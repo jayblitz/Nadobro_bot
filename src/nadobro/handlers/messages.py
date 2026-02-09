@@ -11,12 +11,17 @@ from src.nadobro.services.trade_service import (
 from src.nadobro.services.alert_service import create_alert, get_user_alerts
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_name, PRODUCTS
+from src.nadobro.handlers.callbacks import handle_pending_input
+from src.nadobro.handlers.keyboards import main_menu_keyboard
 
 logger = logging.getLogger(__name__)
 
 
 async def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
+        return
+
+    if await handle_pending_input(update, context):
         return
 
     telegram_id = update.effective_user.id
@@ -255,7 +260,7 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text(ai_message)
         else:
             await update.message.reply_text(
-                "I'm your Nado trading assistant! Try:\n"
-                "\"What's BTC price?\" or \"Long ETH 0.05\"\n\n"
-                "For help, type /help or DM @nadobro on X."
+                "I'm your Nado trading assistant!\n\n"
+                "Chat naturally or use the menu below:",
+                reply_markup=main_menu_keyboard(),
             )

@@ -16,6 +16,7 @@ from src.nadobro.services.admin_service import (
     get_recent_admin_logs, get_recent_trades_all, log_admin_action,
 )
 from src.nadobro.config import get_product_name, PRODUCTS
+from src.nadobro.handlers.keyboards import main_menu_keyboard, back_to_menu_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,8 @@ async def cmd_start(update: Update, context: CallbackContext):
 
     if is_new:
         msg = (
-            "Welcome to *Nadobro* \u2014 your AI trading companion for Nado DEX!\n\n"
+            "*Welcome to Nadobro!*\n"
+            "Your AI trading companion for Nado DEX.\n\n"
             "Your testnet wallet has been created:\n"
             f"`{user.wallet_address_testnet}`\n\n"
         )
@@ -39,61 +41,33 @@ async def cmd_start(update: Update, context: CallbackContext):
                 "Store this safely \u2014 it's the ONLY way to recover your wallet.\n\n"
             )
         msg += (
-            "Get started:\n"
+            "*Getting started:*\n"
             "1. Get testnet ETH: https://docs.inkonchain.com/tools/faucets\n"
             "2. Get USDT0: https://testnet.nado.xyz/portfolio/faucet\n"
             "3. Deposit >= $5 USDT0 on Nado testnet\n\n"
-            "Then try:\n"
-            "/balance \u2014 check your margin\n"
-            "/price BTC \u2014 live prices\n"
-            "/long BTC 0.001 \u2014 market long\n"
-            "/help \u2014 all commands\n\n"
-            "Or just chat naturally: \"What's the price of ETH?\""
+            "Use the menu below to start trading:"
         )
     else:
         mode = user.network_mode.value
         addr = user.wallet_address_mainnet if mode == "mainnet" else user.wallet_address_testnet
         msg = (
-            f"Welcome back! You're on *{mode}* mode.\n"
-            f"Wallet: `{addr}`\n\n"
-            "Type /help for commands or just chat naturally."
+            f"*Welcome back!*\n"
+            f"Network: *{mode}* | Wallet: `{addr}`\n\n"
+            "What would you like to do?"
         )
 
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_keyboard())
 
 
 async def cmd_help(update: Update, context: CallbackContext):
     msg = (
-        "*Nadobro Commands*\n\n"
-        "*Trading:*\n"
-        "/long <product> <size> \u2014 Market long\n"
-        "/short <product> <size> \u2014 Market short\n"
-        "/limit\\_long <product> <size> <price> \u2014 Limit buy\n"
-        "/limit\\_short <product> <size> <price> \u2014 Limit sell\n"
-        "/tp <product> <size> <price> \u2014 Take profit\n"
-        "/sl <product> <size> <price> \u2014 Stop loss\n"
-        "/close <product> \u2014 Close position\n"
-        "/close\\_all \u2014 Close all positions\n\n"
-        "*Info:*\n"
-        "/positions \u2014 View open positions\n"
-        "/balance \u2014 Check margin balance\n"
-        "/price <product> \u2014 Live market price\n"
-        "/funding <product> \u2014 Funding rate\n"
-        "/history \u2014 Trade history\n"
-        "/analytics \u2014 PNL analytics\n\n"
-        "*Alerts:*\n"
-        "/alert <product> above/below <price>\n"
-        "/my\\_alerts \u2014 View active alerts\n"
-        "/del\\_alert <id> \u2014 Delete alert\n\n"
-        "*Account:*\n"
-        "/wallet \u2014 Wallet info\n"
-        "/mode testnet/mainnet \u2014 Switch network\n"
-        "/recover <mnemonic> \u2014 Recover wallet\n\n"
-        "*Products:* BTC, ETH, SOL, ARB, OP, DOGE, LINK, AVAX\n\n"
-        "Or just chat naturally! I understand things like:\n"
-        "\"Long ETH 0.05\" or \"What's BTC funding?\""
+        "*Nadobro Trading Bot*\n\n"
+        "Use the buttons below to navigate, or chat naturally.\n\n"
+        "I understand messages like:\n"
+        "\"Long ETH 0.05\" or \"What's BTC price?\"\n\n"
+        "*Products:* BTC, ETH, SOL, ARB, OP, DOGE, LINK, AVAX"
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_keyboard())
 
 
 async def cmd_long(update: Update, context: CallbackContext):

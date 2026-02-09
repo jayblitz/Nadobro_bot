@@ -4,6 +4,8 @@
 Nadobro is a production-grade Telegram bot for trading on Nado DEX (perpetual futures and spot exchange on Ink blockchain). It supports natural language AI-powered trading, per-user encrypted wallet management, real-time position monitoring, and comprehensive risk management.
 
 ## Recent Changes
+- 2026-02-09: Added inline button UI - Main menu, trade flow, portfolio, market, alerts, account menus all use tap-friendly inline keyboards. Guided trade flow (select action -> pick product -> type size). Old slash commands still work for power users.
+- 2026-02-09: Production hardening - Encryption key validation, AI parser sanitization, comprehensive error handling, REST fallback improvements
 - 2026-02-09: Initial build - Full project structure, database models, Nado SDK integration, xAI Grok AI parser, Telegram bot with all commands, admin system, alert scheduler
 
 ## Architecture
@@ -23,8 +25,10 @@ src/nadobro/
     admin_service.py             # Admin stats, pause trading, logs
     scheduler.py                 # APScheduler for background alert checking
   handlers/
-    commands.py                  # All /command handlers for Telegram
-    messages.py                  # Natural language message handler
+    keyboards.py                 # Inline keyboard builders (all menus, product grids)
+    callbacks.py                 # Callback query handlers for button taps + pending input
+    commands.py                  # /command handlers (now with inline button menus)
+    messages.py                  # Natural language handler (checks pending button input first)
 ```
 
 ## Key Technologies

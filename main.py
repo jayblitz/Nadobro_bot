@@ -48,7 +48,7 @@ def check_config():
 
 
 def setup_bot():
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters
+    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
     from src.nadobro.handlers.commands import (
         cmd_start, cmd_help, cmd_long, cmd_short,
@@ -61,6 +61,7 @@ def setup_bot():
         cmd_admin_stats, cmd_admin_pause, cmd_admin_logs,
     )
     from src.nadobro.handlers.messages import handle_message
+    from src.nadobro.handlers.callbacks import handle_callback
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -89,6 +90,8 @@ def setup_bot():
     app.add_handler(CommandHandler("admin_stats", cmd_admin_stats))
     app.add_handler(CommandHandler("admin_pause", cmd_admin_pause))
     app.add_handler(CommandHandler("admin_logs", cmd_admin_logs))
+
+    app.add_handler(CallbackQueryHandler(handle_callback))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
