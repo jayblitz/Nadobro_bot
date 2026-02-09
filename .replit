@@ -11,6 +11,7 @@ packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc"]
 
 [userenv.shared]
 ENCRYPTION_KEY = "UNQseQTv0VYaoIu_MpjHloBWDcIfhZS-ahSBB_UGiNU"
+ADMIN_USER_IDS = "1124285818"
 
 [workflows]
 runButton = "Project"
