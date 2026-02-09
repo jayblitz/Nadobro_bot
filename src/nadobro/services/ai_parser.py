@@ -56,6 +56,56 @@ Rules:
 """
 
 
+_REQUIRED_FIELDS = {
+    "intent": "chat",
+    "action": None,
+    "product": None,
+    "size": None,
+    "price": None,
+    "leverage": None,
+    "tp_price": None,
+    "sl_price": None,
+    "alert_condition": None,
+    "alert_value": None,
+    "message": "",
+    "confidence": 0.5,
+}
+
+
+def _sanitize_result(result: dict) -> dict:
+    for key, default in _REQUIRED_FIELDS.items():
+        if key not in result or result[key] is None and default is not None:
+            result.setdefault(key, default)
+
+    if result.get("intent") not in ("trade", "query", "command", "chat"):
+        result["intent"] = "chat"
+
+    if result.get("size") is not None:
+        try:
+            result["size"] = float(result["size"])
+        except (ValueError, TypeError):
+            result["size"] = None
+
+    if result.get("price") is not None:
+        try:
+            result["price"] = float(result["price"])
+        except (ValueError, TypeError):
+            result["price"] = None
+
+    if result.get("leverage") is not None:
+        try:
+            result["leverage"] = float(result["leverage"])
+        except (ValueError, TypeError):
+            result["leverage"] = None
+
+    try:
+        result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
+    except (ValueError, TypeError):
+        result["confidence"] = 0.5
+
+    return result
+
+
 def parse_user_message(text: str) -> dict:
     client = get_xai_client()
     if not client:
@@ -72,14 +122,20 @@ def parse_user_message(text: str) -> dict:
             max_tokens=500,
             temperature=0.1,
         )
-        result = json.loads(response.choices[0].message.content)
-        if "intent" not in result:
-            result["intent"] = "chat"
-        if "confidence" not in result:
-            result["confidence"] = 0.5
-        if "message" not in result:
-            result["message"] = ""
-        return result
+        raw_content = response.choices[0].message.content
+        if not raw_content or not raw_content.strip():
+            logger.warning("AI returned empty response, using fallback")
+            return _fallback_parse(text)
+
+        result = json.loads(raw_content)
+        if not isinstance(result, dict):
+            logger.warning(f"AI returned non-dict response: {type(result)}")
+            return _fallback_parse(text)
+
+        return _sanitize_result(result)
+    except json.JSONDecodeError as e:
+        logger.error(f"AI returned invalid JSON: {e}")
+        return _fallback_parse(text)
     except Exception as e:
         logger.error(f"AI parse failed: {e}")
         return _fallback_parse(text)

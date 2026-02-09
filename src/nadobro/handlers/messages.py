@@ -61,61 +61,71 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text(suggestion)
             return
 
-        if action in ["long", "limit_long"]:
-            if price and action == "limit_long":
-                await update.message.reply_text(f"Placing LIMIT LONG {size} {product} @ ${price:,.2f}...")
-                result = execute_limit_order(telegram_id, product, size, price, is_long=True, leverage=leverage)
-            else:
-                await update.message.reply_text(f"Placing LONG {size} {product}...")
-                result = execute_market_order(telegram_id, product, size, is_long=True, leverage=leverage)
+        try:
+            if action in ["long", "limit_long"]:
+                if price and action == "limit_long":
+                    await update.message.reply_text(f"Placing LIMIT LONG {size} {product} @ ${price:,.2f}...")
+                    result = execute_limit_order(telegram_id, product, size, price, is_long=True, leverage=leverage)
+                else:
+                    await update.message.reply_text(f"Placing LONG {size} {product}...")
+                    result = execute_market_order(telegram_id, product, size, is_long=True, leverage=leverage)
 
-            if result["success"]:
-                msg = (
-                    f"LONG {result['size']} {result['product']} filled!\n"
-                    f"Price: ${result['price']:,.2f}\n"
-                    f"Network: {result['network']}"
-                )
-            else:
-                msg = f"Order failed: {result['error']}"
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+                if result["success"]:
+                    msg = (
+                        f"LONG {result['size']} {result['product']} filled!\n"
+                        f"Price: ${result['price']:,.2f}\n"
+                        f"Network: {result['network']}"
+                    )
+                else:
+                    msg = f"Order failed: {result['error']}"
+                await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-        elif action in ["short", "limit_short"]:
-            if price and action == "limit_short":
-                await update.message.reply_text(f"Placing LIMIT SHORT {size} {product} @ ${price:,.2f}...")
-                result = execute_limit_order(telegram_id, product, size, price, is_long=False, leverage=leverage)
-            else:
-                await update.message.reply_text(f"Placing SHORT {size} {product}...")
-                result = execute_market_order(telegram_id, product, size, is_long=False, leverage=leverage)
+            elif action in ["short", "limit_short"]:
+                if price and action == "limit_short":
+                    await update.message.reply_text(f"Placing LIMIT SHORT {size} {product} @ ${price:,.2f}...")
+                    result = execute_limit_order(telegram_id, product, size, price, is_long=False, leverage=leverage)
+                else:
+                    await update.message.reply_text(f"Placing SHORT {size} {product}...")
+                    result = execute_market_order(telegram_id, product, size, is_long=False, leverage=leverage)
 
-            if result["success"]:
-                msg = (
-                    f"SHORT {result['size']} {result['product']} filled!\n"
-                    f"Price: ${result['price']:,.2f}\n"
-                    f"Network: {result['network']}"
-                )
-            else:
-                msg = f"Order failed: {result['error']}"
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+                if result["success"]:
+                    msg = (
+                        f"SHORT {result['size']} {result['product']} filled!\n"
+                        f"Price: ${result['price']:,.2f}\n"
+                        f"Network: {result['network']}"
+                    )
+                else:
+                    msg = f"Order failed: {result['error']}"
+                await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-        elif action == "close":
-            if product:
-                result = close_position(telegram_id, product)
-            else:
+            elif action == "close":
+                if product:
+                    result = close_position(telegram_id, product)
+                else:
+                    result = close_all_positions(telegram_id)
+
+                if result["success"]:
+                    msg = f"Closed {result['cancelled']} orders."
+                else:
+                    msg = f"Close failed: {result['error']}"
+                await update.message.reply_text(msg)
+
+            elif action == "close_all":
                 result = close_all_positions(telegram_id)
+                if result["success"]:
+                    msg = f"Closed {result['cancelled']} orders across {', '.join(result.get('products', []))}."
+                else:
+                    msg = f"Close failed: {result['error']}"
+                await update.message.reply_text(msg)
 
-            if result["success"]:
-                msg = f"Closed {result['cancelled']} orders."
             else:
-                msg = f"Close failed: {result['error']}"
-            await update.message.reply_text(msg)
-
-        elif action == "close_all":
-            result = close_all_positions(telegram_id)
-            if result["success"]:
-                msg = f"Closed {result['cancelled']} orders across {', '.join(result.get('products', []))}."
-            else:
-                msg = f"Close failed: {result['error']}"
-            await update.message.reply_text(msg)
+                await update.message.reply_text(
+                    f"I understood you want to trade, but I'm not sure about the action '{action}'.\n"
+                    f"Try: /long {product} {size} or /short {product} {size}"
+                )
+        except Exception as e:
+            logger.error(f"Trade execution error: {e}", exc_info=True)
+            await update.message.reply_text(f"Something went wrong executing your trade. Please try again or use a command like /long {product} {size}.")
 
     elif intent == "query":
         client = get_user_nado_client(telegram_id)

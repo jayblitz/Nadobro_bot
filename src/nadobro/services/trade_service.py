@@ -223,12 +223,21 @@ def close_all_positions(telegram_id: int) -> dict:
         return {"success": False, "error": "No open positions found."}
 
     cancelled = 0
+    errors = []
     products_closed = set()
     for p in positions:
-        r = client.cancel_order(p["product_id"], p["digest"])
-        if r["success"]:
-            cancelled += 1
-            products_closed.add(p["product_name"])
+        try:
+            r = client.cancel_order(p["product_id"], p["digest"])
+            if r["success"]:
+                cancelled += 1
+                products_closed.add(p["product_name"])
+            else:
+                errors.append(f"{p['product_name']}: {r.get('error', 'unknown')}")
+        except Exception as e:
+            errors.append(f"{p.get('product_name', 'unknown')}: {str(e)}")
+
+    if cancelled == 0 and errors:
+        return {"success": False, "error": f"Failed to close positions: {'; '.join(errors)}"}
 
     return {
         "success": True,

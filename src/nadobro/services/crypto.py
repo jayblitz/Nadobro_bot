@@ -1,26 +1,49 @@
 import os
 import hashlib
+import base64
 import secrets
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from eth_account import Account
 
 Account.enable_unaudited_hdwallet_features()
 
+_fernet_instance = None
+
 def _get_fernet() -> Fernet:
+    global _fernet_instance
+    if _fernet_instance is not None:
+        return _fernet_instance
+
     key = os.environ.get("ENCRYPTION_KEY")
     if not key:
         raise RuntimeError("ENCRYPTION_KEY environment variable not set")
-    if len(key) < 32:
-        key = hashlib.sha256(key.encode()).digest()
-        key = __import__("base64").urlsafe_b64encode(key)
-    elif isinstance(key, str):
-        try:
-            Fernet(key.encode() if isinstance(key, str) else key)
-            key = key.encode() if isinstance(key, str) else key
-        except Exception:
-            key = hashlib.sha256(key.encode()).digest()
-            key = __import__("base64").urlsafe_b64encode(key)
-    return Fernet(key if isinstance(key, bytes) else key.encode())
+
+    key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+
+    try:
+        f = Fernet(key_bytes)
+        _fernet_instance = f
+        return f
+    except Exception:
+        pass
+
+    derived = hashlib.sha256(key_bytes).digest()
+    fernet_key = base64.urlsafe_b64encode(derived)
+    _fernet_instance = Fernet(fernet_key)
+    return _fernet_instance
+
+
+def validate_encryption_key():
+    try:
+        f = _get_fernet()
+        test_data = b"nadobro_encryption_test"
+        encrypted = f.encrypt(test_data)
+        decrypted = f.decrypt(encrypted)
+        if decrypted != test_data:
+            raise RuntimeError("Encryption round-trip failed")
+        return True
+    except Exception as e:
+        raise RuntimeError(f"ENCRYPTION_KEY validation failed: {e}")
 
 
 def generate_wallet() -> dict:

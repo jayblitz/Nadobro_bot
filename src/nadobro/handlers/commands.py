@@ -120,20 +120,24 @@ async def cmd_long(update: Update, context: CallbackContext):
         except ValueError:
             pass
 
-    await update.message.reply_text(f"Placing market LONG {size} {product}...")
-    result = execute_market_order(update.effective_user.id, product, size, is_long=True, leverage=leverage)
+    try:
+        await update.message.reply_text(f"Placing market LONG {size} {product}...")
+        result = execute_market_order(update.effective_user.id, product, size, is_long=True, leverage=leverage)
 
-    if result["success"]:
-        msg = (
-            f"LONG {result['size']} {result['product']} filled!\n"
-            f"Price: ${result['price']:,.2f}\n"
-            f"Digest: `{result.get('digest', 'N/A')}`\n"
-            f"Network: {result['network']}"
-        )
-    else:
-        msg = f"Order failed: {result['error']}"
+        if result["success"]:
+            msg = (
+                f"LONG {result['size']} {result['product']} filled!\n"
+                f"Price: ${result['price']:,.2f}\n"
+                f"Digest: `{result.get('digest', 'N/A')}`\n"
+                f"Network: {result['network']}"
+            )
+        else:
+            msg = f"Order failed: {result['error']}"
 
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"cmd_long error: {e}", exc_info=True)
+        await update.message.reply_text(f"An error occurred while placing the order. Please try again.")
 
 
 async def cmd_short(update: Update, context: CallbackContext):
@@ -160,20 +164,24 @@ async def cmd_short(update: Update, context: CallbackContext):
         except ValueError:
             pass
 
-    await update.message.reply_text(f"Placing market SHORT {size} {product}...")
-    result = execute_market_order(update.effective_user.id, product, size, is_long=False, leverage=leverage)
+    try:
+        await update.message.reply_text(f"Placing market SHORT {size} {product}...")
+        result = execute_market_order(update.effective_user.id, product, size, is_long=False, leverage=leverage)
 
-    if result["success"]:
-        msg = (
-            f"SHORT {result['size']} {result['product']} filled!\n"
-            f"Price: ${result['price']:,.2f}\n"
-            f"Digest: `{result.get('digest', 'N/A')}`\n"
-            f"Network: {result['network']}"
-        )
-    else:
-        msg = f"Order failed: {result['error']}"
+        if result["success"]:
+            msg = (
+                f"SHORT {result['size']} {result['product']} filled!\n"
+                f"Price: ${result['price']:,.2f}\n"
+                f"Digest: `{result.get('digest', 'N/A')}`\n"
+                f"Network: {result['network']}"
+            )
+        else:
+            msg = f"Order failed: {result['error']}"
 
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"cmd_short error: {e}", exc_info=True)
+        await update.message.reply_text("An error occurred while placing the order. Please try again.")
 
 
 async def cmd_limit_long(update: Update, context: CallbackContext):

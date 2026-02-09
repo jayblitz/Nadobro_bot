@@ -13,7 +13,7 @@ logger = logging.getLogger("nadobro")
 
 from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY
 from src.nadobro.models.database import init_db
-from src.nadobro.services.crypto import generate_webhook_secret
+from src.nadobro.services.crypto import validate_encryption_key
 
 if not ENCRYPTION_KEY:
     logger.error(
@@ -21,6 +21,13 @@ if not ENCRYPTION_KEY:
         "Please set ENCRYPTION_KEY in your Replit Secrets tab. "
         "Without a persistent key, encrypted wallets cannot be recovered after restart."
     )
+    sys.exit(1)
+
+try:
+    validate_encryption_key()
+    logger.info("Encryption key validated successfully")
+except RuntimeError as e:
+    logger.error(str(e))
     sys.exit(1)
 
 
@@ -101,15 +108,6 @@ async def run_bot():
 
     from src.nadobro.services.scheduler import set_bot_app, set_check_client, start_scheduler
     set_bot_app(app)
-
-    try:
-        from src.nadobro.services.crypto import encrypt_private_key, generate_wallet
-        test_key = "0x0000000000000000000000000000000000000000000000000000000000000001"
-        encrypted = encrypt_private_key(test_key)
-        logger.info("Encryption system working")
-    except Exception as e:
-        logger.error(f"Encryption test failed: {e}")
-        sys.exit(1)
 
     try:
         from src.nadobro.services.nado_client import NadoClient

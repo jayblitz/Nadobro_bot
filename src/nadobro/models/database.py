@@ -6,6 +6,9 @@ from contextlib import contextmanager
 import enum
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable not set. Please configure PostgreSQL.")
+
 engine = create_engine(DATABASE_URL, pool_recycle=300, pool_pre_ping=True, pool_size=10, max_overflow=20)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
@@ -145,7 +148,6 @@ def get_session() -> Session:
     session = SessionLocal()
     try:
         yield session
-        session.commit()
     except Exception:
         session.rollback()
         raise

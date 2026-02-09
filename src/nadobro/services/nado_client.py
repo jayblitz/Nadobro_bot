@@ -19,6 +19,20 @@ class NadoClient:
         self.subaccount_hex = None
         self.address = None
         self._initialized = False
+        self._derive_address()
+
+    def _derive_address(self):
+        try:
+            from eth_account import Account
+            acct = Account.from_key(self.private_key)
+            self.address = acct.address
+            try:
+                from nado_protocol.utils.bytes32 import subaccount_to_hex
+                self.subaccount_hex = subaccount_to_hex(self.address, "default")
+            except ImportError:
+                self.subaccount_hex = self.address.lower() + "000000000000000000000000"
+        except Exception as e:
+            logger.error(f"Failed to derive address from private key: {e}")
 
     def initialize(self):
         if self._initialized:
