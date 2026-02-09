@@ -22,6 +22,19 @@ from src.nadobro.config import get_product_name, get_product_id, PRODUCTS
 
 logger = logging.getLogger(__name__)
 
+def _get_network_badge(telegram_id: int) -> str:
+    try:
+        user = get_user(telegram_id)
+        if user:
+            mode = user.network_mode.value
+            if mode == "mainnet":
+                return "🌐 MAINNET"
+            return "🧪 TESTNET"
+    except Exception:
+        pass
+    return "🧪 TESTNET"
+
+
 MAIN_MENU_TEXT = (
     "*Nadobro Trading Bot*\n\n"
     "Select an option below to get started."
@@ -77,7 +90,7 @@ HELP_TEXT = (
     "*Account:*\n"
     "/wallet \u2014 Wallet info\n"
     "/mode testnet/mainnet \u2014 Switch network\n\n"
-    "*Products:* BTC, ETH, SOL, ARB, OP, DOGE, LINK, AVAX\n\n"
+    "*Products:* BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX\n\n"
     "Or just chat naturally! I understand things like:\n"
     "\"Long ETH 0.05\" or \"What's BTC funding?\""
 )
@@ -146,29 +159,64 @@ async def handle_callback(update: Update, context: CallbackContext):
 
 async def _handle_nav(query, parts):
     target = parts[1] if len(parts) > 1 else "main"
-    nav_map = {
-        "main": (MAIN_MENU_TEXT, main_menu_keyboard()),
-        "trade": (TRADE_MENU_TEXT, trade_menu_keyboard()),
-        "portfolio": (PORTFOLIO_MENU_TEXT, portfolio_menu_keyboard()),
-        "market": (MARKET_MENU_TEXT, market_menu_keyboard()),
-        "alerts": (ALERTS_MENU_TEXT, alerts_menu_keyboard()),
-        "account": (ACCOUNT_MENU_TEXT, account_menu_keyboard()),
+    telegram_id = query.from_user.id
+    badge = _get_network_badge(telegram_id)
+
+    if target == "main":
+        text = f"*Nadobro Trading Bot* \\[{badge}]\n\nSelect an option below to get started."
+    elif target == "trade":
+        text = f"*Trading Menu* \\[{badge}]\n\nSelect a trading action."
+    elif target == "portfolio":
+        text = PORTFOLIO_MENU_TEXT
+    elif target == "market":
+        text = MARKET_MENU_TEXT
+    elif target == "alerts":
+        text = ALERTS_MENU_TEXT
+    elif target == "account":
+        text = ACCOUNT_MENU_TEXT
+    else:
+        text = f"*Nadobro Trading Bot* \\[{badge}]\n\nSelect an option below to get started."
+        target = "main"
+
+    kb_map = {
+        "main": main_menu_keyboard(),
+        "trade": trade_menu_keyboard(),
+        "portfolio": portfolio_menu_keyboard(),
+        "market": market_menu_keyboard(),
+        "alerts": alerts_menu_keyboard(),
+        "account": account_menu_keyboard(),
     }
-    text, keyboard = nav_map.get(target, (MAIN_MENU_TEXT, main_menu_keyboard()))
+    keyboard = kb_map.get(target, main_menu_keyboard())
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
 
 async def _handle_menu(query, parts):
     action = parts[1] if len(parts) > 1 else "main"
-    menu_map = {
-        "trade": (TRADE_MENU_TEXT, trade_menu_keyboard()),
-        "portfolio": (PORTFOLIO_MENU_TEXT, portfolio_menu_keyboard()),
-        "market": (MARKET_MENU_TEXT, market_menu_keyboard()),
-        "alerts": (ALERTS_MENU_TEXT, alerts_menu_keyboard()),
-        "account": (ACCOUNT_MENU_TEXT, account_menu_keyboard()),
-        "help": (HELP_TEXT, back_to_menu_keyboard()),
-    }
-    text, keyboard = menu_map.get(action, (MAIN_MENU_TEXT, main_menu_keyboard()))
+    telegram_id = query.from_user.id
+    badge = _get_network_badge(telegram_id)
+
+    if action == "trade":
+        text = f"*Trading Menu* \\[{badge}]\n\nSelect a trading action."
+        keyboard = trade_menu_keyboard()
+    elif action == "portfolio":
+        text = PORTFOLIO_MENU_TEXT
+        keyboard = portfolio_menu_keyboard()
+    elif action == "market":
+        text = MARKET_MENU_TEXT
+        keyboard = market_menu_keyboard()
+    elif action == "alerts":
+        text = ALERTS_MENU_TEXT
+        keyboard = alerts_menu_keyboard()
+    elif action == "account":
+        text = ACCOUNT_MENU_TEXT
+        keyboard = account_menu_keyboard()
+    elif action == "help":
+        text = HELP_TEXT
+        keyboard = back_to_menu_keyboard()
+    else:
+        text = f"*Nadobro Trading Bot* \\[{badge}]\n\nSelect an option below to get started."
+        keyboard = main_menu_keyboard()
+
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
 

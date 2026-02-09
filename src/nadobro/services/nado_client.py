@@ -161,9 +161,26 @@ class NadoClient:
                 positions.extend(orders)
         return positions
 
+    @staticmethod
+    def _friendly_error(error_str: str) -> str:
+        err_lower = error_str.lower()
+        if "ipqueryonly" in err_lower:
+            return "Your wallet needs funds deposited on Nado DEX before trading. Please deposit USDT0 at https://testnet.nado.xyz/portfolio/faucet"
+        if "insufficient" in err_lower or "margin" in err_lower:
+            return "Insufficient margin. Please deposit more funds."
+        if "product" in err_lower and "not found" in err_lower:
+            return "This product is not currently available on the exchange."
+        if "blocked" in err_lower:
+            return "Order was blocked by the exchange. Your wallet may need funds deposited on-chain first."
+        if "nonce" in err_lower:
+            return "Order timing issue. Please try again."
+        if "rate" in err_lower and "limit" in err_lower:
+            return "Too many requests. Please wait a moment and try again."
+        return error_str
+
     def place_order(self, product_id: int, size: float, price: float, order_type: str = "default", is_buy: bool = True) -> dict:
         if not self._initialized or not self.client:
-            return {"success": False, "error": "Client not initialized"}
+            return {"success": False, "error": "Client not initialized. Please try /start again."}
 
         try:
             from nado_protocol.engine_client.types.execute import PlaceOrderParams, OrderParams
@@ -195,9 +212,24 @@ class NadoClient:
             params = PlaceOrderParams(product_id=product_id, order=order)
             result = self.client.market.place_order(params)
 
+            if hasattr(result, 'data') and result.data:
+                if hasattr(result.data, 'digest') and result.data.digest:
+                    return {
+                        "success": True,
+                        "digest": result.data.digest,
+                        "product_id": product_id,
+                        "size": size,
+                        "price": price,
+                        "side": "LONG" if is_buy else "SHORT",
+                    }
+
+            result_str = str(result)
+            if "blocked" in result_str.lower() or "reason" in result_str.lower():
+                return {"success": False, "error": self._friendly_error(result_str)}
+
             return {
                 "success": True,
-                "digest": result.data.digest if hasattr(result, 'data') else "unknown",
+                "digest": "unknown",
                 "product_id": product_id,
                 "size": size,
                 "price": price,
@@ -205,7 +237,7 @@ class NadoClient:
             }
         except Exception as e:
             logger.error(f"place_order failed: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": self._friendly_error(str(e))}
 
     def place_market_order(self, product_id: int, size: float, is_buy: bool = True) -> dict:
         mp = self.get_market_price(product_id)

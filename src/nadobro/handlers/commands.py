@@ -49,10 +49,11 @@ async def cmd_start(update: Update, context: CallbackContext):
         )
     else:
         mode = user.network_mode.value
+        badge = "🌐 MAINNET" if mode == "mainnet" else "🧪 TESTNET"
         addr = user.wallet_address_mainnet if mode == "mainnet" else user.wallet_address_testnet
         msg = (
-            f"*Welcome back!*\n"
-            f"Network: *{mode}* | Wallet: `{addr}`\n\n"
+            f"*Welcome back!* \\[{badge}]\n"
+            f"Wallet: `{addr}`\n\n"
             "What would you like to do?"
         )
 
@@ -65,7 +66,7 @@ async def cmd_help(update: Update, context: CallbackContext):
         "Use the buttons below to navigate, or chat naturally.\n\n"
         "I understand messages like:\n"
         "\"Long ETH 0.05\" or \"What's BTC price?\"\n\n"
-        "*Products:* BTC, ETH, SOL, ARB, OP, DOGE, LINK, AVAX"
+        "*Products:* BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_keyboard())
 

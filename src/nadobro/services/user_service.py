@@ -18,9 +18,9 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bo
             if username:
                 user.telegram_username = username
             session.commit()
-            merged = session.merge(user)
-            session.expunge(merged)
-            return merged, False, None
+            session.refresh(user)
+            session.expunge(user)
+            return user, False, None
 
         wallet = generate_wallet()
         encrypted_key = encrypt_private_key(wallet["private_key"])
@@ -46,6 +46,7 @@ def get_user(telegram_id: int) -> User | None:
     with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if user:
+            session.refresh(user)
             session.expunge(user)
         return user
 

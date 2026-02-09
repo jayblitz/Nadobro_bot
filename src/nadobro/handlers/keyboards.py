@@ -1,4 +1,20 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from src.nadobro.config import PRODUCTS
+
+PERP_PRODUCTS = [name for name, info in PRODUCTS.items() if info["type"] == "perp"]
+
+
+def _product_grid(callback_prefix: str, cols: int = 3) -> list:
+    rows = []
+    row = []
+    for name in PERP_PRODUCTS:
+        row.append(InlineKeyboardButton(name, callback_data=f"{callback_prefix}{name}"))
+        if len(row) == cols:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return rows
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -43,25 +59,9 @@ def trade_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def product_keyboard(action: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("BTC", callback_data=f"product:{action}:BTC"),
-            InlineKeyboardButton("ETH", callback_data=f"product:{action}:ETH"),
-            InlineKeyboardButton("SOL", callback_data=f"product:{action}:SOL"),
-        ],
-        [
-            InlineKeyboardButton("ARB", callback_data=f"product:{action}:ARB"),
-            InlineKeyboardButton("OP", callback_data=f"product:{action}:OP"),
-            InlineKeyboardButton("DOGE", callback_data=f"product:{action}:DOGE"),
-        ],
-        [
-            InlineKeyboardButton("LINK", callback_data=f"product:{action}:LINK"),
-            InlineKeyboardButton("AVAX", callback_data=f"product:{action}:AVAX"),
-        ],
-        [
-            InlineKeyboardButton("◀️ Back", callback_data="nav:trade"),
-        ],
-    ])
+    rows = _product_grid(f"product:{action}:")
+    rows.append([InlineKeyboardButton("◀️ Back", callback_data="nav:trade")])
+    return InlineKeyboardMarkup(rows)
 
 
 def portfolio_menu_keyboard() -> InlineKeyboardMarkup:
@@ -81,29 +81,15 @@ def portfolio_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def market_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    rows = [
         [
             InlineKeyboardButton("💹 All Prices", callback_data="market:all_prices"),
             InlineKeyboardButton("📈 Funding Rates", callback_data="market:funding"),
         ],
-        [
-            InlineKeyboardButton("BTC", callback_data="market:price:BTC"),
-            InlineKeyboardButton("ETH", callback_data="market:price:ETH"),
-            InlineKeyboardButton("SOL", callback_data="market:price:SOL"),
-        ],
-        [
-            InlineKeyboardButton("ARB", callback_data="market:price:ARB"),
-            InlineKeyboardButton("OP", callback_data="market:price:OP"),
-            InlineKeyboardButton("DOGE", callback_data="market:price:DOGE"),
-        ],
-        [
-            InlineKeyboardButton("LINK", callback_data="market:price:LINK"),
-            InlineKeyboardButton("AVAX", callback_data="market:price:AVAX"),
-        ],
-        [
-            InlineKeyboardButton("◀️ Back", callback_data="nav:main"),
-        ],
-    ])
+    ]
+    rows.extend(_product_grid("market:price:"))
+    rows.append([InlineKeyboardButton("◀️ Back", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
 
 
 def alerts_menu_keyboard() -> InlineKeyboardMarkup:
@@ -119,25 +105,9 @@ def alerts_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def alert_product_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("BTC", callback_data="alert_product:BTC"),
-            InlineKeyboardButton("ETH", callback_data="alert_product:ETH"),
-            InlineKeyboardButton("SOL", callback_data="alert_product:SOL"),
-        ],
-        [
-            InlineKeyboardButton("ARB", callback_data="alert_product:ARB"),
-            InlineKeyboardButton("OP", callback_data="alert_product:OP"),
-            InlineKeyboardButton("DOGE", callback_data="alert_product:DOGE"),
-        ],
-        [
-            InlineKeyboardButton("LINK", callback_data="alert_product:LINK"),
-            InlineKeyboardButton("AVAX", callback_data="alert_product:AVAX"),
-        ],
-        [
-            InlineKeyboardButton("◀️ Back", callback_data="nav:alerts"),
-        ],
-    ])
+    rows = _product_grid("alert_product:")
+    rows.append([InlineKeyboardButton("◀️ Back", callback_data="nav:alerts")])
+    return InlineKeyboardMarkup(rows)
 
 
 def account_menu_keyboard() -> InlineKeyboardMarkup:
@@ -174,25 +144,9 @@ def confirm_keyboard(action: str) -> InlineKeyboardMarkup:
 
 
 def close_product_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("BTC", callback_data="close:product:BTC"),
-            InlineKeyboardButton("ETH", callback_data="close:product:ETH"),
-            InlineKeyboardButton("SOL", callback_data="close:product:SOL"),
-        ],
-        [
-            InlineKeyboardButton("ARB", callback_data="close:product:ARB"),
-            InlineKeyboardButton("OP", callback_data="close:product:OP"),
-            InlineKeyboardButton("DOGE", callback_data="close:product:DOGE"),
-        ],
-        [
-            InlineKeyboardButton("LINK", callback_data="close:product:LINK"),
-            InlineKeyboardButton("AVAX", callback_data="close:product:AVAX"),
-        ],
-        [
-            InlineKeyboardButton("◀️ Back", callback_data="nav:trade"),
-        ],
-    ])
+    rows = _product_grid("close:product:")
+    rows.append([InlineKeyboardButton("◀️ Back", callback_data="nav:trade")])
+    return InlineKeyboardMarkup(rows)
 
 
 def back_to_menu_keyboard() -> InlineKeyboardMarkup:

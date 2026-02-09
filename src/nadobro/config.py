@@ -23,12 +23,12 @@ PRODUCTS = {
     "USDT0": {"id": 0, "type": "spot"},
     "BTC": {"id": 2, "type": "perp", "symbol": "BTC-PERP"},
     "ETH": {"id": 4, "type": "perp", "symbol": "ETH-PERP"},
-    "SOL": {"id": 6, "type": "perp", "symbol": "SOL-PERP"},
-    "ARB": {"id": 8, "type": "perp", "symbol": "ARB-PERP"},
-    "OP": {"id": 10, "type": "perp", "symbol": "OP-PERP"},
-    "DOGE": {"id": 12, "type": "perp", "symbol": "DOGE-PERP"},
-    "LINK": {"id": 14, "type": "perp", "symbol": "LINK-PERP"},
-    "AVAX": {"id": 16, "type": "perp", "symbol": "AVAX-PERP"},
+    "SOL": {"id": 8, "type": "perp", "symbol": "SOL-PERP"},
+    "XRP": {"id": 10, "type": "perp", "symbol": "XRP-PERP"},
+    "BNB": {"id": 14, "type": "perp", "symbol": "BNB-PERP"},
+    "LINK": {"id": 16, "type": "perp", "symbol": "LINK-PERP"},
+    "DOGE": {"id": 22, "type": "perp", "symbol": "DOGE-PERP"},
+    "AVAX": {"id": 18, "type": "perp", "symbol": "AVAX-PERP"},
 }
 
 PRODUCT_ALIASES = {}

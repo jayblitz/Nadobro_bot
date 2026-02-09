@@ -47,7 +47,7 @@ src/nadobro/
 - DATABASE_URL: Auto-configured by Replit PostgreSQL
 
 ## Supported Products
-BTC-PERP, ETH-PERP, SOL-PERP, ARB-PERP, OP-PERP, DOGE-PERP, LINK-PERP, AVAX-PERP
+BTC-PERP, ETH-PERP, SOL-PERP, XRP-PERP, BNB-PERP, LINK-PERP, DOGE-PERP, AVAX-PERP
 
 ## Bot Commands
 Trading: /long, /short, /limit_long, /limit_short, /close, /close_all

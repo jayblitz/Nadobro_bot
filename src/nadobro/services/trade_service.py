@@ -30,7 +30,8 @@ def check_rate_limit(telegram_id: int) -> tuple[bool, str]:
 def validate_trade(telegram_id: int, product: str, size: float, leverage: float = 1.0) -> tuple[bool, str]:
     product_id = get_product_id(product)
     if product_id is None:
-        available = ", ".join(["BTC", "ETH", "SOL", "ARB", "OP", "DOGE", "LINK", "AVAX"])
+        from src.nadobro.config import PRODUCTS as _P
+        available = ", ".join([n for n, i in _P.items() if i["type"] == "perp"])
         return False, f"Unknown product '{product}'. Available: {available}"
 
     if size <= 0:
