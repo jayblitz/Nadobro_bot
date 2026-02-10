@@ -1,0 +1,207 @@
+# NADO DEX - Complete Knowledge Base
+
+## OVERVIEW
+Nado is the central-limit orderbook DEX where raw power collides with surgical precision. Trade spot and perpetuals via unified margin, where kinetic collateral dynamically flows across positions — netting risks in real-time for superior capital efficiency. Built on Ink L2 and backed by the team that brought you Kraken.
+
+Website: https://www.nado.xyz/
+Docs: https://docs.nado.xyz/
+X/Twitter: https://x.com/nadoHQ
+Telegram Community: https://t.me/+whsZJKpiiVwwNjQ0
+Support: https://nado-90114.zendesk.com/hc/en-us/requests/new?ticket_form_id=52275013155481
+
+## MISSION
+Born from the battle-tested fires of Kraken and the Ink Foundation, Nado rejects the chaos of fragmented DEXs. They engineer the world's most performant DEX: a powerful orderbook fusing blistering speeds with perpetual and spot markets anchored by cross-margin efficiency. Their mission: hand traders the reins to tame DeFi's turbulence.
+
+## KEY FEATURES
+- Trade Spot & Perpetual Markets with deep liquidity and blazing-fast speeds
+- Up to 20x leverage on perpetuals (BTC, ETH, SOL, BNB, XRP, etc.)
+- Up to 5x leverage on spot trading
+- Nado Engine: 5-15ms latency, MEV-proof executions
+- Unified Margin: entire portfolio as collateral across spot, perpetuals, money markets
+- Money Markets: earn yield on deposits, borrow against margin
+- NLP (Nado Liquidity Provider): passive yields from USDT0 deposits
+- Super Low Fees: taker fees as low as 1.5 bps, maker rebates up to -0.8 bps
+- Pro Tools: one-click basis trades, TWAPs, scale orders, conditional triggers
+- Self-Custody: your keys, your assets. DEX transparency with CEX precision
+- One DEX, Every Market: cryptos, equities, commodities (coming soon)
+
+## ARCHITECTURE
+Nado's architecture integrates spot, perpetuals, and money markets into one risk-calibrated engine. Two interlocking pillars:
+
+1. On-Chain Clearinghouse: Protocol-level risk engine on Ink L2 that computes exposures, collaterals, and offsets in real-time. Oracle feeds pulse sub-second. Orders batched and submitted on-chain, starving MEV opportunities.
+
+2. Off-Chain Sequencer (CLOB): Matches orders in 5-15ms, then batches for on-chain settlement. Central-limit orderbook accepting limit orders via frontend or HFT-optimized API. Holds no custody - assets stay locked in on-chain smart contracts. Cannot censor trades or forge signatures.
+
+## PRODUCTS
+
+### Spot Trading
+- Deposit supported collaterals (USDT0, wETH) into unified account
+- Up to 5x leverage on spot positions
+- All deposits earn automatic native yields from platform fees and lending
+- Unified liquidity across products - spot holdings offset risks in perpetuals
+
+### Perpetual Trading
+- Go long or short on BTC, ETH, SOL, BNB, XRP with up to 20x leverage
+- USDT0 settlement
+- Positions funded through unified margin system
+- Basis trading streamlined: open spot-perp pair directly to capture convergence
+- MEV protections and oracle-based pricing
+
+### Money Markets
+- Lenders supply USDT0 or wETH, earn proportional share of borrower interest
+- Borrowers access spot collateral-backed loans at dynamic rates
+- All loans overcollateralized via smart contracts
+- Unified margin nets exposures - healthy positions cover borrows
+- Dynamic interest rate model recalculates every 15 minutes based on utilization ratio
+
+### NLP (Nado Liquidity Provider)
+- Deposit USDT0 into NLP vault for passive yields
+- Transforms idle USDT0 into active liquidity for perpetual markets
+- Sub-vault strategies include liquidations and market-making
+- Yields from unrealized PnL in perpetual positions
+- 4-day lock post-mint, withdrawal fee: 1 USDT0 + max(1 USDT0, 10 bps)
+- Capped at 20,000 USDT0 per account during Private Alpha
+- Pool 0 cannot be liquidated even in unhealthy state
+- Variable yields shaped by market dynamics
+
+## MARGIN TYPES
+
+### Unified (Cross) Margin (Default)
+- Treats entire account as single collateral pool across spot, perps, money markets
+- Automatic netting & rebalancing - positive PnL offsets losses
+- Leverage selector acts as front-end sizing control, not margin allocation
+- Risk engine evaluates account holistically
+- Ideal for diversified portfolios, basis trades, multi-asset hedges
+
+### Isolated Margin
+- Dedicates fixed collateral to single perpetual position
+- Only for perpetuals, one isolated position per market
+- Independent liquidation threshold
+- Useful for high-volatility trades, strict risk limits per position
+- Can adjust margin on open positions by adding/removing
+
+## SUBACCOUNTS & HEALTH
+- Up to 4 subaccounts per wallet (frontend), unlimited via API
+- Named: default, default_1, default_2, default_3
+- Each subaccount operates autonomously with own balances, positions, margin
+- Transfers between subaccounts: $1 USDT0 (standard), $0.10 (isolated)
+
+### Health System
+- Health = weighted measure of account stability
+- Two thresholds: Maintenance Health (liquidation buffer) and Initial Health (available collateral for new positions)
+- Weights adjust for asset volatility (stable assets get higher weights)
+- Spreads (offsetting positions) recognized as hedges, boosting health
+- Leverage = 1 / (1 - initial_asset_weight). BTC with 0.9 weight = 10x max leverage
+
+## ORDER TYPES
+- Market Order: immediate execution at best price
+- Limit Order: buy/sell at specific price, maker fee rebates
+- Stop Market Order: triggers market order at stop price (stop-loss, breakouts)
+- Stop Limit Order: triggers limit order at stop price
+- TWAP: slices large order into chunks over time duration
+- Take-Profit / Stop-Loss (TP/SL): trigger orders at target prices, can chain to entry orders
+- Scaled Orders: ladder of limit orders across price range, customizable distribution
+
+### Trigger Orders
+- Stop, TP/SL, TWAP are trigger orders monitored by trigger service
+- Price trigger types: Oracle Price, Last Price, Mid Price
+- Dependent orders (order chaining): TP/SL activates only after entry fills
+
+### Speed Bump
+- 30ms speed bump on non-post-only orders to protect liquidity providers
+- Post-only orders exempt (zero added latency)
+
+## LIQUIDATIONS
+- Triggered when maintenance health < 0
+- Uses oracle price from Chaos Oracle network (time-weighted average)
+- Sequence: 1) Cancel open orders, 2) Liquidate assets, 3) Liquidate liabilities
+- NLP may front-run external liquidators for perpetual positions
+- Insurance fund: 50% of liquidation profits, absorbs bad debt
+- If fund depleted: socialization in tiers (perpetual holders, then USDT0 depositors)
+
+### Maintenance Margin Usage
+- 0-40%: Low Risk
+- 40-70%: Medium Risk  
+- 70-90%: High Risk
+- 90-100%: Extreme Risk
+- 100%: Eligible for liquidation
+
+## PNL SETTLEMENTS
+- Continuous realization of profits/losses from open positions
+- Unsettled USDT0: pending transfers; Settled USDT0: realized in balance
+- Total PnL = Unsettled + Settled
+- Account Value = Assets - Borrows ± Unsettled USDT0
+- Closing positions: remaining unsettled settles automatically within minutes
+- Negative PnL without USDT0: auto-borrows from money markets
+
+## INTEREST RATES
+- Kinked interest rate model based on utilization ratio
+- Utilization = Total Borrows / Total Deposits
+- Below kink (~80%): gradual rate increase
+- Above kink: rates accelerate rapidly
+- Protocol fee: 20% on interest payments
+- Borrow Rate = Floor + Small Cap × (Utilization / Inflection) below kink
+- Deposit Rate = Utilization × Borrow Rate × (1 - 0.20)
+- Interest compounds continuously
+- Rates are per-asset (USDT0 vs kBTC have different configs)
+
+## FEES
+- Taker fees as low as 1.5 bps (0.015%)
+- Maker rebates up to -0.8 bps (-0.008%)
+- Volume-based fee tiers
+- NFT holders (Templars of the Storm) get automatic fee tier benefits
+
+## NFT - TEMPLARS OF THE STORM
+- Collection of 1,200 NFTs (1,000 to users, 150 reserved, 50 team)
+- Three Wind Force tiers with points multipliers
+- Fee tier benefits based on Wind Force level
+- Tradeable on OpenSea: https://opensea.io/collection/templars-of-the-storm
+- Long-term identity layer within Nado ecosystem
+
+## DEVELOPER RESOURCES
+
+### Getting Started
+- No API keys needed - wallet-based authentication via EIP-712 signatures
+- SDKs: Python (nado-protocol), TypeScript, Rust (nado-sdk)
+- Subaccounts use bytes32 format: wallet address (20 bytes) + name (12 bytes)
+- Linked signers for delegation (1-Click Trading)
+
+### Testnet
+- Network: Ink Sepolia (Chain ID: 763373)
+- Gateway WebSocket: wss://gateway.test.nado.xyz/v1/ws
+- Gateway REST: https://gateway.test.nado.xyz/v1
+- Faucet: https://testnet.nado.xyz/portfolio/faucet
+- ETH Faucet: https://docs.inkonchain.com/tools/faucets
+- Minimum deposit: $5 USDT0
+
+### Mainnet
+- Network: Ink (Chain ID: 57073)
+- Gateway: gateway.prod.nado.xyz
+
+### API
+- WebSocket: JSON payloads at GATEWAY_WEBSOCKET_ENDPOINT
+- REST: POST /execute, GET/POST /query
+- Must set Accept-Encoding to gzip, br, or deflate
+- Ping frames every 30s to keep WebSocket alive
+
+### Common Errors
+- Error 2028 "Signature does not match": Wrong private key, wrong chain ID, wrong verifying contract, or wrong data types
+- Error 2024 "No previous deposits": Subaccount doesn't exist, need deposit >= $5 USDT0
+- 1-Click Trading broken: linked signer mismatch after API integration
+
+### Quickstart Steps
+1. Install SDK: pip install nado-protocol
+2. Create client: create_nado_client(NadoClientMode.TESTNET, PRIVATE_KEY)
+3. Deposit >= $5 USDT0 (creates subaccount)
+4. Place order using PlaceOrderParams
+5. Verify with get_subaccount_open_orders
+
+## SUPPORTED MARKETS
+BTC-PERP, ETH-PERP, SOL-PERP, XRP-PERP, BNB-PERP, LINK-PERP, DOGE-PERP, AVAX-PERP
+Spot: wETH, USDT0, kBTC
+
+## BLOCKCHAIN
+- Built on Ink L2 (by Kraken)
+- EVM-compatible
+- Self-custody: assets locked in on-chain smart contracts
+- MEV-proof: batched settlement makes MEV extraction uneconomical

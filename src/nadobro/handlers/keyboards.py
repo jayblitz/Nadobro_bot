@@ -30,7 +30,10 @@ def main_menu_kb():
             InlineKeyboardButton("🔔 Alerts", callback_data="alert:menu"),
         ],
         [
+            InlineKeyboardButton("🧠 Ask Nado", callback_data="nav:ask_nado"),
             InlineKeyboardButton("⚙️ Settings", callback_data="settings:view"),
+        ],
+        [
             InlineKeyboardButton("❓ Help", callback_data="nav:help"),
         ],
         [

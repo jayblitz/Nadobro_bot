@@ -12,6 +12,7 @@ from src.nadobro.services.trade_service import (
 from src.nadobro.services.alert_service import create_alert, get_user_alerts
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.ai_parser import parse_user_message
+from src.nadobro.services.knowledge_service import answer_nado_question
 from src.nadobro.config import get_product_id, PRODUCTS
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_balance, fmt_prices, fmt_funding,
@@ -36,6 +37,9 @@ async def handle_message(update: Update, context: CallbackContext):
 
     get_or_create_user(telegram_id, username)
 
+    if await _handle_pending_question(update, context, text):
+        return
+
     if await _handle_pending_trade(update, context, telegram_id, text):
         return
 
@@ -52,6 +56,8 @@ async def handle_message(update: Update, context: CallbackContext):
             await _handle_query_intent(update, context, telegram_id, parsed)
         elif intent == "command":
             await _handle_command_intent(update, context, telegram_id, parsed)
+        elif intent == "nado_question":
+            await _handle_nado_question(update, context, text)
         else:
             ai_msg = parsed.get("message", "I'm not sure what you mean.")
             await update.message.reply_text(
@@ -67,6 +73,16 @@ async def handle_message(update: Update, context: CallbackContext):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=main_menu_kb(),
         )
+
+
+async def _handle_pending_question(update, context, text):
+    if not context.user_data.get("pending_question"):
+        return False
+
+    context.user_data.pop("pending_question", None)
+
+    await _handle_nado_question(update, context, text)
+    return True
 
 
 async def _handle_pending_trade(update, context, telegram_id, text):
@@ -358,6 +374,28 @@ async def _handle_query_intent(update, context, telegram_id, parsed):
         ai_msg = parsed.get("message", "")
         await update.message.reply_text(
             f"💬 {escape_md(ai_msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu_kb(),
+        )
+
+
+async def _handle_nado_question(update, context, question):
+    thinking_msg = await update.message.reply_text(
+        "🧠 _Thinking\\.\\.\\._",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+    try:
+        answer = answer_nado_question(question)
+        await thinking_msg.edit_text(
+            f"🧠 *Ask Nado*\n\n{escape_md(answer)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu_kb(),
+        )
+    except Exception as e:
+        logger.error(f"Nado Q&A error: {e}", exc_info=True)
+        await thinking_msg.edit_text(
+            "⚠️ Something went wrong answering your question\\. Please try again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=main_menu_kb(),
         )

@@ -38,7 +38,7 @@ async def handle_callback(update: Update, context: CallbackContext):
 
     try:
         if data.startswith("nav:"):
-            await _handle_nav(query, data, telegram_id)
+            await _handle_nav(query, data, telegram_id, context)
         elif data.startswith("trade:"):
             await _handle_trade(query, data, telegram_id, context)
         elif data.startswith("product:"):
@@ -111,7 +111,7 @@ async def _show_dashboard(query, telegram_id):
     )
 
 
-async def _handle_nav(query, data, telegram_id):
+async def _handle_nav(query, data, telegram_id, context=None):
     target = data.split(":")[1] if ":" in data else "main"
 
     if target in ("main", "refresh"):
@@ -121,6 +121,22 @@ async def _handle_nav(query, data, telegram_id):
             fmt_help(),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=main_menu_kb(),
+        )
+    elif target == "ask_nado" and context is not None:
+        context.user_data["pending_question"] = True
+        await query.edit_message_text(
+            "🧠 *Ask Nado*\n\n"
+            "Ask me anything about Nado DEX\\!\n\n"
+            "Examples:\n"
+            "  • `What is unified margin?`\n"
+            "  • `How do liquidations work?`\n"
+            "  • `What order types are available?`\n"
+            "  • `How do I deposit funds?`\n"
+            "  • `What is the NLP vault?`\n"
+            "  • `What are the trading fees?`\n\n"
+            "Type your question below:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb(),
         )
 
 

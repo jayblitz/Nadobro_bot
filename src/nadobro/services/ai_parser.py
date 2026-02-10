@@ -21,12 +21,12 @@ SYSTEM_PROMPT = """You are Nadobro, an AI trading assistant for Nado DEX (a perp
 
 Your job is to parse user messages and determine their trading intent. Respond ONLY with valid JSON.
 
-Available products: BTC-PERP, ETH-PERP, SOL-PERP, ARB-PERP, OP-PERP, DOGE-PERP, LINK-PERP, AVAX-PERP
+Available products: BTC-PERP, ETH-PERP, SOL-PERP, XRP-PERP, BNB-PERP, DOGE-PERP, LINK-PERP, AVAX-PERP
 Available commands: long, short, limit_long, limit_short, close, close_all, positions, balance, price, funding, alerts, history, help, mode, wallet, cancel
 
 Response format:
 {
-  "intent": "trade|query|command|chat",
+  "intent": "trade|query|command|nado_question|chat",
   "action": "<command name or null>",
   "product": "<product symbol like BTC, ETH, etc or null>",
   "size": <number or null>,
@@ -49,6 +49,8 @@ Rules:
 - For "close my BTC position" -> intent=trade, action=close, product=BTC
 - For "set alert when BTC goes above 100k" -> intent=command, action=alerts, product=BTC, alert_condition=above, alert_value=100000
 - For "what's funding on ETH" -> intent=query, action=funding, product=ETH
+- For questions about Nado DEX features, how it works, fees, margin, liquidation, NLP, order types, etc -> intent=nado_question, message=the user's question
+- Examples of nado_question: "what is NLP on nado?", "how does liquidation work?", "what order types does nado support?", "how do I deposit?", "what is unified margin?", "tell me about nado", "what are the fees?", "how does cross margin work?"
 - For casual chat/greetings -> intent=chat, action=null, message=friendly response
 - If confidence < 0.5, suggest the user try specific commands
 - Always include a user-friendly message explaining what you understood
@@ -77,7 +79,7 @@ def _sanitize_result(result: dict) -> dict:
         if key not in result or result[key] is None and default is not None:
             result.setdefault(key, default)
 
-    if result.get("intent") not in ("trade", "query", "command", "chat"):
+    if result.get("intent") not in ("trade", "query", "command", "chat", "nado_question"):
         result["intent"] = "chat"
 
     if result.get("size") is not None:
@@ -249,11 +251,28 @@ def _fallback_parse(text: str) -> dict:
             "confidence": 0.8,
         }
 
+    nado_keywords = [
+        "nado", "margin", "liquidat", "nlp", "vault", "deposit", "withdraw",
+        "subaccount", "order type", "leverage", "cross margin", "isolated",
+        "settlement", "pnl", "insurance", "fee", "speed bump", "twap",
+        "stop loss", "take profit", "templars", "nft", "ink", "faucet",
+        "how do", "how does", "what is", "what are", "explain", "tell me about",
+    ]
+    if any(kw in text_lower for kw in nado_keywords):
+        return {
+            "intent": "nado_question", "action": None,
+            "product": None, "size": None,
+            "price": None, "leverage": None, "tp_price": None, "sl_price": None,
+            "alert_condition": None, "alert_value": None,
+            "message": text,
+            "confidence": 0.7,
+        }
+
     return {
         "intent": "chat", "action": None,
         "product": None, "size": None,
         "price": None, "leverage": None, "tp_price": None, "sl_price": None,
         "alert_condition": None, "alert_value": None,
-        "message": "I'm not sure what you're looking for. Try commands like /positions, /balance, /long BTC 0.01, or /price BTC. For help, DM @nadobro on X.",
+        "message": "I'm not sure what you're looking for. Try commands like /positions, /balance, /long BTC 0.01, or /price BTC. You can also ask me about Nado — try 'What is Nado?' or 'How does margin work?'",
         "confidence": 0.2,
     }
