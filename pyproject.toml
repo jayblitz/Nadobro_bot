@@ -6,6 +6,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "apscheduler>=3.11.2",
     "cryptography>=46.0.4",
+    "flask>=3.1.2",
     "nado-protocol>=0.3.3",
     "openai>=2.17.0",
     "psycopg2-binary>=2.9.11",

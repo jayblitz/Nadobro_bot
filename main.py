@@ -3,6 +3,7 @@ import sys
 import logging
 import asyncio
 import signal
+import threading
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,8 +19,7 @@ from src.nadobro.services.crypto import validate_encryption_key
 if not ENCRYPTION_KEY:
     logger.error(
         "ENCRYPTION_KEY is required for wallet encryption. "
-        "Please set ENCRYPTION_KEY in your Replit Secrets tab. "
-        "Without a persistent key, encrypted wallets cannot be recovered after restart."
+        "Please set ENCRYPTION_KEY in your Replit Secrets tab."
     )
     sys.exit(1)
 
@@ -41,7 +41,6 @@ def check_config():
 
     if missing:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
-        logger.error("Please set these in your Replit Secrets tab.")
         sys.exit(1)
 
     logger.info("Configuration check passed")
@@ -49,17 +48,9 @@ def check_config():
 
 def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+    from telegram import WebAppInfo, MenuButtonWebApp
 
-    from src.nadobro.handlers.commands import (
-        cmd_start, cmd_help, cmd_long, cmd_short,
-        cmd_limit_long, cmd_limit_short, cmd_tp, cmd_sl,
-        cmd_close, cmd_close_all,
-        cmd_positions, cmd_balance, cmd_price, cmd_funding,
-        cmd_history, cmd_analytics,
-        cmd_wallet, cmd_mode, cmd_recover,
-        cmd_alert, cmd_my_alerts, cmd_del_alert,
-        cmd_admin_stats, cmd_admin_pause, cmd_admin_logs,
-    )
+    from src.nadobro.handlers.commands import cmd_start, cmd_help
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
 
@@ -67,36 +58,17 @@ def setup_bot():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("long", cmd_long))
-    app.add_handler(CommandHandler("short", cmd_short))
-    app.add_handler(CommandHandler("limit_long", cmd_limit_long))
-    app.add_handler(CommandHandler("limit_short", cmd_limit_short))
-    app.add_handler(CommandHandler("tp", cmd_tp))
-    app.add_handler(CommandHandler("sl", cmd_sl))
-    app.add_handler(CommandHandler("close", cmd_close))
-    app.add_handler(CommandHandler("close_all", cmd_close_all))
-    app.add_handler(CommandHandler("positions", cmd_positions))
-    app.add_handler(CommandHandler("balance", cmd_balance))
-    app.add_handler(CommandHandler("price", cmd_price))
-    app.add_handler(CommandHandler("funding", cmd_funding))
-    app.add_handler(CommandHandler("history", cmd_history))
-    app.add_handler(CommandHandler("analytics", cmd_analytics))
-    app.add_handler(CommandHandler("wallet", cmd_wallet))
-    app.add_handler(CommandHandler("mode", cmd_mode))
-    app.add_handler(CommandHandler("recover", cmd_recover))
-    app.add_handler(CommandHandler("alert", cmd_alert))
-    app.add_handler(CommandHandler("my_alerts", cmd_my_alerts))
-    app.add_handler(CommandHandler("del_alert", cmd_del_alert))
-    app.add_handler(CommandHandler("admin_stats", cmd_admin_stats))
-    app.add_handler(CommandHandler("admin_pause", cmd_admin_pause))
-    app.add_handler(CommandHandler("admin_logs", cmd_admin_logs))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
-
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot handlers registered")
+    logger.info("Bot handlers registered (Mini App mode)")
     return app
+
+
+def run_flask():
+    from src.nadobro.api import app as flask_app
+    flask_app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
 
 
 async def run_bot():
@@ -106,11 +78,15 @@ async def run_bot():
     init_db()
     logger.info("Database initialized")
 
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Flask web server started on port 5000")
+
     logger.info("Setting up Telegram bot...")
-    app = setup_bot()
+    bot_app = setup_bot()
 
     from src.nadobro.services.scheduler import set_bot_app, set_check_client, start_scheduler
-    set_bot_app(app)
+    set_bot_app(bot_app)
 
     try:
         from src.nadobro.services.nado_client import NadoClient
@@ -119,23 +95,19 @@ async def run_bot():
         set_check_client(alert_client)
         logger.info("Alert price-check client initialized")
     except Exception as e:
-        logger.warning(f"Alert price-check client failed to initialize (alerts will be limited): {e}")
-
-    from src.nadobro.config import ADMIN_USER_IDS
-    if not ADMIN_USER_IDS:
-        logger.warning("ADMIN_USER_IDS not set - admin commands will be inaccessible")
+        logger.warning(f"Alert price-check client failed to initialize: {e}")
 
     start_scheduler()
 
     logger.info("Starting bot with polling...")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling(
         drop_pending_updates=True,
         allowed_updates=["message", "callback_query"],
     )
 
-    logger.info("Nadobro bot is live! Waiting for messages...")
+    logger.info("Nadobro is live! Mini App + Bot running.")
 
     stop_event = asyncio.Event()
 
@@ -154,9 +126,9 @@ async def run_bot():
         logger.info("Shutting down...")
         from src.nadobro.services.scheduler import stop_scheduler
         stop_scheduler()
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+        await bot_app.updater.stop()
+        await bot_app.stop()
+        await bot_app.shutdown()
         logger.info("Bot stopped cleanly")
 
 
