@@ -3,7 +3,6 @@ import sys
 import logging
 import asyncio
 import signal
-import threading
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,7 +47,6 @@ def check_config():
 
 def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
-    from telegram import WebAppInfo, MenuButtonWebApp
 
     from src.nadobro.handlers.commands import cmd_start, cmd_help
     from src.nadobro.handlers.messages import handle_message
@@ -62,13 +60,8 @@ def setup_bot():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot handlers registered (Mini App mode)")
+    logger.info("Bot handlers registered (pure bot mode)")
     return app
-
-
-def run_flask():
-    from src.nadobro.api import app as flask_app
-    flask_app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
 
 
 async def run_bot():
@@ -77,10 +70,6 @@ async def run_bot():
     logger.info("Initializing database...")
     init_db()
     logger.info("Database initialized")
-
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask web server started on port 5000")
 
     logger.info("Setting up Telegram bot...")
     bot_app = setup_bot()
@@ -107,7 +96,7 @@ async def run_bot():
         allowed_updates=["message", "callback_query"],
     )
 
-    logger.info("Nadobro is live! Mini App + Bot running.")
+    logger.info("Nadobro is live! Pure bot mode running.")
 
     stop_event = asyncio.Event()
 

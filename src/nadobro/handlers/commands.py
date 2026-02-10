@@ -1,24 +1,16 @@
-import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
 from src.nadobro.services.user_service import (
-    get_or_create_user, get_user,
+    get_or_create_user, get_user_nado_client, get_user,
 )
+from src.nadobro.handlers.formatters import (
+    escape_md, fmt_dashboard, fmt_help,
+)
+from src.nadobro.handlers.keyboards import main_menu_kb, back_kb
 
 logger = logging.getLogger(__name__)
-
-WEBAPP_URL = f"https://{os.environ.get('REPLIT_DEV_DOMAIN', os.environ.get('REPLIT_DOMAINS', 'localhost:5000'))}"
-
-
-def _get_webapp_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "Open Nadobro",
-            web_app=WebAppInfo(url=WEBAPP_URL)
-        )],
-    ])
 
 
 async def cmd_start(update: Update, context: CallbackContext):
@@ -28,57 +20,55 @@ async def cmd_start(update: Update, context: CallbackContext):
     user, is_new, mnemonic = get_or_create_user(telegram_id, username)
 
     if is_new:
-        msg = (
-            "*Welcome to Nadobro!*\n"
-            "Your AI trading companion for Nado DEX.\n\n"
-            "Your testnet wallet has been created:\n"
-            f"`{user.wallet_address_testnet}`\n\n"
+        welcome = (
+            "🔷 *Welcome to NADOBRO\\!*\n"
+            "Your trading bot for Nado DEX perpetual futures\\.\n\n"
+            "🔑 *Your testnet wallet has been created:*\n"
+            f"`{escape_md(user.wallet_address_testnet)}`\n\n"
         )
         if mnemonic:
-            msg += (
-                "SAVE YOUR RECOVERY PHRASE (shown only once):\n"
-                f"`{mnemonic}`\n\n"
-                "Store this safely - it's the ONLY way to recover your wallet.\n\n"
+            welcome += (
+                "⚠️ *SAVE YOUR RECOVERY PHRASE \\(shown only once\\):*\n"
+                f"`{escape_md(mnemonic)}`\n\n"
+                "Store this safely \\— it's the ONLY way to recover your wallet\\.\n\n"
             )
-        msg += (
-            "*Getting started:*\n"
-            "1. Get testnet ETH: https://docs.inkonchain.com/tools/faucets\n"
-            "2. Get USDT0: https://testnet.nado.xyz/portfolio/faucet\n"
-            "3. Deposit >= $5 USDT0 on Nado testnet\n\n"
-            "Tap the button below to open the trading app:"
-        )
-    else:
-        mode = user.network_mode.value
-        badge = "MAINNET" if mode == "mainnet" else "TESTNET"
-        addr = user.wallet_address_mainnet if mode == "mainnet" else user.wallet_address_testnet
-        msg = (
-            f"*Welcome back!* [{badge}]\n"
-            f"Wallet: `{addr}`\n\n"
-            "Tap below to open the trading app:"
+        welcome += (
+            "📌 *Getting started:*\n"
+            "1\\. Get testnet ETH: docs\\.inkonchain\\.com/tools/faucets\n"
+            "2\\. Get USDT0: testnet\\.nado\\.xyz/portfolio/faucet\n"
+            "3\\. Deposit ≥ \\$5 USDT0 on Nado testnet\n"
         )
 
+        await update.message.reply_text(
+            welcome,
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+    network = user.network_mode.value
+    balance = None
+    positions = None
+    prices = None
+
+    try:
+        client = get_user_nado_client(telegram_id)
+        if client:
+            balance = client.get_balance()
+            positions = client.get_all_positions()
+            prices = client.get_all_market_prices()
+    except Exception as e:
+        logger.warning(f"Failed to fetch data for dashboard: {e}")
+
+    dashboard = fmt_dashboard(user, balance, positions, prices, network)
     await update.message.reply_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_get_webapp_keyboard(),
+        dashboard,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=main_menu_kb(),
     )
 
 
 async def cmd_help(update: Update, context: CallbackContext):
-    msg = (
-        "*Nadobro - Nado DEX Trading App*\n\n"
-        "Tap the button below to open the full trading interface.\n\n"
-        "You can trade perpetual futures on:\n"
-        "BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX\n\n"
-        "Features:\n"
-        "- Market & limit orders\n"
-        "- Real-time prices\n"
-        "- Position management\n"
-        "- Price alerts\n"
-        "- Testnet & mainnet support"
-    )
     await update.message.reply_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_get_webapp_keyboard(),
+        fmt_help(),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=main_menu_kb(),
     )

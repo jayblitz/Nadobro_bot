@@ -1,25 +1,19 @@
 # Nadobro - AI Trading Companion for Nado DEX
 
 ## Overview
-Nadobro is a Telegram Mini App for trading on Nado DEX (perpetual futures on Ink blockchain). It provides a full web-based trading interface inside Telegram, with per-user encrypted wallet management, real-time market data, position management, and price alerts.
+Nadobro is a Telegram trading bot for Nado DEX (perpetual futures on Ink blockchain). It provides a rich, button-driven Trojan-style interface with inline keyboards for all interactions, per-user encrypted wallet management, real-time market data, position management, price alerts, and AI-powered natural language command parsing.
 
 ## Recent Changes
-- 2026-02-10: Pivoted from Telegram bot UI to Telegram Mini App. Built Flask web server serving a modern dark-themed trading interface. Bot now sends "Open Nadobro" button that launches the Mini App inside Telegram. All trading functionality available through the web UI.
+- 2026-02-10: Fixed limit order flow (pending_trade step set correctly in _handle_product), enhanced fmt_positions with PnL and mark price display, hardened MarkdownV2 escaping (backslash handling).
+- 2026-02-10: Rebuilt as Trojan-style pure bot. Removed Flask web UI/Mini App entirely. New button-driven interface with MarkdownV2 formatting, inline keyboards for multi-step trade flows, position management, wallet ops, alerts, and settings. Added formatters.py for rich message formatting.
 - 2026-02-09: Production hardening - Encryption key validation, AI parser sanitization, comprehensive error handling
 - 2026-02-09: Initial build - Full project structure, database models, Nado SDK integration, wallet encryption
 
 ## Architecture
 ```
-main.py                          # Entry point - runs Flask + bot polling together
-templates/
-  index.html                     # Mini App HTML (single-page app)
-static/
-  css/app.css                    # Dark trading theme CSS
-  js/app.js                      # Frontend logic (tabs, trading, positions, wallet)
+main.py                          # Entry point - pure bot polling (no Flask)
 src/nadobro/
   config.py                      # Environment vars, product definitions, constants
-  api.py                         # Flask REST API endpoints
-  webapp_auth.py                 # Telegram WebApp initData validation
   models/
     database.py                  # SQLAlchemy models (User, Trade, Alert, AdminLog, BotState)
   services/
@@ -32,34 +26,30 @@ src/nadobro/
     admin_service.py             # Admin stats, pause trading, logs
     scheduler.py                 # APScheduler for background alert checking
   handlers/
-    commands.py                  # /start and /help with Mini App launch button
-    messages.py                  # Redirects text to Mini App
-    callbacks.py                 # Legacy callback handlers
-    keyboards.py                 # Legacy inline keyboards
+    formatters.py                # MarkdownV2 message formatting (dashboard, positions, etc.)
+    keyboards.py                 # Trojan-style inline keyboard layouts
+    commands.py                  # /start (dashboard) and /help commands
+    callbacks.py                 # Button-driven trade/position/wallet/alert/settings flows
+    messages.py                  # AI-powered natural language handler + pending input
 ```
 
 ## Key Technologies
-- Python 3.11, Flask (web server on port 5000)
-- Telegram Mini App (WebApp SDK for auth + theming)
-- python-telegram-bot (polling mode for notifications)
+- Python 3.11
+- python-telegram-bot (polling mode, inline keyboards, MarkdownV2)
 - Nado Protocol SDK (nado-protocol)
 - PostgreSQL (SQLAlchemy ORM)
 - AES-256 Fernet encryption for private keys
 - APScheduler for background alert checking
+- xAI Grok API for natural language trade parsing
 
-## API Endpoints
-- GET /api/user - Get/create user
-- GET /api/balance - Wallet balance
-- GET /api/positions - Open positions
-- GET /api/prices - All market prices
-- POST /api/trade - Execute trade (market/limit)
-- POST /api/close - Close position(s)
-- GET /api/history - Trade history
-- GET /api/analytics - Trading stats
-- GET /api/wallet - Wallet info
-- POST /api/network - Switch testnet/mainnet
-- GET/POST/DELETE /api/alerts - Price alerts
-- GET /api/products - Available products
+## Bot Interface Flows
+- Trade: Product picker -> Size presets -> Leverage selector -> Preview -> Confirm
+- Positions: View all -> Close individual or close all
+- Wallet: Balance, address, network switching, faucet
+- Markets: Prices grid, funding rates
+- Alerts: Set/view/delete price alerts
+- Settings: Default leverage, slippage
+- AI: Natural language commands parsed via xAI Grok
 
 ## Environment Variables Required
 - TELEGRAM_TOKEN: Bot token from @BotFather
@@ -71,9 +61,8 @@ src/nadobro/
 BTC-PERP, ETH-PERP, SOL-PERP, XRP-PERP, BNB-PERP, LINK-PERP, DOGE-PERP, AVAX-PERP
 
 ## Deployment
-- Development: `python main.py` (Flask on port 5000 + bot polling)
+- Development: `python main.py` (bot polling, console output)
 - Production: Replit Deployments (VM type, always-on)
-- Mini App URL must be set in BotFather: use the Replit deployment URL
 
 ## User Preferences
 - Production-grade, 24/7 uptime
@@ -81,4 +70,4 @@ BTC-PERP, ETH-PERP, SOL-PERP, XRP-PERP, BNB-PERP, LINK-PERP, DOGE-PERP, AVAX-PER
 - Rate limit: 1 trade per minute per user
 - Max leverage: 50x
 - Testnet and mainnet support with network switching
-- Telegram Mini App (not chat-based bot UI)
+- Trojan-style button-driven bot interface
