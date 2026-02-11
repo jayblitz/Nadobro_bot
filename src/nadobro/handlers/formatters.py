@@ -1,4 +1,5 @@
 import re
+from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
 
 
@@ -449,7 +450,7 @@ def fmt_help():
     )
 
 
-def fmt_onboarding_step(step: str, network: str, readiness: dict, extra: dict | None = None):
+def fmt_onboarding_step(step: str, network: str, readiness: dict, extra: Optional[dict] = None):
     extra = extra or {}
     progress = extra.get("progress", "0/6")
     if step == "welcome":

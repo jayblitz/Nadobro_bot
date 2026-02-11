@@ -42,6 +42,7 @@ from src.nadobro.services.onboarding_service import (
     set_selected_template,
 )
 from src.nadobro.config import get_product_name, get_product_id, PRODUCTS
+from src.nadobro.services.debug_logger import debug_log
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,15 @@ async def handle_callback(update: Update, context: CallbackContext):
 
     data = query.data
     telegram_id = query.from_user.id
+    # region agent log
+    debug_log(
+        "baseline",
+        "H1",
+        "callbacks.py:59",
+        "callback_received",
+        {"telegram_id": telegram_id, "data": data},
+    )
+    # endregion
 
     try:
         if data.startswith("nav:"):
@@ -92,6 +102,15 @@ async def handle_callback(update: Update, context: CallbackContext):
                 reply_markup=back_kb(),
             )
     except Exception as e:
+        # region agent log
+        debug_log(
+            "baseline",
+            "H1",
+            "callbacks.py:102",
+            "callback_exception",
+            {"telegram_id": telegram_id, "data": data, "error": str(e)},
+        )
+        # endregion
         logger.error(f"Callback error for '{data}': {e}", exc_info=True)
         try:
             await query.edit_message_text(
@@ -341,6 +360,21 @@ async def _handle_leverage(query, data, telegram_id, context):
 
 async def _handle_exec_trade(query, data, telegram_id, context):
     pending = context.user_data.get("pending_trade")
+    # region agent log
+    debug_log(
+        "baseline",
+        "H2",
+        "callbacks.py:353",
+        "exec_trade_clicked",
+        {
+            "telegram_id": telegram_id,
+            "has_pending_trade": bool(pending),
+            "pending_action": pending.get("action") if pending else None,
+            "pending_product": pending.get("product") if pending else None,
+            "pending_step": pending.get("step") if pending else None,
+        },
+    )
+    # endregion
     if not pending:
         await query.edit_message_text(
             "⚠️ No pending trade found\\. Please start again\\.",
@@ -871,6 +905,20 @@ async def _handle_strategy(query, data, context, telegram_id):
         strategy_id = parts[2]
         product = parts[3]
         resume_step = get_resume_step(telegram_id)
+        # region agent log
+        debug_log(
+            "baseline",
+            "H4",
+            "callbacks.py:901",
+            "strategy_start_requested",
+            {
+                "telegram_id": telegram_id,
+                "strategy_id": strategy_id,
+                "product": product,
+                "resume_step": resume_step,
+            },
+        )
+        # endregion
         if resume_step != "complete":
             await query.edit_message_text(
                 f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(resume_step.upper())}*\\.",
@@ -1151,6 +1199,21 @@ async def _handle_onboarding(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else ""
     network, state = get_onboarding_progress(telegram_id)["network"], get_onboarding_progress(telegram_id)["state"]
     step = state.get("current_step", "welcome")
+    # region agent log
+    debug_log(
+        "baseline",
+        "H3",
+        "callbacks.py:1175",
+        "onboarding_action_received",
+        {
+            "telegram_id": telegram_id,
+            "network": network,
+            "action": action,
+            "current_step": step,
+            "resume_step": get_resume_step(telegram_id),
+        },
+    )
+    # endregion
 
     if action == "resume":
         step = get_resume_step(telegram_id)

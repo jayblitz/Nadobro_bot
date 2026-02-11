@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -39,7 +40,7 @@ for name, info in PRODUCTS.items():
         PRODUCT_ALIASES[info["symbol"].lower()] = info["id"]
         PRODUCT_ALIASES[info["symbol"].replace("-PERP", "").lower() + "-perp"] = info["id"]
 
-def get_product_id(name: str) -> int | None:
+def get_product_id(name: str) -> Optional[int]:
     return PRODUCT_ALIASES.get(name.lower().strip())
 
 def get_product_name(product_id: int) -> str:

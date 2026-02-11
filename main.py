@@ -3,6 +3,7 @@ import sys
 import logging
 import asyncio
 import signal
+from dotenv import load_dotenv
 
 logging.basicConfig(
     level=logging.INFO,
@@ -11,13 +12,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger("nadobro")
 
+# Load local .env during development before reading config vars.
+load_dotenv()
+
 from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
 from src.nadobro.services.crypto import validate_encryption_key
+from src.nadobro.services.debug_logger import debug_log
 
 if not ENCRYPTION_KEY:
+    # region agent log
+    debug_log(
+        "baseline",
+        "H7",
+        "main.py:24",
+        "missing_encryption_key",
+        {"has_telegram_token": bool(TELEGRAM_TOKEN), "has_database_url": bool(DATABASE_URL)},
+    )
+    # endregion
     logger.error(
         "ENCRYPTION_KEY is required for wallet encryption. "
-        "Please set ENCRYPTION_KEY in your Replit Secrets tab."
+        "Please set ENCRYPTION_KEY in environment variables or a local .env file."
     )
     sys.exit(1)
 
@@ -25,6 +39,15 @@ try:
     validate_encryption_key()
     logger.info("Encryption key validated successfully")
 except RuntimeError as e:
+    # region agent log
+    debug_log(
+        "baseline",
+        "H7",
+        "main.py:40",
+        "invalid_encryption_key",
+        {"error": str(e)},
+    )
+    # endregion
     logger.error(str(e))
     sys.exit(1)
 
@@ -70,12 +93,30 @@ def setup_bot():
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # region agent log
+    debug_log(
+        "baseline",
+        "H6",
+        "main.py:75",
+        "handlers_registered",
+        {"has_callback_handler": True, "has_message_handler": True},
+    )
+    # endregion
 
     logger.info("Bot handlers registered (pure bot mode)")
     return app
 
 
 async def run_bot():
+    # region agent log
+    debug_log(
+        "baseline",
+        "H6",
+        "main.py:87",
+        "run_bot_started",
+        {"pid": os.getpid()},
+    )
+    # endregion
     check_config()
     from src.nadobro.models.database import init_db
 
@@ -108,6 +149,15 @@ async def run_bot():
     restore_running_bots()
 
     logger.info("Starting bot with polling...")
+    # region agent log
+    debug_log(
+        "baseline",
+        "H6",
+        "main.py:121",
+        "starting_polling",
+        {"allowed_updates": ["message", "callback_query"]},
+    )
+    # endregion
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling(

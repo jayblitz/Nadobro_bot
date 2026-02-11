@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from typing import Optional
 from src.nadobro.models.database import User, NetworkMode, get_session
 from src.nadobro.services.crypto import (
     encrypt_private_key, decrypt_private_key,
@@ -10,7 +11,7 @@ from src.nadobro.services.nado_client import get_nado_client, NadoClient, clear_
 logger = logging.getLogger(__name__)
 
 
-def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bool, str | None]:
+def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bool, Optional[str]]:
     with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if user:
@@ -35,7 +36,7 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bo
         return user, True, None
 
 
-def get_user(telegram_id: int) -> User | None:
+def get_user(telegram_id: int) -> Optional[User]:
     with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if user:
@@ -69,7 +70,7 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
         return True, msg
 
 
-def get_user_nado_client(telegram_id: int) -> NadoClient | None:
+def get_user_nado_client(telegram_id: int) -> Optional[NadoClient]:
     with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if not user:
@@ -89,7 +90,7 @@ def get_user_nado_client(telegram_id: int) -> NadoClient | None:
         return get_nado_client(pk, network)
 
 
-def get_user_wallet_info(telegram_id: int) -> dict | None:
+def get_user_wallet_info(telegram_id: int) -> Optional[dict]:
     with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if not user:
@@ -185,7 +186,7 @@ def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
     return True, ""
 
 
-def get_user_private_key(telegram_id: int, network: str | None = None) -> tuple[bool, str]:
+def get_user_private_key(telegram_id: int, network: Optional[str] = None) -> tuple[bool, str]:
     user = get_user(telegram_id)
     if not user:
         return False, "User not found."

@@ -17,6 +17,7 @@ from src.nadobro.services.ai_parser import parse_user_message
 from src.nadobro.services.knowledge_service import answer_nado_question
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.onboarding_service import get_resume_step
+from src.nadobro.services.debug_logger import debug_log
 from src.nadobro.services.crypto import (
     is_probable_mnemonic,
     normalize_private_key,
@@ -46,6 +47,21 @@ async def handle_message(update: Update, context: CallbackContext):
     text = update.message.text.strip()
 
     get_or_create_user(telegram_id, username)
+    # region agent log
+    debug_log(
+        "baseline",
+        "H5",
+        "messages.py:51",
+        "message_received",
+        {
+            "telegram_id": telegram_id,
+            "text_len": len(text),
+            "has_pending_trade": bool(context.user_data.get("pending_trade")),
+            "has_pending_alert": bool(context.user_data.get("pending_alert")),
+            "has_pending_question": bool(context.user_data.get("pending_question")),
+        },
+    )
+    # endregion
 
     if await _handle_pending_question(update, context, text):
         return
@@ -64,6 +80,21 @@ async def handle_message(update: Update, context: CallbackContext):
 
     parsed = await parse_user_message(text)
     intent = parsed.get("intent", "chat")
+    # region agent log
+    debug_log(
+        "baseline",
+        "H5",
+        "messages.py:84",
+        "message_intent_parsed",
+        {
+            "telegram_id": telegram_id,
+            "intent": intent,
+            "action": parsed.get("action"),
+            "product": parsed.get("product"),
+            "has_size": parsed.get("size") is not None,
+        },
+    )
+    # endregion
 
     try:
         if intent == "trade":
@@ -86,6 +117,15 @@ async def handle_message(update: Update, context: CallbackContext):
                     reply_markup=main_menu_kb(),
                 )
     except Exception as e:
+        # region agent log
+        debug_log(
+            "baseline",
+            "H5",
+            "messages.py:106",
+            "message_handler_exception",
+            {"telegram_id": telegram_id, "error": str(e), "intent": intent},
+        )
+        # endregion
         logger.error(f"Message handler error: {e}", exc_info=True)
         await update.message.reply_text(
             "⚠️ Something went wrong\\. Please try again\\.",
@@ -110,6 +150,20 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         return False
 
     step = pending.get("step", "")
+    # region agent log
+    debug_log(
+        "baseline",
+        "H2",
+        "messages.py:138",
+        "pending_trade_message_step",
+        {
+            "telegram_id": telegram_id,
+            "step": step,
+            "action": pending.get("action"),
+            "product": pending.get("product"),
+        },
+    )
+    # endregion
 
     if step == "custom_size":
         try:

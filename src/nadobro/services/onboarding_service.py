@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from typing import Optional
 
 from src.nadobro.models.database import BotState, get_session
 from src.nadobro.services.user_service import (
@@ -7,6 +8,7 @@ from src.nadobro.services.user_service import (
     has_mode_private_key,
     get_user_nado_client,
 )
+from src.nadobro.services.debug_logger import debug_log
 
 ONBOARDING_PREFIX = "onboarding:"
 
@@ -81,7 +83,7 @@ def update_onboarding_state(telegram_id: int, mutator):
     return network, state
 
 
-def _first_missing_step(state: dict) -> str | None:
+def _first_missing_step(state: dict) -> Optional[str]:
     completed = set(state.get("completed_steps", []))
     skipped = set(state.get("skipped_steps", []))
     for step in ONBOARDING_STEPS:
@@ -184,7 +186,7 @@ def evaluate_readiness(telegram_id: int) -> dict:
             funded = False
 
     missing_step = get_resume_step(telegram_id)
-    return {
+    readiness = {
         "network": network,
         "has_key": has_key,
         "funded": funded,
@@ -195,3 +197,21 @@ def evaluate_readiness(telegram_id: int) -> dict:
         or "risk" in set(state.get("skipped_steps", [])),
         "user_exists": bool(user),
     }
+    # region agent log
+    debug_log(
+        "baseline",
+        "H3",
+        "onboarding_service.py:204",
+        "readiness_evaluated",
+        {
+            "telegram_id": telegram_id,
+            "network": readiness["network"],
+            "has_key": readiness["has_key"],
+            "funded": readiness["funded"],
+            "onboarding_complete": readiness["onboarding_complete"],
+            "missing_step": readiness["missing_step"],
+            "selected_template": readiness["selected_template"],
+        },
+    )
+    # endregion
+    return readiness
