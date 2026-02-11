@@ -2,8 +2,8 @@ import logging
 from datetime import datetime
 from src.nadobro.models.database import User, NetworkMode, get_session
 from src.nadobro.services.crypto import (
-    generate_wallet, encrypt_private_key, decrypt_private_key,
-    hash_mnemonic, recover_wallet_from_mnemonic,
+    encrypt_private_key, decrypt_private_key,
+    derive_address_from_private_key, normalize_private_key,
 )
 from src.nadobro.services.nado_client import get_nado_client, NadoClient, clear_client_cache
 
@@ -22,16 +22,9 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bo
             session.expunge(user)
             return user, False, None
 
-        wallet = generate_wallet()
-        encrypted_key = encrypt_private_key(wallet["private_key"])
-        mnemonic_h = hash_mnemonic(wallet["mnemonic"])
-
         user = User(
             telegram_id=telegram_id,
             telegram_username=username,
-            encrypted_private_key_testnet=encrypted_key,
-            wallet_address_testnet=wallet["address"],
-            mnemonic_hash_testnet=mnemonic_h,
             network_mode=NetworkMode.TESTNET,
         )
         session.add(user)
@@ -39,7 +32,7 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bo
         session.refresh(user)
         session.expunge(user)
 
-        return user, True, wallet["mnemonic"]
+        return user, True, None
 
 
 def get_user(telegram_id: int) -> User | None:
@@ -59,30 +52,19 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
 
         new_mode = NetworkMode.MAINNET if network == "mainnet" else NetworkMode.TESTNET
 
-        if new_mode == NetworkMode.MAINNET and not user.encrypted_private_key_mainnet:
-            wallet = generate_wallet()
-            encrypted_key = encrypt_private_key(wallet["private_key"])
-            user.encrypted_private_key_mainnet = encrypted_key
-            user.wallet_address_mainnet = wallet["address"]
-            user.mnemonic_hash_mainnet = hash_mnemonic(wallet["mnemonic"])
-            mnemonic_msg = (
-                f"New mainnet wallet created!\n"
-                f"Address: {wallet['address']}\n\n"
-                f"SAVE YOUR RECOVERY PHRASE (shown once):\n"
-                f"`{wallet['mnemonic']}`\n\n"
-                f"Store this safely - it's the ONLY way to recover your mainnet wallet."
-            )
-        else:
-            mnemonic_msg = None
-
         user.network_mode = new_mode
         clear_client_cache()
         session.commit()
 
         addr = user.wallet_address_mainnet if new_mode == NetworkMode.MAINNET else user.wallet_address_testnet
-        msg = f"Switched to {network} mode.\nActive wallet: `{addr}`"
-        if mnemonic_msg:
-            msg = mnemonic_msg + "\n\n" + msg
+        if addr:
+            msg = f"Switched to {network} mode.\nActive wallet: `{addr}`"
+        else:
+            msg = (
+                f"Switched to {network} mode.\n"
+                "No key imported for this mode yet.\n"
+                "Use /import_key to add a dedicated trading private key."
+            )
 
         return True, msg
 
@@ -117,35 +99,110 @@ def get_user_wallet_info(telegram_id: int) -> dict | None:
             "mainnet_address": user.wallet_address_mainnet,
             "network": user.network_mode.value,
             "active_address": user.wallet_address_mainnet if user.network_mode == NetworkMode.MAINNET else user.wallet_address_testnet,
+            "testnet_ready": bool(user.encrypted_private_key_testnet and user.wallet_address_testnet),
+            "mainnet_ready": bool(user.encrypted_private_key_mainnet and user.wallet_address_mainnet),
         }
 
 
-def recover_user_wallet(telegram_id: int, mnemonic: str, network: str = "testnet") -> tuple[bool, str]:
+def import_user_private_key(telegram_id: int, private_key: str, network: str = "testnet") -> tuple[bool, str]:
     with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if not user:
             return False, "User not found."
 
         try:
-            wallet = recover_wallet_from_mnemonic(mnemonic)
+            normalized = normalize_private_key(private_key)
+            address = derive_address_from_private_key(normalized)
         except Exception as e:
-            return False, f"Invalid recovery phrase: {str(e)}"
+            return False, f"Invalid private key: {str(e)}"
 
-        encrypted_key = encrypt_private_key(wallet["private_key"])
+        encrypted_key = encrypt_private_key(normalized)
 
         if network == "mainnet":
             user.encrypted_private_key_mainnet = encrypted_key
-            user.wallet_address_mainnet = wallet["address"]
-            user.mnemonic_hash_mainnet = hash_mnemonic(mnemonic)
+            user.wallet_address_mainnet = address
+            user.mnemonic_hash_mainnet = None
         else:
             user.encrypted_private_key_testnet = encrypted_key
-            user.wallet_address_testnet = wallet["address"]
-            user.mnemonic_hash_testnet = hash_mnemonic(mnemonic)
+            user.wallet_address_testnet = address
+            user.mnemonic_hash_testnet = None
 
         clear_client_cache()
         session.commit()
 
-        return True, f"Wallet recovered successfully!\nAddress: `{wallet['address']}`"
+        return True, f"Trading key imported successfully.\nAddress: `{address}`"
+
+
+def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple[bool, str]:
+    with get_session() as session:
+        user = session.query(User).filter_by(telegram_id=telegram_id).first()
+        if not user:
+            return False, "User not found."
+
+        if network == "mainnet":
+            user.encrypted_private_key_mainnet = None
+            user.wallet_address_mainnet = None
+            user.mnemonic_hash_mainnet = None
+        else:
+            user.encrypted_private_key_testnet = None
+            user.wallet_address_testnet = None
+            user.mnemonic_hash_testnet = None
+
+        clear_client_cache()
+        session.commit()
+        return True, f"{network} key removed."
+
+
+def has_mode_private_key(telegram_id: int, network: str) -> bool:
+    user = get_user(telegram_id)
+    if not user:
+        return False
+    if network == "mainnet":
+        return bool(user.encrypted_private_key_mainnet and user.wallet_address_mainnet)
+    return bool(user.encrypted_private_key_testnet and user.wallet_address_testnet)
+
+
+def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
+    user = get_user(telegram_id)
+    if not user:
+        return False, "User not found. Use /start first."
+    network = user.network_mode.value
+    if not has_mode_private_key(telegram_id, network):
+        return (
+            False,
+            f"No trading key set for {network} mode. "
+            "Use /import_key and paste a dedicated private key for this mode.",
+        )
+    client = get_user_nado_client(telegram_id)
+    if not client:
+        return False, "Wallet client not initialized. Try /import_key again."
+    balance = client.get_balance()
+    if not balance.get("exists"):
+        return (
+            False,
+            "Subaccount not found on Nado yet. Fund your imported wallet first, then retry.",
+        )
+    return True, ""
+
+
+def get_user_private_key(telegram_id: int, network: str | None = None) -> tuple[bool, str]:
+    user = get_user(telegram_id)
+    if not user:
+        return False, "User not found."
+
+    target_network = network or user.network_mode.value
+    if target_network == "mainnet":
+        encrypted = user.encrypted_private_key_mainnet
+    else:
+        encrypted = user.encrypted_private_key_testnet
+
+    if not encrypted:
+        return False, f"No private key set for {target_network} mode."
+
+    try:
+        return True, decrypt_private_key(encrypted)
+    except Exception:
+        return False, "Failed to decrypt private key."
 
 
 def update_trade_stats(telegram_id: int, volume_usd: float):

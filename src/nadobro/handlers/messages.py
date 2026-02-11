@@ -1,9 +1,11 @@
 import logging
-from telegram import Update
+import time
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info, get_user,
+    import_user_private_key, ensure_active_wallet_ready,
 )
 from src.nadobro.services.trade_service import (
     execute_market_order, close_position, close_all_positions,
@@ -13,6 +15,14 @@ from src.nadobro.services.alert_service import create_alert, get_user_alerts
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.ai_parser import parse_user_message
 from src.nadobro.services.knowledge_service import answer_nado_question
+from src.nadobro.services.settings_service import get_user_settings, update_user_settings
+from src.nadobro.services.onboarding_service import get_resume_step
+from src.nadobro.services.crypto import (
+    is_probable_mnemonic,
+    normalize_private_key,
+    derive_address_from_private_key,
+    private_key_fingerprint,
+)
 from src.nadobro.config import get_product_id, PRODUCTS
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_balance, fmt_prices, fmt_funding,
@@ -40,10 +50,16 @@ async def handle_message(update: Update, context: CallbackContext):
     if await _handle_pending_question(update, context, text):
         return
 
+    if await _handle_pending_key_import(update, context, telegram_id, text):
+        return
+
     if await _handle_pending_trade(update, context, telegram_id, text):
         return
 
     if await _handle_pending_alert(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_strategy_input(update, context, telegram_id, text):
         return
 
     parsed = await parse_user_message(text)
@@ -59,13 +75,16 @@ async def handle_message(update: Update, context: CallbackContext):
         elif intent == "nado_question":
             await _handle_nado_question(update, context, text)
         else:
-            ai_msg = parsed.get("message", "I'm not sure what you mean.")
-            await update.message.reply_text(
-                f"💬 {escape_md(ai_msg)}\n\n"
-                f"Use the buttons below to navigate:",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=main_menu_kb(),
-            )
+            if _should_route_to_nado_support(text):
+                await _handle_nado_question(update, context, text)
+            else:
+                ai_msg = parsed.get("message", "I'm not sure what you mean.")
+                await update.message.reply_text(
+                    f"💬 {escape_md(ai_msg)}\n\n"
+                    f"Use the buttons below to navigate:",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=main_menu_kb(),
+                )
     except Exception as e:
         logger.error(f"Message handler error: {e}", exc_info=True)
         await update.message.reply_text(
@@ -96,7 +115,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         try:
             parts = text.split()
             size = float(parts[0])
-            leverage = 1
+            leverage = _get_user_settings(telegram_id, context).get("default_leverage", 3)
             if len(parts) >= 2:
                 lev_str = parts[1].replace("x", "").replace("X", "")
                 leverage = int(float(lev_str))
@@ -130,6 +149,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             "leverage": leverage,
             "price": price,
             "est_margin": est_margin,
+            "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
         }
 
         preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
@@ -159,11 +179,18 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             "action": action,
             "product": product,
             "size": size,
-            "leverage": 1,
+            "leverage": _get_user_settings(telegram_id, context).get("default_leverage", 3),
             "price": price,
+            "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
         }
 
-        preview = fmt_trade_preview(action, product, size, price, 1)
+        preview = fmt_trade_preview(
+            action,
+            product,
+            size,
+            price,
+            _get_user_settings(telegram_id, context).get("default_leverage", 3),
+        )
         await update.message.reply_text(
             preview,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -172,6 +199,91 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         return True
 
     return False
+
+
+async def _handle_pending_key_import(update, context, telegram_id, text):
+    pending_confirm = context.user_data.get("pending_key_confirm")
+    if pending_confirm:
+        await _delete_user_message(update)
+        await update.message.reply_text(
+            "⚠️ You already have a key import awaiting confirmation\\. "
+            "Use the *Confirm Import* or *Cancel* button\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Confirm Import", callback_data="keyimp:confirm")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="keyimp:cancel")],
+            ]),
+        )
+        return True
+
+    pending = context.user_data.get("pending_key_import")
+    if not pending:
+        return False
+
+    started_at = float(pending.get("started_at") or 0)
+    if started_at and time.time() - started_at > 300:
+        await _delete_user_message(update)
+        context.user_data.pop("pending_key_import", None)
+        await update.message.reply_text(
+            "⌛ Key import session expired\\. Run /import\\_key again\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu_kb(),
+        )
+        return True
+
+    if is_probable_mnemonic(text):
+        await _delete_user_message(update)
+        await update.message.reply_text(
+            "🛑 This looks like a seed phrase\\. Nadobro accepts *private key only* for dedicated trading wallets\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu_kb(),
+        )
+        context.user_data.pop("pending_key_import", None)
+        return True
+
+    network = pending.get("network", "testnet")
+    try:
+        normalized = normalize_private_key(text.strip())
+        address = derive_address_from_private_key(normalized)
+        fingerprint = private_key_fingerprint(normalized)
+    except Exception as e:
+        await _delete_user_message(update)
+        await update.message.reply_text(
+            f"❌ {escape_md(str(e))}\n\nTry again with a dedicated private key for this mode\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu_kb(),
+        )
+        return True
+
+    context.user_data["pending_key_confirm"] = {
+        "network": network,
+        "private_key": normalized,
+        "address": address,
+        "fingerprint": fingerprint,
+        "started_at": time.time(),
+    }
+    await _delete_user_message(update)
+    context.user_data.pop("pending_key_import", None)
+    await update.message.reply_text(
+        f"🔐 *Confirm Key Import* \\({escape_md(network.upper())}\\)\n\n"
+        f"Address: `{escape_md(address)}`\n"
+        f"Fingerprint: `fp\\-{escape_md(fingerprint)}`\n\n"
+        "⚠️ Ensure this is your *dedicated trading key* \\(not your main wallet\\) before confirming\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirm Import", callback_data="keyimp:confirm")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="keyimp:cancel")],
+        ]),
+    )
+    return True
+
+
+async def _delete_user_message(update: Update):
+    try:
+        if update.message:
+            await update.message.delete()
+    except Exception:
+        pass
 
 
 async def _handle_pending_alert(update, context, telegram_id, text):
@@ -193,7 +305,7 @@ async def _handle_pending_alert(update, context, telegram_id, text):
         )
         return True
 
-    if condition not in ("above", "below", "funding_above", "funding_below"):
+    if condition not in ("above", "below"):
         await update.message.reply_text(
             "⚠️ Invalid condition\\. Use: above, below",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -218,11 +330,69 @@ async def _handle_pending_alert(update, context, telegram_id, text):
     return True
 
 
+async def _handle_pending_strategy_input(update, context, telegram_id, text):
+    pending = context.user_data.get("pending_strategy_input")
+    if not pending:
+        return False
+
+    strategy = pending.get("strategy")
+    field = pending.get("field")
+    if strategy not in ("mm", "grid", "dn") or field not in ("notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct"):
+        context.user_data.pop("pending_strategy_input", None)
+        return False
+
+    try:
+        value = float(text.strip())
+    except (TypeError, ValueError):
+        await update.message.reply_text(
+            "⚠️ Invalid value\\. Please enter a number\\. Example: `1\\.2`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return True
+
+    limits = {
+        "notional_usd": (1, 1000000),
+        "spread_bp": (0.1, 200),
+        "interval_seconds": (10, 3600),
+        "tp_pct": (0.05, 100),
+        "sl_pct": (0.05, 100),
+    }
+    lo, hi = limits[field]
+    if value < lo or value > hi:
+        await update.message.reply_text(
+            f"⚠️ Value out of range\\. Allowed: {escape_md(str(lo))} to {escape_md(str(hi))}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return True
+
+    def _mutate(s):
+        strategies = s.setdefault("strategies", {})
+        cfg = strategies.setdefault(strategy, {})
+        if field == "interval_seconds":
+            cfg[field] = int(value)
+        else:
+            cfg[field] = value
+
+    network, settings = update_user_settings(telegram_id, _mutate)
+    conf = settings.get("strategies", {}).get(strategy, {})
+    context.user_data.pop("pending_strategy_input", None)
+    await update.message.reply_text(
+        _fmt_strategy_update(strategy, network, conf),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️ Continue Editing", callback_data=f"strategy:config:{strategy}")],
+            [InlineKeyboardButton("🧭 Strategy Hub", callback_data="nav:strategy_hub")],
+        ]),
+    )
+    return True
+
+
 async def _handle_trade_intent(update, context, telegram_id, parsed):
     action = parsed.get("action", "long")
     product = parsed.get("product")
     size = parsed.get("size")
-    leverage = parsed.get("leverage", 1) or 1
+    settings = _get_user_settings(telegram_id, context)
+    leverage = parsed.get("leverage", settings.get("default_leverage", 3)) or settings.get("default_leverage", 3)
 
     if action == "close":
         if product:
@@ -267,15 +437,36 @@ async def _handle_trade_intent(update, context, telegram_id, parsed):
             reply_markup=main_menu_kb(),
         )
         return
+    resume_step = get_resume_step(telegram_id)
+    if resume_step != "complete":
+        await update.message.reply_text(
+            f"⚠️ Setup incomplete\\. Continue onboarding at *{escape_md(resume_step.upper())}*\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧭 Continue Setup", callback_data="onboarding:resume")],
+                [InlineKeyboardButton("Dashboard", callback_data="nav:main")],
+            ]),
+        )
+        return
+    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    if not wallet_ready:
+        await update.message.reply_text(
+            f"⚠️ {escape_md(wallet_msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu_kb(),
+        )
+        return
 
-    price = 0
+    parsed_price = parsed.get("price")
+    price = parsed_price if parsed_price else 0
     try:
         client = get_user_nado_client(telegram_id)
         if client:
             pid = get_product_id(product)
             if pid is not None:
-                mp = client.get_market_price(pid)
-                price = mp.get("mid", 0)
+                if not parsed_price:
+                    mp = client.get_market_price(pid)
+                    price = mp.get("mid", 0)
     except Exception:
         pass
 
@@ -288,6 +479,7 @@ async def _handle_trade_intent(update, context, telegram_id, parsed):
         "leverage": leverage,
         "price": price,
         "est_margin": est_margin,
+        "slippage_pct": settings.get("slippage", 1),
     }
 
     preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
@@ -410,13 +602,20 @@ async def _handle_command_intent(update, context, telegram_id, parsed):
         condition = parsed.get("alert_condition")
         value = parsed.get("alert_value")
 
-        if product and condition and value:
-            result = create_alert(telegram_id, product, condition, value)
+        parsed_value = None
+        if value is not None:
+            try:
+                parsed_value = float(value)
+            except (TypeError, ValueError):
+                parsed_value = None
+
+        if product and condition and parsed_value is not None:
+            result = create_alert(telegram_id, product, condition, parsed_value)
             if result["success"]:
                 msg = (
                     f"✅ Alert set\\!\n"
                     f"{escape_md(result['product'])} {escape_md(condition)} "
-                    f"{escape_md(f'${value:,.2f}')}"
+                    f"{escape_md(f'${parsed_value:,.2f}')}"
                 )
             else:
                 msg = f"❌ {escape_md(result['error'])}"
@@ -433,3 +632,43 @@ async def _handle_command_intent(update, context, telegram_id, parsed):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=main_menu_kb(),
         )
+
+
+def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
+    network, settings = get_user_settings(telegram_id)
+    context.user_data[f"settings:{network}"] = settings
+    context.user_data["settings"] = settings
+    return settings
+
+
+def _fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
+    notional = float(conf.get("notional_usd", 100.0))
+    spread_bp = float(conf.get("spread_bp", 5.0))
+    interval_seconds = int(conf.get("interval_seconds", 60))
+    tp_pct = float(conf.get("tp_pct", 1.0))
+    sl_pct = float(conf.get("sl_pct", 0.5))
+    return (
+        f"✅ *{escape_md(strategy.upper())} updated* \\({escape_md(network.upper())}\\)\n\n"
+        f"Notional: {escape_md(f'${notional:,.2f}')}\n"
+        f"Spread: {escape_md(f'{spread_bp:.1f} bp')}\n"
+        f"Interval: {escape_md(f'{interval_seconds}s')}\n"
+        f"TP: {escape_md(f'{tp_pct:.2f}%')}\n"
+        f"SL: {escape_md(f'{sl_pct:.2f}%')}"
+    )
+
+
+def _should_route_to_nado_support(text: str) -> bool:
+    txt = (text or "").strip()
+    if not txt:
+        return False
+    lowered = txt.lower()
+    if lowered in {"hi", "hello", "hey", "gm", "gn"}:
+        return False
+    if "?" in txt:
+        return True
+    support_keywords = [
+        "nado", "support", "help", "docs", "api", "deposit", "withdraw",
+        "liquidation", "margin", "funding", "fees", "network", "chain",
+        "subaccount", "signer", "wallet", "error", "issue", "troubleshoot",
+    ]
+    return any(k in lowered for k in support_keywords)

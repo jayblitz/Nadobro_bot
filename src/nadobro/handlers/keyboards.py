@@ -18,26 +18,36 @@ SIZE_PRESETS = {
 def main_menu_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🟢 Buy / Long", callback_data="trade:long"),
-            InlineKeyboardButton("🔴 Sell / Short", callback_data="trade:short"),
+            InlineKeyboardButton("🧭 Setup", callback_data="onboarding:resume"),
+            InlineKeyboardButton("📈 Strategies", callback_data="nav:strategy_hub"),
         ],
         [
-            InlineKeyboardButton("📋 Positions", callback_data="pos:view"),
+            InlineKeyboardButton("🟢 Trade Long", callback_data="trade:long"),
+            InlineKeyboardButton("🔴 Trade Short", callback_data="trade:short"),
+        ],
+        [
+            InlineKeyboardButton("🟩 Limit Buy", callback_data="trade:limit_long"),
+            InlineKeyboardButton("🟥 Limit Sell", callback_data="trade:limit_short"),
+        ],
+        [
             InlineKeyboardButton("👛 Wallet", callback_data="wallet:view"),
+            InlineKeyboardButton("📋 Positions", callback_data="pos:view"),
+        ],
+        [
+            InlineKeyboardButton("📡 Status", callback_data="strategy:status"),
+            InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop"),
         ],
         [
             InlineKeyboardButton("💹 Markets", callback_data="mkt:prices"),
             InlineKeyboardButton("🔔 Alerts", callback_data="alert:menu"),
         ],
         [
-            InlineKeyboardButton("🧠 Ask Nado", callback_data="nav:ask_nado"),
             InlineKeyboardButton("⚙️ Settings", callback_data="settings:view"),
+            InlineKeyboardButton("🧠 Ask Nado", callback_data="nav:ask_nado"),
         ],
         [
+            InlineKeyboardButton("⚡ Onboarding", callback_data="nav:quick_start"),
             InlineKeyboardButton("❓ Help", callback_data="nav:help"),
-        ],
-        [
-            InlineKeyboardButton("↻ Refresh", callback_data="nav:refresh"),
         ],
     ])
 
@@ -116,6 +126,17 @@ def wallet_kb():
             InlineKeyboardButton("💰 Balance", callback_data="wallet:balance"),
         ],
         [
+            InlineKeyboardButton("🔑 Import Testnet Key", callback_data="wallet:import:testnet"),
+            InlineKeyboardButton("🔑 Import Mainnet Key", callback_data="wallet:import:mainnet"),
+        ],
+        [
+            InlineKeyboardButton("♻️ Rotate Active Key", callback_data="wallet:rotate"),
+            InlineKeyboardButton("🗑 Remove Active Key", callback_data="wallet:remove_active"),
+        ],
+        [
+            InlineKeyboardButton("👁️ Review Private Key", callback_data="wallet:view_key"),
+        ],
+        [
             InlineKeyboardButton("🧪 Testnet", callback_data="wallet:network:testnet"),
             InlineKeyboardButton("🌐 Mainnet", callback_data="wallet:network:mainnet"),
         ],
@@ -168,6 +189,9 @@ def alert_delete_kb(alerts):
 def settings_kb(leverage=1, slippage=1):
     return InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("🛡 Risk Profile", callback_data="settings:risk_menu"),
+        ],
+        [
             InlineKeyboardButton(f"⚡ Default Leverage: {leverage}x", callback_data="settings:leverage_menu"),
         ],
         [
@@ -206,6 +230,69 @@ def settings_slippage_kb():
     ])
 
 
+def risk_profile_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🛡 Conservative", callback_data="settings:risk:conservative"),
+            InlineKeyboardButton("⚖️ Balanced", callback_data="settings:risk:balanced"),
+        ],
+        [
+            InlineKeyboardButton("🔥 Aggressive", callback_data="settings:risk:aggressive"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="settings:view"),
+        ],
+    ])
+
+
+def strategy_hub_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📈 Market Maker", callback_data="strategy:preview:mm"),
+            InlineKeyboardButton("🧮 Grid", callback_data="strategy:preview:grid"),
+        ],
+        [
+            InlineKeyboardButton("⚖️ Delta Neutral", callback_data="strategy:preview:dn"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="nav:main"),
+        ],
+    ])
+
+
+def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Mark Active", callback_data=f"strategy:activate:{strategy_id}"),
+            InlineKeyboardButton("⚙️ Tune Risk", callback_data="settings:risk_menu"),
+        ],
+        [
+            InlineKeyboardButton("🧩 Edit Strategy Params", callback_data=f"strategy:config:{strategy_id}"),
+        ],
+        [
+            InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
+            InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
+            InlineKeyboardButton("SOL", callback_data=f"strategy:pair:{strategy_id}:SOL"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"🚀 Start {selected_product.upper()}",
+                callback_data=f"strategy:start:{strategy_id}:{selected_product.upper()}",
+            ),
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh Analytics", callback_data=f"strategy:preview:{strategy_id}"),
+        ],
+        [
+            InlineKeyboardButton("📡 Bot Status", callback_data="strategy:status"),
+            InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+        ],
+    ])
+
+
 def close_product_kb():
     rows = []
     row = []
@@ -232,4 +319,92 @@ def confirm_close_all_kb():
 def back_kb(target="main"):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("◀ Back", callback_data=f"nav:{target}")],
+    ])
+
+
+def onboarding_nav_kb(step: str, allow_skip: bool = False, allow_back: bool = True):
+    rows = []
+    nav_row = []
+    if allow_back:
+        nav_row.append(InlineKeyboardButton("◀ Back", callback_data="onboarding:back"))
+    nav_row.append(InlineKeyboardButton("Next ▶", callback_data="onboarding:next"))
+    rows.append(nav_row)
+    if allow_skip:
+        rows.append([InlineKeyboardButton("Skip this step", callback_data="onboarding:skip")])
+    rows.append([InlineKeyboardButton("Go to Dashboard", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def onboarding_mode_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🧪 Use Testnet", callback_data="onboarding:set_mode:testnet"),
+            InlineKeyboardButton("🌐 Use Mainnet", callback_data="onboarding:set_mode:mainnet"),
+        ],
+        [
+            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
+        ],
+        [
+            InlineKeyboardButton("Go to Dashboard", callback_data="nav:main"),
+        ],
+    ])
+
+
+def onboarding_key_kb(network: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"🔑 Import {network.upper()} Key",
+                callback_data=f"wallet:import:{network}",
+            ),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
+            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
+        ],
+        [
+            InlineKeyboardButton("Open Wallet", callback_data="wallet:view"),
+        ],
+    ])
+
+
+def onboarding_funding_kb(network: str):
+    faucet_url = "https://testnet.nado.xyz/portfolio/faucet" if network == "testnet" else "https://nado.xyz"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("↻ Check Again", callback_data="onboarding:check_funding")],
+        [InlineKeyboardButton("Open Funding Page", url=faucet_url)],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
+            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
+        ],
+    ])
+
+
+def onboarding_risk_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🛡 Conservative", callback_data="onboarding:set_risk:conservative"),
+            InlineKeyboardButton("⚖️ Balanced", callback_data="onboarding:set_risk:balanced"),
+        ],
+        [InlineKeyboardButton("🔥 Aggressive", callback_data="onboarding:set_risk:aggressive")],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
+            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
+        ],
+        [InlineKeyboardButton("Skip this step", callback_data="onboarding:skip")],
+    ])
+
+
+def onboarding_template_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📈 MM Starter", callback_data="onboarding:set_template:mm"),
+            InlineKeyboardButton("🧮 Grid Starter", callback_data="onboarding:set_template:grid"),
+        ],
+        [InlineKeyboardButton("⚖️ DN Starter", callback_data="onboarding:set_template:dn")],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
+            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
+        ],
+        [InlineKeyboardButton("Skip this step", callback_data="onboarding:skip")],
     ])

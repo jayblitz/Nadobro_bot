@@ -45,13 +45,14 @@ def validate_trade(telegram_id: int, product: str, size: float, leverage: float 
 
     client = get_user_nado_client(telegram_id)
     if not client:
-        return False, "Wallet not initialized. Use /start first."
+        return False, "No active mode key found. Use /import_key, then fund wallet."
 
     balance = client.get_balance()
     if not balance.get("exists"):
         return False, "Subaccount not found. Please deposit funds first on Nado."
 
-    usdt_balance = balance.get("balances", {}).get(0, 0)
+    balances = balance.get("balances", {}) or {}
+    usdt_balance = balances.get(0, balances.get("0", 0))
 
     mp = client.get_market_price(product_id)
     if mp["mid"] == 0:
@@ -78,7 +79,14 @@ def validate_trade(telegram_id: int, product: str, size: float, leverage: float 
     return True, ""
 
 
-def execute_market_order(telegram_id: int, product: str, size: float, is_long: bool, leverage: float = 1.0) -> dict:
+def execute_market_order(
+    telegram_id: int,
+    product: str,
+    size: float,
+    is_long: bool,
+    leverage: float = 1.0,
+    slippage_pct: float = 1.0,
+) -> dict:
     valid, msg = validate_trade(telegram_id, product, size, leverage)
     if not valid:
         return {"success": False, "error": msg}
@@ -103,7 +111,7 @@ def execute_market_order(telegram_id: int, product: str, size: float, is_long: b
         session.commit()
         trade_id = trade.id
 
-    result = client.place_market_order(product_id, size, is_buy=is_long)
+    result = client.place_market_order(product_id, size, is_buy=is_long, slippage_pct=slippage_pct)
 
     with get_session() as session:
         trade = session.query(Trade).get(trade_id)

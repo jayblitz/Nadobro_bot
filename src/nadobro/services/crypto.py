@@ -2,6 +2,7 @@ import os
 import hashlib
 import base64
 import secrets
+import re
 from cryptography.fernet import Fernet, InvalidToken
 from eth_account import Account
 
@@ -79,3 +80,32 @@ def recover_wallet_from_mnemonic(mnemonic: str) -> dict:
 
 def generate_webhook_secret() -> str:
     return secrets.token_hex(32)
+
+
+def derive_address_from_private_key(private_key: str) -> str:
+    acct = Account.from_key(private_key)
+    return acct.address
+
+
+def normalize_private_key(private_key: str) -> str:
+    raw = (private_key or "").strip()
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
+        raise ValueError("Invalid private key format. Expected 64 hex chars.")
+    return "0x" + raw.lower()
+
+
+def is_probable_mnemonic(text: str) -> bool:
+    if not text:
+        return False
+    words = [w for w in text.strip().split() if w]
+    if len(words) < 12:
+        return False
+    return all(re.fullmatch(r"[a-zA-Z]+", w) for w in words[:12])
+
+
+def private_key_fingerprint(private_key: str) -> str:
+    normalized = normalize_private_key(private_key)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return digest[-8:]

@@ -3,6 +3,7 @@ import os
 DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 XAI_API_KEY = os.environ.get("XAI_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "default-session-secret")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
 ADMIN_USER_IDS = [int(uid.strip()) for uid in os.environ.get("ADMIN_USER_IDS", "").split(",") if uid.strip()]

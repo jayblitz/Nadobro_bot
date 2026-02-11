@@ -149,10 +149,15 @@ def fmt_balance(balance_data, wallet_addr=None):
             lines.append(f"🚰 Faucet: {escape_md('https://testnet.nado.xyz/portfolio/faucet')}")
         return "\n".join(lines)
 
-    usdt = balance_data.get("balances", {}).get(0, 0)
+    balances = balance_data.get("balances", {}) or {}
+    usdt = balances.get(0, balances.get("0", 0))
     lines.append(f"💵 *USDT0:* {escape_md(f'${usdt:,.2f}')}")
 
-    for pid, bal in balance_data.get("balances", {}).items():
+    for pid_raw, bal in balances.items():
+        try:
+            pid = int(pid_raw)
+        except (TypeError, ValueError):
+            continue
         if pid != 0 and bal != 0:
             pname = get_product_name(pid)
             lines.append(f"  └ {escape_md(pname)}: {escape_md(f'{bal:.6f}')}")
@@ -193,17 +198,17 @@ def fmt_prices(prices):
 
 def fmt_funding(funding_data):
     if not funding_data:
-        return "📊 *Funding Rates*\n\nCould not fetch funding rates\\."
+        return "📊 *Funding Snapshot*\n\nCould not fetch funding data\\."
 
     lines = [
-        "📊 *Funding Rates*",
+        "📊 *Funding Snapshot*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
 
     for name, rate in funding_data.items():
         lines.append(
-            f"*{escape_md(name)}\\-PERP:* {escape_md(f'{rate:.6f}')}"
+            f"*{escape_md(name)}\\-PERP:* {escape_md(f'{rate:.6f}')} \\(index\\)"
         )
 
     return "\n".join(lines)
@@ -273,20 +278,30 @@ def fmt_wallet_info(wallet_info):
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"📊 *Network:* {net_emoji} {escape_md(net.upper())}",
+        f"🔐 *Active Key:* {escape_md('READY' if wallet_info.get('active_address') else 'MISSING')}",
         "",
         f"📋 *Active Address:*",
-        f"`{escape_md(wallet_info.get('active_address', '?'))}`",
+        f"`{escape_md(wallet_info.get('active_address', 'Not set'))}`",
     ]
 
     if wallet_info.get("testnet_address"):
         lines.append("")
         lines.append(f"🧪 *Testnet:*")
         lines.append(f"`{escape_md(wallet_info['testnet_address'])}`")
+    else:
+        lines.append("")
+        lines.append("🧪 *Testnet:* Not imported")
 
     if wallet_info.get("mainnet_address"):
         lines.append("")
         lines.append(f"🌐 *Mainnet:*")
         lines.append(f"`{escape_md(wallet_info['mainnet_address'])}`")
+    else:
+        lines.append("")
+        lines.append("🌐 *Mainnet:* Not imported")
+
+    lines.append("")
+    lines.append("Use /import\\_key or Wallet \\-> Import Key to add dedicated mode keys\\.")
 
     return "\n".join(lines)
 
@@ -388,10 +403,20 @@ def fmt_help():
         "❓ *NADOBRO \\— Help*\n"
         + escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n"
         "\n"
+        "⚡ *Quick Start:*\n"
+        "Use *Continue Setup* for guided onboarding:\n"
+        "mode \\-> key \\-> funding \\-> risk \\-> template\\.\n"
+        "Use dedicated private keys per mode \\(testnet/mainnet\\)\\.\n"
+        "Never paste a seed phrase or main wallet key\\.\n"
+        "Key import uses a confirm step with masked fingerprint before saving\\.\n"
+        "Settings and strategy params are saved separately for testnet/mainnet\\.\n"
+        "Each strategy supports custom Notional, Spread, Interval, TP and SL values\\.\n"
+        "\n"
         "🤖 *Button Trading:*\n"
         "Use the buttons below to trade\\. Select\n"
         "Buy/Long or Sell/Short, pick a product,\n"
         "choose size and leverage, then confirm\\.\n"
+        "Limit Buy/Sell is also available from main menu\\.\n"
         "\n"
         "💬 *Natural Language:*\n"
         "You can also type commands like:\n"
@@ -413,8 +438,105 @@ def fmt_help():
         "📌 *Commands:*\n"
         "/start \\— Dashboard\n"
         "/help \\— This help message\n"
+        "/start \\(new users\\) \\— Launch onboarding wizard\n"
+        "/import\\_key \\— Import dedicated key for active mode\n"
+        "/status \\— Running strategy bot status\n"
+        "/stop\\_all \\— Stop strategy bot and cancel open orders\n"
         "\n"
         "🔗 *Useful Links:*\n"
         "• Testnet Faucet: testnet\\.nado\\.xyz/portfolio/faucet\n"
         "• ETH Faucet: docs\\.inkonchain\\.com/tools/faucets"
     )
+
+
+def fmt_onboarding_step(step: str, network: str, readiness: dict, extra: dict | None = None):
+    extra = extra or {}
+    progress = extra.get("progress", "0/6")
+    if step == "welcome":
+        return (
+            "🚀 *Welcome to Nadobro*\n\n"
+            "Let’s get you ready in a few quick steps\\.\n\n"
+            "Security rules:\n"
+            "• Use dedicated trading keys per mode\n"
+            "• Never paste a seed phrase\n"
+            "• Never paste your main wallet key\n\n"
+            "Setup includes:\n"
+            "1\\. Mode\n"
+            "2\\. Dedicated key\n"
+            "3\\. Funding readiness\n"
+            "4\\. Risk profile\n"
+            "5\\. Strategy template\n\n"
+            f"Progress: *{escape_md(progress)}*"
+        )
+    if step == "mode":
+        return (
+            "🧭 *Step 1 — Select Mode*\n\n"
+            f"Current mode: *{escape_md(network.upper())}*\n"
+            "Testnet is best for first-time setup\\. Mainnet is live trading\\.\n\n"
+            f"Progress: *{escape_md(progress)}*"
+        )
+    if step == "key":
+        status = "READY" if readiness.get("has_key") else "MISSING"
+        return (
+            "🔑 *Step 2 — Import Dedicated Key*\n\n"
+            f"Mode: *{escape_md(network.upper())}*\n"
+            f"Key status: *{escape_md(status)}*\n\n"
+            "Import the dedicated private key for this mode\\.\n"
+            "Never use your main wallet key or seed phrase\\.\n\n"
+            f"Progress: *{escape_md(progress)}*"
+        )
+    if step == "funding":
+        funded = "READY" if readiness.get("funded") else "NOT FUNDED"
+        return (
+            "💰 *Step 3 — Funding Check*\n\n"
+            f"Mode: *{escape_md(network.upper())}*\n"
+            f"Funding status: *{escape_md(funded)}*\n\n"
+            "Fund this wallet and make sure the Nado subaccount is initialized\\.\n\n"
+            f"Progress: *{escape_md(progress)}*"
+        )
+    if step == "risk":
+        return (
+            "🛡 *Step 4 — Risk Profile*\n\n"
+            "Choose default risk settings for faster trading\\. "
+            "You can edit anytime in Settings\\.\n\n"
+            f"Progress: *{escape_md(progress)}*"
+        )
+    if step == "template":
+        selected = extra.get("selected_template", "None")
+        return (
+            "🧩 *Step 5 — Strategy Starter*\n\n"
+            f"Selected starter: *{escape_md(str(selected).upper())}*\n"
+            "Pick a starter template for your first launch\\.\n\n"
+            f"Progress: *{escape_md(progress)}*"
+        )
+    return "Onboarding step not found."
+
+
+def fmt_status_overview(status: dict, onboarding: dict):
+    running = status.get("running")
+    step = onboarding.get("missing_step") or "complete"
+    complete = onboarding.get("onboarding_complete")
+    mode = onboarding.get("network", "testnet").upper()
+    key_ready = "YES" if onboarding.get("has_key") else "NO"
+    funded = "YES" if onboarding.get("funded") else "NO"
+
+    lines = [
+        "📡 *Nadobro Status*",
+        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        "",
+        f"Mode: *{escape_md(mode)}*",
+        f"Onboarding: *{escape_md('COMPLETE' if complete else 'IN PROGRESS')}*",
+        f"Next Step: *{escape_md(step.upper())}*",
+        f"Key: *{escape_md(key_ready)}* \\| Funding: *{escape_md(funded)}*",
+        "",
+    ]
+    if not running:
+        lines.append("Strategy Runtime: *IDLE*")
+    else:
+        lines.extend([
+            f"Strategy Runtime: *{escape_md((status.get('strategy') or '').upper())}*",
+            f"Pair: *{escape_md(str(status.get('product', 'BTC')))}\\-PERP*",
+            f"Cycles: *{escape_md(str(status.get('runs', 0)))}*",
+            f"Interval: *{escape_md(str(status.get('interval_seconds', 0)))}s*",
+        ])
+    return "\n".join(lines)

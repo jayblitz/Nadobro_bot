@@ -44,7 +44,7 @@ src/nadobro/
 - PostgreSQL (SQLAlchemy ORM)
 - AES-256 Fernet encryption for private keys
 - APScheduler for background alert checking
-- xAI Grok API for natural language trade parsing and Nado knowledge Q&A
+- xAI Grok API + OpenAI API (optional) for natural language trade parsing and Nado knowledge Q&A
 
 ## Bot Interface Flows
 - Trade: Product picker -> Size presets -> Leverage selector -> Preview -> Confirm
@@ -59,8 +59,15 @@ src/nadobro/
 ## Environment Variables Required
 - TELEGRAM_TOKEN: Bot token from @BotFather
 - XAI_API_KEY: xAI API key for Grok AI
+- OPENAI_API_KEY: OpenAI API key for higher-intelligence support answers (optional, recommended)
 - ENCRYPTION_KEY: For wallet encryption
 - DATABASE_URL: Auto-configured by Replit PostgreSQL
+
+### Optional AI Routing Variables
+- NADO_AI_PROVIDER: `auto` (default), `xai`, or `openai`
+- NADO_AI_ESCALATE_ON_COMPLEX: `true`/`false` (default `true`, used in `auto` mode)
+- XAI_SUPPORT_MODEL: Override xAI model (default: `grok-3-mini-fast`)
+- OPENAI_SUPPORT_MODEL: Override OpenAI model (default: `gpt-4.1-mini`)
 
 ## Supported Products
 BTC-PERP, ETH-PERP, SOL-PERP, XRP-PERP, BNB-PERP, LINK-PERP, DOGE-PERP, AVAX-PERP

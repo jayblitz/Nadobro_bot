@@ -19,14 +19,10 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
     cond_map = {
         "above": AlertCondition.ABOVE,
         "below": AlertCondition.BELOW,
-        "funding_above": AlertCondition.FUNDING_ABOVE,
-        "funding_below": AlertCondition.FUNDING_BELOW,
-        "pnl_above": AlertCondition.PNL_ABOVE,
-        "pnl_below": AlertCondition.PNL_BELOW,
     }
     alert_cond = cond_map.get(condition)
     if not alert_cond:
-        return {"success": False, "error": f"Unknown condition '{condition}'. Use: above, below, funding_above, funding_below"}
+        return {"success": False, "error": f"Unknown condition '{condition}'. Use: above, below"}
 
     with get_session() as session:
         alert = Alert(

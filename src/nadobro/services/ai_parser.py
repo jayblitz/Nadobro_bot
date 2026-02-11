@@ -23,7 +23,7 @@ SYSTEM_PROMPT = """You are Nadobro, an AI trading assistant for Nado DEX (a perp
 Your job is to parse user messages and determine their trading intent. Respond ONLY with valid JSON.
 
 Available products: BTC-PERP, ETH-PERP, SOL-PERP, XRP-PERP, BNB-PERP, DOGE-PERP, LINK-PERP, AVAX-PERP
-Available commands: long, short, limit_long, limit_short, close, close_all, positions, balance, price, funding, alerts, history, help, mode, wallet, cancel
+Available commands: long, short, limit_long, limit_short, close, close_all, positions, balance, price, funding, alerts, history, help
 
 Response format:
 {
@@ -53,6 +53,7 @@ Rules:
 - For questions about Nado DEX features, how it works, fees, margin, liquidation, NLP, order types, etc -> intent=nado_question, message=the user's question
 - Examples of nado_question: "what is NLP on nado?", "how does liquidation work?", "what order types does nado support?", "how do I deposit?", "what is unified margin?", "tell me about nado", "what are the fees?", "how does cross margin work?"
 - For casual chat/greetings -> intent=chat, action=null, message=friendly response
+- If the user asks any support/help/how/why/what question about Nado platform, docs, API, website, X updates, or troubleshooting, prefer intent=nado_question
 - If confidence < 0.5, suggest the user try specific commands
 - Always include a user-friendly message explaining what you understood
 - TP = take profit, SL = stop loss
@@ -166,6 +167,28 @@ def _fallback_parse(text: str) -> dict:
         except ValueError:
             pass
 
+    if "limit" in text_lower and any(w in text_lower for w in ["buy", "long"]):
+        limit_price = numbers[1] if len(numbers) > 1 else None
+        return {
+            "intent": "trade", "action": "limit_long",
+            "product": detected_product, "size": numbers[0] if numbers else None,
+            "price": limit_price, "leverage": None, "tp_price": None, "sl_price": None,
+            "alert_condition": None, "alert_value": None,
+            "message": "Preparing limit buy order...",
+            "confidence": 0.75 if detected_product and numbers else 0.45,
+        }
+
+    if "limit" in text_lower and any(w in text_lower for w in ["sell", "short"]):
+        limit_price = numbers[1] if len(numbers) > 1 else None
+        return {
+            "intent": "trade", "action": "limit_short",
+            "product": detected_product, "size": numbers[0] if numbers else None,
+            "price": limit_price, "leverage": None, "tp_price": None, "sl_price": None,
+            "alert_condition": None, "alert_value": None,
+            "message": "Preparing limit sell order...",
+            "confidence": 0.75 if detected_product and numbers else 0.45,
+        }
+
     if any(w in text_lower for w in ["long", "buy"]):
         return {
             "intent": "trade", "action": "long",
@@ -257,6 +280,16 @@ def _fallback_parse(text: str) -> dict:
             "confidence": 0.8,
         }
 
+    if "?" in text_lower or any(w in text_lower for w in ["help", "support", "issue", "error", "problem", "why", "how", "what"]):
+        return {
+            "intent": "nado_question", "action": None,
+            "product": None, "size": None,
+            "price": None, "leverage": None, "tp_price": None, "sl_price": None,
+            "alert_condition": None, "alert_value": None,
+            "message": text,
+            "confidence": 0.65,
+        }
+
     nado_keywords = [
         "nado", "liquidat", "nlp", "vault", "deposit", "withdraw",
         "subaccount", "order type", "cross margin", "isolated",
@@ -275,10 +308,10 @@ def _fallback_parse(text: str) -> dict:
         }
 
     return {
-        "intent": "chat", "action": None,
+        "intent": "nado_question", "action": None,
         "product": None, "size": None,
         "price": None, "leverage": None, "tp_price": None, "sl_price": None,
         "alert_condition": None, "alert_value": None,
-        "message": "I'm not sure what you're looking for. Try commands like /positions, /balance, /long BTC 0.01, or /price BTC. You can also ask me about Nado — try 'What is Nado?' or 'How does margin work?'",
-        "confidence": 0.2,
+        "message": text,
+        "confidence": 0.5,
     }

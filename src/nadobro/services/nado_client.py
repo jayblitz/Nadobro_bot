@@ -240,11 +240,17 @@ class NadoClient:
             logger.error(f"place_order failed: {e}")
             return {"success": False, "error": self._friendly_error(str(e))}
 
-    def place_market_order(self, product_id: int, size: float, is_buy: bool = True) -> dict:
+    def place_market_order(self, product_id: int, size: float, is_buy: bool = True, slippage_pct: float = 1.0) -> dict:
         mp = self.get_market_price(product_id)
         if mp["mid"] == 0:
             return {"success": False, "error": "Could not fetch market price"}
-        price = mp["ask"] * 1.05 if is_buy else mp["bid"] * 0.95
+        try:
+            slippage_pct = float(slippage_pct)
+        except (TypeError, ValueError):
+            slippage_pct = 1.0
+        slippage_pct = max(0.1, min(slippage_pct, 10.0))
+        multiplier = 1.0 + (slippage_pct / 100.0)
+        price = mp["ask"] * multiplier if is_buy else mp["bid"] / multiplier
         return self.place_order(product_id, size, price, order_type="ioc", is_buy=is_buy)
 
     def place_limit_order(self, product_id: int, size: float, price: float, is_buy: bool = True) -> dict:

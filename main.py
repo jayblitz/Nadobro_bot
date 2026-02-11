@@ -11,8 +11,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("nadobro")
 
-from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY
-from src.nadobro.models.database import init_db
+from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
 from src.nadobro.services.crypto import validate_encryption_key
 
 if not ENCRYPTION_KEY:
@@ -34,9 +33,18 @@ def check_config():
     missing = []
     if not TELEGRAM_TOKEN:
         missing.append("TELEGRAM_TOKEN")
+    if not DATABASE_URL:
+        missing.append("DATABASE_URL")
     xai_key = os.environ.get("XAI_API_KEY")
-    if not xai_key:
-        logger.warning("XAI_API_KEY not set - AI features will use fallback keyword matching")
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if not xai_key and not openai_key:
+        logger.warning(
+            "No AI key set (XAI_API_KEY/OPENAI_API_KEY) - support AI features will be unavailable"
+        )
+    elif not xai_key:
+        logger.info("XAI_API_KEY not set - OpenAI-only support mode enabled")
+    elif not openai_key:
+        logger.info("OPENAI_API_KEY not set - xAI-only support mode enabled")
 
     if missing:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
@@ -48,7 +56,7 @@ def check_config():
 def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-    from src.nadobro.handlers.commands import cmd_start, cmd_help
+    from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_import_key
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
 
@@ -56,6 +64,9 @@ def setup_bot():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("stop_all", cmd_stop_all))
+    app.add_handler(CommandHandler("import_key", cmd_import_key))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -66,6 +77,7 @@ def setup_bot():
 
 async def run_bot():
     check_config()
+    from src.nadobro.models.database import init_db
 
     logger.info("Initializing database...")
     init_db()
@@ -75,7 +87,13 @@ async def run_bot():
     bot_app = setup_bot()
 
     from src.nadobro.services.scheduler import set_bot_app, set_check_client, start_scheduler
+    from src.nadobro.services.bot_runtime import (
+        set_bot_app as set_runtime_app,
+        restore_running_bots,
+        stop_runtime,
+    )
     set_bot_app(bot_app)
+    set_runtime_app(bot_app)
 
     try:
         from src.nadobro.services.nado_client import NadoClient
@@ -87,6 +105,7 @@ async def run_bot():
         logger.warning(f"Alert price-check client failed to initialize: {e}")
 
     start_scheduler()
+    restore_running_bots()
 
     logger.info("Starting bot with polling...")
     await bot_app.initialize()
@@ -115,6 +134,7 @@ async def run_bot():
         logger.info("Shutting down...")
         from src.nadobro.services.scheduler import stop_scheduler
         stop_scheduler()
+        stop_runtime()
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()
