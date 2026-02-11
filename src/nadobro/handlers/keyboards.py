@@ -83,7 +83,7 @@ def trade_size_kb(product, action):
 
 
 def trade_leverage_kb(product, action, size):
-    leverages = [1, 2, 3, 5, 10, 20, 50]
+    leverages = [1, 2, 3, 5, 10, 20, 40]
     rows = []
     row = []
     for lev in leverages:
@@ -204,7 +204,7 @@ def settings_kb(leverage=1, slippage=1):
 
 
 def settings_leverage_kb():
-    leverages = [1, 2, 3, 5, 10, 20, 50]
+    leverages = [1, 2, 3, 5, 10, 20, 40]
     rows = []
     row = []
     for lev in leverages:

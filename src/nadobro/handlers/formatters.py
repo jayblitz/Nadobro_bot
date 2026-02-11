@@ -401,7 +401,7 @@ def fmt_settings(user_data):
 
 def fmt_help():
     return (
-        "❓ *NADOBRO \\— Help*\n"
+        "❓ *NADOBRO \\- Help*\n"
         + escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n"
         "\n"
         "⚡ *Quick Start:*\n"
@@ -437,12 +437,12 @@ def fmt_help():
         "BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX\n"
         "\n"
         "📌 *Commands:*\n"
-        "/start \\— Dashboard\n"
-        "/help \\— This help message\n"
-        "/start \\(new users\\) \\— Launch onboarding wizard\n"
-        "/import\\_key \\— Import dedicated key for active mode\n"
-        "/status \\— Running strategy bot status\n"
-        "/stop\\_all \\— Stop strategy bot and cancel open orders\n"
+        "/start \\- Dashboard\n"
+        "/help \\- This help message\n"
+        "/start \\(new users\\) \\- Launch onboarding wizard\n"
+        "/import\\_key \\- Import dedicated key for active mode\n"
+        "/status \\- Running strategy bot status\n"
+        "/stop\\_all \\- Stop strategy bot and cancel open orders\n"
         "\n"
         "🔗 *Useful Links:*\n"
         "• Testnet Faucet: testnet\\.nado\\.xyz/portfolio/faucet\n"

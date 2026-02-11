@@ -7,6 +7,7 @@ from urllib.parse import quote_plus
 
 import requests
 from openai import OpenAI
+from src.nadobro.services.debug_logger import debug_log
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +15,12 @@ _knowledge_base = None
 _xai_client = None
 _openai_client = None
 _source_cache = {}
+_answer_cache = {}
 
 KNOWLEDGE_FILE = Path(__file__).parent.parent / "data" / "nado_knowledge.txt"
 SOURCE_CACHE_TTL_SECONDS = 600
 SOURCE_FETCH_TIMEOUT_SECONDS = 12
+ANSWER_CACHE_TTL_SECONDS = 300
 
 OFFICIAL_URLS = [
     "https://docs.nado.xyz/",
@@ -33,6 +36,29 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_question(question: str) -> str:
+    return re.sub(r"\s+", " ", (question or "").strip().lower())
+
+
+def _should_use_live_retrieval(question: str) -> bool:
+    if _env_bool("NADO_SUPPORT_LIVE_DEFAULT", False):
+        return True
+    q = _normalize_question(question)
+    live_signals = [
+        "latest",
+        "recent",
+        "today",
+        "now",
+        "update",
+        "updates",
+        "x.com",
+        "twitter",
+        "news",
+        "what changed",
+    ]
+    return any(sig in q for sig in live_signals)
 
 
 def _get_xai_client():
@@ -198,12 +224,13 @@ def _build_retrieved_context(question: str) -> tuple[str, list[str]]:
     used_sources = []
 
     source_pairs = []
-    for url in OFFICIAL_URLS:
-        txt = _fetch_url_text(url)
-        if txt:
-            source_pairs.append((url, txt))
-
-    source_pairs.extend(_search_live(question))
+    use_live = _should_use_live_retrieval(question)
+    if use_live:
+        for url in OFFICIAL_URLS:
+            txt = _fetch_url_text(url)
+            if txt:
+                source_pairs.append((url, txt))
+        source_pairs.extend(_search_live(question))
 
     scored = []
     for url, txt in source_pairs:
@@ -247,6 +274,7 @@ def _call_support_llm(provider: str, system: str, question: str) -> str:
 
 
 async def answer_nado_question(question: str) -> str:
+    started_at = time.time()
     xai_client = _get_xai_client()
     openai_client = _get_openai_client()
     if not xai_client and not openai_client:
@@ -259,16 +287,34 @@ async def answer_nado_question(question: str) -> str:
     if not knowledge:
         return "Knowledge base is not loaded. Please contact support."
 
+    qkey = _normalize_question(question)
+    cached = _answer_cache.get(qkey)
+    if cached and (time.time() - cached["ts"] < ANSWER_CACHE_TTL_SECONDS):
+        # region agent log
+        debug_log(
+            "post-fix",
+            "H11",
+            "knowledge_service.py:287",
+            "answer_cache_hit",
+            {"question_len": len(question or ""), "latency_ms": int((time.time() - started_at) * 1000)},
+        )
+        # endregion
+        return cached["answer"]
+
+    use_live = _should_use_live_retrieval(question)
     try:
         import asyncio
         loop = asyncio.get_event_loop()
-        retrieved_context, used_sources = await loop.run_in_executor(None, _build_retrieved_context, question)
+        if use_live:
+            retrieved_context, used_sources = await loop.run_in_executor(None, _build_retrieved_context, question)
+        else:
+            retrieved_context, used_sources = ("Live retrieval skipped for low-latency mode.", [])
     except Exception:
         retrieved_context, used_sources = ("No retrieved context available.", [])
 
     system = KNOWLEDGE_SYSTEM_PROMPT.format(
-        knowledge_base=knowledge[:12000],
-        retrieved_context=retrieved_context[:18000],
+        knowledge_base=knowledge[:9000],
+        retrieved_context=retrieved_context[:8000],
     )
 
     try:
@@ -312,6 +358,21 @@ async def answer_nado_question(question: str) -> str:
             else:
                 sources_line = "Sources: https://docs.nado.xyz/, https://x.com/nadoHQ"
             answer = f"{answer}\n\n{sources_line}"
+        _answer_cache[qkey] = {"ts": time.time(), "answer": answer}
+        # region agent log
+        debug_log(
+            "post-fix",
+            "H11",
+            "knowledge_service.py:347",
+            "answer_generated",
+            {
+                "provider": used_provider,
+                "use_live_retrieval": use_live,
+                "sources_count": len(used_sources),
+                "latency_ms": int((time.time() - started_at) * 1000),
+            },
+        )
+        # endregion
         return answer
     except Exception as e:
         logger.error(f"Knowledge Q&A failed: {e}", exc_info=True)

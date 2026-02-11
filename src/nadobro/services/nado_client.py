@@ -122,11 +122,14 @@ class NadoClient:
             resp = requests.get(url, params=params, headers=headers, timeout=10)
             data = resp.json()
             if data.get("status") == "success":
+                data_payload = data.get("data", {}) or {}
+                exists_field = data_payload.get("exists")
                 balances = {}
-                for sb in data["data"].get("spot_balances", []):
+                for sb in data_payload.get("spot_balances", []):
                     bal = int(sb["balance"]["amount"]) / 1e18
                     balances[sb["product_id"]] = bal
-                return {"exists": True, "balances": balances}
+                exists = bool(exists_field) if exists_field is not None else bool(balances)
+                return {"exists": exists, "balances": balances}
         except Exception as e:
             logger.error(f"REST get_balance failed: {e}")
 
@@ -165,7 +168,8 @@ class NadoClient:
     @staticmethod
     def _friendly_error(error_str: str) -> str:
         err_lower = error_str.lower()
-        if "ipqueryonly" in err_lower:
+        compact = err_lower.replace("_", "").replace("-", "")
+        if "ipqueryonly" in compact:
             return "Your wallet needs funds deposited on Nado DEX before trading. Please deposit USDT0 at https://testnet.nado.xyz/portfolio/faucet"
         if "insufficient" in err_lower or "margin" in err_lower:
             return "Insufficient margin. Please deposit more funds."

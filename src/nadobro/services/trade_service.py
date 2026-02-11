@@ -6,6 +6,7 @@ from src.nadobro.models.database import (
 )
 from src.nadobro.config import get_product_id, get_product_name, RATE_LIMIT_SECONDS, MAX_LEVERAGE, MIN_TRADE_SIZE_USD
 from src.nadobro.services.user_service import get_user, get_user_nado_client, update_trade_stats
+from src.nadobro.services.debug_logger import debug_log
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,22 @@ def validate_trade(telegram_id: int, product: str, size: float, leverage: float 
         return False, "No active mode key found. Use /import_key, then fund wallet."
 
     balance = client.get_balance()
+    # region agent log
+    debug_log(
+        "post-fix",
+        "H10",
+        "trade_service.py:52",
+        "pretrade_balance_checked",
+        {
+            "telegram_id": telegram_id,
+            "product": product,
+            "leverage": leverage,
+            "size": size,
+            "subaccount_exists": bool(balance.get("exists")),
+            "usdt_balance": (balance.get("balances", {}) or {}).get(0, (balance.get("balances", {}) or {}).get("0", 0)),
+        },
+    )
+    # endregion
     if not balance.get("exists"):
         return False, "Subaccount not found. Please deposit funds first on Nado."
 

@@ -2,6 +2,7 @@ import logging
 import time
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
 from src.nadobro.handlers.formatters import (
@@ -168,11 +169,25 @@ async def _handle_nav(query, data, telegram_id, context=None):
     if target in ("main", "refresh"):
         await _show_dashboard(query, telegram_id)
     elif target == "help":
-        await query.edit_message_text(
-            fmt_help(),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
-        )
+        try:
+            await query.edit_message_text(
+                fmt_help(),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=main_menu_kb(),
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                # region agent log
+                debug_log(
+                    "post-fix",
+                    "H12",
+                    "callbacks.py:182",
+                    "help_edit_noop_ignored",
+                    {"telegram_id": telegram_id},
+                )
+                # endregion
+                return
+            raise
     elif target == "quick_start":
         await _handle_onboarding(query, "onboarding:resume", telegram_id, context)
     elif target == "strategy_hub":
@@ -1379,11 +1394,25 @@ async def _render_onboarding(query, telegram_id: int, step: str):
         kb = onboarding_template_kb()
     else:
         kb = onboarding_nav_kb(step, allow_skip=False, allow_back=False)
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=kb,
-    )
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=kb,
+        )
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            # region agent log
+            debug_log(
+                "post-fix",
+                "H9",
+                "callbacks.py:1388",
+                "onboarding_edit_noop_ignored",
+                {"telegram_id": telegram_id, "step": step},
+            )
+            # endregion
+            return
+        raise
 
 
 async def _delete_message_later(query, chat_id: int, message_id: int, delay_seconds: int = 30):
