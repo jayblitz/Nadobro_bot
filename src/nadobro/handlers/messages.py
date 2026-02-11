@@ -386,7 +386,7 @@ async def _handle_nado_question(update, context, question):
     )
 
     try:
-        answer = answer_nado_question(question)
+        answer = await answer_nado_question(question)
         await thinking_msg.edit_text(
             f"🧠 *Ask Nado*\n\n{escape_md(answer)}",
             parse_mode=ParseMode.MARKDOWN_V2,
