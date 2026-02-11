@@ -302,7 +302,7 @@ def fmt_wallet_info(wallet_info):
         lines.append("🌐 *Mainnet:* Not imported")
 
     lines.append("")
-    lines.append("Use /import\\_key or Wallet \\-> Import Key to add dedicated mode keys\\.")
+    lines.append("Use /import\\_key or Wallet \\-\\> Import Key to add dedicated mode keys\\.")
 
     return "\n".join(lines)
 
@@ -473,7 +473,7 @@ def fmt_onboarding_step(step: str, network: str, readiness: dict, extra: Optiona
         return (
             "🧭 *Step 1 — Select Mode*\n\n"
             f"Current mode: *{escape_md(network.upper())}*\n"
-            "Testnet is best for first-time setup\\. Mainnet is live trading\\.\n\n"
+            "Testnet is best for first\\-time setup\\. Mainnet is live trading\\.\n\n"
             f"Progress: *{escape_md(progress)}*"
         )
     if step == "key":

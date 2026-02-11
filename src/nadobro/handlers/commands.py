@@ -26,6 +26,7 @@ from src.nadobro.services.onboarding_service import (
     evaluate_readiness,
     set_current_step,
 )
+from src.nadobro.services.debug_logger import debug_log
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +40,19 @@ async def cmd_start(update: Update, context: CallbackContext):
     resume_step = get_resume_step(telegram_id)
     if resume_step != "complete":
         set_current_step(telegram_id, resume_step)
-        await _send_onboarding_step(update, telegram_id, resume_step)
-        return
+    # region agent log
+    debug_log(
+        "post-fix",
+        "H8",
+        "commands.py:49",
+        "start_route_decision",
+        {
+            "telegram_id": telegram_id,
+            "is_new_user": bool(is_new),
+            "resume_step": resume_step,
+        },
+    )
+    # endregion
 
     network = user.network_mode.value
     balance = None
@@ -57,6 +69,15 @@ async def cmd_start(update: Update, context: CallbackContext):
         logger.warning(f"Failed to fetch data for dashboard: {e}")
 
     dashboard = fmt_dashboard(user, balance, positions, prices, network)
+    readiness = evaluate_readiness(telegram_id)
+    if readiness.get("onboarding_complete"):
+        dashboard += "\n\n✅ *Setup:* Complete"
+    else:
+        next_step = readiness.get("missing_step", "welcome")
+        dashboard += (
+            f"\n\n⚠️ *Setup:* Incomplete\n"
+            f"Next step: *{escape_md(str(next_step).upper())}*"
+        )
     await update.message.reply_text(
         dashboard,
         parse_mode=ParseMode.MARKDOWN_V2,
