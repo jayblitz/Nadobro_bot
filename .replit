@@ -14,27 +14,6 @@ ENCRYPTION_KEY = "UNQseQTv0VYaoIu_MpjHloBWDcIfhZS-ahSBB_UGiNU"
 ADMIN_USER_IDS = "1124285818"
 
 [workflows]
-runButton = "Project"
-
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Nadobro Bot"
-
-[[workflows.workflow]]
-name = "Nadobro Bot"
-author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "console"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python main.py"
 
 [deployment]
 deploymentTarget = "vm"
