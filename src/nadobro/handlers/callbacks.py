@@ -473,9 +473,10 @@ async def _handle_market(query, data, telegram_id):
 
     elif action == "funding":
         funding = {}
+        all_rates = client.get_all_funding_rates()
         for name, info in PRODUCTS.items():
             if info["type"] == "perp":
-                fr = client.get_funding_rate(info["id"])
+                fr = all_rates.get(info["id"])
                 if fr:
                     funding[name] = fr.get("funding_rate", 0)
 

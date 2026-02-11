@@ -30,7 +30,8 @@ class NadoClient:
                 from nado_protocol.utils.bytes32 import subaccount_to_hex
                 self.subaccount_hex = subaccount_to_hex(self.address, "default")
             except ImportError:
-                self.subaccount_hex = self.address.lower() + "000000000000000000000000"
+                default_bytes = "default".encode().hex()
+                self.subaccount_hex = self.address.lower() + default_bytes + "0" * (24 - len(default_bytes))
         except Exception as e:
             logger.error(f"Failed to derive address from private key: {e}")
 
@@ -275,7 +276,7 @@ class NadoClient:
             results.append(r)
         return {"success": True, "cancelled": len([r for r in results if r["success"]])}
 
-    def get_funding_rate(self, product_id: int) -> Optional[dict]:
+    def get_all_funding_rates(self) -> dict:
         try:
             url = f"{self._rest_url()}/query"
             params = {"type": "all_products"}
@@ -283,13 +284,19 @@ class NadoClient:
             resp = requests.get(url, params=params, headers=headers, timeout=10)
             data = resp.json()
             if data.get("status") == "success":
+                rates = {}
                 for prod in data["data"].get("perp_products", []):
-                    if prod.get("product_id") == product_id:
-                        funding = int(prod.get("cum_funding_x18", 0)) / 1e18
-                        return {"product_id": product_id, "funding_rate": funding}
+                    pid = prod.get("product_id")
+                    funding = int(prod.get("cum_funding_x18", 0)) / 1e18
+                    rates[pid] = {"product_id": pid, "funding_rate": funding}
+                return rates
         except Exception as e:
-            logger.error(f"get_funding_rate failed: {e}")
-        return None
+            logger.error(f"get_all_funding_rates failed: {e}")
+        return {}
+
+    def get_funding_rate(self, product_id: int) -> Optional[dict]:
+        rates = self.get_all_funding_rates()
+        return rates.get(product_id)
 
     def get_all_products_info(self) -> dict:
         try:

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import asyncio
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -108,32 +109,37 @@ def _sanitize_result(result: dict) -> dict:
     return result
 
 
-def parse_user_message(text: str) -> dict:
+def _call_xai(client, text: str) -> dict:
+    response = client.chat.completions.create(
+        model="grok-3-mini-fast",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+        response_format={"type": "json_object"},
+        max_tokens=500,
+        temperature=0.1,
+    )
+    raw_content = response.choices[0].message.content
+    if not raw_content or not raw_content.strip():
+        return None
+    result = json.loads(raw_content)
+    if not isinstance(result, dict):
+        return None
+    return result
+
+
+async def parse_user_message(text: str) -> dict:
     client = get_xai_client()
     if not client:
         return _fallback_parse(text)
 
     try:
-        response = client.chat.completions.create(
-            model="grok-2-1212",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            response_format={"type": "json_object"},
-            max_tokens=500,
-            temperature=0.1,
-        )
-        raw_content = response.choices[0].message.content
-        if not raw_content or not raw_content.strip():
-            logger.warning("AI returned empty response, using fallback")
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _call_xai, client, text)
+        if result is None:
+            logger.warning("AI returned empty/invalid response, using fallback")
             return _fallback_parse(text)
-
-        result = json.loads(raw_content)
-        if not isinstance(result, dict):
-            logger.warning(f"AI returned non-dict response: {type(result)}")
-            return _fallback_parse(text)
-
         return _sanitize_result(result)
     except json.JSONDecodeError as e:
         logger.error(f"AI returned invalid JSON: {e}")
@@ -146,7 +152,7 @@ def parse_user_message(text: str) -> dict:
 def _fallback_parse(text: str) -> dict:
     text_lower = text.lower().strip()
 
-    products = ["btc", "eth", "sol", "arb", "op", "doge", "link", "avax"]
+    products = ["btc", "eth", "sol", "xrp", "bnb", "doge", "link", "avax"]
     detected_product = None
     for p in products:
         if p in text_lower:
@@ -252,9 +258,9 @@ def _fallback_parse(text: str) -> dict:
         }
 
     nado_keywords = [
-        "nado", "margin", "liquidat", "nlp", "vault", "deposit", "withdraw",
-        "subaccount", "order type", "leverage", "cross margin", "isolated",
-        "settlement", "pnl", "insurance", "fee", "speed bump", "twap",
+        "nado", "liquidat", "nlp", "vault", "deposit", "withdraw",
+        "subaccount", "order type", "cross margin", "isolated",
+        "settlement", "insurance", "fee", "speed bump", "twap",
         "stop loss", "take profit", "templars", "nft", "ink", "faucet",
         "how do", "how does", "what is", "what are", "explain", "tell me about",
     ]

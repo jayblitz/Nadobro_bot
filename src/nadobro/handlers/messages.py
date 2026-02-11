@@ -46,7 +46,7 @@ async def handle_message(update: Update, context: CallbackContext):
     if await _handle_pending_alert(update, context, telegram_id, text):
         return
 
-    parsed = parse_user_message(text)
+    parsed = await parse_user_message(text)
     intent = parsed.get("intent", "chat")
 
     try:
@@ -350,11 +350,12 @@ async def _handle_query_intent(update, context, telegram_id, parsed):
 
     elif action == "funding":
         funding = {}
+        all_rates = client.get_all_funding_rates()
         for name, info in PRODUCTS.items():
             if info["type"] == "perp":
                 if product and name.upper() != product.upper():
                     continue
-                fr = client.get_funding_rate(info["id"])
+                fr = all_rates.get(info["id"])
                 if fr:
                     funding[name] = fr.get("funding_rate", 0)
         msg = fmt_funding(funding)
