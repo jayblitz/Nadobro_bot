@@ -38,7 +38,7 @@ def main_menu_kb():
             InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop"),
         ],
         [
-            InlineKeyboardButton("💹 Markets", callback_data="mkt:prices"),
+            InlineKeyboardButton("💹 Markets", callback_data="mkt:menu"),
             InlineKeyboardButton("🔔 Alerts", callback_data="alert:menu"),
         ],
         [
@@ -256,6 +256,47 @@ def strategy_hub_kb():
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
+        ],
+    ])
+
+
+def markets_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💹 Price Grid", callback_data="mkt:prices"),
+            InlineKeyboardButton("📊 Funding", callback_data="mkt:funding"),
+        ],
+        [
+            InlineKeyboardButton("🔴 Live Last Price", callback_data="mkt:live_menu"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="nav:main"),
+        ],
+    ])
+
+
+def live_price_asset_kb():
+    rows = []
+    row = []
+    for name in PERP_PRODUCTS:
+        row.append(InlineKeyboardButton(name, callback_data=f"mkt:live:{name}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("◀ Back", callback_data="mkt:menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def live_price_controls_kb(product: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🛑 Stop Live", callback_data="mkt:live_stop"),
+            InlineKeyboardButton("Switch Asset", callback_data="mkt:live_menu"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
         ],
     ])
 
