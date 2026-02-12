@@ -11,6 +11,7 @@ from src.nadobro.handlers.formatters import (
 )
 from src.nadobro.handlers.keyboards import (
     main_menu_kb,
+    persistent_menu_kb,
     onboarding_mode_kb,
     onboarding_key_kb,
     onboarding_funding_kb,
@@ -81,7 +82,7 @@ async def cmd_start(update: Update, context: CallbackContext):
     await update.message.reply_text(
         dashboard,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=main_menu_kb(),
+        reply_markup=persistent_menu_kb(),
     )
 
 
@@ -89,7 +90,7 @@ async def cmd_help(update: Update, context: CallbackContext):
     await update.message.reply_text(
         fmt_help(),
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=main_menu_kb(),
+        reply_markup=persistent_menu_kb(),
     )
 
 

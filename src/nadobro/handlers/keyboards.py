@@ -1,4 +1,4 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from src.nadobro.config import PRODUCTS
 
 PERP_PRODUCTS = [name for name, info in PRODUCTS.items() if info["type"] == "perp"]
@@ -13,6 +13,40 @@ SIZE_PRESETS = {
     "DOGE": [100, 500, 1000, 5000, 10000],
     "AVAX": [0.1, 0.5, 1, 5, 10],
 }
+
+
+REPLY_BUTTON_MAP = {
+    "🧭 Setup": "onboarding:resume",
+    "📈 Strategies": "nav:strategy_hub",
+    "🟢 Trade Long": "trade:long",
+    "🔴 Trade Short": "trade:short",
+    "🟩 Limit Buy": "trade:limit_long",
+    "🟥 Limit Sell": "trade:limit_short",
+    "👛 Wallet": "wallet:view",
+    "📋 Positions": "pos:view",
+    "📡 Status": "strategy:status",
+    "🛑 Stop Bot": "strategy:stop",
+    "💹 Markets": "mkt:menu",
+    "🔔 Alerts": "alert:menu",
+    "⚙️ Settings": "settings:view",
+    "❓ Help": "nav:help",
+}
+
+
+def persistent_menu_kb():
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("🟢 Trade Long"), KeyboardButton("🔴 Trade Short")],
+            [KeyboardButton("🟩 Limit Buy"), KeyboardButton("🟥 Limit Sell")],
+            [KeyboardButton("👛 Wallet"), KeyboardButton("📋 Positions")],
+            [KeyboardButton("📈 Strategies"), KeyboardButton("💹 Markets")],
+            [KeyboardButton("📡 Status"), KeyboardButton("🛑 Stop Bot")],
+            [KeyboardButton("🔔 Alerts"), KeyboardButton("⚙️ Settings")],
+            [KeyboardButton("🧭 Setup"), KeyboardButton("❓ Help")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 def main_menu_kb():

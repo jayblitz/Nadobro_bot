@@ -160,6 +160,17 @@ async def run_bot():
     # endregion
     await bot_app.initialize()
     await bot_app.start()
+
+    from telegram import BotCommand
+    await bot_app.bot.set_my_commands([
+        BotCommand("start", "Open dashboard"),
+        BotCommand("help", "Show help"),
+        BotCommand("status", "Bot & strategy status"),
+        BotCommand("import_key", "Import trading key"),
+        BotCommand("stop_all", "Stop bot & cancel orders"),
+    ])
+    logger.info("Bot commands registered in Menu")
+
     await bot_app.updater.start_polling(
         drop_pending_updates=True,
         allowed_updates=["message", "callback_query"],

@@ -5,15 +5,10 @@ from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info, get_user,
-    import_user_private_key, ensure_active_wallet_ready,
+    ensure_active_wallet_ready,
 )
-from src.nadobro.services.trade_service import (
-    execute_market_order, close_position, close_all_positions,
-    get_trade_history, get_trade_analytics,
-)
-from src.nadobro.services.alert_service import create_alert, get_user_alerts
-from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.services.ai_parser import parse_user_message
+from src.nadobro.services.trade_service import execute_market_order
+from src.nadobro.services.alert_service import create_alert
 from src.nadobro.services.knowledge_service import answer_nado_question
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.onboarding_service import get_resume_step
@@ -24,15 +19,12 @@ from src.nadobro.services.crypto import (
     derive_address_from_private_key,
     private_key_fingerprint,
 )
-from src.nadobro.config import get_product_id, PRODUCTS
+from src.nadobro.config import get_product_id
 from src.nadobro.handlers.formatters import (
-    escape_md, fmt_positions, fmt_balance, fmt_prices, fmt_funding,
-    fmt_trade_preview, fmt_trade_result, fmt_history, fmt_analytics,
-    fmt_alerts, fmt_price,
+    escape_md, fmt_positions, fmt_trade_preview,
 )
 from src.nadobro.handlers.keyboards import (
-    main_menu_kb, trade_confirm_kb, back_kb,
-    trade_leverage_kb,
+    main_menu_kb, persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,7 +55,9 @@ async def handle_message(update: Update, context: CallbackContext):
     )
     # endregion
 
-    if await _handle_pending_question(update, context, text):
+    if text in REPLY_BUTTON_MAP:
+        callback_data = REPLY_BUTTON_MAP[text]
+        await _dispatch_reply_button(update, context, telegram_id, callback_data)
         return
 
     if await _handle_pending_key_import(update, context, telegram_id, text):
@@ -78,70 +72,215 @@ async def handle_message(update: Update, context: CallbackContext):
     if await _handle_pending_strategy_input(update, context, telegram_id, text):
         return
 
-    parsed = await parse_user_message(text)
-    intent = parsed.get("intent", "chat")
-    # region agent log
-    debug_log(
-        "baseline",
-        "H5",
-        "messages.py:84",
-        "message_intent_parsed",
-        {
-            "telegram_id": telegram_id,
-            "intent": intent,
-            "action": parsed.get("action"),
-            "product": parsed.get("product"),
-            "has_size": parsed.get("size") is not None,
-        },
-    )
-    # endregion
+    await _handle_nado_question(update, context, text)
 
-    try:
-        if intent == "trade":
-            await _handle_trade_intent(update, context, telegram_id, parsed)
-        elif intent == "query":
-            await _handle_query_intent(update, context, telegram_id, parsed)
-        elif intent == "command":
-            await _handle_command_intent(update, context, telegram_id, parsed)
-        elif intent == "nado_question":
-            await _handle_nado_question(update, context, text)
+
+async def _dispatch_reply_button(update, context, telegram_id, callback_data):
+    from src.nadobro.handlers.callbacks import handle_callback as _cb_handler
+    from src.nadobro.services.user_service import get_user
+    from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
+
+    prefix = callback_data.split(":")[0]
+    action = callback_data.split(":")[1] if ":" in callback_data else ""
+
+    if callback_data == "onboarding:resume":
+        step = get_resume_step(telegram_id)
+        if step == "complete":
+            await _send_dashboard_msg(update, telegram_id)
         else:
-            if _should_route_to_nado_support(text):
-                await _handle_nado_question(update, context, text)
-            else:
-                ai_msg = parsed.get("message", "I'm not sure what you mean.")
-                await update.message.reply_text(
-                    f"💬 {escape_md(ai_msg)}\n\n"
-                    f"Use the buttons below to navigate:",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=main_menu_kb(),
-                )
-    except Exception as e:
-        # region agent log
-        debug_log(
-            "baseline",
-            "H5",
-            "messages.py:106",
-            "message_handler_exception",
-            {"telegram_id": telegram_id, "error": str(e), "intent": intent},
-        )
-        # endregion
-        logger.error(f"Message handler error: {e}", exc_info=True)
+            from src.nadobro.services.onboarding_service import set_current_step
+            set_current_step(telegram_id, step)
+            from src.nadobro.handlers.commands import _send_onboarding_step
+            await _send_onboarding_step(update, telegram_id, step)
+        return
+
+    if callback_data == "nav:help":
+        from src.nadobro.handlers.formatters import fmt_help
         await update.message.reply_text(
-            "⚠️ Something went wrong\\. Please try again\\.",
+            fmt_help(),
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    if callback_data == "nav:strategy_hub":
+        from src.nadobro.handlers.keyboards import strategy_hub_kb
+        await update.message.reply_text(
+            "🧭 *Strategy Hub*\n\n"
+            "Pick a strategy, review setup, then start with pre\\-trade analytics\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=strategy_hub_kb(),
+        )
+        return
+
+    if prefix == "trade":
+        step = get_resume_step(telegram_id)
+        if step != "complete":
+            await update.message.reply_text(
+                f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(step.upper())}*\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🧭 Continue Setup", callback_data="onboarding:resume")],
+                ]),
+            )
+            return
+        from src.nadobro.services.user_service import ensure_active_wallet_ready
+        wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+        if not wallet_ready:
+            await update.message.reply_text(
+                f"⚠️ {escape_md(wallet_msg)}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
+
+        if action in ("long", "short"):
+            from src.nadobro.handlers.keyboards import trade_product_kb
+            action_label = "🟢 BUY / LONG" if action == "long" else "🔴 SELL / SHORT"
+            await update.message.reply_text(
+                f"*{escape_md(action_label)}*\n\nSelect a product:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=trade_product_kb(action),
+            )
+        elif action in ("limit_long", "limit_short"):
+            from src.nadobro.handlers.keyboards import trade_product_kb
+            context.user_data["pending_trade"] = {"action": action, "step": "product_select"}
+            action_label = "LIMIT LONG" if action == "limit_long" else "LIMIT SHORT"
+            await update.message.reply_text(
+                f"*{escape_md(action_label)}*\n\nSelect a product:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=trade_product_kb(action),
+            )
+        return
+
+    if callback_data == "wallet:view":
+        info = get_user_wallet_info(telegram_id)
+        from src.nadobro.handlers.formatters import fmt_wallet_info
+        from src.nadobro.handlers.keyboards import wallet_kb
+        msg = fmt_wallet_info(info)
+        await update.message.reply_text(
+            msg,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=wallet_kb(),
+        )
+        return
+
+    if callback_data == "pos:view":
+        client = get_user_nado_client(telegram_id)
+        if not client:
+            await update.message.reply_text(
+                "⚠️ Wallet not initialized\\. Use /start first\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
+        positions = client.get_all_positions()
+        prices = None
+        try:
+            prices = client.get_all_market_prices()
+        except Exception:
+            pass
+        from src.nadobro.handlers.keyboards import positions_kb
+        msg = fmt_positions(positions, prices)
+        await update.message.reply_text(
+            msg,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=positions_kb(positions or []),
+        )
+        return
+
+    if callback_data == "strategy:status":
+        from src.nadobro.services.bot_runtime import get_user_bot_status
+        from src.nadobro.handlers.formatters import fmt_status_overview
+        st = get_user_bot_status(telegram_id)
+        readiness = evaluate_readiness(telegram_id)
+        text = fmt_status_overview(st, readiness)
+        if st.get("last_error"):
+            text += f"\nLast error: {escape_md(str(st.get('last_error')))}"
+        await update.message.reply_text(
+            text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=main_menu_kb(),
         )
+        return
+
+    if callback_data == "strategy:stop":
+        from src.nadobro.services.bot_runtime import stop_user_bot
+        ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
+        prefix_emoji = "🛑" if ok else "⚠️"
+        await update.message.reply_text(
+            f"{prefix_emoji} {escape_md(msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    if callback_data == "mkt:menu":
+        from src.nadobro.handlers.keyboards import markets_kb
+        await update.message.reply_text(
+            "💹 *Markets*\n\nPick a market view:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=markets_kb(),
+        )
+        return
+
+    if callback_data == "alert:menu":
+        from src.nadobro.handlers.keyboards import alerts_kb
+        await update.message.reply_text(
+            "🔔 *Alerts*\n\nManage your price alerts\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=alerts_kb(),
+        )
+        return
+
+    if callback_data == "settings:view":
+        from src.nadobro.handlers.formatters import fmt_settings
+        from src.nadobro.handlers.keyboards import settings_kb
+        user_settings = _get_user_settings(telegram_id, context)
+        msg = fmt_settings(user_settings)
+        lev = user_settings.get("default_leverage", 1)
+        slip = user_settings.get("slippage", 1)
+        await update.message.reply_text(
+            msg,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=settings_kb(lev, slip),
+        )
+        return
+
+    await update.message.reply_text(
+        f"Use the inline buttons or type a question for AI chat\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
 
 
-async def _handle_pending_question(update, context, text):
-    if not context.user_data.get("pending_question"):
-        return False
-
-    context.user_data.pop("pending_question", None)
-
-    await _handle_nado_question(update, context, text)
-    return True
+async def _send_dashboard_msg(update, telegram_id):
+    from src.nadobro.services.user_service import get_user
+    from src.nadobro.handlers.formatters import fmt_dashboard
+    from src.nadobro.services.onboarding_service import evaluate_readiness
+    user = get_user(telegram_id)
+    if not user:
+        await update.message.reply_text("User not found\\. Use /start first\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        return
+    network = user.network_mode.value
+    balance = positions = prices = None
+    try:
+        client = get_user_nado_client(telegram_id)
+        if client:
+            balance = client.get_balance()
+            positions = client.get_all_positions()
+            prices = client.get_all_market_prices()
+    except Exception:
+        pass
+    dashboard = fmt_dashboard(user, balance, positions, prices, network)
+    readiness = evaluate_readiness(telegram_id)
+    if readiness.get("onboarding_complete"):
+        dashboard += "\n\n✅ *Setup:* Complete"
+    else:
+        next_step = readiness.get("missing_step", "welcome")
+        dashboard += (
+            f"\n\n⚠️ *Setup:* Incomplete\n"
+            f"Next step: *{escape_md(str(next_step).upper())}*"
+        )
+    await update.message.reply_text(
+        dashboard,
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
 
 
 async def _handle_pending_trade(update, context, telegram_id, text):
@@ -441,191 +580,6 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     return True
 
 
-async def _handle_trade_intent(update, context, telegram_id, parsed):
-    action = parsed.get("action", "long")
-    product = parsed.get("product")
-    size = parsed.get("size")
-    settings = _get_user_settings(telegram_id, context)
-    leverage = parsed.get("leverage", settings.get("default_leverage", 3)) or settings.get("default_leverage", 3)
-
-    if action == "close":
-        if product:
-            result = close_position(telegram_id, product)
-            if result["success"]:
-                msg = f"✅ Closed {escape_md(str(result['cancelled']))} order\\(s\\) on {escape_md(result['product'])}\\."
-            else:
-                msg = f"❌ {escape_md(result['error'])}"
-        else:
-            result = close_all_positions(telegram_id)
-            if result["success"]:
-                products = ", ".join(result.get("products", []))
-                msg = f"✅ Closed {escape_md(str(result['cancelled']))} order\\(s\\) on {escape_md(products)}\\."
-            else:
-                msg = f"❌ {escape_md(result['error'])}"
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-        return
-
-    if action == "close_all":
-        result = close_all_positions(telegram_id)
-        if result["success"]:
-            products = ", ".join(result.get("products", []))
-            msg = f"✅ Closed {escape_md(str(result['cancelled']))} order\\(s\\) on {escape_md(products)}\\."
-        else:
-            msg = f"❌ {escape_md(result['error'])}"
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-        return
-
-    if not product or not size:
-        ai_msg = parsed.get("message", "Please specify product and size.")
-        await update.message.reply_text(
-            f"💬 {escape_md(ai_msg)}\n\nUse the buttons for easier trading:",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
-        )
-        return
-
-    if is_trading_paused():
-        await update.message.reply_text(
-            "⏸ Trading is temporarily paused by admin\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
-        )
-        return
-    resume_step = get_resume_step(telegram_id)
-    if resume_step != "complete":
-        await update.message.reply_text(
-            f"⚠️ Setup incomplete\\. Continue onboarding at *{escape_md(resume_step.upper())}*\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🧭 Continue Setup", callback_data="onboarding:resume")],
-                [InlineKeyboardButton("Dashboard", callback_data="nav:main")],
-            ]),
-        )
-        return
-    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
-    if not wallet_ready:
-        await update.message.reply_text(
-            f"⚠️ {escape_md(wallet_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
-        )
-        return
-
-    parsed_price = parsed.get("price")
-    price = parsed_price if parsed_price else 0
-    try:
-        client = get_user_nado_client(telegram_id)
-        if client:
-            pid = get_product_id(product)
-            if pid is not None:
-                if not parsed_price:
-                    mp = client.get_market_price(pid)
-                    price = mp.get("mid", 0)
-    except Exception:
-        pass
-
-    est_margin = (size * price) / leverage if leverage > 0 and price else None
-
-    context.user_data["pending_trade"] = {
-        "action": action,
-        "product": product,
-        "size": size,
-        "leverage": leverage,
-        "price": price,
-        "est_margin": est_margin,
-        "slippage_pct": settings.get("slippage", 1),
-    }
-
-    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
-    await update.message.reply_text(
-        preview,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=trade_confirm_kb(),
-    )
-
-
-async def _handle_query_intent(update, context, telegram_id, parsed):
-    action = parsed.get("action", "")
-    product = parsed.get("product")
-
-    client = get_user_nado_client(telegram_id)
-    if not client:
-        await update.message.reply_text(
-            "⚠️ Wallet not initialized\\. Use /start first\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
-        return
-
-    if action == "positions":
-        positions = client.get_all_positions()
-        prices = None
-        try:
-            prices = client.get_all_market_prices()
-        except Exception:
-            pass
-        msg = fmt_positions(positions, prices)
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-
-    elif action == "balance":
-        balance = client.get_balance()
-        info = get_user_wallet_info(telegram_id)
-        addr = info.get("active_address") if info else None
-        msg = fmt_balance(balance, addr)
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-
-    elif action == "price":
-        if product:
-            pid = get_product_id(product)
-            if pid is not None:
-                mp = client.get_market_price(pid)
-                bid_str = "$" + fmt_price(mp["bid"], product)
-                ask_str = "$" + fmt_price(mp["ask"], product)
-                mid_str = "$" + fmt_price(mp["mid"], product)
-                msg = (
-                    f"💹 *{escape_md(product)}\\-PERP*\n\n"
-                    f"Bid: {escape_md(bid_str)}\n"
-                    f"Ask: {escape_md(ask_str)}\n"
-                    f"Mid: {escape_md(mid_str)}"
-                )
-            else:
-                msg = f"❌ Unknown product: {escape_md(product)}"
-        else:
-            prices = client.get_all_market_prices()
-            msg = fmt_prices(prices)
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-
-    elif action == "funding":
-        funding = {}
-        all_rates = client.get_all_funding_rates()
-        for name, info in PRODUCTS.items():
-            if info["type"] == "perp":
-                if product and name.upper() != product.upper():
-                    continue
-                fr = all_rates.get(info["id"])
-                if fr:
-                    funding[name] = fr.get("funding_rate", 0)
-        msg = fmt_funding(funding)
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-
-    elif action == "history":
-        trades = get_trade_history(telegram_id)
-        msg = fmt_history(trades)
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-
-    elif action == "analytics":
-        stats = get_trade_analytics(telegram_id)
-        msg = fmt_analytics(stats)
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-
-    else:
-        ai_msg = parsed.get("message", "")
-        await update.message.reply_text(
-            f"💬 {escape_md(ai_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
-        )
-
-
 async def _handle_nado_question(update, context, question):
     thinking_msg = await update.message.reply_text(
         "🧠 _Thinking\\.\\.\\._",
@@ -643,46 +597,6 @@ async def _handle_nado_question(update, context, question):
         logger.error(f"Nado Q&A error: {e}", exc_info=True)
         await thinking_msg.edit_text(
             "⚠️ Something went wrong answering your question\\. Please try again\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
-        )
-
-
-async def _handle_command_intent(update, context, telegram_id, parsed):
-    action = parsed.get("action", "")
-    product = parsed.get("product")
-
-    if action == "alerts":
-        condition = parsed.get("alert_condition")
-        value = parsed.get("alert_value")
-
-        parsed_value = None
-        if value is not None:
-            try:
-                parsed_value = float(value)
-            except (TypeError, ValueError):
-                parsed_value = None
-
-        if product and condition and parsed_value is not None:
-            result = create_alert(telegram_id, product, condition, parsed_value)
-            if result["success"]:
-                msg = (
-                    f"✅ Alert set\\!\n"
-                    f"{escape_md(result['product'])} {escape_md(condition)} "
-                    f"{escape_md(f'${parsed_value:,.2f}')}"
-                )
-            else:
-                msg = f"❌ {escape_md(result['error'])}"
-        else:
-            alerts = get_user_alerts(telegram_id)
-            msg = fmt_alerts(alerts)
-
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu_kb())
-
-    else:
-        ai_msg = parsed.get("message", "I'm not sure what you mean.")
-        await update.message.reply_text(
-            f"💬 {escape_md(ai_msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=main_menu_kb(),
         )
@@ -711,18 +625,3 @@ def _fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
     )
 
 
-def _should_route_to_nado_support(text: str) -> bool:
-    txt = (text or "").strip()
-    if not txt:
-        return False
-    lowered = txt.lower()
-    if lowered in {"hi", "hello", "hey", "gm", "gn"}:
-        return False
-    if "?" in txt:
-        return True
-    support_keywords = [
-        "nado", "support", "help", "docs", "api", "deposit", "withdraw",
-        "liquidation", "margin", "funding", "fees", "network", "chain",
-        "subaccount", "signer", "wallet", "error", "issue", "troubleshoot",
-    ]
-    return any(k in lowered for k in support_keywords)
