@@ -82,7 +82,7 @@ def trade_order_type_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("📈 Market"), KeyboardButton("📉 Limit")],
-            [KeyboardButton("◀ Back")],
+            [KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
@@ -93,7 +93,7 @@ def trade_product_reply_kb():
         [
             [KeyboardButton("BTC"), KeyboardButton("ETH"), KeyboardButton("SOL"), KeyboardButton("XRP")],
             [KeyboardButton("BNB"), KeyboardButton("LINK"), KeyboardButton("DOGE"), KeyboardButton("AVAX")],
-            [KeyboardButton("◀ Back")],
+            [KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
@@ -104,7 +104,7 @@ def trade_leverage_reply_kb():
         [
             [KeyboardButton("1x"), KeyboardButton("2x"), KeyboardButton("3x")],
             [KeyboardButton("5x"), KeyboardButton("10x"), KeyboardButton("20x")],
-            [KeyboardButton("◀ Back")],
+            [KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
@@ -123,7 +123,7 @@ def trade_size_reply_kb(product):
     if row:
         rows.append(row)
     rows.append([KeyboardButton("✏️ Custom")])
-    rows.append([KeyboardButton("◀ Back")])
+    rows.append([KeyboardButton("◀ Back"), KeyboardButton("◀ Home")])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -131,7 +131,7 @@ def trade_tpsl_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("📐 Set TP/SL"), KeyboardButton("⏭ Skip")],
-            [KeyboardButton("◀ Back")],
+            [KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
@@ -141,7 +141,7 @@ def trade_tpsl_edit_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("Set TP"), KeyboardButton("Set SL")],
-            [KeyboardButton("✅ Done"), KeyboardButton("◀ Back")],
+            [KeyboardButton("✅ Done"), KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
@@ -151,6 +151,7 @@ def trade_confirm_reply_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("✅ Confirm Trade"), KeyboardButton("❌ Cancel")],
+            [KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
@@ -275,7 +276,10 @@ def alert_product_kb():
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("◀ Back", callback_data="alert:menu")])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="alert:menu"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -286,7 +290,10 @@ def alert_delete_kb(alerts):
             f"🗑 #{a['id']} {a['product']} {a['condition']} ${a['target']:,.2f}",
             callback_data=f"alert:del:{a['id']}"
         )])
-    rows.append([InlineKeyboardButton("◀ Back", callback_data="alert:menu")])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="alert:menu"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -318,7 +325,10 @@ def settings_leverage_kb():
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("◀ Back", callback_data="settings:view")])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="settings:view"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -330,7 +340,10 @@ def settings_slippage_kb():
         row.append(InlineKeyboardButton(label, callback_data=f"settings:slippage:{s}"))
     return InlineKeyboardMarkup([
         row,
-        [InlineKeyboardButton("◀ Back", callback_data="settings:view")],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="settings:view"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+        ],
     ])
 
 
@@ -345,6 +358,7 @@ def risk_profile_kb():
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="settings:view"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
 
@@ -389,7 +403,10 @@ def live_price_asset_kb():
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("◀ Back", callback_data="mkt:menu")])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -401,6 +418,7 @@ def live_price_controls_kb(product: str):
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
 
@@ -434,6 +452,7 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
 
