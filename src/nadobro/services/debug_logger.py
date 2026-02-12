@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 
-DEBUG_LOG_PATH = Path("/Users/jerry/Nadobro_bot/.cursor/debug.log")
+DEBUG_LOG_PATH = Path("/tmp/nadobro_debug.log")
 DEBUG_STDOUT_LOGGER = logging.getLogger("nadobro.debug")
 
 
@@ -19,7 +19,6 @@ def debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data
         "timestamp": int(time.time() * 1000),
     }
     try:
-        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=True) + "\n")
     except Exception:

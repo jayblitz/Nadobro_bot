@@ -41,11 +41,10 @@ async def cmd_start(update: Update, context: CallbackContext):
     resume_step = get_resume_step(telegram_id)
     if resume_step != "complete":
         set_current_step(telegram_id, resume_step)
-    # region agent log
     debug_log(
-        "post-fix",
-        "H8",
-        "commands.py:49",
+        "baseline",
+        "start",
+        "commands.py:cmd_start",
         "start_route_decision",
         {
             "telegram_id": telegram_id,
@@ -53,7 +52,6 @@ async def cmd_start(update: Update, context: CallbackContext):
             "resume_step": resume_step,
         },
     )
-    # endregion
 
     network = user.network_mode.value
     balance = None
@@ -105,7 +103,7 @@ async def cmd_status(update: Update, context: CallbackContext):
     await update.message.reply_text(
         text,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=main_menu_kb(),
+        reply_markup=persistent_menu_kb(),
     )
 
 
@@ -122,7 +120,7 @@ async def cmd_stop_all(update: Update, context: CallbackContext):
     await update.message.reply_text(
         f"{prefix} {escape_md(msg)}\n\n{closed_msg}",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=main_menu_kb(),
+        reply_markup=persistent_menu_kb(),
     )
 
 
@@ -151,7 +149,7 @@ async def cmd_import_key(update: Update, context: CallbackContext):
         "Send your *private key* now \\(64 hex chars, with or without `0x`\\)\\.\n\n"
         "⚠️ Never send a seed phrase\\. Never send your main wallet key\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=main_menu_kb(),
+        reply_markup=persistent_menu_kb(),
     )
 
 

@@ -541,3 +541,19 @@ def fmt_status_overview(status: dict, onboarding: dict):
             f"Interval: *{escape_md(str(status.get('interval_seconds', 0)))}s*",
         ])
     return "\n".join(lines)
+
+
+def fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
+    notional = float(conf.get("notional_usd", 100.0))
+    spread_bp = float(conf.get("spread_bp", 5.0))
+    interval_seconds = int(conf.get("interval_seconds", 60))
+    tp_pct = float(conf.get("tp_pct", 1.0))
+    sl_pct = float(conf.get("sl_pct", 0.5))
+    return (
+        f"✅ *{escape_md(strategy.upper())} updated* \\({escape_md(network.upper())}\\)\n\n"
+        f"Notional: {escape_md(f'${notional:,.2f}')}\n"
+        f"Spread: {escape_md(f'{spread_bp:.1f} bp')}\n"
+        f"Interval: {escape_md(f'{interval_seconds}s')}\n"
+        f"TP: {escape_md(f'{tp_pct:.2f}%')}\n"
+        f"SL: {escape_md(f'{sl_pct:.2f}%')}"
+    )

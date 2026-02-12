@@ -21,7 +21,7 @@ from src.nadobro.services.crypto import (
 )
 from src.nadobro.config import get_product_id
 from src.nadobro.handlers.formatters import (
-    escape_md, fmt_positions, fmt_trade_preview,
+    escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
 )
 from src.nadobro.handlers.keyboards import (
     main_menu_kb, persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
@@ -570,7 +570,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     conf = settings.get("strategies", {}).get(strategy, {})
     context.user_data.pop("pending_strategy_input", None)
     await update.message.reply_text(
-        _fmt_strategy_update(strategy, network, conf),
+        fmt_strategy_update(strategy, network, conf),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⚙️ Continue Editing", callback_data=f"strategy:config:{strategy}")],
@@ -609,19 +609,5 @@ def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
     return settings
 
 
-def _fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
-    notional = float(conf.get("notional_usd", 100.0))
-    spread_bp = float(conf.get("spread_bp", 5.0))
-    interval_seconds = int(conf.get("interval_seconds", 60))
-    tp_pct = float(conf.get("tp_pct", 1.0))
-    sl_pct = float(conf.get("sl_pct", 0.5))
-    return (
-        f"✅ *{escape_md(strategy.upper())} updated* \\({escape_md(network.upper())}\\)\n\n"
-        f"Notional: {escape_md(f'${notional:,.2f}')}\n"
-        f"Spread: {escape_md(f'{spread_bp:.1f} bp')}\n"
-        f"Interval: {escape_md(f'{interval_seconds}s')}\n"
-        f"TP: {escape_md(f'{tp_pct:.2f}%')}\n"
-        f"SL: {escape_md(f'{sl_pct:.2f}%')}"
-    )
 
 
