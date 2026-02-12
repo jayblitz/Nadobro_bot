@@ -119,7 +119,18 @@ async def handle_message(update: Update, context: CallbackContext):
     if text in REPLY_BUTTON_MAP:
         callback_data = REPLY_BUTTON_MAP[text]
         if _is_contextual_button(callback_data, context):
-            await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
+            try:
+                await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
+            except Exception as e:
+                logger.error(f"Button dispatch error for '{text}': {e}", exc_info=True)
+                try:
+                    await update.message.reply_text(
+                        "⚠️ Something went wrong\\. Please try again\\.",
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=persistent_menu_kb(),
+                    )
+                except Exception:
+                    pass
             return
 
     if await _handle_trade_flow_free_text(update, context, telegram_id, text):
