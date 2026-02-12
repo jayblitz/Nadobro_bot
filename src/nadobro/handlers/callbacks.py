@@ -20,6 +20,7 @@ from src.nadobro.handlers.keyboards import (
     onboarding_mode_kb, onboarding_key_kb, onboarding_funding_kb,
     onboarding_risk_kb, onboarding_template_kb, onboarding_nav_kb,
     markets_kb, live_price_asset_kb, live_price_controls_kb,
+    mode_kb,
 )
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info,
@@ -98,6 +99,8 @@ async def handle_callback(update: Update, context: CallbackContext):
             await _handle_strategy(query, data, context, telegram_id)
         elif data.startswith("keyimp:"):
             await _handle_key_import_confirm(query, data, context, telegram_id)
+        elif data.startswith("mode:"):
+            await _handle_mode(query, data, telegram_id)
         else:
             await query.edit_message_text(
                 "Unknown action\\.",
@@ -135,34 +138,64 @@ async def _show_dashboard(query, telegram_id):
         return
 
     network = user.network_mode.value
-    balance = None
-    positions = None
-    prices = None
+    network_label = "🧪 TESTNET" if network == "testnet" else "🌐 MAINNET"
+    balance_str = ""
 
     try:
         client = get_user_nado_client(telegram_id)
         if client:
             balance = client.get_balance()
-            positions = client.get_all_positions()
-            prices = client.get_all_market_prices()
-    except Exception as e:
-        logger.warning(f"Dashboard data fetch error: {e}")
+            if balance and balance.get("exists"):
+                bal_val = float((balance.get("balances", {}) or {}).get(0, 0) or (balance.get("balances", {}) or {}).get("0", 0) or 0)
+                balance_str = f"\nBalance: *{escape_md(f'${bal_val:,.2f}')}*"
+    except Exception:
+        pass
 
-    dashboard = fmt_dashboard(user, balance, positions, prices, network)
-    readiness = evaluate_readiness(telegram_id)
-    if readiness.get("onboarding_complete"):
-        dashboard += "\n\n✅ *Setup:* Complete"
-    else:
-        next_step = readiness.get("missing_step", "welcome")
-        dashboard += (
-            f"\n\n⚠️ *Setup:* Incomplete\n"
-            f"Next step: *{escape_md(str(next_step).upper())}*"
-        )
     await query.edit_message_text(
-        dashboard,
+        f"📊 *Nadobro*\n\n"
+        f"Mode: *{escape_md(network_label)}*{balance_str}\n\n"
+        f"Use the keyboard below to navigate\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=back_kb(),
     )
+
+
+async def _handle_mode(query, data, telegram_id):
+    parts = data.split(":")
+    target_network = parts[1] if len(parts) > 1 else ""
+    if target_network not in ("testnet", "mainnet"):
+        return
+
+    user = get_user(telegram_id)
+    current_network = user.network_mode.value if user else "testnet"
+
+    if target_network == current_network:
+        network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
+        try:
+            await query.edit_message_text(
+                f"🔄 *Network Mode*\n\n"
+                f"Already on *{escape_md(network_label)}*\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=mode_kb(current_network),
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise
+        return
+
+    success, result_msg = switch_network(telegram_id, target_network)
+    if success:
+        network_label = "🧪 TESTNET" if target_network == "testnet" else "🌐 MAINNET"
+        await query.edit_message_text(
+            f"✅ *Switched to {escape_md(network_label)}*\n\n{escape_md(result_msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=mode_kb(target_network),
+        )
+    else:
+        await query.edit_message_text(
+            f"❌ {escape_md(result_msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=mode_kb(current_network),
+        )
 
 
 async def _handle_nav(query, data, telegram_id, context=None):
@@ -443,7 +476,6 @@ async def _handle_exec_trade(query, data, telegram_id, context):
     await query.edit_message_text(
         msg,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=back_kb(),
     )
 
 
@@ -486,7 +518,6 @@ async def _handle_positions(query, data, telegram_id, context):
         await query.edit_message_text(
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
         )
 
     elif action == "close_all":
@@ -508,7 +539,6 @@ async def _handle_positions(query, data, telegram_id, context):
         await query.edit_message_text(
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
         )
 
 
@@ -970,7 +1000,6 @@ async def _handle_strategy(query, data, context, telegram_id):
             f"✅ Active setup is now *{escape_md(strategy_id.upper())}*\\.\n\n"
             "Next: open Buy/Long or Sell/Short and execute with preview\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
         )
     elif action == "start" and len(parts) >= 4:
         strategy_id = parts[2]
@@ -1023,7 +1052,6 @@ async def _handle_strategy(query, data, context, telegram_id):
         await query.edit_message_text(
             reply,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
         )
     elif action == "status":
         st = get_user_bot_status(telegram_id)
@@ -1034,7 +1062,6 @@ async def _handle_strategy(query, data, context, telegram_id):
         await query.edit_message_text(
             text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
         )
     elif action == "stop":
         ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
@@ -1042,7 +1069,6 @@ async def _handle_strategy(query, data, context, telegram_id):
         await query.edit_message_text(
             f"{prefix} {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
         )
 
 
@@ -1255,13 +1281,11 @@ async def _handle_key_import_confirm(query, data, context, telegram_id):
             f"Fingerprint: `fp\\-{escape_md(fingerprint)}`\n\n"
             "Next: fund this wallet on Nado, then start trading\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
         )
     else:
         await query.edit_message_text(
             f"❌ {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
         )
 
 

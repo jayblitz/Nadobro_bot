@@ -23,7 +23,7 @@ REPLY_BUTTON_MAP = {
     "📈 Strategies": "nav:strategy_hub",
     "🔔 Alerts": "alert:menu",
     "⚙️ Settings": "settings:view",
-    "❓ Help": "nav:help",
+    "🔄 Mode": "nav:mode",
     "🟢 Long": "trade_flow:direction:long",
     "🔴 Short": "trade_flow:direction:short",
     "◀ Home": "trade_flow:home",
@@ -61,7 +61,7 @@ def persistent_menu_kb():
             [KeyboardButton("📊 Trade"), KeyboardButton("📋 Positions")],
             [KeyboardButton("👛 Wallet"), KeyboardButton("💹 Markets")],
             [KeyboardButton("📈 Strategies"), KeyboardButton("🔔 Alerts")],
-            [KeyboardButton("⚙️ Settings"), KeyboardButton("❓ Help")],
+            [KeyboardButton("⚙️ Settings"), KeyboardButton("🔄 Mode")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -457,6 +457,17 @@ def confirm_close_all_kb():
         [
             InlineKeyboardButton("✅ Yes, Close All", callback_data="pos:confirm_close_all"),
             InlineKeyboardButton("❌ Cancel", callback_data="nav:main"),
+        ],
+    ])
+
+
+def mode_kb(current_network="testnet"):
+    testnet_label = "🧪 Testnet ✅" if current_network == "testnet" else "🧪 Testnet"
+    mainnet_label = "🌐 Mainnet ✅" if current_network == "mainnet" else "🌐 Mainnet"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(testnet_label, callback_data="mode:testnet"),
+            InlineKeyboardButton(mainnet_label, callback_data="mode:mainnet"),
         ],
     ])
 

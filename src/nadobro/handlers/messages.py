@@ -157,12 +157,17 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         await _handle_trade_flow_button(update, context, telegram_id, callback_data)
         return
 
-    if callback_data == "nav:help":
-        from src.nadobro.handlers.formatters import fmt_help
+    if callback_data == "nav:mode":
+        from src.nadobro.handlers.keyboards import mode_kb
+        user = get_user(telegram_id)
+        current_network = user.network_mode.value if user else "testnet"
+        network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
         await update.message.reply_text(
-            fmt_help(),
+            f"🔄 *Network Mode*\n\n"
+            f"Current: *{escape_md(network_label)}*\n\n"
+            f"Switch network below:",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
+            reply_markup=mode_kb(current_network),
         )
         return
 

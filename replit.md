@@ -4,7 +4,8 @@
 Nadobro is a Telegram trading bot for Nado DEX (perpetual futures on Ink blockchain). It provides a dual-interface UX: a persistent reply keyboard (grid button) for quick actions and a blue Menu button for slash commands. All free-text messages route to Ask Nado AI chat for natural language Q&A about Nado DEX. Per-user encrypted wallet management, real-time market data, position management, price alerts, and AI-powered knowledge Q&A.
 
 ## Recent Changes
-- 2026-02-12: Dynamic reply keyboard UX refactor. Trade flow now uses dynamic keyboard swaps (direction → order type → product → leverage → size → TP/SL → confirm) with Back navigation at each step. Home keyboard simplified to 8 buttons (Trade, Positions, Wallet, Markets, Strategies, Alerts, Settings, Help). Removed main_menu_kb() inline keyboard entirely. Sub-flows (Wallet, Positions, Markets, Alerts, Settings, Strategies) still use inline keyboards in chat while home keyboard stays visible. Trade flow state machine in messages.py with full custom size, limit price, and TP/SL input handling.
+- 2026-02-12: Complete UX workflow refactor. Replaced Help button with Mode button for quick testnet/mainnet switching. Fixed all inline Back button flows — sub-flow dismissals now show clean status instead of dead-end dashboard loop. State-aware button validation prevents out-of-order trade steps. All 8 home buttons (Trade, Positions, Wallet, Markets, Strategies, Alerts, Settings, Mode) work end-to-end.
+- 2026-02-12: Dynamic reply keyboard UX refactor. Trade flow now uses dynamic keyboard swaps (direction → order type → product → leverage → size → TP/SL → confirm) with Back navigation at each step. Home keyboard simplified to 8 buttons. Removed main_menu_kb() inline keyboard entirely. Sub-flows (Wallet, Positions, Markets, Alerts, Settings, Strategies) still use inline keyboards in chat while home keyboard stays visible. Trade flow state machine in messages.py with full custom size, limit price, and TP/SL input handling.
 - 2026-02-12: Intensive dev review cleanup. Removed dead ai_parser.py module (318 lines). Fixed debug_logger.py hardcoded macOS path → /tmp. Fixed keyboard inconsistency (all commands now use persistent_menu_kb). Moved _fmt_strategy_update to formatters.py. Cleaned up stale debug_log IDs.
 - 2026-02-12: UX overhaul to dual-interface pattern. Added persistent reply keyboard (ReplyKeyboardMarkup, is_persistent=True) with action buttons. Added blue Menu button via set_my_commands (/start, /help, /status, /import_key, /stop_all). All free text now routes to Ask Nado AI chat. Removed AI intent parser flow.
 - 2026-02-10: Added AI-powered "Ask Nado" knowledge Q&A feature. Created knowledge_service.py with xAI Grok + comprehensive Nado docs knowledge base (nado_knowledge.txt).
@@ -55,7 +56,7 @@ src/nadobro/
 ## Bot Interface
 ### Dual-Interface Pattern
 1. **Blue Menu button** (Telegram native): /start, /help, /status, /import_key, /stop_all
-2. **Dynamic reply keyboard** (bottom panel): Home keyboard has 8 buttons (Trade, Positions, Wallet, Markets, Strategies, Alerts, Settings, Help). Trade flow dynamically swaps keyboards through each step.
+2. **Dynamic reply keyboard** (bottom panel): Home keyboard has 8 buttons (Trade, Positions, Wallet, Markets, Strategies, Alerts, Settings, Mode). Trade flow dynamically swaps keyboards through each step.
 3. **Free text**: All free-text messages route directly to Ask Nado AI chat
 4. **Inline keyboards**: Used for sub-flow data displays in chat (positions, wallet, markets, alerts, settings, strategies)
 
