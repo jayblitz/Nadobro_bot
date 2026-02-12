@@ -10,7 +10,6 @@ from src.nadobro.handlers.formatters import (
     escape_md, fmt_dashboard, fmt_help, fmt_onboarding_step, fmt_status_overview,
 )
 from src.nadobro.handlers.keyboards import (
-    main_menu_kb,
     persistent_menu_kb,
     onboarding_mode_kb,
     onboarding_key_kb,

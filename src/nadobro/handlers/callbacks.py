@@ -12,7 +12,7 @@ from src.nadobro.handlers.formatters import (
     fmt_settings, fmt_help, fmt_price, fmt_onboarding_step, fmt_status_overview,
 )
 from src.nadobro.handlers.keyboards import (
-    main_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
+    persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
     trade_confirm_kb, positions_kb, wallet_kb, alerts_kb,
     alert_product_kb, alert_delete_kb, settings_kb, settings_leverage_kb,
     settings_slippage_kb, close_product_kb, confirm_close_all_kb, back_kb,
@@ -119,7 +119,7 @@ async def handle_callback(update: Update, context: CallbackContext):
             await query.edit_message_text(
                 f"⚠️ An error occurred\\. Please try again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=main_menu_kb(),
+                reply_markup=back_kb(),
             )
         except Exception:
             pass
@@ -161,7 +161,7 @@ async def _show_dashboard(query, telegram_id):
     await query.edit_message_text(
         dashboard,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=main_menu_kb(),
+        reply_markup=back_kb(),
     )
 
 
@@ -175,7 +175,7 @@ async def _handle_nav(query, data, telegram_id, context=None):
             await query.edit_message_text(
                 fmt_help(),
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=main_menu_kb(),
+                reply_markup=back_kb(),
             )
         except BadRequest as e:
             if "Message is not modified" in str(e):
@@ -238,7 +238,7 @@ async def _handle_trade(query, data, telegram_id, context):
         await query.edit_message_text(
             f"⚠️ {escape_md(wallet_msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
         return
 
@@ -396,7 +396,7 @@ async def _handle_exec_trade(query, data, telegram_id, context):
         await query.edit_message_text(
             "⚠️ No pending trade found\\. Please start again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
         return
 
@@ -412,7 +412,7 @@ async def _handle_exec_trade(query, data, telegram_id, context):
         await query.edit_message_text(
             "⏸ Trading is temporarily paused by admin\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
         return
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
@@ -420,7 +420,7 @@ async def _handle_exec_trade(query, data, telegram_id, context):
         await query.edit_message_text(
             f"⚠️ {escape_md(wallet_msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
         return
 
@@ -443,7 +443,7 @@ async def _handle_exec_trade(query, data, telegram_id, context):
     await query.edit_message_text(
         msg,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=main_menu_kb(),
+        reply_markup=back_kb(),
     )
 
 
@@ -486,7 +486,7 @@ async def _handle_positions(query, data, telegram_id, context):
         await query.edit_message_text(
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
 
     elif action == "close_all":
@@ -508,7 +508,7 @@ async def _handle_positions(query, data, telegram_id, context):
         await query.edit_message_text(
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
 
 
@@ -970,7 +970,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             f"✅ Active setup is now *{escape_md(strategy_id.upper())}*\\.\n\n"
             "Next: open Buy/Long or Sell/Short and execute with preview\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
     elif action == "start" and len(parts) >= 4:
         strategy_id = parts[2]
@@ -1005,7 +1005,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             await query.edit_message_text(
                 f"⚠️ {escape_md(wallet_msg)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=main_menu_kb(),
+                reply_markup=back_kb(),
             )
             return
         settings = _get_user_settings(telegram_id, context)
@@ -1023,7 +1023,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         await query.edit_message_text(
             reply,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
     elif action == "status":
         st = get_user_bot_status(telegram_id)
@@ -1034,7 +1034,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         await query.edit_message_text(
             text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
     elif action == "stop":
         ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
@@ -1042,7 +1042,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         await query.edit_message_text(
             f"{prefix} {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
 
 
@@ -1214,7 +1214,7 @@ async def _handle_key_import_confirm(query, data, context, telegram_id):
         await query.edit_message_text(
             "⚠️ No pending key import found\\. Use /import\\_key to start again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
         return
 
@@ -1224,7 +1224,7 @@ async def _handle_key_import_confirm(query, data, context, telegram_id):
         await query.edit_message_text(
             "⌛ Key import confirmation expired\\. Use /import\\_key again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
         return
 
@@ -1234,7 +1234,7 @@ async def _handle_key_import_confirm(query, data, context, telegram_id):
         await query.edit_message_text(
             "❌ Key import cancelled\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
         return
 
@@ -1255,13 +1255,13 @@ async def _handle_key_import_confirm(query, data, context, telegram_id):
             f"Fingerprint: `fp\\-{escape_md(fingerprint)}`\n\n"
             "Next: fund this wallet on Nado, then start trading\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
     else:
         await query.edit_message_text(
             f"❌ {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=back_kb(),
         )
 
 

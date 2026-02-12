@@ -7,7 +7,7 @@ from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info, get_user,
     ensure_active_wallet_ready,
 )
-from src.nadobro.services.trade_service import execute_market_order
+from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.alert_service import create_alert
 from src.nadobro.services.knowledge_service import answer_nado_question
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
@@ -19,15 +19,78 @@ from src.nadobro.services.crypto import (
     derive_address_from_private_key,
     private_key_fingerprint,
 )
+from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
+    fmt_trade_result,
 )
 from src.nadobro.handlers.keyboards import (
-    main_menu_kb, persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
+    persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
+    trade_direction_kb, trade_order_type_kb, trade_product_reply_kb,
+    trade_leverage_reply_kb, trade_size_reply_kb, trade_tpsl_kb,
+    trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
 )
 
 logger = logging.getLogger(__name__)
+
+TRADE_FLOW_STEPS = ["direction", "order_type", "product", "leverage", "size", "limit_price", "tpsl", "confirm"]
+
+
+_STATE_REQUIRED_ACTIONS = {
+    "trade_flow:direction:long": "direction",
+    "trade_flow:direction:short": "direction",
+    "trade_flow:order_type:market": "order_type",
+    "trade_flow:order_type:limit": "order_type",
+    "trade_flow:tpsl:set": "tpsl",
+    "trade_flow:tpsl:skip": "tpsl",
+    "trade_flow:tpsl:set_tp": "tpsl_edit",
+    "trade_flow:tpsl:set_sl": "tpsl_edit",
+    "trade_flow:tpsl:done": "tpsl_edit",
+    "trade_flow:confirm": "confirm",
+}
+
+
+def _is_contextual_button(callback_data: str, context) -> bool:
+    if not callback_data.startswith("trade_flow:"):
+        return True
+
+    if callback_data in ("trade_flow:home", "trade_flow:back", "trade_flow:cancel"):
+        return True
+
+    flow = context.user_data.get("trade_flow")
+    if not flow:
+        return callback_data in ("trade_flow:home", "trade_flow:back", "trade_flow:cancel")
+
+    state = flow.get("state", "")
+
+    if callback_data in _STATE_REQUIRED_ACTIONS:
+        return state == _STATE_REQUIRED_ACTIONS[callback_data]
+
+    if callback_data.startswith("trade_flow:product:"):
+        return state == "product"
+    if callback_data.startswith("trade_flow:leverage:"):
+        return state == "leverage"
+    if callback_data.startswith("trade_flow:size:"):
+        return state == "size"
+
+    return True
+
+
+def _get_trade_flow(context):
+    return context.user_data.get("trade_flow")
+
+
+def _set_trade_flow(context, flow):
+    context.user_data["trade_flow"] = flow
+
+
+def _clear_trade_flow(context):
+    context.user_data.pop("trade_flow", None)
+    context.user_data.pop("trade_flow_custom_size", None)
+    context.user_data.pop("trade_flow_tp_input", None)
+    context.user_data.pop("trade_flow_sl_input", None)
+    context.user_data.pop("trade_flow_limit_price_input", None)
 
 
 async def handle_message(update: Update, context: CallbackContext):
@@ -39,7 +102,6 @@ async def handle_message(update: Update, context: CallbackContext):
     text = update.message.text.strip()
 
     get_or_create_user(telegram_id, username)
-    # region agent log
     debug_log(
         "baseline",
         "H5",
@@ -53,11 +115,14 @@ async def handle_message(update: Update, context: CallbackContext):
             "has_pending_question": bool(context.user_data.get("pending_question")),
         },
     )
-    # endregion
 
     if text in REPLY_BUTTON_MAP:
         callback_data = REPLY_BUTTON_MAP[text]
-        await _dispatch_reply_button(update, context, telegram_id, callback_data)
+        if _is_contextual_button(callback_data, context):
+            await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
+            return
+
+    if await _handle_trade_flow_free_text(update, context, telegram_id, text):
         return
 
     if await _handle_pending_key_import(update, context, telegram_id, text):
@@ -75,23 +140,21 @@ async def handle_message(update: Update, context: CallbackContext):
     await _handle_nado_question(update, context, text)
 
 
-async def _dispatch_reply_button(update, context, telegram_id, callback_data):
-    from src.nadobro.handlers.callbacks import handle_callback as _cb_handler
-    from src.nadobro.services.user_service import get_user
+async def _dispatch_reply_button(update, context, telegram_id, callback_data, text):
     from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
 
-    prefix = callback_data.split(":")[0]
-    action = callback_data.split(":")[1] if ":" in callback_data else ""
+    if callback_data == "nav:trade":
+        await update.message.reply_text(
+            "📊 *Trade*\n\nSelect direction:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_direction_kb(),
+        )
+        _clear_trade_flow(context)
+        _set_trade_flow(context, {"state": "direction"})
+        return
 
-    if callback_data == "onboarding:resume":
-        step = get_resume_step(telegram_id)
-        if step == "complete":
-            await _send_dashboard_msg(update, telegram_id)
-        else:
-            from src.nadobro.services.onboarding_service import set_current_step
-            set_current_step(telegram_id, step)
-            from src.nadobro.handlers.commands import _send_onboarding_step
-            await _send_onboarding_step(update, telegram_id, step)
+    if callback_data.startswith("trade_flow:"):
+        await _handle_trade_flow_button(update, context, telegram_id, callback_data)
         return
 
     if callback_data == "nav:help":
@@ -99,6 +162,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data):
         await update.message.reply_text(
             fmt_help(),
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
         )
         return
 
@@ -110,45 +174,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )
-        return
-
-    if prefix == "trade":
-        step = get_resume_step(telegram_id)
-        if step != "complete":
-            await update.message.reply_text(
-                f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(step.upper())}*\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🧭 Continue Setup", callback_data="onboarding:resume")],
-                ]),
-            )
-            return
-        from src.nadobro.services.user_service import ensure_active_wallet_ready
-        wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
-        if not wallet_ready:
-            await update.message.reply_text(
-                f"⚠️ {escape_md(wallet_msg)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-            )
-            return
-
-        if action in ("long", "short"):
-            from src.nadobro.handlers.keyboards import trade_product_kb
-            action_label = "🟢 BUY / LONG" if action == "long" else "🔴 SELL / SHORT"
-            await update.message.reply_text(
-                f"*{escape_md(action_label)}*\n\nSelect a product:",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=trade_product_kb(action),
-            )
-        elif action in ("limit_long", "limit_short"):
-            from src.nadobro.handlers.keyboards import trade_product_kb
-            context.user_data["pending_trade"] = {"action": action, "step": "product_select"}
-            action_label = "LIMIT LONG" if action == "limit_long" else "LIMIT SHORT"
-            await update.message.reply_text(
-                f"*{escape_md(action_label)}*\n\nSelect a product:",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=trade_product_kb(action),
-            )
         return
 
     if callback_data == "wallet:view":
@@ -186,31 +211,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data):
         )
         return
 
-    if callback_data == "strategy:status":
-        from src.nadobro.services.bot_runtime import get_user_bot_status
-        from src.nadobro.handlers.formatters import fmt_status_overview
-        st = get_user_bot_status(telegram_id)
-        readiness = evaluate_readiness(telegram_id)
-        text = fmt_status_overview(st, readiness)
-        if st.get("last_error"):
-            text += f"\nLast error: {escape_md(str(st.get('last_error')))}"
-        await update.message.reply_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
-        )
-        return
-
-    if callback_data == "strategy:stop":
-        from src.nadobro.services.bot_runtime import stop_user_bot
-        ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
-        prefix_emoji = "🛑" if ok else "⚠️"
-        await update.message.reply_text(
-            f"{prefix_emoji} {escape_md(msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
-        return
-
     if callback_data == "mkt:menu":
         from src.nadobro.handlers.keyboards import markets_kb
         await update.message.reply_text(
@@ -244,43 +244,467 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data):
         return
 
     await update.message.reply_text(
-        f"Use the inline buttons or type a question for AI chat\\.",
+        f"Use the keyboard buttons or type a question for AI chat\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
 
 
-async def _send_dashboard_msg(update, telegram_id):
-    from src.nadobro.services.user_service import get_user
-    from src.nadobro.handlers.formatters import fmt_dashboard
-    from src.nadobro.services.onboarding_service import evaluate_readiness
-    user = get_user(telegram_id)
-    if not user:
-        await update.message.reply_text("User not found\\. Use /start first\\.", parse_mode=ParseMode.MARKDOWN_V2)
+async def _handle_trade_flow_button(update, context, telegram_id, callback_data):
+    from src.nadobro.services.onboarding_service import get_resume_step
+
+    parts = callback_data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    value = parts[2] if len(parts) > 2 else ""
+
+    flow = _get_trade_flow(context)
+
+    if action == "home" or action == "cancel":
+        _clear_trade_flow(context)
+        await update.message.reply_text(
+            "↩️ Returned to home\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
         return
-    network = user.network_mode.value
-    balance = positions = prices = None
+
+    if action == "back":
+        if not flow:
+            _clear_trade_flow(context)
+            await update.message.reply_text(
+                "↩️ Returned to home\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=persistent_menu_kb(),
+            )
+            return
+        state = flow.get("state", "direction")
+        await _go_back(update, context, flow, state)
+        return
+
+    if action == "direction":
+        step = get_resume_step(telegram_id)
+        if step != "complete":
+            await update.message.reply_text(
+                f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(step.upper())}*\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=persistent_menu_kb(),
+            )
+            _clear_trade_flow(context)
+            return
+        wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+        if not wallet_ready:
+            await update.message.reply_text(
+                f"⚠️ {escape_md(wallet_msg)}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=persistent_menu_kb(),
+            )
+            _clear_trade_flow(context)
+            return
+
+        direction = value
+        direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
+        _set_trade_flow(context, {"state": "order_type", "direction": direction})
+        await update.message.reply_text(
+            f"{direction_label} → Select order type:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_order_type_kb(),
+        )
+        return
+
+    if action == "order_type":
+        if not flow:
+            return
+        flow["order_type"] = value
+        flow["state"] = "product"
+        _set_trade_flow(context, flow)
+        order_label = "📈 MARKET" if value == "market" else "📉 LIMIT"
+        await update.message.reply_text(
+            f"{order_label} → Select product:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_product_reply_kb(),
+        )
+        return
+
+    if action == "product":
+        if not flow:
+            return
+        flow["product"] = value
+        flow["state"] = "leverage"
+        _set_trade_flow(context, flow)
+        await update.message.reply_text(
+            f"🪙 {escape_md(value)}\\-PERP → Select leverage:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_leverage_reply_kb(),
+        )
+        return
+
+    if action == "leverage":
+        if not flow:
+            return
+        lev_str = value.replace("x", "").replace("X", "")
+        try:
+            leverage = int(lev_str)
+        except ValueError:
+            leverage = 1
+        flow["leverage"] = leverage
+        flow["state"] = "size"
+        _set_trade_flow(context, flow)
+        product = flow.get("product", "BTC")
+        await update.message.reply_text(
+            f"⚡ {escape_md(str(leverage))}x → Select size for {escape_md(product)}:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_size_reply_kb(product),
+        )
+        return
+
+    if action == "size":
+        if not flow:
+            return
+        if value == "custom":
+            context.user_data["trade_flow_custom_size"] = True
+            await update.message.reply_text(
+                "✏️ Enter custom size \\(e\\.g\\. `0\\.01`\\):",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
+
+        try:
+            size = float(value)
+        except ValueError:
+            return
+        flow["size"] = size
+        if flow.get("order_type") == "limit":
+            flow["state"] = "limit_price"
+            _set_trade_flow(context, flow)
+            context.user_data["trade_flow_limit_price_input"] = True
+            await update.message.reply_text(
+                f"📏 Size: {escape_md(str(size))} → Enter limit price:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        else:
+            flow["state"] = "tpsl"
+            _set_trade_flow(context, flow)
+            await update.message.reply_text(
+                f"📏 Size: {escape_md(str(size))} → Set TP/SL or skip:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=trade_tpsl_kb(),
+            )
+        return
+
+    if action == "tpsl":
+        if not flow:
+            return
+        if value == "skip":
+            await _move_to_confirm(update, context, telegram_id, flow)
+            return
+        if value == "set":
+            flow["state"] = "tpsl_edit"
+            _set_trade_flow(context, flow)
+            tp_val = flow.get("tp")
+            sl_val = flow.get("sl")
+            tp_str = f"TP: {escape_md(str(tp_val))}" if tp_val else "TP: not set"
+            sl_str = f"SL: {escape_md(str(sl_val))}" if sl_val else "SL: not set"
+            await update.message.reply_text(
+                f"📐 *TP/SL Settings*\n{tp_str} \\| {sl_str}\n\nTap Set TP or Set SL to enter values:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=trade_tpsl_edit_kb(),
+            )
+            return
+        if value == "set_tp":
+            context.user_data["trade_flow_tp_input"] = True
+            await update.message.reply_text(
+                "Enter take profit price:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
+        if value == "set_sl":
+            context.user_data["trade_flow_sl_input"] = True
+            await update.message.reply_text(
+                "Enter stop loss price:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
+        if value == "done":
+            await _move_to_confirm(update, context, telegram_id, flow)
+            return
+        return
+
+    if action == "confirm":
+        if not flow:
+            return
+        await _execute_trade_flow(update, context, telegram_id, flow)
+        return
+
+
+async def _go_back(update, context, flow, state):
+    if state in ("direction", "order_type"):
+        _clear_trade_flow(context)
+        await update.message.reply_text(
+            "↩️ Returned to home\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return
+
+    back_map = {
+        "product": ("order_type", trade_order_type_kb, "Select order type:"),
+        "leverage": ("product", trade_product_reply_kb, "Select product:"),
+        "size": ("leverage", trade_leverage_reply_kb, "Select leverage:"),
+        "limit_price": ("size", None, None),
+        "tpsl": ("size", None, None),
+        "tpsl_edit": ("tpsl", trade_tpsl_kb, "Set TP/SL or skip:"),
+        "confirm": ("tpsl", trade_tpsl_kb, "Set TP/SL or skip:"),
+    }
+
+    if state in back_map:
+        prev_state, kb_fn, prompt = back_map[state]
+        flow["state"] = prev_state
+        context.user_data.pop("trade_flow_custom_size", None)
+        context.user_data.pop("trade_flow_tp_input", None)
+        context.user_data.pop("trade_flow_sl_input", None)
+        context.user_data.pop("trade_flow_limit_price_input", None)
+        _set_trade_flow(context, flow)
+
+        if prev_state == "size":
+            product = flow.get("product", "BTC")
+            await update.message.reply_text(
+                f"Select size for {escape_md(product)}:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=trade_size_reply_kb(product),
+            )
+        elif kb_fn and prompt:
+            await update.message.reply_text(
+                prompt,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=kb_fn(),
+            )
+        else:
+            if prev_state == "size":
+                product = flow.get("product", "BTC")
+                await update.message.reply_text(
+                    f"Select size for {escape_md(product)}:",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=trade_size_reply_kb(product),
+                )
+    else:
+        _clear_trade_flow(context)
+        await update.message.reply_text(
+            "↩️ Returned to home\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+
+
+async def _move_to_confirm(update, context, telegram_id, flow):
+    product = flow.get("product", "BTC")
+    size = flow.get("size", 0)
+    leverage = flow.get("leverage", 1)
+    direction = flow.get("direction", "long")
+    order_type = flow.get("order_type", "market")
+
+    if order_type == "limit":
+        action = "limit_long" if direction == "long" else "limit_short"
+    else:
+        action = direction
+
+    price = 0
     try:
-        client = get_user_nado_client(telegram_id)
-        if client:
-            balance = client.get_balance()
-            positions = client.get_all_positions()
-            prices = client.get_all_market_prices()
+        if order_type == "limit":
+            price = flow.get("limit_price", 0)
+        else:
+            client = get_user_nado_client(telegram_id)
+            if client:
+                pid = get_product_id(product)
+                if pid is not None:
+                    mp = client.get_market_price(pid)
+                    price = mp.get("mid", 0)
     except Exception:
         pass
-    dashboard = fmt_dashboard(user, balance, positions, prices, network)
-    readiness = evaluate_readiness(telegram_id)
-    if readiness.get("onboarding_complete"):
-        dashboard += "\n\n✅ *Setup:* Complete"
-    else:
-        next_step = readiness.get("missing_step", "welcome")
-        dashboard += (
-            f"\n\n⚠️ *Setup:* Incomplete\n"
-            f"Next step: *{escape_md(str(next_step).upper())}*"
-        )
+
+    est_margin = (size * price) / leverage if leverage > 0 and price else None
+
+    flow["state"] = "confirm"
+    flow["price"] = price
+    flow["est_margin"] = est_margin
+    _set_trade_flow(context, flow)
+
+    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
+    tp_val = flow.get("tp")
+    sl_val = flow.get("sl")
+    if tp_val or sl_val:
+        preview += "\n"
+        if tp_val:
+            preview += f"\n📈 *Take Profit:* {escape_md(str(tp_val))}"
+        if sl_val:
+            preview += f"\n📉 *Stop Loss:* {escape_md(str(sl_val))}"
+
     await update.message.reply_text(
-        dashboard,
+        preview,
         parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=trade_confirm_reply_kb(),
     )
+
+
+async def _execute_trade_flow(update, context, telegram_id, flow):
+    direction = flow.get("direction", "long")
+    order_type = flow.get("order_type", "market")
+    product = flow.get("product", "BTC")
+    size = flow.get("size", 0)
+    leverage = flow.get("leverage", 1)
+    slippage_pct = _get_user_settings(telegram_id, context).get("slippage", 1)
+
+    _clear_trade_flow(context)
+
+    if is_trading_paused():
+        await update.message.reply_text(
+            "⏸ Trading is temporarily paused by admin\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return
+
+    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    if not wallet_ready:
+        await update.message.reply_text(
+            f"⚠️ {escape_md(wallet_msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return
+
+    if order_type == "limit":
+        price = flow.get("limit_price", flow.get("price", 0))
+        is_long = direction == "long"
+        result = execute_limit_order(telegram_id, product, size, price, is_long=is_long, leverage=leverage)
+    else:
+        is_long = direction == "long"
+        result = execute_market_order(
+            telegram_id,
+            product,
+            size,
+            is_long=is_long,
+            leverage=leverage,
+            slippage_pct=slippage_pct,
+        )
+
+    msg = fmt_trade_result(result)
+    await update.message.reply_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=persistent_menu_kb(),
+    )
+
+
+async def _handle_trade_flow_free_text(update, context, telegram_id, text):
+    if context.user_data.get("trade_flow_custom_size"):
+        context.user_data.pop("trade_flow_custom_size", None)
+        flow = _get_trade_flow(context)
+        if not flow:
+            return False
+        try:
+            size = float(text.strip())
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ Invalid size\\. Enter a number \\(e\\.g\\. `0\\.01`\\)\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            context.user_data["trade_flow_custom_size"] = True
+            return True
+        flow["size"] = size
+        if flow.get("order_type") == "limit":
+            flow["state"] = "limit_price"
+            _set_trade_flow(context, flow)
+            context.user_data["trade_flow_limit_price_input"] = True
+            await update.message.reply_text(
+                f"📏 Size: {escape_md(str(size))} → Enter limit price:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        else:
+            flow["state"] = "tpsl"
+            _set_trade_flow(context, flow)
+            await update.message.reply_text(
+                f"📏 Size: {escape_md(str(size))} → Set TP/SL or skip:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=trade_tpsl_kb(),
+            )
+        return True
+
+    if context.user_data.get("trade_flow_limit_price_input"):
+        context.user_data.pop("trade_flow_limit_price_input", None)
+        flow = _get_trade_flow(context)
+        if not flow:
+            return False
+        try:
+            price = float(text.strip())
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ Invalid price\\. Enter a number \\(e\\.g\\. `95000`\\)\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            context.user_data["trade_flow_limit_price_input"] = True
+            return True
+        flow["limit_price"] = price
+        flow["state"] = "tpsl"
+        _set_trade_flow(context, flow)
+        await update.message.reply_text(
+            f"💲 Limit price: {escape_md(str(price))} → Set TP/SL or skip:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_tpsl_kb(),
+        )
+        return True
+
+    if context.user_data.get("trade_flow_tp_input"):
+        context.user_data.pop("trade_flow_tp_input", None)
+        flow = _get_trade_flow(context)
+        if not flow:
+            return False
+        try:
+            tp = float(text.strip())
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ Invalid price\\. Enter a number\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            context.user_data["trade_flow_tp_input"] = True
+            return True
+        flow["tp"] = tp
+        _set_trade_flow(context, flow)
+        tp_str = f"TP: {escape_md(str(tp))}"
+        sl_val = flow.get("sl")
+        sl_str = f"SL: {escape_md(str(sl_val))}" if sl_val else "SL: not set"
+        await update.message.reply_text(
+            f"✅ TP set\\!\n{tp_str} \\| {sl_str}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_tpsl_edit_kb(),
+        )
+        return True
+
+    if context.user_data.get("trade_flow_sl_input"):
+        context.user_data.pop("trade_flow_sl_input", None)
+        flow = _get_trade_flow(context)
+        if not flow:
+            return False
+        try:
+            sl = float(text.strip())
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ Invalid price\\. Enter a number\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            context.user_data["trade_flow_sl_input"] = True
+            return True
+        flow["sl"] = sl
+        _set_trade_flow(context, flow)
+        tp_val = flow.get("tp")
+        tp_str = f"TP: {escape_md(str(tp_val))}" if tp_val else "TP: not set"
+        sl_str = f"SL: {escape_md(str(sl))}"
+        await update.message.reply_text(
+            f"✅ SL set\\!\n{tp_str} \\| {sl_str}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_tpsl_edit_kb(),
+        )
+        return True
+
+    return False
 
 
 async def _handle_pending_trade(update, context, telegram_id, text):
@@ -289,7 +713,6 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         return False
 
     step = pending.get("step", "")
-    # region agent log
     debug_log(
         "baseline",
         "H2",
@@ -302,7 +725,6 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             "product": pending.get("product"),
         },
     )
-    # endregion
 
     if step == "custom_size":
         try:
@@ -420,7 +842,7 @@ async def _handle_pending_key_import(update, context, telegram_id, text):
         await update.message.reply_text(
             "⌛ Key import session expired\\. Run /import\\_key again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=persistent_menu_kb(),
         )
         return True
 
@@ -429,7 +851,7 @@ async def _handle_pending_key_import(update, context, telegram_id, text):
         await update.message.reply_text(
             "🛑 This looks like a seed phrase\\. Nadobro accepts *private key only* for dedicated trading wallets\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=persistent_menu_kb(),
         )
         context.user_data.pop("pending_key_import", None)
         return True
@@ -444,7 +866,7 @@ async def _handle_pending_key_import(update, context, telegram_id, text):
         await update.message.reply_text(
             f"❌ {escape_md(str(e))}\n\nTry again with a dedicated private key for this mode\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=persistent_menu_kb(),
         )
         return True
 
@@ -512,13 +934,13 @@ async def _handle_pending_alert(update, context, telegram_id, text):
             f"{escape_md(result['product'])} {escape_md(condition)} "
             f"{escape_md(f'${target:,.2f}')}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=persistent_menu_kb(),
         )
     else:
         await update.message.reply_text(
             f"❌ {escape_md(result['error'])}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
+            reply_markup=persistent_menu_kb(),
         )
     return True
 
@@ -591,14 +1013,12 @@ async def _handle_nado_question(update, context, question):
         await thinking_msg.edit_text(
             f"🧠 *Ask Nado*\n\n{escape_md(answer)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
         )
     except Exception as e:
         logger.error(f"Nado Q&A error: {e}", exc_info=True)
         await thinking_msg.edit_text(
             "⚠️ Something went wrong answering your question\\. Please try again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu_kb(),
         )
 
 
@@ -607,7 +1027,3 @@ def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
     context.user_data[f"settings:{network}"] = settings
     context.user_data["settings"] = settings
     return settings
-
-
-
-

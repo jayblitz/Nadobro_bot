@@ -16,74 +16,144 @@ SIZE_PRESETS = {
 
 
 REPLY_BUTTON_MAP = {
-    "🧭 Setup": "onboarding:resume",
-    "📈 Strategies": "nav:strategy_hub",
-    "🟢 Trade Long": "trade:long",
-    "🔴 Trade Short": "trade:short",
-    "🟩 Limit Buy": "trade:limit_long",
-    "🟥 Limit Sell": "trade:limit_short",
-    "👛 Wallet": "wallet:view",
+    "📊 Trade": "nav:trade",
     "📋 Positions": "pos:view",
-    "📡 Status": "strategy:status",
-    "🛑 Stop Bot": "strategy:stop",
+    "👛 Wallet": "wallet:view",
     "💹 Markets": "mkt:menu",
+    "📈 Strategies": "nav:strategy_hub",
     "🔔 Alerts": "alert:menu",
     "⚙️ Settings": "settings:view",
     "❓ Help": "nav:help",
+    "🟢 Long": "trade_flow:direction:long",
+    "🔴 Short": "trade_flow:direction:short",
+    "◀ Home": "trade_flow:home",
+    "📈 Market": "trade_flow:order_type:market",
+    "📉 Limit": "trade_flow:order_type:limit",
+    "◀ Back": "trade_flow:back",
+    "1x": "trade_flow:leverage:1",
+    "2x": "trade_flow:leverage:2",
+    "3x": "trade_flow:leverage:3",
+    "5x": "trade_flow:leverage:5",
+    "10x": "trade_flow:leverage:10",
+    "20x": "trade_flow:leverage:20",
+    "✏️ Custom": "trade_flow:size:custom",
+    "📐 Set TP/SL": "trade_flow:tpsl:set",
+    "⏭ Skip": "trade_flow:tpsl:skip",
+    "Set TP": "trade_flow:tpsl:set_tp",
+    "Set SL": "trade_flow:tpsl:set_sl",
+    "✅ Done": "trade_flow:tpsl:done",
+    "✅ Confirm Trade": "trade_flow:confirm",
+    "❌ Cancel": "trade_flow:cancel",
 }
+
+for name in PERP_PRODUCTS:
+    REPLY_BUTTON_MAP[name] = f"trade_flow:product:{name}"
+
+for preset_product, presets in SIZE_PRESETS.items():
+    for s in presets:
+        label = str(int(s)) if s == int(s) else str(s)
+        REPLY_BUTTON_MAP[label] = f"trade_flow:size:{label}"
 
 
 def persistent_menu_kb():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🟢 Trade Long"), KeyboardButton("🔴 Trade Short")],
-            [KeyboardButton("🟩 Limit Buy"), KeyboardButton("🟥 Limit Sell")],
-            [KeyboardButton("👛 Wallet"), KeyboardButton("📋 Positions")],
-            [KeyboardButton("📈 Strategies"), KeyboardButton("💹 Markets")],
-            [KeyboardButton("📡 Status"), KeyboardButton("🛑 Stop Bot")],
-            [KeyboardButton("🔔 Alerts"), KeyboardButton("⚙️ Settings")],
-            [KeyboardButton("🧭 Setup"), KeyboardButton("❓ Help")],
+            [KeyboardButton("📊 Trade"), KeyboardButton("📋 Positions")],
+            [KeyboardButton("👛 Wallet"), KeyboardButton("💹 Markets")],
+            [KeyboardButton("📈 Strategies"), KeyboardButton("🔔 Alerts")],
+            [KeyboardButton("⚙️ Settings"), KeyboardButton("❓ Help")],
         ],
         resize_keyboard=True,
         is_persistent=True,
     )
 
 
-def main_menu_kb():
-    return InlineKeyboardMarkup([
+def trade_direction_kb():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("🧭 Setup", callback_data="onboarding:resume"),
-            InlineKeyboardButton("📈 Strategies", callback_data="nav:strategy_hub"),
+            [KeyboardButton("🟢 Long"), KeyboardButton("🔴 Short")],
+            [KeyboardButton("◀ Home")],
         ],
+        resize_keyboard=True,
+    )
+
+
+def trade_order_type_kb():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("🟢 Trade Long", callback_data="trade:long"),
-            InlineKeyboardButton("🔴 Trade Short", callback_data="trade:short"),
+            [KeyboardButton("📈 Market"), KeyboardButton("📉 Limit")],
+            [KeyboardButton("◀ Back")],
         ],
+        resize_keyboard=True,
+    )
+
+
+def trade_product_reply_kb():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("🟩 Limit Buy", callback_data="trade:limit_long"),
-            InlineKeyboardButton("🟥 Limit Sell", callback_data="trade:limit_short"),
+            [KeyboardButton("BTC"), KeyboardButton("ETH"), KeyboardButton("SOL"), KeyboardButton("XRP")],
+            [KeyboardButton("BNB"), KeyboardButton("LINK"), KeyboardButton("DOGE"), KeyboardButton("AVAX")],
+            [KeyboardButton("◀ Back")],
         ],
+        resize_keyboard=True,
+    )
+
+
+def trade_leverage_reply_kb():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("👛 Wallet", callback_data="wallet:view"),
-            InlineKeyboardButton("📋 Positions", callback_data="pos:view"),
+            [KeyboardButton("1x"), KeyboardButton("2x"), KeyboardButton("3x")],
+            [KeyboardButton("5x"), KeyboardButton("10x"), KeyboardButton("20x")],
+            [KeyboardButton("◀ Back")],
         ],
+        resize_keyboard=True,
+    )
+
+
+def trade_size_reply_kb(product):
+    presets = SIZE_PRESETS.get(product.upper(), [1, 5, 10, 50, 100])
+    rows = []
+    row = []
+    for s in presets:
+        label = str(int(s)) if s == int(s) else str(s)
+        row.append(KeyboardButton(label))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([KeyboardButton("✏️ Custom")])
+    rows.append([KeyboardButton("◀ Back")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def trade_tpsl_kb():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("📡 Status", callback_data="strategy:status"),
-            InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop"),
+            [KeyboardButton("📐 Set TP/SL"), KeyboardButton("⏭ Skip")],
+            [KeyboardButton("◀ Back")],
         ],
+        resize_keyboard=True,
+    )
+
+
+def trade_tpsl_edit_kb():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("💹 Markets", callback_data="mkt:menu"),
-            InlineKeyboardButton("🔔 Alerts", callback_data="alert:menu"),
+            [KeyboardButton("Set TP"), KeyboardButton("Set SL")],
+            [KeyboardButton("✅ Done"), KeyboardButton("◀ Back")],
         ],
+        resize_keyboard=True,
+    )
+
+
+def trade_confirm_reply_kb():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("⚙️ Settings", callback_data="settings:view"),
-            InlineKeyboardButton("🧠 Ask Nado", callback_data="nav:ask_nado"),
+            [KeyboardButton("✅ Confirm Trade"), KeyboardButton("❌ Cancel")],
         ],
-        [
-            InlineKeyboardButton("⚡ Onboarding", callback_data="nav:quick_start"),
-            InlineKeyboardButton("❓ Help", callback_data="nav:help"),
-        ],
-    ])
+        resize_keyboard=True,
+    )
 
 
 def trade_product_kb(action):
