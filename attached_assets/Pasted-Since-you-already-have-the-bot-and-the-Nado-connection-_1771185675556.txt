@@ -1,0 +1,135 @@
+Since you already have the bot and the "Nado" connection, we can skip the setup and go straight to the **Strategy Logic Module**.
+
+This is the code that makes your bot "Smart." It implements the **Hybrid Whale Engine** we discussed: it sits in a **Delta-Neutral (Funding)** state by default and only switches to **Directional** when the "Whale Box" is broken.
+
+Because Nado has **Unified Margin** (Spot and Perps share the same collateral), this strategy is incredibly capital-efficient. You can use your Spot BTC as collateral for your Short, making liquidation almost impossible in the neutral state.
+
+### The Strategy Logic (Python)
+
+You can drop this `WhaleStrategy` class directly into your existing bot's backend.
+
+```python
+import json
+from datetime import datetime
+
+class WhaleStrategy:
+    def __init__(self, nado_client, user_id):
+        self.nado = nado_client
+        self.user_id = user_id
+        self.symbol_spot = "BTC-USDC"
+        self.symbol_perp = "BTC-PERP"
+    
+    def handle_webhook(self, payload):
+        """
+        Receives the TradingView Webhook JSON and decides the action.
+        Payload format: {"action": "long"|"short"|"neutral", "price": 68000}
+        """
+        signal = payload.get('action')
+        current_price = payload.get('price')
+        
+        # 1. Get current positions to understand state
+        positions = self.nado.get_positions(self.user_id)
+        spot_bal = self.get_spot_balance() # Custom helper to get BTC balance
+        perp_pos = self.get_perp_position(positions) # Custom helper to get Perp size
+
+        explanation = ""
+
+        # --- LOGIC CORE ---
+        
+        if signal == "long":
+            # BULLISH MODE: We want to be Net Long (+1 Delta).
+            # Action: Close any Hedge Short. Just hold Spot.
+            if perp_pos < 0:
+                self.nado.close_position(symbol=self.symbol_perp)
+                explanation = f"🐋 **Whale Long Detected!**\nI closed your Hedge Short. You are now holding pure Spot BTC to ride the pump to {current_price * 1.05:.0f}."
+            elif spot_bal == 0:
+                # If we were fully short/cash, buy spot
+                self.nado.place_order(self.symbol_spot, "buy", "market", amount="ALL_USDC")
+                explanation = f"🐋 **Whale Long Detected!**\nI bought Spot BTC. Target: {current_price * 1.05:.0f}."
+
+        elif signal == "short":
+            # BEARISH MODE: We want to be Net Short (-1 Delta).
+            # Action: Sell Spot to USDC. Open Short Perp.
+            if spot_bal > 0:
+                self.nado.place_order(self.symbol_spot, "sell", "market", amount=spot_bal)
+            
+            if perp_pos == 0:
+                self.nado.place_order(self.symbol_perp, "sell", "market", amount="100%", leverage=1)
+            
+            explanation = f"🐻 **Whale Dump Detected!**\nI sold your Spot and opened a Short. We profit if BTC drops."
+
+        elif signal == "neutral":
+            # FARMING MODE: We want to be Delta Neutral (0 Delta).
+            # Action: Hold Spot BTC + Short Perp (Equal Size).
+            # This is the "Always Win" state -> collecting funding.
+            
+            target_size = 1000 # Example: $1000 position
+            
+            # 1. Ensure we have Spot
+            if spot_bal < target_size:
+                 self.nado.place_order(self.symbol_spot, "buy", "market", amount=(target_size - spot_bal))
+            
+            # 2. Ensure we have Equal Short
+            if abs(perp_pos) < target_size:
+                self.nado.place_order(self.symbol_perp, "sell", "market", amount=(target_size - abs(perp_pos)), leverage=1)
+
+            explanation = f"🛡️ **Defensive Mode**\nMarket is choppy. I have engaged the **Funding Hedge**.\n\n" \
+                          f"• Long: ${target_size} (Spot)\n" \
+                          f"• Short: ${target_size} (Hedge)\n" \
+                          f"✅ **Risk:** Near Zero.\n" \
+                          f"💰 **Earning:** ~15% APR Funding Fees."
+
+        return explanation
+    
+    # --- Helpers would go here (get_spot_balance, etc) ---
+
+```
+
+---
+
+### The "Explain Like I'm 5" Generator
+
+Since you want this to be beginner-friendly, the bot shouldn't just say "Order Executed." It should explain **WHY**.
+
+Add this function to your bot's response handler:
+
+```python
+def generate_human_update(action, price, reason):
+    emojis = {
+        "long": "🚀",
+        "short": "📉",
+        "neutral": "🚜"
+    }
+    
+    titles = {
+        "long": "WHALE BUY ALERT",
+        "short": "WHALE SELL ALERT",
+        "neutral": "FARMING MODE"
+    }
+    
+    msg = f"{emojis[action]} **{titles[action]}**\n"
+    msg += f"----------------------------\n"
+    msg += f"**Price:** ${price}\n\n"
+    msg += f"**Why did I do this?**\n{reason}\n\n"
+    msg += f"**Next Step:** I am watching the chart for you. No action needed."
+    
+    return msg
+
+```
+
+### How to use this in your existing Bot
+
+1. **Incoming Webhook:** When your bot server receives the `POST` request from TradingView.
+2. **Trigger:** Call `WhaleStrategy.handle_webhook(json_data)`.
+3. **Output:** The function returns the `explanation` string.
+4. **Telegram:** Send that string immediately to the user via `bot.send_message`.
+
+### The TradingView Alert Configuration
+
+For this to work, your TradingView alert needs to send the specific "State" you want.
+
+* **Condition:** Whale Box Breakout (Up) -> Message: `{"action": "long", "price": {{close}}}`
+* **Condition:** Whale Box Breakout (Down) -> Message: `{"action": "short", "price": {{close}}}`
+* **Condition:** Price enters "Chop Zone" (ADX < 20) -> Message: `{"action": "neutral", "price": {{close}}}`
+
+This modular approach lets you add this "Magnificent Quant" strategy to your bot without rewriting your entire codebase. It simply acts as a logic layer between the signal and the Nado execution.
