@@ -12,6 +12,7 @@ packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc"]
 [userenv.shared]
 ENCRYPTION_KEY = "UNQseQTv0VYaoIu_MpjHloBWDcIfhZS-ahSBB_UGiNU"
 ADMIN_USER_IDS = "1124285818"
+WEBHOOK_SECRET = "9_-Jf6HYiHLv6JMw_sRmD_xVwA5LxNlfu3kp6Xu9h2E"
 
 [workflows]
 runButton = "Project"

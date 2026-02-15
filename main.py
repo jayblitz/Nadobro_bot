@@ -181,18 +181,32 @@ async def run_bot():
     from aiohttp import web as aio_web
     webhook_app = aio_web.Application()
 
+    webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
+
     async def handle_webhook(request):
+        if webhook_secret:
+            provided = request.headers.get("X-Webhook-Secret", "")
+            if provided != webhook_secret:
+                return aio_web.json_response({"error": "unauthorized"}, status=401)
+
         try:
             body = await request.json()
         except Exception:
             return aio_web.json_response({"error": "invalid JSON"}, status=400)
 
         action = body.get("action", "").lower().strip()
-        try:
-            price = float(body.get("price", 0))
-        except (ValueError, TypeError):
-            price = 0.0
+        raw_price = body.get("price")
         telegram_id = body.get("telegram_id")
+
+        if raw_price is not None:
+            try:
+                price = float(raw_price)
+                if price < 0:
+                    return aio_web.json_response({"error": "price must be non-negative"}, status=400)
+            except (ValueError, TypeError):
+                return aio_web.json_response({"error": "invalid price value"}, status=400)
+        else:
+            price = 0.0
 
         if not action or action not in ("long", "short", "neutral"):
             return aio_web.json_response({"error": "action must be long/short/neutral"}, status=400)

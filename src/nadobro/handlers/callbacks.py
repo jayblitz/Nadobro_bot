@@ -1236,7 +1236,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
 
 
 async def _handle_whale(query, data, context, telegram_id):
-    from src.nadobro.services.whale_strategy import get_whale_strategy, generate_human_update
+    from src.nadobro.services.whale_strategy import get_whale_strategy
 
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
