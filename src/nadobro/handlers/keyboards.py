@@ -71,7 +71,7 @@ def persistent_menu_kb():
 def trade_direction_kb():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🟢 Long"), KeyboardButton("🔴 Short")],
+            [KeyboardButton("🟢 Long", api_kwargs={"style": "primary"}), KeyboardButton("🔴 Short", api_kwargs={"style": "destructive"})],
             [KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
@@ -141,7 +141,7 @@ def trade_tpsl_edit_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("Set TP"), KeyboardButton("Set SL")],
-            [KeyboardButton("✅ Done"), KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
+            [KeyboardButton("✅ Done", api_kwargs={"style": "primary"}), KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
@@ -150,7 +150,7 @@ def trade_tpsl_edit_kb():
 def trade_confirm_reply_kb():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("✅ Confirm Trade"), KeyboardButton("❌ Cancel")],
+            [KeyboardButton("✅ Confirm Trade", api_kwargs={"style": "primary"}), KeyboardButton("❌ Cancel", api_kwargs={"style": "destructive"})],
             [KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
@@ -205,8 +205,8 @@ def trade_leverage_kb(product, action, size):
 def trade_confirm_kb(trade_id="pending"):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Confirm Trade", callback_data=f"exec_trade:{trade_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel_trade"),
+            InlineKeyboardButton("✅ Confirm Trade", callback_data=f"exec_trade:{trade_id}", api_kwargs={"style": "primary"}),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_trade", api_kwargs={"style": "destructive"}),
         ],
     ])
 
@@ -218,9 +218,9 @@ def positions_kb(positions):
         pname = p.get("product_name", "").replace("-PERP", "")
         if pname and pname not in seen:
             seen.add(pname)
-            rows.append([InlineKeyboardButton(f"❌ Close {pname}-PERP", callback_data=f"pos:close:{pname}")])
+            rows.append([InlineKeyboardButton(f"❌ Close {pname}-PERP", callback_data=f"pos:close:{pname}", api_kwargs={"style": "destructive"})])
     if positions:
-        rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
+        rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all", api_kwargs={"style": "destructive"})])
     rows.append([InlineKeyboardButton("◀ Back", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
 
@@ -236,7 +236,7 @@ def wallet_kb():
         ],
         [
             InlineKeyboardButton("♻️ Rotate Active Key", callback_data="wallet:rotate"),
-            InlineKeyboardButton("🗑 Remove Active Key", callback_data="wallet:remove_active"),
+            InlineKeyboardButton("🗑 Remove Active Key", callback_data="wallet:remove_active", api_kwargs={"style": "destructive"}),
         ],
         [
             InlineKeyboardButton("👁️ Review Private Key", callback_data="wallet:view_key"),
@@ -288,7 +288,8 @@ def alert_delete_kb(alerts):
     for a in alerts:
         rows.append([InlineKeyboardButton(
             f"🗑 #{a['id']} {a['product']} {a['condition']} ${a['target']:,.2f}",
-            callback_data=f"alert:del:{a['id']}"
+            callback_data=f"alert:del:{a['id']}",
+            api_kwargs={"style": "destructive"},
         )])
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data="alert:menu"),
@@ -354,7 +355,7 @@ def risk_profile_kb():
             InlineKeyboardButton("⚖️ Balanced", callback_data="settings:risk:balanced"),
         ],
         [
-            InlineKeyboardButton("🔥 Aggressive", callback_data="settings:risk:aggressive"),
+            InlineKeyboardButton("🔥 Aggressive", callback_data="settings:risk:aggressive", api_kwargs={"style": "destructive"}),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="settings:view"),
@@ -397,11 +398,12 @@ def whale_preview_kb(product: str = "BTC", target_size: float = 1000.0):
             InlineKeyboardButton(
                 f"🚀 Start Whale ({product} ${target_size:,.0f})",
                 callback_data=f"whale:start:{product}:{int(target_size)}",
+                api_kwargs={"style": "primary"},
             ),
         ],
         [
             InlineKeyboardButton("📡 Whale Status", callback_data="whale:status"),
-            InlineKeyboardButton("🛑 Stop Whale", callback_data="whale:stop"),
+            InlineKeyboardButton("🛑 Stop Whale", callback_data="whale:stop", api_kwargs={"style": "destructive"}),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
@@ -421,21 +423,24 @@ def whale_active_kb(current_mode: str = "neutral"):
             InlineKeyboardButton(
                 "🐂 Go Long" if current_mode != "long" else mode_labels["long"],
                 callback_data="whale:signal:long",
+                api_kwargs={"style": "primary"},
             ),
             InlineKeyboardButton(
                 "🐻 Go Short" if current_mode != "short" else mode_labels["short"],
                 callback_data="whale:signal:short",
+                api_kwargs={"style": "destructive"},
             ),
         ],
         [
             InlineKeyboardButton(
                 "🛡 Go Neutral" if current_mode != "neutral" else mode_labels["neutral"],
                 callback_data="whale:signal:neutral",
+                api_kwargs={"style": "primary"},
             ),
         ],
         [
             InlineKeyboardButton("📡 Status", callback_data="whale:status"),
-            InlineKeyboardButton("🛑 Stop Whale", callback_data="whale:stop"),
+            InlineKeyboardButton("🛑 Stop Whale", callback_data="whale:stop", api_kwargs={"style": "destructive"}),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
@@ -480,7 +485,7 @@ def live_price_asset_kb():
 def live_price_controls_kb(product: str):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🛑 Stop Live", callback_data="mkt:live_stop"),
+            InlineKeyboardButton("🛑 Stop Live", callback_data="mkt:live_stop", api_kwargs={"style": "destructive"}),
             InlineKeyboardButton("Switch Asset", callback_data="mkt:live_menu"),
         ],
         [
@@ -493,7 +498,7 @@ def live_price_controls_kb(product: str):
 def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Mark Active", callback_data=f"strategy:activate:{strategy_id}"),
+            InlineKeyboardButton("✅ Mark Active", callback_data=f"strategy:activate:{strategy_id}", api_kwargs={"style": "primary"}),
             InlineKeyboardButton("⚙️ Tune Risk", callback_data="settings:risk_menu"),
         ],
         [
@@ -508,6 +513,7 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
             InlineKeyboardButton(
                 f"🚀 Start {selected_product.upper()}",
                 callback_data=f"strategy:start:{strategy_id}:{selected_product.upper()}",
+                api_kwargs={"style": "primary"},
             ),
         ],
         [
@@ -515,7 +521,7 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
         ],
         [
             InlineKeyboardButton("📡 Bot Status", callback_data="strategy:status"),
-            InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop"),
+            InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop", api_kwargs={"style": "destructive"}),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
@@ -541,8 +547,8 @@ def close_product_kb():
 def confirm_close_all_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Yes, Close All", callback_data="pos:confirm_close_all"),
-            InlineKeyboardButton("❌ Cancel", callback_data="nav:main"),
+            InlineKeyboardButton("✅ Yes, Close All", callback_data="pos:confirm_close_all", api_kwargs={"style": "primary"}),
+            InlineKeyboardButton("❌ Cancel", callback_data="nav:main", api_kwargs={"style": "destructive"}),
         ],
     ])
 
@@ -628,7 +634,7 @@ def onboarding_risk_kb():
             InlineKeyboardButton("🛡 Conservative", callback_data="onboarding:set_risk:conservative"),
             InlineKeyboardButton("⚖️ Balanced", callback_data="onboarding:set_risk:balanced"),
         ],
-        [InlineKeyboardButton("🔥 Aggressive", callback_data="onboarding:set_risk:aggressive")],
+        [InlineKeyboardButton("🔥 Aggressive", callback_data="onboarding:set_risk:aggressive", api_kwargs={"style": "destructive"})],
         [
             InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
             InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),

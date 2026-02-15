@@ -273,6 +273,137 @@ def _call_support_llm(provider: str, system: str, question: str) -> str:
     return content.strip()
 
 
+def _stream_support_llm(provider: str, system: str, question: str):
+    if provider == "openai":
+        client = _get_openai_client()
+    else:
+        client = _get_xai_client()
+
+    if not client:
+        raise RuntimeError(f"{provider.upper()} client not configured")
+
+    stream = client.chat.completions.create(
+        model=_model_for(provider),
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": question},
+        ],
+        max_tokens=700,
+        temperature=0.2,
+        stream=True,
+    )
+    for chunk in stream:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta and delta.content:
+            yield delta.content
+
+
+async def stream_nado_answer(question: str):
+    started_at = time.time()
+    xai_client = _get_xai_client()
+    openai_client = _get_openai_client()
+    if not xai_client and not openai_client:
+        yield "AI service is not configured. Add XAI_API_KEY and/or OPENAI_API_KEY then restart the bot."
+        return
+
+    knowledge = _load_knowledge_base()
+    if not knowledge:
+        yield "Knowledge base is not loaded. Please contact support."
+        return
+
+    qkey = _normalize_question(question)
+    cached = _answer_cache.get(qkey)
+    if cached and (time.time() - cached["ts"] < ANSWER_CACHE_TTL_SECONDS):
+        yield cached["answer"]
+        return
+
+    use_live = _should_use_live_retrieval(question)
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if use_live:
+            retrieved_context, used_sources = await loop.run_in_executor(None, _build_retrieved_context, question)
+        else:
+            retrieved_context, used_sources = ("Live retrieval skipped for low-latency mode.", [])
+    except Exception:
+        retrieved_context, used_sources = ("No retrieved context available.", [])
+
+    system = KNOWLEDGE_SYSTEM_PROMPT.format(
+        knowledge_base=knowledge[:9000],
+        retrieved_context=retrieved_context[:8000],
+    )
+
+    primary = _pick_primary_provider(question)
+    secondary = "openai" if primary == "xai" else "xai"
+    providers = [primary, secondary]
+    providers = [
+        p for p in providers
+        if (p == "xai" and xai_client) or (p == "openai" and openai_client)
+    ]
+
+    import asyncio, queue, threading
+    loop = asyncio.get_event_loop()
+
+    for provider in providers:
+        try:
+            chunk_queue = queue.Queue()
+
+            def _run_stream(p=provider):
+                try:
+                    for chunk_text in _stream_support_llm(p, system, question):
+                        chunk_queue.put(chunk_text)
+                    chunk_queue.put(None)
+                except Exception as e:
+                    chunk_queue.put(e)
+
+            thread = threading.Thread(target=_run_stream, daemon=True)
+            thread.start()
+
+            full_answer = ""
+            while True:
+                try:
+                    item = await loop.run_in_executor(None, lambda: chunk_queue.get(timeout=30))
+                except Exception:
+                    break
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                full_answer += item
+                yield item
+
+            if not full_answer.strip():
+                continue
+
+            if "Sources:" not in full_answer:
+                if used_sources:
+                    sources_line = "\n\nSources: " + ", ".join(used_sources[:4])
+                else:
+                    sources_line = "\n\nSources: https://docs.nado.xyz/, https://x.com/nadoHQ"
+                yield sources_line
+                full_answer += sources_line
+
+            _answer_cache[qkey] = {"ts": time.time(), "answer": full_answer}
+            debug_log(
+                "post-fix",
+                "H11",
+                "knowledge_service.py:stream",
+                "stream_answer_generated",
+                {
+                    "provider": provider,
+                    "use_live_retrieval": use_live,
+                    "sources_count": len(used_sources),
+                    "latency_ms": int((time.time() - started_at) * 1000),
+                },
+            )
+            return
+        except Exception as provider_error:
+            logger.warning("Stream answer failed on provider=%s: %s", provider, provider_error)
+            continue
+
+    yield "I couldn't generate an answer. Please try again."
+
+
 async def answer_nado_question(question: str) -> str:
     started_at = time.time()
     xai_client = _get_xai_client()

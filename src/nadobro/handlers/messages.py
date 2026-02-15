@@ -9,7 +9,7 @@ from src.nadobro.services.user_service import (
 )
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.alert_service import create_alert
-from src.nadobro.services.knowledge_service import answer_nado_question
+from src.nadobro.services.knowledge_service import answer_nado_question, stream_nado_answer
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
 from src.nadobro.services.debug_logger import debug_log
@@ -1010,21 +1010,55 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
 
 
 async def _handle_nado_question(update, context, question):
-    await update.message.chat.send_action(ChatAction.TYPING)
-    thinking_msg = await update.message.reply_text(
-        "🧠 _Thinking\\.\\.\\._",
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
+    import random
+    chat_id = update.effective_chat.id
+    draft_id = random.randint(1, 2**31 - 1)
 
     try:
-        answer = await answer_nado_question(question)
-        await thinking_msg.edit_text(
-            f"🧠 *Ask Nado*\n\n{escape_md(answer)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+        await update.message.chat.send_action(ChatAction.TYPING)
+    except Exception:
+        pass
+
+    full_text = ""
+    last_draft_len = 0
+    draft_ok = True
+
+    try:
+        async for chunk in stream_nado_answer(question):
+            full_text += chunk
+            if draft_ok and len(full_text) - last_draft_len >= 40:
+                try:
+                    await context.bot.send_message_draft(
+                        chat_id=chat_id,
+                        draft_id=draft_id,
+                        text=f"🧠 Ask Nado\n\n{full_text}",
+                    )
+                    last_draft_len = len(full_text)
+                except Exception:
+                    draft_ok = False
+
+        if full_text.strip():
+            await update.message.reply_text(
+                f"🧠 *Ask Nado*\n\n{escape_md(full_text)}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ I couldn't generate an answer\\. Please try again\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
     except Exception as e:
         logger.error(f"Nado Q&A error: {e}", exc_info=True)
-        await thinking_msg.edit_text(
+        if full_text.strip():
+            try:
+                await update.message.reply_text(
+                    f"🧠 *Ask Nado*\n\n{escape_md(full_text)}",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                return
+            except Exception:
+                pass
+        await update.message.reply_text(
             "⚠️ Something went wrong answering your question\\. Please try again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
