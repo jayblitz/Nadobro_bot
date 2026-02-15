@@ -10,6 +10,9 @@ from src.nadobro.config import (
 
 logger = logging.getLogger(__name__)
 
+_price_cache = {}
+_PRICE_CACHE_TTL = 5
+
 
 class NadoClient:
     def __init__(self, private_key: str, network: str = "testnet"):
@@ -65,13 +68,20 @@ class NadoClient:
         return NADO_MAINNET_ARCHIVE if self.network == "mainnet" else NADO_TESTNET_ARCHIVE
 
     def get_market_price(self, product_id: int) -> dict:
+        cache_key = f"{self.network}:{product_id}"
+        cached = _price_cache.get(cache_key)
+        if cached and (time.time() - cached["ts"] < _PRICE_CACHE_TTL):
+            return cached["data"]
+
         if self._initialized and self.client:
             try:
                 from nado_protocol.utils.math import from_x18
                 mp = self.client.context.engine_client.get_market_price(product_id)
                 bid = from_x18(int(mp.bid_x18))
                 ask = from_x18(int(mp.ask_x18)) if hasattr(mp, 'ask_x18') else bid
-                return {"bid": float(bid), "ask": float(ask), "mid": float((bid + ask) / 2)}
+                result = {"bid": float(bid), "ask": float(ask), "mid": float((bid + ask) / 2)}
+                _price_cache[cache_key] = {"data": result, "ts": time.time()}
+                return result
             except Exception as e:
                 logger.error(f"SDK get_market_price failed: {e}")
 
@@ -84,7 +94,9 @@ class NadoClient:
             if data.get("status") == "success":
                 bid = int(data["data"]["bid_x18"]) / 1e18
                 ask = int(data["data"].get("ask_x18", data["data"]["bid_x18"])) / 1e18
-                return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2}
+                result = {"bid": bid, "ask": ask, "mid": (bid + ask) / 2}
+                _price_cache[cache_key] = {"data": result, "ts": time.time()}
+                return result
         except Exception as e:
             logger.error(f"REST get_market_price failed: {e}")
 

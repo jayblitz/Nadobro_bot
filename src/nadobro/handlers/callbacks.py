@@ -4,7 +4,7 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_dashboard, fmt_positions, fmt_balance,
     fmt_prices, fmt_funding, fmt_trade_preview, fmt_trade_result,
@@ -46,6 +46,7 @@ from src.nadobro.services.onboarding_service import (
 )
 from src.nadobro.config import get_product_name, get_product_id, PRODUCTS
 from src.nadobro.services.debug_logger import debug_log
+from src.nadobro.services.whale_strategy import get_whale_strategy
 
 logger = logging.getLogger(__name__)
 LIVE_PRICE_TASKS = {}
@@ -54,6 +55,7 @@ LIVE_PRICE_TASKS = {}
 async def handle_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
+    await query.message.chat.send_action(ChatAction.TYPING)
 
     data = query.data
     telegram_id = query.from_user.id
@@ -1236,8 +1238,6 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
 
 
 async def _handle_whale(query, data, context, telegram_id):
-    from src.nadobro.services.whale_strategy import get_whale_strategy
-
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
 

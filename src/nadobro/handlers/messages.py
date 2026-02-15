@@ -2,7 +2,7 @@ import logging
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info, get_user,
     ensure_active_wallet_ready,
@@ -11,7 +11,7 @@ from src.nadobro.services.trade_service import execute_market_order, execute_lim
 from src.nadobro.services.alert_service import create_alert
 from src.nadobro.services.knowledge_service import answer_nado_question
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
-from src.nadobro.services.onboarding_service import get_resume_step
+from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
 from src.nadobro.services.debug_logger import debug_log
 from src.nadobro.services.crypto import (
     is_probable_mnemonic,
@@ -23,13 +23,15 @@ from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
-    fmt_trade_result,
+    fmt_trade_result, fmt_wallet_info, fmt_settings,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
     trade_direction_kb, trade_order_type_kb, trade_product_reply_kb,
     trade_leverage_reply_kb, trade_size_reply_kb, trade_tpsl_kb,
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
+    mode_kb, strategy_hub_kb, wallet_kb, positions_kb, markets_kb,
+    alerts_kb, settings_kb,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,8 +154,6 @@ async def handle_message(update: Update, context: CallbackContext):
 
 
 async def _dispatch_reply_button(update, context, telegram_id, callback_data, text):
-    from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
-
     if callback_data == "nav:trade":
         await update.message.reply_text(
             "📊 *Trade*\n\nSelect direction:",
@@ -169,7 +169,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "nav:mode":
-        from src.nadobro.handlers.keyboards import mode_kb
         user = get_user(telegram_id)
         current_network = user.network_mode.value if user else "testnet"
         network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
@@ -183,7 +182,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "nav:strategy_hub":
-        from src.nadobro.handlers.keyboards import strategy_hub_kb
         await update.message.reply_text(
             "🧭 *Strategy Hub*\n\n"
             "Pick a strategy, review setup, then start with pre\\-trade analytics\\.",
@@ -193,9 +191,8 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "wallet:view":
+        await update.message.chat.send_action(ChatAction.TYPING)
         info = get_user_wallet_info(telegram_id)
-        from src.nadobro.handlers.formatters import fmt_wallet_info
-        from src.nadobro.handlers.keyboards import wallet_kb
         msg = fmt_wallet_info(info)
         await update.message.reply_text(
             msg,
@@ -205,6 +202,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "pos:view":
+        await update.message.chat.send_action(ChatAction.TYPING)
         client = get_user_nado_client(telegram_id)
         if not client:
             await update.message.reply_text(
@@ -218,7 +216,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             prices = client.get_all_market_prices()
         except Exception:
             pass
-        from src.nadobro.handlers.keyboards import positions_kb
         msg = fmt_positions(positions, prices)
         await update.message.reply_text(
             msg,
@@ -228,7 +225,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "mkt:menu":
-        from src.nadobro.handlers.keyboards import markets_kb
         await update.message.reply_text(
             "💹 *Markets*\n\nPick a market view:",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -237,7 +233,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "alert:menu":
-        from src.nadobro.handlers.keyboards import alerts_kb
         await update.message.reply_text(
             "🔔 *Alerts*\n\nManage your price alerts\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -246,8 +241,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "settings:view":
-        from src.nadobro.handlers.formatters import fmt_settings
-        from src.nadobro.handlers.keyboards import settings_kb
         user_settings = _get_user_settings(telegram_id, context)
         msg = fmt_settings(user_settings)
         lev = user_settings.get("default_leverage", 1)
@@ -266,8 +259,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
 
 async def _handle_trade_flow_button(update, context, telegram_id, callback_data):
-    from src.nadobro.services.onboarding_service import get_resume_step
-
     parts = callback_data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     value = parts[2] if len(parts) > 2 else ""
@@ -1019,6 +1010,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
 
 
 async def _handle_nado_question(update, context, question):
+    await update.message.chat.send_action(ChatAction.TYPING)
     thinking_msg = await update.message.reply_text(
         "🧠 _Thinking\\.\\.\\._",
         parse_mode=ParseMode.MARKDOWN_V2,

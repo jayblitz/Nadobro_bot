@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 from src.nadobro.models.database import User, NetworkMode, get_session
@@ -9,6 +10,27 @@ from src.nadobro.services.crypto import (
 from src.nadobro.services.nado_client import get_nado_client, NadoClient, clear_client_cache
 
 logger = logging.getLogger(__name__)
+
+_user_cache = {}
+_USER_CACHE_TTL = 10
+
+
+def _cache_user(user):
+    _user_cache[user.telegram_id] = {"user": user, "ts": time.time()}
+
+
+def _get_cached_user(telegram_id):
+    entry = _user_cache.get(telegram_id)
+    if entry and (time.time() - entry["ts"] < _USER_CACHE_TTL):
+        return entry["user"]
+    return None
+
+
+def invalidate_user_cache(telegram_id=None):
+    if telegram_id:
+        _user_cache.pop(telegram_id, None)
+    else:
+        _user_cache.clear()
 
 
 def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bool, Optional[str]]:
@@ -21,6 +43,7 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bo
             session.commit()
             session.refresh(user)
             session.expunge(user)
+            _cache_user(user)
             return user, False, None
 
         user = User(
@@ -32,16 +55,21 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple[User, bo
         session.commit()
         session.refresh(user)
         session.expunge(user)
+        _cache_user(user)
 
         return user, True, None
 
 
 def get_user(telegram_id: int) -> Optional[User]:
+    cached = _get_cached_user(telegram_id)
+    if cached:
+        return cached
     with get_session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if user:
             session.refresh(user)
             session.expunge(user)
+            _cache_user(user)
         return user
 
 
@@ -56,6 +84,7 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
         user.network_mode = new_mode
         clear_client_cache()
         session.commit()
+        invalidate_user_cache(telegram_id)
 
         addr = user.wallet_address_mainnet if new_mode == NetworkMode.MAINNET else user.wallet_address_testnet
         if addr:
@@ -130,6 +159,7 @@ def import_user_private_key(telegram_id: int, private_key: str, network: str = "
 
         clear_client_cache()
         session.commit()
+        invalidate_user_cache(telegram_id)
 
         return True, f"Trading key imported successfully.\nAddress: `{address}`"
 
@@ -151,6 +181,7 @@ def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple
 
         clear_client_cache()
         session.commit()
+        invalidate_user_cache(telegram_id)
         return True, f"{network} key removed."
 
 
