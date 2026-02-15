@@ -366,6 +366,9 @@ def risk_profile_kb():
 def strategy_hub_kb():
     return InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("🐋 Whale Engine", callback_data="whale:preview"),
+        ],
+        [
             InlineKeyboardButton("📈 Market Maker", callback_data="strategy:preview:mm"),
             InlineKeyboardButton("🧮 Grid", callback_data="strategy:preview:grid"),
         ],
@@ -376,6 +379,70 @@ def strategy_hub_kb():
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
         ],
     ])
+
+
+def whale_preview_kb(product: str = "BTC", target_size: float = 1000.0):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("BTC", callback_data="whale:pair:BTC"),
+            InlineKeyboardButton("ETH", callback_data="whale:pair:ETH"),
+            InlineKeyboardButton("SOL", callback_data="whale:pair:SOL"),
+        ],
+        [
+            InlineKeyboardButton("$500", callback_data="whale:size:500"),
+            InlineKeyboardButton("$1000", callback_data="whale:size:1000"),
+            InlineKeyboardButton("$2500", callback_data="whale:size:2500"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"🚀 Start Whale ({product} ${target_size:,.0f})",
+                callback_data=f"whale:start:{product}:{int(target_size)}",
+            ),
+        ],
+        [
+            InlineKeyboardButton("📡 Whale Status", callback_data="whale:status"),
+            InlineKeyboardButton("🛑 Stop Whale", callback_data="whale:stop"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+        ],
+    ])
+
+
+def whale_active_kb(current_mode: str = "neutral"):
+    mode_labels = {
+        "long": "🐂 Long (Active)",
+        "short": "🐻 Short (Active)",
+        "neutral": "🛡 Neutral (Active)",
+    }
+    rows = [
+        [
+            InlineKeyboardButton(
+                "🐂 Go Long" if current_mode != "long" else mode_labels["long"],
+                callback_data="whale:signal:long",
+            ),
+            InlineKeyboardButton(
+                "🐻 Go Short" if current_mode != "short" else mode_labels["short"],
+                callback_data="whale:signal:short",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🛡 Go Neutral" if current_mode != "neutral" else mode_labels["neutral"],
+                callback_data="whale:signal:neutral",
+            ),
+        ],
+        [
+            InlineKeyboardButton("📡 Status", callback_data="whale:status"),
+            InlineKeyboardButton("🛑 Stop Whale", callback_data="whale:stop"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 def markets_kb():

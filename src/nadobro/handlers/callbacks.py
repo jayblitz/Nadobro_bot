@@ -20,7 +20,7 @@ from src.nadobro.handlers.keyboards import (
     onboarding_mode_kb, onboarding_key_kb, onboarding_funding_kb,
     onboarding_risk_kb, onboarding_template_kb, onboarding_nav_kb,
     markets_kb, live_price_asset_kb, live_price_controls_kb,
-    mode_kb,
+    mode_kb, whale_preview_kb, whale_active_kb,
 )
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info,
@@ -97,6 +97,8 @@ async def handle_callback(update: Update, context: CallbackContext):
             await _handle_settings(query, data, telegram_id, context)
         elif data.startswith("strategy:"):
             await _handle_strategy(query, data, context, telegram_id)
+        elif data.startswith("whale:"):
+            await _handle_whale(query, data, context, telegram_id)
         elif data.startswith("keyimp:"):
             await _handle_key_import_confirm(query, data, context, telegram_id)
         elif data.startswith("mode:"):
@@ -1231,6 +1233,260 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Max Loss \\(from SL\\): *{escape_md(f'${max_loss:,.2f}')}*\n"
         f"Net Estimate: *{escape_md(net_str)}*"
     )
+
+
+async def _handle_whale(query, data, context, telegram_id):
+    from src.nadobro.services.whale_strategy import get_whale_strategy, generate_human_update
+
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+
+    whale_product = context.user_data.get("whale_product", "BTC")
+    whale_size = context.user_data.get("whale_size", 1000.0)
+
+    if action == "preview":
+        status = None
+        ws = get_whale_strategy(telegram_id)
+        if ws:
+            status = ws.get_status()
+
+        if status and status.get("active"):
+            mode = status.get("mode", "neutral")
+            product = status.get("product", "BTC")
+            target = status.get("target_size_usd", 1000)
+            signals = status.get("signals_received", 0)
+            pnl = status.get("pnl_usd", 0)
+            last_price = status.get("last_signal_price", 0)
+            pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+
+            mode_emoji = {"long": "🐂", "short": "🐻", "neutral": "🛡"}.get(mode, "❓")
+
+            text = (
+                f"🐋 *Whale Engine \\- ACTIVE*\n\n"
+                f"Mode: {mode_emoji} *{escape_md(mode.upper())}*\n"
+                f"Product: *{escape_md(product)}\\-PERP*\n"
+                f"Target Size: *{escape_md(f'${target:,.0f}')}*\n"
+                f"Signals Processed: *{escape_md(str(signals))}*\n"
+                f"Last Price: *{escape_md(f'${last_price:,.2f}')}*\n"
+                f"Est\\. PnL: *{escape_md(pnl_str)}*\n\n"
+                "Use the buttons below to send manual whale signals "
+                "or check detailed status\\."
+            )
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=whale_active_kb(mode),
+            )
+        else:
+            text = (
+                "🐋 *Whale Engine \\(Hybrid Whale Strategy\\)*\n\n"
+                "Combines delta\\-neutral funding farming with directional "
+                "trading based on whale signals\\.\n\n"
+                "*3 Modes:*\n"
+                "🐂 *Long* \\- Whale buying detected, ride the pump\n"
+                "🐻 *Short* \\- Whale dump detected, profit from the drop\n"
+                "🛡 *Neutral* \\- Farm ~15% APR funding fees \\(default\\)\n\n"
+                "*How it works:*\n"
+                "1\\. Choose product and target size\n"
+                "2\\. Start the engine \\(begins in Neutral mode\\)\n"
+                "3\\. Send signals manually or via TradingView webhook\n"
+                "4\\. Bot auto\\-switches positions and explains each move\n\n"
+                f"Product: *{escape_md(whale_product)}* \\| "
+                f"Size: *{escape_md(f'${whale_size:,.0f}')}*"
+            )
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=whale_preview_kb(whale_product, whale_size),
+            )
+
+    elif action == "pair":
+        product = parts[2] if len(parts) > 2 else "BTC"
+        context.user_data["whale_product"] = product
+        text = (
+            f"🐋 *Whale Engine*\n\n"
+            f"Product updated to *{escape_md(product)}\\-PERP*\n"
+            f"Target Size: *{escape_md(f'${whale_size:,.0f}')}*"
+        )
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=whale_preview_kb(product, whale_size),
+        )
+
+    elif action == "size":
+        try:
+            size = float(parts[2]) if len(parts) > 2 else 1000.0
+        except ValueError:
+            size = 1000.0
+        context.user_data["whale_size"] = size
+        text = (
+            f"🐋 *Whale Engine*\n\n"
+            f"Product: *{escape_md(whale_product)}\\-PERP*\n"
+            f"Target Size updated to *{escape_md(f'${size:,.0f}')}*"
+        )
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=whale_preview_kb(whale_product, size),
+        )
+
+    elif action == "start":
+        product = parts[2] if len(parts) > 2 else whale_product
+        try:
+            size = float(parts[3]) if len(parts) > 3 else whale_size
+        except (ValueError, IndexError):
+            size = whale_size
+
+        ws = get_whale_strategy(telegram_id)
+        if not ws:
+            await query.edit_message_text(
+                "⚠️ Create a wallet first \\(Wallet → Generate\\)\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
+            return
+
+        msg = ws.start(product=product, target_size_usd=size)
+        context.user_data["whale_product"] = product
+        context.user_data["whale_size"] = size
+
+        await query.edit_message_text(
+            f"🐋 {escape_md(msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=whale_active_kb("neutral"),
+        )
+
+    elif action == "stop":
+        ws = get_whale_strategy(telegram_id)
+        if not ws:
+            await query.edit_message_text(
+                "⚠️ No active wallet\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
+            return
+
+        msg = ws.stop()
+        await query.edit_message_text(
+            f"🐋 {escape_md(msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=whale_preview_kb(whale_product, whale_size),
+        )
+
+    elif action == "signal":
+        signal_type = parts[2] if len(parts) > 2 else "neutral"
+        ws = get_whale_strategy(telegram_id)
+        if not ws:
+            await query.edit_message_text(
+                "⚠️ No active wallet\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
+            return
+
+        status = ws.get_status()
+        if not status.get("active"):
+            await query.edit_message_text(
+                "⚠️ Whale Engine is not running\\. Start it first\\!",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=whale_preview_kb(whale_product, whale_size),
+            )
+            return
+
+        try:
+            product = status.get("product", "BTC")
+            client = ws.client
+            mp = client.get_market_price(ws._get_perp_product_id())
+            price = float(mp.get("mid", 0) or 0)
+        except Exception:
+            price = 0.0
+
+        if price <= 0:
+            await query.edit_message_text(
+                "⚠️ Could not fetch current price\\. Try again\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=whale_active_kb(status.get("mode", "neutral")),
+            )
+            return
+
+        result = ws.process_signal(signal_type, price)
+        await query.edit_message_text(
+            f"🐋 {escape_md(result)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=whale_active_kb(signal_type),
+        )
+
+    elif action == "status":
+        ws = get_whale_strategy(telegram_id)
+        if not ws:
+            await query.edit_message_text(
+                "⚠️ No active wallet\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
+            return
+
+        status = ws.get_status()
+        if not status.get("active"):
+            text = "🐋 *Whale Engine Status*\n\nStrategy is *not active*\\."
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=whale_preview_kb(whale_product, whale_size),
+            )
+            return
+
+        mode = status.get("mode", "neutral")
+        mode_emoji = {"long": "🐂", "short": "🐻", "neutral": "🛡"}.get(mode, "❓")
+        product = status.get("product", "BTC")
+        target = status.get("target_size_usd", 1000)
+        signals = status.get("signals_received", 0)
+        pnl = status.get("pnl_usd", 0)
+        last_price = status.get("last_signal_price", 0)
+        started = status.get("started_at", "N/A")
+        last_signal = status.get("last_signal_at", "N/A")
+        pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+
+        try:
+            client = ws.client
+            mp = client.get_market_price(ws._get_perp_product_id())
+            current_price = float(mp.get("mid", 0) or 0)
+            price_str = f"${current_price:,.2f}"
+        except Exception:
+            price_str = "N/A"
+
+        perp_exp = 0.0
+        try:
+            perp_exp = ws._get_perp_exposure()
+        except Exception:
+            pass
+
+        text = (
+            f"🐋 *Whale Engine Status*\n\n"
+            f"Mode: {mode_emoji} *{escape_md(mode.upper())}*\n"
+            f"Product: *{escape_md(product)}\\-PERP*\n"
+            f"Target Size: *{escape_md(f'${target:,.0f}')}*\n"
+            f"Current Price: *{escape_md(price_str)}*\n"
+            f"Perp Exposure: *{escape_md(f'{perp_exp:.6f}')}*\n\n"
+            f"Signals Processed: *{escape_md(str(signals))}*\n"
+            f"Last Signal Price: *{escape_md(f'${last_price:,.2f}')}*\n"
+            f"Last Signal: *{escape_md(str(last_signal))}*\n"
+            f"Started: *{escape_md(str(started))}*\n"
+            f"Est\\. PnL: *{escape_md(pnl_str)}*"
+        )
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=whale_active_kb(mode),
+        )
+
+    else:
+        await query.edit_message_text(
+            "Unknown whale action\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb(),
+        )
 
 
 async def _handle_key_import_confirm(query, data, context, telegram_id):

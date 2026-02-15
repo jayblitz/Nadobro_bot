@@ -178,6 +178,77 @@ async def run_bot():
 
     logger.info("Nadobro is live! Pure bot mode running.")
 
+    from aiohttp import web as aio_web
+    webhook_app = aio_web.Application()
+
+    async def handle_webhook(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return aio_web.json_response({"error": "invalid JSON"}, status=400)
+
+        action = body.get("action", "").lower().strip()
+        try:
+            price = float(body.get("price", 0))
+        except (ValueError, TypeError):
+            price = 0.0
+        telegram_id = body.get("telegram_id")
+
+        if not action or action not in ("long", "short", "neutral"):
+            return aio_web.json_response({"error": "action must be long/short/neutral"}, status=400)
+        if not telegram_id:
+            return aio_web.json_response({"error": "telegram_id required"}, status=400)
+
+        try:
+            telegram_id = int(telegram_id)
+        except (ValueError, TypeError):
+            return aio_web.json_response({"error": "invalid telegram_id"}, status=400)
+
+        from src.nadobro.services.whale_strategy import get_whale_strategy
+
+        ws = get_whale_strategy(telegram_id)
+        if not ws:
+            return aio_web.json_response({"error": "no wallet configured for this user"}, status=404)
+
+        status = ws.get_status()
+        if not status.get("active"):
+            return aio_web.json_response({"error": "whale strategy not active"}, status=400)
+
+        if price <= 0:
+            try:
+                mp = ws.client.get_market_price(ws._get_perp_product_id())
+                price = float(mp.get("mid", 0) or 0)
+            except Exception:
+                pass
+        if price <= 0:
+            return aio_web.json_response({"error": "could not determine price"}, status=400)
+
+        result = ws.process_signal(action, price)
+
+        try:
+            from src.nadobro.handlers.formatters import escape_md
+            await bot_app.bot.send_message(
+                chat_id=telegram_id,
+                text=f"🐋 {escape_md(result)}",
+                parse_mode="MarkdownV2",
+            )
+        except Exception as notify_err:
+            logger.warning("Webhook notification failed for %s: %s", telegram_id, notify_err)
+
+        return aio_web.json_response({"ok": True, "action": action, "price": price})
+
+    async def handle_health(request):
+        return aio_web.json_response({"status": "ok", "service": "nadobro"})
+
+    webhook_app.router.add_post("/webhook", handle_webhook)
+    webhook_app.router.add_get("/health", handle_health)
+
+    runner = aio_web.AppRunner(webhook_app)
+    await runner.setup()
+    webhook_site = aio_web.TCPSite(runner, "0.0.0.0", 8099)
+    await webhook_site.start()
+    logger.info("Webhook server started on port 8099")
+
     stop_event = asyncio.Event()
 
     def handle_signal(sig, frame):
@@ -196,6 +267,7 @@ async def run_bot():
         from src.nadobro.services.scheduler import stop_scheduler
         stop_scheduler()
         stop_runtime()
+        await runner.cleanup()
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()

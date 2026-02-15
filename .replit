@@ -43,3 +43,7 @@ run = ["python", "main.py"]
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 8099
+externalPort = 8099
