@@ -15,27 +15,6 @@ ADMIN_USER_IDS = "1124285818"
 WEBHOOK_SECRET = "9_-Jf6HYiHLv6JMw_sRmD_xVwA5LxNlfu3kp6Xu9h2E"
 
 [workflows]
-runButton = "Project"
-
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Nadobro Bot"
-
-[[workflows.workflow]]
-name = "Nadobro Bot"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python main.py"
-
-[workflows.workflow.metadata]
-outputType = "console"
 
 [deployment]
 deploymentTarget = "vm"
