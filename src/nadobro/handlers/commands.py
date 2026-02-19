@@ -18,7 +18,7 @@ from src.nadobro.handlers.keyboards import (
     onboarding_template_kb,
     onboarding_nav_kb,
 )
-from src.nadobro.services.bot_runtime import get_user_bot_status, stop_user_bot
+from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_user_bots
 from src.nadobro.services.trade_service import close_all_positions
 from src.nadobro.services.onboarding_service import (
     get_resume_step,
@@ -27,6 +27,12 @@ from src.nadobro.services.onboarding_service import (
     set_current_step,
 )
 from src.nadobro.services.debug_logger import debug_log
+from src.nadobro.config import DUAL_MODE_CARD_FLOW
+from src.nadobro.handlers.home_card import (
+    open_home_card_from_command,
+    open_help_card_from_command,
+    open_status_card_from_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +57,10 @@ async def cmd_start(update: Update, context: CallbackContext):
             "resume_step": resume_step,
         },
     )
+
+    if DUAL_MODE_CARD_FLOW:
+        await open_home_card_from_command(update, context, telegram_id)
+        return
 
     network = user.network_mode.value
     balance = None
@@ -84,6 +94,9 @@ async def cmd_start(update: Update, context: CallbackContext):
 
 
 async def cmd_help(update: Update, context: CallbackContext):
+    if DUAL_MODE_CARD_FLOW:
+        await open_help_card_from_command(update, context)
+        return
     await update.message.reply_text(
         fmt_help(),
         parse_mode=ParseMode.MARKDOWN_V2,
@@ -99,6 +112,10 @@ async def cmd_status(update: Update, context: CallbackContext):
     if status.get("last_error"):
         text += f"\nLast error: {escape_md(str(status.get('last_error')))}"
 
+    if DUAL_MODE_CARD_FLOW:
+        await open_status_card_from_command(update, context, text)
+        return
+
     await update.message.reply_text(
         text,
         parse_mode=ParseMode.MARKDOWN_V2,
@@ -108,17 +125,15 @@ async def cmd_status(update: Update, context: CallbackContext):
 
 async def cmd_stop_all(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    ok, msg = stop_user_bot(telegram_id, cancel_orders=False)
+    ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
     close_result = close_all_positions(telegram_id)
-    closed_msg = (
-        f"Closed {close_result.get('cancelled', 0)} open order\\(s\\)\\."
-        if close_result.get("success")
-        else f"No open orders closed \\({escape_md(close_result.get('error', 'none'))}\\)\\."
-    )
+    if close_result.get("success"):
+        closed_msg = f"Closed total position size {close_result.get('cancelled', 0):.8f}."
+    else:
+        closed_msg = f"No open orders closed ({close_result.get('error', 'none')})."
     prefix = "🛑" if ok else "⚠️"
     await update.message.reply_text(
-        f"{prefix} {escape_md(msg)}\n\n{closed_msg}",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        f"{prefix} {msg}\n\n{closed_msg}",
         reply_markup=persistent_menu_kb(),
     )
 

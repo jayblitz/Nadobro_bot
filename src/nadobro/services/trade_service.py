@@ -28,7 +28,13 @@ def check_rate_limit(telegram_id: int) -> tuple[bool, str]:
     return True, ""
 
 
-def validate_trade(telegram_id: int, product: str, size: float, leverage: float = 1.0) -> tuple[bool, str]:
+def validate_trade(
+    telegram_id: int,
+    product: str,
+    size: float,
+    leverage: float = 1.0,
+    enforce_rate_limit: bool = True,
+) -> tuple[bool, str]:
     product_id = get_product_id(product)
     if product_id is None:
         from src.nadobro.config import PRODUCTS as _P
@@ -89,9 +95,10 @@ def validate_trade(telegram_id: int, product: str, size: float, leverage: float 
     if notional < MIN_TRADE_SIZE_USD:
         return False, f"Minimum trade size is ${MIN_TRADE_SIZE_USD}."
 
-    allowed, msg = check_rate_limit(telegram_id)
-    if not allowed:
-        return False, msg
+    if enforce_rate_limit:
+        allowed, msg = check_rate_limit(telegram_id)
+        if not allowed:
+            return False, msg
 
     return True, ""
 
@@ -103,8 +110,15 @@ def execute_market_order(
     is_long: bool,
     leverage: float = 1.0,
     slippage_pct: float = 1.0,
+    enforce_rate_limit: bool = True,
 ) -> dict:
-    valid, msg = validate_trade(telegram_id, product, size, leverage)
+    valid, msg = validate_trade(
+        telegram_id,
+        product,
+        size,
+        leverage,
+        enforce_rate_limit=enforce_rate_limit,
+    )
     if not valid:
         return {"success": False, "error": msg}
 
@@ -158,8 +172,22 @@ def execute_market_order(
     return result
 
 
-def execute_limit_order(telegram_id: int, product: str, size: float, price: float, is_long: bool, leverage: float = 1.0) -> dict:
-    valid, msg = validate_trade(telegram_id, product, size, leverage)
+def execute_limit_order(
+    telegram_id: int,
+    product: str,
+    size: float,
+    price: float,
+    is_long: bool,
+    leverage: float = 1.0,
+    enforce_rate_limit: bool = True,
+) -> dict:
+    valid, msg = validate_trade(
+        telegram_id,
+        product,
+        size,
+        leverage,
+        enforce_rate_limit=enforce_rate_limit,
+    )
     if not valid:
         return {"success": False, "error": msg}
 
@@ -213,6 +241,45 @@ def execute_limit_order(telegram_id: int, product: str, size: float, price: floa
     return result
 
 
+def _normalize_net_positions(positions: list) -> dict[int, dict]:
+    """
+    Build net position by product with de-dup protection.
+
+    Some client payloads can include duplicated entries for the same product from
+    different source lists. We fingerprint rows and collapse to a net signed size
+    so close actions execute exactly once per product.
+    """
+    seen_rows = set()
+    net_by_product: dict[int, dict] = {}
+
+    for p in positions or []:
+        try:
+            pid = int(p.get("product_id", -1))
+            if pid < 0:
+                continue
+            side = str(p.get("side", "") or "").upper()
+            amount = float(p.get("amount", 0) or 0)
+            if amount <= 0:
+                continue
+            # Fingerprint rounded values to suppress near-identical duplicates.
+            fp = (pid, side, round(amount, 12), round(float(p.get("price", 0) or 0), 8))
+            if fp in seen_rows:
+                continue
+            seen_rows.add(fp)
+
+            signed = amount if side == "LONG" else -amount
+            current = net_by_product.get(
+                pid,
+                {"product_name": p.get("product_name", get_product_name(pid)), "signed_amount": 0.0},
+            )
+            current["signed_amount"] = float(current.get("signed_amount", 0.0)) + signed
+            net_by_product[pid] = current
+        except Exception:
+            continue
+
+    return net_by_product
+
+
 def close_position(telegram_id: int, product: str, size: float = None) -> dict:
     product_id = get_product_id(product)
     if product_id is None:
@@ -221,20 +288,26 @@ def close_position(telegram_id: int, product: str, size: float = None) -> dict:
     client = get_user_nado_client(telegram_id)
     if not client:
         return {"success": False, "error": "Wallet not initialized."}
-
-    orders = client.get_open_orders(product_id)
-    if not orders:
+    net_positions = _normalize_net_positions(client.get_all_positions() or [])
+    product_pos = net_positions.get(product_id)
+    if not product_pos:
         return {"success": False, "error": f"No open positions on {product}."}
 
-    cancelled = 0
-    for o in orders:
-        r = client.cancel_order(product_id, o["digest"])
-        if r["success"]:
-            cancelled += 1
+    signed_amount = float(product_pos.get("signed_amount", 0) or 0)
+    pos_size = abs(signed_amount)
+    if pos_size <= 0:
+        return {"success": False, "error": f"No open positions on {product}."}
+
+    close_size = min(pos_size, float(size)) if size else pos_size
+    # LONG closes with SELL, SHORT closes with BUY.
+    is_buy = signed_amount < 0
+    r = client.place_market_order(product_id, close_size, is_buy=is_buy, slippage_pct=1.0)
+    if not r.get("success"):
+        return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
 
     return {
         "success": True,
-        "cancelled": cancelled,
+        "cancelled": close_size,
         "product": get_product_name(product_id),
     }
 
@@ -244,21 +317,26 @@ def close_all_positions(telegram_id: int) -> dict:
     if not client:
         return {"success": False, "error": "Wallet not initialized."}
 
-    positions = client.get_all_positions()
-    if not positions:
+    net_positions = _normalize_net_positions(client.get_all_positions() or [])
+    if not net_positions:
         return {"success": False, "error": "No open positions found."}
 
-    cancelled = 0
+    cancelled = 0.0
     errors = []
     products_closed = set()
-    for p in positions:
+    for pid, p in net_positions.items():
         try:
-            r = client.cancel_order(p["product_id"], p["digest"])
+            signed_amount = float(p.get("signed_amount", 0) or 0)
+            pos_size = abs(signed_amount)
+            if pos_size <= 0:
+                continue
+            is_buy = signed_amount < 0
+            r = client.place_market_order(pid, pos_size, is_buy=is_buy, slippage_pct=1.0)
             if r["success"]:
-                cancelled += 1
-                products_closed.add(p["product_name"])
+                cancelled += pos_size
+                products_closed.add(p.get("product_name", get_product_name(pid)))
             else:
-                errors.append(f"{p['product_name']}: {r.get('error', 'unknown')}")
+                errors.append(f"{p.get('product_name', get_product_name(pid))}: {r.get('error', 'unknown')}")
         except Exception as e:
             errors.append(f"{p.get('product_name', 'unknown')}: {str(e)}")
 

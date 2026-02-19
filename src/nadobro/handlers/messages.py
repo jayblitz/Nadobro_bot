@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
@@ -8,6 +9,7 @@ from src.nadobro.services.user_service import (
     ensure_active_wallet_ready,
 )
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
+from src.nadobro.services.trade_service import close_position, close_all_positions, get_trade_analytics
 from src.nadobro.services.alert_service import create_alert
 from src.nadobro.services.knowledge_service import answer_nado_question, stream_nado_answer
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
@@ -23,7 +25,7 @@ from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
-    fmt_trade_result, fmt_wallet_info, fmt_settings,
+    fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
@@ -31,12 +33,24 @@ from src.nadobro.handlers.keyboards import (
     trade_leverage_reply_kb, trade_size_reply_kb, trade_tpsl_kb,
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
     mode_kb, strategy_hub_kb, wallet_kb, positions_kb, markets_kb,
-    alerts_kb, settings_kb,
+    alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb,
 )
+from src.nadobro.handlers.trade_card import (
+    open_trade_card_from_message,
+    handle_trade_card_text_input,
+    is_trade_card_mode_enabled,
+)
+from src.nadobro.handlers.home_card import open_home_card_view_from_message
+from src.nadobro.handlers.intent_handlers import (
+    handle_pending_text_trade_confirmation,
+    handle_trade_intent_message,
+)
+from src.nadobro.handlers.intent_parser import parse_interaction_intent
 
 logger = logging.getLogger(__name__)
 
 TRADE_FLOW_STEPS = ["direction", "order_type", "product", "leverage", "size", "limit_price", "tpsl", "confirm"]
+PENDING_TEXT_CLOSE_ALL_KEY = "pending_text_close_all"
 
 
 _STATE_REQUIRED_ACTIONS = {
@@ -95,6 +109,15 @@ def _clear_trade_flow(context):
     context.user_data.pop("trade_flow_limit_price_input", None)
 
 
+def _looks_like_private_key_candidate(raw_text: str) -> bool:
+    text = (raw_text or "").strip()
+    if text.startswith("0x") or text.startswith("0X"):
+        text = text[2:]
+    if len(text) != 64:
+        return False
+    return bool(re.fullmatch(r"[0-9a-fA-F]{64}", text))
+
+
 async def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
         return
@@ -135,6 +158,15 @@ async def handle_message(update: Update, context: CallbackContext):
                     pass
             return
 
+    if await handle_trade_card_text_input(update, context, telegram_id, text):
+        return
+
+    if await handle_pending_text_trade_confirmation(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
+        return
+
     if await _handle_trade_flow_free_text(update, context, telegram_id, text):
         return
 
@@ -150,11 +182,45 @@ async def handle_message(update: Update, context: CallbackContext):
     if await _handle_pending_strategy_input(update, context, telegram_id, text):
         return
 
+    if await handle_trade_intent_message(update, context, telegram_id, text):
+        return
+
+    if await _handle_interaction_intent_message(update, context, telegram_id, text):
+        return
+
     await _handle_nado_question(update, context, text)
 
 
 async def _dispatch_reply_button(update, context, telegram_id, callback_data, text):
+    if callback_data == "nav:main":
+        if is_trade_card_mode_enabled():
+            await open_home_card_view_from_message(update, context, telegram_id, "nav:main")
+            return
+        await update.message.reply_text(
+            "Use /start to open the dashboard\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return
+
+    if is_trade_card_mode_enabled() and callback_data in (
+        "pos:view",
+        "portfolio:view",
+        "wallet:view",
+        "mkt:menu",
+        "nav:strategy_hub",
+        "alert:menu",
+        "settings:view",
+        "nav:mode",
+    ):
+        target = "home:mode" if callback_data == "nav:mode" else callback_data
+        await open_home_card_view_from_message(update, context, telegram_id, target)
+        return
+
     if callback_data == "nav:trade":
+        if is_trade_card_mode_enabled():
+            await open_trade_card_from_message(update, context, telegram_id)
+            return
         await update.message.reply_text(
             "📊 *Trade*\n\nSelect direction:",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -165,6 +231,17 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data.startswith("trade_flow:"):
+        if is_trade_card_mode_enabled():
+            if callback_data in ("trade_flow:home", "trade_flow:cancel"):
+                _clear_trade_flow(context)
+                await update.message.reply_text(
+                    "↩️ Returned to home\\.",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=persistent_menu_kb(),
+                )
+                return
+            await open_trade_card_from_message(update, context, telegram_id)
+            return
         await _handle_trade_flow_button(update, context, telegram_id, callback_data)
         return
 
@@ -221,6 +298,30 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=positions_kb(positions or []),
+        )
+        return
+
+    if callback_data == "portfolio:view":
+        await update.message.chat.send_action(ChatAction.TYPING)
+        client = get_user_nado_client(telegram_id)
+        if not client:
+            await update.message.reply_text(
+                "⚠️ Wallet not initialized\\. Use /start first\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
+        positions = client.get_all_positions() or []
+        prices = None
+        try:
+            prices = client.get_all_market_prices()
+        except Exception:
+            pass
+        stats = get_trade_analytics(telegram_id)
+        msg = fmt_portfolio(stats, positions, prices)
+        await update.message.reply_text(
+            msg,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=portfolio_kb(has_positions=bool(positions)),
         )
         return
 
@@ -853,6 +954,16 @@ async def _handle_pending_key_import(update, context, telegram_id, text):
         )
         return True
 
+    lowered = text.strip().lower()
+    if lowered in ("cancel", "stop", "abort", "exit", "skip", "nevermind", "never mind"):
+        context.user_data.pop("pending_key_import", None)
+        await update.message.reply_text(
+            "✅ Key import cancelled\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return True
+
     if is_probable_mnemonic(text):
         await _delete_user_message(update)
         await update.message.reply_text(
@@ -862,6 +973,11 @@ async def _handle_pending_key_import(update, context, telegram_id, text):
         )
         context.user_data.pop("pending_key_import", None)
         return True
+
+    if not _looks_like_private_key_candidate(text):
+        # User sent normal chat text while import was pending; cancel import so chat can continue.
+        context.user_data.pop("pending_key_import", None)
+        return False
 
     network = pending.get("network", "testnet")
     try:
@@ -1062,6 +1178,96 @@ async def _handle_nado_question(update, context, question):
             "⚠️ Something went wrong answering your question\\. Please try again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
+
+
+async def _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
+    if not context.user_data.get(PENDING_TEXT_CLOSE_ALL_KEY):
+        return False
+
+    normalized = (text or "").strip().lower()
+    if normalized in ("cancel", "no", "n", "abort"):
+        context.user_data.pop(PENDING_TEXT_CLOSE_ALL_KEY, None)
+        await update.message.reply_text(
+            "❌ Close-all request cancelled\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return True
+
+    if normalized not in ("confirm", "yes", "y", "execute", "close all"):
+        await update.message.reply_text(
+            "Type `confirm` to close all positions or `cancel` to discard\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=confirm_close_all_kb(),
+        )
+        return True
+
+    context.user_data.pop(PENDING_TEXT_CLOSE_ALL_KEY, None)
+    result = close_all_positions(telegram_id)
+    if result.get("success"):
+        products = ", ".join(result.get("products", []))
+        msg = f"✅ Closed total size {escape_md(str(result.get('cancelled', 0)))} across {escape_md(products)}\\."
+    else:
+        msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
+    await update.message.reply_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=persistent_menu_kb(),
+    )
+    return True
+
+
+async def _handle_interaction_intent_message(update, context, telegram_id, text):
+    intent = parse_interaction_intent(text)
+    if not intent:
+        return False
+
+    action = intent.get("action")
+    if action == "open_view":
+        callback_data = intent.get("target")
+        if not callback_data:
+            return False
+        await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
+        return True
+
+    if action == "close_menu":
+        await update.message.reply_text(
+            "*Close Position*\n\nSelect the product to close:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=close_product_kb(),
+        )
+        return True
+
+    if action == "close_all":
+        context.user_data[PENDING_TEXT_CLOSE_ALL_KEY] = True
+        await update.message.reply_text(
+            "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?\n\n"
+            "Type `confirm` to execute or `cancel` to discard\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=confirm_close_all_kb(),
+        )
+        return True
+
+    if action == "close_product":
+        product = intent.get("product")
+        if not product:
+            return False
+        result = close_position(telegram_id, product)
+        if result.get("success"):
+            msg = (
+                f"✅ Closed {escape_md(str(result.get('cancelled', 0)))} "
+                f"{escape_md(result.get('product', product))} position size\\."
+            )
+        else:
+            msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
+        await update.message.reply_text(
+            msg,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return True
+
+    return False
 
 
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:

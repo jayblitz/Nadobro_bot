@@ -384,6 +384,58 @@ def fmt_analytics(stats):
     return "\n".join(lines)
 
 
+def fmt_portfolio(stats, positions, prices=None):
+    total_trades = int(stats.get("total_trades", 0) or 0)
+    total_volume = float(stats.get("total_volume", 0) or 0)
+    total_pnl = float(stats.get("total_pnl", 0) or 0)
+    win_rate = float(stats.get("win_rate", 0) or 0)
+
+    pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+    pnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
+
+    lines = [
+        "📁 *Portfolio*",
+        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        "",
+        f"📌 *Open Positions:* {escape_md(str(len(positions or [])))}",
+        f"💰 *Total Volume:* {escape_md(f'${total_volume:,.2f}')}",
+        f"{pnl_emoji} *Total PnL:* {escape_md(pnl_str)}",
+        f"🏆 *Win Rate:* {escape_md(f'{win_rate:.1f}%')} \\| Trades: {escape_md(str(total_trades))}",
+    ]
+
+    if not positions:
+        lines.append("")
+        lines.append("No open positions right now\\.")
+        return "\n".join(lines)
+
+    lines.extend(["", "*Top Open Positions*"])
+    for p in (positions or [])[:5]:
+        side = p.get("side", "LONG")
+        amount = abs(float(p.get("amount", 0) or 0))
+        pname = p.get("product_name", "???")
+        base = pname.replace("-PERP", "")
+        entry = float(p.get("price", 0) or 0)
+        current = 0.0
+        if prices and base in prices:
+            try:
+                current = float((prices.get(base) or {}).get("mid", 0) or 0)
+            except Exception:
+                current = 0.0
+
+        pnl_text = "N/A"
+        if current and entry:
+            pnl = (current - entry) * amount if side == "LONG" else (entry - current) * amount
+            pnl_text = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+
+        lines.append(
+            f"• {escape_md(side)} {escape_md(f'{amount:.4f}')} {escape_md(pname)} \\| PnL: {escape_md(pnl_text)}"
+        )
+
+    if len(positions) > 5:
+        lines.append(f"• \\...and {escape_md(str(len(positions) - 5))} more")
+    return "\n".join(lines)
+
+
 def fmt_settings(user_data):
     leverage = user_data.get("default_leverage", 1)
     slippage = user_data.get("slippage", 1)

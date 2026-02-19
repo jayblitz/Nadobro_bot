@@ -1,5 +1,5 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from src.nadobro.config import PRODUCTS
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW
 
 PERP_PRODUCTS = [name for name, info in PRODUCTS.items() if info["type"] == "perp"]
 
@@ -15,15 +15,27 @@ SIZE_PRESETS = {
 }
 
 
+HOME_BTN_TRADE = "📊 Trade"
+HOME_BTN_PORTFOLIO = "📁 Portfolio"
+HOME_BTN_HOME = "🏠 Home"
+HOME_BTN_WALLET = "💼 Wallet"
+HOME_BTN_MARKETS = "💹 Markets"
+HOME_BTN_STRATEGIES = "📈 Strategies"
+HOME_BTN_ALERTS = "🔔 Alerts"
+HOME_BTN_SETTINGS = "⚙️ Settings"
+HOME_BTN_MODE = "🔄 Mode"
+
+
 REPLY_BUTTON_MAP = {
-    "📊 Trade": "nav:trade",
-    "📋 Positions": "pos:view",
-    "👛 Wallet": "wallet:view",
-    "💹 Markets": "mkt:menu",
-    "📈 Strategies": "nav:strategy_hub",
-    "🔔 Alerts": "alert:menu",
-    "⚙️ Settings": "settings:view",
-    "🔄 Mode": "nav:mode",
+    HOME_BTN_HOME: "nav:main",
+    HOME_BTN_TRADE: "nav:trade",
+    HOME_BTN_PORTFOLIO: "portfolio:view",
+    HOME_BTN_WALLET: "wallet:view",
+    HOME_BTN_MARKETS: "mkt:menu",
+    HOME_BTN_STRATEGIES: "nav:strategy_hub",
+    HOME_BTN_ALERTS: "alert:menu",
+    HOME_BTN_SETTINGS: "settings:view",
+    HOME_BTN_MODE: "nav:mode",
     "🟢 Long": "trade_flow:direction:long",
     "🔴 Short": "trade_flow:direction:short",
     "◀ Home": "trade_flow:home",
@@ -46,6 +58,24 @@ REPLY_BUTTON_MAP = {
     "❌ Cancel": "trade_flow:cancel",
 }
 
+# Backward-compatible aliases for older keyboards/client emoji fallbacks.
+REPLY_BUTTON_MAP.update({
+    "📋 Positions": "pos:view",
+    "📁 Portfolio": "portfolio:view",
+    "Portofolio": "portfolio:view",
+    "Portfolio": "portfolio:view",
+    "👛 Wallet": "wallet:view",
+    "Trade": "nav:trade",
+    "Home": "nav:main",
+    "Positions": "pos:view",
+    "Wallet": "wallet:view",
+    "Markets": "mkt:menu",
+    "Strategies": "nav:strategy_hub",
+    "Alerts": "alert:menu",
+    "Settings": "settings:view",
+    "Mode": "nav:mode",
+})
+
 for name in PERP_PRODUCTS:
     REPLY_BUTTON_MAP[name] = f"trade_flow:product:{name}"
 
@@ -56,22 +86,60 @@ for preset_product, presets in SIZE_PRESETS.items():
 
 
 def persistent_menu_kb():
+    if DUAL_MODE_CARD_FLOW:
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton(HOME_BTN_HOME)]],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("📊 Trade"), KeyboardButton("📋 Positions")],
-            [KeyboardButton("👛 Wallet"), KeyboardButton("💹 Markets")],
-            [KeyboardButton("📈 Strategies"), KeyboardButton("🔔 Alerts")],
-            [KeyboardButton("⚙️ Settings"), KeyboardButton("🔄 Mode")],
+            [KeyboardButton(HOME_BTN_TRADE), KeyboardButton(HOME_BTN_PORTFOLIO)],
+            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_MARKETS)],
+            [KeyboardButton(HOME_BTN_STRATEGIES), KeyboardButton(HOME_BTN_ALERTS)],
+            [KeyboardButton(HOME_BTN_SETTINGS), KeyboardButton(HOME_BTN_MODE)],
         ],
         resize_keyboard=True,
         is_persistent=True,
     )
 
 
+def home_card_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Trade", callback_data="card:trade:start"),
+            InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
+        ],
+        [
+            InlineKeyboardButton("💼 Wallet", callback_data="wallet:view"),
+            InlineKeyboardButton("💹 Markets", callback_data="mkt:menu"),
+        ],
+        [
+            InlineKeyboardButton("📈 Strategies", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🔔 Alerts", callback_data="alert:menu"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings:view"),
+            InlineKeyboardButton("🔄 Mode", callback_data="home:mode"),
+        ],
+    ])
+
+
+def portfolio_kb(has_positions: bool = False):
+    rows = [
+        [InlineKeyboardButton("📌 Open Positions", callback_data="pos:view")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:view")],
+    ]
+    if has_positions:
+        rows.insert(1, [InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
+
+
 def trade_direction_kb():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🟢 Long", api_kwargs={"style": "primary"}), KeyboardButton("🔴 Short", api_kwargs={"style": "destructive"})],
+            [KeyboardButton("🟢 Long"), KeyboardButton("🔴 Short")],
             [KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
@@ -141,7 +209,7 @@ def trade_tpsl_edit_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("Set TP"), KeyboardButton("Set SL")],
-            [KeyboardButton("✅ Done", api_kwargs={"style": "primary"}), KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
+            [KeyboardButton("✅ Done"), KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
@@ -150,11 +218,164 @@ def trade_tpsl_edit_kb():
 def trade_confirm_reply_kb():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("✅ Confirm Trade", api_kwargs={"style": "primary"}), KeyboardButton("❌ Cancel", api_kwargs={"style": "destructive"})],
+            [KeyboardButton("✅ Confirm Trade"), KeyboardButton("❌ Cancel")],
             [KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
     )
+
+
+def trade_card_cb(session_id: str, action: str, value: str = "") -> str:
+    if value:
+        return f"card:trade:{session_id}:{action}:{value}"
+    return f"card:trade:{session_id}:{action}"
+
+
+def trade_card_start_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Trade", callback_data="card:trade:start")],
+    ])
+
+
+def trade_card_direction_kb(session_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🟢 Long", callback_data=trade_card_cb(session_id, "direction", "long")),
+            InlineKeyboardButton("🔴 Short", callback_data=trade_card_cb(session_id, "direction", "short")),
+        ],
+        [
+            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+            InlineKeyboardButton("❌ Cancel", callback_data=trade_card_cb(session_id, "cancel")),
+        ],
+    ])
+
+
+def trade_card_order_type_kb(session_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📈 Market", callback_data=trade_card_cb(session_id, "order", "market")),
+            InlineKeyboardButton("📉 Limit", callback_data=trade_card_cb(session_id, "order", "limit")),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+        ],
+    ])
+
+
+def trade_card_product_kb(session_id: str):
+    rows = []
+    row = []
+    for name in PERP_PRODUCTS:
+        row.append(InlineKeyboardButton(name, callback_data=trade_card_cb(session_id, "product", name)))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+        InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def trade_card_leverage_kb(session_id: str):
+    leverages = [1, 2, 3, 5, 10, 20, 40]
+    rows = []
+    row = []
+    for lev in leverages:
+        row.append(InlineKeyboardButton(f"{lev}x", callback_data=trade_card_cb(session_id, "lev", str(lev))))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+        InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def trade_card_size_kb(session_id: str, product: str):
+    presets = SIZE_PRESETS.get(product.upper(), [1, 5, 10, 50, 100])
+    rows = []
+    row = []
+    for s in presets:
+        label = str(int(s)) if s == int(s) else str(s)
+        row.append(InlineKeyboardButton(label, callback_data=trade_card_cb(session_id, "size", label)))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("✏️ Custom", callback_data=trade_card_cb(session_id, "size_custom"))])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+        InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def trade_card_limit_price_input_kb(session_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+        ],
+    ])
+
+
+def trade_card_tpsl_kb(session_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📐 Set TP/SL", callback_data=trade_card_cb(session_id, "tpsl", "edit")),
+            InlineKeyboardButton("⏭ Skip", callback_data=trade_card_cb(session_id, "tpsl", "skip")),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+        ],
+    ])
+
+
+def trade_card_tpsl_edit_kb(session_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Set TP", callback_data=trade_card_cb(session_id, "tp_prompt")),
+            InlineKeyboardButton("Set SL", callback_data=trade_card_cb(session_id, "sl_prompt")),
+        ],
+        [
+            InlineKeyboardButton("✅ Done", callback_data=trade_card_cb(session_id, "tpsl_done")),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+        ],
+    ])
+
+
+def trade_card_text_input_kb(session_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+        ],
+    ])
+
+
+def trade_card_confirm_kb(session_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirm Trade", callback_data=trade_card_cb(session_id, "confirm")),
+            InlineKeyboardButton("❌ Cancel", callback_data=trade_card_cb(session_id, "cancel")),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
+            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+        ],
+    ])
 
 
 def trade_product_kb(action):
@@ -205,8 +426,8 @@ def trade_leverage_kb(product, action, size):
 def trade_confirm_kb(trade_id="pending"):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Confirm Trade", callback_data=f"exec_trade:{trade_id}", api_kwargs={"style": "primary"}),
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel_trade", api_kwargs={"style": "destructive"}),
+            InlineKeyboardButton("✅ Confirm Trade", callback_data=f"exec_trade:{trade_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_trade"),
         ],
     ])
 
@@ -218,10 +439,10 @@ def positions_kb(positions):
         pname = p.get("product_name", "").replace("-PERP", "")
         if pname and pname not in seen:
             seen.add(pname)
-            rows.append([InlineKeyboardButton(f"❌ Close {pname}-PERP", callback_data=f"pos:close:{pname}", api_kwargs={"style": "destructive"})])
+            rows.append([InlineKeyboardButton(f"❌ Close {pname}-PERP", callback_data=f"pos:close:{pname}")])
     if positions:
-        rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all", api_kwargs={"style": "destructive"})])
-    rows.append([InlineKeyboardButton("◀ Back", callback_data="nav:main")])
+        rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -236,7 +457,7 @@ def wallet_kb():
         ],
         [
             InlineKeyboardButton("♻️ Rotate Active Key", callback_data="wallet:rotate"),
-            InlineKeyboardButton("🗑 Remove Active Key", callback_data="wallet:remove_active", api_kwargs={"style": "destructive"}),
+            InlineKeyboardButton("🗑 Remove Active Key", callback_data="wallet:remove_active"),
         ],
         [
             InlineKeyboardButton("👁️ Review Private Key", callback_data="wallet:view_key"),
@@ -289,7 +510,6 @@ def alert_delete_kb(alerts):
         rows.append([InlineKeyboardButton(
             f"🗑 #{a['id']} {a['product']} {a['condition']} ${a['target']:,.2f}",
             callback_data=f"alert:del:{a['id']}",
-            api_kwargs={"style": "destructive"},
         )])
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data="alert:menu"),
@@ -355,7 +575,7 @@ def risk_profile_kb():
             InlineKeyboardButton("⚖️ Balanced", callback_data="settings:risk:balanced"),
         ],
         [
-            InlineKeyboardButton("🔥 Aggressive", callback_data="settings:risk:aggressive", api_kwargs={"style": "destructive"}),
+            InlineKeyboardButton("🔥 Aggressive", callback_data="settings:risk:aggressive"),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="settings:view"),
@@ -367,9 +587,6 @@ def risk_profile_kb():
 def strategy_hub_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🐋 Whale Engine", callback_data="whale:preview"),
-        ],
-        [
             InlineKeyboardButton("📈 Market Maker", callback_data="strategy:preview:mm"),
             InlineKeyboardButton("🧮 Grid", callback_data="strategy:preview:grid"),
         ],
@@ -380,74 +597,6 @@ def strategy_hub_kb():
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
         ],
     ])
-
-
-def whale_preview_kb(product: str = "BTC", target_size: float = 1000.0):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("BTC", callback_data="whale:pair:BTC"),
-            InlineKeyboardButton("ETH", callback_data="whale:pair:ETH"),
-            InlineKeyboardButton("SOL", callback_data="whale:pair:SOL"),
-        ],
-        [
-            InlineKeyboardButton("$500", callback_data="whale:size:500"),
-            InlineKeyboardButton("$1000", callback_data="whale:size:1000"),
-            InlineKeyboardButton("$2500", callback_data="whale:size:2500"),
-        ],
-        [
-            InlineKeyboardButton(
-                f"🚀 Start Whale ({product} ${target_size:,.0f})",
-                callback_data=f"whale:start:{product}:{int(target_size)}",
-                api_kwargs={"style": "primary"},
-            ),
-        ],
-        [
-            InlineKeyboardButton("📡 Whale Status", callback_data="whale:status"),
-            InlineKeyboardButton("🛑 Stop Whale", callback_data="whale:stop", api_kwargs={"style": "destructive"}),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
-            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-        ],
-    ])
-
-
-def whale_active_kb(current_mode: str = "neutral"):
-    mode_labels = {
-        "long": "🐂 Long (Active)",
-        "short": "🐻 Short (Active)",
-        "neutral": "🛡 Neutral (Active)",
-    }
-    rows = [
-        [
-            InlineKeyboardButton(
-                "🐂 Go Long" if current_mode != "long" else mode_labels["long"],
-                callback_data="whale:signal:long",
-                api_kwargs={"style": "primary"},
-            ),
-            InlineKeyboardButton(
-                "🐻 Go Short" if current_mode != "short" else mode_labels["short"],
-                callback_data="whale:signal:short",
-                api_kwargs={"style": "destructive"},
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🛡 Go Neutral" if current_mode != "neutral" else mode_labels["neutral"],
-                callback_data="whale:signal:neutral",
-                api_kwargs={"style": "primary"},
-            ),
-        ],
-        [
-            InlineKeyboardButton("📡 Status", callback_data="whale:status"),
-            InlineKeyboardButton("🛑 Stop Whale", callback_data="whale:stop", api_kwargs={"style": "destructive"}),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
-            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-        ],
-    ]
-    return InlineKeyboardMarkup(rows)
 
 
 def markets_kb():
@@ -485,7 +634,7 @@ def live_price_asset_kb():
 def live_price_controls_kb(product: str):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🛑 Stop Live", callback_data="mkt:live_stop", api_kwargs={"style": "destructive"}),
+            InlineKeyboardButton("🛑 Stop Live", callback_data="mkt:live_stop"),
             InlineKeyboardButton("Switch Asset", callback_data="mkt:live_menu"),
         ],
         [
@@ -498,7 +647,7 @@ def live_price_controls_kb(product: str):
 def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Mark Active", callback_data=f"strategy:activate:{strategy_id}", api_kwargs={"style": "primary"}),
+            InlineKeyboardButton("✅ Mark Active", callback_data=f"strategy:activate:{strategy_id}"),
             InlineKeyboardButton("⚙️ Tune Risk", callback_data="settings:risk_menu"),
         ],
         [
@@ -513,7 +662,6 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
             InlineKeyboardButton(
                 f"🚀 Start {selected_product.upper()}",
                 callback_data=f"strategy:start:{strategy_id}:{selected_product.upper()}",
-                api_kwargs={"style": "primary"},
             ),
         ],
         [
@@ -521,7 +669,7 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
         ],
         [
             InlineKeyboardButton("📡 Bot Status", callback_data="strategy:status"),
-            InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop", api_kwargs={"style": "destructive"}),
+            InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop"),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
@@ -547,8 +695,8 @@ def close_product_kb():
 def confirm_close_all_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Yes, Close All", callback_data="pos:confirm_close_all", api_kwargs={"style": "primary"}),
-            InlineKeyboardButton("❌ Cancel", callback_data="nav:main", api_kwargs={"style": "destructive"}),
+            InlineKeyboardButton("✅ Yes, Close All", callback_data="pos:confirm_close_all"),
+            InlineKeyboardButton("❌ Cancel", callback_data="nav:main"),
         ],
     ])
 
@@ -565,8 +713,9 @@ def mode_kb(current_network="testnet"):
 
 
 def back_kb(target="main"):
+    label = "🏠 Home" if target == "main" else "◀ Back"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("◀ Back", callback_data=f"nav:{target}")],
+        [InlineKeyboardButton(label, callback_data=f"nav:{target}")],
     ])
 
 
@@ -634,7 +783,7 @@ def onboarding_risk_kb():
             InlineKeyboardButton("🛡 Conservative", callback_data="onboarding:set_risk:conservative"),
             InlineKeyboardButton("⚖️ Balanced", callback_data="onboarding:set_risk:balanced"),
         ],
-        [InlineKeyboardButton("🔥 Aggressive", callback_data="onboarding:set_risk:aggressive", api_kwargs={"style": "destructive"})],
+        [InlineKeyboardButton("🔥 Aggressive", callback_data="onboarding:set_risk:aggressive")],
         [
             InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
             InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),

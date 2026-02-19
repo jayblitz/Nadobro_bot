@@ -164,6 +164,38 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
     return True, "Strategy bot stopped. Open orders cancellation requested."
 
 
+def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[bool, str]:
+    stopped = 0
+    with get_session() as session:
+        rows = session.query(BotState).filter(BotState.key.like(f"{STATE_PREFIX}{telegram_id}:%")).all()
+        for row in rows:
+            try:
+                user_network = row.key.replace(STATE_PREFIX, "")
+                user_id_str, network = user_network.split(":")
+                if int(user_id_str) != int(telegram_id):
+                    continue
+                state = json.loads(row.value or "{}")
+                if not state.get("running"):
+                    continue
+                state["running"] = False
+                row.value = json.dumps(state)
+                row.updated_at = datetime.utcnow()
+                task = _tasks.pop(_task_key(telegram_id, network), None)
+                if task:
+                    task.cancel()
+                stopped += 1
+            except Exception:
+                continue
+        session.commit()
+
+    if cancel_orders:
+        close_all_positions(telegram_id)
+
+    if stopped > 0:
+        return True, f"Stopped {stopped} running strategy loop(s)."
+    return False, "No running strategy bot found."
+
+
 def get_user_bot_status(telegram_id: int) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "testnet"
@@ -190,7 +222,10 @@ def stop_runtime():
         _tasks.pop(task_id, None)
 
 
-def restore_running_bots():
+def restore_running_bots(enabled: bool = False):
+    if not enabled:
+        logger.info("Skipping strategy auto-restore on startup (disabled).")
+        return
     with get_session() as session:
         rows = session.query(BotState).filter(BotState.key.like(f"{STATE_PREFIX}%")).all()
         for row in rows:
@@ -323,8 +358,24 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
     sell_price = mid * (1.0 + half_spread)
 
     # Keep each cycle bounded to 2 maker orders.
-    buy_result = execute_limit_order(telegram_id, product, size, buy_price, is_long=True, leverage=leverage)
-    sell_result = execute_limit_order(telegram_id, product, size, sell_price, is_long=False, leverage=leverage)
+    buy_result = execute_limit_order(
+        telegram_id,
+        product,
+        size,
+        buy_price,
+        is_long=True,
+        leverage=leverage,
+        enforce_rate_limit=False,
+    )
+    sell_result = execute_limit_order(
+        telegram_id,
+        product,
+        size,
+        sell_price,
+        is_long=False,
+        leverage=leverage,
+        enforce_rate_limit=False,
+    )
 
     state["last_run_ts"] = time.time()
     state["runs"] = int(state.get("runs") or 0) + 1

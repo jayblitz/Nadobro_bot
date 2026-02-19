@@ -8,7 +8,7 @@ from telegram.constants import ParseMode, ChatAction
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_dashboard, fmt_positions, fmt_balance,
     fmt_prices, fmt_funding, fmt_trade_preview, fmt_trade_result,
-    fmt_wallet_info, fmt_alerts, fmt_history, fmt_analytics,
+    fmt_wallet_info, fmt_alerts, fmt_history, fmt_analytics, fmt_portfolio,
     fmt_settings, fmt_help, fmt_price, fmt_onboarding_step, fmt_status_overview,
 )
 from src.nadobro.handlers.keyboards import (
@@ -20,8 +20,10 @@ from src.nadobro.handlers.keyboards import (
     onboarding_mode_kb, onboarding_key_kb, onboarding_funding_kb,
     onboarding_risk_kb, onboarding_template_kb, onboarding_nav_kb,
     markets_kb, live_price_asset_kb, live_price_controls_kb,
-    mode_kb, whale_preview_kb, whale_active_kb,
+    mode_kb, home_card_kb, portfolio_kb,
 )
+from src.nadobro.handlers.trade_card import handle_trade_card_callback
+from src.nadobro.handlers.home_card import build_home_card_text
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info,
     switch_network, get_user, remove_user_private_key, ensure_active_wallet_ready,
@@ -46,7 +48,6 @@ from src.nadobro.services.onboarding_service import (
 )
 from src.nadobro.config import get_product_name, get_product_id, PRODUCTS
 from src.nadobro.services.debug_logger import debug_log
-from src.nadobro.services.whale_strategy import get_whale_strategy
 
 logger = logging.getLogger(__name__)
 LIVE_PRICE_TASKS = {}
@@ -72,6 +73,8 @@ async def handle_callback(update: Update, context: CallbackContext):
     try:
         if data.startswith("nav:"):
             await _handle_nav(query, data, telegram_id, context)
+        elif data.startswith("card:trade:"):
+            await handle_trade_card_callback(update, context, telegram_id, data)
         elif data.startswith("onboarding:"):
             await _handle_onboarding(query, data, telegram_id, context)
         elif data.startswith("trade:"):
@@ -89,6 +92,8 @@ async def handle_callback(update: Update, context: CallbackContext):
             await _show_dashboard(query, telegram_id)
         elif data.startswith("pos:"):
             await _handle_positions(query, data, telegram_id, context)
+        elif data.startswith("portfolio:"):
+            await _handle_portfolio(query, data, telegram_id)
         elif data.startswith("wallet:"):
             await _handle_wallet(query, data, telegram_id, context)
         elif data.startswith("mkt:"):
@@ -99,10 +104,19 @@ async def handle_callback(update: Update, context: CallbackContext):
             await _handle_settings(query, data, telegram_id, context)
         elif data.startswith("strategy:"):
             await _handle_strategy(query, data, context, telegram_id)
-        elif data.startswith("whale:"):
-            await _handle_whale(query, data, context, telegram_id)
         elif data.startswith("keyimp:"):
             await _handle_key_import_confirm(query, data, context, telegram_id)
+        elif data == "home:mode":
+            user = get_user(telegram_id)
+            current_network = user.network_mode.value if user else "testnet"
+            network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
+            await query.edit_message_text(
+                f"🔄 *Network Mode*\n\n"
+                f"Current: *{escape_md(network_label)}*\n\n"
+                f"Switch network below:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=mode_kb(current_network),
+            )
         elif data.startswith("mode:"):
             await _handle_mode(query, data, telegram_id)
         else:
@@ -133,33 +147,10 @@ async def handle_callback(update: Update, context: CallbackContext):
 
 
 async def _show_dashboard(query, telegram_id):
-    user = get_user(telegram_id)
-    if not user:
-        await query.edit_message_text(
-            "User not found\\. Use /start first\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
-        return
-
-    network = user.network_mode.value
-    network_label = "🧪 TESTNET" if network == "testnet" else "🌐 MAINNET"
-    balance_str = ""
-
-    try:
-        client = get_user_nado_client(telegram_id)
-        if client:
-            balance = client.get_balance()
-            if balance and balance.get("exists"):
-                bal_val = float((balance.get("balances", {}) or {}).get(0, 0) or (balance.get("balances", {}) or {}).get("0", 0) or 0)
-                balance_str = f"\nBalance: *{escape_md(f'${bal_val:,.2f}')}*"
-    except Exception:
-        pass
-
     await query.edit_message_text(
-        f"📊 *Nadobro*\n\n"
-        f"Mode: *{escape_md(network_label)}*{balance_str}\n\n"
-        f"Use the keyboard below to navigate\\.",
+        build_home_card_text(telegram_id),
         parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=home_card_kb(),
     )
 
 
@@ -515,13 +506,14 @@ async def _handle_positions(query, data, telegram_id, context):
         result = close_position(telegram_id, product)
 
         if result["success"]:
-            msg = f"✅ Closed {escape_md(str(result['cancelled']))} order\\(s\\) on {escape_md(result['product'])}\\."
+            msg = f"✅ Closed {escape_md(str(result['cancelled']))} {escape_md(result['product'])} position size\\."
         else:
             msg = f"❌ Close failed: {escape_md(result['error'])}"
 
         await query.edit_message_text(
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb("main"),
         )
 
     elif action == "close_all":
@@ -536,14 +528,40 @@ async def _handle_positions(query, data, telegram_id, context):
 
         if result["success"]:
             products = ", ".join(result.get("products", []))
-            msg = f"✅ Closed {escape_md(str(result['cancelled']))} order\\(s\\) on {escape_md(products)}\\."
+            msg = f"✅ Closed total size {escape_md(str(result['cancelled']))} across {escape_md(products)}\\."
         else:
             msg = f"❌ Close failed: {escape_md(result['error'])}"
 
         await query.edit_message_text(
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb("main"),
         )
+
+
+async def _handle_portfolio(query, data, telegram_id):
+    client = get_user_nado_client(telegram_id)
+    if not client:
+        await query.edit_message_text(
+            "⚠️ Wallet not initialized\\. Use /start first\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb(),
+        )
+        return
+
+    positions = client.get_all_positions() or []
+    prices = None
+    try:
+        prices = client.get_all_market_prices()
+    except Exception:
+        pass
+    stats = get_trade_analytics(telegram_id)
+    msg = fmt_portfolio(stats, positions, prices)
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=portfolio_kb(has_positions=bool(positions)),
+    )
 
 
 async def _handle_wallet(query, data, telegram_id, context):
@@ -1235,258 +1253,6 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Max Loss \\(from SL\\): *{escape_md(f'${max_loss:,.2f}')}*\n"
         f"Net Estimate: *{escape_md(net_str)}*"
     )
-
-
-async def _handle_whale(query, data, context, telegram_id):
-    parts = data.split(":")
-    action = parts[1] if len(parts) > 1 else ""
-
-    whale_product = context.user_data.get("whale_product", "BTC")
-    whale_size = context.user_data.get("whale_size", 1000.0)
-
-    if action == "preview":
-        status = None
-        ws = get_whale_strategy(telegram_id)
-        if ws:
-            status = ws.get_status()
-
-        if status and status.get("active"):
-            mode = status.get("mode", "neutral")
-            product = status.get("product", "BTC")
-            target = status.get("target_size_usd", 1000)
-            signals = status.get("signals_received", 0)
-            pnl = status.get("pnl_usd", 0)
-            last_price = status.get("last_signal_price", 0)
-            pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
-
-            mode_emoji = {"long": "🐂", "short": "🐻", "neutral": "🛡"}.get(mode, "❓")
-
-            text = (
-                f"🐋 *Whale Engine \\- ACTIVE*\n\n"
-                f"Mode: {mode_emoji} *{escape_md(mode.upper())}*\n"
-                f"Product: *{escape_md(product)}\\-PERP*\n"
-                f"Target Size: *{escape_md(f'${target:,.0f}')}*\n"
-                f"Signals Processed: *{escape_md(str(signals))}*\n"
-                f"Last Price: *{escape_md(f'${last_price:,.2f}')}*\n"
-                f"Est\\. PnL: *{escape_md(pnl_str)}*\n\n"
-                "Use the buttons below to send manual whale signals "
-                "or check detailed status\\."
-            )
-            await query.edit_message_text(
-                text,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=whale_active_kb(mode),
-            )
-        else:
-            text = (
-                "🐋 *Whale Engine \\(Hybrid Whale Strategy\\)*\n\n"
-                "Combines delta\\-neutral funding farming with directional "
-                "trading based on whale signals\\.\n\n"
-                "*3 Modes:*\n"
-                "🐂 *Long* \\- Whale buying detected, ride the pump\n"
-                "🐻 *Short* \\- Whale dump detected, profit from the drop\n"
-                "🛡 *Neutral* \\- Farm ~15% APR funding fees \\(default\\)\n\n"
-                "*How it works:*\n"
-                "1\\. Choose product and target size\n"
-                "2\\. Start the engine \\(begins in Neutral mode\\)\n"
-                "3\\. Send signals manually or via TradingView webhook\n"
-                "4\\. Bot auto\\-switches positions and explains each move\n\n"
-                f"Product: *{escape_md(whale_product)}* \\| "
-                f"Size: *{escape_md(f'${whale_size:,.0f}')}*"
-            )
-            await query.edit_message_text(
-                text,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=whale_preview_kb(whale_product, whale_size),
-            )
-
-    elif action == "pair":
-        product = parts[2] if len(parts) > 2 else "BTC"
-        context.user_data["whale_product"] = product
-        text = (
-            f"🐋 *Whale Engine*\n\n"
-            f"Product updated to *{escape_md(product)}\\-PERP*\n"
-            f"Target Size: *{escape_md(f'${whale_size:,.0f}')}*"
-        )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=whale_preview_kb(product, whale_size),
-        )
-
-    elif action == "size":
-        try:
-            size = float(parts[2]) if len(parts) > 2 else 1000.0
-        except ValueError:
-            size = 1000.0
-        context.user_data["whale_size"] = size
-        text = (
-            f"🐋 *Whale Engine*\n\n"
-            f"Product: *{escape_md(whale_product)}\\-PERP*\n"
-            f"Target Size updated to *{escape_md(f'${size:,.0f}')}*"
-        )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=whale_preview_kb(whale_product, size),
-        )
-
-    elif action == "start":
-        product = parts[2] if len(parts) > 2 else whale_product
-        try:
-            size = float(parts[3]) if len(parts) > 3 else whale_size
-        except (ValueError, IndexError):
-            size = whale_size
-
-        ws = get_whale_strategy(telegram_id)
-        if not ws:
-            await query.edit_message_text(
-                "⚠️ Create a wallet first \\(Wallet → Generate\\)\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-            )
-            return
-
-        msg = ws.start(product=product, target_size_usd=size)
-        context.user_data["whale_product"] = product
-        context.user_data["whale_size"] = size
-
-        await query.edit_message_text(
-            f"🐋 {escape_md(msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=whale_active_kb("neutral"),
-        )
-
-    elif action == "stop":
-        ws = get_whale_strategy(telegram_id)
-        if not ws:
-            await query.edit_message_text(
-                "⚠️ No active wallet\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-            )
-            return
-
-        msg = ws.stop()
-        await query.edit_message_text(
-            f"🐋 {escape_md(msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=whale_preview_kb(whale_product, whale_size),
-        )
-
-    elif action == "signal":
-        signal_type = parts[2] if len(parts) > 2 else "neutral"
-        ws = get_whale_strategy(telegram_id)
-        if not ws:
-            await query.edit_message_text(
-                "⚠️ No active wallet\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-            )
-            return
-
-        status = ws.get_status()
-        if not status.get("active"):
-            await query.edit_message_text(
-                "⚠️ Whale Engine is not running\\. Start it first\\!",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=whale_preview_kb(whale_product, whale_size),
-            )
-            return
-
-        try:
-            product = status.get("product", "BTC")
-            client = ws.client
-            mp = client.get_market_price(ws._get_perp_product_id())
-            price = float(mp.get("mid", 0) or 0)
-        except Exception:
-            price = 0.0
-
-        if price <= 0:
-            await query.edit_message_text(
-                "⚠️ Could not fetch current price\\. Try again\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=whale_active_kb(status.get("mode", "neutral")),
-            )
-            return
-
-        result = ws.process_signal(signal_type, price)
-        await query.edit_message_text(
-            f"🐋 {escape_md(result)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=whale_active_kb(signal_type),
-        )
-
-    elif action == "status":
-        ws = get_whale_strategy(telegram_id)
-        if not ws:
-            await query.edit_message_text(
-                "⚠️ No active wallet\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-            )
-            return
-
-        status = ws.get_status()
-        if not status.get("active"):
-            text = "🐋 *Whale Engine Status*\n\nStrategy is *not active*\\."
-            await query.edit_message_text(
-                text,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=whale_preview_kb(whale_product, whale_size),
-            )
-            return
-
-        mode = status.get("mode", "neutral")
-        mode_emoji = {"long": "🐂", "short": "🐻", "neutral": "🛡"}.get(mode, "❓")
-        product = status.get("product", "BTC")
-        target = status.get("target_size_usd", 1000)
-        signals = status.get("signals_received", 0)
-        pnl = status.get("pnl_usd", 0)
-        last_price = status.get("last_signal_price", 0)
-        started = status.get("started_at", "N/A")
-        last_signal = status.get("last_signal_at", "N/A")
-        pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
-
-        try:
-            client = ws.client
-            mp = client.get_market_price(ws._get_perp_product_id())
-            current_price = float(mp.get("mid", 0) or 0)
-            price_str = f"${current_price:,.2f}"
-        except Exception:
-            price_str = "N/A"
-
-        perp_exp = 0.0
-        try:
-            perp_exp = ws._get_perp_exposure()
-        except Exception:
-            pass
-
-        text = (
-            f"🐋 *Whale Engine Status*\n\n"
-            f"Mode: {mode_emoji} *{escape_md(mode.upper())}*\n"
-            f"Product: *{escape_md(product)}\\-PERP*\n"
-            f"Target Size: *{escape_md(f'${target:,.0f}')}*\n"
-            f"Current Price: *{escape_md(price_str)}*\n"
-            f"Perp Exposure: *{escape_md(f'{perp_exp:.6f}')}*\n\n"
-            f"Signals Processed: *{escape_md(str(signals))}*\n"
-            f"Last Signal Price: *{escape_md(f'${last_price:,.2f}')}*\n"
-            f"Last Signal: *{escape_md(str(last_signal))}*\n"
-            f"Started: *{escape_md(str(started))}*\n"
-            f"Est\\. PnL: *{escape_md(pnl_str)}*"
-        )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=whale_active_kb(mode),
-        )
-
-    else:
-        await query.edit_message_text(
-            "Unknown whale action\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-        )
 
 
 async def _handle_key_import_confirm(query, data, context, telegram_id):

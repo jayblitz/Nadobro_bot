@@ -119,6 +119,20 @@ def _is_complex_question(question: str) -> bool:
     return any(sig in q for sig in complexity_signals)
 
 
+def _wants_detailed_answer(question: str) -> bool:
+    q = (question or "").strip().lower()
+    detail_signals = [
+        "detailed",
+        "step by step",
+        "in depth",
+        "deep dive",
+        "full explanation",
+        "comprehensive",
+        "long answer",
+    ]
+    return any(sig in q for sig in detail_signals)
+
+
 def _model_for(provider: str) -> str:
     if provider == "openai":
         return os.environ.get("OPENAI_SUPPORT_MODEL", "gpt-4.1-mini")
@@ -146,6 +160,10 @@ Your role:
 
 Rules:
 - Be accurate and concise.
+- Default style: short summary first.
+- For normal questions, answer in 3-5 compact bullet points.
+- Keep default answers under ~500 characters unless user asks for detail.
+- If user asks for detailed explanation, provide a fuller answer.
 - If data is uncertain or missing, say it clearly and suggest the next best official source.
 - For product/how-to questions, provide actionable steps.
 - For developer questions, include concrete API/docs direction.
@@ -258,13 +276,14 @@ def _call_support_llm(provider: str, system: str, question: str) -> str:
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
+    max_tokens = 700 if _wants_detailed_answer(question) else 260
     response = client.chat.completions.create(
         model=_model_for(provider),
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": question},
         ],
-        max_tokens=700,
+        max_tokens=max_tokens,
         temperature=0.2,
     )
     content = response.choices[0].message.content
@@ -282,13 +301,14 @@ def _stream_support_llm(provider: str, system: str, question: str):
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
+    max_tokens = 700 if _wants_detailed_answer(question) else 260
     stream = client.chat.completions.create(
         model=_model_for(provider),
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": question},
         ],
-        max_tokens=700,
+        max_tokens=max_tokens,
         temperature=0.2,
         stream=True,
     )
