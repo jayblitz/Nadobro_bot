@@ -502,69 +502,6 @@ def fmt_help():
     )
 
 
-def fmt_onboarding_step(step: str, network: str, readiness: dict, extra: Optional[dict] = None):
-    extra = extra or {}
-    progress = extra.get("progress", "0/6")
-    if step == "welcome":
-        return (
-            "🚀 *Welcome to Nadobro*\n\n"
-            "Let’s get you ready in a few quick steps\\.\n\n"
-            "Security rules:\n"
-            "• Use dedicated trading keys per mode\n"
-            "• Never paste a seed phrase\n"
-            "• Never paste your main wallet key\n\n"
-            "Setup includes:\n"
-            "1\\. Mode\n"
-            "2\\. Dedicated key\n"
-            "3\\. Funding readiness\n"
-            "4\\. Risk profile\n"
-            "5\\. Strategy template\n\n"
-            f"Progress: *{escape_md(progress)}*"
-        )
-    if step == "mode":
-        return (
-            "🧭 *Step 1 — Select Mode*\n\n"
-            f"Current mode: *{escape_md(network.upper())}*\n"
-            "Testnet is best for first\\-time setup\\. Mainnet is live trading\\.\n\n"
-            f"Progress: *{escape_md(progress)}*"
-        )
-    if step == "key":
-        status = "READY" if readiness.get("has_key") else "MISSING"
-        return (
-            "🔑 *Step 2 — Import Dedicated Key*\n\n"
-            f"Mode: *{escape_md(network.upper())}*\n"
-            f"Key status: *{escape_md(status)}*\n\n"
-            "Import the dedicated private key for this mode\\.\n"
-            "Never use your main wallet key or seed phrase\\.\n\n"
-            f"Progress: *{escape_md(progress)}*"
-        )
-    if step == "funding":
-        funded = "READY" if readiness.get("funded") else "NOT FUNDED"
-        return (
-            "💰 *Step 3 — Funding Check*\n\n"
-            f"Mode: *{escape_md(network.upper())}*\n"
-            f"Funding status: *{escape_md(funded)}*\n\n"
-            "Fund this wallet and make sure the Nado subaccount is initialized\\.\n\n"
-            f"Progress: *{escape_md(progress)}*"
-        )
-    if step == "risk":
-        return (
-            "🛡 *Step 4 — Risk Profile*\n\n"
-            "Choose default risk settings for faster trading\\. "
-            "You can edit anytime in Settings\\.\n\n"
-            f"Progress: *{escape_md(progress)}*"
-        )
-    if step == "template":
-        selected = extra.get("selected_template", "None")
-        return (
-            "🧩 *Step 5 — Strategy Starter*\n\n"
-            f"Selected starter: *{escape_md(str(selected).upper())}*\n"
-            "Pick a starter template for your first launch\\.\n\n"
-            f"Progress: *{escape_md(progress)}*"
-        )
-    return "Onboarding step not found."
-
-
 def fmt_status_overview(status: dict, onboarding: dict):
     running = status.get("running")
     step = onboarding.get("missing_step") or "complete"

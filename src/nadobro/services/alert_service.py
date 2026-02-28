@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from src.nadobro.models.database import Alert, AlertCondition, NetworkMode, get_session
+from src.nadobro.models.database import AlertCondition, insert_alert, get_alerts_by_user, get_alert_by_id_and_user, update_alert, get_all_active_alerts, update_alert_triggered
 from src.nadobro.config import get_product_id, get_product_name
 from src.nadobro.services.user_service import get_user
 
@@ -16,26 +16,21 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
     if not user:
         return {"success": False, "error": "User not found."}
 
-    cond_map = {
-        "above": AlertCondition.ABOVE,
-        "below": AlertCondition.BELOW,
-    }
+    cond_map = {"above": AlertCondition.ABOVE.value, "below": AlertCondition.BELOW.value}
     alert_cond = cond_map.get(condition)
     if not alert_cond:
         return {"success": False, "error": f"Unknown condition '{condition}'. Use: above, below"}
 
-    with get_session() as session:
-        alert = Alert(
-            user_id=telegram_id,
-            product_id=product_id,
-            product_name=get_product_name(product_id),
-            condition=alert_cond,
-            target_value=target_value,
-            network=user.network_mode,
-        )
-        session.add(alert)
-        session.commit()
-        alert_id = alert.id
+    alert_id = insert_alert({
+        "user_id": telegram_id,
+        "product_id": product_id,
+        "product_name": get_product_name(product_id),
+        "condition": alert_cond,
+        "target_value": target_value,
+        "network": user.network_mode.value,
+    })
+    if not alert_id:
+        return {"success": False, "error": "Failed to create alert."}
 
     return {
         "success": True,
@@ -47,65 +42,52 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
 
 
 def get_user_alerts(telegram_id: int) -> list:
-    with get_session() as session:
-        alerts = (
-            session.query(Alert)
-            .filter_by(user_id=telegram_id, is_active=True)
-            .order_by(Alert.created_at.desc())
-            .all()
-        )
-        return [
-            {
-                "id": a.id,
-                "product": a.product_name,
-                "condition": a.condition.value,
-                "target": a.target_value,
-                "network": a.network.value,
-                "created_at": a.created_at.isoformat(),
-            }
-            for a in alerts
-        ]
+    alerts = get_alerts_by_user(telegram_id, active_only=True)
+    return [
+        {
+            "id": a.get("id"),
+            "product": a.get("product_name"),
+            "condition": a.get("condition"),
+            "target": a.get("target_value"),
+            "network": a.get("network"),
+            "created_at": (a.get("created_at") or "")[:19] if a.get("created_at") else "",
+        }
+        for a in alerts
+    ]
 
 
 def delete_alert(telegram_id: int, alert_id: int) -> dict:
-    with get_session() as session:
-        alert = session.query(Alert).filter_by(id=alert_id, user_id=telegram_id).first()
-        if not alert:
-            return {"success": False, "error": "Alert not found."}
-        alert.is_active = False
-        session.commit()
-        return {"success": True, "message": f"Alert #{alert_id} deleted."}
+    alert = get_alert_by_id_and_user(alert_id, telegram_id)
+    if not alert:
+        return {"success": False, "error": "Alert not found."}
+    update_alert(alert_id, {"is_active": False})
+    return {"success": True, "message": f"Alert #{alert_id} deleted."}
 
 
 def get_triggered_alerts(prices: dict) -> list:
     triggered = []
-    with get_session() as session:
-        active_alerts = session.query(Alert).filter_by(is_active=True).all()
-        for alert in active_alerts:
-            product_name = alert.product_name.replace("-PERP", "")
-            if product_name not in prices:
-                continue
-
-            current_price = prices[product_name].get("mid", 0)
-            if current_price == 0:
-                continue
-
-            should_trigger = False
-            if alert.condition == AlertCondition.ABOVE and current_price >= alert.target_value:
-                should_trigger = True
-            elif alert.condition == AlertCondition.BELOW and current_price <= alert.target_value:
-                should_trigger = True
-
-            if should_trigger:
-                alert.is_active = False
-                alert.triggered_at = datetime.utcnow()
-                triggered.append({
-                    "user_id": alert.user_id,
-                    "product": alert.product_name,
-                    "condition": alert.condition.value,
-                    "target": alert.target_value,
-                    "current_price": current_price,
-                })
-
-        session.commit()
+    active_alerts = get_all_active_alerts()
+    for alert in active_alerts:
+        product_name = (alert.get("product_name") or "").replace("-PERP", "")
+        if product_name not in prices:
+            continue
+        current_price = prices[product_name].get("mid", 0)
+        if current_price == 0:
+            continue
+        cond = alert.get("condition")
+        target = float(alert.get("target_value") or 0)
+        should_trigger = False
+        if cond == AlertCondition.ABOVE.value and current_price >= target:
+            should_trigger = True
+        elif cond == AlertCondition.BELOW.value and current_price <= target:
+            should_trigger = True
+        if should_trigger:
+            update_alert_triggered(alert["id"])
+            triggered.append({
+                "user_id": alert.get("user_id"),
+                "product": alert.get("product_name"),
+                "condition": cond,
+                "target": target,
+                "current_price": current_price,
+            })
     return triggered

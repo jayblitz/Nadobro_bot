@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from typing import Optional
 
-from src.nadobro.models.database import BotState, get_session
+from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.services.user_service import (
     get_user,
     has_mode_private_key,
@@ -11,9 +11,45 @@ from src.nadobro.services.user_service import (
 from src.nadobro.services.debug_logger import debug_log
 
 ONBOARDING_PREFIX = "onboarding:"
+ONBOARDING_V2_PREFIX = "onboarding_v2:"
 
 ONBOARDING_STEPS = ["welcome", "mode", "key", "funding", "risk", "template"]
 SKIPPABLE_STEPS = {"risk", "template"}
+
+
+# --- New onboarding (language → ToS → dashboard) ---
+def _onb_v2_key(telegram_id: int) -> str:
+    return f"{ONBOARDING_V2_PREFIX}{telegram_id}"
+
+
+def get_new_onboarding_state(telegram_id: int) -> dict:
+    raw = get_bot_state_raw(_onb_v2_key(telegram_id))
+    state = {"language": "en", "tos_accepted": False}
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                state.update(loaded)
+        except Exception:
+            pass
+    return state
+
+
+def set_new_onboarding_language(telegram_id: int, language: str):
+    state = get_new_onboarding_state(telegram_id)
+    state["language"] = language
+    set_bot_state(_onb_v2_key(telegram_id), state)
+
+
+def set_new_onboarding_tos_accepted(telegram_id: int):
+    state = get_new_onboarding_state(telegram_id)
+    state["tos_accepted"] = True
+    set_bot_state(_onb_v2_key(telegram_id), state)
+
+
+def is_new_onboarding_complete(telegram_id: int) -> bool:
+    state = get_new_onboarding_state(telegram_id)
+    return bool(state.get("tos_accepted"))
 
 
 def _state_key(telegram_id: int, network: str) -> str:
@@ -45,17 +81,16 @@ def _compute_complete(state: dict) -> bool:
 
 def get_onboarding_state(telegram_id: int) -> tuple[str, dict]:
     user = get_user(telegram_id)
-    network = user.network_mode.value if user else "testnet"
+    network = user.network_mode.value if user else "mainnet"
     state = _default_state()
-    with get_session() as session:
-        row = session.query(BotState).filter_by(key=_state_key(telegram_id, network)).first()
-        if row and row.value:
-            try:
-                loaded = json.loads(row.value)
-                if isinstance(loaded, dict):
-                    state.update(loaded)
-            except Exception:
-                pass
+    raw = get_bot_state_raw(_state_key(telegram_id, network))
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                state.update(loaded)
+        except Exception:
+            pass
     state["onboarding_complete"] = _compute_complete(state)
     return network, state
 
@@ -64,16 +99,7 @@ def save_onboarding_state(telegram_id: int, network: str, state: dict):
     state = dict(state)
     state["onboarding_complete"] = _compute_complete(state)
     state["updated_at"] = datetime.utcnow().isoformat()
-    payload = json.dumps(state)
-    with get_session() as session:
-        row = session.query(BotState).filter_by(key=_state_key(telegram_id, network)).first()
-        if row:
-            row.value = payload
-            row.updated_at = datetime.utcnow()
-        else:
-            row = BotState(key=_state_key(telegram_id, network), value=payload)
-            session.add(row)
-        session.commit()
+    set_bot_state(_state_key(telegram_id, network), state)
 
 
 def update_onboarding_state(telegram_id: int, mutator):
@@ -96,10 +122,10 @@ def _first_missing_step(state: dict) -> Optional[str]:
 
 
 def get_resume_step(telegram_id: int) -> str:
-    _, state = get_onboarding_state(telegram_id)
-    if state.get("onboarding_complete"):
+    """Unified: new onboarding (language + ToS) gates completion."""
+    if is_new_onboarding_complete(telegram_id):
         return "complete"
-    return _first_missing_step(state) or state.get("current_step", "welcome")
+    return "welcome"
 
 
 def set_current_step(telegram_id: int, step: str):
@@ -178,7 +204,7 @@ def evaluate_readiness(telegram_id: int) -> dict:
     funded = False
     if has_key:
         try:
-            client = get_user_nado_client(telegram_id)
+            client = get_user_nado_client(telegram_id, passphrase=None)
             if client:
                 bal = client.get_balance()
                 funded = bool(bal.get("exists"))
@@ -186,12 +212,13 @@ def evaluate_readiness(telegram_id: int) -> dict:
             funded = False
 
     missing_step = get_resume_step(telegram_id)
+    new_complete = is_new_onboarding_complete(telegram_id)
     readiness = {
         "network": network,
         "has_key": has_key,
         "funded": funded,
-        "onboarding_complete": bool(state.get("onboarding_complete")),
-        "missing_step": missing_step if missing_step != "complete" else None,
+        "onboarding_complete": new_complete,
+        "missing_step": None if new_complete else missing_step,
         "selected_template": state.get("selected_template"),
         "risk_profile_set": "risk" in set(state.get("completed_steps", []))
         or "risk" in set(state.get("skipped_steps", [])),

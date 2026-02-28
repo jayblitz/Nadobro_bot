@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 
-from src.nadobro.models.database import BotState, get_session
+from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.services.user_service import get_user
 
 SETTINGS_PREFIX = "user_settings:"
@@ -30,42 +30,30 @@ def _default_settings() -> dict:
 
 def get_user_settings(telegram_id: int) -> tuple[str, dict]:
     user = get_user(telegram_id)
-    network = user.network_mode.value if user else "testnet"
+    network = user.network_mode.value if user else "mainnet"
     key = _settings_key(telegram_id, network)
     settings = _default_settings()
-
-    with get_session() as session:
-        row = session.query(BotState).filter_by(key=key).first()
-        if row and row.value:
-            try:
-                loaded = json.loads(row.value)
-                if isinstance(loaded, dict):
-                    settings.update(loaded)
-                    default_strats = _default_strategy_settings()
-                    loaded_strats = loaded.get("strategies", {})
-                    if isinstance(loaded_strats, dict):
-                        for sid, base in default_strats.items():
-                            if sid in loaded_strats and isinstance(loaded_strats[sid], dict):
-                                base.update(loaded_strats[sid])
-                        settings["strategies"] = default_strats
-            except Exception:
-                pass
-
+    raw = get_bot_state_raw(key)
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                settings.update(loaded)
+                default_strats = _default_strategy_settings()
+                loaded_strats = loaded.get("strategies", {})
+                if isinstance(loaded_strats, dict):
+                    for sid, base in default_strats.items():
+                        if sid in loaded_strats and isinstance(loaded_strats[sid], dict):
+                            base.update(loaded_strats[sid])
+                    settings["strategies"] = default_strats
+        except Exception:
+            pass
     return network, settings
 
 
 def save_user_settings(telegram_id: int, network: str, settings: dict):
     key = _settings_key(telegram_id, network)
-    with get_session() as session:
-        row = session.query(BotState).filter_by(key=key).first()
-        payload = json.dumps(settings)
-        if row:
-            row.value = payload
-            row.updated_at = datetime.utcnow()
-        else:
-            row = BotState(key=key, value=payload)
-            session.add(row)
-        session.commit()
+    set_bot_state(key, settings)
 
 
 def update_user_settings(telegram_id: int, mutator):

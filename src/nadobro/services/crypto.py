@@ -4,6 +4,9 @@ import base64
 import secrets
 import re
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 from eth_account import Account
 
 Account.enable_unaudited_hdwallet_features()
@@ -109,3 +112,37 @@ def private_key_fingerprint(private_key: str) -> str:
     normalized = normalize_private_key(private_key)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return digest[-8:]
+
+
+# --- Passphrase-based encryption for linked signer (PBKDF2 600k + Fernet) ---
+PBKDF2_ITERATIONS = 600_000
+
+
+def encrypt_with_passphrase(data: bytes, passphrase: str) -> tuple[bytes, bytes]:
+    """Encrypt data with passphrase. Returns (ciphertext, salt)."""
+    salt = secrets.token_bytes(16)
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=PBKDF2_ITERATIONS,
+        backend=default_backend(),
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+    f = Fernet(key)
+    ciphertext = f.encrypt(data)
+    return ciphertext, salt
+
+
+def decrypt_with_passphrase(ciphertext: bytes, salt: bytes, passphrase: str) -> bytes:
+    """Decrypt data with passphrase and salt."""
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=PBKDF2_ITERATIONS,
+        backend=default_backend(),
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+    f = Fernet(key)
+    return f.decrypt(ciphertext)

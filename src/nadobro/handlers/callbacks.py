@@ -6,28 +6,27 @@ from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
 from src.nadobro.handlers.formatters import (
-    escape_md, fmt_dashboard, fmt_positions, fmt_balance,
+    escape_md, fmt_dashboard, fmt_positions,
     fmt_prices, fmt_funding, fmt_trade_preview, fmt_trade_result,
     fmt_wallet_info, fmt_alerts, fmt_history, fmt_analytics, fmt_portfolio,
-    fmt_settings, fmt_help, fmt_price, fmt_onboarding_step, fmt_status_overview,
+    fmt_settings, fmt_help, fmt_price, fmt_status_overview,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
-    trade_confirm_kb, positions_kb, wallet_kb, alerts_kb,
+    trade_confirm_kb, positions_kb, wallet_kb, wallet_kb_not_linked, alerts_kb,
     alert_product_kb, alert_delete_kb, settings_kb, settings_leverage_kb,
     settings_slippage_kb, close_product_kb, confirm_close_all_kb, back_kb,
     risk_profile_kb, strategy_hub_kb, strategy_action_kb,
-    onboarding_mode_kb, onboarding_key_kb, onboarding_funding_kb,
-    onboarding_risk_kb, onboarding_template_kb, onboarding_nav_kb,
+    onboarding_language_kb,
     markets_kb, live_price_asset_kb, live_price_controls_kb,
-    mode_kb, home_card_kb, portfolio_kb,
+    mode_kb,     home_card_kb, portfolio_kb,
+    onboarding_accept_tos_kb,
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback
 from src.nadobro.handlers.home_card import build_home_card_text
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info,
     switch_network, get_user, remove_user_private_key, ensure_active_wallet_ready,
-    import_user_private_key, get_user_private_key,
 )
 from src.nadobro.services.trade_service import (
     execute_market_order, execute_limit_order, close_position,
@@ -39,12 +38,11 @@ from src.nadobro.services.bot_runtime import start_user_bot, stop_user_bot, get_
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.onboarding_service import (
     get_resume_step,
-    get_onboarding_progress,
     evaluate_readiness,
-    set_current_step,
-    mark_step_completed,
-    skip_step,
-    set_selected_template,
+    set_new_onboarding_language,
+    set_new_onboarding_tos_accepted,
+    is_new_onboarding_complete,
+    get_new_onboarding_state,
 )
 from src.nadobro.config import get_product_name, get_product_id, PRODUCTS
 from src.nadobro.services.debug_logger import debug_log
@@ -71,7 +69,9 @@ async def handle_callback(update: Update, context: CallbackContext):
     # endregion
 
     try:
-        if data.startswith("nav:"):
+        if data.startswith("onb:"):
+            await _handle_onb_new(query, data, telegram_id, context)
+        elif data.startswith("nav:"):
             await _handle_nav(query, data, telegram_id, context)
         elif data.startswith("card:trade:"):
             await handle_trade_card_callback(update, context, telegram_id, data)
@@ -105,7 +105,12 @@ async def handle_callback(update: Update, context: CallbackContext):
         elif data.startswith("strategy:"):
             await _handle_strategy(query, data, context, telegram_id)
         elif data.startswith("keyimp:"):
-            await _handle_key_import_confirm(query, data, context, telegram_id)
+            context.user_data.pop("pending_key_confirm", None)
+            context.user_data.pop("pending_key_import", None)
+            await query.edit_message_text(
+                "Use the 👛 Wallet button to link your wallet (Linked Signer).",
+                reply_markup=back_kb(),
+            )
         elif data == "home:mode":
             user = get_user(telegram_id)
             current_network = user.network_mode.value if user else "testnet"
@@ -144,6 +149,63 @@ async def handle_callback(update: Update, context: CallbackContext):
             )
         except Exception:
             pass
+
+
+# New onboarding (language → ToS) message text
+_ONB_WELCOME_LANG_MSG = """Yo what's good, future Nado whale?! 👋💰
+
+Welcome to **Nadobro** — your ultimate trading bro for Perps on Nado!
+
+We're building the dopest Telegram bot on the planet:
+• MM Bot (Grid + RGRID that actually prints)
+• Delta Neutral (spot + short = chill funding gains)
+• Volume Bot (farm that leaderboard volume like a boss)
+
+Unified margin. 5-15ms execution. Zero drama.
+
+First, pick your language vibe:"""
+
+_ONB_WELCOME_CARD = """🔥 Nadobro Activated! You're in the squad bro 🔥
+
+Sup, you're now locked in.
+We run on Nado's lightning CLOB with unified margin — the cleanest perps game in crypto.
+
+By tapping **"Let's Get It"** you're saying:
+✅ I accept the Terms of Use & Privacy Policy
+
+⚡ Bro-Note (read this):
+We'll generate a secure Linked Signer address for your default subaccount (we NEVER touch your private keys).
+You just paste the PUBLIC address into Nado → Settings → 1-Click Trading (1 tx, 5 seconds).
+Main wallet stays untouched. Revoke anytime. Funds 100% yours.
+
+Ready to start printing money?"""
+
+_ONB_DASHBOARD_MSG = """🚀 Nadobro Dashboard — You're In, Legend!
+
+What we smashing today?"""
+
+
+async def _handle_onb_new(query, data, telegram_id, context):
+    if data == "onb:accept_tos":
+        set_new_onboarding_tos_accepted(telegram_id)
+        await query.edit_message_text(
+            _ONB_DASHBOARD_MSG,
+            reply_markup=home_card_kb(),
+        )
+        return
+    if data.startswith("onb:lang:"):
+        parts = data.split(":")
+        if len(parts) < 3:
+            return
+        lang = parts[2]
+        set_new_onboarding_language(telegram_id, lang)
+        from src.nadobro.models.database import get_supabase
+        get_supabase().table("users").update({"language": lang}).eq("telegram_id", telegram_id).execute()
+        await query.edit_message_text(
+            _ONB_WELCOME_CARD,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=onboarding_accept_tos_kb(),
+        )
 
 
 async def _show_dashboard(query, telegram_id):
@@ -250,13 +312,12 @@ async def _handle_nav(query, data, telegram_id, context=None):
 async def _handle_trade(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
-    resume_step = get_resume_step(telegram_id)
-    if resume_step != "complete":
+    if not is_new_onboarding_complete(telegram_id):
         await query.edit_message_text(
-            f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(resume_step.upper())}*\\.",
+            "⚠️ Complete setup first (language + accept terms).",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🧭 Continue Setup", callback_data="onboarding:resume")],
+                [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
                 [InlineKeyboardButton("Exit", callback_data="nav:main")],
             ]),
         )
@@ -570,36 +631,46 @@ async def _handle_wallet(query, data, telegram_id, context):
 
     if action == "view":
         info = get_user_wallet_info(telegram_id)
+        if not info or not info.get("linked_signer_address"):
+            context.user_data["wallet_flow"] = "awaiting_done"
+            msg = (
+                "👛 *Wallet Connect — 60 seconds flat*\n\n"
+                "1. Go to https://app.nado.xyz → connect wallet → deposit ≥ $5 USDT0 "
+                "(creates default subaccount automatically).\n\n"
+                "Reply **DONE** when ready."
+            )
+            await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
+            return
         msg = fmt_wallet_info(info)
         await query.edit_message_text(
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=wallet_kb(),
         )
-    elif action == "import" and len(parts) >= 3:
-        network = parts[2]
-        if network not in ("testnet", "mainnet"):
+    elif action == "balance":
+        client = get_user_nado_client(telegram_id, passphrase=None)
+        if not client:
+            await query.edit_message_text(
+                "💰 Balance is shown in Nado app. Link your wallet first, then check https://app.nado.xyz",
+                reply_markup=wallet_kb(),
+            )
             return
-        context.user_data["pending_key_import"] = {"network": network, "started_at": time.time()}
-        set_current_step(telegram_id, "key")
-        await query.edit_message_text(
-            f"🔑 *Import Dedicated Trading Key* \\({escape_md(network.upper())}\\)\n\n"
-            "Send your *private key* now \\(64 hex chars, with or without `0x`\\)\\.\n\n"
-            "⚠️ Never send a seed phrase\\. Never send your main wallet key\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=wallet_kb(),
+        try:
+            bal = client.get_balance()
+            usdt = (bal.get("balances") or {}).get(0, 0) or (bal.get("balances") or {}).get("0", 0)
+            msg = f"💰 Balance: ${float(usdt or 0):,.2f} USDT0"
+        except Exception:
+            msg = "Could not fetch balance. Try again."
+        await query.edit_message_text(msg, reply_markup=wallet_kb())
+    elif action == "revoke_steps":
+        revoke_msg = (
+            "🔄 *Revoke Linked Signer (Nado)*\n\n"
+            "1. Open Nado → Settings\n"
+            "2. 1-Click Trading\n"
+            "3. Remove the linked signer address\n\n"
+            "Your main wallet and funds stay safe. You can link again anytime via Wallet."
         )
-    elif action == "rotate":
-        user = get_user(telegram_id)
-        network = user.network_mode.value if user else "testnet"
-        context.user_data["pending_key_import"] = {"network": network, "started_at": time.time()}
-        set_current_step(telegram_id, "key")
-        await query.edit_message_text(
-            f"♻️ *Rotate Active Key* \\({escape_md(network.upper())}\\)\n\n"
-            "Send the *new dedicated private key*\\. Old key will be replaced\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=wallet_kb(),
-        )
+        await query.edit_message_text(revoke_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb())
     elif action == "remove_active":
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "testnet"
@@ -610,59 +681,6 @@ async def _handle_wallet(query, data, telegram_id, context):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=wallet_kb(),
         )
-    elif action == "view_key":
-        user = get_user(telegram_id)
-        network = user.network_mode.value if user else "testnet"
-        if not query.message or getattr(query.message.chat, "type", "") != "private":
-            await query.edit_message_text(
-                "⚠️ For safety, private key viewing is allowed only in private chat with the bot\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=wallet_kb(),
-            )
-            return
-
-        ok, value = get_user_private_key(telegram_id, network)
-        if not ok:
-            await query.edit_message_text(
-                f"❌ {escape_md(value)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=wallet_kb(),
-            )
-            return
-
-        secret_msg = await query.message.reply_text(
-            f"PRIVATE KEY ({network.upper()}):\n{value}\n\n"
-            "This message will self-delete in 30 seconds.",
-        )
-        asyncio.create_task(
-            _delete_message_later(query, secret_msg.chat_id, secret_msg.message_id, delay_seconds=30)
-        )
-        await query.edit_message_text(
-            "✅ Private key sent as temporary message\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=wallet_kb(),
-        )
-
-    elif action == "balance":
-        client = get_user_nado_client(telegram_id)
-        if not client:
-            await query.edit_message_text(
-                "⚠️ Wallet not initialized\\. Use /start first\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-            )
-            return
-
-        balance = client.get_balance()
-        info = get_user_wallet_info(telegram_id)
-        addr = info.get("active_address") if info else None
-        msg = fmt_balance(balance, addr)
-        await query.edit_message_text(
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=wallet_kb(),
-        )
-
     elif action == "network" and len(parts) >= 3:
         net = parts[2]
         if net not in ("testnet", "mainnet"):
@@ -1026,27 +1044,12 @@ async def _handle_strategy(query, data, context, telegram_id):
     elif action == "start" and len(parts) >= 4:
         strategy_id = parts[2]
         product = parts[3]
-        resume_step = get_resume_step(telegram_id)
-        # region agent log
-        debug_log(
-            "baseline",
-            "H4",
-            "callbacks.py:901",
-            "strategy_start_requested",
-            {
-                "telegram_id": telegram_id,
-                "strategy_id": strategy_id,
-                "product": product,
-                "resume_step": resume_step,
-            },
-        )
-        # endregion
-        if resume_step != "complete":
+        if not is_new_onboarding_complete(telegram_id):
             await query.edit_message_text(
-                f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(resume_step.upper())}*\\.",
+                "⚠️ Complete setup first (language + accept terms).",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🧭 Continue Setup", callback_data="onboarding:resume")],
+                    [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
                     [InlineKeyboardButton("Exit", callback_data="nav:main")],
                 ]),
             )
@@ -1255,266 +1258,28 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     )
 
 
-async def _handle_key_import_confirm(query, data, context, telegram_id):
-    action = data.split(":")[1] if ":" in data else ""
-    pending = context.user_data.get("pending_key_confirm")
-    if not pending:
-        await query.edit_message_text(
-            "⚠️ No pending key import found\\. Use /import\\_key to start again\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-        )
-        return
-
-    started_at = float(pending.get("started_at") or 0)
-    if started_at and time.time() - started_at > 300:
-        context.user_data.pop("pending_key_confirm", None)
-        await query.edit_message_text(
-            "⌛ Key import confirmation expired\\. Use /import\\_key again\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-        )
-        return
-
-    if action == "cancel":
-        context.user_data.pop("pending_key_confirm", None)
-        context.user_data.pop("pending_key_import", None)
-        await query.edit_message_text(
-            "❌ Key import cancelled\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-        )
-        return
-
-    if action != "confirm":
-        return
-
-    network = pending.get("network", "testnet")
-    private_key = pending.get("private_key", "")
-    address = pending.get("address", "unknown")
-    fingerprint = pending.get("fingerprint", "unknown")
-    ok, msg = import_user_private_key(telegram_id, private_key, network)
-    context.user_data.pop("pending_key_confirm", None)
-    if ok:
-        mark_step_completed(telegram_id, "key")
-        await query.edit_message_text(
-            f"✅ {escape_md(msg)}\n\n"
-            f"Address: `{escape_md(address)}`\n"
-            f"Fingerprint: `fp\\-{escape_md(fingerprint)}`\n\n"
-            "Next: fund this wallet on Nado, then start trading\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
-    else:
-        await query.edit_message_text(
-            f"❌ {escape_md(msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
-
-
 async def _handle_onboarding(query, data, telegram_id, context):
+    """Resume new onboarding (language → ToS). Only handles onboarding:resume."""
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
-    network, state = get_onboarding_progress(telegram_id)["network"], get_onboarding_progress(telegram_id)["state"]
-    step = state.get("current_step", "welcome")
-    # region agent log
-    debug_log(
-        "baseline",
-        "H3",
-        "callbacks.py:1175",
-        "onboarding_action_received",
-        {
-            "telegram_id": telegram_id,
-            "network": network,
-            "action": action,
-            "current_step": step,
-            "resume_step": get_resume_step(telegram_id),
-        },
-    )
-    # endregion
-
-    if action == "resume":
-        step = get_resume_step(telegram_id)
-        if step == "complete":
-            await _show_dashboard(query, telegram_id)
-            return
-        set_current_step(telegram_id, step)
-        await _render_onboarding(query, telegram_id, step)
+    if action != "resume":
         return
-
-    if action == "back":
-        order = ["welcome", "mode", "key", "funding", "risk", "template"]
-        idx = max(order.index(step) - 1, 0) if step in order else 0
-        step = order[idx]
-        set_current_step(telegram_id, step)
-        await _render_onboarding(query, telegram_id, step)
+    if is_new_onboarding_complete(telegram_id):
+        await _show_dashboard(query, telegram_id)
         return
-
-    if action == "skip":
-        if step in ("risk", "template"):
-            skip_step(telegram_id, step)
-            await _render_onboarding(query, telegram_id, get_resume_step(telegram_id))
-            return
+    state = get_new_onboarding_state(telegram_id)
+    if not state.get("language"):
         await query.edit_message_text(
-            "This step cannot be skipped\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=onboarding_nav_kb(step, allow_skip=False, allow_back=True),
+            _ONB_WELCOME_LANG_MSG,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=onboarding_language_kb(),
         )
-        return
-
-    if action == "next":
-        await _onboarding_next(query, telegram_id)
-        return
-
-    if action == "set_mode" and len(parts) >= 3:
-        mode = parts[2]
-        ok, msg = switch_network(telegram_id, mode)
-        if ok:
-            mark_step_completed(telegram_id, "mode")
-            set_current_step(telegram_id, "key")
-            await query.edit_message_text(
-                f"✅ {escape_md(msg)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Continue ▶", callback_data="onboarding:resume")],
-                ]),
-            )
-        else:
-            await query.edit_message_text(
-                f"❌ {escape_md(msg)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=onboarding_mode_kb(),
-            )
-        return
-
-    if action == "check_funding":
-        await _render_onboarding(query, telegram_id, "funding")
-        return
-
-    if action == "set_risk" and len(parts) >= 3:
-        profile = parts[2]
-        presets = {
-            "conservative": {"default_leverage": 2, "slippage": 0.5},
-            "balanced": {"default_leverage": 5, "slippage": 1.0},
-            "aggressive": {"default_leverage": 10, "slippage": 2.0},
-        }
-        chosen = presets.get(profile)
-        if chosen:
-            update_user_settings(
-                telegram_id,
-                lambda s: s.update(
-                    {
-                        "default_leverage": chosen["default_leverage"],
-                        "slippage": chosen["slippage"],
-                        "risk_profile": profile,
-                    }
-                ),
-            )
-            mark_step_completed(telegram_id, "risk")
-        await _onboarding_next(query, telegram_id)
-        return
-
-    if action == "set_template" and len(parts) >= 3:
-        tpl = parts[2]
-        if tpl in ("mm", "grid", "dn"):
-            set_selected_template(telegram_id, tpl)
-        await _onboarding_next(query, telegram_id)
-        return
-
-    await _render_onboarding(query, telegram_id, get_resume_step(telegram_id))
-
-
-async def _onboarding_next(query, telegram_id):
-    readiness = evaluate_readiness(telegram_id)
-    _, state = get_onboarding_progress(telegram_id)["network"], get_onboarding_progress(telegram_id)["state"]
-    step = state.get("current_step", "welcome")
-
-    if step == "welcome":
-        mark_step_completed(telegram_id, "welcome")
-        set_current_step(telegram_id, "mode")
-    elif step == "mode":
-        mark_step_completed(telegram_id, "mode")
-        set_current_step(telegram_id, "key")
-    elif step == "key":
-        if not readiness.get("has_key"):
-            await query.edit_message_text(
-                "⚠️ Import a dedicated key first to continue\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=onboarding_key_kb(readiness.get("network", "testnet")),
-            )
-            return
-        mark_step_completed(telegram_id, "key")
-        set_current_step(telegram_id, "funding")
-    elif step == "funding":
-        if not readiness.get("funded"):
-            await query.edit_message_text(
-                "⚠️ Wallet is not funded yet\\. Fund first, then continue\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=onboarding_funding_kb(readiness.get("network", "testnet")),
-            )
-            return
-        mark_step_completed(telegram_id, "funding")
-        set_current_step(telegram_id, "risk")
-    elif step == "risk":
-        mark_step_completed(telegram_id, "risk")
-        set_current_step(telegram_id, "template")
-    elif step == "template":
-        mark_step_completed(telegram_id, "template")
-
-    next_step = get_resume_step(telegram_id)
-    if next_step == "complete":
-        await query.edit_message_text(
-            "✅ Onboarding complete\\. You are ready to trade\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Open Dashboard", callback_data="nav:main")],
-            ]),
-        )
-        return
-    await _render_onboarding(query, telegram_id, next_step)
-
-
-async def _render_onboarding(query, telegram_id: int, step: str):
-    progress = get_onboarding_progress(telegram_id)
-    readiness = evaluate_readiness(telegram_id)
-    progress_text = f"{progress.get('done', 0)}/{progress.get('total', 0)}"
-    text = fmt_onboarding_step(
-        step,
-        readiness.get("network", "testnet"),
-        readiness,
-        {"progress": progress_text, "selected_template": progress.get("state", {}).get("selected_template")},
-    )
-    network = readiness.get("network", "testnet")
-    if step == "mode":
-        kb = onboarding_mode_kb()
-    elif step == "key":
-        kb = onboarding_key_kb(network)
-    elif step == "funding":
-        kb = onboarding_funding_kb(network)
-    elif step == "risk":
-        kb = onboarding_risk_kb()
-    elif step == "template":
-        kb = onboarding_template_kb()
     else:
-        kb = onboarding_nav_kb(step, allow_skip=False, allow_back=False)
-    try:
         await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=kb,
+            _ONB_WELCOME_CARD,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=onboarding_accept_tos_kb(),
         )
-    except BadRequest as e:
-        if "Message is not modified" in str(e):
-            # region agent log
-            debug_log(
-                "post-fix",
-                "H9",
-                "callbacks.py:1388",
-                "onboarding_edit_noop_ignored",
-                {"telegram_id": telegram_id, "step": step},
-            )
-            # endregion
-            return
-        raise
 
 
 async def _delete_message_later(query, chat_id: int, message_id: int, delay_seconds: int = 30):

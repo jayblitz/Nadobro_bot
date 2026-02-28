@@ -15,7 +15,7 @@ logger = logging.getLogger("nadobro")
 # Load local .env during development before reading config vars.
 load_dotenv()
 
-from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
+from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, SUPABASE_URL, SUPABASE_KEY
 from src.nadobro.services.crypto import validate_encryption_key
 from src.nadobro.services.debug_logger import debug_log
 
@@ -26,7 +26,7 @@ if not ENCRYPTION_KEY:
         "H7",
         "main.py:24",
         "missing_encryption_key",
-        {"has_telegram_token": bool(TELEGRAM_TOKEN), "has_database_url": bool(DATABASE_URL)},
+        {"has_telegram_token": bool(TELEGRAM_TOKEN), "has_supabase": bool(SUPABASE_URL and SUPABASE_KEY)},
     )
     # endregion
     logger.error(
@@ -56,8 +56,8 @@ def check_config():
     missing = []
     if not TELEGRAM_TOKEN:
         missing.append("TELEGRAM_TOKEN")
-    if not DATABASE_URL:
-        missing.append("DATABASE_URL")
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        missing.append("SUPABASE_URL and SUPABASE_KEY")
     xai_key = os.environ.get("XAI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     if not xai_key and not openai_key:
@@ -79,7 +79,7 @@ def check_config():
 def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-    from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_import_key
+    from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_import_key, cmd_revoke
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
 
@@ -90,6 +90,7 @@ def setup_bot():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("stop_all", cmd_stop_all))
     app.add_handler(CommandHandler("import_key", cmd_import_key))
+    app.add_handler(CommandHandler("revoke", cmd_revoke))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -120,9 +121,9 @@ async def run_bot():
     check_config()
     from src.nadobro.models.database import init_db
 
-    logger.info("Initializing database...")
+    logger.info("Initializing Supabase...")
     init_db()
-    logger.info("Database initialized")
+    logger.info("Supabase initialized")
 
     logger.info("Setting up Telegram bot...")
     bot_app = setup_bot()
@@ -168,6 +169,7 @@ async def run_bot():
         BotCommand("help", "Show help"),
         BotCommand("status", "Bot & strategy status"),
         BotCommand("import_key", "Import trading key"),
+        BotCommand("revoke", "Revoke linked signer"),
         BotCommand("stop_all", "Stop bot & cancel orders"),
     ])
     logger.info("Bot commands registered in Menu")
@@ -178,6 +180,32 @@ async def run_bot():
     )
 
     logger.info("Nadobro is live! Pure bot mode running.")
+
+    # Optional: listen on PORT for platform health checks (Fly.io, Render, etc.)
+    port_str = os.environ.get("PORT")
+    if port_str:
+        try:
+            port = int(port_str)
+
+            async def _health_handler(reader, writer):
+                try:
+                    await reader.read(4096)
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                    await writer.drain()
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+
+            health_server = await asyncio.start_server(_health_handler, "0.0.0.0", port)
+
+            async def _serve_health():
+                async with health_server:
+                    await asyncio.Future()  # run until cancelled
+
+            asyncio.create_task(_serve_health())
+            logger.info("Health check listening on port %s", port)
+        except Exception as e:
+            logger.warning("Health server failed (non-fatal): %s", e)
 
     stop_event = asyncio.Event()
 

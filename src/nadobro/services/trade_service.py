@@ -1,8 +1,8 @@
 import logging
 from datetime import datetime, timedelta
 from src.nadobro.models.database import (
-    Trade, TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
-    get_session,
+    TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
+    get_last_trade_for_rate_limit, insert_trade, update_trade, get_trades_by_user,
 )
 from src.nadobro.config import get_product_id, get_product_name, RATE_LIMIT_SECONDS, MAX_LEVERAGE, MIN_TRADE_SIZE_USD
 from src.nadobro.services.user_service import get_user, get_user_nado_client, update_trade_stats
@@ -12,19 +12,21 @@ logger = logging.getLogger(__name__)
 
 
 def check_rate_limit(telegram_id: int) -> tuple[bool, str]:
-    with get_session() as session:
-        last_trade = (
-            session.query(Trade)
-            .filter_by(user_id=telegram_id)
-            .filter(Trade.status.in_([TradeStatus.PENDING, TradeStatus.FILLED]))
-            .order_by(Trade.created_at.desc())
-            .first()
-        )
-        if last_trade:
-            elapsed = (datetime.utcnow() - last_trade.created_at).total_seconds()
-            if elapsed < RATE_LIMIT_SECONDS:
-                remaining = int(RATE_LIMIT_SECONDS - elapsed)
-                return False, f"Rate limit: wait {remaining}s before next trade."
+    last_trade = get_last_trade_for_rate_limit(telegram_id)
+    if last_trade and last_trade.get("created_at"):
+        try:
+            raw = last_trade["created_at"]
+            if isinstance(raw, str):
+                created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                created = created.replace(tzinfo=None) if created.tzinfo else created
+            else:
+                created = raw
+            elapsed = (datetime.utcnow() - created).total_seconds()
+        except Exception:
+            elapsed = 0
+        if elapsed < RATE_LIMIT_SECONDS:
+            remaining = int(RATE_LIMIT_SECONDS - elapsed)
+            return False, f"Rate limit: wait {remaining}s before next trade."
     return True, ""
 
 
@@ -125,36 +127,37 @@ def execute_market_order(
     product_id = get_product_id(product)
     client = get_user_nado_client(telegram_id)
     user = get_user(telegram_id)
+    if not client:
+        return {"success": False, "error": "Wallet not initialized. Link wallet via Wallet button."}
 
-    with get_session() as session:
-        trade = Trade(
-            user_id=telegram_id,
-            product_id=product_id,
-            product_name=get_product_name(product_id),
-            order_type=OrderTypeEnum.MARKET,
-            side=OrderSide.LONG if is_long else OrderSide.SHORT,
-            size=size,
-            leverage=leverage,
-            status=TradeStatus.PENDING,
-            network=user.network_mode,
-        )
-        session.add(trade)
-        session.commit()
-        trade_id = trade.id
+    trade_id = insert_trade({
+        "user_id": telegram_id,
+        "product_id": product_id,
+        "product_name": get_product_name(product_id),
+        "order_type": OrderTypeEnum.MARKET.value,
+        "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
+        "size": size,
+        "leverage": leverage,
+        "status": TradeStatus.PENDING.value,
+        "network": user.network_mode.value,
+    })
+    if not trade_id:
+        return {"success": False, "error": "Failed to record trade."}
 
     result = client.place_market_order(product_id, size, is_buy=is_long, slippage_pct=slippage_pct)
 
-    with get_session() as session:
-        trade = session.query(Trade).get(trade_id)
-        if result["success"]:
-            trade.status = TradeStatus.FILLED
-            trade.order_digest = result.get("digest")
-            trade.price = result.get("price") or client.get_market_price(product_id)["mid"]
-            trade.filled_at = datetime.utcnow()
-        else:
-            trade.status = TradeStatus.FAILED
-            trade.error_message = result.get("error", "Unknown error")
-        session.commit()
+    if result["success"]:
+        update_trade(trade_id, {
+            "status": TradeStatus.FILLED.value,
+            "order_digest": result.get("digest"),
+            "price": result.get("price") or client.get_market_price(product_id)["mid"],
+            "filled_at": datetime.utcnow().isoformat(),
+        })
+    else:
+        update_trade(trade_id, {
+            "status": TradeStatus.FAILED.value,
+            "error_message": result.get("error", "Unknown error"),
+        })
 
     if result["success"]:
         mp = client.get_market_price(product_id)
@@ -194,36 +197,30 @@ def execute_limit_order(
     product_id = get_product_id(product)
     client = get_user_nado_client(telegram_id)
     user = get_user(telegram_id)
+    if not client:
+        return {"success": False, "error": "Wallet not initialized. Link wallet via Wallet button."}
 
-    with get_session() as session:
-        trade = Trade(
-            user_id=telegram_id,
-            product_id=product_id,
-            product_name=get_product_name(product_id),
-            order_type=OrderTypeEnum.LIMIT,
-            side=OrderSide.LONG if is_long else OrderSide.SHORT,
-            size=size,
-            price=price,
-            leverage=leverage,
-            status=TradeStatus.PENDING,
-            network=user.network_mode,
-        )
-        session.add(trade)
-        session.commit()
-        trade_id = trade.id
+    trade_id = insert_trade({
+        "user_id": telegram_id,
+        "product_id": product_id,
+        "product_name": get_product_name(product_id),
+        "order_type": OrderTypeEnum.LIMIT.value,
+        "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
+        "size": size,
+        "price": price,
+        "leverage": leverage,
+        "status": TradeStatus.PENDING.value,
+        "network": user.network_mode.value,
+    })
+    if not trade_id:
+        return {"success": False, "error": "Failed to record trade."}
 
     result = client.place_limit_order(product_id, size, price, is_buy=is_long)
 
-    with get_session() as session:
-        trade = session.query(Trade).get(trade_id)
-        if result["success"]:
-            trade.status = TradeStatus.FILLED
-            trade.order_digest = result.get("digest")
-            trade.filled_at = datetime.utcnow()
-        else:
-            trade.status = TradeStatus.FAILED
-            trade.error_message = result.get("error", "Unknown error")
-        session.commit()
+    if result["success"]:
+        update_trade(trade_id, {"status": TradeStatus.FILLED.value, "order_digest": result.get("digest"), "filled_at": datetime.utcnow().isoformat()})
+    else:
+        update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")})
 
     if result["success"]:
         update_trade_stats(telegram_id, size * price)
@@ -351,56 +348,44 @@ def close_all_positions(telegram_id: int) -> dict:
 
 
 def get_trade_history(telegram_id: int, limit: int = 20) -> list:
-    with get_session() as session:
-        trades = (
-            session.query(Trade)
-            .filter_by(user_id=telegram_id)
-            .order_by(Trade.created_at.desc())
-            .limit(limit)
-            .all()
-        )
-        result = []
-        for t in trades:
-            result.append({
-                "id": t.id,
-                "product": t.product_name,
-                "type": t.order_type.value,
-                "side": t.side.value,
-                "size": t.size,
-                "price": t.price,
-                "status": t.status.value,
-                "pnl": t.pnl,
-                "network": t.network.value,
-                "created_at": t.created_at.isoformat(),
-            })
-        return result
+    trades = get_trades_by_user(telegram_id, limit=limit)
+    return [
+        {
+            "id": t.get("id"),
+            "product": t.get("product_name"),
+            "type": t.get("order_type"),
+            "side": t.get("side"),
+            "size": t.get("size"),
+            "price": t.get("price"),
+            "status": t.get("status"),
+            "pnl": t.get("pnl"),
+            "network": t.get("network"),
+            "created_at": t.get("created_at", "")[:19] if t.get("created_at") else "",
+        }
+        for t in trades
+    ]
 
 
 def get_trade_analytics(telegram_id: int) -> dict:
-    with get_session() as session:
-        trades = session.query(Trade).filter_by(user_id=telegram_id).all()
-        if not trades:
-            return {"total_trades": 0}
-
-        total = len(trades)
-        filled = [t for t in trades if t.status == TradeStatus.FILLED]
-        failed = [t for t in trades if t.status == TradeStatus.FAILED]
-
-        pnl_trades = [t for t in filled if t.pnl is not None]
-        total_pnl = sum(t.pnl for t in pnl_trades) if pnl_trades else 0
-        wins = len([t for t in pnl_trades if t.pnl > 0])
-        losses = len([t for t in pnl_trades if t.pnl <= 0])
-        win_rate = (wins / len(pnl_trades) * 100) if pnl_trades else 0
-
-        total_volume = sum(t.size * (t.price or 0) for t in filled)
-
-        return {
-            "total_trades": total,
-            "filled": len(filled),
-            "failed": len(failed),
-            "total_pnl": total_pnl,
-            "win_rate": win_rate,
-            "wins": wins,
-            "losses": losses,
-            "total_volume": total_volume,
-        }
+    trades = get_trades_by_user(telegram_id, limit=500)
+    if not trades:
+        return {"total_trades": 0}
+    total = len(trades)
+    filled = [t for t in trades if t.get("status") == TradeStatus.FILLED.value]
+    failed = [t for t in trades if t.get("status") == TradeStatus.FAILED.value]
+    pnl_trades = [t for t in filled if t.get("pnl") is not None]
+    total_pnl = sum(float(t["pnl"]) for t in pnl_trades) if pnl_trades else 0
+    wins = len([t for t in pnl_trades if float(t["pnl"]) > 0])
+    losses = len([t for t in pnl_trades if float(t["pnl"]) <= 0])
+    win_rate = (wins / len(pnl_trades) * 100) if pnl_trades else 0
+    total_volume = sum(float(t.get("size") or 0) * float(t.get("price") or 0) for t in filled)
+    return {
+        "total_trades": total,
+        "filled": len(filled),
+        "failed": len(failed),
+        "total_pnl": total_pnl,
+        "win_rate": win_rate,
+        "wins": wins,
+        "losses": losses,
+        "total_volume": total_volume,
+    }

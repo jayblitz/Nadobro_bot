@@ -85,6 +85,32 @@ for preset_product, presets in SIZE_PRESETS.items():
         REPLY_BUTTON_MAP[label] = f"trade_flow:size:{label}"
 
 
+# --- New onboarding (language + ToS) ---
+def onboarding_language_kb():
+    """2 columns: 🇬🇧 English, 🇨🇳 Chinese; 🇫🇷 Français, 🇸🇦 العربية; 🇷🇺 Русский, 🇰🇷 Korean"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇬🇧 English", callback_data="onb:lang:en"),
+            InlineKeyboardButton("🇨🇳 Chinese", callback_data="onb:lang:zh"),
+        ],
+        [
+            InlineKeyboardButton("🇫🇷 Français", callback_data="onb:lang:fr"),
+            InlineKeyboardButton("🇸🇦 العربية", callback_data="onb:lang:ar"),
+        ],
+        [
+            InlineKeyboardButton("🇷🇺 Русский", callback_data="onb:lang:ru"),
+            InlineKeyboardButton("🇰🇷 Korean", callback_data="onb:lang:ko"),
+        ],
+    ])
+
+
+def onboarding_accept_tos_kb():
+    """Big green Let's Get It button"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Let's Get It 🔥", callback_data="onb:accept_tos")],
+    ])
+
+
 def persistent_menu_kb():
     if DUAL_MODE_CARD_FLOW:
         return ReplyKeyboardMarkup(
@@ -447,31 +473,18 @@ def positions_kb(positions):
 
 
 def wallet_kb():
+    """Default wallet keyboard (linked-signer model)."""
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💰 Balance", callback_data="wallet:balance"),
-        ],
-        [
-            InlineKeyboardButton("🔑 Import Testnet Key", callback_data="wallet:import:testnet"),
-            InlineKeyboardButton("🔑 Import Mainnet Key", callback_data="wallet:import:mainnet"),
-        ],
-        [
-            InlineKeyboardButton("♻️ Rotate Active Key", callback_data="wallet:rotate"),
-            InlineKeyboardButton("🗑 Remove Active Key", callback_data="wallet:remove_active"),
-        ],
-        [
-            InlineKeyboardButton("👁️ Review Private Key", callback_data="wallet:view_key"),
-        ],
-        [
-            InlineKeyboardButton("🧪 Testnet", callback_data="wallet:network:testnet"),
-            InlineKeyboardButton("🌐 Mainnet", callback_data="wallet:network:mainnet"),
-        ],
-        [
-            InlineKeyboardButton("🚰 Faucet", url="https://testnet.nado.xyz/portfolio/faucet"),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="nav:main"),
-        ],
+        [InlineKeyboardButton("💰 Balance", callback_data="wallet:balance")],
+        [InlineKeyboardButton("🔄 Revoke", callback_data="wallet:revoke_steps")],
+        [InlineKeyboardButton("◀ Back", callback_data="nav:main")],
+    ])
+
+
+def wallet_kb_not_linked():
+    """When wallet is not linked — only Back (user replies DONE in chat)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀ Back", callback_data="nav:main")],
     ])
 
 
@@ -719,89 +732,3 @@ def back_kb(target="main"):
     ])
 
 
-def onboarding_nav_kb(step: str, allow_skip: bool = False, allow_back: bool = True):
-    rows = []
-    nav_row = []
-    if allow_back:
-        nav_row.append(InlineKeyboardButton("◀ Back", callback_data="onboarding:back"))
-    nav_row.append(InlineKeyboardButton("Next ▶", callback_data="onboarding:next"))
-    rows.append(nav_row)
-    if allow_skip:
-        rows.append([InlineKeyboardButton("Skip this step", callback_data="onboarding:skip")])
-    rows.append([InlineKeyboardButton("Go to Dashboard", callback_data="nav:main")])
-    return InlineKeyboardMarkup(rows)
-
-
-def onboarding_mode_kb():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🧪 Use Testnet", callback_data="onboarding:set_mode:testnet"),
-            InlineKeyboardButton("🌐 Use Mainnet", callback_data="onboarding:set_mode:mainnet"),
-        ],
-        [
-            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
-        ],
-        [
-            InlineKeyboardButton("Go to Dashboard", callback_data="nav:main"),
-        ],
-    ])
-
-
-def onboarding_key_kb(network: str):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                f"🔑 Import {network.upper()} Key",
-                callback_data=f"wallet:import:{network}",
-            ),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
-            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
-        ],
-        [
-            InlineKeyboardButton("Open Wallet", callback_data="wallet:view"),
-        ],
-    ])
-
-
-def onboarding_funding_kb(network: str):
-    faucet_url = "https://testnet.nado.xyz/portfolio/faucet" if network == "testnet" else "https://nado.xyz"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("↻ Check Again", callback_data="onboarding:check_funding")],
-        [InlineKeyboardButton("Open Funding Page", url=faucet_url)],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
-            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
-        ],
-    ])
-
-
-def onboarding_risk_kb():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🛡 Conservative", callback_data="onboarding:set_risk:conservative"),
-            InlineKeyboardButton("⚖️ Balanced", callback_data="onboarding:set_risk:balanced"),
-        ],
-        [InlineKeyboardButton("🔥 Aggressive", callback_data="onboarding:set_risk:aggressive")],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
-            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
-        ],
-        [InlineKeyboardButton("Skip this step", callback_data="onboarding:skip")],
-    ])
-
-
-def onboarding_template_kb():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📈 MM Starter", callback_data="onboarding:set_template:mm"),
-            InlineKeyboardButton("🧮 Grid Starter", callback_data="onboarding:set_template:grid"),
-        ],
-        [InlineKeyboardButton("⚖️ DN Starter", callback_data="onboarding:set_template:dn")],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="onboarding:back"),
-            InlineKeyboardButton("Next ▶", callback_data="onboarding:next"),
-        ],
-        [InlineKeyboardButton("Skip this step", callback_data="onboarding:skip")],
-    ])

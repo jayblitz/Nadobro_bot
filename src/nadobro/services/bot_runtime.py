@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 from src.nadobro.config import get_product_id
-from src.nadobro.models.database import BotState, get_session
+from src.nadobro.models.database import get_bot_state_raw, set_bot_state, get_supabase
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
 from src.nadobro.services.trade_service import execute_limit_order, close_all_positions
@@ -55,31 +55,21 @@ def _default_state() -> dict:
 
 
 def _load_state(telegram_id: int, network: str) -> dict:
-    with get_session() as session:
-        row = session.query(BotState).filter_by(key=_state_key(telegram_id, network)).first()
-        if not row or not row.value:
-            return _default_state()
-        try:
-            loaded = json.loads(row.value)
-            state = _default_state()
-            state.update(loaded if isinstance(loaded, dict) else {})
-            return state
-        except Exception:
-            logger.warning("Invalid bot state JSON for user %s", telegram_id)
-            return _default_state()
+    raw = get_bot_state_raw(_state_key(telegram_id, network))
+    if not raw:
+        return _default_state()
+    try:
+        loaded = json.loads(raw)
+        state = _default_state()
+        state.update(loaded if isinstance(loaded, dict) else {})
+        return state
+    except Exception:
+        logger.warning("Invalid bot state JSON for user %s", telegram_id)
+        return _default_state()
 
 
 def _save_state(telegram_id: int, network: str, state: dict):
-    with get_session() as session:
-        row = session.query(BotState).filter_by(key=_state_key(telegram_id, network)).first()
-        payload = json.dumps(state)
-        if row:
-            row.value = payload
-            row.updated_at = datetime.utcnow()
-        else:
-            row = BotState(key=_state_key(telegram_id, network), value=payload)
-            session.add(row)
-        session.commit()
+    set_bot_state(_state_key(telegram_id, network), state)
 
 
 async def _notify(telegram_id: int, text: str):
@@ -116,7 +106,7 @@ def start_user_bot(
         return False, f"Unknown product '{product}'."
 
     user = get_user(telegram_id)
-    network = user.network_mode.value if user else "testnet"
+    network = user.network_mode.value if user else "mainnet"
     _, strat_cfg = get_strategy_settings(telegram_id, strategy)
     state = _default_state()
     state.update(_strategy_defaults(strategy))
@@ -146,7 +136,7 @@ def start_user_bot(
 
 def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, str]:
     user = get_user(telegram_id)
-    network = user.network_mode.value if user else "testnet"
+    network = user.network_mode.value if user else "mainnet"
     state = _load_state(telegram_id, network)
     if not state.get("running"):
         return False, "No running strategy bot found."
@@ -166,31 +156,28 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
 
 def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[bool, str]:
     stopped = 0
-    with get_session() as session:
-        rows = session.query(BotState).filter(BotState.key.like(f"{STATE_PREFIX}{telegram_id}:%")).all()
-        for row in rows:
-            try:
-                user_network = row.key.replace(STATE_PREFIX, "")
-                user_id_str, network = user_network.split(":")
-                if int(user_id_str) != int(telegram_id):
-                    continue
-                state = json.loads(row.value or "{}")
-                if not state.get("running"):
-                    continue
-                state["running"] = False
-                row.value = json.dumps(state)
-                row.updated_at = datetime.utcnow()
-                task = _tasks.pop(_task_key(telegram_id, network), None)
-                if task:
-                    task.cancel()
-                stopped += 1
-            except Exception:
+    sb = get_supabase()
+    r = sb.table("bot_state").select("key, value").like("key", f"{STATE_PREFIX}{telegram_id}:*").execute()
+    for row in (r.data or []):
+        try:
+            key = row.get("key", "")
+            user_network = key.replace(STATE_PREFIX, "")
+            user_id_str, network = user_network.split(":", 1)
+            if int(user_id_str) != int(telegram_id):
                 continue
-        session.commit()
-
+            state = json.loads(row.get("value") or "{}")
+            if not state.get("running"):
+                continue
+            state["running"] = False
+            set_bot_state(key, state)
+            task = _tasks.pop(_task_key(telegram_id, network), None)
+            if task:
+                task.cancel()
+            stopped += 1
+        except Exception:
+            continue
     if cancel_orders:
         close_all_positions(telegram_id)
-
     if stopped > 0:
         return True, f"Stopped {stopped} running strategy loop(s)."
     return False, "No running strategy bot found."
@@ -198,7 +185,7 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
 
 def get_user_bot_status(telegram_id: int) -> dict:
     user = get_user(telegram_id)
-    network = user.network_mode.value if user else "testnet"
+    network = user.network_mode.value if user else "mainnet"
     state = _load_state(telegram_id, network)
     return {
         "network": network,
@@ -226,18 +213,19 @@ def restore_running_bots(enabled: bool = False):
     if not enabled:
         logger.info("Skipping strategy auto-restore on startup (disabled).")
         return
-    with get_session() as session:
-        rows = session.query(BotState).filter(BotState.key.like(f"{STATE_PREFIX}%")).all()
-        for row in rows:
-            try:
-                user_network = row.key.replace(STATE_PREFIX, "")
-                user_id_str, network = user_network.split(":")
-                user_id = int(user_id_str)
-                state = json.loads(row.value or "{}")
-                if state.get("running"):
-                    _ensure_task(user_id, network)
-            except Exception:
-                continue
+    sb = get_supabase()
+    r = sb.table("bot_state").select("key, value").like("key", f"{STATE_PREFIX}*").execute()
+    for row in (r.data or []):
+        try:
+            key = row.get("key", "")
+            user_network = key.replace(STATE_PREFIX, "")
+            user_id_str, network = user_network.split(":", 1)
+            user_id = int(user_id_str)
+            state = json.loads(row.get("value") or "{}")
+            if state.get("running"):
+                _ensure_task(user_id, network)
+        except Exception:
+            continue
 
 
 def _ensure_task(telegram_id: int, network: str):
@@ -299,7 +287,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")
 
-    client = get_user_nado_client(telegram_id)
+    client = get_user_nado_client(telegram_id, passphrase=None)
     if not client:
         raise RuntimeError("Wallet client unavailable")
 

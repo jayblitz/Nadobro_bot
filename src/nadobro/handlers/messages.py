@@ -6,7 +6,7 @@ from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_wallet_info, get_user,
-    ensure_active_wallet_ready,
+    ensure_active_wallet_ready, save_linked_signer,
 )
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.trade_service import close_position, close_all_positions, get_trade_analytics
@@ -15,12 +15,7 @@ from src.nadobro.services.knowledge_service import answer_nado_question, stream_
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
 from src.nadobro.services.debug_logger import debug_log
-from src.nadobro.services.crypto import (
-    is_probable_mnemonic,
-    normalize_private_key,
-    derive_address_from_private_key,
-    private_key_fingerprint,
-)
+from src.nadobro.services.crypto import encrypt_with_passphrase
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id
 from src.nadobro.handlers.formatters import (
@@ -109,15 +104,6 @@ def _clear_trade_flow(context):
     context.user_data.pop("trade_flow_limit_price_input", None)
 
 
-def _looks_like_private_key_candidate(raw_text: str) -> bool:
-    text = (raw_text or "").strip()
-    if text.startswith("0x") or text.startswith("0X"):
-        text = text[2:]
-    if len(text) != 64:
-        return False
-    return bool(re.fullmatch(r"[0-9a-fA-F]{64}", text))
-
-
 async def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
         return
@@ -167,10 +153,10 @@ async def handle_message(update: Update, context: CallbackContext):
     if await _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
         return
 
-    if await _handle_trade_flow_free_text(update, context, telegram_id, text):
+    if await _handle_wallet_flow(update, context, telegram_id, text):
         return
 
-    if await _handle_pending_key_import(update, context, telegram_id, text):
+    if await _handle_trade_flow_free_text(update, context, telegram_id, text):
         return
 
     if await _handle_pending_trade(update, context, telegram_id, text):
@@ -924,96 +910,97 @@ async def _handle_pending_trade(update, context, telegram_id, text):
     return False
 
 
-async def _handle_pending_key_import(update, context, telegram_id, text):
-    pending_confirm = context.user_data.get("pending_key_confirm")
-    if pending_confirm:
-        await _delete_user_message(update)
-        await update.message.reply_text(
-            "⚠️ You already have a key import awaiting confirmation\\. "
-            "Use the *Confirm Import* or *Cancel* button\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Confirm Import", callback_data="keyimp:confirm")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="keyimp:cancel")],
-            ]),
-        )
-        return True
+def _is_valid_main_address(text: str) -> bool:
+    t = (text or "").strip()
+    if not t.startswith("0x"):
+        return False
+    t = t[2:]
+    return len(t) == 40 and bool(re.fullmatch(r"[0-9a-fA-F]{40}", t))
 
-    pending = context.user_data.get("pending_key_import")
-    if not pending:
+
+def _is_strong_passphrase(text: str) -> tuple[bool, str]:
+    t = (text or "").strip()
+    if len(t) < 12:
+        return False, "Use at least 12 characters."
+    if not re.search(r"[A-Z]", t):
+        return False, "Include at least one uppercase letter."
+    if not re.search(r"[a-z]", t):
+        return False, "Include at least one lowercase letter."
+    if not re.search(r"\d", t):
+        return False, "Include at least one number."
+    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>/?]", t):
+        return False, "Include at least one symbol."
+    return True, ""
+
+
+async def _handle_wallet_flow(update, context, telegram_id, text):
+    flow = context.user_data.get("wallet_flow")
+    if not flow:
         return False
 
-    started_at = float(pending.get("started_at") or 0)
-    if started_at and time.time() - started_at > 300:
-        await _delete_user_message(update)
-        context.user_data.pop("pending_key_import", None)
+    if flow == "awaiting_done":
+        if text.strip().upper() != "DONE":
+            return False
+        from eth_account import Account
+        account = Account.create()
+        pk_hex = account.key.hex()
+        address = account.address
+        context.user_data["wallet_flow"] = "awaiting_main_address"
+        context.user_data["wallet_linked_signer_pk"] = pk_hex
+        context.user_data["wallet_linked_signer_address"] = address
         await update.message.reply_text(
-            "⌛ Key import session expired\\. Run /import\\_key again\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
+            f"✅ *Linked Signer ready!*\n\n"
+            f"Paste this address in Nado → Settings → 1-Click Trading → Add New:\n\n"
+            f"`{address}`\n\n"
+            f"After you sign the tx, reply with your *MAIN* wallet address (0x...).",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return True
+
+    if flow == "awaiting_main_address":
+        if not _is_valid_main_address(text):
+            await update.message.reply_text(
+                "❌ Send a valid main wallet address (0x followed by 40 hex chars).",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return True
+        main_addr = text.strip()
+        if main_addr.startswith("0x"):
+            main_addr = main_addr[:2] + main_addr[2:].lower()
+        context.user_data["wallet_main_address"] = main_addr
+        context.user_data["wallet_flow"] = "awaiting_passphrase"
+        await update.message.reply_text(
+            "🔐 Choose a *strong passphrase* to encrypt your linked signer (min 12 chars, mix of upper/lower, number, symbol). "
+            "You'll need it to unlock trading.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return True
+
+    if flow == "awaiting_passphrase":
+        ok, msg = _is_strong_passphrase(text)
+        if not ok:
+            await update.message.reply_text(f"❌ {msg}", parse_mode=ParseMode.MARKDOWN)
+            return True
+        pk_hex = context.user_data.get("wallet_linked_signer_pk")
+        main_addr = context.user_data.get("wallet_main_address")
+        linked_addr = context.user_data.get("wallet_linked_signer_address")
+        if not pk_hex or not main_addr or not linked_addr:
+            context.user_data.pop("wallet_flow", None)
+            await update.message.reply_text("⚠️ Session expired. Start again from Wallet.")
+            return True
+        ciphertext, salt = encrypt_with_passphrase(pk_hex.encode("utf-8"), text.strip())
+        save_linked_signer(telegram_id, main_addr, linked_addr, ciphertext, salt)
+        context.user_data.pop("wallet_flow", None)
+        context.user_data.pop("wallet_linked_signer_pk", None)
+        context.user_data.pop("wallet_main_address", None)
+        context.user_data.pop("wallet_linked_signer_address", None)
+        await update.message.reply_text(
+            "✅ Wallet linked! Your default subaccount is now ready. Revoke anytime with /revoke",
             reply_markup=persistent_menu_kb(),
         )
         return True
 
-    lowered = text.strip().lower()
-    if lowered in ("cancel", "stop", "abort", "exit", "skip", "nevermind", "never mind"):
-        context.user_data.pop("pending_key_import", None)
-        await update.message.reply_text(
-            "✅ Key import cancelled\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
-        )
-        return True
-
-    if is_probable_mnemonic(text):
-        await _delete_user_message(update)
-        await update.message.reply_text(
-            "🛑 This looks like a seed phrase\\. Nadobro accepts *private key only* for dedicated trading wallets\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
-        )
-        context.user_data.pop("pending_key_import", None)
-        return True
-
-    if not _looks_like_private_key_candidate(text):
-        # User sent normal chat text while import was pending; cancel import so chat can continue.
-        context.user_data.pop("pending_key_import", None)
-        return False
-
-    network = pending.get("network", "testnet")
-    try:
-        normalized = normalize_private_key(text.strip())
-        address = derive_address_from_private_key(normalized)
-        fingerprint = private_key_fingerprint(normalized)
-    except Exception as e:
-        await _delete_user_message(update)
-        await update.message.reply_text(
-            f"❌ {escape_md(str(e))}\n\nTry again with a dedicated private key for this mode\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
-        )
-        return True
-
-    context.user_data["pending_key_confirm"] = {
-        "network": network,
-        "private_key": normalized,
-        "address": address,
-        "fingerprint": fingerprint,
-        "started_at": time.time(),
-    }
-    await _delete_user_message(update)
-    context.user_data.pop("pending_key_import", None)
-    await update.message.reply_text(
-        f"🔐 *Confirm Key Import* \\({escape_md(network.upper())}\\)\n\n"
-        f"Address: `{escape_md(address)}`\n"
-        f"Fingerprint: `fp\\-{escape_md(fingerprint)}`\n\n"
-        "⚠️ Ensure this is your *dedicated trading key* \\(not your main wallet\\) before confirming\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Confirm Import", callback_data="keyimp:confirm")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="keyimp:cancel")],
-        ]),
-    )
-    return True
+    return False
 
 
 async def _delete_user_message(update: Update):
