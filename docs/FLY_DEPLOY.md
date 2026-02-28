@@ -115,7 +115,7 @@ A single small machine (256MB) usually stays within a few dollars per month.
 
 | Problem | What to do |
 |--------|------------|
-| **Build fails** (e.g. `uv sync --frozen` or Docker error) | Ensure `uv.lock` exists in the project root and is committed. The Dockerfile expects `pyproject.toml` and `uv.lock`. Run `uv lock` locally if needed, then commit and `fly deploy` again. |
+| **Build fails** (e.g. `Missing workspace member nadobro-bot` or `uv sync` error) | The repo uses a `.dockerignore` that excludes a stale `uv.lock` so the image builds from `pyproject.toml` only. If you see a different uv error, ensure `pyproject.toml` is valid and try `fly deploy` again. For reproducible builds, install [uv](https://docs.astral.sh/uv/), run `uv lock`, commit `uv.lock`, then remove `uv.lock` from `.dockerignore` and add it back to the Dockerfile `COPY` line. |
 | **App exits or won’t start** | Run `fly logs` and look for Python tracebacks or “missing required environment variables”. Fix secrets with `fly secrets set ...` and redeploy. |
 | **Bot doesn’t respond in Telegram** | Confirm `TELEGRAM_TOKEN` is correct and the bot is not stopped in @BotFather. Check `fly logs` for Telegram API errors. |
 | **Wrong or updated secrets** | Run `fly secrets set VAR="value"` for each changed variable, then `fly deploy`. |
