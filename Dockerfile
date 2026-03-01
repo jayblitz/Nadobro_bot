@@ -1,10 +1,13 @@
-# Nadobro — Python 3.12, uv-friendly
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Install compiler for lru-dict source build on Python 3.12.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files (uv.lock excluded via .dockerignore when stale)
 COPY pyproject.toml ./
