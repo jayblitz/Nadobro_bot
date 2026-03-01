@@ -14,7 +14,6 @@ from src.nadobro.services.alert_service import create_alert
 from src.nadobro.services.knowledge_service import answer_nado_question, stream_nado_answer
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
-from src.nadobro.services.debug_logger import debug_log
 from src.nadobro.services.crypto import encrypt_with_passphrase
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id
@@ -113,19 +112,6 @@ async def handle_message(update: Update, context: CallbackContext):
     text = update.message.text.strip()
 
     get_or_create_user(telegram_id, username)
-    debug_log(
-        "baseline",
-        "H5",
-        "messages.py:51",
-        "message_received",
-        {
-            "telegram_id": telegram_id,
-            "text_len": len(text),
-            "has_pending_trade": bool(context.user_data.get("pending_trade")),
-            "has_pending_alert": bool(context.user_data.get("pending_alert")),
-            "has_pending_question": bool(context.user_data.get("pending_question")),
-        },
-    )
 
     if text in REPLY_BUTTON_MAP:
         callback_data = REPLY_BUTTON_MAP[text]
@@ -807,18 +793,6 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         return False
 
     step = pending.get("step", "")
-    debug_log(
-        "baseline",
-        "H2",
-        "messages.py:138",
-        "pending_trade_message_step",
-        {
-            "telegram_id": telegram_id,
-            "step": step,
-            "action": pending.get("action"),
-            "product": pending.get("product"),
-        },
-    )
 
     if step == "custom_size":
         try:

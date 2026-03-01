@@ -8,7 +8,6 @@ from src.nadobro.services.user_service import (
     has_mode_private_key,
     get_user_readonly_client,
 )
-from src.nadobro.services.debug_logger import debug_log
 
 ONBOARDING_PREFIX = "onboarding:"
 ONBOARDING_V2_PREFIX = "onboarding_v2:"
@@ -224,21 +223,4 @@ def evaluate_readiness(telegram_id: int) -> dict:
         or "risk" in set(state.get("skipped_steps", [])),
         "user_exists": bool(user),
     }
-    # region agent log
-    debug_log(
-        "baseline",
-        "H3",
-        "onboarding_service.py:204",
-        "readiness_evaluated",
-        {
-            "telegram_id": telegram_id,
-            "network": readiness["network"],
-            "has_key": readiness["has_key"],
-            "funded": readiness["funded"],
-            "onboarding_complete": readiness["onboarding_complete"],
-            "missing_step": readiness["missing_step"],
-            "selected_template": readiness["selected_template"],
-        },
-    )
-    # endregion
     return readiness

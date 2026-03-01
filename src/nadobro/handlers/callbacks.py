@@ -45,7 +45,6 @@ from src.nadobro.services.onboarding_service import (
     get_new_onboarding_state,
 )
 from src.nadobro.config import get_product_name, get_product_id, PRODUCTS
-from src.nadobro.services.debug_logger import debug_log
 
 logger = logging.getLogger(__name__)
 LIVE_PRICE_TASKS = {}
@@ -58,15 +57,6 @@ async def handle_callback(update: Update, context: CallbackContext):
 
     data = query.data
     telegram_id = query.from_user.id
-    # region agent log
-    debug_log(
-        "baseline",
-        "H1",
-        "callbacks.py:59",
-        "callback_received",
-        {"telegram_id": telegram_id, "data": data},
-    )
-    # endregion
 
     try:
         if data.startswith("onb:"):
@@ -124,15 +114,6 @@ async def handle_callback(update: Update, context: CallbackContext):
                 reply_markup=back_kb(),
             )
     except Exception as e:
-        # region agent log
-        debug_log(
-            "baseline",
-            "H1",
-            "callbacks.py:102",
-            "callback_exception",
-            {"telegram_id": telegram_id, "data": data, "error": str(e)},
-        )
-        # endregion
         logger.error(f"Callback error for '{data}': {e}", exc_info=True)
         try:
             await query.edit_message_text(
@@ -262,15 +243,6 @@ async def _handle_nav(query, data, telegram_id, context=None):
             )
         except BadRequest as e:
             if "Message is not modified" in str(e):
-                # region agent log
-                debug_log(
-                    "post-fix",
-                    "H12",
-                    "callbacks.py:182",
-                    "help_edit_noop_ignored",
-                    {"telegram_id": telegram_id},
-                )
-                # endregion
                 return
             raise
     elif target == "quick_start":
@@ -459,21 +431,6 @@ async def _handle_leverage(query, data, telegram_id, context):
 
 async def _handle_exec_trade(query, data, telegram_id, context):
     pending = context.user_data.get("pending_trade")
-    # region agent log
-    debug_log(
-        "baseline",
-        "H2",
-        "callbacks.py:353",
-        "exec_trade_clicked",
-        {
-            "telegram_id": telegram_id,
-            "has_pending_trade": bool(pending),
-            "pending_action": pending.get("action") if pending else None,
-            "pending_product": pending.get("product") if pending else None,
-            "pending_step": pending.get("step") if pending else None,
-        },
-    )
-    # endregion
     if not pending:
         await query.edit_message_text(
             "⚠️ No pending trade found\\. Please start again\\.",

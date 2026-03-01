@@ -209,36 +209,32 @@ def fmt_wallet_info(wallet_info):
 
     net = wallet_info.get("network", "testnet")
     net_emoji = "🧪" if net == "testnet" else "🌐"
+    signer_linked = bool(wallet_info.get("linked_signer_address"))
 
     lines = [
         "👛 *Wallet Info*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"📊 *Network:* {net_emoji} {escape_md(net.upper())}",
-        f"🔐 *Active Key:* {escape_md('READY' if wallet_info.get('active_address') else 'MISSING')}",
-        "",
-        f"📋 *Active Address:*",
-        f"`{escape_md(wallet_info.get('active_address', 'Not set'))}`",
+        f"🔗 *1CT Signer:* {escape_md('LINKED' if signer_linked else 'NOT LINKED')}",
     ]
 
-    if wallet_info.get("testnet_address"):
+    addr = wallet_info.get("active_address")
+    if addr:
         lines.append("")
-        lines.append(f"🧪 *Testnet:*")
-        lines.append(f"`{escape_md(wallet_info['testnet_address'])}`")
+        lines.append("📋 *Main Wallet:*")
+        lines.append(f"`{escape_md(addr)}`")
     else:
         lines.append("")
-        lines.append("🧪 *Testnet:* Not imported")
+        lines.append("📋 *Main Wallet:* Not set")
 
-    if wallet_info.get("mainnet_address"):
+    if signer_linked:
         lines.append("")
-        lines.append(f"🌐 *Mainnet:*")
-        lines.append(f"`{escape_md(wallet_info['mainnet_address'])}`")
-    else:
-        lines.append("")
-        lines.append("🌐 *Mainnet:* Not imported")
+        lines.append("🔐 *1CT Address:*")
+        lines.append(f"`{escape_md(wallet_info['linked_signer_address'])}`")
 
     lines.append("")
-    lines.append("Use /import\\_key or Wallet \\-\\> Import Key to add dedicated mode keys\\.")
+    lines.append("Use the 👛 Wallet button to link or revoke your 1CT key\\.")
 
     return "\n".join(lines)
 
@@ -372,9 +368,8 @@ def fmt_help():
         "📌 *Commands:*\n"
         "/start \\- Dashboard\n"
         "/help \\- This help message\n"
-        "/start \\(new users\\) \\- Launch onboarding wizard\n"
-        "/import\\_key \\- Import dedicated key for active mode\n"
         "/status \\- Running strategy bot status\n"
+        "/revoke \\- Revoke 1CT linked signer\n"
         "/stop\\_all \\- Stop strategy bot and cancel open orders\n"
         "\n"
         "🔗 *Useful Links:*\n"

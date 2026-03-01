@@ -7,7 +7,6 @@ from urllib.parse import quote_plus
 
 import requests
 from openai import OpenAI
-from src.nadobro.services.debug_logger import debug_log
 
 logger = logging.getLogger(__name__)
 
@@ -404,18 +403,6 @@ async def stream_nado_answer(question: str):
                 full_answer += sources_line
 
             _answer_cache[qkey] = {"ts": time.time(), "answer": full_answer}
-            debug_log(
-                "post-fix",
-                "H11",
-                "knowledge_service.py:stream",
-                "stream_answer_generated",
-                {
-                    "provider": provider,
-                    "use_live_retrieval": use_live,
-                    "sources_count": len(used_sources),
-                    "latency_ms": int((time.time() - started_at) * 1000),
-                },
-            )
             return
         except Exception as provider_error:
             logger.warning("Stream answer failed on provider=%s: %s", provider, provider_error)
@@ -441,15 +428,6 @@ async def answer_nado_question(question: str) -> str:
     qkey = _normalize_question(question)
     cached = _answer_cache.get(qkey)
     if cached and (time.time() - cached["ts"] < ANSWER_CACHE_TTL_SECONDS):
-        # region agent log
-        debug_log(
-            "post-fix",
-            "H11",
-            "knowledge_service.py:287",
-            "answer_cache_hit",
-            {"question_len": len(question or ""), "latency_ms": int((time.time() - started_at) * 1000)},
-        )
-        # endregion
         return cached["answer"]
 
     use_live = _should_use_live_retrieval(question)
@@ -510,20 +488,6 @@ async def answer_nado_question(question: str) -> str:
                 sources_line = "Sources: https://docs.nado.xyz/, https://x.com/nadoHQ"
             answer = f"{answer}\n\n{sources_line}"
         _answer_cache[qkey] = {"ts": time.time(), "answer": answer}
-        # region agent log
-        debug_log(
-            "post-fix",
-            "H11",
-            "knowledge_service.py:347",
-            "answer_generated",
-            {
-                "provider": used_provider,
-                "use_live_retrieval": use_live,
-                "sources_count": len(used_sources),
-                "latency_ms": int((time.time() - started_at) * 1000),
-            },
-        )
-        # endregion
         return answer
     except Exception as e:
         logger.error(f"Knowledge Q&A failed: {e}", exc_info=True)
