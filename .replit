@@ -36,4 +36,3 @@ packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc"]
 [userenv]
 
 [userenv.shared]
-ENCRYPTION_KEY = "POcDfrdE8qtZmluECh2731GNO5NDD5Z9rYpG0tlX698="
