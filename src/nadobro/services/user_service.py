@@ -127,13 +127,13 @@ def get_user_readonly_client(telegram_id: int) -> Optional[NadoClient]:
     return client
 
 
-def get_user_wallet_info(telegram_id: int) -> Optional[dict]:
+def get_user_wallet_info(telegram_id: int, verify_signer: bool = False) -> Optional[dict]:
     user = get_user(telegram_id)
     if not user:
         return None
     network = user.network_mode.value
     linked = bool(user.linked_signer_address and user.encrypted_linked_signer_pk)
-    return {
+    info = {
         "testnet_address": user.main_address,
         "mainnet_address": user.main_address,
         "network": network,
@@ -141,7 +141,20 @@ def get_user_wallet_info(telegram_id: int) -> Optional[dict]:
         "linked_signer_address": user.linked_signer_address,
         "testnet_ready": linked,
         "mainnet_ready": linked,
+        "signer_verification": None,
     }
+
+    if verify_signer and linked and user.main_address:
+        try:
+            readonly = get_user_readonly_client(telegram_id)
+            if readonly:
+                check = readonly.verify_linked_signer(user.linked_signer_address)
+                info["signer_verification"] = check
+        except Exception as e:
+            logger.warning("Signer verification failed for user %s: %s", telegram_id, e)
+            info["signer_verification"] = {"verified": False, "error": str(e), "current_signer": None, "expected_signer": user.linked_signer_address}
+
+    return info
 
 
 def save_linked_signer(

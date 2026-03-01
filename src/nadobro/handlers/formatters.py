@@ -216,7 +216,6 @@ def fmt_wallet_info(wallet_info):
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"📊 *Network:* {net_emoji} {escape_md(net.upper())}",
-        f"🔗 *1CT Signer:* {escape_md('LINKED' if signer_linked else 'NOT LINKED')}",
     ]
 
     addr = wallet_info.get("active_address")
@@ -232,6 +231,30 @@ def fmt_wallet_info(wallet_info):
         lines.append("")
         lines.append("🔐 *1CT Address:*")
         lines.append(f"`{escape_md(wallet_info['linked_signer_address'])}`")
+
+    verification = wallet_info.get("signer_verification")
+    if verification:
+        lines.append("")
+        if verification.get("error"):
+            lines.append(f"⚠️ *Signer Check:* {escape_md('Could not verify — ' + str(verification['error'])[:60])}")
+        elif verification.get("verified"):
+            lines.append("✅ *Signer Check:* 1CT key is linked on Nado")
+        elif verification.get("current_signer"):
+            current = verification["current_signer"]
+            expected = verification.get("expected_signer", "")
+            lines.append("❌ *Signer Check:* MISMATCH")
+            lines.append(f"  Exchange has: `{escape_md(current[:10])}\\.\\.\\.$`")
+            lines.append(f"  Bot expects: `{escape_md(expected[:10])}\\.\\.\\.$`")
+            lines.append(escape_md("→ Disable 1-Click Trading on Nado, then re-link using Advanced 1CT with the bot's key."))
+        else:
+            lines.append("❌ *Signer Check:* No signer linked on exchange")
+            lines.append(escape_md("→ Go to Nado Settings → 1-Click Trading → Advanced 1CT → paste bot's key → enable and save."))
+    elif signer_linked:
+        lines.append("")
+        lines.append(f"🔗 *1CT Signer:* {escape_md('LINKED (not verified)')}")
+    else:
+        lines.append("")
+        lines.append(f"🔗 *1CT Signer:* {escape_md('NOT LINKED')}")
 
     lines.append("")
     lines.append("Use the 👛 Wallet button to link or revoke your 1CT key\\.")

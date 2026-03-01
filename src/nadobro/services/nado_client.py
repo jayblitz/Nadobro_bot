@@ -355,16 +355,125 @@ class NadoClient:
                 positions.extend(orders)
         return positions
 
+    def verify_linked_signer(self, expected_signer_address: str = None) -> dict:
+        expected = (expected_signer_address or self.address or "").lower()
+        result = {
+            "verified": False,
+            "current_signer": None,
+            "expected_signer": expected,
+            "error": None,
+        }
+
+        if self._initialized and self.client:
+            try:
+                ls_data = self.client.context.engine_client.get_linked_signer(self.subaccount_hex)
+                current = getattr(ls_data, "signer", None) or getattr(ls_data, "linked_signer", None)
+                if current and hasattr(current, "address"):
+                    current = current.address
+                current = self._normalize_signer_address(current)
+                result["current_signer"] = current
+                if current and expected:
+                    result["verified"] = current.lower() == expected[:42].lower()
+                logger.info("Linked signer check via SDK: current=%s expected=%s verified=%s",
+                            current, expected, result["verified"])
+                return result
+            except Exception as e:
+                logger.warning("SDK get_linked_signer failed: %s", e)
+
+        try:
+            url = f"{self._rest_url()}/query"
+            params = {"type": "linked_signer", "subaccount": self.subaccount_hex}
+            headers = {"Accept-Encoding": "gzip"}
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            data = resp.json()
+            if data.get("status") == "success":
+                signer_raw = data.get("data", {})
+                current = None
+                if isinstance(signer_raw, dict):
+                    current = signer_raw.get("linked_signer") or signer_raw.get("signer")
+                elif isinstance(signer_raw, str):
+                    current = signer_raw
+                current = self._normalize_signer_address(current)
+                result["current_signer"] = current
+                if current and expected:
+                    result["verified"] = current.lower() == expected[:42].lower()
+                logger.info("Linked signer check via REST: current=%s expected=%s verified=%s",
+                            current, expected, result["verified"])
+            else:
+                result["error"] = data.get("error", "Unknown error from exchange")
+                logger.warning("REST linked_signer query returned non-success: %s", data)
+        except Exception as e:
+            result["error"] = str(e)
+            logger.warning("REST get_linked_signer failed: %s", e)
+
+        return result
+
     @staticmethod
-    def _friendly_error(error_str: str) -> str:
+    def _normalize_signer_address(raw) -> Optional[str]:
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            hex_str = raw.hex()
+            if len(hex_str) >= 40:
+                addr_hex = hex_str[-40:]
+            else:
+                return None
+            addr = "0x" + addr_hex
+        elif isinstance(raw, str):
+            addr = raw.strip().lower()
+        else:
+            return None
+        if not addr.startswith("0x"):
+            addr = "0x" + addr
+        if len(addr) > 42:
+            addr = "0x" + addr[-40:]
+        if len(addr) != 42:
+            return None
+        if addr == "0x" + "0" * 40:
+            return None
+        return addr.lower()
+
+    def _friendly_error(self, error_str: str) -> str:
         err_lower = error_str.lower()
         compact = err_lower.replace("_", "").replace("-", "")
         if "ipqueryonly" in compact:
+            diag = ""
+            try:
+                signer_addr = self.address
+                if signer_addr and self.subaccount_hex:
+                    check = self.verify_linked_signer(signer_addr)
+                    current = check.get("current_signer")
+                    if check.get("error"):
+                        diag = f"\n\n🔍 Diagnostic: Could not verify linked signer ({check['error']})"
+                    elif not current:
+                        diag = (
+                            f"\n\n🔍 Diagnostic: NO linked signer found on the exchange for this subaccount. "
+                            f"You must link the bot's 1CT key first.\n"
+                            f"Bot's 1CT signer address: {signer_addr}"
+                        )
+                    elif check["verified"]:
+                        diag = (
+                            f"\n\n🔍 Diagnostic: Bot's 1CT signer IS linked correctly ({signer_addr[:10]}...). "
+                            f"The rejection is likely an IP restriction on the exchange gateway. "
+                            f"The bot server IP may be blocked for write operations."
+                        )
+                    else:
+                        diag = (
+                            f"\n\n🔍 Diagnostic: SIGNER MISMATCH!\n"
+                            f"• Exchange has: {current[:10]}... linked\n"
+                            f"• Bot's signer: {signer_addr[:10]}...\n"
+                            f"Go to Nado Settings → 1-Click Trading → disable → "
+                            f"then Advanced 1CT → paste the bot's key → enable and save."
+                        )
+            except Exception as de:
+                logger.warning("Linked signer diagnostic failed: %s", de)
+
             return (
                 "The exchange restricted this trade (ip_query_only). This usually means:\n"
                 "1. Your 1CT signer key is not linked on Nado — go to Settings → 1-Click Trading on the Nado web app, paste your 1CT private key, enable the toggle, and save.\n"
                 "2. Your subaccount may not be initialized — deposit at least $5 USDT0 at https://testnet.nado.xyz/portfolio/faucet\n"
                 "3. If already linked and funded, the bot's server IP may be restricted by the exchange."
+                + diag
             )
         if "insufficient" in err_lower or "margin" in err_lower:
             return "Insufficient margin. Please deposit more funds."

@@ -555,7 +555,7 @@ async def _handle_wallet(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else "view"
 
     if action == "view":
-        info = get_user_wallet_info(telegram_id)
+        info = get_user_wallet_info(telegram_id, verify_signer=True)
         if not info or not info.get("linked_signer_address"):
             from eth_account import Account
             account = Account.create()
