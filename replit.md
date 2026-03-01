@@ -54,7 +54,7 @@ src/nadobro/
 | `bot_runtime.py` | Background strategy bot lifecycle (start/stop per user, APScheduler tasks) |
 | `scheduler.py` | APScheduler AsyncIO scheduler; runs alert checks on interval |
 | `crypto.py` | Passphrase-based encryption (PBKDF2 600k + Fernet) for linked signer keys |
-| `knowledge_service.py` | AI Q&A using xAI (Grok) or OpenAI, with local knowledge base fallback and live URL fetching |
+| `knowledge_service.py` | AI Q&A using xAI (Grok) or OpenAI, with local knowledge base fallback and live URL fetching; X/Twitter questions use Grok's native real-time X search |
 | `nado_client.py` | HTTP wrapper around Nado REST API (prices, orders, positions, balance) |
 | `admin_service.py` | Admin-only controls: pause trading, view stats, audit log |
 
@@ -81,6 +81,15 @@ src/nadobro/
 - **`get_user_readonly_client(telegram_id)`** — creates a `NadoClient.from_address(main_address, network)` with no private key; used for all READ operations (balance, prices, positions, market data). Cached in `_readonly_cache` by address+network.
 - **`get_user_nado_client(telegram_id, passphrase)`** — decrypts the 1CT key with the user's passphrase; required ONLY for trade SIGNING (placing/closing orders). Returns `None` if passphrase is missing or wrong.
 - Trade validation (`validate_trade`) uses `ensure_active_wallet_ready` + readonly client for balance checks; passphrase is only needed at execution time.
+
+#### Per-Trade Passphrase Collection Flow
+- When a trade is confirmed (via any path — trade flow, text intent, callback button, trade card), the bot prompts: "🔑 Enter your passphrase to sign this trade:"
+- The passphrase message is immediately deleted from chat for security after the bot reads it.
+- Passphrase is passed to `execute_market_order`/`execute_limit_order`/`close_position`/`close_all_positions` which decrypt the 1CT key on demand.
+- The passphrase is NOT cached in memory — each trade requires fresh entry for maximum security.
+- The `PENDING_PASSPHRASE_ACTION` key in `context.user_data` stores the pending action details while waiting for passphrase input.
+- The `_prompt_passphrase()` and `_handle_passphrase_input()` functions in `messages.py` handle the entire flow centrally.
+- Cancelling (via nav:main button) clears the pending passphrase state.
 
 ### Natural Language Trade Parsing
 - `handlers/intent_parser.py` uses regex to extract product, direction, size, leverage, and order type from free-text messages.

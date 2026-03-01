@@ -232,6 +232,10 @@ async def _handle_mode(query, data, telegram_id):
 async def _handle_nav(query, data, telegram_id, context=None):
     target = data.split(":")[1] if ":" in data else "main"
 
+    if context is not None:
+        context.user_data.pop("pending_passphrase_action", None)
+        context.user_data.pop("pending_trade", None)
+
     if target in ("main", "refresh"):
         await _show_dashboard(query, telegram_id)
     elif target == "help":
@@ -463,26 +467,18 @@ async def _handle_exec_trade(query, data, telegram_id, context):
         )
         return
 
-    if action in ("limit_long", "limit_short"):
-        price = pending.get("price", 0)
-        is_long = action == "limit_long"
-        result = execute_limit_order(telegram_id, product, size, price, is_long=is_long, leverage=leverage)
-    else:
-        is_long = action == "long"
-        result = execute_market_order(
-            telegram_id,
-            product,
-            size,
-            is_long=is_long,
-            leverage=leverage,
-            slippage_pct=slippage_pct,
-        )
-
-    msg = fmt_trade_result(result)
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
+    from src.nadobro.handlers.messages import _prompt_passphrase
+    await _prompt_passphrase(query, context, {
+        "type": "exec_trade_callback",
+        "pending": {
+            "action": action,
+            "product": product,
+            "size": size,
+            "leverage": leverage,
+            "slippage_pct": slippage_pct,
+            "price": pending.get("price", 0),
+        },
+    })
 
 
 async def _handle_positions(query, data, telegram_id, context):
@@ -514,18 +510,8 @@ async def _handle_positions(query, data, telegram_id, context):
 
     elif action == "close" and len(parts) >= 3:
         product = parts[2]
-        result = close_position(telegram_id, product)
-
-        if result["success"]:
-            msg = f"✅ Closed {escape_md(str(result['cancelled']))} {escape_md(result['product'])} position size\\."
-        else:
-            msg = f"❌ Close failed: {escape_md(result['error'])}"
-
-        await query.edit_message_text(
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb("main"),
-        )
+        from src.nadobro.handlers.messages import _prompt_passphrase
+        await _prompt_passphrase(query, context, {"type": "close_position", "product": product})
 
     elif action == "close_all":
         await query.edit_message_text(
@@ -535,19 +521,8 @@ async def _handle_positions(query, data, telegram_id, context):
         )
 
     elif action == "confirm_close_all":
-        result = close_all_positions(telegram_id)
-
-        if result["success"]:
-            products = ", ".join(result.get("products", []))
-            msg = f"✅ Closed total size {escape_md(str(result['cancelled']))} across {escape_md(products)}\\."
-        else:
-            msg = f"❌ Close failed: {escape_md(result['error'])}"
-
-        await query.edit_message_text(
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb("main"),
-        )
+        from src.nadobro.handlers.messages import _prompt_passphrase
+        await _prompt_passphrase(query, context, {"type": "close_all"})
 
 
 async def _handle_portfolio(query, data, telegram_id):

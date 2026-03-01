@@ -721,6 +721,7 @@ def mode_kb(current_network="testnet"):
             InlineKeyboardButton(testnet_label, callback_data="mode:testnet"),
             InlineKeyboardButton(mainnet_label, callback_data="mode:mainnet"),
         ],
+        [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
     ])
 
 

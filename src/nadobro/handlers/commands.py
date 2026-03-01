@@ -12,7 +12,6 @@ from src.nadobro.handlers.keyboards import (
     home_card_kb,
 )
 from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_user_bots
-from src.nadobro.services.trade_service import close_all_positions
 from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
     get_new_onboarding_state,
@@ -132,14 +131,9 @@ async def cmd_status(update: Update, context: CallbackContext):
 async def cmd_stop_all(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
-    close_result = close_all_positions(telegram_id)
-    if close_result.get("success"):
-        closed_msg = f"Closed total position size {close_result.get('cancelled', 0):.8f}."
-    else:
-        closed_msg = f"No open orders closed ({close_result.get('error', 'none')})."
     prefix = "🛑" if ok else "⚠️"
     await update.message.reply_text(
-        f"{prefix} {msg}\n\n{closed_msg}",
+        f"{prefix} {msg}\n\nTo close open positions, use the Positions menu.",
         reply_markup=persistent_menu_kb(),
     )
 

@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 TRADE_FLOW_STEPS = ["direction", "order_type", "product", "leverage", "size", "limit_price", "tpsl", "confirm"]
 PENDING_TEXT_CLOSE_ALL_KEY = "pending_text_close_all"
+PENDING_PASSPHRASE_ACTION = "pending_passphrase_action"
 
 
 _STATE_REQUIRED_ACTIONS = {
@@ -83,6 +84,139 @@ def _is_contextual_button(callback_data: str, context) -> bool:
         return state == "leverage"
     if callback_data.startswith("trade_flow:size:"):
         return state == "size"
+
+    return True
+
+
+async def _prompt_passphrase(update_or_query, context, action_data: dict):
+    context.user_data[PENDING_PASSPHRASE_ACTION] = action_data
+    msg_text = "🔑 Enter your passphrase to sign this trade:"
+    if hasattr(update_or_query, 'message') and update_or_query.message:
+        await update_or_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
+        ]))
+    elif hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
+            ]),
+        )
+
+
+async def _handle_passphrase_input(update, context, telegram_id, text):
+    action_data = context.user_data.get(PENDING_PASSPHRASE_ACTION)
+    if not action_data:
+        return False
+
+    passphrase = text.strip()
+    context.user_data.pop(PENDING_PASSPHRASE_ACTION, None)
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    action_type = action_data.get("type")
+
+    if action_type == "execute_trade":
+        payload = action_data.get("payload", {})
+        from src.nadobro.handlers.intent_handlers import _execute_trade_payload
+        result = _execute_trade_payload(telegram_id, payload, passphrase=passphrase)
+        await update.message.reply_text(
+            fmt_trade_result(result),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+
+    elif action_type == "execute_trade_flow":
+        flow = action_data.get("flow", {})
+        direction = flow.get("direction", "long")
+        order_type = flow.get("order_type", "market")
+        product = flow.get("product", "BTC")
+        size = flow.get("size", 0)
+        leverage = flow.get("leverage", 1)
+        slippage_pct = flow.get("slippage_pct", 1)
+
+        if order_type == "limit":
+            price = flow.get("limit_price", flow.get("price", 0))
+            is_long = direction == "long"
+            result = execute_limit_order(telegram_id, product, size, price, is_long=is_long, leverage=leverage, passphrase=passphrase)
+        else:
+            is_long = direction == "long"
+            result = execute_market_order(telegram_id, product, size, is_long=is_long, leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase)
+        await update.message.reply_text(
+            fmt_trade_result(result),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+
+    elif action_type == "exec_trade_callback":
+        pending = action_data.get("pending", {})
+        action = pending.get("action", "long")
+        product = pending.get("product", "BTC")
+        size = pending.get("size", 0)
+        leverage = pending.get("leverage", 1)
+        slippage_pct = pending.get("slippage_pct", 1)
+
+        if action in ("limit_long", "limit_short"):
+            price = pending.get("price", 0)
+            is_long = action == "limit_long"
+            result = execute_limit_order(telegram_id, product, size, price, is_long=is_long, leverage=leverage, passphrase=passphrase)
+        else:
+            is_long = action == "long"
+            result = execute_market_order(telegram_id, product, size, is_long=is_long, leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase)
+        await update.message.reply_text(
+            fmt_trade_result(result),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+
+    elif action_type == "close_position":
+        product = action_data.get("product")
+        result = close_position(telegram_id, product, passphrase=passphrase)
+        if result.get("success"):
+            msg = f"✅ Closed {escape_md(str(result.get('cancelled', 0)))} {escape_md(result.get('product', product))} position size\\."
+        else:
+            msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
+
+    elif action_type == "close_all":
+        result = close_all_positions(telegram_id, passphrase=passphrase)
+        if result.get("success"):
+            products = ", ".join(result.get("products", []))
+            msg = f"✅ Closed total size {escape_md(str(result.get('cancelled', 0)))} across {escape_md(products)}\\."
+        else:
+            msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
+
+    elif action_type == "trade_card":
+        flow = action_data.get("flow", {})
+        order_type = flow.get("order_type", "market")
+        product = flow.get("product", "BTC")
+        size = flow.get("size", 0)
+        direction = flow.get("direction", "long")
+        leverage = flow.get("leverage", 1)
+        slippage_pct = flow.get("slippage_pct", 1)
+
+        if order_type == "limit":
+            price = float(flow.get("limit_price", flow.get("price", 0)) or 0)
+            result = execute_limit_order(telegram_id, product, size, price, is_long=(direction == "long"), leverage=leverage, passphrase=passphrase)
+        else:
+            result = execute_market_order(telegram_id, product, size, is_long=(direction == "long"), leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase)
+        result_msg = fmt_trade_result(result)
+        await update.message.reply_text(
+            f"{result_msg}\n\nUse the menu for your next action\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+
+    else:
+        await update.message.reply_text(
+            "⚠️ Unknown action\\. Please try again\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
 
     return True
 
@@ -129,6 +263,9 @@ async def handle_message(update: Update, context: CallbackContext):
                 except Exception:
                     pass
             return
+
+    if await _handle_passphrase_input(update, context, telegram_id, text):
+        return
 
     if await handle_trade_card_text_input(update, context, telegram_id, text):
         return
@@ -651,27 +788,18 @@ async def _execute_trade_flow(update, context, telegram_id, flow):
         )
         return
 
-    if order_type == "limit":
-        price = flow.get("limit_price", flow.get("price", 0))
-        is_long = direction == "long"
-        result = execute_limit_order(telegram_id, product, size, price, is_long=is_long, leverage=leverage)
-    else:
-        is_long = direction == "long"
-        result = execute_market_order(
-            telegram_id,
-            product,
-            size,
-            is_long=is_long,
-            leverage=leverage,
-            slippage_pct=slippage_pct,
-        )
-
-    msg = fmt_trade_result(result)
-    await update.message.reply_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=persistent_menu_kb(),
-    )
+    await _prompt_passphrase(update, context, {
+        "type": "execute_trade_flow",
+        "flow": {
+            "direction": direction,
+            "order_type": order_type,
+            "product": product,
+            "size": size,
+            "leverage": leverage,
+            "slippage_pct": slippage_pct,
+            "limit_price": flow.get("limit_price", flow.get("price", 0)),
+        },
+    })
 
 
 async def _handle_trade_flow_free_text(update, context, telegram_id, text):
@@ -1105,11 +1233,17 @@ async def _handle_nado_question(update, context, question):
             await update.message.reply_text(
                 f"🧠 *Ask Nado*\n\n{escape_md(full_text)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+                ]),
             )
         else:
             await update.message.reply_text(
                 "⚠️ I couldn't generate an answer\\. Please try again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+                ]),
             )
     except Exception as e:
         logger.error(f"Nado Q&A error: {e}", exc_info=True)
@@ -1118,6 +1252,9 @@ async def _handle_nado_question(update, context, question):
                 await update.message.reply_text(
                     f"🧠 *Ask Nado*\n\n{escape_md(full_text)}",
                     parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+                    ]),
                 )
                 return
             except Exception:
@@ -1125,6 +1262,9 @@ async def _handle_nado_question(update, context, question):
         await update.message.reply_text(
             "⚠️ Something went wrong answering your question\\. Please try again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+            ]),
         )
 
 
@@ -1151,17 +1291,7 @@ async def _handle_pending_text_close_all_confirmation(update, context, telegram_
         return True
 
     context.user_data.pop(PENDING_TEXT_CLOSE_ALL_KEY, None)
-    result = close_all_positions(telegram_id)
-    if result.get("success"):
-        products = ", ".join(result.get("products", []))
-        msg = f"✅ Closed total size {escape_md(str(result.get('cancelled', 0)))} across {escape_md(products)}\\."
-    else:
-        msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
-    await update.message.reply_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=persistent_menu_kb(),
-    )
+    await _prompt_passphrase(update, context, {"type": "close_all"})
     return True
 
 
@@ -1200,19 +1330,7 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
         product = intent.get("product")
         if not product:
             return False
-        result = close_position(telegram_id, product)
-        if result.get("success"):
-            msg = (
-                f"✅ Closed {escape_md(str(result.get('cancelled', 0)))} "
-                f"{escape_md(result.get('product', product))} position size\\."
-            )
-        else:
-            msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
-        await update.message.reply_text(
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
-        )
+        await _prompt_passphrase(update, context, {"type": "close_position", "product": product})
         return True
 
     return False

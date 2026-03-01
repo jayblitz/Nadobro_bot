@@ -60,6 +60,12 @@ def _should_use_live_retrieval(question: str) -> bool:
     return any(sig in q for sig in live_signals)
 
 
+def _is_x_twitter_question(question: str) -> bool:
+    q = _normalize_question(question)
+    signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq"]
+    return any(sig in q for sig in signals)
+
+
 def _get_xai_client():
     global _xai_client
     if _xai_client is None:
@@ -177,6 +183,28 @@ Retrieved Context:
 {retrieved_context}
 """
 
+X_TWITTER_SYSTEM_PROMPT = """You are Nadobro Support AI for Nado, with real-time access to X (Twitter) content.
+
+Nado's official X handle is @nadoHQ (https://x.com/nadoHQ).
+Nado is a CLOB-based DEX on the Ink L2 blockchain offering perpetual futures and spot trading.
+
+Your task:
+- Use your built-in real-time X/Twitter search to find the latest posts from @nadoHQ.
+- Report the actual tweet content, including the text, date, and any links or media mentioned.
+- If asked about a specific topic, search for relevant tweets from @nadoHQ about that topic.
+- Be specific and accurate — share the actual tweet text, not just summaries.
+
+Rules:
+- Do NOT use MarkdownV2 syntax escapes; plain text only.
+- Do NOT say you cannot access X or Twitter — you have real-time access.
+- Include the tweet date/time if available.
+- Keep response under 1200 characters.
+- End with: Sources: https://x.com/nadoHQ
+
+Static Knowledge:
+{knowledge_base}
+"""
+
 
 def _extract_text(raw: str) -> str:
     text = raw or ""
@@ -219,7 +247,6 @@ def _search_live(question: str) -> list[tuple[str, str]]:
     results = []
     queries = [
         ("duckduckgo", f"https://duckduckgo.com/?q={quote_plus('nado ' + question)}"),
-        ("x-search", f"https://x.com/search?q={quote_plus('from:nadoHQ ' + question)}&src=typed_query"),
     ]
     for _, url in queries:
         txt = _fetch_url_text(url)
@@ -244,6 +271,8 @@ def _build_retrieved_context(question: str) -> tuple[str, list[str]]:
     use_live = _should_use_live_retrieval(question)
     if use_live:
         for url in OFFICIAL_URLS:
+            if "x.com" in url:
+                continue
             txt = _fetch_url_text(url)
             if txt:
                 source_pairs.append((url, txt))
@@ -347,12 +376,21 @@ async def stream_nado_answer(question: str):
     except Exception:
         retrieved_context, used_sources = ("No retrieved context available.", [])
 
-    system = KNOWLEDGE_SYSTEM_PROMPT.format(
-        knowledge_base=knowledge[:9000],
-        retrieved_context=retrieved_context[:8000],
-    )
+    is_x_question = _is_x_twitter_question(question)
+    use_x_prompt = is_x_question and xai_client is not None
+    if use_x_prompt:
+        system = X_TWITTER_SYSTEM_PROMPT.format(
+            knowledge_base=knowledge[:9000],
+        )
+    else:
+        system = KNOWLEDGE_SYSTEM_PROMPT.format(
+            knowledge_base=knowledge[:9000],
+            retrieved_context=retrieved_context[:8000],
+        )
 
     primary = _pick_primary_provider(question)
+    if use_x_prompt:
+        primary = "xai"
     secondary = "openai" if primary == "xai" else "xai"
     providers = [primary, secondary]
     providers = [
@@ -441,15 +479,24 @@ async def answer_nado_question(question: str) -> str:
     except Exception:
         retrieved_context, used_sources = ("No retrieved context available.", [])
 
-    system = KNOWLEDGE_SYSTEM_PROMPT.format(
-        knowledge_base=knowledge[:9000],
-        retrieved_context=retrieved_context[:8000],
-    )
+    is_x_question = _is_x_twitter_question(question)
+    use_x_prompt = is_x_question and xai_client is not None
+    if use_x_prompt:
+        system = X_TWITTER_SYSTEM_PROMPT.format(
+            knowledge_base=knowledge[:9000],
+        )
+    else:
+        system = KNOWLEDGE_SYSTEM_PROMPT.format(
+            knowledge_base=knowledge[:9000],
+            retrieved_context=retrieved_context[:8000],
+        )
 
     try:
         import asyncio
         loop = asyncio.get_event_loop()
         primary = _pick_primary_provider(question)
+        if use_x_prompt:
+            primary = "xai"
         secondary = "openai" if primary == "xai" else "xai"
 
         providers = [primary, secondary]

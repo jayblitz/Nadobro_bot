@@ -357,22 +357,20 @@ async def _execute_card_trade(query, context: CallbackContext, telegram_id: int,
         _clear_trade_card_session(context)
         return
 
-    if order_type == "limit":
-        price = float(session.get("limit_price", session.get("price", 0)) or 0)
-        result = execute_limit_order(telegram_id, product, size, price, is_long=(direction == "long"), leverage=leverage)
-    else:
-        result = execute_market_order(
-            telegram_id,
-            product,
-            size,
-            is_long=(direction == "long"),
-            leverage=leverage,
-            slippage_pct=slippage_pct,
-        )
-
     _clear_trade_card_session(context)
-    result_msg = fmt_trade_result(result)
-    await _edit_message_safely(query, f"{result_msg}\n\nUse this card for your next action\\.", home_card_kb())
+    from src.nadobro.handlers.messages import _prompt_passphrase
+    await _prompt_passphrase(query, context, {
+        "type": "trade_card",
+        "flow": {
+            "order_type": order_type,
+            "product": product,
+            "size": size,
+            "direction": direction,
+            "leverage": leverage,
+            "slippage_pct": slippage_pct,
+            "limit_price": session.get("limit_price", session.get("price", 0)),
+        },
+    })
 
 
 async def handle_trade_card_callback(update: Update, context: CallbackContext, telegram_id: int, data: str) -> bool:
