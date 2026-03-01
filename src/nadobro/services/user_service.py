@@ -34,12 +34,16 @@ def invalidate_user_cache(telegram_id: Optional[int] = None):
 def get_or_create_user(telegram_id: int, username: str = None) -> tuple[UserRow, bool, Optional[str]]:
     row = query_one("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
     if row:
-        update_fields = {"last_active": datetime.utcnow().isoformat()}
         if username:
-            update_fields["telegram_username"] = username
-        sets = ", ".join([f"{k} = %s" for k in update_fields.keys()])
-        vals = list(update_fields.values()) + [telegram_id]
-        execute(f"UPDATE users SET {sets} WHERE telegram_id = %s", vals)
+            execute(
+                "UPDATE users SET last_active = %s, telegram_username = %s WHERE telegram_id = %s",
+                (datetime.utcnow().isoformat(), username, telegram_id),
+            )
+        else:
+            execute(
+                "UPDATE users SET last_active = %s WHERE telegram_id = %s",
+                (datetime.utcnow().isoformat(), telegram_id),
+            )
         user = UserRow(row)
         _cache_user(user)
         return user, False, None
