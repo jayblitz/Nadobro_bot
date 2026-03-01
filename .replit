@@ -18,13 +18,12 @@ args = "Nadobro Bot"
 name = "Nadobro Bot"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
-waitForPort = 8099
-
-[workflows.workflow.metadata]
-outputType = "console"
 
 [[ports]]
 localPort = 8099
