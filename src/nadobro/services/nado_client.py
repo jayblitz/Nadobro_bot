@@ -20,12 +20,13 @@ _price_increment_x18_cache = {}
 
 
 class NadoClient:
-    def __init__(self, private_key: str, network: str = "testnet"):
+    def __init__(self, private_key: str, network: str = "testnet", main_address: str = None):
         self.private_key = private_key
         self.network = network
         self.client = None
         self.subaccount_hex = None
         self.address = None
+        self.main_address = main_address
         self._initialized = False
         self._derive_address()
 
@@ -36,6 +37,7 @@ class NadoClient:
         instance.network = network
         instance.client = None
         instance.address = address
+        instance.main_address = address
         instance._initialized = False
         try:
             from nado_protocol.utils.bytes32 import subaccount_to_hex
@@ -45,17 +47,21 @@ class NadoClient:
             instance.subaccount_hex = address.lower() + default_bytes + "0" * (24 - len(default_bytes))
         return instance
 
+    def _compute_subaccount_hex(self, address: str) -> str:
+        try:
+            from nado_protocol.utils.bytes32 import subaccount_to_hex
+            return subaccount_to_hex(address, "default")
+        except ImportError:
+            default_bytes = "default".encode().hex()
+            return address.lower() + default_bytes + "0" * (24 - len(default_bytes))
+
     def _derive_address(self):
         try:
             from eth_account import Account
             acct = Account.from_key(self.private_key)
             self.address = acct.address
-            try:
-                from nado_protocol.utils.bytes32 import subaccount_to_hex
-                self.subaccount_hex = subaccount_to_hex(self.address, "default")
-            except ImportError:
-                default_bytes = "default".encode().hex()
-                self.subaccount_hex = self.address.lower() + default_bytes + "0" * (24 - len(default_bytes))
+            query_addr = self.main_address or self.address
+            self.subaccount_hex = self._compute_subaccount_hex(query_addr)
         except Exception as e:
             logger.error(f"Failed to derive address from private key: {e}")
 
@@ -64,14 +70,17 @@ class NadoClient:
             return True
         try:
             from nado_protocol.client import create_nado_client, NadoClientMode
-            from nado_protocol.utils.bytes32 import subaccount_to_hex
 
             mode = NadoClientMode.TESTNET if self.network == "testnet" else NadoClientMode.MAINNET
             self.client = create_nado_client(mode, self.private_key)
             self.address = self.client.context.signer.address
-            self.subaccount_hex = subaccount_to_hex(self.address, "default")
+            query_addr = self.main_address or self.address
+            self.subaccount_hex = self._compute_subaccount_hex(query_addr)
             self._initialized = True
-            logger.info(f"Nado client initialized for {self.address} on {self.network}")
+            logger.info(
+                "Nado client initialized: signer=%s, query=%s, network=%s",
+                self.address, query_addr, self.network,
+            )
             return True
         except ImportError:
             logger.warning("nado_protocol not installed, using REST API fallback")
@@ -782,13 +791,18 @@ def _cache_key_for(private_key: str, network: str) -> str:
     return f"{key_hash}_{network}"
 
 
-def get_nado_client(private_key: str, network: str = "testnet") -> NadoClient:
+def get_nado_client(private_key: str, network: str = "testnet", main_address: str = None) -> NadoClient:
     cache_key = _cache_key_for(private_key, network)
-    if cache_key not in _client_cache:
-        client = NadoClient(private_key, network)
-        client.initialize()
-        _client_cache[cache_key] = client
-    return _client_cache[cache_key]
+    cached = _client_cache.get(cache_key)
+    if cached:
+        if main_address and cached.main_address != main_address:
+            cached.main_address = main_address
+            cached.subaccount_hex = cached._compute_subaccount_hex(main_address)
+        return cached
+    client = NadoClient(private_key, network, main_address=main_address)
+    client.initialize()
+    _client_cache[cache_key] = client
+    return client
 
 
 def clear_client_cache(private_key: str = None, network: str = None):

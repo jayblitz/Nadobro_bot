@@ -103,7 +103,7 @@ def get_user_nado_client(telegram_id: int, passphrase: Optional[str] = None) -> 
         pk_bytes = decrypt_with_passphrase(ciphertext, salt_b, passphrase)
         pk = pk_bytes.decode("utf-8") if isinstance(pk_bytes, bytes) else pk_bytes
         network = user.network_mode.value
-        return get_nado_client(pk, network)
+        return get_nado_client(pk, network, main_address=user.main_address)
     except Exception as e:
         logger.warning("Failed to get Nado client for user %s: %s", telegram_id, e)
         return None
