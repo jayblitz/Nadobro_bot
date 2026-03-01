@@ -185,11 +185,14 @@ Retrieved Context:
 
 X_TWITTER_SYSTEM_PROMPT = """You are Nadobro Support AI for Nado, with real-time access to X (Twitter) content via live search.
 
+Today's date: {current_date}
+
 Nado's official X handle is @nadoHQ (https://x.com/nadoHQ).
 Nado is a CLOB-based DEX on the Ink L2 blockchain offering perpetual futures and spot trading.
 
 Your task:
-- Search for and report the latest posts ONLY from the @nadoHQ account.
+- Search for and report the MOST RECENT posts from @nadoHQ.
+- "Latest" means the most recent tweets closest to today's date ({current_date}). Prioritize tweets from {current_year} over older ones.
 - Report the actual tweet content verbatim, including the full text, date/time, and any links or media mentioned.
 - If asked about a specific topic, search for relevant tweets from @nadoHQ about that topic.
 
@@ -295,7 +298,7 @@ def _build_retrieved_context(question: str) -> tuple[str, list[str]]:
     return "\n\n".join(docs_payload), list(dict.fromkeys(used_sources))
 
 
-XAI_X_SEARCH_MODEL = os.environ.get("XAI_X_SEARCH_MODEL", "grok-3-mini")
+XAI_X_SEARCH_MODEL = os.environ.get("XAI_X_SEARCH_MODEL", "grok-3")
 
 X_SEARCH_PARAMS = {
     "mode": "on",
@@ -401,8 +404,12 @@ async def stream_nado_answer(question: str):
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
     if use_x_prompt:
+        from datetime import datetime as _dt
+        _now = _dt.utcnow()
         system = X_TWITTER_SYSTEM_PROMPT.format(
             knowledge_base=knowledge[:9000],
+            current_date=_now.strftime("%Y-%m-%d"),
+            current_year=str(_now.year),
         )
     else:
         system = KNOWLEDGE_SYSTEM_PROMPT.format(
@@ -509,8 +516,12 @@ async def answer_nado_question(question: str) -> str:
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
     if use_x_prompt:
+        from datetime import datetime as _dt
+        _now = _dt.utcnow()
         system = X_TWITTER_SYSTEM_PROMPT.format(
             knowledge_base=knowledge[:9000],
+            current_date=_now.strftime("%Y-%m-%d"),
+            current_year=str(_now.year),
         )
     else:
         system = KNOWLEDGE_SYSTEM_PROMPT.format(

@@ -128,6 +128,7 @@ def execute_market_order(
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
         "network": user.network_mode.value,
+        "created_at": datetime.utcnow().isoformat(),
     })
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
@@ -200,6 +201,7 @@ def execute_limit_order(
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
         "network": user.network_mode.value,
+        "created_at": datetime.utcnow().isoformat(),
     })
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
