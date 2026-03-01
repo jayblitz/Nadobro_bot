@@ -165,11 +165,10 @@ def update_alert_triggered(alert_id: int):
 
 
 def insert_admin_log(data: dict):
-    cols = list(data.keys())
-    placeholders = ", ".join(["%s"] * len(cols))
-    col_names = ", ".join(cols)
-    vals = [data[c] for c in cols]
-    execute(f"INSERT INTO admin_logs ({col_names}) VALUES ({placeholders})", vals)
+    execute(
+        "INSERT INTO admin_logs (admin_id, action, details) VALUES (%s, %s, %s)",
+        (data.get("admin_id"), data.get("action"), data.get("details")),
+    )
 
 
 def get_trades_count() -> int:
