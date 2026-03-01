@@ -6,7 +6,7 @@ from typing import Optional
 from src.nadobro.config import (
     NADO_TESTNET_REST, NADO_MAINNET_REST,
     NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE,
-    PRODUCTS, get_product_name, NADO_PROXY_URL
+    PRODUCTS, get_product_name
 )
 
 logger = logging.getLogger(__name__)
@@ -77,14 +77,9 @@ class NadoClient:
             query_addr = self.main_address or self.address
             self.subaccount_hex = self._compute_subaccount_hex(query_addr)
             self._initialized = True
-
-            if NADO_PROXY_URL:
-                self._inject_proxy_into_sdk()
-
             logger.info(
-                "Nado client initialized: signer=%s, query=%s, network=%s, proxy=%s",
+                "Nado client initialized: signer=%s, query=%s, network=%s",
                 self.address, query_addr, self.network,
-                "enabled" if NADO_PROXY_URL else "disabled",
             )
             return True
         except ImportError:
@@ -95,22 +90,6 @@ class NadoClient:
             logger.error(f"Failed to initialize Nado client: {e}")
             self._initialized = False
             return False
-
-    def _inject_proxy_into_sdk(self):
-        if not NADO_PROXY_URL or not self.client:
-            return
-        proxy_dict = {"http": NADO_PROXY_URL, "https": NADO_PROXY_URL}
-        patched = []
-        try:
-            ctx = self.client.context
-            for client_name in ["engine_client", "trigger_client", "indexer_client"]:
-                client_obj = getattr(ctx, client_name, None)
-                if client_obj and hasattr(client_obj, "session"):
-                    client_obj.session.proxies.update(proxy_dict)
-                    patched.append(client_name)
-            logger.info("SDK proxy injected into sessions: %s", ", ".join(patched) if patched else "none")
-        except Exception as e:
-            logger.warning("Failed to inject proxy into SDK sessions: %s", e)
 
     def _rest_url(self):
         return NADO_MAINNET_REST if self.network == "mainnet" else NADO_TESTNET_REST
