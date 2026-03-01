@@ -8,6 +8,28 @@ logger = logging.getLogger(__name__)
 
 _pool = None
 
+def _prepare_db_url(url: str) -> str:
+    import re
+    from urllib.parse import quote
+    m = re.match(r'^(postgresql|postgres)(\+\w+)?://', url)
+    if not m:
+        return url
+    scheme_end = m.end()
+    rest = url[scheme_end:]
+    at_idx = rest.rfind('@')
+    if at_idx < 0:
+        return url
+    userinfo = rest[:at_idx]
+    hostpart = rest[at_idx + 1:]
+    colon_idx = userinfo.find(':')
+    if colon_idx < 0:
+        return url
+    username = userinfo[:colon_idx]
+    password = userinfo[colon_idx + 1:]
+    encoded_pw = quote(password, safe='')
+    return f"{url[:scheme_end]}{username}:{encoded_pw}@{hostpart}"
+
+
 def get_pool():
     global _pool
     if _pool is None:
@@ -15,6 +37,7 @@ def get_pool():
         if not url:
             raise RuntimeError("Neither SUPABASE_DATABASE_URL nor DATABASE_URL environment variable is set.")
         db_label = "Supabase" if os.environ.get("SUPABASE_DATABASE_URL") else "default"
+        url = _prepare_db_url(url)
         _pool = psycopg2.pool.ThreadedConnectionPool(1, 5, url)
         logger.info("PostgreSQL connection pool initialized (%s)", db_label)
     return _pool
