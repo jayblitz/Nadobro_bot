@@ -7,7 +7,7 @@ Nadobro is a Telegram bot that serves as a trading interface for the Nado DEX (a
 **Core capabilities:**
 - Natural language trade parsing (e.g., "long ETH 0.1 at 10x")
 - Live market data, positions, PnL, and funding rates from Nado DEX
-- Encrypted wallet management (private keys stored encrypted in Supabase)
+- Linked Signer wallet management (no raw private key import — bot generates a signer key, user authorizes it on Nado)
 - Automated trading strategies: Market Making (Grid/RGRID), Delta Neutral, Volume Bot
 - Price and funding alerts via background scheduler
 - Admin controls (pause trading, view stats)
@@ -26,16 +26,16 @@ Preferred communication style: Simple, everyday language.
 ```
 src/nadobro/
   config.py            — all env vars + product/market constants
-  supabase_client.py   — singleton Supabase client
-  models/database.py   — enums + all Supabase table CRUD (no ORM)
+  db.py                — PostgreSQL connection pool (psycopg2 + DATABASE_URL)
+  models/database.py   — enums + all PostgreSQL table CRUD (raw SQL, no ORM)
   handlers/            — Telegram update handlers (commands, callbacks, messages, trade card, home card)
   services/            — business logic (user, trade, alert, crypto, knowledge, scheduler, bot_runtime)
-  strategies/          — MM bot, delta neutral, volume bot cycle logic (currently stubs)
+  strategies/          — MM bot, delta neutral, volume bot cycle logic
   data/                — static knowledge base text for the AI assistant
 ```
 
 ### Frontend (Telegram UI)
-- **Commands** (`/start`, `/help`, `/status`, etc.) handled in `handlers/commands.py`
+- **Commands** (`/start`, `/help`, `/status`, `/revoke`, `/stop_all`) handled in `handlers/commands.py`
 - **Inline keyboards** for navigation and trade flows (`handlers/keyboards.py`)
 - **Reply keyboards** for step-by-step trade card flow (persistent bottom menu)
 - **Callback query router** in `handlers/callbacks.py` dispatches all button taps
@@ -46,29 +46,33 @@ src/nadobro/
 ### Backend Services
 | Service | Purpose |
 |---|---|
-| `user_service.py` | Create/fetch users, manage wallets, NadoClient per user |
+| `user_service.py` | Create/fetch users, manage linked signer wallets, NadoClient per user |
 | `trade_service.py` | Validate and execute market/limit orders, rate limiting |
 | `alert_service.py` | CRUD for price alerts, check triggered alerts |
-| `settings_service.py` | Per-user settings (leverage, slippage, strategy params) stored in Supabase bot_state |
+| `settings_service.py` | Per-user settings (leverage, slippage, strategy params) stored in bot_state |
 | `onboarding_service.py` | Multi-step onboarding state machine (language → ToS → dashboard) |
 | `bot_runtime.py` | Background strategy bot lifecycle (start/stop per user, APScheduler tasks) |
 | `scheduler.py` | APScheduler AsyncIO scheduler; runs alert checks on interval |
-| `crypto.py` | Fernet-based encryption/decryption of private keys; passphrase-based key derivation |
+| `crypto.py` | Passphrase-based encryption (PBKDF2 600k + Fernet) for linked signer keys |
 | `knowledge_service.py` | AI Q&A using xAI (Grok) or OpenAI, with local knowledge base fallback and live URL fetching |
 | `nado_client.py` | HTTP wrapper around Nado REST API (prices, orders, positions, balance) |
 | `admin_service.py` | Admin-only controls: pause trading, view stats, audit log |
 
 ### Data Layer
-- **No ORM, no local database.** All persistence goes through **Supabase** (PostgreSQL-as-a-service) via the `supabase-py` client.
-- Tables expected in Supabase: `users`, `trades`, `alerts`, `bot_state`, `admin_logs` (tables must be created via Supabase dashboard migrations — they are not auto-created by the app).
-- The `bot_state` table acts as a flexible key-value store for settings, onboarding state, strategy state, etc. — avoids needing many small tables.
-- A short in-memory LRU-style cache (`_user_cache`, `_price_cache`) with TTLs reduces Supabase round-trips for hot data.
+- **Replit PostgreSQL** via `DATABASE_URL` environment variable. Connection pooling via `psycopg2.pool.ThreadedConnectionPool` in `src/nadobro/db.py`.
+- Raw SQL queries (no ORM). Helper functions: `query_one`, `query_all`, `execute`, `execute_returning`, `query_count`.
+- Tables: `users`, `trades`, `alerts`, `bot_state`, `admin_logs` — auto-created by `init_db()` on startup.
+- The `bot_state` table acts as a flexible key-value store for settings, onboarding state, strategy state, etc.
+- A short in-memory LRU-style cache (`_user_cache`, `_price_cache`) with TTLs reduces DB round-trips for hot data.
 
-### Wallet Encryption
-- Each user's private key is encrypted with Fernet symmetric encryption before storage in Supabase.
-- The `ENCRYPTION_KEY` environment variable must be a valid Fernet key (or a raw string that gets SHA-256 derived into one).
-- Keys are validated at startup; the process exits if the key is missing or invalid.
-- Optional passphrase-based encryption (`encrypt_with_passphrase`) is available for additional protection.
+### Wallet — Linked Signer Model
+- **No raw private key import.** Users link wallets via a Linked Signer flow:
+  1. Bot generates a new Ethereum account (the "signer")
+  2. User authorizes this signer address on Nado (Settings → 1-Click Trading)
+  3. Signer private key is encrypted with user's passphrase (PBKDF2 600k iterations + Fernet)
+  4. Encrypted key + salt stored in `users` table; main wallet address stored separately
+- The `ENCRYPTION_KEY` env var provides a Fernet key for general encryption validation at startup.
+- Users can revoke/unlink at any time via the Wallet button or `/revoke` command.
 
 ### Natural Language Trade Parsing
 - `handlers/intent_parser.py` uses regex to extract product, direction, size, leverage, and order type from free-text messages.
@@ -76,13 +80,15 @@ src/nadobro/
 
 ### Trading Strategies (Background Bots)
 - `bot_runtime.py` manages per-user asyncio tasks that run strategy cycles on a timer.
-- Strategy state (running, parameters, last tick) is persisted in the Supabase `bot_state` table under a `strategy_bot:{user_id}:{network}` key.
-- Three strategy skeletons exist in `src/nadobro/strategies/`: MM Bot, Delta Neutral, Volume Bot. Currently placeholders pending full implementation.
+- Strategy state (running, parameters, last tick) is persisted in the `bot_state` table under a `strategy_bot:{user_id}:{network}` key.
+- `_dispatch_strategy()` routes: mm/grid → `strategies/mm_bot.py`, dn → `strategies/delta_neutral.py`, vol → `strategies/volume_bot.py`
+- SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol")
 
 ### Configuration
 All configuration lives in `src/nadobro/config.py` and is read from environment variables. Key flags:
 - `DUAL_MODE_CARD_FLOW` — enables the inline trade card UI pattern
 - `RATE_LIMIT_SECONDS`, `MAX_LEVERAGE`, `MIN_TRADE_SIZE_USD` — trading safety constants
+- `EST_FEE_RATE`, `EST_FILL_EFFICIENCY` — estimation constants for strategies
 - Product IDs and aliases for BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX are hardcoded here
 
 ## External Dependencies
@@ -91,19 +97,19 @@ All configuration lives in `src/nadobro/config.py` and is read from environment 
 | Service | Purpose | Config Keys |
 |---|---|---|
 | **Telegram Bot API** | All user interaction (python-telegram-bot library) | `TELEGRAM_TOKEN` |
-| **Supabase** | Persistent storage for users, trades, alerts, settings | `SUPABASE_URL`, `SUPABASE_KEY` |
+| **Replit PostgreSQL** | Persistent storage for users, trades, alerts, settings | `DATABASE_URL` (auto-provided) |
 | **Nado DEX REST API** | Market data, order placement, position management | No key needed; testnet/mainnet URLs in config |
 
 ### Optional Services
 | Service | Purpose | Config Keys |
 |---|---|---|
-| **xAI (Grok)** | AI-powered "Ask Nado" Q&A feature | `XAI_API_KEY` |
+| **xAI (Grok)** | AI-powered "Ask Nado" Q&A feature (primary) | `XAI_API_KEY` |
 | **OpenAI** | Fallback AI for Q&A | `OPENAI_API_KEY` |
 
 ### Key Python Packages
 - `python-telegram-bot` — Telegram bot framework
-- `supabase` — Supabase Python client
-- `cryptography` — Fernet encryption for private keys
+- `psycopg2-binary` — PostgreSQL driver for Replit PG
+- `cryptography` — Fernet encryption for linked signer keys
 - `eth-account` — Ethereum key derivation and signing
 - `nado_protocol` — Official Nado DEX SDK (order building, signing, subaccount utils)
 - `apscheduler` — Background job scheduler for alerts and strategy bots
@@ -112,7 +118,8 @@ All configuration lives in `src/nadobro/config.py` and is read from environment 
 - `python-dotenv` — Local `.env` loading for development
 
 ### Deployment
-- Designed to run as a single Python process with long polling
-- Documented deployment targets: Fly.io (via `fly.toml` + Docker), Oracle Cloud Always Free, or any VPS with a process manager
-- Secrets are injected as environment variables (never committed); a helper script `run_setup_secrets.py` prompts securely and writes to `.env`
+- Runs on Replit (India server) as a single Python process with long polling
+- Workflow configured as console output (no port needed)
+- Optional: Fly.io deployment via `fly.toml` + Docker (needs own Postgres)
+- Secrets injected as environment variables via Replit Secrets panel
 - No webhook server needed; long polling works without a public URL

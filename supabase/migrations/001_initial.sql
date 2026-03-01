@@ -1,9 +1,10 @@
--- Nadobro Supabase schema (run in Supabase SQL editor or via migration)
--- RLS: use service role key for full access; or add policies as needed.
+-- Nadobro PostgreSQL schema (canonical reference)
+-- Used by Replit PostgreSQL via DATABASE_URL.
+-- Tables are auto-created by src/nadobro/db.py init_db() on startup.
 
--- Users: linked signer model (telegram_id PK, main_address, linked_signer, encrypted key, language)
 CREATE TABLE IF NOT EXISTS users (
-  telegram_id BIGINT PRIMARY KEY,
+  id SERIAL PRIMARY KEY,
+  telegram_id BIGINT UNIQUE NOT NULL,
   telegram_username TEXT,
   main_address TEXT,
   linked_signer_address TEXT,
@@ -19,7 +20,6 @@ CREATE TABLE IF NOT EXISTS users (
   total_volume_usd DOUBLE PRECISION DEFAULT 0
 );
 
--- Bot state: key-value for onboarding, strategy runtime, settings
 CREATE TABLE IF NOT EXISTS bot_state (
   id SERIAL PRIMARY KEY,
   key TEXT UNIQUE NOT NULL,
@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS bot_state (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Trades history
 CREATE TABLE IF NOT EXISTS trades (
   id SERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL,
@@ -51,7 +50,6 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE INDEX IF NOT EXISTS idx_trades_user_product ON trades (user_id, product_id);
 CREATE INDEX IF NOT EXISTS idx_trades_created ON trades (created_at);
 
--- Alerts
 CREATE TABLE IF NOT EXISTS alerts (
   id SERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL,
@@ -67,7 +65,6 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (user_id, is_active);
 
--- Admin logs
 CREATE TABLE IF NOT EXISTS admin_logs (
   id SERIAL PRIMARY KEY,
   admin_id BIGINT NOT NULL,

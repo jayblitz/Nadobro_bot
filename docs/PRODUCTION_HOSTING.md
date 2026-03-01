@@ -41,8 +41,7 @@ The bot uses **long polling** (it must run continuously). These platforms can ke
 
    # Set secrets (paste each when prompted; no echo)
    export TELEGRAM_TOKEN="your_token"
-   export SUPABASE_URL="https://xxx.supabase.co"
-   export SUPABASE_KEY="your_service_role_key"
+   export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
    export ENCRYPTION_KEY="your_fernet_key"
    # Optional: XAI_API_KEY, OPENAI_API_KEY, ADMIN_USER_IDS
 
@@ -81,8 +80,7 @@ For a full step-by-step, see [Fly.io deployment guide](FLY_DEPLOY.md).
 3. **Set secrets**
    ```bash
    fly secrets set TELEGRAM_TOKEN="your_token"
-   fly secrets set SUPABASE_URL="https://xxx.supabase.co"
-   fly secrets set SUPABASE_KEY="your_service_role_key"
+   fly secrets set DATABASE_URL="postgresql://user:pass@host:5432/dbname"
    fly secrets set ENCRYPTION_KEY="your_fernet_key"
    # Optional:
    fly secrets set XAI_API_KEY="..."
