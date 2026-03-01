@@ -11,11 +11,12 @@ _pool = None
 def get_pool():
     global _pool
     if _pool is None:
-        url = os.environ.get("DATABASE_URL")
+        url = os.environ.get("SUPABASE_DATABASE_URL") or os.environ.get("DATABASE_URL")
         if not url:
-            raise RuntimeError("DATABASE_URL environment variable not set.")
+            raise RuntimeError("Neither SUPABASE_DATABASE_URL nor DATABASE_URL environment variable is set.")
+        db_label = "Supabase" if os.environ.get("SUPABASE_DATABASE_URL") else "default"
         _pool = psycopg2.pool.ThreadedConnectionPool(1, 5, url)
-        logger.info("PostgreSQL connection pool initialized")
+        logger.info("PostgreSQL connection pool initialized (%s)", db_label)
     return _pool
 
 

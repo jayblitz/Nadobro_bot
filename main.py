@@ -37,8 +37,8 @@ def check_config():
     missing = []
     if not TELEGRAM_TOKEN:
         missing.append("TELEGRAM_TOKEN")
-    if not DATABASE_URL:
-        missing.append("DATABASE_URL")
+    if not DATABASE_URL and not os.environ.get("SUPABASE_DATABASE_URL"):
+        missing.append("DATABASE_URL or SUPABASE_DATABASE_URL")
     xai_key = os.environ.get("XAI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     if not xai_key and not openai_key:
