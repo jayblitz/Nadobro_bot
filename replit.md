@@ -120,6 +120,17 @@ All configuration lives in `src/nadobro/config.py` and is read from environment 
 ### Deployment
 - Runs on Replit (India server) as a single Python process with long polling
 - Workflow configured as console output (no port needed)
-- Optional: Fly.io deployment via `fly.toml` + Docker (needs own Postgres)
 - Secrets injected as environment variables via Replit Secrets panel
 - No webhook server needed; long polling works without a public URL
+
+### Project Structure (root)
+```
+main.py          — entry point
+pyproject.toml   — Python dependencies
+uv.lock          — locked dependency versions
+replit.md        — this file
+.replit           — Replit workspace config
+.gitignore       — Git ignore rules
+src/nadobro/     — all source code
+attached_assets/ — reference images/docs from user
+```
