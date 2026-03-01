@@ -12,6 +12,22 @@ def escape_md(text):
     return re.sub(r'([' + re.escape(special) + r'])', r'\\\1', text)
 
 
+def _calc_position_pnl(position: dict, current_price: float) -> Optional[float]:
+    v_quote = position.get("v_quote_balance")
+    signed_amount = position.get("signed_amount")
+    if v_quote is not None and signed_amount is not None and current_price:
+        return v_quote + signed_amount * current_price
+    entry = float(position.get("price", 0) or 0)
+    amount = abs(float(position.get("amount", 0) or 0))
+    if current_price and entry and amount:
+        side = position.get("side", "LONG")
+        if side == "LONG":
+            return (current_price - entry) * amount
+        else:
+            return (entry - current_price) * amount
+    return None
+
+
 def fmt_price(price, product="BTC"):
     if price is None or price == 0:
         return "N/A"
@@ -51,18 +67,16 @@ def fmt_positions(positions, prices=None):
         if prices and base in prices:
             current = prices[base].get("mid", 0)
 
-        if current and entry:
-            if side == "LONG":
-                pnl = (current - entry) * amount
-            else:
-                pnl = (entry - current) * amount
-            pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
-            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-            mark_str = f"${fmt_price(current, base)}"
-            lines.append(
-                f"  └ Mark: {escape_md(mark_str)} \\| "
-                f"PnL: {pnl_emoji} {escape_md(pnl_str)}"
-            )
+        if current:
+            pnl = _calc_position_pnl(p, current)
+            if pnl is not None:
+                pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                mark_str = f"${fmt_price(current, base)}"
+                lines.append(
+                    f"  └ Mark: {escape_md(mark_str)} \\| "
+                    f"PnL: {pnl_emoji} {escape_md(pnl_str)}"
+                )
 
     lines.append("")
     lines.append(f"Total: {escape_md(str(len(positions)))} order\\(s\\)")
@@ -284,24 +298,57 @@ def fmt_alerts(alerts):
 
 
 
+def _compute_exchange_stats(positions, prices):
+    unrealized_pnl = 0.0
+    position_value = 0.0
+    for p in (positions or []):
+        amount = abs(float(p.get("amount", 0) or 0))
+        pname = p.get("product_name", "???")
+        base = pname.replace("-PERP", "")
+        current = 0.0
+        if prices and base in prices:
+            try:
+                current = float((prices.get(base) or {}).get("mid", 0) or 0)
+            except Exception:
+                current = 0.0
+        if current:
+            pnl = _calc_position_pnl(p, current)
+            if pnl is not None:
+                unrealized_pnl += pnl
+            position_value += amount * current
+    return unrealized_pnl, position_value
+
+
 def fmt_portfolio(stats, positions, prices=None):
     total_trades = int(stats.get("total_trades", 0) or 0)
-    total_volume = float(stats.get("total_volume", 0) or 0)
-    total_pnl = float(stats.get("total_pnl", 0) or 0)
-    win_rate = float(stats.get("win_rate", 0) or 0)
 
-    pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
-    pnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
+    unrealized_pnl, position_value = _compute_exchange_stats(positions, prices)
+
+    upnl_emoji = "🟢" if unrealized_pnl >= 0 else "🔴"
+    upnl_str = f"+${unrealized_pnl:,.2f}" if unrealized_pnl >= 0 else f"-${abs(unrealized_pnl):,.2f}"
 
     lines = [
         "📁 *Portfolio*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"📌 *Open Positions:* {escape_md(str(len(positions or [])))}",
-        f"💰 *Total Volume:* {escape_md(f'${total_volume:,.2f}')}",
-        f"{pnl_emoji} *Total PnL:* {escape_md(pnl_str)}",
-        f"🏆 *Win Rate:* {escape_md(f'{win_rate:.1f}%')} \\| Trades: {escape_md(str(total_trades))}",
+        f"💎 *Position Value:* {escape_md(f'${position_value:,.2f}')}",
+        f"{upnl_emoji} *Unrealized PnL:* {escape_md(upnl_str)}",
     ]
+
+    if total_trades > 0:
+        total_volume = float(stats.get("total_volume", 0) or 0)
+        total_pnl = float(stats.get("total_pnl", 0) or 0)
+        win_rate = float(stats.get("win_rate", 0) or 0)
+        rpnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+        rpnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
+        lines.extend([
+            "",
+            "*Bot Trading Stats*",
+            f"💰 *Volume:* {escape_md(f'${total_volume:,.2f}')}",
+            f"{rpnl_emoji} *Realized PnL:* {escape_md(rpnl_str)}",
+            f"🏆 *Win Rate:* {escape_md(f'{win_rate:.1f}%')} \\| Trades: {escape_md(str(total_trades))}",
+        ])
 
     if not positions:
         lines.append("")
@@ -314,7 +361,6 @@ def fmt_portfolio(stats, positions, prices=None):
         amount = abs(float(p.get("amount", 0) or 0))
         pname = p.get("product_name", "???")
         base = pname.replace("-PERP", "")
-        entry = float(p.get("price", 0) or 0)
         current = 0.0
         if prices and base in prices:
             try:
@@ -323,9 +369,10 @@ def fmt_portfolio(stats, positions, prices=None):
                 current = 0.0
 
         pnl_text = "N/A"
-        if current and entry:
-            pnl = (current - entry) * amount if side == "LONG" else (entry - current) * amount
-            pnl_text = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+        if current:
+            pnl = _calc_position_pnl(p, current)
+            if pnl is not None:
+                pnl_text = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
 
         lines.append(
             f"• {escape_md(side)} {escape_md(f'{amount:.4f}')} {escape_md(pname)} \\| PnL: {escape_md(pnl_text)}"

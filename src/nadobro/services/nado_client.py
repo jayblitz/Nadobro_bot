@@ -252,18 +252,22 @@ class NadoClient:
                     or 0
                 )
                 price = self._from_x18_dynamic(price_raw)
-                if (not price or price <= 0) and v_quote_raw is not None:
-                    v_quote = self._from_x18_dynamic(v_quote_raw)
+                v_quote_val = self._from_x18_dynamic(v_quote_raw) if v_quote_raw is not None else None
+                if (not price or price <= 0) and v_quote_val is not None:
                     if abs(amount) > 0:
-                        price = abs(v_quote / amount)
+                        price = abs(v_quote_val / amount)
 
-                positions.append({
+                pos = {
                     "product_id": int(product_id),
                     "product_name": get_product_name(int(product_id)),
                     "amount": abs(amount),
+                    "signed_amount": float(amount),
                     "price": float(price),
                     "side": "LONG" if amount > 0 else "SHORT",
-                })
+                }
+                if v_quote_val is not None:
+                    pos["v_quote_balance"] = float(v_quote_val)
+                positions.append(pos)
         return positions
 
     def _extract_positions_from_rest_payload(self, payload: dict) -> list:
@@ -309,17 +313,21 @@ class NadoClient:
                     or 0
                 )
                 price = self._from_x18_dynamic(price_raw)
-                if (not price or price <= 0) and v_quote_raw is not None:
-                    v_quote = self._from_x18_dynamic(v_quote_raw)
+                v_quote_val = self._from_x18_dynamic(v_quote_raw) if v_quote_raw is not None else None
+                if (not price or price <= 0) and v_quote_val is not None:
                     if abs(amount) > 0:
-                        price = abs(v_quote / amount)
-                positions.append({
+                        price = abs(v_quote_val / amount)
+                pos = {
                     "product_id": product_id,
                     "product_name": get_product_name(product_id),
                     "amount": abs(amount),
+                    "signed_amount": float(amount),
                     "price": float(price),
                     "side": "LONG" if amount > 0 else "SHORT",
-                })
+                }
+                if v_quote_val is not None:
+                    pos["v_quote_balance"] = float(v_quote_val)
+                positions.append(pos)
         return positions
 
     def get_all_positions(self) -> list:
