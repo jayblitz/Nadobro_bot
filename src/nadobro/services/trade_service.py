@@ -54,7 +54,7 @@ def validate_trade(
 
     client = get_user_nado_client(telegram_id)
     if not client:
-        return False, "No active mode key found. Use /import_key, then fund wallet."
+        return False, "Wallet not linked. Use the 👛 Wallet button to connect your Linked Signer."
 
     balance = client.get_balance()
     # region agent log

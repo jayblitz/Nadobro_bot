@@ -104,13 +104,6 @@ async def handle_callback(update: Update, context: CallbackContext):
             await _handle_settings(query, data, telegram_id, context)
         elif data.startswith("strategy:"):
             await _handle_strategy(query, data, context, telegram_id)
-        elif data.startswith("keyimp:"):
-            context.user_data.pop("pending_key_confirm", None)
-            context.user_data.pop("pending_key_import", None)
-            await query.edit_message_text(
-                "Use the 👛 Wallet button to link your wallet (Linked Signer).",
-                reply_markup=back_kb(),
-            )
         elif data == "home:mode":
             user = get_user(telegram_id)
             current_network = user.network_mode.value if user else "testnet"
@@ -199,8 +192,8 @@ async def _handle_onb_new(query, data, telegram_id, context):
             return
         lang = parts[2]
         set_new_onboarding_language(telegram_id, lang)
-        from src.nadobro.models.database import get_supabase
-        get_supabase().table("users").update({"language": lang}).eq("telegram_id", telegram_id).execute()
+        from src.nadobro.services.user_service import update_user_language
+        update_user_language(telegram_id, lang)
         await query.edit_message_text(
             _ONB_WELCOME_CARD,
             parse_mode=ParseMode.MARKDOWN,

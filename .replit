@@ -29,3 +29,12 @@ outputType = "console"
 [[ports]]
 localPort = 8099
 externalPort = 8099
+
+[nix]
+channel = "stable-25_05"
+packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc"]
+
+[userenv]
+
+[userenv.shared]
+ENCRYPTION_KEY = "POcDfrdE8qtZmluECh2731GNO5NDD5Z9rYpG0tlX698="

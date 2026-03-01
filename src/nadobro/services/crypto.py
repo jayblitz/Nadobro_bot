@@ -65,27 +65,6 @@ def generate_wallet() -> dict:
     }
 
 
-def encrypt_private_key(private_key: str) -> str:
-    f = _get_fernet()
-    return f.encrypt(private_key.encode()).decode()
-
-
-def decrypt_private_key(encrypted_key: str) -> str:
-    f = _get_fernet()
-    return f.decrypt(encrypted_key.encode()).decode()
-
-
-def hash_mnemonic(mnemonic: str) -> str:
-    return hashlib.sha256(mnemonic.encode()).hexdigest()
-
-
-def recover_wallet_from_mnemonic(mnemonic: str) -> dict:
-    acct = Account.from_mnemonic(mnemonic)
-    return {
-        "address": acct.address,
-        "private_key": acct.key.hex(),
-    }
-
 
 def generate_webhook_secret() -> str:
     return secrets.token_hex(32)
@@ -104,14 +83,6 @@ def normalize_private_key(private_key: str) -> str:
         raise ValueError("Invalid private key format. Expected 64 hex chars.")
     return "0x" + raw.lower()
 
-
-def is_probable_mnemonic(text: str) -> bool:
-    if not text:
-        return False
-    words = [w for w in text.strip().split() if w]
-    if len(words) < 12:
-        return False
-    return all(re.fullmatch(r"[a-zA-Z]+", w) for w in words[:12])
 
 
 def private_key_fingerprint(private_key: str) -> str:

@@ -15,7 +15,7 @@ logger = logging.getLogger("nadobro")
 # Load local .env during development before reading config vars.
 load_dotenv()
 
-from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, SUPABASE_URL, SUPABASE_KEY
+from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
 from src.nadobro.services.crypto import validate_encryption_key
 from src.nadobro.services.debug_logger import debug_log
 
@@ -26,7 +26,7 @@ if not ENCRYPTION_KEY:
         "H7",
         "main.py:24",
         "missing_encryption_key",
-        {"has_telegram_token": bool(TELEGRAM_TOKEN), "has_supabase": bool(SUPABASE_URL and SUPABASE_KEY)},
+        {"has_telegram_token": bool(TELEGRAM_TOKEN), "has_database_url": bool(DATABASE_URL)},
     )
     # endregion
     logger.error(
@@ -56,8 +56,8 @@ def check_config():
     missing = []
     if not TELEGRAM_TOKEN:
         missing.append("TELEGRAM_TOKEN")
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        missing.append("SUPABASE_URL and SUPABASE_KEY")
+    if not DATABASE_URL:
+        missing.append("DATABASE_URL")
     xai_key = os.environ.get("XAI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     if not xai_key and not openai_key:
@@ -79,7 +79,7 @@ def check_config():
 def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-    from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_import_key, cmd_revoke
+    from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_revoke
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
 
@@ -89,7 +89,6 @@ def setup_bot():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("stop_all", cmd_stop_all))
-    app.add_handler(CommandHandler("import_key", cmd_import_key))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -121,9 +120,9 @@ async def run_bot():
     check_config()
     from src.nadobro.models.database import init_db
 
-    logger.info("Initializing Supabase...")
+    logger.info("Initializing database...")
     init_db()
-    logger.info("Supabase initialized")
+    logger.info("Database initialized")
 
     logger.info("Setting up Telegram bot...")
     bot_app = setup_bot()
@@ -168,7 +167,6 @@ async def run_bot():
         BotCommand("start", "Open dashboard"),
         BotCommand("help", "Show help"),
         BotCommand("status", "Bot & strategy status"),
-        BotCommand("import_key", "Import trading key"),
         BotCommand("revoke", "Revoke linked signer"),
         BotCommand("stop_all", "Stop bot & cancel orders"),
     ])

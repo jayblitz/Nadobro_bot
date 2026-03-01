@@ -5,7 +5,8 @@ import time
 from datetime import datetime
 
 from src.nadobro.config import get_product_id
-from src.nadobro.models.database import get_bot_state_raw, set_bot_state, get_supabase
+from src.nadobro.models.database import get_bot_state_raw, set_bot_state
+from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
 from src.nadobro.services.trade_service import close_all_positions
@@ -160,9 +161,11 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
 
 def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[bool, str]:
     stopped = 0
-    sb = get_supabase()
-    r = sb.table("bot_state").select("key, value").like("key", f"{STATE_PREFIX}{telegram_id}:*").execute()
-    for row in (r.data or []):
+    rows = query_all(
+        "SELECT key, value FROM bot_state WHERE key LIKE %s",
+        (f"{STATE_PREFIX}{telegram_id}:%",),
+    )
+    for row in rows:
         try:
             key = row.get("key", "")
             user_network = key.replace(STATE_PREFIX, "")
@@ -217,9 +220,11 @@ def restore_running_bots(enabled: bool = False):
     if not enabled:
         logger.info("Skipping strategy auto-restore on startup (disabled).")
         return
-    sb = get_supabase()
-    r = sb.table("bot_state").select("key, value").like("key", f"{STATE_PREFIX}*").execute()
-    for row in (r.data or []):
+    rows = query_all(
+        "SELECT key, value FROM bot_state WHERE key LIKE %s",
+        (f"{STATE_PREFIX}%",),
+    )
+    for row in rows:
         try:
             key = row.get("key", "")
             user_network = key.replace(STATE_PREFIX, "")

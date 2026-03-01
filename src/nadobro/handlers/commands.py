@@ -156,10 +156,3 @@ async def cmd_revoke(update: Update, context: CallbackContext):
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=persistent_menu_kb())
 
 
-async def cmd_import_key(update: Update, context: CallbackContext):
-    """Redirect to Wallet flow (Linked Signer)."""
-    await update.message.reply_text(
-        "Use the 👛 Wallet button to link your wallet (Linked Signer). "
-        "We generate a secure signer for you — no private key import.",
-        reply_markup=persistent_menu_kb(),
-    )

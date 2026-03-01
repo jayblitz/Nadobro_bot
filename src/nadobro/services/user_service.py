@@ -3,7 +3,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from src.nadobro.models.database import UserRow, NetworkMode, get_supabase
+from src.nadobro.models.database import UserRow, NetworkMode
+from src.nadobro.db import query_one, query_all, execute, query_count
 from src.nadobro.services.nado_client import get_nado_client, NadoClient, clear_client_cache
 
 logger = logging.getLogger(__name__)
@@ -31,26 +32,24 @@ def invalidate_user_cache(telegram_id: Optional[int] = None):
 
 
 def get_or_create_user(telegram_id: int, username: str = None) -> tuple[UserRow, bool, Optional[str]]:
-    sb = get_supabase()
-    r = sb.table("users").select("*").eq("telegram_id", telegram_id).execute()
-    if r.data and len(r.data) > 0:
-        row = r.data[0]
-        sb.table("users").update({
-            "last_active": datetime.utcnow().isoformat(),
-            **({"telegram_username": username} if username else {}),
-        }).eq("telegram_id", telegram_id).execute()
+    row = query_one("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
+    if row:
+        update_fields = {"last_active": datetime.utcnow().isoformat()}
+        if username:
+            update_fields["telegram_username"] = username
+        sets = ", ".join([f"{k} = %s" for k in update_fields.keys()])
+        vals = list(update_fields.values()) + [telegram_id]
+        execute(f"UPDATE users SET {sets} WHERE telegram_id = %s", vals)
         user = UserRow(row)
         _cache_user(user)
         return user, False, None
 
-    sb.table("users").insert({
-        "telegram_id": telegram_id,
-        "telegram_username": username,
-        "language": "en",
-        "network_mode": "mainnet",
-    }).execute()
-    r = sb.table("users").select("*").eq("telegram_id", telegram_id).execute()
-    user = UserRow(r.data[0]) if r.data else UserRow({"telegram_id": telegram_id, "network_mode": "mainnet"})
+    execute(
+        "INSERT INTO users (telegram_id, telegram_username, language, network_mode) VALUES (%s, %s, %s, %s)",
+        (telegram_id, username, "en", "mainnet"),
+    )
+    row = query_one("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
+    user = UserRow(row) if row else UserRow({"telegram_id": telegram_id, "network_mode": "mainnet"})
     _cache_user(user)
     return user, True, None
 
@@ -59,11 +58,10 @@ def get_user(telegram_id: int) -> Optional[UserRow]:
     cached = _get_cached_user(telegram_id)
     if cached:
         return cached
-    sb = get_supabase()
-    r = sb.table("users").select("*").eq("telegram_id", telegram_id).execute()
-    if not r.data or len(r.data) == 0:
+    row = query_one("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
+    if not row:
         return None
-    user = UserRow(r.data[0])
+    user = UserRow(row)
     _cache_user(user)
     return user
 
@@ -73,8 +71,7 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     if not user:
         return False, "User not found. Use /start first."
 
-    new_mode = NetworkMode.MAINNET if network == "mainnet" else NetworkMode.TESTNET
-    get_supabase().table("users").update({"network_mode": network}).eq("telegram_id", telegram_id).execute()
+    execute("UPDATE users SET network_mode = %s WHERE telegram_id = %s", (network, telegram_id))
     clear_client_cache()
     invalidate_user_cache(telegram_id)
 
@@ -90,7 +87,6 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
 
 
 def get_user_nado_client(telegram_id: int, passphrase: Optional[str] = None) -> Optional[NadoClient]:
-    """Return NadoClient for user's linked signer. Requires passphrase to decrypt (or cached in session)."""
     user = get_user(telegram_id)
     if not user or not user.linked_signer_address or not user.main_address:
         return None
@@ -136,15 +132,17 @@ def save_linked_signer(
     encrypted_pk: bytes,
     salt: bytes,
 ) -> None:
-    """Store linked signer after wallet link flow. encrypted_pk/salt stored as base64 for portability."""
     import base64
-    sb = get_supabase()
-    sb.table("users").update({
-        "main_address": main_address,
-        "linked_signer_address": linked_signer_address,
-        "encrypted_linked_signer_pk": base64.b64encode(encrypted_pk).decode("ascii"),
-        "salt": base64.b64encode(salt).decode("ascii"),
-    }).eq("telegram_id", telegram_id).execute()
+    execute(
+        "UPDATE users SET main_address = %s, linked_signer_address = %s, encrypted_linked_signer_pk = %s, salt = %s WHERE telegram_id = %s",
+        (
+            main_address,
+            linked_signer_address,
+            base64.b64encode(encrypted_pk).decode("ascii"),
+            base64.b64encode(salt).decode("ascii"),
+            telegram_id,
+        ),
+    )
     invalidate_user_cache(telegram_id)
     clear_client_cache()
 
@@ -168,42 +166,45 @@ def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
     return True, ""
 
 
-
 def update_trade_stats(telegram_id: int, volume_usd: float):
-    sb = get_supabase()
-    r = sb.table("users").select("total_trades, total_volume_usd").eq("telegram_id", telegram_id).execute()
-    if not r.data or len(r.data) == 0:
+    row = query_one(
+        "SELECT total_trades, total_volume_usd FROM users WHERE telegram_id = %s",
+        (telegram_id,),
+    )
+    if not row:
         return
-    row = r.data[0]
-    sb.table("users").update({
-        "total_trades": int(row.get("total_trades") or 0) + 1,
-        "total_volume_usd": float(row.get("total_volume_usd") or 0) + volume_usd,
-        "last_trade_at": datetime.utcnow().isoformat(),
-    }).eq("telegram_id", telegram_id).execute()
+    execute(
+        "UPDATE users SET total_trades = %s, total_volume_usd = %s, last_trade_at = %s WHERE telegram_id = %s",
+        (
+            int(row.get("total_trades") or 0) + 1,
+            float(row.get("total_volume_usd") or 0) + volume_usd,
+            datetime.utcnow().isoformat(),
+            telegram_id,
+        ),
+    )
     invalidate_user_cache(telegram_id)
 
 
 def get_all_users_count() -> int:
-    r = get_supabase().table("users").select("telegram_id", count="exact").execute()
-    return r.count or 0
+    return query_count("SELECT COUNT(*) FROM users")
 
 
 def get_active_users_count() -> int:
     from datetime import timedelta
     cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
-    r = get_supabase().table("users").select("telegram_id", count="exact").gte("last_active", cutoff).execute()
-    return r.count or 0
-
+    return query_count("SELECT COUNT(*) FROM users WHERE last_active >= %s", (cutoff,))
 
 
 def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple[bool, str]:
-    # Could clear linked_signer_address/encrypted_linked_signer_pk/main_address
-    get_supabase().table("users").update({
-        "main_address": None,
-        "linked_signer_address": None,
-        "encrypted_linked_signer_pk": None,
-        "salt": None,
-    }).eq("telegram_id", telegram_id).execute()
+    execute(
+        "UPDATE users SET main_address = NULL, linked_signer_address = NULL, encrypted_linked_signer_pk = NULL, salt = NULL WHERE telegram_id = %s",
+        (telegram_id,),
+    )
     invalidate_user_cache(telegram_id)
     clear_client_cache()
     return True, f"{network} wallet unlinked. You can link again via Wallet button."
+
+
+def update_user_language(telegram_id: int, lang: str):
+    execute("UPDATE users SET language = %s WHERE telegram_id = %s", (lang, telegram_id))
+    invalidate_user_cache(telegram_id)
