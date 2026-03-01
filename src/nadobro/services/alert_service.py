@@ -60,7 +60,7 @@ def delete_alert(telegram_id: int, alert_id: int) -> dict:
     alert = get_alert_by_id_and_user(alert_id, telegram_id)
     if not alert:
         return {"success": False, "error": "Alert not found."}
-    update_alert(alert_id, {"is_active": False})
+    update_alert(alert_id, is_active=False)
     return {"success": True, "message": f"Alert #{alert_id} deleted."}
 
 

@@ -139,10 +139,11 @@ def get_alerts_by_user(telegram_id: int, active_only: bool = True) -> list:
     )
 
 
-def update_alert(alert_id: int, data: dict):
-    sets = ", ".join([f"{k} = %s" for k in data.keys()])
-    vals = list(data.values()) + [alert_id]
-    execute(f"UPDATE alerts SET {sets} WHERE id = %s", vals)
+def update_alert(alert_id: int, is_active: bool):
+    execute(
+        "UPDATE alerts SET is_active = %s WHERE id = %s",
+        (is_active, alert_id),
+    )
 
 
 def get_alert_by_id_and_user(alert_id: int, telegram_id: int) -> Optional[dict]:
