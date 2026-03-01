@@ -87,7 +87,15 @@ def insert_trade(data: dict) -> Optional[int]:
     return row["id"] if row else None
 
 
+_TRADE_UPDATE_ALLOWED_COLS = frozenset({
+    "status", "order_digest", "price", "filled_at", "error_message",
+})
+
+
 def update_trade(trade_id: int, data: dict):
+    disallowed = set(data.keys()) - _TRADE_UPDATE_ALLOWED_COLS
+    if disallowed:
+        raise ValueError(f"update_trade: disallowed column(s): {disallowed}")
     sets = ", ".join([f"{k} = %s" for k in data.keys()])
     vals = list(data.values()) + [trade_id]
     execute(f"UPDATE trades SET {sets} WHERE id = %s", vals)
