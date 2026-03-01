@@ -1,7 +1,9 @@
 import os
 import re
+import json
 import time
 import logging
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -11,6 +13,7 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 _knowledge_base = None
+_knowledge_sections = None
 _xai_client = None
 _openai_client = None
 _source_cache = {}
@@ -46,16 +49,9 @@ def _should_use_live_retrieval(question: str) -> bool:
         return True
     q = _normalize_question(question)
     live_signals = [
-        "latest",
-        "recent",
-        "today",
-        "now",
-        "update",
-        "updates",
-        "x.com",
-        "twitter",
-        "news",
-        "what changed",
+        "latest", "recent", "today", "now", "update", "updates",
+        "x.com", "twitter", "news", "what changed", "announced",
+        "week", "points", "airdrop", "distributed", "launch",
     ]
     return any(sig in q for sig in live_signals)
 
@@ -94,7 +90,6 @@ def _pick_primary_provider(question: str) -> str:
     if configured != "auto":
         logger.warning("Unknown NADO_AI_PROVIDER=%s, defaulting to auto", configured)
 
-    # Auto mode: xAI first for speed; escalate to OpenAI for harder questions.
     if _is_complex_question(question) and _env_bool("NADO_AI_ESCALATE_ON_COMPLEX", True):
         return "openai"
     return "xai"
@@ -105,20 +100,9 @@ def _is_complex_question(question: str) -> bool:
     if len(q) > 220:
         return True
     complexity_signals = [
-        "compare",
-        "difference",
-        "architecture",
-        "sdk",
-        "api",
-        "gateway",
-        "signature",
-        "auth",
-        "websocket",
-        "debug",
-        "error",
-        "best practice",
-        "production",
-        "integration",
+        "compare", "difference", "architecture", "sdk", "api",
+        "gateway", "signature", "auth", "websocket", "debug",
+        "error", "best practice", "production", "integration",
         "explain step by step",
     ]
     return any(sig in q for sig in complexity_signals)
@@ -127,13 +111,8 @@ def _is_complex_question(question: str) -> bool:
 def _wants_detailed_answer(question: str) -> bool:
     q = (question or "").strip().lower()
     detail_signals = [
-        "detailed",
-        "step by step",
-        "in depth",
-        "deep dive",
-        "full explanation",
-        "comprehensive",
-        "long answer",
+        "detailed", "step by step", "in depth", "deep dive",
+        "full explanation", "comprehensive", "long answer",
     ]
     return any(sig in q for sig in detail_signals)
 
@@ -156,32 +135,155 @@ def _load_knowledge_base():
     return _knowledge_base
 
 
-KNOWLEDGE_SYSTEM_PROMPT = """You are Nadobro Support AI for Nado.
+def _load_knowledge_sections() -> list[dict]:
+    global _knowledge_sections
+    if _knowledge_sections is not None:
+        return _knowledge_sections
 
-Your role:
-- Be the first-line support assistant for all Nado user questions.
-- Use the retrieved context from Nado docs, developer docs, website, X, and live web search.
-- Prefer official Nado sources when there is any conflict.
+    kb = _load_knowledge_base()
+    if not kb:
+        _knowledge_sections = []
+        return _knowledge_sections
+
+    parts = re.split(r"\n(?=##+ )", kb)
+    sections = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        first_line, _, rest = part.partition("\n")
+        title = first_line.lstrip("#").strip()
+        body = rest.strip()
+
+        sub_headers = re.findall(r"^###+ .+", part, re.MULTILINE)
+        if sub_headers and not first_line.startswith("## "):
+            for sub_part in re.split(r"\n(?=### )", part):
+                sub_part = sub_part.strip()
+                if not sub_part:
+                    continue
+                sub_first, _, sub_rest = sub_part.partition("\n")
+                sub_title = sub_first.lstrip("#").strip()
+                sub_body = sub_rest.strip()
+                kw = set(
+                    t.lower() for t in re.split(r"[^a-zA-Z0-9]+", f"{sub_title} {sub_body}") if len(t) > 2
+                )
+                sections.append({"title": sub_title, "body": sub_body, "keywords": kw, "raw": sub_part})
+            continue
+
+        keywords = set(
+            t.lower() for t in re.split(r"[^a-zA-Z0-9]+", f"{title} {body}") if len(t) > 2
+        )
+        sections.append({"title": title, "body": body, "keywords": keywords, "raw": part})
+
+    if len(sections) <= 1:
+        logger.warning("Knowledge section parsing produced %d sections — expected more. Falling back to full KB.", len(sections))
+
+    _knowledge_sections = sections
+    logger.info(f"Parsed {len(sections)} knowledge sections")
+    return _knowledge_sections
+
+
+def _search_knowledge_sections(query: str, top_k: int = 4) -> str:
+    sections = _load_knowledge_sections()
+    if not sections:
+        return ""
+
+    q_tokens = set(
+        t.lower() for t in re.split(r"[^a-zA-Z0-9]+", query) if len(t) > 2
+    )
+    if not q_tokens:
+        return "\n\n".join(s["raw"] for s in sections[:top_k])
+
+    scored = []
+    for s in sections:
+        overlap = len(q_tokens & s["keywords"])
+        title_bonus = 2 * sum(1 for t in q_tokens if t in s["title"].lower())
+        scored.append((overlap + title_bonus, s))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = [s for score, s in scored[:top_k] if score > 0]
+
+    if not top:
+        top = [scored[0][1]] if scored else []
+
+    return "\n\n".join(s["raw"] for s in top)
+
+
+AGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_knowledge_base",
+            "description": "Search the Nado knowledge base for information about a specific topic. Use this for questions about Nado features, trading, margin, fees, NFTs, developer resources, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to find relevant knowledge base sections"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web for live/current information about Nado. Use this when the question asks about recent events, news, updates, announcements, points distribution, airdrops, or anything time-sensitive that may not be in the static knowledge base.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The web search query"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+]
+
+XAI_X_SEARCH_MODEL = os.environ.get("XAI_X_SEARCH_MODEL", "grok-3")
+
+X_SEARCH_PARAMS = {
+    "mode": "on",
+    "sources": [{"type": "x", "x_handles": ["nadoHQ"]}],
+}
+
+ROUTER_SYSTEM_PROMPT = """You are a routing agent for Nadobro, the support AI for Nado DEX.
+
+Today's date: {current_date}
+
+Your job is to analyze the user's question and call the right tools to gather the information needed to answer it.
 
 Rules:
-- Be accurate and concise.
-- Default style: short summary first.
-- For normal questions, answer in 3-5 compact bullet points.
-- Keep default answers under ~500 characters unless user asks for detail.
-- If user asks for detailed explanation, provide a fuller answer.
-- If data is uncertain or missing, say it clearly and suggest the next best official source.
-- For product/how-to questions, provide actionable steps.
-- For developer questions, include concrete API/docs direction.
-- Do NOT use MarkdownV2 syntax escapes; plain text only.
-- Keep response under 1200 characters.
-- End with a short "Sources:" line listing 2-5 source URLs used.
+- ALWAYS call search_knowledge_base for questions about Nado features, products, trading, margin, fees, liquidations, developer API, etc.
+- ALWAYS call search_web for questions about recent events, news, announcements, points/rewards distribution, launches, updates, airdrops, or anything time-sensitive.
+- For questions that need both static knowledge AND current info, call BOTH tools.
+- If you're not sure, call both tools to be thorough.
 
-Static Knowledge:
-{knowledge_base}
+Do NOT answer the question yourself. Only call the tools."""
 
-Retrieved Context:
-{retrieved_context}
-"""
+SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro Support AI for Nado DEX — a CLOB-based exchange on the Ink L2 blockchain offering perpetual futures and spot trading.
+
+Today's date: {current_date}
+
+You have been given context gathered from Nado's knowledge base and live web sources. Use ONLY this context to answer the user's question.
+
+STRICT RULES:
+- Answer ONLY based on the provided context. If the context does not contain the answer, say clearly: "I don't have confirmed information about this. Please check Nado's official channels for the latest."
+- NEVER fabricate, guess, or invent information not present in the context.
+- Be accurate and concise: 3-5 bullet points for standard questions, more detail if the user asks.
+- Plain text only — no MarkdownV2 escapes.
+- Keep response under 1200 characters unless user asks for detail.
+- End with a "Sources:" line listing the sources used.
+- For time-sensitive questions (points, airdrops, events), if you only have static/old info, say you don't have confirmed current data.
+
+CONTEXT:
+{context}"""
 
 X_TWITTER_SYSTEM_PROMPT = """You are Nadobro Support AI for Nado, with real-time access to X (Twitter) content via live search.
 
@@ -204,7 +306,7 @@ STRICT rules:
 - Keep response under 1200 characters.
 - End with: Sources: https://x.com/nadoHQ
 
-Static Knowledge:
+Relevant Nado Knowledge:
 {knowledge_base}
 """
 
@@ -224,7 +326,6 @@ def _fetch_url_text(url: str) -> str:
         return cache_item["text"]
 
     try:
-        # Use jina AI reader proxy for cleaner text and JS-heavy pages like X.
         reader_url = f"https://r.jina.ai/http://{url.replace('https://', '').replace('http://', '')}"
         resp = requests.get(reader_url, timeout=SOURCE_FETCH_TIMEOUT_SECONDS)
         if resp.ok and resp.text:
@@ -298,42 +399,85 @@ def _build_retrieved_context(question: str) -> tuple[str, list[str]]:
     return "\n\n".join(docs_payload), list(dict.fromkeys(used_sources))
 
 
-XAI_X_SEARCH_MODEL = os.environ.get("XAI_X_SEARCH_MODEL", "grok-3")
+def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str, list[str]]:
+    if tool_name == "search_knowledge_base":
+        query = args.get("query", question)
+        sections = _search_knowledge_sections(query, top_k=4)
+        if sections:
+            return f"[KNOWLEDGE BASE RESULTS]\n{sections}", []
+        return "[KNOWLEDGE BASE] No matching sections found.", []
 
-X_SEARCH_PARAMS = {
-    "mode": "on",
-    "sources": [{"type": "x", "x_handles": ["nadoHQ"]}],
-}
+    elif tool_name == "search_web":
+        query = args.get("query", question)
+        context, sources = _build_retrieved_context(query)
+        if context and context != "No retrieved context available.":
+            return f"[WEB SEARCH RESULTS]\n{context}", sources
+        return "[WEB SEARCH] No relevant results found.", []
+
+    return f"[ERROR] Unknown tool: {tool_name}", []
 
 
-def _call_support_llm(provider: str, system: str, question: str, x_search: bool = False) -> str:
-    if provider == "openai":
-        client = _get_openai_client()
-    else:
-        client = _get_xai_client()
-
+def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
+    client = _get_xai_client() if provider == "xai" else _get_openai_client()
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 260
+    now = datetime.utcnow()
+    current_date = now.strftime("%Y-%m-%d")
 
-    kwargs = dict(
-        model=XAI_X_SEARCH_MODEL if (x_search and provider == "xai") else _model_for(provider),
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ],
-        max_tokens=max_tokens,
-        temperature=0.2,
-    )
-    if x_search and provider == "xai":
-        kwargs["search_parameters"] = X_SEARCH_PARAMS
+    router_system = ROUTER_SYSTEM_PROMPT.format(current_date=current_date)
+    router_model = _model_for(provider)
 
-    response = client.chat.completions.create(**kwargs)
-    content = response.choices[0].message.content
-    if not content or not content.strip():
-        raise RuntimeError(f"{provider.upper()} returned empty response")
-    return content.strip()
+    try:
+        router_response = client.chat.completions.create(
+            model=router_model,
+            messages=[
+                {"role": "system", "content": router_system},
+                {"role": "user", "content": question},
+            ],
+            tools=AGENT_TOOLS,
+            tool_choice="auto",
+            max_tokens=200,
+            temperature=0.0,
+        )
+    except Exception as e:
+        logger.warning(f"Agent router call failed ({provider}): {e}")
+        kb_context = _search_knowledge_sections(question, top_k=4)
+        return kb_context or _load_knowledge_base()[:6000], []
+
+    tool_calls = []
+    if router_response.choices and router_response.choices[0].message.tool_calls:
+        tool_calls = router_response.choices[0].message.tool_calls
+
+    if not tool_calls:
+        kb_context = _search_knowledge_sections(question, top_k=4)
+        live_needed = _should_use_live_retrieval(question)
+        if live_needed:
+            web_ctx, web_sources = _build_retrieved_context(question)
+            combined = f"[KNOWLEDGE BASE]\n{kb_context}\n\n[WEB SEARCH]\n{web_ctx}"
+            return combined, web_sources
+        return f"[KNOWLEDGE BASE]\n{kb_context}", []
+
+    all_context_parts = []
+    all_sources = []
+    for tc in tool_calls:
+        try:
+            fn_name = tc.function.name
+            fn_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+        except (json.JSONDecodeError, AttributeError):
+            continue
+
+        ctx, sources = _execute_agent_tool(fn_name, fn_args, question)
+        all_context_parts.append(ctx)
+        all_sources.extend(sources)
+
+    combined_context = "\n\n".join(all_context_parts) if all_context_parts else ""
+
+    if not combined_context.strip():
+        kb_context = _search_knowledge_sections(question, top_k=4)
+        combined_context = f"[KNOWLEDGE BASE]\n{kb_context}"
+
+    return combined_context, list(dict.fromkeys(all_sources))
 
 
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False):
@@ -345,7 +489,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 260
+    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 500
 
     kwargs = dict(
         model=XAI_X_SEARCH_MODEL if (x_search and provider == "xai") else _model_for(provider),
@@ -358,7 +502,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
         stream=True,
     )
     if x_search and provider == "xai":
-        kwargs["search_parameters"] = X_SEARCH_PARAMS
+        kwargs["extra_body"] = {"search_parameters": X_SEARCH_PARAMS}
 
     stream = client.chat.completions.create(**kwargs)
     for chunk in stream:
@@ -390,31 +534,36 @@ async def stream_nado_answer(question: str):
         yield cached["answer"]
         return
 
-    use_live = _should_use_live_retrieval(question)
-    try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        if use_live:
-            retrieved_context, used_sources = await loop.run_in_executor(None, _build_retrieved_context, question)
-        else:
-            retrieved_context, used_sources = ("Live retrieval skipped for low-latency mode.", [])
-    except Exception:
-        retrieved_context, used_sources = ("No retrieved context available.", [])
-
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
+
+    now = datetime.utcnow()
+    current_date = now.strftime("%Y-%m-%d")
+
     if use_x_prompt:
-        from datetime import datetime as _dt
-        _now = _dt.utcnow()
         system = X_TWITTER_SYSTEM_PROMPT.format(
-            knowledge_base=knowledge[:9000],
-            current_date=_now.strftime("%Y-%m-%d"),
-            current_year=str(_now.year),
+            knowledge_base=_search_knowledge_sections(question, top_k=2),
+            current_date=current_date,
+            current_year=str(now.year),
         )
+        used_sources = ["https://x.com/nadoHQ"]
     else:
-        system = KNOWLEDGE_SYSTEM_PROMPT.format(
-            knowledge_base=knowledge[:9000],
-            retrieved_context=retrieved_context[:8000],
+        import asyncio
+        loop = asyncio.get_event_loop()
+
+        primary = _pick_primary_provider(question)
+        try:
+            gathered_context, used_sources = await loop.run_in_executor(
+                None, _run_agent_pipeline, question, primary
+            )
+        except Exception as e:
+            logger.warning(f"Agent pipeline failed: {e}")
+            gathered_context = _search_knowledge_sections(question, top_k=4)
+            used_sources = []
+
+        system = SYNTHESIZER_SYSTEM_PROMPT.format(
+            current_date=current_date,
+            context=gathered_context[:12000],
         )
 
     primary = _pick_primary_provider(question)
@@ -472,6 +621,7 @@ async def stream_nado_answer(question: str):
                 full_answer += sources_line
 
             _answer_cache[qkey] = {"ts": time.time(), "answer": full_answer}
+            logger.info("Streamed answer via %s in %.1fs", provider, time.time() - started_at)
             return
         except Exception as provider_error:
             logger.warning("Stream answer failed on provider=%s: %s", provider, provider_error)
@@ -502,31 +652,36 @@ async def answer_nado_question(question: str) -> str:
     if cached and (time.time() - cached["ts"] < ANSWER_CACHE_TTL_SECONDS):
         return cached["answer"]
 
-    use_live = _should_use_live_retrieval(question)
-    try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        if use_live:
-            retrieved_context, used_sources = await loop.run_in_executor(None, _build_retrieved_context, question)
-        else:
-            retrieved_context, used_sources = ("Live retrieval skipped for low-latency mode.", [])
-    except Exception:
-        retrieved_context, used_sources = ("No retrieved context available.", [])
-
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
+
+    now = datetime.utcnow()
+    current_date = now.strftime("%Y-%m-%d")
+
     if use_x_prompt:
-        from datetime import datetime as _dt
-        _now = _dt.utcnow()
         system = X_TWITTER_SYSTEM_PROMPT.format(
-            knowledge_base=knowledge[:9000],
-            current_date=_now.strftime("%Y-%m-%d"),
-            current_year=str(_now.year),
+            knowledge_base=_search_knowledge_sections(question, top_k=2),
+            current_date=current_date,
+            current_year=str(now.year),
         )
+        used_sources = ["https://x.com/nadoHQ"]
     else:
-        system = KNOWLEDGE_SYSTEM_PROMPT.format(
-            knowledge_base=knowledge[:9000],
-            retrieved_context=retrieved_context[:8000],
+        import asyncio
+        loop = asyncio.get_event_loop()
+
+        primary = _pick_primary_provider(question)
+        try:
+            gathered_context, used_sources = await loop.run_in_executor(
+                None, _run_agent_pipeline, question, primary
+            )
+        except Exception as e:
+            logger.warning(f"Agent pipeline failed: {e}")
+            gathered_context = _search_knowledge_sections(question, top_k=4)
+            used_sources = []
+
+        system = SYNTHESIZER_SYSTEM_PROMPT.format(
+            current_date=current_date,
+            context=gathered_context[:12000],
         )
 
     try:
@@ -538,7 +693,6 @@ async def answer_nado_question(question: str) -> str:
         secondary = "openai" if primary == "xai" else "xai"
 
         providers = [primary, secondary]
-        # Remove provider with no configured client up front.
         providers = [
             p for p in providers
             if (p == "xai" and xai_client) or (p == "openai" and openai_client)
@@ -549,10 +703,27 @@ async def answer_nado_question(question: str) -> str:
         used_provider = None
         for provider in providers:
             try:
-                answer = await loop.run_in_executor(
-                    None,
-                    lambda p=provider: _call_support_llm(p, system, question, x_search=use_x_prompt),
-                )
+                def _call(p=provider):
+                    client = _get_xai_client() if p == "xai" else _get_openai_client()
+                    max_tokens = 700 if (_wants_detailed_answer(question) or use_x_prompt) else 500
+                    kwargs = dict(
+                        model=XAI_X_SEARCH_MODEL if (use_x_prompt and p == "xai") else _model_for(p),
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": question},
+                        ],
+                        max_tokens=max_tokens,
+                        temperature=0.2,
+                    )
+                    if use_x_prompt and p == "xai":
+                        kwargs["extra_body"] = {"search_parameters": X_SEARCH_PARAMS}
+                    resp = client.chat.completions.create(**kwargs)
+                    content = resp.choices[0].message.content
+                    if not content or not content.strip():
+                        raise RuntimeError(f"{p.upper()} returned empty response")
+                    return content.strip()
+
+                answer = await loop.run_in_executor(None, _call)
                 used_provider = provider
                 break
             except Exception as provider_error:
@@ -565,7 +736,7 @@ async def answer_nado_question(question: str) -> str:
                 raise last_error
             return "I couldn't generate an answer. Please try again."
 
-        logger.info("Support answer generated via provider=%s", used_provider)
+        logger.info("Support answer generated via provider=%s in %.1fs", used_provider, time.time() - started_at)
         if "Sources:" not in answer:
             if use_x_prompt:
                 sources_line = "Sources: https://x.com/nadoHQ"

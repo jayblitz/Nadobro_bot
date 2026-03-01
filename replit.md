@@ -54,7 +54,7 @@ src/nadobro/
 | `bot_runtime.py` | Background strategy bot lifecycle (start/stop per user, APScheduler tasks) |
 | `scheduler.py` | APScheduler AsyncIO scheduler; runs alert checks on interval |
 | `crypto.py` | Passphrase-based encryption (PBKDF2 600k + Fernet) for linked signer keys |
-| `knowledge_service.py` | AI Q&A using xAI (Grok) or OpenAI, with local knowledge base fallback and live URL fetching; X/Twitter questions use Grok's native real-time X search |
+| `knowledge_service.py` | Agentic AI Q&A pipeline: Router LLM classifies questions and calls tools (search_knowledge_base, search_web), then Synthesizer LLM produces grounded answers from gathered context. Section-based KB retrieval (33 sections). X/Twitter queries use xAI Grok-3 with live search via extra_body. Supports xAI (primary) + OpenAI (fallback). |
 | `nado_client.py` | HTTP wrapper around Nado REST API (prices, orders, positions, balance) |
 | `admin_service.py` | Admin-only controls: pause trading, view stats, audit log |
 

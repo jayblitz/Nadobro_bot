@@ -351,7 +351,12 @@ class NadoClient:
         err_lower = error_str.lower()
         compact = err_lower.replace("_", "").replace("-", "")
         if "ipqueryonly" in compact:
-            return "Your wallet needs funds deposited on Nado DEX before trading. Please deposit USDT0 at https://testnet.nado.xyz/portfolio/faucet"
+            return (
+                "The exchange restricted this trade (ip_query_only). This usually means:\n"
+                "1. Your 1CT signer key is not linked on Nado — go to Settings → 1-Click Trading on the Nado web app, paste your 1CT private key, enable the toggle, and save.\n"
+                "2. Your subaccount may not be initialized — deposit at least $5 USDT0 at https://testnet.nado.xyz/portfolio/faucet\n"
+                "3. If already linked and funded, the bot's server IP may be restricted by the exchange."
+            )
         if "insufficient" in err_lower or "margin" in err_lower:
             return "Insufficient margin. Please deposit more funds."
         if "product" in err_lower and "not found" in err_lower:
