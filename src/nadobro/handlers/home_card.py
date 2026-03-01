@@ -18,7 +18,7 @@ from src.nadobro.handlers.keyboards import (
 )
 from src.nadobro.services.trade_service import get_trade_analytics
 from src.nadobro.services.settings_service import get_user_settings
-from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_wallet_info
+from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def build_home_card_text(telegram_id: int) -> str:
     network_label = "🧪 TESTNET" if network == "testnet" else "🌐 MAINNET"
     balance_str = "N/A"
     try:
-        client = get_user_nado_client(telegram_id)
+        client = get_user_readonly_client(telegram_id)
         if client:
             balance = client.get_balance()
             if balance and balance.get("exists"):
@@ -133,7 +133,7 @@ def _view_wallet_text(telegram_id: int):
 
 
 def _view_positions_text(telegram_id: int):
-    client = get_user_nado_client(telegram_id)
+    client = get_user_readonly_client(telegram_id)
     if not client:
         return "⚠️ Wallet not initialized\\. Use /start first\\.", home_card_kb()
     positions = client.get_all_positions()
@@ -146,7 +146,7 @@ def _view_positions_text(telegram_id: int):
 
 
 def _view_portfolio_text(telegram_id: int):
-    client = get_user_nado_client(telegram_id)
+    client = get_user_readonly_client(telegram_id)
     if not client:
         return "⚠️ Wallet not initialized\\. Use /start first\\.", home_card_kb()
     positions = client.get_all_positions() or []

@@ -6,7 +6,7 @@ from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.services.user_service import (
     get_user,
     has_mode_private_key,
-    get_user_nado_client,
+    get_user_readonly_client,
 )
 from src.nadobro.services.debug_logger import debug_log
 
@@ -204,7 +204,7 @@ def evaluate_readiness(telegram_id: int) -> dict:
     funded = False
     if has_key:
         try:
-            client = get_user_nado_client(telegram_id, passphrase=None)
+            client = get_user_readonly_client(telegram_id)
             if client:
                 bal = client.get_balance()
                 funded = bool(bal.get("exists"))

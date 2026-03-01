@@ -10,7 +10,7 @@ from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.onboarding_service import get_resume_step
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
-from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_nado_client
+from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client
 from src.nadobro.config import get_product_id
 
 PENDING_TEXT_TRADE_KEY = "pending_text_trade"
@@ -36,7 +36,7 @@ def _enrich_trade_payload(telegram_id: int, payload: dict, settings: dict) -> di
         if result.get("order_type") == "limit":
             price = float(result.get("limit_price") or 0)
         else:
-            client = get_user_nado_client(telegram_id)
+            client = get_user_readonly_client(telegram_id)
             if client:
                 pid = get_product_id(result.get("product", "BTC"))
                 if pid is not None:

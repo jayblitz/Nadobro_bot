@@ -10,7 +10,7 @@ from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
 from src.nadobro.services.trade_service import close_all_positions
-from src.nadobro.services.user_service import get_user_nado_client, get_user
+from src.nadobro.services.user_service import get_user_nado_client, get_user_readonly_client, get_user
 
 logger = logging.getLogger(__name__)
 
@@ -316,7 +316,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")
 
-    client = get_user_nado_client(telegram_id, passphrase=None)
+    client = get_user_readonly_client(telegram_id)
     if not client:
         raise RuntimeError("Wallet client unavailable")
 

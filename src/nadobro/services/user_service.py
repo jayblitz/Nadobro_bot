@@ -73,6 +73,7 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
 
     execute("UPDATE users SET network_mode = %s WHERE telegram_id = %s", (network, telegram_id))
     clear_client_cache()
+    _readonly_cache.clear()
     invalidate_user_cache(telegram_id)
 
     addr = user.main_address
@@ -106,6 +107,24 @@ def get_user_nado_client(telegram_id: int, passphrase: Optional[str] = None) -> 
     except Exception as e:
         logger.warning("Failed to get Nado client for user %s: %s", telegram_id, e)
         return None
+
+
+_readonly_cache: dict[str, NadoClient] = {}
+_READONLY_CACHE_TTL = 60
+
+
+def get_user_readonly_client(telegram_id: int) -> Optional[NadoClient]:
+    user = get_user(telegram_id)
+    if not user or not user.main_address:
+        return None
+    network = user.network_mode.value
+    cache_key = f"ro:{user.main_address}:{network}"
+    cached = _readonly_cache.get(cache_key)
+    if cached:
+        return cached
+    client = NadoClient.from_address(user.main_address, network)
+    _readonly_cache[cache_key] = client
+    return client
 
 
 def get_user_wallet_info(telegram_id: int) -> Optional[dict]:
@@ -145,6 +164,7 @@ def save_linked_signer(
     )
     invalidate_user_cache(telegram_id)
     clear_client_cache()
+    _readonly_cache.clear()
 
 
 def has_mode_private_key(telegram_id: int, network: str) -> bool:
@@ -202,6 +222,7 @@ def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple
     )
     invalidate_user_cache(telegram_id)
     clear_client_cache()
+    _readonly_cache.clear()
     return True, f"{network} wallet unlinked. You can link again via Wallet button."
 
 

@@ -5,7 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
 from src.nadobro.services.user_service import (
-    get_or_create_user, get_user_nado_client, get_user_wallet_info, get_user,
+    get_or_create_user, get_user_readonly_client, get_user_wallet_info, get_user,
     ensure_active_wallet_ready, save_linked_signer,
 )
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
@@ -266,7 +266,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "pos:view":
         await update.message.chat.send_action(ChatAction.TYPING)
-        client = get_user_nado_client(telegram_id)
+        client = get_user_readonly_client(telegram_id)
         if not client:
             await update.message.reply_text(
                 "⚠️ Wallet not initialized\\. Use /start first\\.",
@@ -289,7 +289,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "portfolio:view":
         await update.message.chat.send_action(ChatAction.TYPING)
-        client = get_user_nado_client(telegram_id)
+        client = get_user_readonly_client(telegram_id)
         if not client:
             await update.message.reply_text(
                 "⚠️ Wallet not initialized\\. Use /start first\\.",
@@ -605,7 +605,7 @@ async def _move_to_confirm(update, context, telegram_id, flow):
         if order_type == "limit":
             price = flow.get("limit_price", 0)
         else:
-            client = get_user_nado_client(telegram_id)
+            client = get_user_readonly_client(telegram_id)
             if client:
                 pid = get_product_id(product)
                 if pid is not None:
@@ -840,7 +840,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
 
         price = 0
         try:
-            client = get_user_nado_client(telegram_id)
+            client = get_user_readonly_client(telegram_id)
             if client:
                 pid = get_product_id(product)
                 if pid is not None:

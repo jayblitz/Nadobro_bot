@@ -77,6 +77,11 @@ src/nadobro/
 - The `ENCRYPTION_KEY` env var provides a Fernet key for general encryption validation at startup
 - Users can revoke/unlink at any time via the Wallet button or `/revoke` command
 
+#### Read-Only vs Signing Client Pattern
+- **`get_user_readonly_client(telegram_id)`** — creates a `NadoClient.from_address(main_address, network)` with no private key; used for all READ operations (balance, prices, positions, market data). Cached in `_readonly_cache` by address+network.
+- **`get_user_nado_client(telegram_id, passphrase)`** — decrypts the 1CT key with the user's passphrase; required ONLY for trade SIGNING (placing/closing orders). Returns `None` if passphrase is missing or wrong.
+- Trade validation (`validate_trade`) uses `ensure_active_wallet_ready` + readonly client for balance checks; passphrase is only needed at execution time.
+
 ### Natural Language Trade Parsing
 - `handlers/intent_parser.py` uses regex to extract product, direction, size, leverage, and order type from free-text messages.
 - `handlers/intent_handlers.py` enriches parsed intents with user settings and shows a confirmation preview before executing.

@@ -29,6 +29,22 @@ class NadoClient:
         self._initialized = False
         self._derive_address()
 
+    @classmethod
+    def from_address(cls, address: str, network: str = "testnet") -> "NadoClient":
+        instance = cls.__new__(cls)
+        instance.private_key = None
+        instance.network = network
+        instance.client = None
+        instance.address = address
+        instance._initialized = False
+        try:
+            from nado_protocol.utils.bytes32 import subaccount_to_hex
+            instance.subaccount_hex = subaccount_to_hex(address, "default")
+        except ImportError:
+            default_bytes = "default".encode().hex()
+            instance.subaccount_hex = address.lower() + default_bytes + "0" * (24 - len(default_bytes))
+        return instance
+
     def _derive_address(self):
         try:
             from eth_account import Account

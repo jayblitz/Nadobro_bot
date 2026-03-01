@@ -25,7 +25,7 @@ from src.nadobro.handlers.keyboards import (
 from src.nadobro.handlers.trade_card import handle_trade_card_callback
 from src.nadobro.handlers.home_card import build_home_card_text
 from src.nadobro.services.user_service import (
-    get_or_create_user, get_user_nado_client, get_user_wallet_info,
+    get_or_create_user, get_user_nado_client, get_user_readonly_client, get_user_wallet_info,
     switch_network, get_user, remove_user_private_key, ensure_active_wallet_ready,
 )
 from src.nadobro.services.trade_service import (
@@ -428,7 +428,7 @@ async def _handle_leverage(query, data, telegram_id, context):
 
     price = 0
     try:
-        client = get_user_nado_client(telegram_id)
+        client = get_user_readonly_client(telegram_id)
         if client:
             pid = get_product_id(product)
             if pid is not None:
@@ -533,7 +533,7 @@ async def _handle_positions(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else "view"
 
     if action == "view":
-        client = get_user_nado_client(telegram_id)
+        client = get_user_readonly_client(telegram_id)
         if not client:
             await query.edit_message_text(
                 "⚠️ Wallet not initialized\\. Use /start first\\.",
@@ -594,7 +594,7 @@ async def _handle_positions(query, data, telegram_id, context):
 
 
 async def _handle_portfolio(query, data, telegram_id):
-    client = get_user_nado_client(telegram_id)
+    client = get_user_readonly_client(telegram_id)
     if not client:
         await query.edit_message_text(
             "⚠️ Wallet not initialized\\. Use /start first\\.",
@@ -652,10 +652,10 @@ async def _handle_wallet(query, data, telegram_id, context):
             reply_markup=wallet_kb(),
         )
     elif action == "balance":
-        client = get_user_nado_client(telegram_id, passphrase=None)
+        client = get_user_readonly_client(telegram_id)
         if not client:
             await query.edit_message_text(
-                "💰 Balance is shown in Nado app. Link your wallet first, then check https://app.nado.xyz",
+                "💰 Link your wallet first to check balance.",
                 reply_markup=wallet_kb(),
             )
             return
@@ -713,7 +713,7 @@ async def _handle_market(query, data, telegram_id):
     action = parts[1] if len(parts) > 1 else ""
     task_key = _live_task_key(query, telegram_id)
 
-    client = get_user_nado_client(telegram_id)
+    client = get_user_readonly_client(telegram_id)
     if not client:
         await query.edit_message_text(
             "⚠️ Wallet not initialized\\. Use /start first\\.",
@@ -1189,7 +1189,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     available_margin = 0.0
     mid = 0.0
     funding_rate = 0.0
-    client = get_user_nado_client(telegram_id)
+    client = get_user_readonly_client(telegram_id)
     if client:
         try:
             bal = client.get_balance()
@@ -1320,7 +1320,7 @@ def _fmt_live_last_price(product: str, last_price: float) -> str:
 async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int, product: str, task_key):
     try:
         while True:
-            client = get_user_nado_client(telegram_id)
+            client = get_user_readonly_client(telegram_id)
             if not client:
                 break
 

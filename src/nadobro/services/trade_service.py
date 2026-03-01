@@ -5,7 +5,7 @@ from src.nadobro.models.database import (
     get_last_trade_for_rate_limit, insert_trade, update_trade, get_trades_by_user,
 )
 from src.nadobro.config import get_product_id, get_product_name, RATE_LIMIT_SECONDS, MAX_LEVERAGE, MIN_TRADE_SIZE_USD
-from src.nadobro.services.user_service import get_user, get_user_nado_client, update_trade_stats
+from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 from src.nadobro.services.debug_logger import debug_log
 
 logger = logging.getLogger(__name__)
@@ -52,9 +52,13 @@ def validate_trade(
     if leverage < 1:
         return False, "Leverage must be at least 1x."
 
-    client = get_user_nado_client(telegram_id)
+    wallet_ok, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    if not wallet_ok:
+        return False, wallet_msg
+
+    client = get_user_readonly_client(telegram_id)
     if not client:
-        return False, "Wallet not linked. Use the 👛 Wallet button to connect your Linked Signer."
+        return False, "Could not initialize client. Please try again."
 
     balance = client.get_balance()
     # region agent log
