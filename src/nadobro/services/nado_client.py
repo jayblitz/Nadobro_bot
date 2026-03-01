@@ -6,7 +6,7 @@ from typing import Optional
 from src.nadobro.config import (
     NADO_TESTNET_REST, NADO_MAINNET_REST,
     NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE,
-    PRODUCTS, get_product_name
+    PRODUCTS, get_product_name, NADO_PROXY_URL
 )
 
 logger = logging.getLogger(__name__)
@@ -77,9 +77,14 @@ class NadoClient:
             query_addr = self.main_address or self.address
             self.subaccount_hex = self._compute_subaccount_hex(query_addr)
             self._initialized = True
+
+            if NADO_PROXY_URL:
+                self._inject_proxy_into_sdk()
+
             logger.info(
-                "Nado client initialized: signer=%s, query=%s, network=%s",
+                "Nado client initialized: signer=%s, query=%s, network=%s, proxy=%s",
                 self.address, query_addr, self.network,
+                "enabled" if NADO_PROXY_URL else "disabled",
             )
             return True
         except ImportError:
@@ -90,6 +95,38 @@ class NadoClient:
             logger.error(f"Failed to initialize Nado client: {e}")
             self._initialized = False
             return False
+
+    def _inject_proxy_into_sdk(self):
+        if not NADO_PROXY_URL or not self.client:
+            return
+        proxy_dict = {"http": NADO_PROXY_URL, "https": NADO_PROXY_URL}
+        patched = []
+        try:
+            ctx = self.client.context
+            if hasattr(ctx, "engine_client"):
+                ec = ctx.engine_client
+                if hasattr(ec, "execute") and hasattr(ec.execute, "session"):
+                    ec.execute.session.proxies.update(proxy_dict)
+                    patched.append("engine_execute")
+                if hasattr(ec, "query") and hasattr(ec.query, "session"):
+                    ec.query.session.proxies.update(proxy_dict)
+                    patched.append("engine_query")
+            if hasattr(ctx, "trigger_client"):
+                tc = ctx.trigger_client
+                if hasattr(tc, "execute") and hasattr(tc.execute, "session"):
+                    tc.execute.session.proxies.update(proxy_dict)
+                    patched.append("trigger_execute")
+                if hasattr(tc, "query") and hasattr(tc.query, "session"):
+                    tc.query.session.proxies.update(proxy_dict)
+                    patched.append("trigger_query")
+            if hasattr(ctx, "indexer_client"):
+                ic = ctx.indexer_client
+                if hasattr(ic, "query") and hasattr(ic.query, "session"):
+                    ic.query.session.proxies.update(proxy_dict)
+                    patched.append("indexer_query")
+            logger.info("SDK proxy injected into sessions: %s", ", ".join(patched) if patched else "none")
+        except Exception as e:
+            logger.warning("Failed to inject proxy into SDK sessions: %s", e)
 
     def _rest_url(self):
         return NADO_MAINNET_REST if self.network == "mainnet" else NADO_TESTNET_REST

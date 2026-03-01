@@ -184,6 +184,31 @@ def _load_knowledge_sections() -> list[dict]:
     return _knowledge_sections
 
 
+_SYNONYMS = {
+    "points": {"rewards", "incentives", "season", "earning"},
+    "rewards": {"points", "incentives", "season", "earning"},
+    "program": {"season", "system"},
+    "season": {"points", "rewards", "program"},
+    "airdrop": {"points", "rewards", "token", "distribution"},
+    "referral": {"referrals", "invite", "refer"},
+    "referrals": {"referral", "invite", "refer"},
+    "fees": {"rebates", "taker", "maker", "trading"},
+    "nft": {"templars", "storm"},
+    "templars": {"nft", "storm"},
+    "leverage": {"margin", "cross"},
+    "liquidation": {"liquidations", "health"},
+    "liquidations": {"liquidation", "health"},
+}
+
+
+def _expand_with_synonyms(tokens: set) -> set:
+    expanded = set(tokens)
+    for t in tokens:
+        if t in _SYNONYMS:
+            expanded.update(_SYNONYMS[t])
+    return expanded
+
+
 def _search_knowledge_sections(query: str, top_k: int = 4) -> str:
     sections = _load_knowledge_sections()
     if not sections:
@@ -195,11 +220,16 @@ def _search_knowledge_sections(query: str, top_k: int = 4) -> str:
     if not q_tokens:
         return "\n\n".join(s["raw"] for s in sections[:top_k])
 
+    expanded_tokens = _expand_with_synonyms(q_tokens)
+
     scored = []
     for s in sections:
-        overlap = len(q_tokens & s["keywords"])
-        title_bonus = 2 * sum(1 for t in q_tokens if t in s["title"].lower())
-        scored.append((overlap + title_bonus, s))
+        direct_overlap = len(q_tokens & s["keywords"])
+        synonym_overlap = len((expanded_tokens - q_tokens) & s["keywords"])
+        title_bonus = 3 * sum(1 for t in q_tokens if t in s["title"].lower())
+        synonym_title_bonus = sum(1 for t in (expanded_tokens - q_tokens) if t in s["title"].lower())
+        score = direct_overlap + (synonym_overlap * 0.5) + title_bonus + synonym_title_bonus
+        scored.append((score, s))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top = [s for score, s in scored[:top_k] if score > 0]

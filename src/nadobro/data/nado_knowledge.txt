@@ -151,6 +151,33 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 - Volume-based fee tiers
 - NFT holders (Templars of the Storm) get automatic fee tier benefits
 
+## POINTS & REWARDS PROGRAM
+
+### Season 1
+- Nado runs a season-based points program (currently Season 1)
+- Points reward active, genuine trading participation
+- Nado is invite-only during Season 1 — invite codes are earned through your own trading activity
+- Points can be tracked on the Nado app and Referrals page
+- Docs: https://docs.nado.xyz/points/referrals
+
+### How to Earn Points
+- **Trade actively**: Higher trading volume = more points and better fee tiers
+- **Refer traders**: Earn points when referred users trade on Nado
+  - Multi-level rewards: earn from 1st, 2nd, and 3rd level referrals
+  - Points scale with the referred user's trading volume
+- **NFT multipliers**: Templars of the Storm NFT holders get points multipliers based on Wind Force tier
+- **Invite codes**: Unlock more invite codes by trading more
+
+### Anti-Farming Rules
+- Non-organic behavior (referral farming, coordinated low-quality activity) results in reduced or zero points for that weekly epoch
+- System designed to reward real growth and active participation, not inactive accounts
+
+### Volume-Based Fee Tiers
+- 30-day rolling trading volume (maker + taker) determines your fee tier
+- Higher volume → lower taker fees (down to 1.5 bps) + higher maker rebates (up to -0.8 bps)
+- Tiers reset monthly (1st of each UTC month)
+- Creates a virtuous cycle: more trading → lower fees → more efficient trading
+
 ## NFT - TEMPLARS OF THE STORM
 - Collection of 1,200 NFTs (1,000 to users, 150 reserved, 50 team)
 - Three Wind Force tiers with points multipliers
