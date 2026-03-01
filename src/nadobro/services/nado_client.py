@@ -103,27 +103,11 @@ class NadoClient:
         patched = []
         try:
             ctx = self.client.context
-            if hasattr(ctx, "engine_client"):
-                ec = ctx.engine_client
-                if hasattr(ec, "execute") and hasattr(ec.execute, "session"):
-                    ec.execute.session.proxies.update(proxy_dict)
-                    patched.append("engine_execute")
-                if hasattr(ec, "query") and hasattr(ec.query, "session"):
-                    ec.query.session.proxies.update(proxy_dict)
-                    patched.append("engine_query")
-            if hasattr(ctx, "trigger_client"):
-                tc = ctx.trigger_client
-                if hasattr(tc, "execute") and hasattr(tc.execute, "session"):
-                    tc.execute.session.proxies.update(proxy_dict)
-                    patched.append("trigger_execute")
-                if hasattr(tc, "query") and hasattr(tc.query, "session"):
-                    tc.query.session.proxies.update(proxy_dict)
-                    patched.append("trigger_query")
-            if hasattr(ctx, "indexer_client"):
-                ic = ctx.indexer_client
-                if hasattr(ic, "query") and hasattr(ic.query, "session"):
-                    ic.query.session.proxies.update(proxy_dict)
-                    patched.append("indexer_query")
+            for client_name in ["engine_client", "trigger_client", "indexer_client"]:
+                client_obj = getattr(ctx, client_name, None)
+                if client_obj and hasattr(client_obj, "session"):
+                    client_obj.session.proxies.update(proxy_dict)
+                    patched.append(client_name)
             logger.info("SDK proxy injected into sessions: %s", ", ".join(patched) if patched else "none")
         except Exception as e:
             logger.warning("Failed to inject proxy into SDK sessions: %s", e)
