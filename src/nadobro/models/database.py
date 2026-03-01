@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from typing import Any, Optional
 
+from psycopg2 import sql as pgsql
 from src.nadobro.db import query_one, query_all, execute, execute_returning, query_count
 
 
@@ -96,9 +97,12 @@ def update_trade(trade_id: int, data: dict):
     disallowed = set(data.keys()) - _TRADE_UPDATE_ALLOWED_COLS
     if disallowed:
         raise ValueError(f"update_trade: disallowed column(s): {disallowed}")
-    sets = ", ".join([f"{k} = %s" for k in data.keys()])
+    set_clause = pgsql.SQL(", ").join(
+        pgsql.SQL("{} = %s").format(pgsql.Identifier(k)) for k in data.keys()
+    )
+    query = pgsql.SQL("UPDATE trades SET {} WHERE id = %s").format(set_clause)
     vals = list(data.values()) + [trade_id]
-    execute(f"UPDATE trades SET {sets} WHERE id = %s", vals)
+    execute(query, vals)
 
 
 def get_last_trade_for_rate_limit(telegram_id: int) -> Optional[dict]:
