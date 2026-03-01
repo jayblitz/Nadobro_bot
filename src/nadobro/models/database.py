@@ -78,13 +78,12 @@ def get_bot_state_raw(key: str) -> Optional[str]:
 
 def insert_trade(data: dict) -> Optional[int]:
     cols = list(data.keys())
-    placeholders = ", ".join(["%s"] * len(cols))
-    col_names = ", ".join(cols)
     vals = [data[c] for c in cols]
-    row = execute_returning(
-        f"INSERT INTO trades ({col_names}) VALUES ({placeholders}) RETURNING id",
-        vals,
+    query = pgsql.SQL("INSERT INTO trades ({}) VALUES ({}) RETURNING id").format(
+        pgsql.SQL(", ").join(pgsql.Identifier(c) for c in cols),
+        pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols)),
     )
+    row = execute_returning(query, vals)
     return row["id"] if row else None
 
 
@@ -121,13 +120,12 @@ def get_trades_by_user(telegram_id: int, limit: int = 50) -> list:
 
 def insert_alert(data: dict) -> Optional[int]:
     cols = list(data.keys())
-    placeholders = ", ".join(["%s"] * len(cols))
-    col_names = ", ".join(cols)
     vals = [data[c] for c in cols]
-    row = execute_returning(
-        f"INSERT INTO alerts ({col_names}) VALUES ({placeholders}) RETURNING id",
-        vals,
+    query = pgsql.SQL("INSERT INTO alerts ({}) VALUES ({}) RETURNING id").format(
+        pgsql.SQL(", ").join(pgsql.Identifier(c) for c in cols),
+        pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols)),
     )
+    row = execute_returning(query, vals)
     return row["id"] if row else None
 
 
