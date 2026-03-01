@@ -176,10 +176,13 @@ class NadoClient:
 
     @staticmethod
     def _from_x18_dynamic(value) -> float:
+        if value is None:
+            return 0.0
         try:
             iv = int(value)
             return iv / 1e18
-        except Exception:
+        except (ValueError, TypeError) as e:
+            logging.getLogger(__name__).warning("_from_x18_dynamic: invalid value %r: %s", value, e)
             return 0.0
 
     def _extract_positions_from_sdk_info(self, info) -> list:
@@ -752,8 +755,14 @@ class NadoClient:
 _client_cache: dict[str, NadoClient] = {}
 
 
+def _cache_key_for(private_key: str, network: str) -> str:
+    import hashlib
+    key_hash = hashlib.sha256(private_key.encode()).hexdigest()[:16]
+    return f"{key_hash}_{network}"
+
+
 def get_nado_client(private_key: str, network: str = "testnet") -> NadoClient:
-    cache_key = f"{private_key[:10]}_{network}"
+    cache_key = _cache_key_for(private_key, network)
     if cache_key not in _client_cache:
         client = NadoClient(private_key, network)
         client.initialize()
@@ -763,7 +772,7 @@ def get_nado_client(private_key: str, network: str = "testnet") -> NadoClient:
 
 def clear_client_cache(private_key: str = None, network: str = None):
     if private_key and network:
-        cache_key = f"{private_key[:10]}_{network}"
+        cache_key = _cache_key_for(private_key, network)
         _client_cache.pop(cache_key, None)
     else:
         _client_cache.clear()

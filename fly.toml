@@ -2,6 +2,7 @@
 # First time: fly auth login && fly launch --no-deploy && fly secrets set TELEGRAM_TOKEN=... (etc.) && fly deploy
 
 app = "nadobro-bot"
+primary_region = "ams"
 
 [build]
 

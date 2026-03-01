@@ -6,9 +6,9 @@ from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
 from src.nadobro.handlers.formatters import (
-    escape_md, fmt_dashboard, fmt_positions,
+    escape_md, fmt_positions,
     fmt_prices, fmt_funding, fmt_trade_preview, fmt_trade_result,
-    fmt_wallet_info, fmt_alerts, fmt_history, fmt_analytics, fmt_portfolio,
+    fmt_wallet_info, fmt_alerts, fmt_portfolio,
     fmt_settings, fmt_help, fmt_price, fmt_status_overview,
 )
 from src.nadobro.handlers.keyboards import (
@@ -1098,11 +1098,8 @@ async def _handle_strategy(query, data, context, telegram_id):
 
 
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
-    network, settings = get_user_settings(telegram_id)
-    cache_key = f"settings:{network}"
-    context.user_data[cache_key] = settings
-    context.user_data["settings"] = settings
-    return settings
+    from src.nadobro.handlers import get_cached_user_settings
+    return get_cached_user_settings(telegram_id, context)
 
 
 def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
@@ -1213,12 +1210,10 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     est_daily_volume = notional * 2.0 * cycles_per_day
 
     # Conservative fee estimate using builder fee (2 bps) + maker fee proxy (1 bp).
-    est_fee_rate = 0.0003
-    est_fees = est_daily_volume * est_fee_rate
+    from src.nadobro.config import EST_FEE_RATE, EST_FILL_EFFICIENCY
+    est_fees = est_daily_volume * EST_FEE_RATE
 
-    # Approximate spread capture potential before funding and slippage.
-    fill_efficiency = 0.45
-    est_spread_pnl = est_daily_volume * (spread_bp / 10000.0) * fill_efficiency
+    est_spread_pnl = est_daily_volume * (spread_bp / 10000.0) * EST_FILL_EFFICIENCY
     est_funding = 0.0
     if strategy_id == "dn":
         est_funding = abs(funding_rate) * notional * 3

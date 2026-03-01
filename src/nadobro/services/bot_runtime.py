@@ -8,7 +8,7 @@ from src.nadobro.config import get_product_id
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state, get_supabase
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
-from src.nadobro.services.trade_service import execute_limit_order, close_all_positions
+from src.nadobro.services.trade_service import close_all_positions
 from src.nadobro.services.user_service import get_user_nado_client, get_user
 
 logger = logging.getLogger(__name__)
@@ -86,8 +86,12 @@ def _strategy_defaults(strategy: str) -> dict:
         "mm": {"notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45},
         "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60},
         "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90},
+        "vol": {"notional_usd": 100.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
     }
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
+
+
+SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol")
 
 
 def start_user_bot(
@@ -98,7 +102,7 @@ def start_user_bot(
     slippage_pct: float = 1.0,
 ) -> tuple[bool, str]:
     strategy = (strategy or "").lower()
-    if strategy not in ("mm", "grid", "dn"):
+    if strategy not in SUPPORTED_STRATEGIES:
         return False, "Unknown strategy."
 
     product_id = get_product_id(product)
@@ -257,6 +261,27 @@ async def _bot_loop(telegram_id: int, network: str):
         _tasks.pop(_task_key(telegram_id, network), None)
 
 
+def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dict,
+                       client, mid: float, product_id: int, product: str, open_orders: list) -> dict:
+    from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
+
+    if strategy in ("mm", "grid"):
+        return mm_bot.run_cycle(
+            telegram_id, network, state,
+            client=client, mid=mid, open_orders=open_orders,
+        )
+    elif strategy == "dn":
+        return delta_neutral.run_cycle(
+            telegram_id, network, state,
+            client=client, mid=mid, product_id=product_id,
+            product=product, open_orders=open_orders,
+        )
+    elif strategy == "vol":
+        return volume_bot.run_cycle(telegram_id, network, state)
+    else:
+        return {"success": False, "error": f"Unknown strategy '{strategy}'"}
+
+
 async def _run_cycle(telegram_id: int, network: str, state: dict):
     if is_trading_paused():
         return
@@ -282,7 +307,6 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
 
     product = state.get("product", "BTC")
     strategy = state.get("strategy")
-    leverage = float(state.get("leverage") or 3.0)
     product_id = get_product_id(product)
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")
@@ -327,54 +351,23 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
         return
 
     open_orders = client.get_open_orders(product_id)
-    if len(open_orders) >= MAX_OPEN_ORDERS_PER_PRODUCT:
-        state["last_run_ts"] = time.time()
+
+    result = _dispatch_strategy(
+        strategy, telegram_id, network, state,
+        client=client, mid=mid, product_id=product_id,
+        product=product, open_orders=open_orders,
+    )
+
+    if not state.get("running", True):
         _save_state(telegram_id, network, state)
+        await _notify(telegram_id, f"✅ {strategy.upper()} completed on {product}-PERP ({network}).")
         return
-
-    notional = float(state.get("notional_usd") or 100.0)
-    size = max(notional / mid, 0.0001)
-    spread_bp = float(state.get("spread_bp") or 5.0)
-
-    if strategy == "grid":
-        spread_bp = max(spread_bp, 8.0)
-    elif strategy == "dn":
-        spread_bp = max(2.0, min(spread_bp, 4.0))
-
-    half_spread = spread_bp / 10000.0
-    buy_price = mid * (1.0 - half_spread)
-    sell_price = mid * (1.0 + half_spread)
-
-    # Keep each cycle bounded to 2 maker orders.
-    buy_result = execute_limit_order(
-        telegram_id,
-        product,
-        size,
-        buy_price,
-        is_long=True,
-        leverage=leverage,
-        enforce_rate_limit=False,
-    )
-    sell_result = execute_limit_order(
-        telegram_id,
-        product,
-        size,
-        sell_price,
-        is_long=False,
-        leverage=leverage,
-        enforce_rate_limit=False,
-    )
 
     state["last_run_ts"] = time.time()
     state["runs"] = int(state.get("runs") or 0) + 1
-    state["last_error"] = None
+    state["last_error"] = result.get("error")
     _save_state(telegram_id, network, state)
 
-    if not buy_result.get("success") or not sell_result.get("success"):
-        errs = []
-        if not buy_result.get("success"):
-            errs.append(f"buy: {buy_result.get('error')}")
-        if not sell_result.get("success"):
-            errs.append(f"sell: {sell_result.get('error')}")
-        msg = "; ".join(errs)[:300]
-        await _notify(telegram_id, f"{strategy.upper()} cycle had errors: {msg}")
+    if not result.get("success", True):
+        error_msg = str(result.get("error", "unknown"))[:300]
+        await _notify(telegram_id, f"{strategy.upper()} cycle error: {error_msg}")

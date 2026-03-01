@@ -36,7 +36,7 @@ fly launch --no-deploy
 When prompted:
 
 - **App name:** Accept the default (`nadobro-bot`) or enter another (must be unique on Fly).
-- **Region:** Pick one close to you or your users (e.g. `iad` for US East).
+- **Region:** Pick a non-US region (e.g. `ams` for Amsterdam). This is important because Nado DEX geo-restricts US-based IP addresses. The `fly.toml` defaults to `ams`.
 - **Postgres / Redis:** Answer **No** (the bot uses Supabase, not Fly Postgres).
 
 This creates the app in your Fly account and updates `fly.toml` if needed.
@@ -53,7 +53,7 @@ Fly injects these as environment variables. Do not commit or paste them in code.
 fly secrets set TELEGRAM_TOKEN="your_bot_token_from_botfather"
 fly secrets set SUPABASE_URL="https://your-project.supabase.co"
 fly secrets set SUPABASE_KEY="your_supabase_service_role_key"
-fly secrets set ENCRYPTION_KEY="your_fernet_or_32_char_secret"
+fly secrets set ENCRYPTION_KEY="your_fernet_key"
 ```
 
 **Optional (AI support and admin):**
@@ -62,6 +62,7 @@ fly secrets set ENCRYPTION_KEY="your_fernet_or_32_char_secret"
 fly secrets set XAI_API_KEY="your_xai_key"
 fly secrets set OPENAI_API_KEY="your_openai_key"
 fly secrets set ADMIN_USER_IDS="123456789"
+fly secrets set WEBHOOK_SECRET="your_random_hex_secret"
 ```
 
 Replace the quoted values with your real ones. To change a secret later, run `fly secrets set NAME="new_value"` again and redeploy.

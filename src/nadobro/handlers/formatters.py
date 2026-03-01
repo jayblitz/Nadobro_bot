@@ -23,70 +23,6 @@ def fmt_price(price, product="BTC"):
     return f"{price:,.4f}"
 
 
-def fmt_dashboard(user, balance, positions, prices, network):
-    net_emoji = "🧪" if network == "testnet" else "🌐"
-    net_label = "TESTNET" if network == "testnet" else "MAINNET"
-
-    usdt = 0
-    if balance and balance.get("exists"):
-        usdt = balance.get("balances", {}).get(0, 0)
-
-    lines = [
-        "🔷 *NADOBRO — Nado DEX Trading Bot*",
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        "",
-        f"💰 *Balance:* {escape_md(f'${usdt:,.2f}')} USDT",
-        f"📊 *Network:* {net_emoji} {escape_md(net_label)}",
-        "",
-    ]
-
-    if positions:
-        lines.append(f"📈 *Open Orders:* {escape_md(str(len(positions)))}")
-        for p in positions[:5]:
-            side = p.get("side", "LONG")
-            amount = abs(p.get("amount", 0))
-            pname = p.get("product_name", "???")
-            entry = p.get("price", 0)
-
-            base = pname.replace("-PERP", "")
-            current = 0
-            if prices and base in prices:
-                current = prices[base].get("mid", 0)
-
-            pnl = 0
-            if current and entry:
-                if side == "LONG":
-                    pnl = (current - entry) * amount
-                else:
-                    pnl = (entry - current) * amount
-
-            pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
-            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-
-            lines.append(
-                f"  └ {escape_md(side)} {escape_md(f'{amount:.4f}')} "
-                f"{escape_md(pname)} @ {escape_md(f'${entry:,.2f}')} "
-                f"\\| PnL: {pnl_emoji} {escape_md(pnl_str)}"
-            )
-        if len(positions) > 5:
-            lines.append(f"  └ \\.\\.\\.and {escape_md(str(len(positions) - 5))} more")
-    else:
-        lines.append("📈 *Open Orders:* 0")
-
-    lines.append("")
-
-    if prices:
-        lines.append("💹 *Markets*")
-        price_parts = []
-        for name in ["BTC", "ETH", "SOL"]:
-            if name in prices:
-                mid = prices[name].get("mid", 0)
-                price_parts.append(f"{escape_md(name)} {escape_md(f'${fmt_price(mid, name)}')}")
-        if price_parts:
-            lines.append(escape_md(" | ").join(price_parts))
-
-    return "\n".join(lines)
-
 
 def fmt_positions(positions, prices=None):
     if not positions:
@@ -327,61 +263,6 @@ def fmt_alerts(alerts):
 
     return "\n".join(lines)
 
-
-def fmt_history(trades):
-    if not trades:
-        return "📜 *Trade History*\n\nNo trades yet\\."
-
-    lines = [
-        "📜 *Trade History*",
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        "",
-    ]
-
-    status_map = {"filled": "✅", "failed": "❌", "pending": "⏳", "cancelled": "🚫"}
-
-    for t in trades[:10]:
-        status_emoji = status_map.get(t["status"], "❓")
-        price_str = f"${t['price']:,.2f}" if t["price"] else "N/A"
-        lines.append(
-            f"{status_emoji} {escape_md(t['side'].upper())} "
-            f"{escape_md(str(t['size']))} {escape_md(t['product'])} "
-            f"@ {escape_md(price_str)} \\({escape_md(t['network'])}\\)"
-        )
-
-    if len(trades) > 10:
-        lines.append(f"\n\\.\\.\\.and {escape_md(str(len(trades) - 10))} more")
-
-    return "\n".join(lines)
-
-
-def fmt_analytics(stats):
-    if stats.get("total_trades", 0) == 0:
-        return "📊 *Trading Analytics*\n\nNo trades yet to analyze\\."
-
-    total_pnl = stats.get("total_pnl", 0)
-    pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
-    pnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
-    win_rate_val = stats.get("win_rate", 0)
-    vol_str = f"${stats.get('total_volume', 0):,.2f}"
-
-    lines = [
-        "📊 *Trading Analytics*",
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        "",
-        f"📋 *Total Trades:* {escape_md(str(stats['total_trades']))}",
-        f"✅ Filled: {escape_md(str(stats.get('filled', 0)))} \\| "
-        f"❌ Failed: {escape_md(str(stats.get('failed', 0)))}",
-        "",
-        f"🏆 *Win Rate:* {escape_md(f'{win_rate_val:.1f}%')}",
-        f"  Wins: {escape_md(str(stats.get('wins', 0)))} \\| "
-        f"Losses: {escape_md(str(stats.get('losses', 0)))}",
-        "",
-        f"{pnl_emoji} *Total PnL:* {escape_md(pnl_str)}",
-        f"💰 *Total Volume:* {escape_md(vol_str)}",
-    ]
-
-    return "\n".join(lines)
 
 
 def fmt_portfolio(stats, positions, prices=None):

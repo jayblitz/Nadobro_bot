@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
 from src.nadobro.services.user_service import get_or_create_user, get_user
-from src.nadobro.handlers.formatters import escape_md, fmt_dashboard, fmt_help, fmt_status_overview
+from src.nadobro.handlers.formatters import escape_md, fmt_help, fmt_status_overview
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb,
     onboarding_language_kb,

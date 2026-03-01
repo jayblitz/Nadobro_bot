@@ -54,4 +54,7 @@ def get_product_name(product_id: int) -> str:
 RATE_LIMIT_SECONDS = 60
 MAX_LEVERAGE = 40
 MIN_TRADE_SIZE_USD = 1.0
+
+EST_FEE_RATE = 0.0003
+EST_FILL_EFFICIENCY = 0.45
 DUAL_MODE_CARD_FLOW = os.environ.get("DUAL_MODE_CARD_FLOW", "true").strip().lower() in ("1", "true", "yes", "on")

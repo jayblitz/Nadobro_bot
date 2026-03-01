@@ -62,7 +62,6 @@ REPLY_BUTTON_MAP = {
 REPLY_BUTTON_MAP.update({
     "📋 Positions": "pos:view",
     "📁 Portfolio": "portfolio:view",
-    "Portofolio": "portfolio:view",
     "Portfolio": "portfolio:view",
     "👛 Wallet": "wallet:view",
     "Trade": "nav:trade",

@@ -31,6 +31,12 @@ def _get_fernet() -> Fernet:
     except Exception:
         pass
 
+    import logging
+    logging.getLogger(__name__).warning(
+        "ENCRYPTION_KEY is not a valid Fernet key — deriving one via SHA-256. "
+        "For better security, generate a proper key with: "
+        "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
     derived = hashlib.sha256(key_bytes).digest()
     fernet_key = base64.urlsafe_b64encode(derived)
     _fernet_instance = Fernet(fernet_key)

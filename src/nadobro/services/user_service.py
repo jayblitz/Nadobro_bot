@@ -168,10 +168,6 @@ def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
     return True, ""
 
 
-def get_user_private_key(telegram_id: int, network: Optional[str] = None) -> tuple[bool, str]:
-    """Not used in linked-signer model; decrypt requires passphrase in session."""
-    return False, "Use Wallet flow to unlock trading."
-
 
 def update_trade_stats(telegram_id: int, volume_usd: float):
     sb = get_supabase()
@@ -198,10 +194,6 @@ def get_active_users_count() -> int:
     r = get_supabase().table("users").select("telegram_id", count="exact").gte("last_active", cutoff).execute()
     return r.count or 0
 
-
-# Legacy: import/remove key (no-op in linked-signer model; wallet flow replaces these)
-def import_user_private_key(telegram_id: int, private_key: str, network: str = "testnet") -> tuple[bool, str]:
-    return False, "Use the Wallet button to link your wallet (Linked Signer) instead of importing a key."
 
 
 def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple[bool, str]:

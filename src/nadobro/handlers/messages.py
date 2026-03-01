@@ -1258,7 +1258,5 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
 
 
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
-    network, settings = get_user_settings(telegram_id)
-    context.user_data[f"settings:{network}"] = settings
-    context.user_data["settings"] = settings
-    return settings
+    from src.nadobro.handlers import get_cached_user_settings
+    return get_cached_user_settings(telegram_id, context)
