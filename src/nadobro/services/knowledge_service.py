@@ -183,21 +183,21 @@ Retrieved Context:
 {retrieved_context}
 """
 
-X_TWITTER_SYSTEM_PROMPT = """You are Nadobro Support AI for Nado, with real-time access to X (Twitter) content.
+X_TWITTER_SYSTEM_PROMPT = """You are Nadobro Support AI for Nado, with real-time access to X (Twitter) content via live search.
 
 Nado's official X handle is @nadoHQ (https://x.com/nadoHQ).
 Nado is a CLOB-based DEX on the Ink L2 blockchain offering perpetual futures and spot trading.
 
 Your task:
-- Use your built-in real-time X/Twitter search to find the latest posts from @nadoHQ.
-- Report the actual tweet content, including the text, date, and any links or media mentioned.
+- Search for and report the latest posts ONLY from the @nadoHQ account.
+- Report the actual tweet content verbatim, including the full text, date/time, and any links or media mentioned.
 - If asked about a specific topic, search for relevant tweets from @nadoHQ about that topic.
-- Be specific and accurate — share the actual tweet text, not just summaries.
 
-Rules:
+STRICT rules:
+- ONLY return content from @nadoHQ. Never include tweets from other accounts.
+- If you cannot find relevant tweets from @nadoHQ, say so honestly. Do NOT fabricate or invent tweet content.
 - Do NOT use MarkdownV2 syntax escapes; plain text only.
-- Do NOT say you cannot access X or Twitter — you have real-time access.
-- Include the tweet date/time if available.
+- Include the tweet date/time for each tweet.
 - Keep response under 1200 characters.
 - End with: Sources: https://x.com/nadoHQ
 
@@ -295,7 +295,15 @@ def _build_retrieved_context(question: str) -> tuple[str, list[str]]:
     return "\n\n".join(docs_payload), list(dict.fromkeys(used_sources))
 
 
-def _call_support_llm(provider: str, system: str, question: str) -> str:
+XAI_X_SEARCH_MODEL = os.environ.get("XAI_X_SEARCH_MODEL", "grok-3-mini")
+
+X_SEARCH_PARAMS = {
+    "mode": "on",
+    "sources": [{"type": "x", "x_handles": ["nadoHQ"]}],
+}
+
+
+def _call_support_llm(provider: str, system: str, question: str, x_search: bool = False) -> str:
     if provider == "openai":
         client = _get_openai_client()
     else:
@@ -304,9 +312,10 @@ def _call_support_llm(provider: str, system: str, question: str) -> str:
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 700 if _wants_detailed_answer(question) else 260
-    response = client.chat.completions.create(
-        model=_model_for(provider),
+    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 260
+
+    kwargs = dict(
+        model=XAI_X_SEARCH_MODEL if (x_search and provider == "xai") else _model_for(provider),
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": question},
@@ -314,13 +323,17 @@ def _call_support_llm(provider: str, system: str, question: str) -> str:
         max_tokens=max_tokens,
         temperature=0.2,
     )
+    if x_search and provider == "xai":
+        kwargs["search_parameters"] = X_SEARCH_PARAMS
+
+    response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content
     if not content or not content.strip():
         raise RuntimeError(f"{provider.upper()} returned empty response")
     return content.strip()
 
 
-def _stream_support_llm(provider: str, system: str, question: str):
+def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False):
     if provider == "openai":
         client = _get_openai_client()
     else:
@@ -329,9 +342,10 @@ def _stream_support_llm(provider: str, system: str, question: str):
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 700 if _wants_detailed_answer(question) else 260
-    stream = client.chat.completions.create(
-        model=_model_for(provider),
+    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 260
+
+    kwargs = dict(
+        model=XAI_X_SEARCH_MODEL if (x_search and provider == "xai") else _model_for(provider),
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": question},
@@ -340,6 +354,10 @@ def _stream_support_llm(provider: str, system: str, question: str):
         temperature=0.2,
         stream=True,
     )
+    if x_search and provider == "xai":
+        kwargs["search_parameters"] = X_SEARCH_PARAMS
+
+    stream = client.chat.completions.create(**kwargs)
     for chunk in stream:
         delta = chunk.choices[0].delta if chunk.choices else None
         if delta and delta.content:
@@ -352,6 +370,10 @@ async def stream_nado_answer(question: str):
     openai_client = _get_openai_client()
     if not xai_client and not openai_client:
         yield "AI service is not configured. Add XAI_API_KEY and/or OPENAI_API_KEY then restart the bot."
+        return
+
+    if _is_x_twitter_question(question) and not xai_client:
+        yield "X/Twitter search requires the xAI (Grok) service. Please ask a different question or contact support."
         return
 
     knowledge = _load_knowledge_base()
@@ -405,9 +427,9 @@ async def stream_nado_answer(question: str):
         try:
             chunk_queue = queue.Queue()
 
-            def _run_stream(p=provider):
+            def _run_stream(p=provider, xs=use_x_prompt):
                 try:
-                    for chunk_text in _stream_support_llm(p, system, question):
+                    for chunk_text in _stream_support_llm(p, system, question, x_search=xs):
                         chunk_queue.put(chunk_text)
                     chunk_queue.put(None)
                 except Exception as e:
@@ -433,7 +455,9 @@ async def stream_nado_answer(question: str):
                 continue
 
             if "Sources:" not in full_answer:
-                if used_sources:
+                if use_x_prompt:
+                    sources_line = "\n\nSources: https://x.com/nadoHQ"
+                elif used_sources:
                     sources_line = "\n\nSources: " + ", ".join(used_sources[:4])
                 else:
                     sources_line = "\n\nSources: https://docs.nado.xyz/, https://x.com/nadoHQ"
@@ -458,6 +482,9 @@ async def answer_nado_question(question: str) -> str:
             "AI service is not configured. Add XAI_API_KEY and/or OPENAI_API_KEY "
             "then restart the bot."
         )
+
+    if _is_x_twitter_question(question) and not xai_client:
+        return "X/Twitter search requires the xAI (Grok) service. Please ask a different question or contact support."
 
     knowledge = _load_knowledge_base()
     if not knowledge:
@@ -513,7 +540,7 @@ async def answer_nado_question(question: str) -> str:
             try:
                 answer = await loop.run_in_executor(
                     None,
-                    lambda p=provider: _call_support_llm(p, system, question),
+                    lambda p=provider: _call_support_llm(p, system, question, x_search=use_x_prompt),
                 )
                 used_provider = provider
                 break
@@ -529,7 +556,9 @@ async def answer_nado_question(question: str) -> str:
 
         logger.info("Support answer generated via provider=%s", used_provider)
         if "Sources:" not in answer:
-            if used_sources:
+            if use_x_prompt:
+                sources_line = "Sources: https://x.com/nadoHQ"
+            elif used_sources:
                 sources_line = "Sources: " + ", ".join(used_sources[:4])
             else:
                 sources_line = "Sources: https://docs.nado.xyz/, https://x.com/nadoHQ"
