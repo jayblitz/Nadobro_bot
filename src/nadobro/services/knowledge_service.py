@@ -30,6 +30,7 @@ OFFICIAL_URLS = [
     "https://docs.nado.xyz/developer-resources/api/gateway",
     "https://www.nado.xyz/",
     "https://x.com/nadoHQ",
+    "https://x.com/inkonchain",
 ]
 
 
@@ -58,7 +59,7 @@ def _should_use_live_retrieval(question: str) -> bool:
 
 def _is_x_twitter_question(question: str) -> bool:
     q = _normalize_question(question)
-    signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq"]
+    signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq", "inkonchain"]
     return any(sig in q for sig in signals)
 
 
@@ -214,7 +215,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_knowledge_base",
-            "description": "Search the Nado knowledge base for information about a specific topic. Use this for questions about Nado features, trading, margin, fees, NFTs, developer resources, etc.",
+            "description": "Search the Nado knowledge base for information about a specific topic. Use this for questions about Nado features, trading, margin, fees, NFTs, developer resources, architecture, order types, liquidations, etc.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -231,7 +232,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Search the web for live/current information about Nado. Use this when the question asks about recent events, news, updates, announcements, points distribution, airdrops, or anything time-sensitive that may not be in the static knowledge base.",
+            "description": "Search the web for live/current information about Nado from official docs (docs.nado.xyz), website (nado.xyz), and general web. Use for recent events, news, updates, announcements, points distribution, airdrops, launches, or anything time-sensitive.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -244,13 +245,52 @@ AGENT_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_x_twitter",
+            "description": "Search X (Twitter) for the latest posts from Nado's official account @nadoHQ and Ink blockchain's account @inkonchain. Use for questions about tweets, X posts, social media updates, announcements on X, or anything asking what Nado/Ink posted.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query for X/Twitter content"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_market_sentiment",
+            "description": "Get market sentiment and crypto market context. Combines general web search for crypto news and broader crypto Twitter sentiment. Use when the user asks about market conditions, price outlook, sentiment, what the market thinks, crypto trends, or general trading conditions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The market/sentiment query (e.g., 'ETH price outlook', 'crypto market sentiment today')"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 XAI_X_SEARCH_MODEL = os.environ.get("XAI_X_SEARCH_MODEL", "grok-3")
 
-X_SEARCH_PARAMS = {
+X_NADO_SEARCH_PARAMS = {
     "mode": "on",
-    "sources": [{"type": "x", "x_handles": ["nadoHQ"]}],
+    "sources": [{"type": "x", "x_handles": ["nadoHQ", "inkonchain"]}],
+}
+
+X_CRYPTO_SEARCH_PARAMS = {
+    "mode": "on",
+    "sources": [{"type": "x"}],
 }
 
 ROUTER_SYSTEM_PROMPT = """You are a routing agent for Nadobro, the support AI for Nado DEX.
@@ -259,11 +299,20 @@ Today's date: {current_date}
 
 Your job is to analyze the user's question and call the right tools to gather the information needed to answer it.
 
+You have 4 tools available:
+1. search_knowledge_base — Static Nado product knowledge (features, trading, margin, fees, NFTs, dev docs, architecture)
+2. search_web — Live info from Nado docs (docs.nado.xyz), website (nado.xyz), and general web search
+3. search_x_twitter — Latest posts from @nadoHQ and @inkonchain on X/Twitter
+4. get_market_sentiment — Crypto market sentiment from general web + crypto Twitter
+
 Rules:
-- ALWAYS call search_knowledge_base for questions about Nado features, products, trading, margin, fees, liquidations, developer API, etc.
-- ALWAYS call search_web for questions about recent events, news, announcements, points/rewards distribution, launches, updates, airdrops, or anything time-sensitive.
-- For questions that need both static knowledge AND current info, call BOTH tools.
-- If you're not sure, call both tools to be thorough.
+- For product/feature questions: call search_knowledge_base
+- For recent news/updates/announcements/points/airdrops: call search_web AND search_x_twitter
+- For "what did Nado tweet" or X/Twitter questions: call search_x_twitter
+- For market conditions/price/sentiment: call get_market_sentiment
+- For questions needing both static knowledge AND current info: call multiple tools
+- If you're not sure, call search_knowledge_base + search_web to be thorough
+- You can call multiple tools in a single response
 
 Do NOT answer the question yourself. Only call the tools."""
 
@@ -289,22 +338,25 @@ X_TWITTER_SYSTEM_PROMPT = """You are Nadobro Support AI for Nado, with real-time
 
 Today's date: {current_date}
 
-Nado's official X handle is @nadoHQ (https://x.com/nadoHQ).
+Official X accounts:
+- @nadoHQ (https://x.com/nadoHQ) — Nado DEX official
+- @inkonchain (https://x.com/inkonchain) — Ink L2 blockchain (Nado's chain)
+
 Nado is a CLOB-based DEX on the Ink L2 blockchain offering perpetual futures and spot trading.
 
 Your task:
-- Search for and report the MOST RECENT posts from @nadoHQ.
+- Search for and report the MOST RECENT posts from @nadoHQ and @inkonchain.
 - "Latest" means the most recent tweets closest to today's date ({current_date}). Prioritize tweets from {current_year} over older ones.
 - Report the actual tweet content verbatim, including the full text, date/time, and any links or media mentioned.
-- If asked about a specific topic, search for relevant tweets from @nadoHQ about that topic.
+- If asked about a specific topic, search for relevant tweets about that topic from either account.
 
 STRICT rules:
-- ONLY return content from @nadoHQ. Never include tweets from other accounts.
-- If you cannot find relevant tweets from @nadoHQ, say so honestly. Do NOT fabricate or invent tweet content.
+- ONLY return content from @nadoHQ and @inkonchain. Never include tweets from other accounts.
+- If you cannot find relevant tweets, say so honestly. Do NOT fabricate or invent tweet content.
 - Do NOT use MarkdownV2 syntax escapes; plain text only.
-- Include the tweet date/time for each tweet.
+- Include the tweet date/time and which account posted it for each tweet.
 - Keep response under 1200 characters.
-- End with: Sources: https://x.com/nadoHQ
+- End with: Sources: https://x.com/nadoHQ, https://x.com/inkonchain
 
 Relevant Nado Knowledge:
 {knowledge_base}
@@ -399,6 +451,89 @@ def _build_retrieved_context(question: str) -> tuple[str, list[str]]:
     return "\n\n".join(docs_payload), list(dict.fromkeys(used_sources))
 
 
+def _execute_x_search(query: str) -> tuple[str, list[str]]:
+    client = _get_xai_client()
+    if not client:
+        return "[X SEARCH] xAI client not available — cannot search X/Twitter.", []
+
+    now = datetime.utcnow()
+    try:
+        response = client.chat.completions.create(
+            model=XAI_X_SEARCH_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"Today is {now.strftime('%Y-%m-%d')}. "
+                        "Search X for the most recent posts from @nadoHQ and @inkonchain. "
+                        "Return the actual tweet content verbatim with dates. "
+                        f"Focus on tweets from {now.year}. Plain text only."
+                    ),
+                },
+                {"role": "user", "content": query},
+            ],
+            max_tokens=600,
+            temperature=0.1,
+            extra_body={"search_parameters": X_NADO_SEARCH_PARAMS},
+        )
+        content = response.choices[0].message.content
+        if content and content.strip():
+            return (
+                f"[X/TWITTER RESULTS — @nadoHQ & @inkonchain]\n{content.strip()}",
+                ["https://x.com/nadoHQ", "https://x.com/inkonchain"],
+            )
+    except Exception as e:
+        logger.warning(f"X search failed: {e}")
+
+    return "[X SEARCH] No results found from @nadoHQ or @inkonchain.", []
+
+
+def _execute_market_sentiment(query: str) -> tuple[str, list[str]]:
+    parts = []
+    sources = []
+
+    web_results = _search_live(query)
+    for url, txt in web_results[:3]:
+        snippet = txt[:1500]
+        parts.append(f"[WEB — {url}]\n{snippet}")
+        sources.append(url)
+
+    client = _get_xai_client()
+    if client:
+        now = datetime.utcnow()
+        try:
+            response = client.chat.completions.create(
+                model=XAI_X_SEARCH_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"Today is {now.strftime('%Y-%m-%d')}. "
+                            "Search crypto Twitter for the latest market sentiment, news, and opinions "
+                            "related to the user's query. Include notable tweets from crypto traders, "
+                            "analysts, and news accounts. Report tweet content with dates and handles. "
+                            "Plain text only."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                max_tokens=600,
+                temperature=0.1,
+                extra_body={"search_parameters": X_CRYPTO_SEARCH_PARAMS},
+            )
+            content = response.choices[0].message.content
+            if content and content.strip():
+                parts.append(f"[CRYPTO TWITTER SENTIMENT]\n{content.strip()}")
+                sources.append("https://x.com (crypto twitter)")
+        except Exception as e:
+            logger.warning(f"Crypto Twitter sentiment search failed: {e}")
+
+    if not parts:
+        return "[MARKET SENTIMENT] No market data available.", []
+
+    return "\n\n".join(parts), list(dict.fromkeys(sources))
+
+
 def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str, list[str]]:
     if tool_name == "search_knowledge_base":
         query = args.get("query", question)
@@ -413,6 +548,14 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str,
         if context and context != "No retrieved context available.":
             return f"[WEB SEARCH RESULTS]\n{context}", sources
         return "[WEB SEARCH] No relevant results found.", []
+
+    elif tool_name == "search_x_twitter":
+        query = args.get("query", question)
+        return _execute_x_search(query)
+
+    elif tool_name == "get_market_sentiment":
+        query = args.get("query", question)
+        return _execute_market_sentiment(query)
 
     return f"[ERROR] Unknown tool: {tool_name}", []
 
@@ -502,7 +645,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
         stream=True,
     )
     if x_search and provider == "xai":
-        kwargs["extra_body"] = {"search_parameters": X_SEARCH_PARAMS}
+        kwargs["extra_body"] = {"search_parameters": X_NADO_SEARCH_PARAMS}
 
     stream = client.chat.completions.create(**kwargs)
     for chunk in stream:
@@ -546,7 +689,7 @@ async def stream_nado_answer(question: str):
             current_date=current_date,
             current_year=str(now.year),
         )
-        used_sources = ["https://x.com/nadoHQ"]
+        used_sources = ["https://x.com/nadoHQ", "https://x.com/inkonchain"]
     else:
         import asyncio
         loop = asyncio.get_event_loop()
@@ -612,11 +755,11 @@ async def stream_nado_answer(question: str):
 
             if "Sources:" not in full_answer:
                 if use_x_prompt:
-                    sources_line = "\n\nSources: https://x.com/nadoHQ"
+                    sources_line = "\n\nSources: https://x.com/nadoHQ, https://x.com/inkonchain"
                 elif used_sources:
                     sources_line = "\n\nSources: " + ", ".join(used_sources[:4])
                 else:
-                    sources_line = "\n\nSources: https://docs.nado.xyz/, https://x.com/nadoHQ"
+                    sources_line = "\n\nSources: https://docs.nado.xyz/, https://x.com/nadoHQ, https://x.com/inkonchain"
                 yield sources_line
                 full_answer += sources_line
 
@@ -664,7 +807,7 @@ async def answer_nado_question(question: str) -> str:
             current_date=current_date,
             current_year=str(now.year),
         )
-        used_sources = ["https://x.com/nadoHQ"]
+        used_sources = ["https://x.com/nadoHQ", "https://x.com/inkonchain"]
     else:
         import asyncio
         loop = asyncio.get_event_loop()
@@ -716,7 +859,7 @@ async def answer_nado_question(question: str) -> str:
                         temperature=0.2,
                     )
                     if use_x_prompt and p == "xai":
-                        kwargs["extra_body"] = {"search_parameters": X_SEARCH_PARAMS}
+                        kwargs["extra_body"] = {"search_parameters": X_NADO_SEARCH_PARAMS}
                     resp = client.chat.completions.create(**kwargs)
                     content = resp.choices[0].message.content
                     if not content or not content.strip():
@@ -739,11 +882,11 @@ async def answer_nado_question(question: str) -> str:
         logger.info("Support answer generated via provider=%s in %.1fs", used_provider, time.time() - started_at)
         if "Sources:" not in answer:
             if use_x_prompt:
-                sources_line = "Sources: https://x.com/nadoHQ"
+                sources_line = "Sources: https://x.com/nadoHQ, https://x.com/inkonchain"
             elif used_sources:
                 sources_line = "Sources: " + ", ".join(used_sources[:4])
             else:
-                sources_line = "Sources: https://docs.nado.xyz/, https://x.com/nadoHQ"
+                sources_line = "Sources: https://docs.nado.xyz/, https://x.com/nadoHQ, https://x.com/inkonchain"
             answer = f"{answer}\n\n{sources_line}"
         _answer_cache[qkey] = {"ts": time.time(), "answer": answer}
         return answer
