@@ -30,6 +30,22 @@ def _prepare_db_url(url: str) -> str:
     return f"{url[:scheme_end]}{username}:{encoded_pw}@{hostpart}"
 
 
+def _resolve_host_ipv4(url: str) -> str:
+    import re
+    import socket
+    m = re.search(r'@([^/:]+)', url)
+    if not m:
+        return url
+    hostname = m.group(1)
+    try:
+        ipv4 = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
+        logger.info("Resolved %s -> %s (IPv4)", hostname, ipv4)
+        return url.replace(f"@{hostname}", f"@{ipv4}") + (f"&options=-csearch_path%3Dpublic" if "?" in url else f"?options=-csearch_path%3Dpublic")
+    except Exception as e:
+        logger.warning("IPv4 resolution failed for %s: %s — using hostname as-is", hostname, e)
+        return url
+
+
 def get_pool():
     global _pool
     if _pool is None:
@@ -38,6 +54,8 @@ def get_pool():
             raise RuntimeError("Neither SUPABASE_DATABASE_URL nor DATABASE_URL environment variable is set.")
         db_label = "Supabase" if os.environ.get("SUPABASE_DATABASE_URL") else "default"
         url = _prepare_db_url(url)
+        if db_label == "Supabase":
+            url = _resolve_host_ipv4(url)
         _pool = psycopg2.pool.ThreadedConnectionPool(1, 5, url)
         logger.info("PostgreSQL connection pool initialized (%s)", db_label)
     return _pool
