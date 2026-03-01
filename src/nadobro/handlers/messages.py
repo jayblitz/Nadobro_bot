@@ -1,6 +1,5 @@
 import logging
 import re
-import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
@@ -1337,5 +1336,5 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
 
 
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
-    from src.nadobro.handlers import get_cached_user_settings
-    return get_cached_user_settings(telegram_id, context)
+    from src.nadobro.handlers import shared_get_user_settings
+    return shared_get_user_settings(telegram_id, context)

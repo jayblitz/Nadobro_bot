@@ -1034,8 +1034,8 @@ async def _handle_strategy(query, data, context, telegram_id):
 
 
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
-    from src.nadobro.handlers import get_cached_user_settings
-    return get_cached_user_settings(telegram_id, context)
+    from src.nadobro.handlers import shared_get_user_settings
+    return shared_get_user_settings(telegram_id, context)
 
 
 def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
@@ -1274,6 +1274,7 @@ async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int,
                 if "Message is not modified" not in str(e):
                     break
             except Exception:
+                logger.warning("Live price loop error for %s, stopping", product, exc_info=True)
                 break
             await asyncio.sleep(2)
     except asyncio.CancelledError:

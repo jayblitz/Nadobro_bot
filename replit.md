@@ -122,7 +122,6 @@ All configuration lives in `src/nadobro/config.py` and is read from environment 
 |---|---|---|
 | **xAI (Grok)** | AI-powered "Ask Nado" Q&A feature (primary) | `XAI_API_KEY` |
 | **OpenAI** | Fallback AI for Q&A | `OPENAI_API_KEY` |
-| **SOCKS5/HTTPS Proxy** | Route trade execution through non-restricted IP (bypasses geo-blocks on Nado gateway) | `NADO_PROXY_URL` |
 
 ### Key Python Packages
 - `python-telegram-bot` — Telegram bot framework

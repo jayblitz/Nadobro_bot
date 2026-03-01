@@ -76,7 +76,17 @@ def get_bot_state_raw(key: str) -> Optional[str]:
     return row.get("value")
 
 
+_TRADE_INSERT_ALLOWED_COLS = frozenset({
+    "user_id", "product_id", "product_name", "order_type", "side",
+    "size", "price", "leverage", "status", "order_digest", "pnl",
+    "fees", "network", "error_message", "created_at", "filled_at",
+})
+
+
 def insert_trade(data: dict) -> Optional[int]:
+    disallowed = set(data.keys()) - _TRADE_INSERT_ALLOWED_COLS
+    if disallowed:
+        raise ValueError(f"insert_trade: disallowed column(s): {disallowed}")
     cols = list(data.keys())
     vals = [data[c] for c in cols]
     query = pgsql.SQL("INSERT INTO trades ({}) VALUES ({}) RETURNING id").format(
@@ -118,7 +128,16 @@ def get_trades_by_user(telegram_id: int, limit: int = 50) -> list:
     )
 
 
+_ALERT_INSERT_ALLOWED_COLS = frozenset({
+    "user_id", "product_id", "product_name", "condition",
+    "target_value", "is_active", "network", "created_at",
+})
+
+
 def insert_alert(data: dict) -> Optional[int]:
+    disallowed = set(data.keys()) - _ALERT_INSERT_ALLOWED_COLS
+    if disallowed:
+        raise ValueError(f"insert_alert: disallowed column(s): {disallowed}")
     cols = list(data.keys())
     vals = [data[c] for c in cols]
     query = pgsql.SQL("INSERT INTO alerts ({}) VALUES ({}) RETURNING id").format(
@@ -186,13 +205,8 @@ def get_trades_count_failed() -> int:
 
 
 def get_total_volume_filled() -> float:
-    rows = query_all("SELECT size, price FROM trades WHERE status = 'filled'")
-    total = 0.0
-    for row in rows:
-        size = float(row.get("size") or 0)
-        price = float(row.get("price") or 0)
-        total += size * price
-    return total
+    row = query_one("SELECT COALESCE(SUM(size * price), 0) AS total FROM trades WHERE status = 'filled'")
+    return float(row["total"]) if row else 0.0
 
 
 def get_recent_trades(limit: int = 20) -> list:

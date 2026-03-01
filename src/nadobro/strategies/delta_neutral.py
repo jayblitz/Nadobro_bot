@@ -10,7 +10,6 @@ spot hedging. This strategy focuses on funding rate farming with protective
 TP/SL managed by bot_runtime.
 """
 import logging
-import time
 
 logger = logging.getLogger(__name__)
 

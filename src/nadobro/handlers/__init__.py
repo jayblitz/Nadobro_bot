@@ -7,3 +7,7 @@ def get_cached_user_settings(telegram_id: int, context: CallbackContext) -> dict
     context.user_data[f"settings:{network}"] = settings
     context.user_data["settings"] = settings
     return settings
+
+
+def shared_get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
+    return get_cached_user_settings(telegram_id, context)

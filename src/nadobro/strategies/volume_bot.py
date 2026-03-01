@@ -4,7 +4,6 @@ volume is reached.  Shows fee/PnL preview before start.  Auto-stops on
 completion.  Uses linked signer via trade_service.execute_market_order.
 """
 import logging
-import time
 
 from src.nadobro.config import EST_FEE_RATE, get_product_id
 from src.nadobro.services.trade_service import execute_market_order

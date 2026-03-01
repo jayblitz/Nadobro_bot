@@ -5,21 +5,14 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 XAI_API_KEY = os.environ.get("XAI_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-SESSION_SECRET = os.environ.get("SESSION_SECRET", "default-session-secret")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
 ADMIN_USER_IDS = [int(uid.strip()) for uid in os.environ.get("ADMIN_USER_IDS", "").split(",") if uid.strip()]
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", SESSION_SECRET)
 
-NADO_TESTNET_WS = "wss://gateway.test.nado.xyz/v1/ws"
 NADO_TESTNET_REST = "https://gateway.test.nado.xyz/v1"
-NADO_MAINNET_WS = "wss://gateway.prod.nado.xyz/v1/ws"
 NADO_MAINNET_REST = "https://gateway.prod.nado.xyz/v1"
 
 NADO_TESTNET_ARCHIVE = "https://archive.test.nado.xyz/v1"
 NADO_MAINNET_ARCHIVE = "https://archive.prod.nado.xyz/v1"
-
-NADO_TESTNET_TRIGGER = "https://trigger.test.nado.xyz/v1"
-NADO_MAINNET_TRIGGER = "https://trigger.prod.nado.xyz/v1"
 
 PRODUCTS = {
     "USDT0": {"id": 0, "type": "spot"},
@@ -48,8 +41,6 @@ def get_product_name(product_id: int) -> str:
         if info["id"] == product_id:
             return info.get("symbol", name)
     return f"ID:{product_id}"
-
-NADO_PROXY_URL = os.environ.get("NADO_PROXY_URL")
 
 RATE_LIMIT_SECONDS = 60
 MAX_LEVERAGE = 40
