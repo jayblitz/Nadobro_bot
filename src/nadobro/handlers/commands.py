@@ -51,8 +51,8 @@ By tapping **"Let's Get It"** you're saying:
 ✅ I accept the Terms of Use & Privacy Policy
 
 ⚡ Bro-Note (read this):
-We'll generate a secure Linked Signer address for your default subaccount (we NEVER touch your private keys).
-You just paste the PUBLIC address into Nado → Settings → 1-Click Trading (1 tx, 5 seconds).
+We'll generate a secure 1CT key for your default subaccount (we NEVER touch your main wallet keys).
+You paste the key into Nado → Settings → 1-Click Trading → Advanced 1CT (1 tx, 1 USDT0).
 Main wallet stays untouched. Revoke anytime. Funds 100% yours.
 
 Ready to start printing money?"""
@@ -145,12 +145,12 @@ async def cmd_stop_all(update: Update, context: CallbackContext):
 
 
 async def cmd_revoke(update: Update, context: CallbackContext):
-    """Show Nado revoke steps for linked signer."""
+    """Show Nado revoke steps for 1CT key."""
     msg = (
-        "🔄 *Revoke Linked Signer (Nado)*\n\n"
+        "🔄 *Revoke 1CT Key (Nado)*\n\n"
         "1. Open Nado → Settings\n"
-        "2. 1-Click Trading\n"
-        "3. Remove the linked signer address\n\n"
+        "2. 1-Click Trading → Advanced 1CT\n"
+        "3. Disable the toggle and save\n\n"
         "Your main wallet and funds stay safe. You can link again anytime via Wallet."
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=persistent_menu_kb())

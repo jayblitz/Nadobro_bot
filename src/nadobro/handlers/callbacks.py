@@ -167,8 +167,8 @@ By tapping **"Let's Get It"** you're saying:
 ✅ I accept the Terms of Use & Privacy Policy
 
 ⚡ Bro-Note (read this):
-We'll generate a secure Linked Signer address for your default subaccount (we NEVER touch your private keys).
-You just paste the PUBLIC address into Nado → Settings → 1-Click Trading (1 tx, 5 seconds).
+We'll generate a secure 1CT key for your default subaccount (we NEVER touch your main wallet keys).
+You paste the key into Nado → Settings → 1-Click Trading → Advanced 1CT (1 tx, 1 USDT0).
 Main wallet stays untouched. Revoke anytime. Funds 100% yours.
 
 Ready to start printing money?"""
@@ -625,12 +625,23 @@ async def _handle_wallet(query, data, telegram_id, context):
     if action == "view":
         info = get_user_wallet_info(telegram_id)
         if not info or not info.get("linked_signer_address"):
-            context.user_data["wallet_flow"] = "awaiting_done"
+            from eth_account import Account
+            account = Account.create()
+            pk_hex = account.key.hex()
+            if not pk_hex.startswith("0x"):
+                pk_hex = "0x" + pk_hex
+            context.user_data["wallet_flow"] = "awaiting_main_address"
+            context.user_data["wallet_linked_signer_pk"] = pk_hex
+            context.user_data["wallet_linked_signer_address"] = account.address
             msg = (
-                "👛 *Wallet Connect — 60 seconds flat*\n\n"
-                "1. Go to https://app.nado.xyz → connect wallet → deposit ≥ $5 USDT0 "
-                "(creates default subaccount automatically).\n\n"
-                "Reply **DONE** when ready."
+                "👛 *Wallet Connect*\n\n"
+                "*Step 1:* Go to https://app.nado.xyz → connect wallet → deposit ≥ $5 USDT0\n\n"
+                "*Step 2:* Go to Settings → 1-Click Trading → Advanced 1CT\n\n"
+                "*Step 3:* Paste this key into the *1CT Private Key* field:\n\n"
+                f"`{pk_hex}`\n\n"
+                "*Step 4:* Enable the toggle, click *Save*, and confirm the transaction in your wallet (1 USDT0 fee)\n\n"
+                "Once saved, reply here with your *main wallet address* (0x...).\n\n"
+                "_This key is for trading only — it cannot withdraw your funds._"
             )
             await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
             return
@@ -657,10 +668,10 @@ async def _handle_wallet(query, data, telegram_id, context):
         await query.edit_message_text(msg, reply_markup=wallet_kb())
     elif action == "revoke_steps":
         revoke_msg = (
-            "🔄 *Revoke Linked Signer (Nado)*\n\n"
+            "🔄 *Revoke 1CT Key (Nado)*\n\n"
             "1. Open Nado → Settings\n"
-            "2. 1-Click Trading\n"
-            "3. Remove the linked signer address\n\n"
+            "2. 1-Click Trading → Advanced 1CT\n"
+            "3. Disable the toggle and save\n\n"
             "Your main wallet and funds stay safe. You can link again anytime via Wallet."
         )
         await query.edit_message_text(revoke_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb())

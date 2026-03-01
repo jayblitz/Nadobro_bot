@@ -65,14 +65,17 @@ src/nadobro/
 - The `bot_state` table acts as a flexible key-value store for settings, onboarding state, strategy state, etc.
 - A short in-memory LRU-style cache (`_user_cache`, `_price_cache`) with TTLs reduces DB round-trips for hot data.
 
-### Wallet — Linked Signer Model
-- **No raw private key import.** Users link wallets via a Linked Signer flow:
-  1. Bot generates a new Ethereum account (the "signer")
-  2. User authorizes this signer address on Nado (Settings → 1-Click Trading)
-  3. Signer private key is encrypted with user's passphrase (PBKDF2 600k iterations + Fernet)
-  4. Encrypted key + salt stored in `users` table; main wallet address stored separately
-- The `ENCRYPTION_KEY` env var provides a Fernet key for general encryption validation at startup.
-- Users can revoke/unlink at any time via the Wallet button or `/revoke` command.
+### Wallet — 1-Click Trading (1CT) Model
+- **No raw main-wallet key import.** Users link wallets via Nado's 1CT (1-Click Trading) flow:
+  1. Bot generates a new Ethereum keypair (the "1CT signer")
+  2. Bot shows the 1CT **private key** to the user
+  3. User pastes the key into Nado's web UI (Settings → 1-Click Trading → Advanced 1CT → "1CT Private Key" field), enables the toggle, and saves (1 USDT0 fee, signed by their connected browser wallet)
+  4. User sends their main wallet address back to the bot
+  5. User sets a strong passphrase; bot encrypts the 1CT key with PBKDF2 600k iterations + Fernet
+  6. Encrypted key + salt stored in `users` table; main wallet address stored separately
+- The 1CT key can only sign trades — it cannot withdraw funds from the user's account
+- The `ENCRYPTION_KEY` env var provides a Fernet key for general encryption validation at startup
+- Users can revoke/unlink at any time via the Wallet button or `/revoke` command
 
 ### Natural Language Trade Parsing
 - `handlers/intent_parser.py` uses regex to extract product, direction, size, leverage, and order type from free-text messages.

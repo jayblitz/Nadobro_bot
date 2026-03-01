@@ -938,29 +938,10 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
     if not flow:
         return False
 
-    if flow == "awaiting_done":
-        if text.strip().upper() != "DONE":
-            return False
-        from eth_account import Account
-        account = Account.create()
-        pk_hex = account.key.hex()
-        address = account.address
-        context.user_data["wallet_flow"] = "awaiting_main_address"
-        context.user_data["wallet_linked_signer_pk"] = pk_hex
-        context.user_data["wallet_linked_signer_address"] = address
-        await update.message.reply_text(
-            f"✅ *Linked Signer ready!*\n\n"
-            f"Paste this address in Nado → Settings → 1-Click Trading → Add New:\n\n"
-            f"`{address}`\n\n"
-            f"After you sign the tx, reply with your *MAIN* wallet address (0x...).",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return True
-
     if flow == "awaiting_main_address":
         if not _is_valid_main_address(text):
             await update.message.reply_text(
-                "❌ Send a valid main wallet address (0x followed by 40 hex chars).",
+                "❌ That doesn't look right. Send your main wallet address — starts with 0x followed by 40 hex characters.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return True
@@ -970,8 +951,9 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
         context.user_data["wallet_main_address"] = main_addr
         context.user_data["wallet_flow"] = "awaiting_passphrase"
         await update.message.reply_text(
-            "🔐 Choose a *strong passphrase* to encrypt your linked signer (min 12 chars, mix of upper/lower, number, symbol). "
-            "You'll need it to unlock trading.",
+            "🔐 Almost done! Choose a *strong passphrase* to encrypt your 1CT key.\n\n"
+            "Requirements: min 12 characters, mix of uppercase, lowercase, number, and symbol.\n\n"
+            "You'll need this passphrase each time you start a trading session.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return True
@@ -986,16 +968,21 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
         linked_addr = context.user_data.get("wallet_linked_signer_address")
         if not pk_hex or not main_addr or not linked_addr:
             context.user_data.pop("wallet_flow", None)
-            await update.message.reply_text("⚠️ Session expired. Start again from Wallet.")
+            await update.message.reply_text("⚠️ Session expired. Tap the Wallet button to start again.")
             return True
-        ciphertext, salt = encrypt_with_passphrase(pk_hex.encode("utf-8"), text.strip())
+        passphrase = text.strip()
+        pk_bytes = pk_hex.encode("utf-8")
+        ciphertext, salt = encrypt_with_passphrase(pk_bytes, passphrase)
         save_linked_signer(telegram_id, main_addr, linked_addr, ciphertext, salt)
-        context.user_data.pop("wallet_flow", None)
-        context.user_data.pop("wallet_linked_signer_pk", None)
-        context.user_data.pop("wallet_main_address", None)
-        context.user_data.pop("wallet_linked_signer_address", None)
+        for key in ("wallet_flow", "wallet_linked_signer_pk", "wallet_main_address", "wallet_linked_signer_address"):
+            context.user_data.pop(key, None)
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         await update.message.reply_text(
-            "✅ Wallet linked! Your default subaccount is now ready. Revoke anytime with /revoke",
+            "✅ Wallet linked! Your 1CT key is encrypted and stored.\n\n"
+            "You can now trade directly from this bot. Revoke anytime with /revoke.",
             reply_markup=persistent_menu_kb(),
         )
         return True
