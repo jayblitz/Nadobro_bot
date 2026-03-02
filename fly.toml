@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for nadobro-bot on 2026-03-01T14:56:26Z
+# fly.toml app configuration file generated for nadobro-bot on 2026-03-02T07:55:31Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -20,4 +20,4 @@ primary_region = 'ams'
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-  processes = ['app']
+  memory_mb = 2048
