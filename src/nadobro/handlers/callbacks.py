@@ -34,7 +34,7 @@ from src.nadobro.services.trade_service import (
 )
 from src.nadobro.services.alert_service import create_alert, get_user_alerts, delete_alert
 from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.services.bot_runtime import start_user_bot, stop_user_bot, get_user_bot_status
+from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.onboarding_service import (
     get_resume_step,
@@ -999,21 +999,14 @@ async def _handle_strategy(query, data, context, telegram_id):
             )
             return
         settings = _get_user_settings(telegram_id, context)
-        ok, msg = start_user_bot(
-            telegram_id,
-            strategy=strategy_id,
-            product=product,
-            leverage=settings.get("default_leverage", 3),
-            slippage_pct=settings.get("slippage", 1),
-        )
-        if ok:
-            reply = f"🚀 {escape_md(msg)}\n\nUse /status to monitor live loop health\\."
-        else:
-            reply = f"❌ {escape_md(msg)}"
-        await query.edit_message_text(
-            reply,
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+        from src.nadobro.handlers.messages import _prompt_passphrase
+        await _prompt_passphrase(query, context, {
+            "type": "start_strategy",
+            "strategy": strategy_id,
+            "product": product,
+            "leverage": settings.get("default_leverage", 3),
+            "slippage_pct": settings.get("slippage", 1),
+        })
     elif action == "status":
         st = get_user_bot_status(telegram_id)
         readiness = evaluate_readiness(telegram_id)

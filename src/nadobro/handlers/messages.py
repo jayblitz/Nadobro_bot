@@ -12,6 +12,7 @@ from src.nadobro.services.trade_service import close_position, close_all_positio
 from src.nadobro.services.alert_service import create_alert
 from src.nadobro.services.knowledge_service import answer_nado_question, stream_nado_answer
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
+from src.nadobro.services.bot_runtime import start_user_bot
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
 from src.nadobro.services.crypto import encrypt_with_passphrase
 from src.nadobro.services.admin_service import is_trading_paused
@@ -206,6 +207,28 @@ async def _handle_passphrase_input(update, context, telegram_id, text):
         result_msg = fmt_trade_result(result)
         await update.message.reply_text(
             f"{result_msg}\n\nUse the menu for your next action\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+    elif action_type == "start_strategy":
+        strategy = action_data.get("strategy")
+        product = action_data.get("product")
+        leverage = float(action_data.get("leverage", 3))
+        slippage_pct = float(action_data.get("slippage_pct", 1))
+        ok, msg = start_user_bot(
+            telegram_id,
+            strategy=strategy,
+            product=product,
+            leverage=leverage,
+            slippage_pct=slippage_pct,
+            passphrase=passphrase,
+        )
+        if ok:
+            reply = f"🚀 {escape_md(msg)}\n\nUse /status to monitor live loop health\\."
+        else:
+            reply = f"❌ {escape_md(msg)}"
+        await update.message.reply_text(
+            reply,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
         )

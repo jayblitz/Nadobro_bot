@@ -7,7 +7,7 @@ import logging
 
 from src.nadobro.config import EST_FEE_RATE, get_product_id
 from src.nadobro.services.trade_service import execute_market_order
-from src.nadobro.services.user_service import get_user_nado_client
+from src.nadobro.services.user_service import get_user_readonly_client
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def get_fee_pnl_preview(telegram_id: int, product: str, target_volume_usd: float
     }
 
 
-def run_cycle(telegram_id: int, network: str, state: dict) -> dict:
+def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = None) -> dict:
     """
     One cycle: place a single small market flip (alternating long/short)
     toward the cumulative target volume.
@@ -79,7 +79,7 @@ def run_cycle(telegram_id: int, network: str, state: dict) -> dict:
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'"}
 
-    client = get_user_nado_client(telegram_id, passphrase=None)
+    client = get_user_readonly_client(telegram_id)
     if not client:
         return {"success": False, "error": "Wallet client unavailable"}
 
@@ -100,6 +100,7 @@ def run_cycle(telegram_id: int, network: str, state: dict) -> dict:
         leverage=leverage,
         slippage_pct=slippage_pct,
         enforce_rate_limit=False,
+        passphrase=passphrase,
     )
 
     if result.get("success"):

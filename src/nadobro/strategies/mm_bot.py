@@ -57,6 +57,7 @@ def run_cycle(
     client=None,
     mid: float = 0.0,
     open_orders: list = None,
+    passphrase: str = None,
 ) -> dict:
     product = state.get("product", "BTC")
     strategy = state.get("strategy", "mm")
@@ -134,6 +135,7 @@ def run_cycle(
             is_long=order_spec["is_long"],
             leverage=leverage,
             enforce_rate_limit=False,
+            passphrase=passphrase,
         )
 
         if result.get("success"):
@@ -145,8 +147,10 @@ def run_cycle(
         else:
             errors.append(f"L{order_spec['level']} {'BUY' if order_spec['is_long'] else 'SELL'}: {result.get('error', 'unknown')}")
 
+    success = not (orders_placed == 0 and errors and len(open_orders) == 0)
     return {
-        "success": True,
+        "success": success,
+        "error": errors[0] if not success else None,
         "orders_placed": orders_placed,
         "orders_cancelled": orders_cancelled,
         "levels": levels,

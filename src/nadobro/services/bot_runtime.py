@@ -20,6 +20,7 @@ MAX_OPEN_ORDERS_PER_PRODUCT = 6
 
 _bot_app = None
 _tasks: dict[str, asyncio.Task] = {}
+_session_passphrases: dict[str, str] = {}
 
 
 def set_bot_app(app):
@@ -33,6 +34,12 @@ def _task_key(telegram_id: int, network: str) -> str:
 
 def _state_key(telegram_id: int, network: str) -> str:
     return f"{STATE_PREFIX}{telegram_id}:{network}"
+
+
+def set_runtime_passphrase(telegram_id: int, network: str, passphrase: str):
+    if not passphrase:
+        return
+    _session_passphrases[_task_key(telegram_id, network)] = passphrase
 
 
 def _default_state() -> dict:
@@ -101,6 +108,7 @@ def start_user_bot(
     product: str,
     leverage: float = 3.0,
     slippage_pct: float = 1.0,
+    passphrase: str | None = None,
 ) -> tuple[bool, str]:
     strategy = (strategy or "").lower()
     if strategy not in SUPPORTED_STRATEGIES:
@@ -131,6 +139,8 @@ def start_user_bot(
         }
     )
     _save_state(telegram_id, network, state)
+    if passphrase:
+        set_runtime_passphrase(telegram_id, network, passphrase)
     _ensure_task(telegram_id, network)
     return (
         True,
@@ -149,12 +159,14 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
     state["running"] = False
     _save_state(telegram_id, network, state)
 
-    task = _tasks.pop(_task_key(telegram_id, network), None)
+    tk = _task_key(telegram_id, network)
+    task = _tasks.pop(tk, None)
     if task:
         task.cancel()
 
     if cancel_orders:
-        close_all_positions(telegram_id)
+        close_all_positions(telegram_id, passphrase=_session_passphrases.get(tk))
+    _session_passphrases.pop(tk, None)
 
     return True, "Strategy bot stopped. Open orders cancellation requested."
 
@@ -180,6 +192,7 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             task = _tasks.pop(_task_key(telegram_id, network), None)
             if task:
                 task.cancel()
+            _session_passphrases.pop(_task_key(telegram_id, network), None)
             stopped += 1
         except Exception:
             continue
@@ -214,6 +227,7 @@ def stop_runtime():
     for task_id, task in list(_tasks.items()):
         task.cancel()
         _tasks.pop(task_id, None)
+    _session_passphrases.clear()
 
 
 def restore_running_bots(enabled: bool = False):
@@ -267,22 +281,23 @@ async def _bot_loop(telegram_id: int, network: str):
 
 
 def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dict,
-                       client, mid: float, product_id: int, product: str, open_orders: list) -> dict:
+                       client, mid: float, product_id: int, product: str, open_orders: list,
+                       passphrase: str) -> dict:
     from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
 
     if strategy in ("mm", "grid"):
         return mm_bot.run_cycle(
             telegram_id, network, state,
-            client=client, mid=mid, open_orders=open_orders,
+            client=client, mid=mid, open_orders=open_orders, passphrase=passphrase,
         )
     elif strategy == "dn":
         return delta_neutral.run_cycle(
             telegram_id, network, state,
             client=client, mid=mid, product_id=product_id,
-            product=product, open_orders=open_orders,
+            product=product, open_orders=open_orders, passphrase=passphrase,
         )
     elif strategy == "vol":
-        return volume_bot.run_cycle(telegram_id, network, state)
+        return volume_bot.run_cycle(telegram_id, network, state, passphrase=passphrase)
     else:
         return {"success": False, "error": f"Unknown strategy '{strategy}'"}
 
@@ -302,6 +317,19 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
         await _notify(
             telegram_id,
             f"Stopped {state.get('strategy', '').upper()} loop on {network}: active mode changed to {user.network_mode.value}.",
+        )
+        return
+
+    tk = _task_key(telegram_id, network)
+    session_passphrase = _session_passphrases.get(tk)
+    if not session_passphrase:
+        state["running"] = False
+        state["last_error"] = "Strategy session expired. Restart strategy and enter passphrase again."
+        _save_state(telegram_id, network, state)
+        await _notify(
+            telegram_id,
+            f"⚠️ {str(state.get('strategy', '')).upper()} stopped on {network}: strategy session expired. "
+            f"Restart strategy and enter passphrase again.",
         )
         return
 
@@ -338,7 +366,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
         state["running"] = False
         state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
         _save_state(telegram_id, network, state)
-        close_all_positions(telegram_id)
+        close_all_positions(telegram_id, passphrase=session_passphrase)
         await _notify(
             telegram_id,
             f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}) - SL hit ({move_pct:.2f}%).",
@@ -348,7 +376,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
         state["running"] = False
         state["last_error"] = None
         _save_state(telegram_id, network, state)
-        close_all_positions(telegram_id)
+        close_all_positions(telegram_id, passphrase=session_passphrase)
         await _notify(
             telegram_id,
             f"✅ {strategy.upper()} target reached on {product}-PERP ({network}) - TP hit ({move_pct:.2f}%).",
@@ -360,7 +388,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
     result = _dispatch_strategy(
         strategy, telegram_id, network, state,
         client=client, mid=mid, product_id=product_id,
-        product=product, open_orders=open_orders,
+        product=product, open_orders=open_orders, passphrase=session_passphrase,
     )
 
     if not state.get("running", True):
