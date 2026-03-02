@@ -1173,7 +1173,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
 
     strategy = pending.get("strategy")
     field = pending.get("field")
-    if strategy not in ("mm", "grid", "dn") or field not in ("notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct"):
+    if strategy not in ("mm", "grid", "dn", "vol") or field not in ("notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct"):
         context.user_data.pop("pending_strategy_input", None)
         return False
 
