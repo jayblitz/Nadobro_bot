@@ -109,7 +109,8 @@ async def run_bot():
         logger.warning(f"Alert price-check client failed to initialize: {e}")
 
     start_scheduler()
-    auto_restore = os.environ.get("NADO_AUTO_RESTORE_STRATEGIES", "false").strip().lower() in ("1", "true", "yes", "on")
+    # In production we want strategy loops to resume after restarts/deploys by default.
+    auto_restore = os.environ.get("NADO_AUTO_RESTORE_STRATEGIES", "true").strip().lower() in ("1", "true", "yes", "on")
     restore_running_bots(enabled=auto_restore)
 
     logger.info("Starting bot with polling...")
