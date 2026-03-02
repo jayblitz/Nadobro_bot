@@ -604,6 +604,7 @@ def strategy_hub_kb():
         ],
         [
             InlineKeyboardButton("⚖️ Delta Neutral", callback_data="strategy:preview:dn"),
+            InlineKeyboardButton("🔁 Volume Bot", callback_data="strategy:preview:vol"),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),

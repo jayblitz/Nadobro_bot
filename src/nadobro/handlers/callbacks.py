@@ -891,7 +891,7 @@ async def _handle_strategy(query, data, context, telegram_id):
     strategy_id = parts[2] if len(parts) > 2 else ""
 
     if action == "preview":
-        if strategy_id not in ("mm", "grid", "dn"):
+        if strategy_id not in ("mm", "grid", "dn", "vol"):
             return
         selected_product = context.user_data.get(f"strategy_pair:{strategy_id}", "BTC")
         await query.edit_message_text(
@@ -902,7 +902,7 @@ async def _handle_strategy(query, data, context, telegram_id):
     elif action == "pair" and len(parts) >= 4:
         strategy_id = parts[2]
         selected_product = parts[3].upper()
-        if strategy_id not in ("mm", "grid", "dn"):
+        if strategy_id not in ("mm", "grid", "dn", "vol"):
             return
         if selected_product not in ("BTC", "ETH", "SOL"):
             return
@@ -913,7 +913,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             reply_markup=strategy_action_kb(strategy_id, selected_product),
         )
     elif action == "config":
-        if strategy_id not in ("mm", "grid", "dn"):
+        if strategy_id not in ("mm", "grid", "dn", "vol"):
             return
         network, settings = get_user_settings(telegram_id)
         conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -926,7 +926,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         strategy_id = parts[2]
         field = parts[3]
         raw_value = parts[4]
-        if strategy_id not in ("mm", "grid", "dn"):
+        if strategy_id not in ("mm", "grid", "dn", "vol"):
             return
         value = float(raw_value)
 
@@ -948,7 +948,7 @@ async def _handle_strategy(query, data, context, telegram_id):
     elif action == "input" and len(parts) >= 4:
         strategy_id = parts[2]
         field = parts[3]
-        if strategy_id not in ("mm", "grid", "dn"):
+        if strategy_id not in ("mm", "grid", "dn", "vol"):
             return
         if field not in ("notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct"):
             return
@@ -1100,6 +1100,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         "mm": "Market Maker \\(Mid Mode\\)",
         "grid": "Grid Bot",
         "dn": "Delta Neutral",
+        "vol": "Volume Bot",
     }
     network, settings = get_user_settings(telegram_id)
     conf = settings.get("strategies", {}).get(strategy_id, {})
