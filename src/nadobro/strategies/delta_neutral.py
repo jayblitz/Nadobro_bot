@@ -42,6 +42,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     mid = kwargs.get("mid", 0.0)
     product_id = kwargs.get("product_id")
     product = kwargs.get("product", state.get("product", "BTC"))
+    passphrase = kwargs.get("passphrase")
 
     if not client or mid <= 0 or product_id is None:
         return {"success": False, "error": "Missing client, price, or product_id"}
@@ -101,6 +102,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 leverage=leverage,
                 slippage_pct=float(state.get("slippage_pct") or 1.0),
                 enforce_rate_limit=False,
+                passphrase=passphrase,
             )
             state["dn_position_side"] = None
             state["dn_entry_price"] = 0.0
@@ -135,6 +137,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     leverage=leverage,
                     slippage_pct=float(state.get("slippage_pct") or 1.0),
                     enforce_rate_limit=False,
+                    passphrase=passphrase,
                 )
                 result["action"] = "adjust_increase"
                 result["adjust_result"] = adj_result.get("success", False)
@@ -149,6 +152,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     leverage=leverage,
                     slippage_pct=float(state.get("slippage_pct") or 1.0),
                     enforce_rate_limit=False,
+                    passphrase=passphrase,
                 )
                 result["action"] = "adjust_decrease"
                 result["adjust_result"] = adj_result.get("success", False)
@@ -167,6 +171,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             leverage=leverage,
             slippage_pct=float(state.get("slippage_pct") or 1.0),
             enforce_rate_limit=False,
+            passphrase=passphrase,
         )
         result["action"] = "close_wrong_side"
         return result
@@ -183,6 +188,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         leverage=leverage,
         slippage_pct=float(state.get("slippage_pct") or 1.0),
         enforce_rate_limit=False,
+        passphrase=passphrase,
     )
 
     if order_result.get("success"):
