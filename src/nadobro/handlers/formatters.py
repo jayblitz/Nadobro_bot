@@ -454,7 +454,7 @@ def fmt_help():
         "Place market or limit orders from guided flow or natural language commands\\.\n"
         "\n"
         "🧠 *Strategy Lab*\n"
-        "Configure and run automated strategies: Mirror MM, Grid Reactor, Mirror DN, and Volume Engine\\.\n"
+        "Configure and run automated strategies: Mirror MM, Grid Reactor, Mirror DN, Volume Engine, and DCA Engine\\.\n"
         "Each dashboard includes a \"How it works\" explainer and pre\\-trade analytics\\.\n"
         "\n"
         "📁 *Portfolio Deck*\n"

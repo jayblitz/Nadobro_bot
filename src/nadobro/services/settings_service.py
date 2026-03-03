@@ -13,10 +13,24 @@ def _settings_key(telegram_id: int, network: str) -> str:
 
 def _default_strategy_settings() -> dict:
     return {
-        "mm": {"notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "tp_pct": 0.6, "sl_pct": 0.5},
-        "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "tp_pct": 1.2, "sl_pct": 0.8},
-        "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6},
+        "mm": {
+            "notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "tp_pct": 0.6, "sl_pct": 0.5,
+            "levels": 2, "threshold_bp": 12.0, "close_offset_bp": 24.0,
+        },
+        "grid": {
+            "notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "tp_pct": 1.2, "sl_pct": 0.8,
+            "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0,
+        },
+        "dn": {
+            "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6,
+            "auto_close_on_maintenance": 1.0,
+        },
         "vol": {"notional_usd": 100.0, "spread_bp": 6.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
+        "dca": {
+            "notional_usd": 100.0, "interval_seconds": 60, "tp_pct": 1.0, "sl_pct": 1.0,
+            "base_order_usd": 25.0, "dca_order_usd": 25.0, "max_dca_orders": 3.0, "deviation_pct": 1.0,
+            "size_multiplier": 1.5, "is_long_bias": 1.0,
+        },
     }
 
 

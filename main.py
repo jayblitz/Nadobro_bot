@@ -3,6 +3,7 @@ import sys
 import logging
 import asyncio
 import signal
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 logging.basicConfig(
@@ -34,11 +35,16 @@ except RuntimeError as e:
 
 
 def check_config():
+    transport_mode = os.environ.get("TELEGRAM_TRANSPORT", "polling").strip().lower()
     missing = []
     if not TELEGRAM_TOKEN:
         missing.append("TELEGRAM_TOKEN")
     if not DATABASE_URL and not os.environ.get("SUPABASE_DATABASE_URL"):
         missing.append("DATABASE_URL or SUPABASE_DATABASE_URL")
+    if transport_mode not in ("polling", "webhook"):
+        missing.append("TELEGRAM_TRANSPORT must be polling or webhook")
+    if transport_mode == "webhook" and not os.environ.get("TELEGRAM_WEBHOOK_URL"):
+        missing.append("TELEGRAM_WEBHOOK_URL (required when TELEGRAM_TRANSPORT=webhook)")
     xai_key = os.environ.get("XAI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     if not xai_key and not openai_key:
@@ -54,7 +60,7 @@ def check_config():
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
 
-    logger.info("Configuration check passed")
+    logger.info("Configuration check passed (transport=%s)", transport_mode)
 
 
 def setup_bot():
@@ -95,9 +101,17 @@ async def run_bot():
         set_bot_app as set_runtime_app,
         restore_running_bots,
         stop_runtime,
+        handle_strategy_job,
     )
+    from src.nadobro.services.scheduler import handle_alert_job
+    from src.nadobro.services.execution_queue import register_handlers, start_workers, stop_workers
     set_bot_app(bot_app)
     set_runtime_app(bot_app)
+    register_handlers(handle_strategy_job, handle_alert_job)
+    start_workers(
+        strategy_workers=int(os.environ.get("NADO_STRATEGY_WORKERS", "2")),
+        alert_workers=int(os.environ.get("NADO_ALERT_WORKERS", "1")),
+    )
 
     try:
         from src.nadobro.services.nado_client import NadoClient
@@ -113,7 +127,22 @@ async def run_bot():
     auto_restore = os.environ.get("NADO_AUTO_RESTORE_STRATEGIES", "true").strip().lower() in ("1", "true", "yes", "on")
     restore_running_bots(enabled=auto_restore)
 
-    logger.info("Starting bot with polling...")
+    transport_mode = os.environ.get("TELEGRAM_TRANSPORT", "polling").strip().lower()
+    webhook_url = (os.environ.get("TELEGRAM_WEBHOOK_URL") or "").strip()
+    webhook_path = (os.environ.get("TELEGRAM_WEBHOOK_PATH") or "/telegram/webhook").strip()
+    if not webhook_path.startswith("/"):
+        webhook_path = "/" + webhook_path
+    webhook_secret = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+    if transport_mode == "webhook" and webhook_url:
+        parsed = urlparse(webhook_url)
+        if parsed.path.rstrip("/") != webhook_path.rstrip("/"):
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            webhook_url = base + webhook_path
+
+    webhook_listen = os.environ.get("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0").strip()
+    webhook_port = int(os.environ.get("PORT", os.environ.get("TELEGRAM_WEBHOOK_PORT", "8080")))
+
+    logger.info("Starting bot (transport=%s)...", transport_mode)
     await bot_app.initialize()
     await bot_app.start()
 
@@ -127,38 +156,55 @@ async def run_bot():
     ])
     logger.info("Bot commands registered in Menu")
 
-    await bot_app.updater.start_polling(
-        drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"],
-    )
+    if transport_mode == "webhook":
+        logger.info(
+            "Starting webhook server listen=%s port=%s path=%s",
+            webhook_listen,
+            webhook_port,
+            webhook_path,
+        )
+        await bot_app.updater.start_webhook(
+            listen=webhook_listen,
+            port=webhook_port,
+            url_path=webhook_path.lstrip("/"),
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+            secret_token=webhook_secret or None,
+        )
+        logger.info("Nadobro is live in webhook mode.")
+    else:
+        await bot_app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+        )
+        logger.info("Nadobro is live in polling mode.")
 
-    logger.info("Nadobro is live! Pure bot mode running.")
+        # Polling mode only: lightweight TCP health responder on PORT.
+        port_str = os.environ.get("PORT")
+        if port_str:
+            try:
+                port = int(port_str)
 
-    # Optional: listen on PORT for platform health checks (Fly.io, Render, etc.)
-    port_str = os.environ.get("PORT")
-    if port_str:
-        try:
-            port = int(port_str)
+                async def _health_handler(reader, writer):
+                    try:
+                        await reader.read(4096)
+                        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                        await writer.drain()
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
 
-            async def _health_handler(reader, writer):
-                try:
-                    await reader.read(4096)
-                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
-                    await writer.drain()
-                finally:
-                    writer.close()
-                    await writer.wait_closed()
+                health_server = await asyncio.start_server(_health_handler, "0.0.0.0", port)
 
-            health_server = await asyncio.start_server(_health_handler, "0.0.0.0", port)
+                async def _serve_health():
+                    async with health_server:
+                        await asyncio.Future()  # run until cancelled
 
-            async def _serve_health():
-                async with health_server:
-                    await asyncio.Future()  # run until cancelled
-
-            asyncio.create_task(_serve_health())
-            logger.info("Health check listening on port %s", port)
-        except Exception as e:
-            logger.warning("Health server failed (non-fatal): %s", e)
+                asyncio.create_task(_serve_health())
+                logger.info("Health check listening on port %s", port)
+            except Exception as e:
+                logger.warning("Health server failed (non-fatal): %s", e)
 
     stop_event = asyncio.Event()
 
@@ -178,6 +224,7 @@ async def run_bot():
         from src.nadobro.services.scheduler import stop_scheduler
         stop_scheduler()
         stop_runtime()
+        stop_workers()
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()

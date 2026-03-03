@@ -17,9 +17,28 @@ MM_MIN_SPREAD_BP = 2.0
 GRID_MIN_SPREAD_BP = 8.0
 
 
-def _compute_grid_prices(mid: float, spread_bp: float, levels: int) -> list[dict]:
+def _compute_grid_prices(
+    mid: float,
+    spread_bp: float,
+    levels: int,
+    strategy: str,
+    min_range_pct: float = 1.0,
+    max_range_pct: float = 1.0,
+) -> list[dict]:
     half_spread = spread_bp / 10000.0
     orders = []
+    if strategy == "grid":
+        min_off = max(0.0001, min_range_pct / 100.0)
+        max_off = max(min_off, max_range_pct / 100.0)
+        step = (max_off - min_off) / max(levels - 1, 1)
+        for i in range(levels):
+            offset = min_off + (step * i)
+            buy_price = mid * (1.0 - offset)
+            sell_price = mid * (1.0 + offset)
+            lvl = i + 1
+            orders.append({"price": buy_price, "is_long": True, "level": lvl})
+            orders.append({"price": sell_price, "is_long": False, "level": lvl})
+        return orders
     for i in range(1, levels + 1):
         offset = half_spread * i
         buy_price = mid * (1.0 - offset)
@@ -29,10 +48,12 @@ def _compute_grid_prices(mid: float, spread_bp: float, levels: int) -> list[dict
     return orders
 
 
-def _cancel_stale_orders(client, product_id: int, mid: float, spread_bp: float, levels: int, open_orders: list) -> int:
+def _cancel_stale_orders(client, product_id: int, mid: float, spread_bp: float, levels: int, open_orders: list, close_offset_bp: float = 0.0) -> int:
     if not open_orders:
         return 0
     max_offset = (spread_bp / 10000.0) * levels * STALE_DRIFT_MULTIPLIER
+    if close_offset_bp > 0:
+        max_offset = max(max_offset, close_offset_bp / 10000.0)
     cancelled = 0
     for order in open_orders:
         order_price = float(order.get("price", 0))
@@ -84,6 +105,10 @@ def run_cycle(
     notional = float(state.get("notional_usd") or 100.0)
     leverage = float(state.get("leverage") or 3.0)
     max_orders = int(state.get("max_open_orders", 6))
+    min_range_pct = float(state.get("min_range_pct") or 1.0)
+    max_range_pct = float(state.get("max_range_pct") or 1.0)
+    threshold_bp = float(state.get("threshold_bp") or 0.0)
+    close_offset_bp = float(state.get("close_offset_bp") or 0.0)
 
     if strategy == "grid":
         levels = int(state.get("levels", GRID_DEFAULT_LEVELS))
@@ -92,7 +117,13 @@ def run_cycle(
         levels = int(state.get("levels", MM_DEFAULT_LEVELS))
         spread_bp = max(spread_bp, MM_MIN_SPREAD_BP)
 
-    orders_cancelled = _cancel_stale_orders(client, product_id, mid, spread_bp, levels, open_orders)
+    if threshold_bp > 0 and strategy == "mm":
+        reference = float(state.get("reference_price") or mid)
+        moved_bp = abs(mid - reference) / max(reference, 1e-9) * 10000.0
+        if moved_bp < threshold_bp:
+            return {"success": True, "orders_placed": 0, "orders_cancelled": 0, "reason": "below threshold"}
+
+    orders_cancelled = _cancel_stale_orders(client, product_id, mid, spread_bp, levels, open_orders, close_offset_bp=close_offset_bp)
 
     if orders_cancelled > 0:
         open_orders = client.get_open_orders(product_id)
@@ -112,7 +143,9 @@ def run_cycle(
         if p > 0:
             existing_prices.add(round(p, 8))
 
-    grid_orders = _compute_grid_prices(mid, spread_bp, levels)
+    grid_orders = _compute_grid_prices(
+        mid, spread_bp, levels, strategy=strategy, min_range_pct=min_range_pct, max_range_pct=max_range_pct
+    )
 
     size_per_level = max(notional / mid / levels, 0.0001)
 

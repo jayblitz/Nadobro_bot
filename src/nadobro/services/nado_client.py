@@ -1,6 +1,8 @@
 import logging
 import time
+import os
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional
 from src.nadobro.config import (
@@ -13,10 +15,17 @@ logger = logging.getLogger(__name__)
 
 _price_cache = {}
 _PRICE_CACHE_TTL = 5
+_ALL_PRODUCTS_CACHE = {}
+_ALL_PRODUCTS_TTL = 20
+_FUNDING_CACHE = {}
+_FUNDING_TTL = 10
 _size_increment_cache = {}
 _price_increment_cache = {}
 _size_increment_x18_cache = {}
 _price_increment_x18_cache = {}
+_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
+_FANOUT_WORKERS = int(os.environ.get("NADO_FANOUT_WORKERS", "8"))
+_rest_session = requests.Session()
 
 
 class NadoClient:
@@ -97,6 +106,19 @@ class NadoClient:
     def _archive_url(self):
         return NADO_MAINNET_ARCHIVE if self.network == "mainnet" else NADO_TESTNET_ARCHIVE
 
+    def _query_rest(self, query_type: str, extra_params: dict | None = None) -> Optional[dict]:
+        params = {"type": query_type}
+        if extra_params:
+            params.update(extra_params)
+        try:
+            url = f"{self._rest_url()}/query"
+            headers = {"Accept-Encoding": "gzip"}
+            resp = _rest_session.get(url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
+            return resp.json()
+        except Exception as e:
+            logger.error("REST query failed type=%s: %s", query_type, e)
+            return None
+
     def get_market_price(self, product_id: int) -> dict:
         cache_key = f"{self.network}:{product_id}"
         cached = _price_cache.get(cache_key)
@@ -116,11 +138,7 @@ class NadoClient:
                 logger.error(f"SDK get_market_price failed: {e}")
 
         try:
-            url = f"{self._rest_url()}/query"
-            params = {"type": "market_price", "product_id": product_id}
-            headers = {"Accept-Encoding": "gzip"}
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            data = resp.json()
+            data = self._query_rest("market_price", {"product_id": product_id}) or {}
             if data.get("status") == "success":
                 bid = int(data["data"]["bid_x18"]) / 1e18
                 ask = int(data["data"].get("ask_x18", data["data"]["bid_x18"])) / 1e18
@@ -134,13 +152,15 @@ class NadoClient:
 
     def get_all_market_prices(self) -> dict:
         prices = {}
-        for name, info in PRODUCTS.items():
-            if info["type"] == "perp":
+        perp_products = [(name, info["id"]) for name, info in PRODUCTS.items() if info["type"] == "perp"]
+        with ThreadPoolExecutor(max_workers=max(1, _FANOUT_WORKERS)) as pool:
+            futures = {pool.submit(self.get_market_price, pid): name for name, pid in perp_products}
+            for fut in as_completed(futures):
+                name = futures[fut]
                 try:
-                    p = self.get_market_price(info["id"])
-                    prices[name] = p
+                    prices[name] = fut.result()
                 except Exception:
-                    pass
+                    prices[name] = {"bid": 0, "ask": 0, "mid": 0}
         return prices
 
     def get_balance(self) -> dict:
@@ -158,11 +178,7 @@ class NadoClient:
                 logger.error(f"SDK get_balance failed: {e}")
 
         try:
-            url = f"{self._rest_url()}/query"
-            params = {"type": "subaccount_info", "subaccount": self.subaccount_hex}
-            headers = {"Accept-Encoding": "gzip"}
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            data = resp.json()
+            data = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
             if data.get("status") == "success":
                 data_payload = data.get("data", {}) or {}
                 exists_field = data_payload.get("exists")
@@ -409,11 +425,7 @@ class NadoClient:
                 logger.warning(f"SDK get_all_positions via subaccount_info failed: {e}")
 
         try:
-            url = f"{self._rest_url()}/query"
-            params = {"type": "subaccount_info", "subaccount": self.subaccount_hex}
-            headers = {"Accept-Encoding": "gzip"}
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            data = resp.json()
+            data = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
             if data.get("status") == "success":
                 payload = data.get("data", {}) or {}
                 rest_positions = self._extract_positions_from_rest_payload(payload)
@@ -456,11 +468,7 @@ class NadoClient:
                 logger.warning("SDK get_linked_signer failed: %s", e)
 
         try:
-            url = f"{self._rest_url()}/query"
-            params = {"type": "linked_signer", "subaccount": self.subaccount_hex}
-            headers = {"Accept-Encoding": "gzip"}
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            data = resp.json()
+            data = self._query_rest("linked_signer", {"subaccount": self.subaccount_hex}) or {}
             if data.get("status") == "success":
                 signer_raw = data.get("data", {})
                 current = None
@@ -659,11 +667,7 @@ class NadoClient:
         if key in _size_increment_x18_cache and key in _price_increment_x18_cache:
             return
         try:
-            url = f"{self._rest_url()}/query"
-            params = {"type": "all_products"}
-            headers = {"Accept-Encoding": "gzip"}
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            data = resp.json()
+            data = self._query_rest("all_products") or {}
             if data.get("status") != "success":
                 return
             perp_products = (data.get("data", {}) or {}).get("perp_products", []) or []
@@ -932,18 +936,19 @@ class NadoClient:
         return {"success": True, "cancelled": len([r for r in results if r["success"]])}
 
     def get_all_funding_rates(self) -> dict:
+        cache_key = f"{self.network}:funding"
+        cached = _FUNDING_CACHE.get(cache_key)
+        if cached and (time.time() - cached["ts"] < _FUNDING_TTL):
+            return cached["data"]
         try:
-            url = f"{self._rest_url()}/query"
-            params = {"type": "all_products"}
-            headers = {"Accept-Encoding": "gzip"}
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            data = resp.json()
+            data = self._query_rest("all_products") or {}
             if data.get("status") == "success":
                 rates = {}
                 for prod in data["data"].get("perp_products", []):
                     pid = prod.get("product_id")
                     funding = int(prod.get("cum_funding_x18", 0)) / 1e18
                     rates[pid] = {"product_id": pid, "funding_rate": funding}
+                _FUNDING_CACHE[cache_key] = {"data": rates, "ts": time.time()}
                 return rates
         except Exception as e:
             logger.error(f"get_all_funding_rates failed: {e}")
@@ -954,13 +959,19 @@ class NadoClient:
         return rates.get(product_id)
 
     def get_all_products_info(self) -> dict:
+        cache_key = f"{self.network}:products"
+        cached = _ALL_PRODUCTS_CACHE.get(cache_key)
+        if cached and (time.time() - cached["ts"] < _ALL_PRODUCTS_TTL):
+            return cached["data"]
         try:
             if self._initialized and self.client:
                 products = self.client.context.engine_client.get_all_products()
-                return {
+                data = {
                     "perp": [{"id": p.product_id} for p in products.perp_products],
                     "spot": [{"id": p.product_id} for p in products.spot_products],
                 }
+                _ALL_PRODUCTS_CACHE[cache_key] = {"data": data, "ts": time.time()}
+                return data
         except Exception as e:
             logger.error(f"get_all_products_info failed: {e}")
         return {"perp": [], "spot": []}

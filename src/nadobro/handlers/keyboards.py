@@ -638,6 +638,9 @@ def strategy_hub_kb():
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],
         [
+            InlineKeyboardButton("📉 DCA Engine", callback_data="strategy:preview:dca"),
+        ],
+        [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
         ],
     ])

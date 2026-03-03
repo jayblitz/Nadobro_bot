@@ -22,6 +22,7 @@ from src.nadobro.handlers.home_card import (
     open_help_card_from_command,
     open_status_card_from_command,
 )
+from src.nadobro.services.perf import summary_lines
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,11 @@ async def cmd_status(update: Update, context: CallbackContext):
     text = fmt_status_overview(status, onboarding)
     if status.get("last_error"):
         text += f"\nLast error: {escape_md(str(status.get('last_error')))}"
+    perf_lines = summary_lines(top_n=5)
+    if perf_lines:
+        text += "\n\n*Perf Snapshot*"
+        for line in perf_lines:
+            text += f"\n• {escape_md(line)}"
 
     if DUAL_MODE_CARD_FLOW:
         await open_status_card_from_command(update, context, text)

@@ -19,6 +19,8 @@ from src.nadobro.handlers.keyboards import (
 from src.nadobro.services.trade_service import get_trade_analytics
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
+from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.perf import timed_metric
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,11 @@ def build_home_card_text(telegram_id: int) -> str:
         "Use this control panel for trading, portfolio, strategy lab, and risk settings\\.\n"
         "Use chat messages for AI Q\\&A and typed trade commands\\."
     )
+
+
+async def build_home_card_text_async(telegram_id: int) -> str:
+    with timed_metric("card.home.build"):
+        return await run_blocking(build_home_card_text, telegram_id)
 
 
 def _remember_home_card(context: CallbackContext, chat_id: int, message_id: int) -> None:
@@ -176,7 +183,7 @@ def _view_settings_text(telegram_id: int):
     return msg, settings_kb(lev, slip)
 
 
-def resolve_home_view(callback_data: str, telegram_id: int):
+async def resolve_home_view(callback_data: str, telegram_id: int):
     if callback_data == "home:mode":
         return _view_mode_text(telegram_id)
     if callback_data == "nav:strategy_hub":
@@ -193,16 +200,17 @@ def resolve_home_view(callback_data: str, telegram_id: int):
         return _view_alerts_text()
     if callback_data == "settings:view":
         return _view_settings_text(telegram_id)
-    return build_home_card_text(telegram_id), home_card_kb()
+    return await build_home_card_text_async(telegram_id), home_card_kb()
 
 
 async def open_home_card_view_from_message(update, context: CallbackContext, telegram_id: int, callback_data: str):
-    text, kb = resolve_home_view(callback_data, telegram_id)
+    text, kb = await resolve_home_view(callback_data, telegram_id)
     await _edit_or_send_card(update, context, text, kb)
 
 
 async def open_home_card_from_command(update, context: CallbackContext, telegram_id: int):
-    await _edit_or_send_card(update, context, build_home_card_text(telegram_id), home_card_kb())
+    text = await build_home_card_text_async(telegram_id)
+    await _edit_or_send_card(update, context, text, home_card_kb())
 
 
 async def open_help_card_from_command(update, context: CallbackContext):
