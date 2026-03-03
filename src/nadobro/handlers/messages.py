@@ -1272,6 +1272,9 @@ async def _handle_nado_question(update, context, question):
     import random
     chat_id = update.effective_chat.id
     draft_id = random.randint(1, 2**31 - 1)
+    telegram_id = update.effective_user.id
+    user = update.effective_user
+    user_name = user.first_name or user.username or "trader"
 
     try:
         await update.message.chat.send_action(ChatAction.TYPING)
@@ -1283,7 +1286,7 @@ async def _handle_nado_question(update, context, question):
     draft_ok = True
 
     try:
-        async for chunk in stream_nado_answer(question):
+        async for chunk in stream_nado_answer(question, telegram_id=telegram_id, user_name=user_name):
             full_text += chunk
             if draft_ok and len(full_text) - last_draft_len >= 40:
                 try:

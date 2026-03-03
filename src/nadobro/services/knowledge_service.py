@@ -3,8 +3,10 @@ import re
 import json
 import time
 import logging
+import requests as _requests
 from datetime import datetime
 from pathlib import Path
+from collections import defaultdict
 
 from openai import OpenAI
 
@@ -15,6 +17,13 @@ _knowledge_sections = None
 _xai_client = None
 _openai_client = None
 _answer_cache = {}
+
+_chat_history: dict[int, list[dict]] = defaultdict(list)
+CHAT_HISTORY_MAX_MESSAGES = 8
+CHAT_HISTORY_TTL_SECONDS = 900
+
+_fng_cache: dict = {}
+FNG_CACHE_TTL_SECONDS = 300
 
 KNOWLEDGE_FILE = Path(__file__).parent.parent / "data" / "nado_knowledge.txt"
 ANSWER_CACHE_TTL_SECONDS = 300
@@ -32,6 +41,61 @@ OFFICIAL_SOURCES = {
 
 def _normalize_question(question: str) -> str:
     return re.sub(r"\s+", " ", (question or "").strip().lower())
+
+
+def _get_chat_history(telegram_id: int) -> list[dict]:
+    now = time.time()
+    history = _chat_history.get(telegram_id, [])
+    history = [m for m in history if now - m["ts"] < CHAT_HISTORY_TTL_SECONDS]
+    _chat_history[telegram_id] = history
+    return history
+
+
+def _add_to_chat_history(telegram_id: int, role: str, content: str):
+    now = time.time()
+    history = _chat_history[telegram_id]
+    history = [m for m in history if now - m["ts"] < CHAT_HISTORY_TTL_SECONDS]
+    history.append({"role": role, "content": content, "ts": now})
+    if len(history) > CHAT_HISTORY_MAX_MESSAGES:
+        history = history[-CHAT_HISTORY_MAX_MESSAGES:]
+    _chat_history[telegram_id] = history
+
+
+def _build_history_messages(telegram_id: int) -> list[dict]:
+    history = _get_chat_history(telegram_id)
+    return [{"role": m["role"], "content": m["content"]} for m in history]
+
+
+def _is_casual_message(text: str) -> bool:
+    t = (text or "").strip().lower().rstrip("!.?")
+    casual_patterns = {
+        "gm", "gn", "good morning", "good night", "good evening", "good afternoon",
+        "hi", "hey", "hello", "hola", "sup", "yo", "whats up", "what's up",
+        "thanks", "thank you", "thx", "ty", "cheers",
+        "bye", "goodbye", "cya", "see ya", "later", "peace",
+        "how are you", "how r u", "hows it going", "how's it going",
+        "wassup", "wsg", "wagmi", "gm fam", "lfg",
+    }
+    return t in casual_patterns or len(t) <= 3
+
+
+def _fetch_fear_greed_index() -> str:
+    now = time.time()
+    cached = _fng_cache.get("data")
+    if cached and now - _fng_cache.get("ts", 0) < FNG_CACHE_TTL_SECONDS:
+        return cached
+    try:
+        resp = _requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
+        data = resp.json().get("data", [{}])[0]
+        value = data.get("value", "N/A")
+        classification = data.get("value_classification", "N/A")
+        result = f"Fear & Greed Index: {value}/100 ({classification})"
+        _fng_cache["data"] = result
+        _fng_cache["ts"] = now
+        return result
+    except Exception as e:
+        logger.warning(f"Fear & Greed Index fetch failed: {e}")
+        return "Fear & Greed Index: unavailable"
 
 
 def _get_xai_client():
@@ -219,17 +283,59 @@ AGENT_TOOLS = [
         "function": {
             "name": "search_knowledge_base",
             "description": (
-                "Search Nado's comprehensive knowledge base. This is the PRIMARY source for all questions "
-                "about Nado DEX — features, trading, margin, fees, points, rewards, NFTs, NLP vault, "
-                "developer resources, architecture, order types, liquidations, getting started, "
-                "supported markets, and how things work. ALWAYS call this tool first."
+                "Search Nado's official knowledge base. PRIMARY source for all Nado DEX questions: "
+                "features, trading, margin, fees, points, rewards, NFTs, NLP vault, developer docs, "
+                "architecture, order types, liquidations, getting started, supported markets. "
+                "ALWAYS call this first for any Nado-related question."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query to find relevant knowledge base sections"
+                        "description": "Search query for the knowledge base"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_live_price",
+            "description": (
+                "Get LIVE current price for a crypto asset from Nado DEX. "
+                "Use when user asks about current price, how much something costs, or price of any asset. "
+                "Supports: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "string",
+                        "description": "Asset symbol (BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX)"
+                    }
+                },
+                "required": ["product"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_market_sentiment",
+            "description": (
+                "Get current crypto market sentiment including Fear & Greed Index, trending news, "
+                "and opinions from crypto traders and analysts. Use when user asks about market conditions, "
+                "sentiment, fear/greed, whether market is bullish/bearish, or general crypto outlook."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The market/sentiment query"
                     }
                 },
                 "required": ["query"]
@@ -241,37 +347,15 @@ AGENT_TOOLS = [
         "function": {
             "name": "search_x_twitter",
             "description": (
-                "Search X (Twitter) for the latest posts from @nadoHQ and @inkonchain. "
-                "ONLY use this for questions explicitly about tweets, X posts, social media updates, "
-                "or recent announcements. Do NOT use for general product questions."
+                "Search X (Twitter) for latest posts from @nadoHQ and @inkonchain. "
+                "ONLY for questions about Nado tweets, social media posts, or recent announcements."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query for X/Twitter content"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_market_sentiment",
-            "description": (
-                "Get crypto market sentiment from X/Twitter. Use ONLY when the user asks about "
-                "market conditions, price outlook, sentiment, crypto trends, or general trading conditions. "
-                "Do NOT use for Nado-specific product questions."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The market/sentiment query"
+                        "description": "Search query for X/Twitter"
                     }
                 },
                 "required": ["query"]
@@ -292,49 +376,83 @@ X_CRYPTO_SEARCH_PARAMS = {
     "sources": [{"type": "x"}],
 }
 
-ROUTER_SYSTEM_PROMPT = """You are a routing agent for Nadobro, the support AI for Nado DEX.
+ROUTER_SYSTEM_PROMPT = """You are a routing agent for Nadobro, a crypto trading AI on Nado DEX.
 
 Today's date: {current_date}
 
-Your job is to analyze the user's question and call the right tool(s) to gather information.
+Analyze the user's message and call the right tool(s) to gather information.
 
-You have 3 tools:
-1. search_knowledge_base — Nado's comprehensive product knowledge (features, trading, margin, fees, points, rewards, NFTs, NLP, dev docs, architecture, getting started, supported markets). This is the PRIMARY source. ALWAYS call this for any Nado-related question.
-2. search_x_twitter — Live posts from @nadoHQ and @inkonchain on X/Twitter. ONLY for questions about tweets, social media, or recent announcements.
-3. get_market_sentiment — Crypto market sentiment from Twitter. ONLY for market conditions, price outlook, or trading sentiment.
+Tools (4):
+1. search_knowledge_base — Nado product knowledge (features, fees, margin, points, NFTs, NLP, dev docs, getting started, how things work). PRIMARY source for all Nado questions.
+2. get_live_price — LIVE current price from Nado DEX. Use for "what's BTC price?", "how much is ETH?", "price of SOL" etc.
+3. get_market_sentiment — Crypto market sentiment, Fear & Greed Index, trending news. Use for "is the market bullish?", "what's the sentiment?", market outlook.
+4. search_x_twitter — Latest tweets from @nadoHQ and @inkonchain. ONLY for Nado social media/announcements.
 
-Rules:
-- For ANY question about Nado (features, how-to, fees, points, trading, etc.): call search_knowledge_base
-- For "what did Nado tweet" or social media questions: call search_x_twitter
-- For market conditions/price/sentiment: call get_market_sentiment
-- If you need both product info AND recent news: call search_knowledge_base AND search_x_twitter
-- When in doubt: call search_knowledge_base — it covers most questions
-- You can call multiple tools in one response
+Routing rules:
+- "What's BTC price?" / "price of ETH" / "how much is SOL" → get_live_price
+- "What are Nado fees?" / "how does margin work?" / "how to get started" → search_knowledge_base
+- "Is the market bullish?" / "market sentiment" / "fear and greed" → get_market_sentiment
+- "What did Nado tweet?" / "latest announcements" → search_x_twitter
+- "Should I buy BTC?" → get_live_price AND get_market_sentiment
+- Casual greetings (gm, hi, hello, thanks, bye) → do NOT call any tools (handled separately)
+- When in doubt → search_knowledge_base
 
-Do NOT answer the question yourself. Only call the tools."""
+You can call multiple tools. Do NOT answer the question yourself — only call tools."""
 
-SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro, the expert AI assistant for Nado DEX — a high-performance CLOB-based exchange on the Ink L2 blockchain (backed by Kraken) offering perpetual futures and spot trading.
+CASUAL_SYSTEM_PROMPT = """You are Nadobro, a friendly and knowledgeable crypto trading companion on Telegram for Nado DEX.
 
 Today's date: {current_date}
+User's name: {user_name}
 
-You have been given context from Nado's official knowledge base. Use this context to answer the user's question accurately and helpfully.
+You are chatting with {user_name}. Be warm, natural, and engaging — like a knowledgeable crypto friend.
+
+PERSONALITY:
+- Respond to greetings enthusiastically but naturally (GM {user_name}! / Hey! / What's good!)
+- Use the user's name occasionally but not every message
+- Be encouraging about trading but never give financial advice
+- Match the user's energy — casual if they're casual, detailed if they ask specifics
+- You can use crypto slang naturally (WAGMI, LFG, degen, alpha, etc.)
+- Keep casual responses SHORT (1-3 sentences max)
+- If thanked, be gracious and offer to help more
+- If they say bye/gn, wish them well and remind them you're always here
+
+You are a trading bot for Nado DEX. Users can:
+- Ask about prices, market sentiment, Nado features
+- Execute trades by typing: "long BTC 0.01 5x market" or "short ETH 0.05 10x limit 2500"
+- Supported assets: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX (perpetuals up to 20x leverage)
+
+If the conversation naturally leads to trading, you can mention: "Just type something like 'long BTC 0.01 5x market' and I'll set it up for you!"
+
+Plain text only. No markdown. No source links needed for casual chat."""
+
+SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro, an expert crypto trading companion for Nado DEX — a high-performance CLOB exchange on Ink L2 (backed by Kraken) with perpetual futures and spot trading.
+
+Today's date: {current_date}
+User's name: {user_name}
+
+You have context from Nado's knowledge base and/or live data. Use it to answer accurately and conversationally.
+
+PERSONALITY:
+- You're a knowledgeable crypto friend, not a stiff support bot
+- Address the user by name occasionally
+- Be direct — answer first, then elaborate
+- If discussing trading ideas, you can suggest trades: "You could try typing: long BTC 0.01 5x market"
+- Supported trade format: "[long/short] [asset] [size] [leverage]x [market/limit] [price]"
+- Supported assets: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX (perps, up to 20x)
 
 RULES:
-1. Answer the question DIRECTLY first, then provide supporting details.
-2. Use ONLY the provided context. If the answer isn't in the context, say: "I don't have specific information about that. For the latest details, check Nado's official docs or channels."
-3. NEVER fabricate, guess, or invent information.
-4. Be helpful and conversational — explain things clearly like an expert would.
-5. Use bullet points for lists, but write naturally for explanations.
-6. Keep responses focused and informative — 3-8 sentences for simple questions, more for complex ones.
-7. Plain text only — no markdown formatting or special characters.
-8. Keep response under 2000 characters unless the user asks for detail.
+1. Answer the question DIRECTLY first, then provide supporting details
+2. Use ONLY the provided context. If not in context, say: "I don't have that info right now. Check Nado's docs or ask in the community!"
+3. NEVER fabricate or guess information
+4. Plain text only — no markdown formatting
+5. Keep responses focused: 2-6 sentences for simple questions, more for complex ones
+6. For price data, always mention it's from Nado DEX and include bid/ask when available
+7. For market sentiment, present it conversationally with the Fear & Greed reading
 
-SOURCE RULES (CRITICAL):
-- ONLY cite these official sources: docs.nado.xyz, nado.xyz, x.com/nadoHQ, x.com/inkonchain
-- NEVER include DuckDuckGo, Google, Bing, or any search engine links
-- NEVER include r.jina.ai or any proxy/scraper links
-- End with "Sources:" followed by 1-3 relevant official URLs
-- Pick sources relevant to the topic (e.g., docs for technical questions, x.com for announcements)
+SOURCE RULES:
+- ONLY cite: docs.nado.xyz, nado.xyz, x.com/nadoHQ, x.com/inkonchain
+- NEVER include search engine links
+- End with "Sources:" followed by 1-3 relevant official URLs (skip for price/sentiment queries)
 
 CONTEXT:
 {context}"""
@@ -426,10 +544,59 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
     return "[X SEARCH] No results found from @nadoHQ or @inkonchain.", []
 
 
+def _execute_live_price(product: str) -> tuple[str, list[str]]:
+    from src.nadobro.config import PRODUCTS, get_product_id
+    from src.nadobro.services.nado_client import NadoClient
+
+    symbol = product.strip().upper().replace("-PERP", "")
+    product_id = get_product_id(symbol)
+
+    if product_id is None:
+        if symbol == "ALL":
+            try:
+                client = NadoClient.from_address("0x0000000000000000000000000000000000000000", "mainnet")
+                prices = client.get_all_market_prices()
+                lines = ["[LIVE PRICES FROM NADO DEX]"]
+                for name, p in sorted(prices.items()):
+                    if p.get("mid", 0) > 0:
+                        lines.append(f"{name}-PERP: ${p['mid']:,.2f} (Bid: ${p['bid']:,.2f} / Ask: ${p['ask']:,.2f})")
+                return "\n".join(lines), [OFFICIAL_SOURCES["website"]]
+            except Exception as e:
+                logger.warning(f"All prices fetch failed: {e}")
+                return "[LIVE PRICE] Could not fetch prices right now.", []
+
+        supported = [n for n, i in PRODUCTS.items() if i["type"] == "perp"]
+        return f"[LIVE PRICE] Unknown asset '{product}'. Supported: {', '.join(supported)}", []
+
+    try:
+        client = NadoClient.from_address("0x0000000000000000000000000000000000000000", "mainnet")
+        price_data = client.get_market_price(product_id)
+        mid = price_data.get("mid", 0)
+        bid = price_data.get("bid", 0)
+        ask = price_data.get("ask", 0)
+        spread = ask - bid if ask and bid else 0
+        spread_bps = (spread / mid * 10000) if mid else 0
+
+        result = (
+            f"[LIVE PRICE FROM NADO DEX]\n"
+            f"{symbol}-PERP:\n"
+            f"  Mid Price: ${mid:,.2f}\n"
+            f"  Bid: ${bid:,.2f}\n"
+            f"  Ask: ${ask:,.2f}\n"
+            f"  Spread: ${spread:,.2f} ({spread_bps:.1f} bps)"
+        )
+        return result, [OFFICIAL_SOURCES["website"]]
+    except Exception as e:
+        logger.warning(f"Live price fetch failed for {symbol}: {e}")
+        return f"[LIVE PRICE] Could not fetch price for {symbol} right now.", []
+
+
 def _execute_market_sentiment(query: str) -> tuple[str, list[str]]:
+    fng = _fetch_fear_greed_index()
+
     client = _get_xai_client()
     if not client:
-        return "[MARKET SENTIMENT] xAI client not available for market sentiment.", []
+        return f"[MARKET SENTIMENT]\n{fng}\n\nxAI client not available for detailed sentiment.", []
 
     now = datetime.utcnow()
     try:
@@ -440,28 +607,29 @@ def _execute_market_sentiment(query: str) -> tuple[str, list[str]]:
                     "role": "system",
                     "content": (
                         f"Today is {now.strftime('%Y-%m-%d')}. "
-                        "Search crypto Twitter for the latest market sentiment, news, and opinions "
-                        "related to the user's query. Include notable tweets from crypto traders, "
-                        "analysts, and news accounts. Report tweet content with dates and handles. "
-                        "Plain text only."
+                        "Search crypto Twitter for the latest market sentiment, breaking news, and analysis. "
+                        "Focus on posts from major crypto news accounts like @WatcherGuru, @CoinDesk, "
+                        "@TheBlock__, @Cointelegraph, @whale_alert, and prominent crypto analysts. "
+                        "Report key developments, price movements, regulatory news, and market-moving events. "
+                        "Include tweet content with dates and handles. Plain text only."
                     ),
                 },
                 {"role": "user", "content": query},
             ],
-            max_tokens=600,
+            max_tokens=700,
             temperature=0.1,
             extra_body={"search_parameters": X_CRYPTO_SEARCH_PARAMS},
         )
         content = response.choices[0].message.content
         if content and content.strip():
             return (
-                f"[CRYPTO TWITTER SENTIMENT]\n{content.strip()}",
+                f"[MARKET SENTIMENT]\n{fng}\n\n{content.strip()}",
                 [OFFICIAL_SOURCES["x_nado"]],
             )
     except Exception as e:
         logger.warning(f"Crypto Twitter sentiment search failed: {e}")
 
-    return "[MARKET SENTIMENT] No market data available.", []
+    return f"[MARKET SENTIMENT]\n{fng}\n\nNo additional sentiment data available.", []
 
 
 def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str, list[str]]:
@@ -471,6 +639,10 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str,
         if sections:
             return f"[KNOWLEDGE BASE RESULTS]\n{sections}", _pick_sources_for_question(query)
         return "[KNOWLEDGE BASE] No matching sections found.", [OFFICIAL_SOURCES["docs"]]
+
+    elif tool_name == "get_live_price":
+        product = args.get("product", "BTC")
+        return _execute_live_price(product)
 
     elif tool_name == "search_x_twitter":
         query = args.get("query", question)
@@ -559,7 +731,7 @@ def _filter_official_sources(sources: list[str]) -> list[str]:
     return filtered[:4]
 
 
-def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False):
+def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
     if provider == "openai":
         client = _get_openai_client()
     else:
@@ -570,14 +742,16 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
 
     max_tokens = 800 if (_wants_detailed_answer(question) or x_search) else 600
 
+    messages = [{"role": "system", "content": system}]
+    if history:
+        messages.extend(history[-6:])
+    messages.append({"role": "user", "content": question})
+
     kwargs = dict(
         model=XAI_X_SEARCH_MODEL if (x_search and provider == "xai") else _model_for(provider),
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ],
+        messages=messages,
         max_tokens=max_tokens,
-        temperature=0.2,
+        temperature=0.3,
         stream=True,
     )
     if x_search and provider == "xai":
@@ -596,12 +770,77 @@ def _is_x_twitter_question(question: str) -> bool:
     return any(sig in q for sig in signals)
 
 
-async def stream_nado_answer(question: str):
+def _is_price_question(question: str) -> bool:
+    q = _normalize_question(question)
+    price_signals = ["price of", "price for", "how much is", "what's btc", "what's eth",
+                     "btc price", "eth price", "sol price", "current price", "live price",
+                     "market price", "what is btc at", "what is eth at"]
+    return any(sig in q for sig in price_signals)
+
+
+async def stream_nado_answer(question: str, telegram_id: int = None, user_name: str = None):
     started_at = time.time()
     xai_client = _get_xai_client()
     openai_client = _get_openai_client()
     if not xai_client and not openai_client:
         yield "AI service is not configured. Add XAI_API_KEY and/or OPENAI_API_KEY then restart the bot."
+        return
+
+    display_name = user_name or "trader"
+    history_msgs = _build_history_messages(telegram_id) if telegram_id else []
+
+    if telegram_id:
+        _add_to_chat_history(telegram_id, "user", question)
+
+    now = datetime.utcnow()
+    current_date = now.strftime("%Y-%m-%d")
+
+    if _is_casual_message(question):
+        system = CASUAL_SYSTEM_PROMPT.format(
+            current_date=current_date,
+            user_name=display_name,
+        )
+        primary = _pick_primary_provider(question)
+        try:
+            full_answer = ""
+            import asyncio, queue, threading
+            loop = asyncio.get_event_loop()
+            chunk_queue = queue.Queue()
+
+            def _run_casual(p=primary):
+                try:
+                    for chunk_text in _stream_support_llm(p, system, question, history=history_msgs):
+                        chunk_queue.put(chunk_text)
+                    chunk_queue.put(None)
+                except Exception as e:
+                    chunk_queue.put(e)
+
+            thread = threading.Thread(target=_run_casual, daemon=True)
+            thread.start()
+
+            while True:
+                try:
+                    item = await loop.run_in_executor(None, lambda: chunk_queue.get(timeout=15))
+                except Exception:
+                    break
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                full_answer += item
+                yield item
+
+            if full_answer.strip() and telegram_id:
+                _add_to_chat_history(telegram_id, "assistant", full_answer.strip())
+            if full_answer.strip():
+                logger.info("Casual response via %s in %.1fs", primary, time.time() - started_at)
+                return
+        except Exception as e:
+            logger.warning(f"Casual response failed: {e}")
+
+        yield f"GM {display_name}! How can I help you today?"
+        if telegram_id:
+            _add_to_chat_history(telegram_id, "assistant", f"GM {display_name}! How can I help you today?")
         return
 
     if _is_x_twitter_question(question) and not xai_client:
@@ -613,17 +852,8 @@ async def stream_nado_answer(question: str):
         yield "Knowledge base is not loaded. Please contact support."
         return
 
-    qkey = _normalize_question(question)
-    cached = _answer_cache.get(qkey)
-    if cached and (time.time() - cached["ts"] < ANSWER_CACHE_TTL_SECONDS):
-        yield cached["answer"]
-        return
-
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
-
-    now = datetime.utcnow()
-    current_date = now.strftime("%Y-%m-%d")
 
     if use_x_prompt:
         system = X_TWITTER_SYSTEM_PROMPT.format(
@@ -648,10 +878,12 @@ async def stream_nado_answer(question: str):
 
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
+            user_name=display_name,
             context=gathered_context[:12000],
         )
 
     used_sources = _filter_official_sources(used_sources)
+    skip_sources = _is_price_question(question) or _is_casual_message(question)
 
     primary = _pick_primary_provider(question)
     if use_x_prompt:
@@ -672,7 +904,7 @@ async def stream_nado_answer(question: str):
 
             def _run_stream(p=provider, xs=use_x_prompt):
                 try:
-                    for chunk_text in _stream_support_llm(p, system, question, x_search=xs):
+                    for chunk_text in _stream_support_llm(p, system, question, x_search=xs, history=history_msgs):
                         chunk_queue.put(chunk_text)
                     chunk_queue.put(None)
                 except Exception as e:
@@ -697,12 +929,15 @@ async def stream_nado_answer(question: str):
             if not full_answer.strip():
                 continue
 
-            if "Sources:" not in full_answer:
+            if not skip_sources and "Sources:" not in full_answer:
                 sources_line = "\n\nSources:\n" + "\n".join(f"- {s}" for s in used_sources)
                 yield sources_line
                 full_answer += sources_line
 
-            _answer_cache[qkey] = {"ts": time.time(), "answer": full_answer}
+            if telegram_id:
+                _add_to_chat_history(telegram_id, "assistant", full_answer.strip())
+
+            _answer_cache[_normalize_question(question)] = {"ts": time.time(), "answer": full_answer}
             logger.info("Streamed answer via %s in %.1fs", provider, time.time() - started_at)
             return
         except Exception as provider_error:
@@ -712,7 +947,7 @@ async def stream_nado_answer(question: str):
     yield "I couldn't generate an answer. Please try again."
 
 
-async def answer_nado_question(question: str) -> str:
+async def answer_nado_question(question: str, telegram_id: int = None, user_name: str = None) -> str:
     started_at = time.time()
     xai_client = _get_xai_client()
     openai_client = _get_openai_client()
@@ -722,6 +957,44 @@ async def answer_nado_question(question: str) -> str:
             "then restart the bot."
         )
 
+    display_name = user_name or "trader"
+    history_msgs = _build_history_messages(telegram_id) if telegram_id else []
+
+    if telegram_id:
+        _add_to_chat_history(telegram_id, "user", question)
+
+    now = datetime.utcnow()
+    current_date = now.strftime("%Y-%m-%d")
+
+    if _is_casual_message(question):
+        system = CASUAL_SYSTEM_PROMPT.format(current_date=current_date, user_name=display_name)
+        primary = _pick_primary_provider(question)
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+
+            def _call_casual(p=primary):
+                client = _get_xai_client() if p == "xai" else _get_openai_client()
+                messages = [{"role": "system", "content": system}]
+                if history_msgs:
+                    messages.extend(history_msgs[-6:])
+                messages.append({"role": "user", "content": question})
+                resp = client.chat.completions.create(
+                    model=_model_for(p), messages=messages, max_tokens=300, temperature=0.4,
+                )
+                return resp.choices[0].message.content.strip()
+
+            answer = await loop.run_in_executor(None, _call_casual)
+            if answer and telegram_id:
+                _add_to_chat_history(telegram_id, "assistant", answer)
+            return answer
+        except Exception as e:
+            logger.warning(f"Casual answer failed: {e}")
+            fallback = f"GM {display_name}! How can I help you today?"
+            if telegram_id:
+                _add_to_chat_history(telegram_id, "assistant", fallback)
+            return fallback
+
     if _is_x_twitter_question(question) and not xai_client:
         return "X/Twitter search requires the xAI (Grok) service. Please ask a different question or contact support."
 
@@ -729,16 +1002,8 @@ async def answer_nado_question(question: str) -> str:
     if not knowledge:
         return "Knowledge base is not loaded. Please contact support."
 
-    qkey = _normalize_question(question)
-    cached = _answer_cache.get(qkey)
-    if cached and (time.time() - cached["ts"] < ANSWER_CACHE_TTL_SECONDS):
-        return cached["answer"]
-
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
-
-    now = datetime.utcnow()
-    current_date = now.strftime("%Y-%m-%d")
 
     if use_x_prompt:
         system = X_TWITTER_SYSTEM_PROMPT.format(
@@ -763,10 +1028,12 @@ async def answer_nado_question(question: str) -> str:
 
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
+            user_name=display_name,
             context=gathered_context[:12000],
         )
 
     used_sources = _filter_official_sources(used_sources)
+    skip_sources = _is_price_question(question)
 
     try:
         import asyncio
@@ -790,14 +1057,15 @@ async def answer_nado_question(question: str) -> str:
                 def _call(p=provider):
                     client = _get_xai_client() if p == "xai" else _get_openai_client()
                     max_tokens = 800 if (_wants_detailed_answer(question) or use_x_prompt) else 600
+                    messages = [{"role": "system", "content": system}]
+                    if history_msgs:
+                        messages.extend(history_msgs[-6:])
+                    messages.append({"role": "user", "content": question})
                     kwargs = dict(
                         model=XAI_X_SEARCH_MODEL if (use_x_prompt and p == "xai") else _model_for(p),
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": question},
-                        ],
+                        messages=messages,
                         max_tokens=max_tokens,
-                        temperature=0.2,
+                        temperature=0.3,
                     )
                     if use_x_prompt and p == "xai":
                         kwargs["extra_body"] = {"search_parameters": X_NADO_SEARCH_PARAMS}
@@ -821,10 +1089,14 @@ async def answer_nado_question(question: str) -> str:
             return "I couldn't generate an answer. Please try again."
 
         logger.info("Support answer generated via provider=%s in %.1fs", used_provider, time.time() - started_at)
-        if "Sources:" not in answer:
+        if not skip_sources and "Sources:" not in answer:
             sources_line = "Sources:\n" + "\n".join(f"- {s}" for s in used_sources)
             answer = f"{answer}\n\n{sources_line}"
-        _answer_cache[qkey] = {"ts": time.time(), "answer": answer}
+
+        if telegram_id:
+            _add_to_chat_history(telegram_id, "assistant", answer)
+
+        _answer_cache[_normalize_question(question)] = {"ts": time.time(), "answer": answer}
         return answer
     except Exception as e:
         logger.error(f"Knowledge Q&A failed: {e}", exc_info=True)
