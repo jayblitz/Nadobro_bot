@@ -204,11 +204,46 @@ class NadoClient:
         if value is None:
             return 0.0
         try:
-            iv = int(value)
-            return iv / 1e18
+            if isinstance(value, str):
+                raw = value.strip()
+                if not raw:
+                    return 0.0
+                fv = float(raw)
+            else:
+                fv = float(value)
+            # Nado payloads can mix x18 integers and plain floats.
+            # Treat very large magnitudes as x18; otherwise keep human units.
+            if abs(fv) >= 1e9:
+                return fv / 1e18
+            return fv
         except (ValueError, TypeError) as e:
             logging.getLogger(__name__).warning("_from_x18_dynamic: invalid value %r: %s", value, e)
             return 0.0
+
+    @staticmethod
+    def _normalize_side(raw_side=None, raw_is_long=None, raw_direction=None, signed_amount: float = 0.0) -> str:
+        if raw_is_long is not None:
+            return "LONG" if bool(raw_is_long) else "SHORT"
+
+        def _from_text(value):
+            if value is None:
+                return None
+            text = str(value).strip().upper()
+            if not text:
+                return None
+            if text in ("LONG", "BUY", "BID", "BULL", "L"):
+                return "LONG"
+            if text in ("SHORT", "SELL", "ASK", "BEAR", "S"):
+                return "SHORT"
+            return None
+
+        side = _from_text(raw_side)
+        if side:
+            return side
+        side = _from_text(raw_direction)
+        if side:
+            return side
+        return "LONG" if float(signed_amount or 0.0) >= 0 else "SHORT"
 
     def _extract_positions_from_sdk_info(self, info) -> list:
         positions = []
@@ -257,13 +292,29 @@ class NadoClient:
                     if abs(amount) > 0:
                         price = abs(v_quote_val / amount)
 
+                side_hint = self._normalize_side(
+                    raw_side=getattr(p, "side", None) or (getattr(balance_obj, "side", None) if balance_obj is not None else None),
+                    raw_is_long=getattr(p, "is_long", None),
+                    raw_direction=getattr(p, "direction", None),
+                    signed_amount=amount,
+                )
+                abs_amount = abs(float(amount))
+                signed_amount = abs_amount if side_hint == "LONG" else -abs_amount
+                if amount != 0 and ((amount > 0 and side_hint == "SHORT") or (amount < 0 and side_hint == "LONG")):
+                    logger.info(
+                        "Position side override for product %s: amount_sign=%s side_hint=%s",
+                        product_id,
+                        "LONG" if amount > 0 else "SHORT",
+                        side_hint,
+                    )
+
                 pos = {
                     "product_id": int(product_id),
                     "product_name": get_product_name(int(product_id)),
-                    "amount": abs(amount),
-                    "signed_amount": float(amount),
+                    "amount": abs_amount,
+                    "signed_amount": signed_amount,
                     "price": float(price),
-                    "side": "LONG" if amount > 0 else "SHORT",
+                    "side": side_hint,
                 }
                 if v_quote_val is not None:
                     pos["v_quote_balance"] = float(v_quote_val)
@@ -317,13 +368,29 @@ class NadoClient:
                 if (not price or price <= 0) and v_quote_val is not None:
                     if abs(amount) > 0:
                         price = abs(v_quote_val / amount)
+
+                side_hint = self._normalize_side(
+                    raw_side=p.get("side") or (balance_dict.get("side") if balance_dict else None),
+                    raw_is_long=p.get("is_long"),
+                    raw_direction=p.get("direction"),
+                    signed_amount=amount,
+                )
+                abs_amount = abs(float(amount))
+                signed_amount = abs_amount if side_hint == "LONG" else -abs_amount
+                if amount != 0 and ((amount > 0 and side_hint == "SHORT") or (amount < 0 and side_hint == "LONG")):
+                    logger.info(
+                        "REST position side override for product %s: amount_sign=%s side_hint=%s",
+                        product_id,
+                        "LONG" if amount > 0 else "SHORT",
+                        side_hint,
+                    )
                 pos = {
                     "product_id": product_id,
                     "product_name": get_product_name(product_id),
-                    "amount": abs(amount),
-                    "signed_amount": float(amount),
+                    "amount": abs_amount,
+                    "signed_amount": signed_amount,
                     "price": float(price),
-                    "side": "LONG" if amount > 0 else "SHORT",
+                    "side": side_hint,
                 }
                 if v_quote_val is not None:
                     pos["v_quote_balance"] = float(v_quote_val)

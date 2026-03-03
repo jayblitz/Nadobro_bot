@@ -536,6 +536,9 @@ def settings_kb(leverage=1, slippage=1):
             InlineKeyboardButton("🛡 Risk Profile", callback_data="settings:risk_menu"),
         ],
         [
+            InlineKeyboardButton("🌐 Language", callback_data="settings:language_menu"),
+        ],
+        [
             InlineKeyboardButton(f"⚡ Default Leverage: {leverage}x", callback_data="settings:leverage_menu"),
         ],
         [
@@ -594,6 +597,34 @@ def risk_profile_kb():
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
+
+
+def settings_language_kb(current_language: str = "en"):
+    current = (current_language or "en").lower()
+    options = [
+        ("en", "🇬🇧 English"),
+        ("zh", "🇨🇳 Chinese"),
+        ("fr", "🇫🇷 Français"),
+        ("ar", "🇸🇦 العربية"),
+        ("ru", "🇷🇺 Русский"),
+        ("ko", "🇰🇷 Korean"),
+    ]
+
+    rows = []
+    row = []
+    for code, label in options:
+        suffix = " ✅" if current == code else ""
+        row.append(InlineKeyboardButton(f"{label}{suffix}", callback_data=f"settings:language:{code}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="settings:view"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 def strategy_hub_kb():

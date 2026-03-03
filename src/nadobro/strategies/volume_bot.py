@@ -1,13 +1,15 @@
 """
-Volume Bot — alternating small market orders (long/short flips) until target
-volume is reached.  Shows fee/PnL preview before start.  Auto-stops on
-completion.  Uses linked signer via trade_service.execute_market_order.
+Volume Bot cycle:
+1) Place a LIMIT order at current mid (alternating long/short each round)
+2) Wait until strategy interval elapses
+3) Cancel leftover open orders and close the opened position immediately
 """
 import logging
+import time
 
 from src.nadobro.config import EST_FEE_RATE, get_product_id
-from src.nadobro.services.trade_service import execute_market_order
-from src.nadobro.services.user_service import get_user_readonly_client
+from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
+from src.nadobro.services.user_service import get_user_readonly_client, get_user_nado_client
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +37,9 @@ def get_fee_pnl_preview(telegram_id: int, product: str, target_volume_usd: float
 
 def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = None) -> dict:
     """
-    One cycle: place a single small market flip (alternating long/short)
-    toward the cumulative target volume.
+    One round:
+      - open with LIMIT at mid
+      - on next eligible cycle (after interval), close immediately
 
     Expected state keys (managed by bot_runtime):
       - product            : e.g. "BTC"
@@ -57,6 +60,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
     last_side = state.get("last_side", "short")
     leverage = float(state.get("leverage") or 3.0)
     slippage_pct = float(state.get("slippage_pct") or 1.0)
+    interval_seconds = int(state.get("interval_seconds") or 30)
     flip_size_usd = float(state.get("flip_size_usd") or DEFAULT_FLIP_SIZE_USD)
 
     if flip_size_usd < MIN_FLIP_SIZE_USD:
@@ -88,31 +92,64 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
     if mid <= 0:
         return {"success": False, "error": "Could not fetch market price"}
 
-    size = max(this_flip_usd / mid, 0.0001)
+    phase = state.get("vol_phase", "idle")
+    now_ts = time.time()
 
-    is_long = last_side != "long"
+    if phase == "open_wait":
+        opened_at = float(state.get("vol_opened_at") or 0.0)
+        if opened_at > 0 and (now_ts - opened_at) < interval_seconds:
+            return {"success": True, "done": False, "action": "waiting"}
 
-    result = execute_market_order(
-        telegram_id,
-        product,
-        size,
-        is_long=is_long,
-        leverage=leverage,
-        slippage_pct=slippage_pct,
-        enforce_rate_limit=False,
-        passphrase=passphrase,
-    )
+        # Interval exhausted -> close immediately and clean any stale open orders.
+        signer_client = get_user_nado_client(telegram_id, passphrase=passphrase) if passphrase else None
+        if signer_client:
+            try:
+                for order in (client.get_open_orders(product_id) or []):
+                    digest = order.get("digest")
+                    if digest:
+                        signer_client.cancel_order(product_id, digest)
+            except Exception as e:
+                logger.warning("Volume bot order cancel sweep failed for user %s: %s", telegram_id, e)
 
-    if result.get("success"):
-        exec_price = float(result.get("price") or mid)
-        notional = size * exec_price
-        fee = notional * EST_FEE_RATE
+        pos = None
+        for p in (client.get_all_positions() or []):
+            if int(p.get("product_id", -1)) == product_id:
+                pos = p
+                break
 
-        volume_done += notional
-        fees_paid += fee
-        state["volume_done_usd"] = round(volume_done, 4)
-        state["fees_paid"] = round(fees_paid, 6)
-        state["last_side"] = "long" if is_long else "short"
+        if pos:
+            pos_size = abs(float(pos.get("amount", 0) or 0))
+            if pos_size > 0:
+                side = str(pos.get("side", "") or "").upper()
+                close_is_long = side == "SHORT"
+                close_result = execute_market_order(
+                    telegram_id,
+                    product,
+                    pos_size,
+                    is_long=close_is_long,
+                    leverage=leverage,
+                    slippage_pct=slippage_pct,
+                    enforce_rate_limit=False,
+                    passphrase=passphrase,
+                )
+                if not close_result.get("success"):
+                    return {
+                        "success": False,
+                        "error": close_result.get("error", "Close after interval failed"),
+                        "volume_done_usd": round(volume_done, 4),
+                        "fees_paid": round(fees_paid, 6),
+                    }
+                close_notional = pos_size * mid
+                close_fee = close_notional * EST_FEE_RATE
+                volume_done += close_notional
+                fees_paid += close_fee
+                state["volume_done_usd"] = round(volume_done, 4)
+                state["fees_paid"] = round(fees_paid, 6)
+
+        state["vol_phase"] = "idle"
+        state["vol_opened_at"] = 0.0
+        state["vol_position_size"] = 0.0
+        state["vol_position_side"] = None
 
         if target_volume > 0 and volume_done >= target_volume:
             state["running"] = False
@@ -121,10 +158,43 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
                 "done": True,
                 "volume_done_usd": round(volume_done, 4),
                 "fees_paid": round(fees_paid, 6),
-                "this_flip_notional": round(notional, 4),
-                "side": "LONG" if is_long else "SHORT",
                 "message": "Target volume reached — bot auto-stopped.",
             }
+
+        return {
+            "success": True,
+            "done": False,
+            "action": "closed_after_interval",
+            "volume_done_usd": round(volume_done, 4),
+            "fees_paid": round(fees_paid, 6),
+        }
+
+    size = max(this_flip_usd / mid, 0.0001)
+    is_long = last_side != "long"
+    open_result = execute_limit_order(
+        telegram_id,
+        product,
+        size,
+        mid,
+        is_long=is_long,
+        leverage=leverage,
+        enforce_rate_limit=False,
+        passphrase=passphrase,
+    )
+
+    if open_result.get("success"):
+        notional = size * mid
+        fee = notional * EST_FEE_RATE
+
+        volume_done += notional
+        fees_paid += fee
+        state["volume_done_usd"] = round(volume_done, 4)
+        state["fees_paid"] = round(fees_paid, 6)
+        state["last_side"] = "long" if is_long else "short"
+        state["vol_phase"] = "open_wait"
+        state["vol_opened_at"] = now_ts
+        state["vol_position_size"] = size
+        state["vol_position_side"] = "LONG" if is_long else "SHORT"
 
         return {
             "success": True,
@@ -132,14 +202,16 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
             "volume_done_usd": round(volume_done, 4),
             "target_volume_usd": target_volume,
             "fees_paid": round(fees_paid, 6),
-            "this_flip_notional": round(notional, 4),
+            "this_open_notional": round(notional, 4),
             "side": "LONG" if is_long else "SHORT",
+            "entry_price": round(mid, 8),
+            "action": "opened_limit_mid",
             "remaining_usd": round(max(target_volume - volume_done, 0), 4) if target_volume > 0 else None,
         }
 
     return {
         "success": False,
-        "error": result.get("error", "Market order failed"),
+        "error": open_result.get("error", "Limit order failed"),
         "volume_done_usd": round(volume_done, 4),
         "fees_paid": round(fees_paid, 6),
     }
