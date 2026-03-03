@@ -11,6 +11,9 @@ from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
 from src.nadobro.services.trade_service import close_all_positions
 from src.nadobro.services.user_service import get_user_nado_client, get_user_readonly_client, get_user
+from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.perf import timed_metric, record_metric
+from src.nadobro.services.execution_queue import enqueue_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -91,15 +94,16 @@ async def _notify(telegram_id: int, text: str):
 
 def _strategy_defaults(strategy: str) -> dict:
     presets = {
-        "mm": {"notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45},
-        "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60},
-        "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90},
+        "mm": {"notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "threshold_bp": 12.0, "close_offset_bp": 24.0},
+        "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0},
+        "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "auto_close_on_maintenance": 1.0},
         "vol": {"notional_usd": 100.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
+        "dca": {"notional_usd": 100.0, "interval_seconds": 60, "base_order_usd": 25.0, "dca_order_usd": 25.0, "max_dca_orders": 3},
     }
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
 
 
-SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol")
+SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol", "dca")
 
 
 def start_user_bot(
@@ -268,7 +272,11 @@ async def _bot_loop(telegram_id: int, network: str):
             if not state.get("running"):
                 break
             try:
-                await _run_cycle(telegram_id, network, state)
+                now_bucket = int(time.time() / max(1, RUNTIME_TICK_SECONDS))
+                await enqueue_strategy(
+                    {"telegram_id": telegram_id, "network": network},
+                    dedupe_key=f"{telegram_id}:{network}:{now_bucket}",
+                )
             except Exception as cycle_error:
                 logger.error("Cycle failure for user %s: %s", telegram_id, cycle_error, exc_info=True)
                 state["last_error"] = str(cycle_error)
@@ -280,10 +288,21 @@ async def _bot_loop(telegram_id: int, network: str):
         _tasks.pop(_task_key(telegram_id, network), None)
 
 
+async def handle_strategy_job(payload: dict):
+    telegram_id = int(payload.get("telegram_id"))
+    network = str(payload.get("network"))
+    state = _load_state(telegram_id, network)
+    if not state.get("running"):
+        return
+    cycle_started = time.perf_counter()
+    await _run_cycle(telegram_id, network, state)
+    record_metric("runtime.strategy_cycle.total", (time.perf_counter() - cycle_started) * 1000.0)
+
+
 def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dict,
                        client, mid: float, product_id: int, product: str, open_orders: list,
                        passphrase: str) -> dict:
-    from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
+    from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot, dca_bot
 
     if strategy in ("mm", "grid"):
         return mm_bot.run_cycle(
@@ -298,14 +317,26 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
         )
     elif strategy == "vol":
         return volume_bot.run_cycle(telegram_id, network, state, passphrase=passphrase)
+    elif strategy == "dca":
+        return dca_bot.run_cycle(
+            telegram_id, network, state,
+            client=client, mid=mid, product_id=product_id, product=product, passphrase=passphrase,
+        )
     else:
         return {"success": False, "error": f"Unknown strategy '{strategy}'"}
 
 
 async def _run_cycle(telegram_id: int, network: str, state: dict):
     if is_trading_paused():
+        if str(state.get("strategy", "")).lower() == "dn" and float(state.get("auto_close_on_maintenance") or 0) >= 0.5:
+            state["running"] = False
+            state["last_error"] = "Auto-closed on maintenance pause."
+            _save_state(telegram_id, network, state)
+            tk = _task_key(telegram_id, network)
+            await run_blocking(close_all_positions, telegram_id, _session_passphrases.get(tk))
+            await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
         return
-    user = get_user(telegram_id)
+    user = await run_blocking(get_user, telegram_id)
     if not user:
         state["running"] = False
         _save_state(telegram_id, network, state)
@@ -344,11 +375,12 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")
 
-    client = get_user_readonly_client(telegram_id)
+    client = await run_blocking(get_user_readonly_client, telegram_id)
     if not client:
         raise RuntimeError("Wallet client unavailable")
 
-    mp = client.get_market_price(product_id)
+    with timed_metric("runtime.market_price.fetch"):
+        mp = await run_blocking(client.get_market_price, product_id)
     mid = float(mp.get("mid") or 0.0)
     if mid <= 0:
         raise RuntimeError("Could not fetch market price")
@@ -366,7 +398,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
         state["running"] = False
         state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
         _save_state(telegram_id, network, state)
-        close_all_positions(telegram_id, passphrase=session_passphrase)
+        await run_blocking(close_all_positions, telegram_id, session_passphrase)
         await _notify(
             telegram_id,
             f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}) - SL hit ({move_pct:.2f}%).",
@@ -376,20 +408,22 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
         state["running"] = False
         state["last_error"] = None
         _save_state(telegram_id, network, state)
-        close_all_positions(telegram_id, passphrase=session_passphrase)
+        await run_blocking(close_all_positions, telegram_id, session_passphrase)
         await _notify(
             telegram_id,
             f"✅ {strategy.upper()} target reached on {product}-PERP ({network}) - TP hit ({move_pct:.2f}%).",
         )
         return
 
-    open_orders = client.get_open_orders(product_id)
+    with timed_metric("runtime.open_orders.fetch"):
+        open_orders = await run_blocking(client.get_open_orders, product_id)
 
-    result = _dispatch_strategy(
-        strategy, telegram_id, network, state,
-        client=client, mid=mid, product_id=product_id,
-        product=product, open_orders=open_orders, passphrase=session_passphrase,
-    )
+    with timed_metric(f"runtime.strategy.dispatch.{strategy}"):
+        result = await run_blocking(
+            _dispatch_strategy,
+            strategy, telegram_id, network, state,
+            client, mid, product_id, product, open_orders, session_passphrase,
+        )
 
     if not state.get("running", True):
         _save_state(telegram_id, network, state)
@@ -400,6 +434,9 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
     state["runs"] = int(state.get("runs") or 0) + 1
     state["last_error"] = result.get("error")
     _save_state(telegram_id, network, state)
+    drift_seconds = max(0.0, state["last_run_ts"] - last_run - interval) if last_run > 0 else 0.0
+    if drift_seconds > 0:
+        record_metric("runtime.cycle_drift_ms", drift_seconds * 1000.0)
 
     if not result.get("success", True):
         error_msg = str(result.get("error", "unknown"))[:300]

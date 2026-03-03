@@ -45,12 +45,15 @@ from src.nadobro.services.onboarding_service import (
     get_new_onboarding_state,
 )
 from src.nadobro.config import get_product_name, get_product_id, PRODUCTS
+from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
 
 logger = logging.getLogger(__name__)
 LIVE_PRICE_TASKS = {}
 
 
 async def handle_callback(update: Update, context: CallbackContext):
+    started = time.perf_counter()
     query = update.callback_query
     await query.answer()
     await query.message.chat.send_action(ChatAction.TYPING)
@@ -123,6 +126,8 @@ async def handle_callback(update: Update, context: CallbackContext):
             )
         except Exception:
             pass
+    finally:
+        log_slow("callback.total", threshold_ms=800.0, started_at=started)
 
 
 # New onboarding (language → ToS) message text
@@ -495,10 +500,11 @@ async def _handle_positions(query, data, telegram_id, context):
             )
             return
 
-        positions = client.get_all_positions()
+        with timed_metric("cb.positions.view"):
+            positions = await run_blocking(client.get_all_positions)
         prices = None
         try:
-            prices = client.get_all_market_prices()
+            prices = await run_blocking(client.get_all_market_prices)
         except Exception:
             pass
         msg = fmt_positions(positions, prices)
@@ -535,13 +541,14 @@ async def _handle_portfolio(query, data, telegram_id):
         )
         return
 
-    positions = client.get_all_positions() or []
+    with timed_metric("cb.portfolio.view"):
+        positions = (await run_blocking(client.get_all_positions)) or []
     prices = None
     try:
-        prices = client.get_all_market_prices()
+        prices = await run_blocking(client.get_all_market_prices)
     except Exception:
         pass
-    stats = get_trade_analytics(telegram_id)
+    stats = await run_blocking(get_trade_analytics, telegram_id)
     msg = fmt_portfolio(stats, positions, prices)
     await query.edit_message_text(
         msg,
@@ -664,7 +671,8 @@ async def _handle_market(query, data, telegram_id):
 
     elif action == "prices":
         await _stop_live_task(task_key)
-        prices = client.get_all_market_prices()
+        with timed_metric("cb.market.prices"):
+            prices = await run_blocking(client.get_all_market_prices)
         msg = fmt_prices(prices)
         await query.edit_message_text(
             msg,
@@ -675,7 +683,8 @@ async def _handle_market(query, data, telegram_id):
     elif action == "funding":
         await _stop_live_task(task_key)
         funding = {}
-        all_rates = client.get_all_funding_rates()
+        with timed_metric("cb.market.funding"):
+            all_rates = await run_blocking(client.get_all_funding_rates)
         for name, info in PRODUCTS.items():
             if info["type"] == "perp":
                 fr = all_rates.get(info["id"])
@@ -714,7 +723,7 @@ async def _handle_market(query, data, telegram_id):
 
         await _stop_live_task(task_key)
         pid = get_product_id(product)
-        mp = client.get_market_price(pid) if pid is not None else {"mid": 0}
+        mp = await run_blocking(client.get_market_price, pid) if pid is not None else {"mid": 0}
         initial = _fmt_live_last_price(product, mp.get("mid", 0))
         message = await query.edit_message_text(
             initial,
@@ -907,34 +916,39 @@ async def _handle_settings(query, data, telegram_id, context):
 
 
 async def _handle_strategy(query, data, context, telegram_id):
+    supported = ("mm", "grid", "dn", "vol", "dca")
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     strategy_id = parts[2] if len(parts) > 2 else ""
 
     if action == "preview":
-        if strategy_id not in ("mm", "grid", "dn", "vol"):
+        if strategy_id not in supported:
             return
         selected_product = context.user_data.get(f"strategy_pair:{strategy_id}", "BTC")
+        with timed_metric("cb.strategy.preview"):
+            preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
         await query.edit_message_text(
-            _build_strategy_preview_text(telegram_id, strategy_id, selected_product),
+            preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_action_kb(strategy_id, selected_product),
         )
     elif action == "pair" and len(parts) >= 4:
         strategy_id = parts[2]
         selected_product = parts[3].upper()
-        if strategy_id not in ("mm", "grid", "dn", "vol"):
+        if strategy_id not in supported:
             return
         if selected_product not in ("BTC", "ETH", "SOL"):
             return
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
+        with timed_metric("cb.strategy.preview"):
+            preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
         await query.edit_message_text(
-            _build_strategy_preview_text(telegram_id, strategy_id, selected_product),
+            preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_action_kb(strategy_id, selected_product),
         )
     elif action == "config":
-        if strategy_id not in ("mm", "grid", "dn", "vol"):
+        if strategy_id not in supported:
             return
         network, settings = get_user_settings(telegram_id)
         conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -947,14 +961,18 @@ async def _handle_strategy(query, data, context, telegram_id):
         strategy_id = parts[2]
         field = parts[3]
         raw_value = parts[4]
-        if strategy_id not in ("mm", "grid", "dn", "vol"):
+        if strategy_id not in supported:
             return
         value = float(raw_value)
+        int_fields = {
+            "interval_seconds", "levels", "max_open_orders", "max_dca_orders",
+            "auto_close_on_maintenance", "is_long_bias",
+        }
 
         def _mutate(s):
             strategies = s.setdefault("strategies", {})
             cfg = strategies.setdefault(strategy_id, {})
-            if field == "interval_seconds":
+            if field in int_fields:
                 cfg[field] = int(value)
             else:
                 cfg[field] = value
@@ -969,9 +987,14 @@ async def _handle_strategy(query, data, context, telegram_id):
     elif action == "input" and len(parts) >= 4:
         strategy_id = parts[2]
         field = parts[3]
-        if strategy_id not in ("mm", "grid", "dn", "vol"):
+        if strategy_id not in supported:
             return
-        if field not in ("notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct"):
+        allowed_inputs = (
+            "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
+            "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
+            "base_order_usd", "dca_order_usd", "max_dca_orders", "deviation_pct", "size_multiplier",
+        )
+        if field not in allowed_inputs:
             return
         context.user_data["pending_strategy_input"] = {
             "strategy": strategy_id,
@@ -983,6 +1006,16 @@ async def _handle_strategy(query, data, context, telegram_id):
             "interval_seconds": "Enter loop interval seconds \\(example: `45`\\)",
             "tp_pct": "Enter take profit % \\(example: `1\\.2`\\)",
             "sl_pct": "Enter stop loss % \\(example: `0\\.7`\\)",
+            "levels": "Enter grid levels \\(example: `4`\\)",
+            "min_range_pct": "Enter min range % \\(example: `1\\.0`\\)",
+            "max_range_pct": "Enter max range % \\(example: `2\\.0`\\)",
+            "threshold_bp": "Enter threshold in bps \\(example: `12`\\)",
+            "close_offset_bp": "Enter close offset in bps \\(example: `25`\\)",
+            "base_order_usd": "Enter base order USD \\(example: `25`\\)",
+            "dca_order_usd": "Enter DCA order USD \\(example: `30`\\)",
+            "max_dca_orders": "Enter max DCA orders \\(example: `3`\\)",
+            "deviation_pct": "Enter DCA deviation % \\(example: `1\\.2`\\)",
+            "size_multiplier": "Enter DCA size multiplier \\(example: `1\\.5`\\)",
         }
         await query.edit_message_text(
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -1001,6 +1034,8 @@ async def _handle_strategy(query, data, context, telegram_id):
     elif action == "start" and len(parts) >= 4:
         strategy_id = parts[2]
         product = parts[3]
+        if strategy_id not in supported:
+            return
         if not is_new_onboarding_complete(telegram_id):
             await query.edit_message_text(
                 "⚠️ Complete setup first (language + accept terms).",
@@ -1034,6 +1069,11 @@ async def _handle_strategy(query, data, context, telegram_id):
         text = fmt_status_overview(st, readiness)
         if st.get("last_error"):
             text += f"\nLast error: {escape_md(str(st.get('last_error')))}"
+        perf_lines = summary_lines(top_n=5)
+        if perf_lines:
+            text += "\n\n*Perf Snapshot*"
+            for line in perf_lines:
+                text += f"\n• {escape_md(line)}"
         await query.edit_message_text(
             text,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -1058,18 +1098,47 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
-    return (
+    base = (
         f"⚙️ *{escape_md(strategy.upper())} PARAMS \\| ROBOTIC MODE*\n\n"
         f"Mode: *{escape_md(network.upper())}*\n"
         f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
         f"Interval: *{escape_md(f'{interval_seconds}s')}*\n"
         f"TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*\n\n"
-        "Use presets or set custom values below\\."
     )
+    extra = ""
+    if strategy == "grid":
+        min_range = f"{float(conf.get('min_range_pct', 1.0)):.2f}%"
+        max_range = f"{float(conf.get('max_range_pct', 1.0)):.2f}%"
+        extra = (
+            f"Grid Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
+            f"Range: *{escape_md(min_range)} \\- {escape_md(max_range)}*\n\n"
+        )
+    elif strategy == "mm":
+        threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
+        close_offset = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
+        extra = (
+            f"Threshold: *{escape_md(threshold)}* \\| "
+            f"Close Offset: *{escape_md(close_offset)}*\n\n"
+        )
+    elif strategy == "dn":
+        auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
+        extra = f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+    elif strategy == "dca":
+        base_order = f"${float(conf.get('base_order_usd', 25.0)):,.2f}"
+        dca_order = f"${float(conf.get('dca_order_usd', 25.0)):,.2f}"
+        deviation = f"{float(conf.get('deviation_pct', 1.0)):.2f}%"
+        multiplier = f"{float(conf.get('size_multiplier', 1.5)):.2f}x"
+        extra = (
+            f"Base/DCA: *{escape_md(base_order)}* / *{escape_md(dca_order)}*\n"
+            f"Max DCA: *{escape_md(str(int(conf.get('max_dca_orders', 3))))}* \\| "
+            f"Deviation: *{escape_md(deviation)}* \\| "
+            f"Multiplier: *{escape_md(multiplier)}*\n\n"
+        )
+    return base + extra + "Use presets or set custom values below\\."
 
 
 def _strategy_config_kb(strategy: str):
-    return InlineKeyboardMarkup([
+    rows = [
         [
             InlineKeyboardButton("Notional $50", callback_data=f"strategy:set:{strategy}:notional_usd:50"),
             InlineKeyboardButton("Notional $100", callback_data=f"strategy:set:{strategy}:notional_usd:100"),
@@ -1108,10 +1177,69 @@ def _strategy_config_kb(strategy: str):
             InlineKeyboardButton("Custom TP", callback_data=f"strategy:input:{strategy}:tp_pct"),
             InlineKeyboardButton("Custom SL", callback_data=f"strategy:input:{strategy}:sl_pct"),
         ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data=f"strategy:preview:{strategy}"),
-        ],
-    ])
+    ]
+    if strategy == "grid":
+        rows.extend([
+            [
+                InlineKeyboardButton("Levels 3", callback_data=f"strategy:set:{strategy}:levels:3"),
+                InlineKeyboardButton("Levels 5", callback_data=f"strategy:set:{strategy}:levels:5"),
+                InlineKeyboardButton("Levels 7", callback_data=f"strategy:set:{strategy}:levels:7"),
+            ],
+            [
+                InlineKeyboardButton("Range 1%/1%", callback_data=f"strategy:set:{strategy}:min_range_pct:1"),
+                InlineKeyboardButton("Range 1%/2%", callback_data=f"strategy:set:{strategy}:max_range_pct:2"),
+            ],
+            [
+                InlineKeyboardButton("Custom Levels", callback_data=f"strategy:input:{strategy}:levels"),
+                InlineKeyboardButton("Custom Range", callback_data=f"strategy:input:{strategy}:max_range_pct"),
+            ],
+        ])
+    if strategy == "mm":
+        rows.extend([
+            [
+                InlineKeyboardButton("Threshold 8bp", callback_data=f"strategy:set:{strategy}:threshold_bp:8"),
+                InlineKeyboardButton("Threshold 12bp", callback_data=f"strategy:set:{strategy}:threshold_bp:12"),
+                InlineKeyboardButton("Threshold 20bp", callback_data=f"strategy:set:{strategy}:threshold_bp:20"),
+            ],
+            [
+                InlineKeyboardButton("Close 20bp", callback_data=f"strategy:set:{strategy}:close_offset_bp:20"),
+                InlineKeyboardButton("Close 30bp", callback_data=f"strategy:set:{strategy}:close_offset_bp:30"),
+            ],
+            [
+                InlineKeyboardButton("Custom Threshold", callback_data=f"strategy:input:{strategy}:threshold_bp"),
+                InlineKeyboardButton("Custom Close", callback_data=f"strategy:input:{strategy}:close_offset_bp"),
+            ],
+        ])
+    if strategy == "dn":
+        rows.extend([
+            [
+                InlineKeyboardButton("Auto-Close ON", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:1"),
+                InlineKeyboardButton("Auto-Close OFF", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:0"),
+            ],
+        ])
+    if strategy == "dca":
+        rows.extend([
+            [
+                InlineKeyboardButton("Base $25", callback_data=f"strategy:set:{strategy}:base_order_usd:25"),
+                InlineKeyboardButton("Base $50", callback_data=f"strategy:set:{strategy}:base_order_usd:50"),
+                InlineKeyboardButton("DCA $25", callback_data=f"strategy:set:{strategy}:dca_order_usd:25"),
+            ],
+            [
+                InlineKeyboardButton("Max 3", callback_data=f"strategy:set:{strategy}:max_dca_orders:3"),
+                InlineKeyboardButton("Max 5", callback_data=f"strategy:set:{strategy}:max_dca_orders:5"),
+                InlineKeyboardButton("Dev 1%", callback_data=f"strategy:set:{strategy}:deviation_pct:1"),
+            ],
+            [
+                InlineKeyboardButton("Mul 1.5x", callback_data=f"strategy:set:{strategy}:size_multiplier:1.5"),
+                InlineKeyboardButton("Mul 2.0x", callback_data=f"strategy:set:{strategy}:size_multiplier:2.0"),
+            ],
+            [
+                InlineKeyboardButton("Custom Base", callback_data=f"strategy:input:{strategy}:base_order_usd"),
+                InlineKeyboardButton("Custom DCA", callback_data=f"strategy:input:{strategy}:dca_order_usd"),
+            ],
+        ])
+    rows.append([InlineKeyboardButton("◀ Back", callback_data=f"strategy:preview:{strategy}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: str) -> str:
@@ -1120,6 +1248,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         "grid": "Grid Reactor",
         "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",
+        "dca": "DCA Engine",
     }
     network, settings = get_user_settings(telegram_id)
     conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -1191,8 +1320,41 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             "Executes balanced two\\-sided flow with risk caps "
             "to generate consistent trading activity and volume\\."
         ),
+        "dca": (
+            "Opens a base position and adds DCA legs as price moves against entry, "
+            "using configured deviation and size multiplier controls\\."
+        ),
     }
     selected_explainer = how_it_works.get(strategy_id, "Automates recurring trade cycles with configured risk controls\\.")
+    extra_cfg = ""
+    if strategy_id == "grid":
+        min_range = f"{float(conf.get('min_range_pct', 1.0)):.2f}%"
+        max_range = f"{float(conf.get('max_range_pct', 1.0)):.2f}%"
+        extra_cfg = (
+            f"\nGrid Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
+            f"Range: *{escape_md(min_range)} \\- {escape_md(max_range)}*"
+        )
+    elif strategy_id == "mm":
+        threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
+        close_offset = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
+        extra_cfg = (
+            f"\nThreshold: *{escape_md(threshold)}* \\| "
+            f"Close Offset: *{escape_md(close_offset)}*"
+        )
+    elif strategy_id == "dn":
+        auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
+        extra_cfg = f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
+    elif strategy_id == "dca":
+        base_order = f"${float(conf.get('base_order_usd', 25.0)):,.2f}"
+        dca_order = f"${float(conf.get('dca_order_usd', 25.0)):,.2f}"
+        deviation = f"{float(conf.get('deviation_pct', 1.0)):.2f}%"
+        multiplier = f"{float(conf.get('size_multiplier', 1.5)):.2f}x"
+        extra_cfg = (
+            f"\nBase/DCA: *{escape_md(base_order)}* / *{escape_md(dca_order)}*"
+            f"\nMax DCA: *{escape_md(str(int(conf.get('max_dca_orders', 3))))}* \\| "
+            f"Deviation: *{escape_md(deviation)}* \\| "
+            f"Multiplier: *{escape_md(multiplier)}*"
+        )
 
     return (
         f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
@@ -1213,7 +1375,8 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}*\n\n"
         "*04 STRATEGY CONFIGURATION*\n"
         f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
-        f"Interval: *{escape_md(f'{interval_seconds}s')}* \\| TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*\n\n"
+        f"Interval: *{escape_md(f'{interval_seconds}s')}* \\| TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*"
+        f"{extra_cfg}\n\n"
         "*05 PRE\\-TRADE ANALYTICS*\n"
         f"Available Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}*\n"
         f"Required Margin: *{escape_md(f'${required_margin:,.2f}')}*\n"
@@ -1298,7 +1461,7 @@ async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int,
             if pid is None:
                 break
 
-            mp = client.get_market_price(pid)
+            mp = await run_blocking(client.get_market_price, pid)
             text = _fmt_live_last_price(product, mp.get("mid", 0))
             try:
                 await bot.edit_message_text(

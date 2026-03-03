@@ -7,6 +7,8 @@ import psycopg2.extras
 logger = logging.getLogger(__name__)
 
 _pool = None
+_DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
+_DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "12"))
 
 def _prepare_db_url(url: str) -> str:
     import re
@@ -56,8 +58,8 @@ def get_pool():
         url = _prepare_db_url(url)
         if db_label == "Supabase":
             url = _resolve_host_ipv4(url)
-        _pool = psycopg2.pool.ThreadedConnectionPool(1, 5, url)
-        logger.info("PostgreSQL connection pool initialized (%s)", db_label)
+        _pool = psycopg2.pool.ThreadedConnectionPool(_DB_POOL_MIN, _DB_POOL_MAX, url)
+        logger.info("PostgreSQL connection pool initialized (%s) min=%s max=%s", db_label, _DB_POOL_MIN, _DB_POOL_MAX)
     return _pool
 
 
@@ -78,7 +80,6 @@ def query_one(sql, params=None):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
-            conn.commit()
             return dict(row) if row else None
     except Exception:
         conn.rollback()
@@ -93,7 +94,6 @@ def query_all(sql, params=None):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
-            conn.commit()
             return [dict(r) for r in rows]
     except Exception:
         conn.rollback()
@@ -136,7 +136,6 @@ def query_count(sql, params=None):
         with conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
-            conn.commit()
             return row[0] if row else 0
     except Exception:
         conn.rollback()

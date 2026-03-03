@@ -39,6 +39,22 @@ fly secrets set \
   SESSION_SECRET="your-session-secret"
 ```
 
+### Optional: Enable webhook transport (recommended for speed and scale)
+
+```bash
+fly secrets set \
+  TELEGRAM_TRANSPORT="webhook" \
+  TELEGRAM_WEBHOOK_URL="https://your-app-name.fly.dev/telegram/webhook" \
+  TELEGRAM_WEBHOOK_PATH="/telegram/webhook" \
+  TELEGRAM_WEBHOOK_SECRET="your-long-random-secret"
+```
+
+If you want to keep polling mode, set:
+
+```bash
+fly secrets set TELEGRAM_TRANSPORT="polling"
+```
+
 ## Step 4: Deploy
 
 ```bash
@@ -53,7 +69,7 @@ This builds the Docker image and deploys it to the Amsterdam region.
 fly logs
 ```
 
-You should see the bot starting up and polling for Telegram updates.
+You should see the bot starting in either polling or webhook mode, depending on `TELEGRAM_TRANSPORT`.
 
 ## Updating the bot
 
@@ -97,3 +113,23 @@ fly scale count 1   # Ensure 1 machine is running
 
 **Changing regions:**
 - Edit `primary_region` in `fly.toml` and redeploy
+
+## Scale Path (Polling -> Webhook)
+
+Current runtime uses Telegram polling, which should run as a single ingress instance.
+
+### Phase A (now)
+- Keep one ingress machine always on (`auto_stop_machines=off`, `min_machines_running=1`)
+- Scale internal workers using:
+  - `NADO_STRATEGY_WORKERS` (default `2`)
+  - `NADO_ALERT_WORKERS` (default `1`)
+
+### Phase B (recommended for high concurrency)
+1. Set webhook secrets (`TELEGRAM_TRANSPORT`, `TELEGRAM_WEBHOOK_URL`, `TELEGRAM_WEBHOOK_PATH`, `TELEGRAM_WEBHOOK_SECRET`).
+2. Keep bot ingress stateless and enqueue all heavy work.
+3. Run dedicated strategy/alert workers separately.
+4. Use idempotency keys on jobs to avoid duplicate execution.
+
+### Phase C
+- Horizontally scale webhook ingress replicas behind Fly load balancing.
+- Keep strategy workers independently scaled from ingress.
