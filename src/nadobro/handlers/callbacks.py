@@ -15,7 +15,7 @@ from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
     trade_confirm_kb, positions_kb, wallet_kb, wallet_kb_not_linked, alerts_kb,
     alert_product_kb, alert_delete_kb, settings_kb, settings_leverage_kb,
-    settings_slippage_kb, close_product_kb, confirm_close_all_kb, back_kb,
+    settings_slippage_kb, settings_language_kb, close_product_kb, confirm_close_all_kb, back_kb,
     risk_profile_kb, strategy_hub_kb, strategy_action_kb,
     onboarding_language_kb,
     markets_kb, live_price_asset_kb, live_price_controls_kb,
@@ -26,7 +26,7 @@ from src.nadobro.handlers.trade_card import handle_trade_card_callback
 from src.nadobro.handlers.home_card import build_home_card_text
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_readonly_client, get_user_wallet_info,
-    switch_network, get_user, remove_user_private_key, ensure_active_wallet_ready,
+    switch_network, get_user, remove_user_private_key, ensure_active_wallet_ready, update_user_language,
 )
 from src.nadobro.services.trade_service import (
     execute_market_order, execute_limit_order, close_position,
@@ -842,6 +842,27 @@ async def _handle_settings(query, data, telegram_id, context):
             "📊 *Select Slippage Tolerance*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_slippage_kb(),
+        )
+    elif action == "language_menu":
+        user = get_user(telegram_id)
+        lang = (getattr(user, "language", None) or "en").lower()
+        await query.edit_message_text(
+            "🌐 *Select Language*\n\nChoose your preferred language for onboarding and UI copy\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=settings_language_kb(lang),
+        )
+    elif action == "language" and len(parts) >= 3:
+        lang = (parts[2] or "").lower()
+        supported = {"en", "zh", "fr", "ar", "ru", "ko"}
+        if lang not in supported:
+            return
+        update_user_language(telegram_id, lang)
+        user = get_user(telegram_id)
+        current = (getattr(user, "language", None) or lang).lower()
+        await query.edit_message_text(
+            f"✅ Language updated to *{escape_md(lang.upper())}*\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=settings_language_kb(current),
         )
 
     elif action == "slippage" and len(parts) >= 3:

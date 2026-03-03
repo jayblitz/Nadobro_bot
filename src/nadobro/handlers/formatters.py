@@ -1,6 +1,9 @@
+import logging
 import re
 from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
+
+logger = logging.getLogger(__name__)
 
 
 def escape_md(text):
@@ -13,19 +16,51 @@ def escape_md(text):
 
 
 def _calc_position_pnl(position: dict, current_price: float) -> Optional[float]:
-    v_quote = position.get("v_quote_balance")
-    signed_amount = position.get("signed_amount")
-    if v_quote is not None and signed_amount is not None and current_price:
-        return v_quote + signed_amount * current_price
-    entry = float(position.get("price", 0) or 0)
-    amount = abs(float(position.get("amount", 0) or 0))
-    if current_price and entry and amount:
-        side = position.get("side", "LONG")
+    def _inventory_pnl() -> Optional[float]:
+        v_quote = position.get("v_quote_balance")
+        signed_amount = position.get("signed_amount")
+        if v_quote is None or signed_amount is None or not current_price:
+            return None
+        try:
+            return float(v_quote) + float(signed_amount) * float(current_price)
+        except Exception:
+            return None
+
+    def _directional_pnl() -> Optional[float]:
+        entry = float(position.get("price", 0) or 0)
+        amount = abs(float(position.get("amount", 0) or 0))
+        if not current_price or not entry or not amount:
+            return None
+        side = str(position.get("side", "LONG")).upper()
         if side == "LONG":
-            return (current_price - entry) * amount
-        else:
-            return (entry - current_price) * amount
-    return None
+            return (float(current_price) - entry) * amount
+        return (entry - float(current_price)) * amount
+
+    inventory = _inventory_pnl()
+    directional = _directional_pnl()
+
+    if inventory is None:
+        return directional
+    if directional is None:
+        return inventory
+
+    diff = abs(inventory - directional)
+    scale = max(abs(inventory), abs(directional), 1.0)
+    # When formulas diverge materially, directional (entry/side based) is
+    # typically closer to platform UI expectations for a single position row.
+    if diff > max(25.0, scale * 0.35):
+        logger.warning(
+            "PnL formula divergence for %s: side=%s entry=%.8f mark=%.8f inv=%.4f dir=%.4f",
+            position.get("product_name", "unknown"),
+            str(position.get("side", "LONG")).upper(),
+            float(position.get("price", 0) or 0),
+            float(current_price or 0),
+            inventory,
+            directional,
+        )
+        return directional
+
+    return inventory
 
 
 def fmt_price(price, product="BTC"):
