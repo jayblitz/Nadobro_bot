@@ -63,6 +63,7 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 - Capped at 20,000 USDT0 per account during Private Alpha
 - Pool 0 cannot be liquidated even in unhealthy state
 - Variable yields shaped by market dynamics
+- NLP holders earn points based on their vault share
 
 ## MARGIN TYPES
 
@@ -148,8 +149,20 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 ## FEES
 - Taker fees as low as 1.5 bps (0.015%)
 - Maker rebates up to -0.8 bps (-0.008%)
-- Volume-based fee tiers
+- Volume-based fee tiers — higher 30-day volume means lower fees
 - NFT holders (Templars of the Storm) get automatic fee tier benefits
+- Deposit: no fees
+- Withdrawal: network gas fees only
+- Subaccount transfers: $1 USDT0 (standard), $0.10 (isolated)
+
+### Fee Tier Schedule
+- Tier 1 (default): Taker 3.0 bps, Maker 0.0 bps
+- Tier 2 ($1M+ 30d volume): Taker 2.5 bps, Maker -0.2 bps
+- Tier 3 ($5M+ 30d volume): Taker 2.0 bps, Maker -0.4 bps
+- Tier 4 ($25M+ 30d volume): Taker 1.8 bps, Maker -0.6 bps
+- Tier 5 ($100M+ 30d volume): Taker 1.5 bps, Maker -0.8 bps
+- Fee tiers are based on rolling 30-day trading volume (maker + taker combined)
+- Tiers reset on the 1st of each month (UTC)
 
 ## POINTS & REWARDS PROGRAM
 
@@ -159,18 +172,25 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 - Nado is invite-only during Season 1 — invite codes are earned through your own trading activity
 - Points can be tracked on the Nado app and Referrals page
 - Docs: https://docs.nado.xyz/points/referrals
+- Points are distributed in weekly epochs
+- The total points distributed per week varies based on overall platform activity and is determined by the Nado team
+- Exact weekly totals are not publicly disclosed and may change week to week
+- Points are relative — your share depends on your activity compared to other traders
 
 ### How to Earn Points
-- **Trade actively**: Higher trading volume = more points and better fee tiers
-- **Refer traders**: Earn points when referred users trade on Nado
+- Trade actively: Higher trading volume = more points and better fee tiers
+- Provide liquidity: NLP vault depositors earn points proportional to their share
+- Refer traders: Earn points when referred users trade on Nado
   - Multi-level rewards: earn from 1st, 2nd, and 3rd level referrals
   - Points scale with the referred user's trading volume
-- **NFT multipliers**: Templars of the Storm NFT holders get points multipliers based on Wind Force tier
-- **Invite codes**: Unlock more invite codes by trading more
+- NFT multipliers: Templars of the Storm NFT holders get points multipliers based on Wind Force tier
+- Invite codes: Unlock more invite codes by trading more
+- Maintain positions: Active position holding contributes to point earning
 
 ### Anti-Farming Rules
 - Non-organic behavior (referral farming, coordinated low-quality activity) results in reduced or zero points for that weekly epoch
 - System designed to reward real growth and active participation, not inactive accounts
+- Wash trading or artificial volume will be penalized
 
 ### Volume-Based Fee Tiers
 - 30-day rolling trading volume (maker + taker) determines your fee tier
@@ -184,6 +204,53 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 - Fee tier benefits based on Wind Force level
 - Tradeable on OpenSea: https://opensea.io/collection/templars-of-the-storm
 - Long-term identity layer within Nado ecosystem
+- NFT holders get automatic fee discounts and points boosts
+
+## GETTING STARTED
+
+### Step-by-Step Guide
+1. Visit https://www.nado.xyz/ and connect your wallet (MetaMask, WalletConnect, etc.)
+2. You need an invite code to join during Season 1 — get one from an existing user or the community
+3. Switch your wallet to the Ink network (Nado will prompt you)
+4. Deposit USDT0 into your account (minimum $5 for subaccount creation)
+5. Start trading — choose a market (BTC-PERP, ETH-PERP, etc.) and place your first order
+6. Enable 1-Click Trading for faster order execution (generates a linked signer key)
+
+### Wallet Requirements
+- Any EVM-compatible wallet works (MetaMask, Rabby, WalletConnect, Coinbase Wallet)
+- Must be connected to Ink L2 network
+- Need USDT0 for trading (bridge from other chains if needed)
+- Small amount of ETH on Ink for gas fees
+
+### 1-Click Trading (Linked Signer)
+- Generates a session key that can sign trades on your behalf
+- Eliminates wallet popup for every trade — much faster execution
+- Key can be revoked anytime from the Nado app
+- Does NOT give access to withdraw funds — only trading operations
+
+## SUPPORTED MARKETS
+
+### Perpetual Markets
+- BTC-PERP (Bitcoin) — up to 20x leverage
+- ETH-PERP (Ethereum) — up to 20x leverage
+- SOL-PERP (Solana) — up to 20x leverage
+- XRP-PERP (Ripple) — up to 20x leverage
+- BNB-PERP (Binance Coin) — up to 20x leverage
+- LINK-PERP (Chainlink) — up to 20x leverage
+- DOGE-PERP (Dogecoin) — up to 20x leverage
+- AVAX-PERP (Avalanche) — up to 20x leverage
+
+### Spot Markets
+- wETH (Wrapped Ethereum)
+- USDT0 (Tether)
+- kBTC (Kraken BTC)
+
+### Funding Rates
+- Perpetual positions incur funding payments
+- Funding rate is calculated based on the difference between perp price and oracle price
+- Positive rate: longs pay shorts; Negative rate: shorts pay longs
+- Funding is continuously applied to open positions
+- Check current funding rates on the Nado app or via API
 
 ## DEVELOPER RESOURCES
 
@@ -223,12 +290,62 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 4. Place order using PlaceOrderParams
 5. Verify with get_subaccount_open_orders
 
-## SUPPORTED MARKETS
-BTC-PERP, ETH-PERP, SOL-PERP, XRP-PERP, BNB-PERP, LINK-PERP, DOGE-PERP, AVAX-PERP
-Spot: wETH, USDT0, kBTC
-
 ## BLOCKCHAIN
 - Built on Ink L2 (by Kraken)
 - EVM-compatible
 - Self-custody: assets locked in on-chain smart contracts
 - MEV-proof: batched settlement makes MEV extraction uneconomical
+- Ink is an Optimistic Rollup on Ethereum
+- Fast finality with low gas fees
+
+## SECURITY
+- Non-custodial: Nado never holds your private keys or funds
+- Assets are locked in audited on-chain smart contracts
+- The off-chain sequencer (orderbook) cannot steal funds, censor trades, or forge signatures
+- Oracle prices from Chaos Oracle network ensure fair liquidation pricing
+- Insurance fund protects against bad debt from liquidations
+- Regular security audits and bug bounty program
+
+## NADOBRO BOT
+- Nadobro is a Telegram bot for trading on Nado DEX
+- Supports natural language trading: "buy 0.01 BTC 5x market"
+- Features: live market data, wallet management, trade execution, price alerts, automated strategies
+- Strategies available: Market Making, Delta Neutral, Volume Bot
+- Uses 1-Click Trading model — generates a linked signer encrypted with your passphrase
+- Supports both testnet and mainnet
+- Portfolio view shows live positions, PnL, and trading stats
+
+## FAQ
+
+### What is Nado?
+Nado is a high-performance CLOB (Central Limit Order Book) DEX built on Ink L2 blockchain. It offers perpetual futures and spot trading with unified margin, backed by the team behind Kraken.
+
+### How do I get an invite code?
+During Season 1, Nado is invite-only. You can get an invite code from existing Nado users, the Telegram community, or through trading activity on the platform.
+
+### What is USDT0?
+USDT0 is the primary settlement currency on Nado. It is Tether (USDT) bridged to the Ink L2 network. You need USDT0 to trade and it serves as collateral for positions.
+
+### What is the minimum deposit?
+The minimum deposit to create a subaccount is $5 USDT0. This is required before you can start trading.
+
+### How does unified margin work?
+Unified margin treats your entire account as one collateral pool. Your deposits, spot positions, and unrealized PnL all count as collateral across all your positions. This means profits from one position can offset losses in another, giving you better capital efficiency.
+
+### What are the trading fees?
+Default fees are 3.0 bps taker / 0.0 bps maker. As your 30-day trading volume increases, fees decrease down to 1.5 bps taker / -0.8 bps maker rebate at the highest tier ($100M+ volume). NFT holders get additional discounts.
+
+### Is Nado safe? Who is behind it?
+Nado is backed by the Ink Foundation (created by Kraken, a major crypto exchange). It is non-custodial — your funds are locked in audited smart contracts on-chain. The sequencer cannot access, steal, or freeze your funds.
+
+### What is NLP and how do I earn yield?
+NLP (Nado Liquidity Provider) lets you deposit USDT0 into a vault that provides liquidity for perpetual markets. You earn passive yields from market-making and liquidation activities. There is a 4-day lock period after depositing.
+
+### How do points work?
+Points are earned through trading activity, NLP deposits, and referrals. They are distributed in weekly epochs. Your point allocation is relative to other traders' activity. Points may be used for future airdrops or rewards (details TBD by Nado team).
+
+### What chains does Nado support?
+Nado runs exclusively on Ink L2 (Chain ID: 57073 for mainnet, 763373 for testnet). Ink is an Optimistic Rollup on Ethereum created by Kraken. You need to bridge assets to Ink to use Nado.
+
+### Can I use Nado on mobile?
+Yes, Nado's web app works on mobile browsers. You can also use the Nadobro Telegram bot for trading on the go.

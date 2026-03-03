@@ -2,11 +2,13 @@
 
 ## Latest Updates (March 2026)
 
+- AI agent overhauled: removed all DuckDuckGo/web scraping; KB is now primary source; only official Nado URLs cited.
+- Knowledge base expanded to ~350 lines with FAQ, getting started guide, fee tiers, supported markets, security, and common questions.
+- Agent tools reduced from 4 to 3 (removed search_web); strict source filtering enforces official URLs only.
+- Webhook mode deployed on Fly.io Amsterdam; single machine with max_machines_running=1.
 - Improved strategy UX and execution reliability for smoother bot operation.
 - Added Volume Bot to the strategy hub and settings flow.
 - Fixed strategy runtime signing and execution flow issues.
-- Improved Fly deployment stability for strategy execution workloads.
-- Updated Fly VM sizing for better deployment compatibility.
 
 ## Overview
 
@@ -62,7 +64,7 @@ src/nadobro/
 | `bot_runtime.py` | Background strategy bot lifecycle (start/stop per user, APScheduler tasks) |
 | `scheduler.py` | APScheduler AsyncIO scheduler; runs alert checks on interval |
 | `crypto.py` | Passphrase-based encryption (PBKDF2 600k + Fernet) for linked signer keys |
-| `knowledge_service.py` | Agentic AI Q&A pipeline: Router LLM classifies questions and calls tools (search_knowledge_base, search_web), then Synthesizer LLM produces grounded answers from gathered context. Section-based KB retrieval (33 sections). X/Twitter queries use xAI Grok-3 with live search via extra_body. Supports xAI (primary) + OpenAI (fallback). |
+| `knowledge_service.py` | Agentic AI Q&A pipeline: Router LLM calls tools (search_knowledge_base, search_x_twitter, get_market_sentiment), Synthesizer LLM produces grounded answers. KB-first approach — no web scraping. Strict source filtering ensures only official Nado URLs. xAI (primary) + OpenAI (fallback). |
 | `nado_client.py` | HTTP wrapper around Nado REST API (prices, orders, positions, balance) |
 | `admin_service.py` | Admin-only controls: pause trading, view stats, audit log |
 
@@ -144,10 +146,11 @@ All configuration lives in `src/nadobro/config.py` and is read from environment 
 - `python-dotenv` — Local `.env` loading for development
 
 ### Deployment
-- Runs on Replit (India server) as a single Python process with long polling
-- Workflow configured as console output (no port needed)
-- Secrets injected as environment variables via Replit Secrets panel
-- No webhook server needed; long polling works without a public URL
+- Production: Fly.io Amsterdam (`nadobro-bot.fly.dev`), single machine (`max_machines_running=1`), 1GB RAM, `shared-cpu-1x`
+- Transport: webhook mode (`TELEGRAM_TRANSPORT=webhook`), webhook URL set to Fly.io endpoint
+- Replit used for development; Fly.io for production to bypass geo restrictions
+- Secrets injected as environment variables via Replit Secrets panel and `fly secrets set`
+- Dockerfile uses requirements.txt; `python-telegram-bot[webhooks]==22.6` required for webhook mode
 
 ### Project Structure (root)
 ```
