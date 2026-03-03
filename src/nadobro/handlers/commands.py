@@ -55,9 +55,9 @@ Main wallet stays untouched. Revoke anytime. Funds 100% yours.
 
 Ready to start printing money?"""
 
-DASHBOARD_MSG = """🚀 Nadobro Dashboard — You're In, Legend!
+DASHBOARD_MSG = """🤖 Nadobro Command Center online.
 
-What we smashing today?"""
+Select a module below to trade, monitor, and run strategy automation."""
 
 
 async def cmd_start(update: Update, context: CallbackContext):

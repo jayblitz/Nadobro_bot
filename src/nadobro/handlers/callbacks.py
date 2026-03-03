@@ -99,9 +99,9 @@ async def handle_callback(update: Update, context: CallbackContext):
             current_network = user.network_mode.value if user else "testnet"
             network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
             await query.edit_message_text(
-                f"🔄 *Network Mode*\n\n"
-                f"Current: *{escape_md(network_label)}*\n\n"
-                f"Switch network below:",
+                f"🌐 *Execution Mode Control*\n\n"
+                f"Current Mode: *{escape_md(network_label)}*\n\n"
+                f"Switch mode below:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=mode_kb(current_network),
             )
@@ -203,7 +203,7 @@ async def _handle_mode(query, data, telegram_id):
         network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
         try:
             await query.edit_message_text(
-                f"🔄 *Network Mode*\n\n"
+                f"🌐 *Execution Mode Control*\n\n"
                 f"Already on *{escape_md(network_label)}*\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=mode_kb(current_network),
@@ -253,15 +253,15 @@ async def _handle_nav(query, data, telegram_id, context=None):
         await _handle_onboarding(query, "onboarding:resume", telegram_id, context)
     elif target == "strategy_hub":
         await query.edit_message_text(
-            "🧭 *Strategy Hub*\n\n"
-            "Pick a strategy, review setup, then start with pre\\-trade analytics\\.",
+            "🤖 *Nadobro Strategy Lab*\n\n"
+            "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )
     elif target == "ask_nado" and context is not None:
         context.user_data["pending_question"] = True
         await query.edit_message_text(
-            "🧠 *Ask Nado*\n\n"
+            "🧠 *Ask Nado AI Console*\n\n"
             "Ask me anything about Nado \\(docs, dev docs, API, website, X updates, troubleshooting\\)\\!\n\n"
             "Examples:\n"
             "  • `What is unified margin?`\n"
@@ -657,7 +657,7 @@ async def _handle_market(query, data, telegram_id):
     if action == "menu":
         await _stop_live_task(task_key)
         await query.edit_message_text(
-            "💹 *Markets*\n\nPick a market view:",
+            "📡 *Market Radar*\n\nPick a market view:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=markets_kb(),
         )
@@ -739,7 +739,7 @@ async def _handle_alert(query, data, telegram_id, context):
 
     if action == "menu":
         await query.edit_message_text(
-            "🔔 *Alerts*\n\nManage your price alerts\\.",
+            "🔔 *Alert Engine*\n\nManage your trigger alerts\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=alerts_kb(),
         )
@@ -812,7 +812,7 @@ async def _handle_settings(query, data, telegram_id, context):
 
     elif action == "leverage_menu":
         await query.edit_message_text(
-            "⚡ *Select Default Leverage*",
+            "⚡ *Leverage Control*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_leverage_kb(),
         )
@@ -839,7 +839,7 @@ async def _handle_settings(query, data, telegram_id, context):
 
     elif action == "slippage_menu":
         await query.edit_message_text(
-            "📊 *Select Slippage Tolerance*",
+            "📊 *Slippage Control*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_slippage_kb(),
         )
@@ -1059,14 +1059,12 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
     return (
-        f"⚙️ *{escape_md(strategy.upper())} Settings*\n\n"
+        f"⚙️ *{escape_md(strategy.upper())} PARAMS \\| ROBOTIC MODE*\n\n"
         f"Mode: *{escape_md(network.upper())}*\n"
-        f"Notional: *{escape_md(f'${notional:,.2f}')}*\n"
-        f"Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
-        f"Interval: *{escape_md(f'{interval_seconds}s')}*\n\n"
-        f"Take Profit: *{escape_md(f'{tp_pct:.2f}%')}*\n"
-        f"Stop Loss: *{escape_md(f'{sl_pct:.2f}%')}*\n\n"
-        "Use presets or custom input below\\."
+        f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
+        f"Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+        f"TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*\n\n"
+        "Use presets or set custom values below\\."
     )
 
 
@@ -1118,9 +1116,9 @@ def _strategy_config_kb(strategy: str):
 
 def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: str) -> str:
     names = {
-        "mm": "Market Maker \\(Mid Mode\\)",
-        "grid": "Grid Bot",
-        "dn": "Delta Neutral",
+        "mm": "Mirror Market Maker",
+        "grid": "Grid Reactor",
+        "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",
     }
     network, settings = get_user_settings(telegram_id)
@@ -1175,24 +1173,48 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
     funding_str = f"{funding_rate:.6f}"
     net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
+    status_dot = "🟢" if est_net >= 0 else "🟠"
+    how_it_works = {
+        "mm": (
+            "Places maker buy/sell quotes around mid price, "
+            "captures spread, then auto\\-reposts every cycle\\."
+        ),
+        "grid": (
+            "Builds staggered levels above and below mid, "
+            "buys lower and sells higher as price oscillates\\."
+        ),
+        "dn": (
+            "Runs offsetting long/short exposure to reduce directional risk "
+            "while aiming to earn spread \\+ funding edge\\."
+        ),
+        "vol": (
+            "Executes balanced two\\-sided flow with risk caps "
+            "to generate consistent trading activity and volume\\."
+        ),
+    }
+    selected_explainer = how_it_works.get(strategy_id, "Automates recurring trade cycles with configured risk controls\\.")
 
     return (
-        f"🧭 *{escape_md(names.get(strategy_id, strategy_id.upper()))}*\n\n"
-        "*Setup Flow*\n"
+        f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
+        f"Strategy Status: {status_dot} *READY*\n\n"
+        "*01 SETUP FLOW*\n"
         "1\\. Account/Mode\n"
         "2\\. Pair\n"
-        "3\\. Margin & Risk\n"
+        "3\\. Margin \\& Risk\n"
         "4\\. Exit Controls\n"
-        "5\\. Review analytics and start\n\n"
+        "5\\. Review analytics \\& launch\n\n"
+        "*02 HOW IT WORKS*\n"
+        f"{escape_md(selected_explainer)}\n\n"
+        "*03 CURRENT SETTINGS*\n"
         f"Mode: *{escape_md(network.upper())}* \\| "
         f"Risk: *{escape_md(settings.get('risk_profile', 'balanced').upper())}* \\| "
         f"Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| "
         f"Slippage: *{escape_md(f'{slippage:.2f}%')}*\n"
         f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}*\n\n"
-        "*Configuration*\n"
+        "*04 STRATEGY CONFIGURATION*\n"
         f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
         f"Interval: *{escape_md(f'{interval_seconds}s')}* \\| TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*\n\n"
-        "*Pre\\-Trade Analytics*\n"
+        "*05 PRE\\-TRADE ANALYTICS*\n"
         f"Available Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}*\n"
         f"Required Margin: *{escape_md(f'${required_margin:,.2f}')}*\n"
         f"Est\\. Daily Volume: *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
@@ -1200,7 +1222,8 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Est\\. Spread PnL: *{escape_md(f'${est_spread_pnl:,.2f}')}*\n"
         f"Est\\. Funding \\(DN\\): *{escape_md(f'${est_funding:,.2f}')}* \\| Funding index: *{escape_md(funding_str)}*\n"
         f"Max Loss \\(from SL\\): *{escape_md(f'${max_loss:,.2f}')}*\n"
-        f"Net Estimate: *{escape_md(net_str)}*"
+        f"Net Estimate: *{escape_md(net_str)}*\n\n"
+        "Use controls below to tune risk, edit parameters, and launch\\."
     )
 
 
