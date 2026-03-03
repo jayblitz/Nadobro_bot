@@ -36,3 +36,6 @@ packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc"]
 [userenv]
 
 [userenv.shared]
+TELEGRAM_TRANSPORT = "webhook"
+TELEGRAM_WEBHOOK_URL = "https://nadobro-bot.fly.dev/telegram/webhook"
+TELEGRAM_WEBHOOK_PATH = "/telegram/webhook"
