@@ -2,9 +2,11 @@
 
 ## Latest Updates (March 2026)
 
-- AI agent overhauled: removed all DuckDuckGo/web scraping; KB is now primary source; only official Nado URLs cited.
-- Knowledge base expanded to ~350 lines with FAQ, getting started guide, fee tiers, supported markets, security, and common questions.
-- Agent tools reduced from 4 to 3 (removed search_web); strict source filtering enforces official URLs only.
+- AI agent transformed into conversational trading companion ("mini Alexa"): conversation memory (8-msg buffer, 15min TTL), personalized greetings using Telegram name, casual chat handling, trade format suggestions.
+- Added live price tool: get_live_price fetches real-time bid/ask/mid from Nado API via NadoClient.
+- Enhanced market sentiment: Fear & Greed Index (api.alternative.me) + broader crypto news from WatcherGuru, CoinDesk, Cointelegraph, whale_alert via xAI search.
+- Knowledge base expanded to ~350 lines with FAQ, getting started guide, fee tiers, supported markets, security.
+- Agent tools now 4: search_knowledge_base, get_live_price, get_market_sentiment, search_x_twitter. Strict source filtering enforces official URLs only.
 - Webhook mode deployed on Fly.io Amsterdam; single machine with max_machines_running=1.
 - Improved strategy UX and execution reliability for smoother bot operation.
 - Added Volume Bot to the strategy hub and settings flow.
@@ -64,7 +66,7 @@ src/nadobro/
 | `bot_runtime.py` | Background strategy bot lifecycle (start/stop per user, APScheduler tasks) |
 | `scheduler.py` | APScheduler AsyncIO scheduler; runs alert checks on interval |
 | `crypto.py` | Passphrase-based encryption (PBKDF2 600k + Fernet) for linked signer keys |
-| `knowledge_service.py` | Agentic AI Q&A pipeline: Router LLM calls tools (search_knowledge_base, search_x_twitter, get_market_sentiment), Synthesizer LLM produces grounded answers. KB-first approach — no web scraping. Strict source filtering ensures only official Nado URLs. xAI (primary) + OpenAI (fallback). |
+| `knowledge_service.py` | Conversational AI agent: Router LLM dispatches to 4 tools (search_knowledge_base, get_live_price, get_market_sentiment, search_x_twitter). Per-user conversation memory (8-msg, 15min TTL). Casual chat fast-path with personalized greetings. Fear & Greed Index integration. KB-first, strict official source filtering. xAI primary + OpenAI fallback. |
 | `nado_client.py` | HTTP wrapper around Nado REST API (prices, orders, positions, balance) |
 | `admin_service.py` | Admin-only controls: pause trading, view stats, audit log |
 
