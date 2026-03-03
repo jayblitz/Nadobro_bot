@@ -1,5 +1,13 @@
 # Nadobro — Replit Project Guide
 
+## Latest Updates (March 2026)
+
+- Improved strategy UX and execution reliability for smoother bot operation.
+- Added Volume Bot to the strategy hub and settings flow.
+- Fixed strategy runtime signing and execution flow issues.
+- Improved Fly deployment stability for strategy execution workloads.
+- Updated Fly VM sizing for better deployment compatibility.
+
 ## Overview
 
 Nadobro is a Telegram bot that serves as a trading interface for the Nado DEX (a CLOB-based perpetuals and spot trading exchange on the Ink L2 blockchain). Users interact with the bot via natural language and keyboard commands to view live market data, manage wallets, place trades, set price alerts, and run automated trading strategies — all without leaving Telegram.

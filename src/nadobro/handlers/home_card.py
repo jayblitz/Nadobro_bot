@@ -3,7 +3,7 @@ import logging
 from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
 
-from src.nadobro.handlers.formatters import escape_md, fmt_positions, fmt_settings, fmt_wallet_info, fmt_portfolio
+from src.nadobro.handlers.formatters import escape_md, fmt_positions, fmt_settings, fmt_wallet_info, fmt_portfolio, fmt_help
 from src.nadobro.handlers.keyboards import (
     home_card_kb,
     mode_kb,
@@ -47,11 +47,11 @@ def build_home_card_text(telegram_id: int) -> str:
         pass
 
     return (
-        "📊 *Nadobro Home*\n\n"
+        "🤖 *Nadobro Command Center*\n\n"
         f"Mode: *{escape_md(network_label)}*\n"
         f"Balance: *{escape_md(balance_str)}*\n\n"
-        "All button workflows run in this message card\\. "
-        "Use chat messages for AI Q&A and typed trades\\."
+        "Use this control panel for trading, portfolio, strategy lab, and risk settings\\.\n"
+        "Use chat messages for AI Q\\&A and typed trade commands\\."
     )
 
 
@@ -112,17 +112,17 @@ def _view_mode_text(telegram_id: int):
     current_network = user.network_mode.value if user else "testnet"
     network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
     text = (
-        f"🔄 *Network Mode*\n\n"
-        f"Current: *{escape_md(network_label)}*\n\n"
-        f"Switch network below:"
+        f"🌐 *Execution Mode Control*\n\n"
+        f"Current Mode: *{escape_md(network_label)}*\n\n"
+        f"Switch mode below:"
     )
     return text, mode_kb(current_network)
 
 
 def _view_strategy_text():
     return (
-        "🧭 *Strategy Hub*\n\n"
-        "Pick a strategy, review setup, then start with pre\\-trade analytics\\.",
+        "🤖 *Nadobro Strategy Lab*\n\n"
+        "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
         strategy_hub_kb(),
     )
 
@@ -161,11 +161,11 @@ def _view_portfolio_text(telegram_id: int):
 
 
 def _view_markets_text():
-    return "💹 *Markets*\n\nPick a market view:", markets_kb()
+    return "📡 *Market Radar*\n\nPick a market view:", markets_kb()
 
 
 def _view_alerts_text():
-    return "🔔 *Alerts*\n\nManage your price alerts\\.", alerts_kb()
+    return "🔔 *Alert Engine*\n\nManage your trigger alerts\\.", alerts_kb()
 
 
 def _view_settings_text(telegram_id: int):
@@ -206,7 +206,7 @@ async def open_home_card_from_command(update, context: CallbackContext, telegram
 
 
 async def open_help_card_from_command(update, context: CallbackContext):
-    await _edit_or_send_card(update, context, "❓ *Help*\n\nUse the buttons below or type your request in chat\\.", home_card_kb())
+    await _edit_or_send_card(update, context, fmt_help(), home_card_kb())
 
 
 async def open_status_card_from_command(update, context: CallbackContext, text: str):

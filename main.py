@@ -123,7 +123,7 @@ async def run_bot():
         BotCommand("help", "Show help"),
         BotCommand("status", "Bot & strategy status"),
         BotCommand("revoke", "Revoke linked signer"),
-        BotCommand("stop_all", "Stop bot & cancel orders"),
+        BotCommand("stop_all", "Stop strategy runtime"),
     ])
     logger.info("Bot commands registered in Menu")
 

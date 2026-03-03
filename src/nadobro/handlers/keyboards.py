@@ -15,15 +15,15 @@ SIZE_PRESETS = {
 }
 
 
-HOME_BTN_TRADE = "📊 Trade"
-HOME_BTN_PORTFOLIO = "📁 Portfolio"
+HOME_BTN_TRADE = "🤖 Trade Console"
+HOME_BTN_PORTFOLIO = "📁 Portfolio Deck"
 HOME_BTN_HOME = "🏠 Home"
-HOME_BTN_WALLET = "💼 Wallet"
-HOME_BTN_MARKETS = "💹 Markets"
-HOME_BTN_STRATEGIES = "📈 Strategies"
-HOME_BTN_ALERTS = "🔔 Alerts"
-HOME_BTN_SETTINGS = "⚙️ Settings"
-HOME_BTN_MODE = "🔄 Mode"
+HOME_BTN_WALLET = "💼 Wallet Vault"
+HOME_BTN_MARKETS = "📡 Market Radar"
+HOME_BTN_STRATEGIES = "🧠 Strategy Lab"
+HOME_BTN_ALERTS = "🔔 Alert Engine"
+HOME_BTN_SETTINGS = "⚙️ Control Panel"
+HOME_BTN_MODE = "🌐 Execution Mode"
 
 
 REPLY_BUTTON_MAP = {
@@ -132,20 +132,20 @@ def persistent_menu_kb():
 def home_card_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Trade", callback_data="card:trade:start"),
-            InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
+            InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
+            InlineKeyboardButton("📁 Portfolio Deck", callback_data="portfolio:view"),
         ],
         [
-            InlineKeyboardButton("💼 Wallet", callback_data="wallet:view"),
-            InlineKeyboardButton("💹 Markets", callback_data="mkt:menu"),
+            InlineKeyboardButton("💼 Wallet Vault", callback_data="wallet:view"),
+            InlineKeyboardButton("📡 Market Radar", callback_data="mkt:menu"),
         ],
         [
-            InlineKeyboardButton("📈 Strategies", callback_data="nav:strategy_hub"),
-            InlineKeyboardButton("🔔 Alerts", callback_data="alert:menu"),
+            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🔔 Alert Engine", callback_data="alert:menu"),
         ],
         [
-            InlineKeyboardButton("⚙️ Settings", callback_data="settings:view"),
-            InlineKeyboardButton("🔄 Mode", callback_data="home:mode"),
+            InlineKeyboardButton("⚙️ Control Panel", callback_data="settings:view"),
+            InlineKeyboardButton("🌐 Execution Mode", callback_data="home:mode"),
         ],
     ])
 
@@ -630,12 +630,12 @@ def settings_language_kb(current_language: str = "en"):
 def strategy_hub_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📈 Market Maker", callback_data="strategy:preview:mm"),
-            InlineKeyboardButton("🧮 Grid", callback_data="strategy:preview:grid"),
+            InlineKeyboardButton("🤖 Mirror MM", callback_data="strategy:preview:mm"),
+            InlineKeyboardButton("🧮 Grid Reactor", callback_data="strategy:preview:grid"),
         ],
         [
-            InlineKeyboardButton("⚖️ Delta Neutral", callback_data="strategy:preview:dn"),
-            InlineKeyboardButton("🔁 Volume Bot", callback_data="strategy:preview:vol"),
+            InlineKeyboardButton("⚖️ Mirror DN", callback_data="strategy:preview:dn"),
+            InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
@@ -691,11 +691,11 @@ def live_price_controls_kb(product: str):
 def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Mark Active", callback_data=f"strategy:activate:{strategy_id}"),
+            InlineKeyboardButton("✅ Arm Strategy", callback_data=f"strategy:activate:{strategy_id}"),
             InlineKeyboardButton("⚙️ Tune Risk", callback_data="settings:risk_menu"),
         ],
         [
-            InlineKeyboardButton("🧩 Edit Strategy Params", callback_data=f"strategy:config:{strategy_id}"),
+            InlineKeyboardButton("🧩 Edit Parameters", callback_data=f"strategy:config:{strategy_id}"),
         ],
         [
             InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
@@ -704,16 +704,16 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
         ],
         [
             InlineKeyboardButton(
-                f"🚀 Start {selected_product.upper()}",
+                f"🚀 Launch {selected_product.upper()}",
                 callback_data=f"strategy:start:{strategy_id}:{selected_product.upper()}",
             ),
         ],
         [
-            InlineKeyboardButton("🔄 Refresh Analytics", callback_data=f"strategy:preview:{strategy_id}"),
+            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data=f"strategy:preview:{strategy_id}"),
         ],
         [
-            InlineKeyboardButton("📡 Bot Status", callback_data="strategy:status"),
-            InlineKeyboardButton("🛑 Stop Bot", callback_data="strategy:stop"),
+            InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status"),
+            InlineKeyboardButton("🛑 Stop Runtime", callback_data="strategy:stop"),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),

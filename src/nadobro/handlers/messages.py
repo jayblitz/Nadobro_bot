@@ -90,7 +90,7 @@ def _is_contextual_button(callback_data: str, context) -> bool:
 
 async def _prompt_passphrase(update_or_query, context, action_data: dict):
     context.user_data[PENDING_PASSPHRASE_ACTION] = action_data
-    msg_text = "🔑 Enter your passphrase to sign this trade:"
+    msg_text = "🔐 Enter your passphrase to authorize this command:"
     if hasattr(update_or_query, 'message') and update_or_query.message:
         await update_or_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
@@ -353,7 +353,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             await open_trade_card_from_message(update, context, telegram_id)
             return
         await update.message.reply_text(
-            "📊 *Trade*\n\nSelect direction:",
+            "🤖 *Trade Console*\n\nSelect direction:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_direction_kb(),
         )
@@ -381,9 +381,9 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         current_network = user.network_mode.value if user else "testnet"
         network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
         await update.message.reply_text(
-            f"🔄 *Network Mode*\n\n"
-            f"Current: *{escape_md(network_label)}*\n\n"
-            f"Switch network below:",
+            f"🌐 *Execution Mode Control*\n\n"
+            f"Current Mode: *{escape_md(network_label)}*\n\n"
+            f"Switch mode below:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=mode_kb(current_network),
         )
@@ -391,8 +391,8 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "nav:strategy_hub":
         await update.message.reply_text(
-            "🧭 *Strategy Hub*\n\n"
-            "Pick a strategy, review setup, then start with pre\\-trade analytics\\.",
+            "🤖 *Nadobro Strategy Lab*\n\n"
+            "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )
@@ -458,7 +458,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "mkt:menu":
         await update.message.reply_text(
-            "💹 *Markets*\n\nPick a market view:",
+            "📡 *Market Radar*\n\nPick a market view:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=markets_kb(),
         )
@@ -466,7 +466,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "alert:menu":
         await update.message.reply_text(
-            "🔔 *Alerts*\n\nManage your price alerts\\.",
+            "🔔 *Alert Engine*\n\nManage your trigger alerts\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=alerts_kb(),
         )
@@ -1217,7 +1217,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⚙️ Continue Editing", callback_data=f"strategy:config:{strategy}")],
-            [InlineKeyboardButton("🧭 Strategy Hub", callback_data="nav:strategy_hub")],
+            [InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub")],
         ]),
     )
     return True

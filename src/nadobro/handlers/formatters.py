@@ -120,7 +120,7 @@ def fmt_positions(positions, prices=None):
 
 def fmt_balance(balance_data, wallet_addr=None):
     lines = [
-        "💰 *Wallet Balance*",
+        "💰 *Wallet Vault Balance*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -157,10 +157,10 @@ def fmt_balance(balance_data, wallet_addr=None):
 
 def fmt_prices(prices):
     if not prices:
-        return "💹 *Market Prices*\n\nCould not fetch prices\\."
+        return "📡 *Market Radar*\n\nCould not fetch prices\\."
 
     lines = [
-        "💹 *Market Prices*",
+        "📡 *Market Radar*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -184,10 +184,10 @@ def fmt_prices(prices):
 
 def fmt_funding(funding_data):
     if not funding_data:
-        return "📊 *Funding Snapshot*\n\nCould not fetch funding data\\."
+        return "📊 *Funding Scanner*\n\nCould not fetch funding data\\."
 
     lines = [
-        "📊 *Funding Snapshot*",
+        "📊 *Funding Scanner*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -254,14 +254,14 @@ def fmt_trade_result(result):
 
 def fmt_wallet_info(wallet_info):
     if not wallet_info:
-        return "👛 *Wallet Info*\n\nWallet not found\\. Use /start first\\."
+        return "💼 *Wallet Vault*\n\nWallet not found\\. Use /start first\\."
 
     net = wallet_info.get("network", "testnet")
     net_emoji = "🧪" if net == "testnet" else "🌐"
     signer_linked = bool(wallet_info.get("linked_signer_address"))
 
     lines = [
-        "👛 *Wallet Info*",
+        "💼 *Wallet Vault*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"📊 *Network:* {net_emoji} {escape_md(net.upper())}",
@@ -313,10 +313,10 @@ def fmt_wallet_info(wallet_info):
 
 def fmt_alerts(alerts):
     if not alerts:
-        return "🔔 *Price Alerts*\n\nNo active alerts\\. Use Set Alert to create one\\."
+        return "🔔 *Alert Engine*\n\nNo active alerts\\. Use Set Alert to create one\\."
 
     lines = [
-        "🔔 *Price Alerts*",
+        "🔔 *Alert Engine*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -363,7 +363,7 @@ def fmt_portfolio(stats, positions, prices=None):
     upnl_str = f"+${unrealized_pnl:,.2f}" if unrealized_pnl >= 0 else f"-${abs(unrealized_pnl):,.2f}"
 
     lines = [
-        "📁 *Portfolio*",
+        "📁 *Portfolio Deck*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"📌 *Open Positions:* {escape_md(str(len(positions or [])))}",
@@ -423,7 +423,7 @@ def fmt_settings(user_data):
     slippage = user_data.get("slippage", 1)
 
     lines = [
-        "⚙️ *Settings*",
+        "⚙️ *Control Panel*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"⚡ *Default Leverage:* {escape_md(f'{leverage}x')}",
@@ -435,51 +435,47 @@ def fmt_settings(user_data):
 
 def fmt_help():
     return (
-        "❓ *NADOBRO \\- Help*\n"
+        "📖 *Trading Bot Guide*\n"
         + escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n"
         "\n"
-        "⚡ *Quick Start:*\n"
-        "Use *Continue Setup* for guided onboarding:\n"
-        "mode \\-> key \\-> funding \\-> risk \\-> template\\.\n"
-        "Use dedicated private keys per mode \\(testnet/mainnet\\)\\.\n"
-        "Never paste a seed phrase or main wallet key\\.\n"
-        "Key import uses a confirm step with masked fingerprint before saving\\.\n"
-        "Settings and strategy params are saved separately for testnet/mainnet\\.\n"
-        "Each strategy supports custom Notional, Spread, Interval, TP and SL values\\.\n"
+        "*Available Commands:*\n"
+        "/start \\- Open command center\n"
+        "/help \\- Show this guide\n"
+        "/status \\- Runtime health and strategy status\n"
+        "/revoke \\- Show 1CT revoke steps\n"
+        "/stop\\_all \\- Stop running strategy loops\n"
         "\n"
-        "🤖 *Button Trading:*\n"
-        "Use the buttons below to trade\\. Select\n"
-        "Buy/Long or Sell/Short, pick a product,\n"
-        "choose size and leverage, then confirm\\.\n"
-        "Limit Buy/Sell is also available from main menu\\.\n"
+        "*Sections:*\n"
         "\n"
-        "💬 *Natural Language:*\n"
-        "You can also type commands like:\n"
+        "💼 *Wallet Vault*\n"
+        "Link your wallet with secure 1CT flow, view balances, and manage signer access\\.\n"
+        "\n"
+        "🤖 *Trading Console*\n"
+        "Place market or limit orders from guided flow or natural language commands\\.\n"
+        "\n"
+        "🧠 *Strategy Lab*\n"
+        "Configure and run automated strategies: Mirror MM, Grid Reactor, Mirror DN, and Volume Engine\\.\n"
+        "Each dashboard includes a \"How it works\" explainer and pre\\-trade analytics\\.\n"
+        "\n"
+        "📁 *Portfolio Deck*\n"
+        "Track open positions, realized/unrealized PnL, and runtime performance stats\\.\n"
+        "\n"
+        "🔒 *Security*\n"
+        "• 1CT signer keys are encrypted with your passphrase\n"
+        "• Never share your passphrase, private key, or seed phrase\n"
+        "• Use dedicated wallets for automation\n"
+        "\n"
+        "🧠 *Ask Nado AI*\n"
+        "Ask docs, API, trading, and troubleshooting questions directly in chat\\.\n"
+        "\n"
+        "*Examples:*\n"
         "  • `Long BTC 0\\.01`\n"
         "  • `Short ETH 0\\.05 at 10x`\n"
-        "  • `What's BTC price?`\n"
+        "  • `What is unified margin?`\n"
         "  • `Show my positions`\n"
         "  • `Close all`\n"
         "\n"
-        "🧠 *Ask Nado \\(AI Knowledge\\):*\n"
-        "Ask anything about Nado DEX:\n"
-        "  • `What is unified margin?`\n"
-        "  • `How do liquidations work?`\n"
-        "  • `What are the trading fees?`\n"
-        "\n"
-        "🪙 *Products:*\n"
-        "BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX\n"
-        "\n"
-        "📌 *Commands:*\n"
-        "/start \\- Dashboard\n"
-        "/help \\- This help message\n"
-        "/status \\- Running strategy bot status\n"
-        "/revoke \\- Revoke 1CT linked signer\n"
-        "/stop\\_all \\- Stop strategy bot and cancel open orders\n"
-        "\n"
-        "🔗 *Useful Links:*\n"
-        "• Testnet Faucet: testnet\\.nado\\.xyz/portfolio/faucet\n"
-        "• ETH Faucet: docs\\.inkonchain\\.com/tools/faucets"
+        "Need support? Ask in chat with full error context and command used\\."
     )
 
 
