@@ -26,6 +26,10 @@ args = "python main.py"
 outputType = "console"
 
 [[ports]]
+localPort = 8080
+externalPort = 80
+
+[[ports]]
 localPort = 8099
 externalPort = 8099
 
