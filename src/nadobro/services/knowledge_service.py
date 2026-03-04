@@ -80,6 +80,19 @@ def _is_casual_message(text: str) -> bool:
     return t in casual_patterns or len(t) <= 3
 
 
+def _is_sentiment_question(text: str) -> bool:
+    q = (text or "").strip().lower()
+    sentiment_signals = [
+        "sentiment", "fear and greed", "fear & greed", "market mood",
+        "market feeling", "how is the market", "how's the market",
+        "market outlook", "bullish or bearish", "market vibe",
+        "bullish", "bearish", "risk on", "risk off", "risk-on", "risk-off",
+        "fear greed", "global market", "market data", "market overview",
+        "market conditions", "market today", "crypto market",
+    ]
+    return any(sig in q for sig in sentiment_signals)
+
+
 def _is_cmc_available() -> bool:
     global _cmc_available
     if _cmc_available is None:
@@ -527,13 +540,10 @@ RULES:
 3. NEVER fabricate or guess information
 4. Plain text only — no markdown formatting
 5. Keep responses focused: 2-6 sentences for simple questions, more for complex ones
-6. For price data, always mention it's from Nado DEX and include bid/ask when available
-7. For market sentiment, present it conversationally with the Fear & Greed reading
-
-SOURCE RULES:
-- ONLY cite: docs.nado.xyz, nado.xyz, x.com/nadoHQ, x.com/inkonchain, coinmarketcap.com
-- NEVER include search engine links
-- End with "Sources:" followed by 1-3 relevant official URLs (skip for price/sentiment/market data queries)
+6. For price data, mention it's from Nado DEX casually and include bid/ask when available
+7. For market sentiment, present it conversationally with the Fear & Greed reading. Cite the source casually inline, e.g. "According to CMC, the Fear & Greed Index is at 10 out of 100 — that's Extreme Fear."
+8. For data from CoinMarketCap (prices, market cap, sentiment), cite it casually inline (e.g. "According to CMC..." or "CMC shows..."). Do NOT add a separate Sources section for these.
+9. Only include a source link if it's directly relevant and helpful. Never include more than 1 link. Do NOT add source links for price, sentiment, or market data responses — just cite the data source by name inline.
 
 CONTEXT:
 {context}"""
@@ -880,9 +890,7 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
 def _filter_official_sources(sources: list[str]) -> list[str]:
     allowed = set(OFFICIAL_SOURCES.values()) | {"https://coinmarketcap.com"}
     filtered = [s for s in sources if s in allowed]
-    if not filtered:
-        filtered = [OFFICIAL_SOURCES["docs"], OFFICIAL_SOURCES["website"]]
-    return filtered[:4]
+    return filtered[:1]
 
 
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
@@ -1039,7 +1047,8 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         )
 
     used_sources = _filter_official_sources(used_sources)
-    skip_sources = _is_price_question(question) or _is_casual_message(question)
+    _data_markers = ("[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]")
+    skip_sources = _is_price_question(question) or _is_casual_message(question) or _is_sentiment_question(question) or any(m in gathered_context for m in _data_markers)
 
     primary = _pick_primary_provider(question)
     if use_x_prompt:
@@ -1189,7 +1198,8 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         )
 
     used_sources = _filter_official_sources(used_sources)
-    skip_sources = _is_price_question(question)
+    _data_markers = ("[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]")
+    skip_sources = _is_price_question(question) or _is_casual_message(question) or _is_sentiment_question(question) or any(m in gathered_context for m in _data_markers)
 
     try:
         import asyncio
