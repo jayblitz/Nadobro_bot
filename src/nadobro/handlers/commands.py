@@ -53,20 +53,27 @@ Yo legend, your trading copilot is online and ready to cook\\.
 
 Pick a module below and let's trade smarter \\(and faster\\) ⚡"""
 
+START_HERO_CAPTION = """👋 *Welcome back to Nadobro\\!*
+
+Your trading copilot is warmed up and ready.
+Let's make smart moves today ⚡"""
+
 WALLET_SETUP_CTA_MSG = """👛 *Let's connect your wallet first*
 
 Before trading, you need to link your signer once.
 Tap below and follow the guided steps to finish setup in a minute."""
 
 
-async def _send_start_image(update: Update):
+async def _send_start_image(update: Update, caption: str | None = None, parse_mode: str | None = None) -> bool:
     if not update.message or not os.path.exists(START_IMAGE_PATH):
-        return
+        return False
     try:
         with open(START_IMAGE_PATH, "rb") as img:
-            await update.message.reply_photo(photo=img)
+            await update.message.reply_photo(photo=img, caption=caption, parse_mode=parse_mode)
+        return True
     except Exception as e:
         logger.warning("Failed to send start image: %s", e)
+        return False
 
 
 async def cmd_start(update: Update, context: CallbackContext):
@@ -74,8 +81,6 @@ async def cmd_start(update: Update, context: CallbackContext):
     username = update.effective_user.username
 
     user, is_new, _ = get_or_create_user(telegram_id, username)
-    await _send_start_image(update)
-
     if not is_new_onboarding_complete(telegram_id):
         state = get_new_onboarding_state(telegram_id)
         if not state.get("language"):
@@ -99,35 +104,74 @@ async def cmd_start(update: Update, context: CallbackContext):
         return
 
     # Onboarding complete → show dashboard (8 buttons)
+    sent_hero = await _send_start_image(
+        update,
+        caption=START_HERO_CAPTION,
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+    if not sent_hero:
+        await update.message.reply_text(
+            "👋 Welcome back to Nadobro! Your trading copilot is ready.",
+        )
+
     wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(
-            WALLET_SETUP_CTA_MSG,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👛 Start Wallet Setup", callback_data="wallet:setup")],
-                [InlineKeyboardButton("🏠 Open Dashboard", callback_data="nav:main")],
-            ]),
-        )
+        try:
+            await update.message.reply_text(
+                WALLET_SETUP_CTA_MSG,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👛 Start Wallet Setup", callback_data="wallet:setup")],
+                    [InlineKeyboardButton("🏠 Open Dashboard", callback_data="nav:main")],
+                ]),
+            )
+        except Exception as e:
+            logger.warning("Failed to send wallet setup CTA in MarkdownV2: %s", e)
+            await update.message.reply_text(
+                "👛 Let's connect your wallet first.\n\n"
+                "Before trading, link your signer once. Tap below to start setup.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👛 Start Wallet Setup", callback_data="wallet:setup")],
+                    [InlineKeyboardButton("🏠 Open Dashboard", callback_data="nav:main")],
+                ]),
+            )
         return
 
     if DUAL_MODE_CARD_FLOW:
         await _send_dashboard_card(update, context, telegram_id)
         return
-    await update.message.reply_text(
-        DASHBOARD_MSG,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=persistent_menu_kb(),
-    )
+    try:
+        await update.message.reply_text(
+            DASHBOARD_MSG,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+    except Exception as e:
+        logger.warning("Failed to send dashboard in MarkdownV2: %s", e)
+        await update.message.reply_text(
+            "🚀 Nadobro Command Center is live!\n\n"
+            "Your trading copilot is online and ready.\n"
+            "Pick a module below and let's trade smarter.",
+            reply_markup=persistent_menu_kb(),
+        )
 
 
 async def _send_dashboard_card(update: Update, context: CallbackContext, telegram_id: int):
     """Send dashboard text + home card inline keyboard (8 buttons)."""
-    await update.message.reply_text(
-        DASHBOARD_MSG,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=home_card_kb(),
-    )
+    try:
+        await update.message.reply_text(
+            DASHBOARD_MSG,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=home_card_kb(),
+        )
+    except Exception as e:
+        logger.warning("Failed to send dashboard card in MarkdownV2: %s", e)
+        await update.message.reply_text(
+            "🚀 Nadobro Command Center is live!\n\n"
+            "Your trading copilot is online and ready.\n"
+            "Pick a module below and let's trade smarter.",
+            reply_markup=home_card_kb(),
+        )
 
 
 async def cmd_help(update: Update, context: CallbackContext):
