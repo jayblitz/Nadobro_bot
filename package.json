@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@replit/connectors-sdk": "^0.2.0",
     "@sentry/node": "^10.42.0"
   }
 }
