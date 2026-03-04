@@ -1,8 +1,11 @@
 import logging
+import os
 from telegram import Update
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
 from src.nadobro.services.user_service import get_or_create_user, get_user
+
+INTRO_VIDEO_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "intro_video.mov")
 from src.nadobro.handlers.formatters import escape_md, fmt_help, fmt_status_overview
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb,
@@ -28,33 +31,20 @@ logger = logging.getLogger(__name__)
 
 
 # New onboarding messages (exact copy from spec)
-WELCOME_MSG = """Yo what's good, future Nado whale?! 👋💰
+WELCOME_MSG = """Welcome to Nadobro 👋
 
-Welcome to **Nadobro** — your ultimate trading bro for Perps on Nado!
+Your trading companion for perps on Nado DEX — fast execution, automated strategies, and AI-powered insights, all from Telegram.
 
-We're building the dopest Telegram bot on the planet:
-• MM Bot (Grid + RGRID that actually prints)
-• Delta Neutral (spot + short = chill funding gains)
-• Volume Bot (farm that leaderboard volume like a boss)
+Pick your language:"""
 
-Unified margin. 5-15ms execution. Zero drama.
+WELCOME_CARD_MSG = """🔥 You're in!
 
-First, pick your language vibe:"""
+By tapping **"Let's Get It"** you accept the Terms of Use & Privacy Policy.
 
-WELCOME_CARD_MSG = """🔥 Nadobro Activated! You're in the squad bro 🔥
+🔐 How it works:
+We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
 
-Sup, you're now locked in.
-We run on Nado's lightning CLOB with unified margin — the cleanest perps game in crypto.
-
-By tapping **"Let's Get It"** you're saying:
-✅ I accept the Terms of Use & Privacy Policy
-
-⚡ Bro-Note (read this):
-We'll generate a secure 1CT key for your default subaccount (we NEVER touch your main wallet keys).
-You paste the key into Nado → Settings → 1-Click Trading → Advanced 1CT (1 tx, 1 USDT0).
-Main wallet stays untouched. Revoke anytime. Funds 100% yours.
-
-Ready to start printing money?"""
+Ready?"""
 
 DASHBOARD_MSG = """🤖 Nadobro Command Center online.
 
@@ -70,6 +60,12 @@ async def cmd_start(update: Update, context: CallbackContext):
     if not is_new_onboarding_complete(telegram_id):
         state = get_new_onboarding_state(telegram_id)
         if not state.get("language"):
+            if is_new and os.path.exists(INTRO_VIDEO_PATH):
+                try:
+                    with open(INTRO_VIDEO_PATH, "rb") as vf:
+                        await update.message.reply_video(video=vf)
+                except Exception as e:
+                    logger.warning("Failed to send intro video: %s", e)
             await update.message.reply_text(
                 WELCOME_MSG,
                 parse_mode=ParseMode.MARKDOWN,
