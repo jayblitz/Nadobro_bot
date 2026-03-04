@@ -5,6 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
+from eth_account import Account
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions,
     fmt_prices, fmt_funding, fmt_trade_preview, fmt_trade_result,
@@ -50,6 +51,46 @@ from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
 
 logger = logging.getLogger(__name__)
 LIVE_PRICE_TASKS = {}
+
+
+def _wallet_setup_message(pk_hex: str) -> str:
+    return (
+        "👛 *Wallet Connect Guide*\n\n"
+        "*Step 1:* Open https://app.nado.xyz and connect your main wallet.\n"
+        "Deposit at least $5 USDT0 to activate trading.\n\n"
+        "*Step 2:* Go to Settings → 1-Click Trading → Advanced 1CT.\n\n"
+        "*Step 3:* Paste this generated 1CT key:\n\n"
+        f"`{pk_hex}`\n\n"
+        "*Step 4:* Enable 1CT, click *Save*, and confirm the transaction in wallet "
+        "(~1 USDT0 network/auth cost).\n\n"
+        "*Step 5:* Return here and send your *main wallet address* (0x...).\n\n"
+        "_This key is trading-only and cannot withdraw funds._"
+    )
+
+
+def seed_wallet_setup_flow(context: CallbackContext) -> str:
+    account = Account.create()
+    pk_hex = account.key.hex()
+    if not pk_hex.startswith("0x"):
+        pk_hex = "0x" + pk_hex
+    context.user_data["wallet_flow"] = "awaiting_main_address"
+    context.user_data["wallet_linked_signer_pk"] = pk_hex
+    context.user_data["wallet_linked_signer_address"] = account.address
+    return _wallet_setup_message(pk_hex)
+
+
+async def prompt_wallet_setup(target, context: CallbackContext, telegram_id: int, lead_text: str | None = None):
+    msg = seed_wallet_setup_flow(context)
+    if lead_text:
+        msg = f"{lead_text}\n\n{msg}"
+
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
+        return
+    if hasattr(target, "reply_text"):
+        await target.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
+        return
+    logger.warning("prompt_wallet_setup called with unsupported target type for user %s", telegram_id)
 
 
 async def handle_callback(update: Update, context: CallbackContext):
@@ -292,12 +333,13 @@ async def _handle_trade(query, data, telegram_id, context):
             ]),
         )
         return
-    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
     if action in ("long", "short", "limit_long", "limit_short") and not wallet_ready:
-        await query.edit_message_text(
-            f"⚠️ {escape_md(wallet_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
+        await prompt_wallet_setup(
+            query,
+            context,
+            telegram_id,
+            lead_text="⚠️ Wallet not linked yet. Complete this quick setup to start trading.",
         )
         return
 
@@ -467,12 +509,13 @@ async def _handle_exec_trade(query, data, telegram_id, context):
             reply_markup=back_kb(),
         )
         return
-    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await query.edit_message_text(
-            f"⚠️ {escape_md(wallet_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
+        await prompt_wallet_setup(
+            query,
+            context,
+            telegram_id,
+            lead_text="⚠️ You need a linked signer before executing trades.",
         )
         return
 
@@ -570,28 +613,10 @@ async def _handle_wallet(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "view"
 
-    if action == "view":
+    if action in ("view", "setup"):
         info = get_user_wallet_info(telegram_id, verify_signer=True)
         if not info or not info.get("linked_signer_address"):
-            from eth_account import Account
-            account = Account.create()
-            pk_hex = account.key.hex()
-            if not pk_hex.startswith("0x"):
-                pk_hex = "0x" + pk_hex
-            context.user_data["wallet_flow"] = "awaiting_main_address"
-            context.user_data["wallet_linked_signer_pk"] = pk_hex
-            context.user_data["wallet_linked_signer_address"] = account.address
-            msg = (
-                "👛 *Wallet Connect*\n\n"
-                "*Step 1:* Go to https://app.nado.xyz → connect wallet → deposit ≥ $5 USDT0\n\n"
-                "*Step 2:* Go to Settings → 1-Click Trading → Advanced 1CT\n\n"
-                "*Step 3:* Paste this key into the *1CT Private Key* field:\n\n"
-                f"`{pk_hex}`\n\n"
-                "*Step 4:* Enable the toggle, click *Save*, and confirm the transaction in your wallet (1 USDT0 fee)\n\n"
-                "Once saved, reply here with your *main wallet address* (0x...).\n\n"
-                "_This key is for trading only — it cannot withdraw your funds._"
-            )
-            await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
+            await prompt_wallet_setup(query, context, telegram_id)
             return
         msg = fmt_wallet_info(info)
         await query.edit_message_text(
@@ -1089,12 +1114,13 @@ async def _handle_strategy(query, data, context, telegram_id):
                 ]),
             )
             return
-        wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+        wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
-            await query.edit_message_text(
-                f"⚠️ {escape_md(wallet_msg)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
+            await prompt_wallet_setup(
+                query,
+                context,
+                telegram_id,
+                lead_text="⚠️ Link your wallet first to launch strategy automation.",
             )
             return
         settings = _get_user_settings(telegram_id, context)
