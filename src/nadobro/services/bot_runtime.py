@@ -175,6 +175,16 @@ def start_user_bot(
 
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
+    tk = _task_key(telegram_id, network)
+    # Require an active passphrase authorization (fresh or existing runtime session)
+    # before persisting state/start signals.
+    runtime_passphrase = _session_passphrases.get(tk)
+    effective_passphrase = (passphrase or runtime_passphrase or "").strip()
+    if not effective_passphrase:
+        return False, "Passphrase authorization is required to start strategy runtime."
+    if not get_user_nado_client(telegram_id, passphrase=effective_passphrase):
+        return False, "Invalid passphrase or wallet not initialized. Please try again."
+
     _, strat_cfg = get_strategy_settings(telegram_id, strategy)
     state = _default_state()
     state.update(_strategy_defaults(strategy))
@@ -194,8 +204,7 @@ def start_user_bot(
         }
     )
     _save_state(telegram_id, network, state)
-    if passphrase:
-        set_runtime_passphrase(telegram_id, network, passphrase)
+    set_runtime_passphrase(telegram_id, network, effective_passphrase)
     _ensure_task(telegram_id, network)
     return (
         True,

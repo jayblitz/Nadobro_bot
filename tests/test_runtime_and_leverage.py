@@ -139,7 +139,9 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
         with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
             bot_runtime, "get_strategy_settings", return_value=("mainnet", {})
-        ), patch.object(bot_runtime, "_save_state"), patch.object(bot_runtime, "_ensure_task"):
+        ), patch.object(bot_runtime, "get_user_nado_client", return_value=object()), patch.object(
+            bot_runtime, "_save_state"
+        ), patch.object(bot_runtime, "_ensure_task"):
             ok, msg = bot_runtime.start_user_bot(
                 telegram_id=1,
                 strategy="mm",
@@ -150,6 +152,20 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertIn("MM bot started on BTC-PERP", msg)
+
+    def test_start_user_bot_requires_passphrase_authorization(self):
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
+        with patch.object(bot_runtime, "get_user", return_value=fake_user):
+            ok, msg = bot_runtime.start_user_bot(
+                telegram_id=1,
+                strategy="mm",
+                product="BTC",
+                leverage=2,
+                slippage_pct=1,
+                passphrase=None,
+            )
+        self.assertFalse(ok)
+        self.assertIn("Passphrase authorization is required", msg)
 
     def test_stop_all_user_bots_uses_network_passphrase_for_close_all(self):
         telegram_id = 42
