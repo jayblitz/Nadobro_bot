@@ -67,6 +67,10 @@ def clear_manual_passphrase(telegram_id: int, network: str):
     _manual_session_passphrases.pop(_task_key(telegram_id, network), None)
 
 
+def clear_runtime_passphrase(telegram_id: int, network: str):
+    _session_passphrases.pop(_task_key(telegram_id, network), None)
+
+
 def get_runtime_passphrase(telegram_id: int, network: str) -> str | None:
     tk = _task_key(telegram_id, network)
     strategy_passphrase = _session_passphrases.get(tk)
@@ -329,10 +333,23 @@ def restore_running_bots(enabled: bool = False):
             key = row.get("key", "")
             user_network = key.replace(STATE_PREFIX, "")
             user_id_str, network = user_network.split(":", 1)
-            user_id = int(user_id_str)
+            _ = int(user_id_str)
             state = json.loads(row.get("value") or "{}")
             if state.get("running"):
-                _ensure_task(user_id, network)
+                # Session passphrases are intentionally in-memory only and are
+                # not recoverable across restarts. Do not auto-resume loops in
+                # a "running" state that can never execute signed actions.
+                strategy = str(state.get("strategy", "")).upper() or "STRATEGY"
+                state["running"] = False
+                state["last_error"] = (
+                    f"{strategy} session expired after restart. Restart strategy and enter passphrase again."
+                )
+                set_bot_state(key, state)
+                logger.info(
+                    "Skipped auto-restore for user %s on %s: passphrase session cannot be restored.",
+                    user_id_str,
+                    network,
+                )
         except Exception:
             continue
 
@@ -409,6 +426,14 @@ async def handle_strategy_job(payload: dict):
                 refreshed["last_error"] = None
                 _save_state(telegram_id, network, refreshed)
         else:
+            logger.warning(
+                "Strategy cycle failed user=%s network=%s strategy=%s product=%s error=%s",
+                telegram_id,
+                network,
+                state.get("strategy"),
+                state.get("product"),
+                error_msg or "unknown cycle error",
+            )
             await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
     except Exception as e:
         logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)

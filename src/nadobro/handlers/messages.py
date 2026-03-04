@@ -98,8 +98,9 @@ def clear_session_passphrase(context: CallbackContext, telegram_id: int | None =
     if telegram_id is not None:
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        from src.nadobro.services.bot_runtime import clear_manual_passphrase
+        from src.nadobro.services.bot_runtime import clear_manual_passphrase, clear_runtime_passphrase
         clear_manual_passphrase(telegram_id, network)
+        clear_runtime_passphrase(telegram_id, network)
 
 
 def _cache_session_passphrase(context: CallbackContext, telegram_id: int, passphrase: str):

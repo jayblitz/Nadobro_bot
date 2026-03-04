@@ -99,7 +99,7 @@ def setup_bot():
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
-        .concurrent_updates(True)
+        .concurrent_updates(False)
         .build()
     )
 
