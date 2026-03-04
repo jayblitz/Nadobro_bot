@@ -11,10 +11,33 @@ from src.nadobro.config import (
     get_product_max_leverage,
     RATE_LIMIT_SECONDS,
     MIN_TRADE_SIZE_USD,
+    PRODUCTS,
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 
 logger = logging.getLogger(__name__)
+
+
+def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[str]]:
+    cancelled = 0
+    errors: list[str] = []
+    try:
+        open_orders = client.get_open_orders(product_id) or []
+    except Exception as e:
+        return 0, [f"{get_product_name(product_id)}: open-orders lookup failed ({e})"]
+    for order in open_orders:
+        digest = order.get("digest")
+        if not digest:
+            continue
+        try:
+            r = client.cancel_order(product_id, digest)
+            if r.get("success"):
+                cancelled += 1
+            else:
+                errors.append(f"{get_product_name(product_id)}: cancel failed ({r.get('error', 'unknown')})")
+        except Exception as e:
+            errors.append(f"{get_product_name(product_id)}: cancel exception ({e})")
+    return cancelled, errors
 
 
 def check_rate_limit(telegram_id: int) -> tuple[bool, str]:
@@ -471,9 +494,19 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
     client = get_user_nado_client(telegram_id, passphrase=passphrase)
     if not client:
         return {"success": False, "error": "Invalid passphrase or wallet not initialized."}
+    cancelled_orders, order_errors = _cancel_open_orders_for_product(client, product_id)
+
     net_positions = _normalize_net_positions(client.get_all_positions() or [])
     product_pos = net_positions.get(product_id)
     if not product_pos:
+        if cancelled_orders > 0:
+            return {
+                "success": True,
+                "cancelled": 0.0,
+                "product": get_product_name(product_id),
+                "cancelled_orders": cancelled_orders,
+                "order_errors": order_errors if order_errors else None,
+            }
         return {"success": False, "error": f"No open positions on {product}."}
 
     signed_amount = float(product_pos.get("signed_amount", 0) or 0)
@@ -482,20 +515,59 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
         return {"success": False, "error": f"No open positions on {product}."}
 
     close_size = min(pos_size, float(size)) if size else pos_size
-    is_buy = signed_amount < 0
-    r = client.place_market_order(product_id, close_size, is_buy=is_buy, slippage_pct=1.0)
-    if not r.get("success"):
-        return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
-
+    full_close_requested = size is None or close_size >= pos_size
     close_side = "short" if signed_amount > 0 else "long"
-    fill_price = float(r.get("price") or 0) if r.get("price") else None
-    _record_close_in_db(telegram_id, product_id, close_size, pos_size, close_side, client, fill_price=fill_price)
 
-    return {
+    remaining_size = close_size
+    attempts = 0
+    while remaining_size > 0 and attempts < 3:
+        attempts += 1
+        # Refresh side before each close attempt in case position flips between retries.
+        latest_positions = _normalize_net_positions(client.get_all_positions() or [])
+        latest_pos = latest_positions.get(product_id)
+        if not latest_pos:
+            remaining_size = 0.0
+            break
+        latest_signed = float(latest_pos.get("signed_amount", 0) or 0)
+        latest_abs = abs(latest_signed)
+        if latest_abs <= 0:
+            remaining_size = 0.0
+            break
+        is_buy = latest_signed < 0
+        this_close_size = min(remaining_size, latest_abs)
+        r = client.place_market_order(product_id, this_close_size, is_buy=is_buy, slippage_pct=1.0)
+        if not r.get("success"):
+            return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
+        fill_price = float(r.get("price") or 0) if r.get("price") else None
+        _record_close_in_db(telegram_id, product_id, this_close_size, pos_size, close_side, client, fill_price=fill_price)
+        remaining_size -= this_close_size
+
+    post_positions = _normalize_net_positions(client.get_all_positions() or [])
+    post_pos = post_positions.get(product_id)
+    post_open_orders = client.get_open_orders(product_id) or []
+    if full_close_requested:
+        still_open = bool(post_pos and abs(float(post_pos.get("signed_amount", 0) or 0)) > 0)
+        if still_open or post_open_orders:
+            detail = []
+            if still_open:
+                detail.append("position still open")
+            if post_open_orders:
+                detail.append(f"{len(post_open_orders)} open orders remain")
+            return {
+                "success": False,
+                "error": f"Close verification failed for {product}: {', '.join(detail)}.",
+            }
+
+    payload = {
         "success": True,
         "cancelled": close_size,
         "product": get_product_name(product_id),
     }
+    if cancelled_orders:
+        payload["cancelled_orders"] = cancelled_orders
+    if order_errors:
+        payload["order_errors"] = order_errors
+    return payload
 
 
 def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
@@ -503,8 +575,35 @@ def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
     if not client:
         return {"success": False, "error": "Invalid passphrase or wallet not initialized."}
 
+    cancelled_orders = 0
+    order_errors = []
+    # Always cancel stale open orders first so strategy stop leaves no resting orders.
+    for _, info in PRODUCTS.items():
+        if info.get("type") != "perp":
+            continue
+        pid = info.get("id")
+        c_count, c_errors = _cancel_open_orders_for_product(client, pid)
+        cancelled_orders += c_count
+        if c_errors:
+            order_errors.extend(c_errors)
+
     net_positions = _normalize_net_positions(client.get_all_positions() or [])
     if not net_positions:
+        if cancelled_orders > 0 and not order_errors:
+            return {
+                "success": True,
+                "cancelled": 0.0,
+                "products": [],
+                "cancelled_orders": cancelled_orders,
+            }
+        if cancelled_orders > 0:
+            return {
+                "success": True,
+                "cancelled": 0.0,
+                "products": [],
+                "cancelled_orders": cancelled_orders,
+                "order_errors": order_errors,
+            }
         return {"success": False, "error": "No open positions found."}
 
     cancelled = 0.0
@@ -531,13 +630,42 @@ def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
             errors.append(f"{p.get('product_name', 'unknown')}: {str(e)}")
 
     if cancelled == 0 and errors:
-        return {"success": False, "error": f"Failed to close positions: {'; '.join(errors)}"}
+        all_errors = list(errors)
+        if order_errors:
+            all_errors.extend(order_errors)
+        return {"success": False, "error": f"Failed to close positions: {'; '.join(all_errors)}"}
 
-    return {
+    result = {
         "success": True,
         "cancelled": cancelled,
         "products": list(products_closed),
     }
+    if cancelled_orders:
+        result["cancelled_orders"] = cancelled_orders
+    if order_errors:
+        result["order_errors"] = order_errors
+    # Verify flatten succeeded before reporting success to callers that notify users.
+    post_positions = _normalize_net_positions(client.get_all_positions() or [])
+    if post_positions:
+        result["success"] = False
+        result["error"] = (
+            "Close-all verification failed: open positions remain on "
+            + ", ".join(get_product_name(pid) for pid in post_positions.keys())
+        )
+    remaining_orders = 0
+    for _, info in PRODUCTS.items():
+        if info.get("type") != "perp":
+            continue
+        try:
+            remaining_orders += len(client.get_open_orders(info.get("id")) or [])
+        except Exception:
+            continue
+    if remaining_orders > 0:
+        result["success"] = False
+        existing_error = result.get("error", "")
+        suffix = f"{remaining_orders} open orders remain."
+        result["error"] = f"{existing_error} {suffix}".strip()
+    return result
 
 
 def get_trade_history(telegram_id: int, limit: int = 20) -> list:

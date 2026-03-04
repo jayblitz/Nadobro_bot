@@ -681,6 +681,16 @@ class NadoClient:
         aligned = (abs_v // int(increment_x18)) * int(increment_x18)
         return sign * aligned
 
+    @staticmethod
+    def _align_x18_up_to_increment(value_x18: int, increment_x18: int) -> int:
+        if increment_x18 <= 0:
+            return value_x18
+        sign = -1 if value_x18 < 0 else 1
+        abs_v = abs(int(value_x18))
+        inc = int(increment_x18)
+        aligned = ((abs_v + inc - 1) // inc) * inc
+        return sign * aligned
+
     def _fallback_size_candidates(self, size: float) -> list[float]:
         # Conservative ladder from fine to coarse increments.
         # Includes 1/2/5 * 10^n steps to match common exchange lot sizes like 5e-5.
@@ -752,6 +762,7 @@ class NadoClient:
             self._warm_product_increment_cache(product_id)
             size_increment = _size_increment_cache.get((self.network, product_id))
             size_increment_x18 = _size_increment_x18_cache.get((self.network, product_id))
+            min_size_x18 = _min_size_x18_cache.get((self.network, product_id))
             if size_increment and size_increment > 0:
                 aligned_size = self._align_size_to_increment(size, size_increment)
                 if aligned_size <= 0:
@@ -802,6 +813,29 @@ class NadoClient:
             if price_increment_x18 and price_increment_x18 > 0:
                 price_x18 = self._align_x18_to_increment(price_x18, int(price_increment_x18))
 
+            # Proactively enforce exchange minimum notional before submission.
+            if min_size_x18 and min_size_x18 > 0 and price_x18 > 0 and amount_x18 != 0:
+                min_notional_x36 = int(min_size_x18) * (10 ** 18)
+                current_notional_x36 = abs(int(amount_x18)) * int(price_x18)
+                if current_notional_x36 < min_notional_x36:
+                    required_abs_amount_x18 = (min_notional_x36 + int(price_x18) - 1) // int(price_x18)
+                    bumped_amount_x18 = required_abs_amount_x18 if amount_x18 > 0 else -required_abs_amount_x18
+                    if size_increment_x18 and size_increment_x18 > 0:
+                        bumped_amount_x18 = self._align_x18_up_to_increment(
+                            bumped_amount_x18,
+                            int(size_increment_x18),
+                        )
+                    if abs(int(bumped_amount_x18)) > abs(int(amount_x18)):
+                        logger.info(
+                            "Bumping order amount for min notional product_id=%s amount_x18=%s->%s min_size_x18=%s",
+                            product_id,
+                            amount_x18,
+                            bumped_amount_x18,
+                            min_size_x18,
+                        )
+                        amount_x18 = int(bumped_amount_x18)
+                        size = abs(float(amount_x18) / 1e18)
+
             order = OrderParams(
                 sender=self.subaccount_hex,
                 priceX18=price_x18,
@@ -826,6 +860,13 @@ class NadoClient:
                     }
 
             result_str = str(result)
+            lowered_result = result_str.lower()
+            if (
+                (hasattr(result, "status") and str(getattr(result, "status")).lower() == "failure")
+                or ('"status":"failure"' in lowered_result)
+                or ("'status': 'failure'" in lowered_result)
+            ):
+                return {"success": False, "error": self._friendly_error(result_str)}
             if "blocked" in result_str.lower() or "reason" in result_str.lower():
                 return {"success": False, "error": self._friendly_error(result_str)}
 
