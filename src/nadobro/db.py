@@ -189,7 +189,9 @@ def init_db():
                     network TEXT NOT NULL,
                     error_message TEXT,
                     created_at TIMESTAMPTZ DEFAULT now(),
-                    filled_at TIMESTAMPTZ
+                    filled_at TIMESTAMPTZ,
+                    close_price DOUBLE PRECISION,
+                    closed_at TIMESTAMPTZ
                 );
                 CREATE INDEX IF NOT EXISTS idx_trades_user_product ON trades (user_id, product_id);
                 CREATE INDEX IF NOT EXISTS idx_trades_created ON trades (created_at);
@@ -215,6 +217,16 @@ def init_db():
                 );
             """)
             conn.commit()
+
+        with conn.cursor() as cur:
+            for col, col_type in [("close_price", "DOUBLE PRECISION"), ("closed_at", "TIMESTAMPTZ")]:
+                try:
+                    cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+                    conn.commit()
+                    logger.info(f"Added column trades.{col}")
+                except Exception:
+                    conn.rollback()
+
         logger.info("Database tables verified/created")
     except Exception:
         conn.rollback()
