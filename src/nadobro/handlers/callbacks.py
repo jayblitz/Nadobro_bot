@@ -235,6 +235,9 @@ async def _handle_nav(query, data, telegram_id, context=None):
         context.user_data.pop("pending_trade", None)
 
     if target in ("main", "refresh"):
+        if context is not None:
+            from src.nadobro.handlers.messages import terminate_active_processes
+            terminate_active_processes(context, telegram_id=telegram_id)
         await _show_dashboard(query, telegram_id)
     elif target == "help":
         try:
