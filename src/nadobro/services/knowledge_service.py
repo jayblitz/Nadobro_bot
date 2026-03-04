@@ -742,10 +742,12 @@ def _execute_trending_cryptos() -> tuple[str, list[str]]:
         from src.nadobro.services.cmc_client import get_trending, format_trending
         data = get_trending()
         formatted = format_trending(data)
-        return f"[TRENDING CRYPTO DATA FROM COINMARKETCAP]\n{formatted}", ["https://coinmarketcap.com"]
+        if formatted and "No trending data" not in formatted:
+            return f"[TRENDING CRYPTO DATA FROM COINMARKETCAP]\n{formatted}", ["https://coinmarketcap.com"]
+        return "[TRENDING] Trending data requires a CoinMarketCap paid plan. Try asking about specific coins instead (e.g. 'how is BTC doing?').", []
     except Exception as e:
         logger.warning(f"CMC trending failed: {e}")
-        return f"[TRENDING] Could not fetch trending data right now: {e}", []
+        return "[TRENDING] Trending data not available. Try asking about specific coins instead.", []
 
 
 def _execute_global_market_data() -> tuple[str, list[str]]:
