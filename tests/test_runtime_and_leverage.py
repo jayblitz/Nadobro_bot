@@ -217,6 +217,36 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIn("testnet: no active strategy session passphrase", msg)
         self.assertEqual(close_calls, [(telegram_id, "main-pass")])
 
+    def test_restore_running_bots_marks_sessions_expired_after_restart(self):
+        telegram_id = 77
+        key = f"{bot_runtime.STATE_PREFIX}{telegram_id}:testnet"
+        rows = [{"key": key, "value": json.dumps({"running": True, "strategy": "mm"})}]
+        saved = []
+
+        with patch.object(bot_runtime, "query_all", return_value=rows), patch.object(
+            bot_runtime, "set_bot_state", side_effect=lambda k, v: saved.append((k, v))
+        ):
+            bot_runtime.restore_running_bots(enabled=True)
+
+        self.assertEqual(len(saved), 1)
+        saved_key, saved_state = saved[0]
+        self.assertEqual(saved_key, key)
+        self.assertFalse(saved_state.get("running"))
+        self.assertIn("session expired after restart", str(saved_state.get("last_error", "")).lower())
+
+    def test_clear_runtime_passphrase_removes_only_target_session(self):
+        old_pass = dict(bot_runtime._session_passphrases)
+        try:
+            bot_runtime._session_passphrases = {
+                "1:testnet": "pw1",
+                "1:mainnet": "pw2",
+            }
+            bot_runtime.clear_runtime_passphrase(1, "testnet")
+            self.assertNotIn("1:testnet", bot_runtime._session_passphrases)
+            self.assertEqual(bot_runtime._session_passphrases.get("1:mainnet"), "pw2")
+        finally:
+            bot_runtime._session_passphrases = old_pass
+
     def test_run_cycle_sl_path_returns_tuple(self):
         telegram_id = 7
         network = "mainnet"
