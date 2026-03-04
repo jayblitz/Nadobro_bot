@@ -8,7 +8,8 @@
 - Enhanced market sentiment: Fear & Greed Index (CMC primary, api.alternative.me fallback) + broader crypto news from WatcherGuru, CoinDesk, Cointelegraph, whale_alert via xAI search.
 - Knowledge base expanded to ~350 lines with FAQ, getting started guide, fee tiers, supported markets, security.
 - Agent tools now 7: search_knowledge_base, get_live_price, get_market_sentiment, search_x_twitter, get_crypto_info, get_trending_cryptos, get_global_market_data. Strict source filtering enforces official URLs + coinmarketcap.com.
-- Trade rate limit reduced from 60s to 5s; only counts filled trades (not pending).
+- Trade close tracking: close_position/close_all_positions now record close price, PnL, closed_at, and status=closed in DB. find_open_trade helper links closes to opens. Trade history and analytics include close data. ALTER TABLE migration adds close_price and closed_at columns.
+- Trade rate limit reduced from 60s to 5s; only counts filled trades (not pending/closed).
 - Webhook mode deployed on Fly.io Amsterdam; single machine with min/max_machines_running=1.
 - Improved strategy UX and execution reliability for smoother bot operation.
 - Added Volume Bot to the strategy hub and settings flow.

@@ -30,6 +30,7 @@ class TradeStatus(enum.Enum):
     PARTIALLY_FILLED = "partially_filled"
     CANCELLED = "cancelled"
     FAILED = "failed"
+    CLOSED = "closed"
 
 
 class AlertCondition(enum.Enum):
@@ -80,6 +81,7 @@ _TRADE_INSERT_ALLOWED_COLS = frozenset({
     "user_id", "product_id", "product_name", "order_type", "side",
     "size", "price", "leverage", "status", "order_digest", "pnl",
     "fees", "network", "error_message", "created_at", "filled_at",
+    "close_price", "closed_at",
 })
 
 
@@ -99,6 +101,7 @@ def insert_trade(data: dict) -> Optional[int]:
 
 _TRADE_UPDATE_ALLOWED_COLS = frozenset({
     "status", "order_digest", "price", "filled_at", "error_message",
+    "pnl", "fees", "close_price", "closed_at",
 })
 
 
@@ -118,6 +121,18 @@ def get_last_trade_for_rate_limit(telegram_id: int) -> Optional[dict]:
     return query_one(
         "SELECT created_at FROM trades WHERE user_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
         (telegram_id,),
+    )
+
+
+def find_open_trade(telegram_id: int, product_id: int, network: str = None) -> Optional[dict]:
+    if network:
+        return query_one(
+            "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND network = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
+            (telegram_id, product_id, network),
+        )
+    return query_one(
+        "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
+        (telegram_id, product_id),
     )
 
 

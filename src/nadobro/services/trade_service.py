@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from src.nadobro.models.database import (
     TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
     get_last_trade_for_rate_limit, insert_trade, update_trade, get_trades_by_user,
+    find_open_trade,
 )
 from src.nadobro.config import get_product_id, get_product_name, RATE_LIMIT_SECONDS, MAX_LEVERAGE, MIN_TRADE_SIZE_USD
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
@@ -268,6 +269,79 @@ def _normalize_net_positions(positions: list) -> dict[int, dict]:
     return net_by_product
 
 
+def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, pos_size: float, side: str, client, fill_price: float = None):
+    try:
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+
+        close_price = fill_price or 0.0
+        if not close_price:
+            try:
+                price_data = client.get_market_price(product_id)
+                close_price = float(price_data.get("mid", 0) or 0)
+            except Exception:
+                pass
+
+        open_trade = find_open_trade(telegram_id, product_id, network=network)
+        is_full_close = close_size >= pos_size
+
+        if open_trade:
+            open_price = float(open_trade.get("price") or 0)
+            open_side = open_trade.get("side", "")
+            pnl = 0.0
+            if open_price > 0 and close_price > 0:
+                if open_side == "long":
+                    pnl = (close_price - open_price) * close_size
+                elif open_side == "short":
+                    pnl = (open_price - close_price) * close_size
+
+            if is_full_close:
+                update_trade(open_trade["id"], {
+                    "status": TradeStatus.CLOSED.value,
+                    "close_price": close_price,
+                    "closed_at": datetime.utcnow().isoformat(),
+                    "pnl": round(pnl, 4),
+                })
+                logger.info(
+                    "Trade #%d fully closed: %s %s size=%.4f open=%.2f close=%.2f pnl=%.4f",
+                    open_trade["id"], open_side, get_product_name(product_id),
+                    close_size, open_price, close_price, pnl,
+                )
+            else:
+                update_trade(open_trade["id"], {
+                    "pnl": round(pnl, 4),
+                    "close_price": close_price,
+                })
+                logger.info(
+                    "Trade #%d partially closed: %s %s closed=%.4f/%.4f open=%.2f close=%.2f pnl=%.4f",
+                    open_trade["id"], open_side, get_product_name(product_id),
+                    close_size, pos_size, open_price, close_price, pnl,
+                )
+        else:
+            insert_trade({
+                "user_id": telegram_id,
+                "product_id": product_id,
+                "product_name": get_product_name(product_id),
+                "order_type": "market",
+                "side": side,
+                "size": close_size,
+                "price": close_price,
+                "leverage": 1.0,
+                "status": TradeStatus.CLOSED.value,
+                "network": network,
+                "close_price": close_price,
+                "closed_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.utcnow().isoformat(),
+                "filled_at": datetime.utcnow().isoformat(),
+            })
+            logger.info(
+                "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f",
+                side, get_product_name(product_id), close_size, close_price,
+            )
+    except Exception as e:
+        logger.warning("Failed to record close in DB: %s", e)
+
+
 def close_position(telegram_id: int, product: str, size: float = None, passphrase: str = None) -> dict:
     product_id = get_product_id(product)
     if product_id is None:
@@ -287,11 +361,14 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
         return {"success": False, "error": f"No open positions on {product}."}
 
     close_size = min(pos_size, float(size)) if size else pos_size
-    # LONG closes with SELL, SHORT closes with BUY.
     is_buy = signed_amount < 0
     r = client.place_market_order(product_id, close_size, is_buy=is_buy, slippage_pct=1.0)
     if not r.get("success"):
         return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
+
+    close_side = "short" if signed_amount > 0 else "long"
+    fill_price = float(r.get("price") or 0) if r.get("price") else None
+    _record_close_in_db(telegram_id, product_id, close_size, pos_size, close_side, client, fill_price=fill_price)
 
     return {
         "success": True,
@@ -322,7 +399,11 @@ def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
             r = client.place_market_order(pid, pos_size, is_buy=is_buy, slippage_pct=1.0)
             if r["success"]:
                 cancelled += pos_size
-                products_closed.add(p.get("product_name", get_product_name(pid)))
+                product_name = p.get("product_name", get_product_name(pid))
+                products_closed.add(product_name)
+                close_side = "short" if signed_amount > 0 else "long"
+                fill_price = float(r.get("price") or 0) if r.get("price") else None
+                _record_close_in_db(telegram_id, pid, pos_size, pos_size, close_side, client, fill_price=fill_price)
             else:
                 errors.append(f"{p.get('product_name', get_product_name(pid))}: {r.get('error', 'unknown')}")
         except Exception as e:
@@ -340,8 +421,9 @@ def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
 
 def get_trade_history(telegram_id: int, limit: int = 20) -> list:
     trades = get_trades_by_user(telegram_id, limit=limit)
-    return [
-        {
+    result = []
+    for t in trades:
+        entry = {
             "id": t.get("id"),
             "product": t.get("product_name"),
             "type": t.get("order_type"),
@@ -350,11 +432,13 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
             "price": t.get("price"),
             "status": t.get("status"),
             "pnl": t.get("pnl"),
+            "close_price": t.get("close_price"),
             "network": t.get("network"),
             "created_at": t.get("created_at", "")[:19] if t.get("created_at") else "",
+            "closed_at": t.get("closed_at", "")[:19] if t.get("closed_at") else "",
         }
-        for t in trades
-    ]
+        result.append(entry)
+    return result
 
 
 def get_trade_analytics(telegram_id: int) -> dict:
@@ -363,16 +447,19 @@ def get_trade_analytics(telegram_id: int) -> dict:
         return {"total_trades": 0}
     total = len(trades)
     filled = [t for t in trades if t.get("status") == TradeStatus.FILLED.value]
+    closed = [t for t in trades if t.get("status") == TradeStatus.CLOSED.value]
     failed = [t for t in trades if t.get("status") == TradeStatus.FAILED.value]
-    pnl_trades = [t for t in filled if t.get("pnl") is not None]
+    completed = filled + closed
+    pnl_trades = [t for t in completed if t.get("pnl") is not None]
     total_pnl = sum(float(t["pnl"]) for t in pnl_trades) if pnl_trades else 0
     wins = len([t for t in pnl_trades if float(t["pnl"]) > 0])
     losses = len([t for t in pnl_trades if float(t["pnl"]) <= 0])
     win_rate = (wins / len(pnl_trades) * 100) if pnl_trades else 0
-    total_volume = sum(float(t.get("size") or 0) * float(t.get("price") or 0) for t in filled)
+    total_volume = sum(float(t.get("size") or 0) * float(t.get("price") or 0) for t in completed)
     return {
         "total_trades": total,
         "filled": len(filled),
+        "closed": len(closed),
         "failed": len(failed),
         "total_pnl": total_pnl,
         "win_rate": win_rate,
