@@ -6,6 +6,7 @@ from telegram.constants import ParseMode
 from src.nadobro.services.user_service import get_or_create_user, get_user
 
 INTRO_VIDEO_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "intro_video.mov")
+START_IMAGE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "start-bot.png")
 from src.nadobro.handlers.formatters import escape_md, fmt_help, fmt_status_overview
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb,
@@ -46,9 +47,21 @@ We generate a secure 1CT signing key for your account. Your main wallet keys are
 
 Ready?"""
 
-DASHBOARD_MSG = """🤖 Nadobro Command Center online.
+DASHBOARD_MSG = """🚀 *Nadobro Command Center is live\\!*
 
-Select a module below to trade, monitor, and run strategy automation."""
+Yo legend, your trading copilot is online and ready to cook\\.
+
+Pick a module below and let's trade smarter \\(and faster\\) ⚡"""
+
+
+async def _send_start_image(update: Update):
+    if not update.message or not os.path.exists(START_IMAGE_PATH):
+        return
+    try:
+        with open(START_IMAGE_PATH, "rb") as img:
+            await update.message.reply_photo(photo=img)
+    except Exception as e:
+        logger.warning("Failed to send start image: %s", e)
 
 
 async def cmd_start(update: Update, context: CallbackContext):
@@ -56,6 +69,7 @@ async def cmd_start(update: Update, context: CallbackContext):
     username = update.effective_user.username
 
     user, is_new, _ = get_or_create_user(telegram_id, username)
+    await _send_start_image(update)
 
     if not is_new_onboarding_complete(telegram_id):
         state = get_new_onboarding_state(telegram_id)
@@ -85,13 +99,18 @@ async def cmd_start(update: Update, context: CallbackContext):
         return
     await update.message.reply_text(
         DASHBOARD_MSG,
+        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=persistent_menu_kb(),
     )
 
 
 async def _send_dashboard_card(update: Update, context: CallbackContext, telegram_id: int):
     """Send dashboard text + home card inline keyboard (8 buttons)."""
-    await update.message.reply_text(DASHBOARD_MSG, reply_markup=home_card_kb())
+    await update.message.reply_text(
+        DASHBOARD_MSG,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=home_card_kb(),
+    )
 
 
 async def cmd_help(update: Update, context: CallbackContext):
