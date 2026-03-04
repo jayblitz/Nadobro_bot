@@ -13,7 +13,7 @@ from src.nadobro.services.user_service import get_user_readonly_client, get_user
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FLIP_SIZE_USD = 100.0
+DEFAULT_FLIP_SIZE_USD = 200.0
 MIN_FLIP_SIZE_USD = 10.0
 
 
@@ -49,7 +49,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
       - last_side          : "long" | "short" — last direction executed
       - leverage           : leverage multiplier
       - slippage_pct       : slippage tolerance %
-      - flip_size_usd      : per-flip notional (default 100)
+      - flip_size_usd      : per-flip notional (default 200)
 
     Returns dict with cycle results.
     """
@@ -58,10 +58,14 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
     volume_done = float(state.get("volume_done_usd") or 0)
     fees_paid = float(state.get("fees_paid") or 0)
     last_side = state.get("last_side", "short")
-    leverage = float(state.get("leverage") or 3.0)
+    leverage = float(state.get("leverage") or 1.0)
     slippage_pct = float(state.get("slippage_pct") or 1.0)
     interval_seconds = int(state.get("interval_seconds") or 30)
-    flip_size_usd = float(state.get("flip_size_usd") or DEFAULT_FLIP_SIZE_USD)
+    flip_size_usd = float(
+        state.get("flip_size_usd")
+        or state.get("notional_usd")
+        or DEFAULT_FLIP_SIZE_USD
+    )
 
     if flip_size_usd < MIN_FLIP_SIZE_USD:
         flip_size_usd = MIN_FLIP_SIZE_USD

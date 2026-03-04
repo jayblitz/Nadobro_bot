@@ -23,6 +23,7 @@ _size_increment_cache = {}
 _price_increment_cache = {}
 _size_increment_x18_cache = {}
 _price_increment_x18_cache = {}
+_min_size_x18_cache = {}
 _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
 _FANOUT_WORKERS = int(os.environ.get("NADO_FANOUT_WORKERS", "8"))
 _rest_session = requests.Session()
@@ -606,9 +607,31 @@ class NadoClient:
         return None
 
     @staticmethod
+    def _extract_min_size_x18_from_error(error_str: str, product_id: int) -> Optional[int]:
+        import re
+        patterns = [
+            rf"min_size for product {product_id}:\s*(\d+)",
+            r"min_size[^0-9]*(\d+)",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, error_str, flags=re.IGNORECASE)
+            if not m:
+                continue
+            try:
+                return int(m.group(1))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
     def _is_size_increment_error(error_str: str) -> bool:
         lowered = (error_str or "").lower()
         return "invalid order amount" in lowered and "size_increment" in lowered
+
+    @staticmethod
+    def _is_min_notional_error(error_str: str) -> bool:
+        lowered = (error_str or "").lower()
+        return "invalid order size" in lowered and "min_size" in lowered
 
     @staticmethod
     def _align_price_to_increment(price: float, increment: float, is_buy: bool, order_type: str) -> float:
@@ -632,6 +655,16 @@ class NadoClient:
         d_size = Decimal(str(size))
         d_inc = Decimal(str(increment))
         ticks = (d_size / d_inc).to_integral_value(rounding=ROUND_FLOOR)
+        aligned = ticks * d_inc
+        return float(aligned)
+
+    @staticmethod
+    def _align_size_up_to_increment(size: float, increment: float) -> float:
+        if increment <= 0:
+            return size
+        d_size = Decimal(str(size))
+        d_inc = Decimal(str(increment))
+        ticks = (d_size / d_inc).to_integral_value(rounding=ROUND_CEILING)
         aligned = ticks * d_inc
         return float(aligned)
 
@@ -680,6 +713,7 @@ class NadoClient:
                 book_info = p.get("book_info", {}) or {}
                 size_inc_x18 = p.get("size_increment_x18") or book_info.get("size_increment")
                 price_inc_x18 = p.get("price_increment_x18") or book_info.get("price_increment_x18")
+                min_size_x18 = p.get("min_size_x18") or book_info.get("min_size_x18") or p.get("min_size")
                 if size_inc_x18 is not None:
                     try:
                         size_inc_x18_int = int(size_inc_x18)
@@ -692,6 +726,11 @@ class NadoClient:
                         price_inc_x18_int = int(price_inc_x18)
                         _price_increment_x18_cache[(self.network, pid)] = price_inc_x18_int
                         _price_increment_cache[(self.network, pid)] = price_inc_x18_int / 1e18
+                    except (TypeError, ValueError):
+                        pass
+                if min_size_x18 is not None:
+                    try:
+                        _min_size_x18_cache[(self.network, pid)] = int(min_size_x18)
                     except (TypeError, ValueError):
                         pass
         except Exception as e:
@@ -802,11 +841,14 @@ class NadoClient:
             err_str = str(e)
             increment = self._extract_price_increment_from_error(err_str, product_id)
             size_increment = self._extract_size_increment_from_error(err_str, product_id)
+            min_size_x18 = self._extract_min_size_x18_from_error(err_str, product_id)
 
             if increment and increment > 0:
                 _price_increment_cache[(self.network, product_id)] = increment
             if size_increment and size_increment > 0:
                 _size_increment_cache[(self.network, product_id)] = size_increment
+            if min_size_x18 and min_size_x18 > 0:
+                _min_size_x18_cache[(self.network, product_id)] = int(min_size_x18)
 
             # Retry with normalized size/price when exchange returns increment errors.
             if _retry_count < 3 and ((increment and increment > 0) or (size_increment and size_increment > 0)):
@@ -838,6 +880,37 @@ class NadoClient:
                     except Exception as retry_e:
                         logger.error(f"place_order retry failed: {retry_e}")
                         return {"success": False, "error": self._friendly_error(str(retry_e))}
+
+            # Retry with bumped size when exchange enforces min notional.
+            if _retry_count < 3 and self._is_min_notional_error(err_str):
+                required_min_x18 = _min_size_x18_cache.get((self.network, product_id)) or min_size_x18
+                if required_min_x18 and required_min_x18 > 0 and price > 0:
+                    required_notional = float(required_min_x18) / 1e18
+                    # Add tiny safety buffer so downstream tick/rounding does not dip below threshold.
+                    target_size = (required_notional / float(price)) * 1.01
+                    if size_increment and size_increment > 0:
+                        target_size = self._align_size_up_to_increment(target_size, size_increment)
+                    retry_size = max(float(size), float(target_size))
+                    if retry_size > size:
+                        logger.info(
+                            "Retrying place_order with min-notional bump product_id=%s size=%s->%s min_notional=%s",
+                            product_id,
+                            size,
+                            retry_size,
+                            required_notional,
+                        )
+                        try:
+                            return self.place_order(
+                                product_id=product_id,
+                                size=retry_size,
+                                price=price,
+                                order_type=order_type,
+                                is_buy=is_buy,
+                                _retry_count=_retry_count + 1,
+                            )
+                        except Exception as retry_e:
+                            logger.error(f"place_order min-notional retry failed: {retry_e}")
+                            return {"success": False, "error": self._friendly_error(str(retry_e))}
 
             # Some exchange error payloads truncate size_increment value. In that case
             # probe a small ladder of common increments to find a valid divisible amount.
