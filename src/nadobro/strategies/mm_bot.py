@@ -16,6 +16,7 @@ MM_DEFAULT_LEVELS = 2
 GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
 GRID_MIN_SPREAD_BP = 8.0
+DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -223,6 +224,10 @@ def run_cycle(
     session_cap_notional = max(0.0, float(state.get("session_notional_cap_usd") or 0.0))
     carry_notional = max(0.0, float(state.get("mm_notional_carry_usd") or 0.0))
     session_done = max(0.0, float(state.get("mm_session_notional_done_usd") or 0.0))
+    min_order_notional_usd = max(
+        1.0,
+        float(state.get("min_order_notional_usd") or DEFAULT_MIN_ORDER_NOTIONAL_USD),
+    )
     order_birth_ts = state.setdefault("mm_order_birth_ts", {})
     if not isinstance(order_birth_ts, dict):
         order_birth_ts = {}
@@ -354,8 +359,24 @@ def run_cycle(
     side_budget_weight_total = max(1e-9, buy_mult + sell_mult)
     buy_budget_usd = cycle_target_notional * (buy_mult / side_budget_weight_total)
     sell_budget_usd = cycle_target_notional * (sell_mult / side_budget_weight_total)
-    per_level_buy_size = max(buy_budget_usd / max(1, levels) / mid, 0.0001)
-    per_level_sell_size = max(sell_budget_usd / max(1, levels) / mid, 0.0001)
+    buy_levels = min(levels, int(buy_budget_usd // min_order_notional_usd))
+    sell_levels = min(levels, int(sell_budget_usd // min_order_notional_usd))
+    if buy_levels <= 0 and sell_levels <= 0:
+        needed_cycle_notional = min_order_notional_usd * 2.0
+        return {
+            "success": False,
+            "error": (
+                f"MM cycle notional is too small for exchange minimum order size. "
+                f"Set cycle notional to at least ${needed_cycle_notional:.0f}."
+            ),
+            "orders_placed": 0,
+            "orders_cancelled": orders_cancelled,
+            "reason": "cycle notional below exchange minimum",
+            "spread_bp": dynamic_spread_bp,
+            "reference_price": reference_price,
+        }
+    per_level_buy_size = (buy_budget_usd / max(1, buy_levels) / mid) if buy_levels > 0 else 0.0
+    per_level_sell_size = (sell_budget_usd / max(1, sell_levels) / mid) if sell_levels > 0 else 0.0
 
     orders_placed = 0
     errors = []
@@ -374,8 +395,14 @@ def run_cycle(
                 continue
             if net_units < 0 and not order_spec["is_long"]:
                 continue
+        if order_spec["is_long"] and order_spec["level"] > buy_levels:
+            continue
+        if (not order_spec["is_long"]) and order_spec["level"] > sell_levels:
+            continue
 
         size_to_use = per_level_buy_size if order_spec["is_long"] else per_level_sell_size
+        if size_to_use <= 0:
+            continue
         result = execute_limit_order(
             telegram_id,
             product,

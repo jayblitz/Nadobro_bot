@@ -134,7 +134,14 @@ async def _notify(telegram_id: int, text: str):
 
 def _strategy_defaults(strategy: str) -> dict:
     presets = {
-        "mm": {"notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "threshold_bp": 12.0, "close_offset_bp": 24.0},
+        "mm": {
+            "notional_usd": 400.0,
+            "cycle_notional_usd": 400.0,
+            "spread_bp": 4.0,
+            "interval_seconds": 45,
+            "threshold_bp": 12.0,
+            "close_offset_bp": 24.0,
+        },
         "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0},
         "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "auto_close_on_maintenance": 1.0},
         "vol": {"notional_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
@@ -213,7 +220,10 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
         task.cancel()
 
     if cancel_orders:
-        close_all_positions(telegram_id, passphrase=_session_passphrases.get(tk))
+        close_res = close_all_positions(telegram_id, passphrase=_session_passphrases.get(tk))
+        if not close_res.get("success"):
+            _session_passphrases.pop(tk, None)
+            return False, f"Strategy loop stopped, but cleanup failed: {close_res.get('error', 'unknown')}"
     _session_passphrases.pop(tk, None)
 
     return True, "Strategy bot stopped. Open orders cancellation requested."
@@ -448,8 +458,15 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             state["last_error"] = "Auto-closed on maintenance pause."
             _save_state(telegram_id, network, state)
             tk = _task_key(telegram_id, network)
-            await run_blocking(close_all_positions, telegram_id, _session_passphrases.get(tk))
-            await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
+            close_res = await run_blocking(close_all_positions, telegram_id, _session_passphrases.get(tk))
+            if close_res.get("success"):
+                await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
+            else:
+                await _notify(
+                    telegram_id,
+                    "Delta Neutral stop triggered, but auto-close cleanup failed. "
+                    f"Please close manually and check open orders. Error: {close_res.get('error', 'unknown')}",
+                )
         return True, None
     user = await run_blocking(get_user, telegram_id)
     if not user:
@@ -513,21 +530,49 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["running"] = False
         state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
         _save_state(telegram_id, network, state)
-        await run_blocking(close_all_positions, telegram_id, session_passphrase)
-        await _notify(
-            telegram_id,
-            f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}) - SL hit ({move_pct:.2f}%).",
-        )
+        close_res = await run_blocking(close_all_positions, telegram_id, session_passphrase)
+        if close_res.get("success"):
+            await _notify(
+                telegram_id,
+                f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}) - SL hit ({move_pct:.2f}%).",
+            )
+        else:
+            logger.warning(
+                "SL stop close_all_positions reported failure for user %s on %s: %s",
+                telegram_id,
+                network,
+                close_res.get("error", "unknown"),
+            )
+            await _notify(
+                telegram_id,
+                f"⚠️ SL triggered for {strategy.upper()} on {product}-PERP ({network}), "
+                "but full cleanup failed. Please close remaining exposure on Nado. "
+                f"Error: {close_res.get('error', 'unknown')}",
+            )
         return True, None
     if tp_pct > 0 and move_pct >= tp_pct:
         state["running"] = False
         state["last_error"] = None
         _save_state(telegram_id, network, state)
-        await run_blocking(close_all_positions, telegram_id, session_passphrase)
-        await _notify(
-            telegram_id,
-            f"✅ {strategy.upper()} target reached on {product}-PERP ({network}) - TP hit ({move_pct:.2f}%).",
-        )
+        close_res = await run_blocking(close_all_positions, telegram_id, session_passphrase)
+        if close_res.get("success"):
+            await _notify(
+                telegram_id,
+                f"✅ {strategy.upper()} target reached on {product}-PERP ({network}) - TP hit ({move_pct:.2f}%).",
+            )
+        else:
+            logger.warning(
+                "TP stop close_all_positions reported failure for user %s on %s: %s",
+                telegram_id,
+                network,
+                close_res.get("error", "unknown"),
+            )
+            await _notify(
+                telegram_id,
+                f"⚠️ TP triggered for {strategy.upper()} on {product}-PERP ({network}), "
+                "but full cleanup failed. Please close remaining exposure on Nado. "
+                f"Error: {close_res.get('error', 'unknown')}",
+            )
         return True, None
 
     with timed_metric("runtime.open_orders.fetch"):
