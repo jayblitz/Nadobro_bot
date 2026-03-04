@@ -8,7 +8,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 
-from src.nadobro.config import DUAL_MODE_CARD_FLOW, get_product_id
+from src.nadobro.config import DUAL_MODE_CARD_FLOW, get_product_id, get_product_max_leverage
 from src.nadobro.handlers.formatters import escape_md, fmt_trade_preview, fmt_trade_result
 from src.nadobro.handlers.keyboards import (
     home_card_kb,
@@ -162,7 +162,7 @@ def _card_keyboard(session: dict):
     if state == "product":
         return trade_card_product_kb(session_id)
     if state == "leverage":
-        return trade_card_leverage_kb(session_id)
+        return trade_card_leverage_kb(session_id, session.get("product", "BTC"))
     if state == "size":
         return trade_card_size_kb(session_id, session.get("product", "BTC"))
     if state == "limit_price":
@@ -358,8 +358,8 @@ async def _execute_card_trade(query, context: CallbackContext, telegram_id: int,
         return
 
     _clear_trade_card_session(context)
-    from src.nadobro.handlers.messages import _prompt_passphrase
-    await _prompt_passphrase(query, context, {
+    from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+    await authorize_or_prompt_passphrase(query, context, telegram_id, {
         "type": "trade_card",
         "flow": {
             "order_type": order_type,
@@ -439,10 +439,17 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
         session["product"] = value
         session["state"] = "leverage"
     elif action == "lev":
+        max_leverage = get_product_max_leverage(session.get("product", "BTC"))
         try:
-            session["leverage"] = int(value)
+            selected = int(value)
         except (TypeError, ValueError):
-            session["leverage"] = 1
+            selected = 1
+        if selected > max_leverage:
+            session["error"] = f"Max leverage for {session.get('product', 'BTC')} is {max_leverage}x."
+            _set_trade_card_session(context, session)
+            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
+            return True
+        session["leverage"] = selected
         session["state"] = "size"
     elif action == "size":
         try:

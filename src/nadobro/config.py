@@ -46,6 +46,23 @@ RATE_LIMIT_SECONDS = 5
 MAX_LEVERAGE = 40
 MIN_TRADE_SIZE_USD = 1.0
 
+# Asset-specific leverage caps. BTC/ETH support 40x, others are capped lower.
+PRODUCT_MAX_LEVERAGE = {
+    "BTC": 40,
+    "ETH": 40,
+    "SOL": 20,
+    "XRP": 20,
+    "BNB": 20,
+    "LINK": 20,
+    "DOGE": 20,
+    "AVAX": 20,
+}
+
+
+def get_product_max_leverage(product: str) -> int:
+    product_key = (product or "").upper().strip()
+    return int(PRODUCT_MAX_LEVERAGE.get(product_key, MAX_LEVERAGE))
+
 EST_FEE_RATE = 0.0003
 EST_FILL_EFFICIENCY = 0.45
 DUAL_MODE_CARD_FLOW = os.environ.get("DUAL_MODE_CARD_FLOW", "true").strip().lower() in ("1", "true", "yes", "on")

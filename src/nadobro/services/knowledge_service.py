@@ -32,6 +32,8 @@ ANSWER_CACHE_TTL_SECONDS = 300
 OFFICIAL_SOURCES = {
     "docs": "https://docs.nado.xyz/",
     "website": "https://www.nado.xyz/",
+    "ink_docs": "https://docs.inkonchain.com/",
+    "ink_website": "https://www.inkonchain.com/",
     "x_nado": "https://x.com/nadoHQ",
     "x_ink": "https://x.com/inkonchain",
     "points": "https://docs.nado.xyz/points/referrals",
@@ -42,6 +44,14 @@ OFFICIAL_SOURCES = {
 
 def _normalize_question(question: str) -> str:
     return re.sub(r"\s+", " ", (question or "").strip().lower())
+
+
+def _is_ink_question(text: str) -> bool:
+    q = _normalize_question(text)
+    ink_signals = (
+        "ink", "ink chain", "ink l2", "inkonchain", "optimistic rollup", "kraken l2",
+    )
+    return any(sig in q for sig in ink_signals)
 
 
 def _get_chat_history(telegram_id: int) -> list[dict]:
@@ -578,17 +588,22 @@ Relevant Nado Knowledge:
 """
 
 
-def _pick_sources_for_question(question: str) -> list[str]:
+def _pick_sources_for_question(question: str, context_text: str = "") -> list[str]:
     q = _normalize_question(question)
+    ctx = _normalize_question(context_text or "")
+    signal_text = f"{q} {ctx}".strip()
     sources = []
 
-    if any(w in q for w in ["api", "sdk", "developer", "code", "integrate", "websocket", "gateway"]):
+    if _is_ink_question(signal_text):
+        sources.append(OFFICIAL_SOURCES["ink_docs"])
+        sources.append(OFFICIAL_SOURCES["ink_website"])
+    elif any(w in signal_text for w in ["api", "sdk", "developer", "code", "integrate", "websocket", "gateway"]):
         sources.append(OFFICIAL_SOURCES["api"])
         sources.append(OFFICIAL_SOURCES["get_started"])
-    elif any(w in q for w in ["point", "reward", "referral", "invite", "season", "earn"]):
+    elif any(w in signal_text for w in ["point", "reward", "referral", "invite", "season", "earn"]):
         sources.append(OFFICIAL_SOURCES["points"])
         sources.append(OFFICIAL_SOURCES["docs"])
-    elif any(w in q for w in ["tweet", "twitter", "x.com", "announced", "news"]):
+    elif any(w in signal_text for w in ["tweet", "twitter", "x.com", "announced", "news"]):
         sources.append(OFFICIAL_SOURCES["x_nado"])
         sources.append(OFFICIAL_SOURCES["x_ink"])
     else:
@@ -782,7 +797,7 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str,
         query = args.get("query", question)
         sections = _search_knowledge_sections(query, top_k=5)
         if sections:
-            return f"[KNOWLEDGE BASE RESULTS]\n{sections}", _pick_sources_for_question(query)
+            return f"[KNOWLEDGE BASE RESULTS]\n{sections}", _pick_sources_for_question(query, context_text=sections)
         return "[KNOWLEDGE BASE] No matching sections found.", [OFFICIAL_SOURCES["docs"]]
 
     elif tool_name == "get_live_price":
@@ -811,7 +826,7 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str,
         query = args.get("query", question)
         sections = _search_knowledge_sections(query, top_k=5)
         if sections:
-            return f"[KNOWLEDGE BASE RESULTS]\n{sections}", _pick_sources_for_question(query)
+            return f"[KNOWLEDGE BASE RESULTS]\n{sections}", _pick_sources_for_question(query, context_text=sections)
         return "[KNOWLEDGE BASE] No matching sections found.", [OFFICIAL_SOURCES["docs"]]
 
     return f"[ERROR] Unknown tool: {tool_name}", []
@@ -852,7 +867,8 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
     except Exception as e:
         logger.warning(f"Agent router call failed ({provider}): {e}")
         kb_context = _search_knowledge_sections(question, top_k=5)
-        return kb_context or _load_knowledge_base()[:6000], _pick_sources_for_question(question)
+        fallback_context = kb_context or _load_knowledge_base()[:6000]
+        return fallback_context, _pick_sources_for_question(question, context_text=fallback_context)
 
     tool_calls = []
     if router_response.choices and router_response.choices[0].message.tool_calls:
@@ -860,7 +876,8 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
 
     if not tool_calls:
         kb_context = _search_knowledge_sections(question, top_k=5)
-        return f"[KNOWLEDGE BASE]\n{kb_context}", _pick_sources_for_question(question)
+        packed_context = f"[KNOWLEDGE BASE]\n{kb_context}"
+        return packed_context, _pick_sources_for_question(question, context_text=packed_context)
 
     all_context_parts = []
     all_sources = []
@@ -882,7 +899,7 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
         combined_context = f"[KNOWLEDGE BASE]\n{kb_context}"
 
     if not all_sources:
-        all_sources = _pick_sources_for_question(question)
+        all_sources = _pick_sources_for_question(question, context_text=combined_context)
 
     return combined_context, list(dict.fromkeys(all_sources))
 
@@ -1019,12 +1036,14 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
 
+    gathered_context = ""
     if use_x_prompt:
         system = X_TWITTER_SYSTEM_PROMPT.format(
             knowledge_base=_search_knowledge_sections(question, top_k=2),
             current_date=current_date,
             current_year=str(now.year),
         )
+        gathered_context = "[X/TWITTER RESULTS]"
         used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
     else:
         import asyncio
@@ -1038,7 +1057,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         except Exception as e:
             logger.warning(f"Agent pipeline failed: {e}")
             gathered_context = _search_knowledge_sections(question, top_k=5)
-            used_sources = _pick_sources_for_question(question)
+            used_sources = _pick_sources_for_question(question, context_text=gathered_context)
 
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
@@ -1170,12 +1189,14 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
 
+    gathered_context = ""
     if use_x_prompt:
         system = X_TWITTER_SYSTEM_PROMPT.format(
             knowledge_base=_search_knowledge_sections(question, top_k=2),
             current_date=current_date,
             current_year=str(now.year),
         )
+        gathered_context = "[X/TWITTER RESULTS]"
         used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
     else:
         import asyncio
@@ -1189,7 +1210,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         except Exception as e:
             logger.warning(f"Agent pipeline failed: {e}")
             gathered_context = _search_knowledge_sections(question, top_k=5)
-            used_sources = _pick_sources_for_question(question)
+            used_sources = _pick_sources_for_question(question, context_text=gathered_context)
 
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,

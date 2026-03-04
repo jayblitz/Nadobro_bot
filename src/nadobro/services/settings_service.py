@@ -16,6 +16,18 @@ def _default_strategy_settings() -> dict:
         "mm": {
             "notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "tp_pct": 0.6, "sl_pct": 0.5,
             "levels": 2, "threshold_bp": 12.0, "close_offset_bp": 24.0,
+            "reference_mode": "ema_fast",
+            "ema_fast_alpha": 0.45,
+            "ema_slow_alpha": 0.20,
+            "vol_window_points": 12,
+            "vol_sensitivity": 0.02,
+            "min_spread_bp": 2.0,
+            "max_spread_bp": 20.0,
+            "quote_ttl_seconds": 90,
+            "directional_bias": "neutral",
+            "inventory_soft_limit_usd": 45.0,
+            "cycle_notional_usd": 75.0,
+            "session_notional_cap_usd": 0.0,
         },
         "grid": {
             "notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "tp_pct": 1.2, "sl_pct": 0.8,
@@ -26,11 +38,6 @@ def _default_strategy_settings() -> dict:
             "auto_close_on_maintenance": 1.0,
         },
         "vol": {"notional_usd": 100.0, "spread_bp": 6.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
-        "dca": {
-            "notional_usd": 100.0, "interval_seconds": 60, "tp_pct": 1.0, "sl_pct": 1.0,
-            "base_order_usd": 25.0, "dca_order_usd": 25.0, "max_dca_orders": 3.0, "deviation_pct": 1.0,
-            "size_multiplier": 1.5, "is_long_bias": 1.0,
-        },
     }
 
 
