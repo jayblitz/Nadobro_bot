@@ -2,12 +2,14 @@
 
 ## Latest Updates (March 2026)
 
+- CoinMarketCap AI Skills integrated: 3 new agent tools (get_crypto_info, get_trending_cryptos, get_global_market_data) powered by CMC API. Provides market cap, volume, price changes, trending coins, gainers/losers, BTC dominance, total market cap. CMC Fear & Greed Index replaces api.alternative.me as primary source. Agent tools now 7 total (4 base + 3 CMC). CMC tools conditionally loaded only when CMC_API_KEY is set. Caching: 2min for quotes/trending/global, 5min for sentiment/news.
 - AI agent transformed into conversational trading companion ("mini Alexa"): conversation memory (8-msg buffer, 15min TTL), personalized greetings using Telegram name, casual chat handling, trade format suggestions.
 - Added live price tool: get_live_price fetches real-time bid/ask/mid from Nado API via NadoClient.
-- Enhanced market sentiment: Fear & Greed Index (api.alternative.me) + broader crypto news from WatcherGuru, CoinDesk, Cointelegraph, whale_alert via xAI search.
+- Enhanced market sentiment: Fear & Greed Index (CMC primary, api.alternative.me fallback) + broader crypto news from WatcherGuru, CoinDesk, Cointelegraph, whale_alert via xAI search.
 - Knowledge base expanded to ~350 lines with FAQ, getting started guide, fee tiers, supported markets, security.
-- Agent tools now 4: search_knowledge_base, get_live_price, get_market_sentiment, search_x_twitter. Strict source filtering enforces official URLs only.
-- Webhook mode deployed on Fly.io Amsterdam; single machine with max_machines_running=1.
+- Agent tools now 7: search_knowledge_base, get_live_price, get_market_sentiment, search_x_twitter, get_crypto_info, get_trending_cryptos, get_global_market_data. Strict source filtering enforces official URLs + coinmarketcap.com.
+- Trade rate limit reduced from 60s to 5s; only counts filled trades (not pending).
+- Webhook mode deployed on Fly.io Amsterdam; single machine with min/max_machines_running=1.
 - Improved strategy UX and execution reliability for smoother bot operation.
 - Added Volume Bot to the strategy hub and settings flow.
 - Fixed strategy runtime signing and execution flow issues.
@@ -66,7 +68,8 @@ src/nadobro/
 | `bot_runtime.py` | Background strategy bot lifecycle (start/stop per user, APScheduler tasks) |
 | `scheduler.py` | APScheduler AsyncIO scheduler; runs alert checks on interval |
 | `crypto.py` | Passphrase-based encryption (PBKDF2 600k + Fernet) for linked signer keys |
-| `knowledge_service.py` | Conversational AI agent: Router LLM dispatches to 4 tools (search_knowledge_base, get_live_price, get_market_sentiment, search_x_twitter). Per-user conversation memory (8-msg, 15min TTL). Casual chat fast-path with personalized greetings. Fear & Greed Index integration. KB-first, strict official source filtering. xAI primary + OpenAI fallback. |
+| `knowledge_service.py` | Conversational AI agent: Router LLM dispatches to 7 tools (search_knowledge_base, get_live_price, get_market_sentiment, search_x_twitter, get_crypto_info, get_trending_cryptos, get_global_market_data). CMC tools conditionally available when CMC_API_KEY set. Per-user conversation memory (8-msg, 15min TTL). Casual chat fast-path with personalized greetings. CMC Fear & Greed primary, api.alternative.me fallback. KB-first, strict official source filtering. xAI primary + OpenAI fallback. |
+| `cmc_client.py` | CoinMarketCap API client: crypto quotes, global metrics, Fear & Greed, trending/gainers/losers, news. 2-5min caching. Requires CMC_API_KEY env var. |
 | `nado_client.py` | HTTP wrapper around Nado REST API (prices, orders, positions, balance) |
 | `admin_service.py` | Admin-only controls: pause trading, view stats, audit log |
 
@@ -134,6 +137,7 @@ All configuration lives in `src/nadobro/config.py` and is read from environment 
 |---|---|---|
 | **xAI (Grok)** | AI-powered "Ask Nado" Q&A feature (primary) | `XAI_API_KEY` |
 | **OpenAI** | Fallback AI for Q&A | `OPENAI_API_KEY` |
+| **CoinMarketCap** | Market data, quotes, trending, Fear & Greed, global metrics | `CMC_API_KEY` |
 
 ### Key Python Packages
 - `python-telegram-bot` — Telegram bot framework

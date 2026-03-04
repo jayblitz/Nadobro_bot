@@ -24,6 +24,7 @@ CHAT_HISTORY_TTL_SECONDS = 900
 
 _fng_cache: dict = {}
 FNG_CACHE_TTL_SECONDS = 300
+_cmc_available: bool = None
 
 KNOWLEDGE_FILE = Path(__file__).parent.parent / "data" / "nado_knowledge.txt"
 ANSWER_CACHE_TTL_SECONDS = 300
@@ -79,7 +80,22 @@ def _is_casual_message(text: str) -> bool:
     return t in casual_patterns or len(t) <= 3
 
 
+def _is_cmc_available() -> bool:
+    global _cmc_available
+    if _cmc_available is None:
+        _cmc_available = bool(os.environ.get("CMC_API_KEY", ""))
+    return _cmc_available
+
+
 def _fetch_fear_greed_index() -> str:
+    if _is_cmc_available():
+        try:
+            from src.nadobro.services.cmc_client import get_fear_greed_index, format_fear_greed
+            data = get_fear_greed_index()
+            return format_fear_greed(data)
+        except Exception as e:
+            logger.warning(f"CMC Fear & Greed fetch failed: {e}")
+
     now = time.time()
     cached = _fng_cache.get("data")
     if cached and now - _fng_cache.get("ts", 0) < FNG_CACHE_TTL_SECONDS:
@@ -362,6 +378,60 @@ AGENT_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_crypto_info",
+            "description": (
+                "Get detailed cryptocurrency data from CoinMarketCap: market cap, 24h volume, "
+                "1h/24h/7d/30d price changes, and dominance. Use when user asks about a coin's "
+                "performance, market cap, volume, how much it's up/down, or wants a market overview "
+                "of a specific crypto. Works for ANY crypto, not just Nado-listed ones."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbols": {
+                        "type": "string",
+                        "description": "Comma-separated crypto symbols (e.g. 'BTC', 'BTC,ETH,SOL')"
+                    }
+                },
+                "required": ["symbols"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trending_cryptos",
+            "description": (
+                "Get trending cryptocurrencies, top gainers, and top losers from CoinMarketCap. "
+                "Use when user asks what's trending, what's hot, biggest movers, top gainers, "
+                "top losers, or what coins are pumping/dumping today."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_global_market_data",
+            "description": (
+                "Get global crypto market overview from CoinMarketCap: total market cap, "
+                "24h volume, BTC/ETH dominance, number of active cryptos. Use when user asks "
+                "about the overall market, total market cap, BTC dominance, or general market health."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]
 
 XAI_X_SEARCH_MODEL = os.environ.get("XAI_X_SEARCH_MODEL", "grok-3")
@@ -376,28 +446,39 @@ X_CRYPTO_SEARCH_PARAMS = {
     "sources": [{"type": "x"}],
 }
 
-ROUTER_SYSTEM_PROMPT = """You are a routing agent for Nadobro, a crypto trading AI on Nado DEX.
+ROUTER_SYSTEM_PROMPT_BASE = """You are a routing agent for Nadobro, a crypto trading AI on Nado DEX.
 
 Today's date: {current_date}
 
 Analyze the user's message and call the right tool(s) to gather information.
 
-Tools (4):
-1. search_knowledge_base — Nado product knowledge (features, fees, margin, points, NFTs, NLP, dev docs, getting started, how things work). PRIMARY source for all Nado questions.
-2. get_live_price — LIVE current price from Nado DEX. Use for "what's BTC price?", "how much is ETH?", "price of SOL" etc.
-3. get_market_sentiment — Crypto market sentiment, Fear & Greed Index, trending news. Use for "is the market bullish?", "what's the sentiment?", market outlook.
+TOOLS:
+1. search_knowledge_base — Nado product knowledge (features, fees, margin, points, NFTs, NLP, dev docs, getting started). PRIMARY source for all Nado-specific questions.
+2. get_live_price — LIVE trading price from Nado DEX orderbook (bid/ask/spread). For: "what's BTC price?", "ETH price on Nado". Assets: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX.
+3. get_market_sentiment — Crypto market sentiment + Fear & Greed Index + crypto news from Twitter. For: "is the market bullish?", "sentiment?", "fear and greed".
 4. search_x_twitter — Latest tweets from @nadoHQ and @inkonchain. ONLY for Nado social media/announcements.
+{cmc_tools_section}
+ROUTING RULES:
+- "What's BTC price?" / "price of ETH" → get_live_price (Nado DEX price)
+{cmc_routing_rules}- "What are Nado fees?" / "how does margin work?" → search_knowledge_base
+- "Is the market bullish?" / "fear and greed" → get_market_sentiment
+- "What did Nado tweet?" → search_x_twitter
+- Casual greetings (gm, hi, hello, thanks, bye) → do NOT call any tools
+- When in doubt about Nado → search_knowledge_base
 
-Routing rules:
-- "What's BTC price?" / "price of ETH" / "how much is SOL" → get_live_price
-- "What are Nado fees?" / "how does margin work?" / "how to get started" → search_knowledge_base
-- "Is the market bullish?" / "market sentiment" / "fear and greed" → get_market_sentiment
-- "What did Nado tweet?" / "latest announcements" → search_x_twitter
-- "Should I buy BTC?" → get_live_price AND get_market_sentiment
-- Casual greetings (gm, hi, hello, thanks, bye) → do NOT call any tools (handled separately)
-- When in doubt → search_knowledge_base
+You can call multiple tools for complex queries. Do NOT answer the question yourself — only call tools."""
 
-You can call multiple tools. Do NOT answer the question yourself — only call tools."""
+ROUTER_CMC_TOOLS_SECTION = """5. get_crypto_info — Detailed crypto market data from CoinMarketCap (market cap, volume, 1h/24h/7d/30d change, dominance). For: "how is BTC doing?", "ETH market cap", "is SOL up today?". Works for ANY crypto.
+6. get_trending_cryptos — Trending coins, top gainers, top losers from CoinMarketCap. For: "what's trending?", "top gainers", "what's pumping?".
+7. get_global_market_data — Global crypto market overview (total market cap, BTC dominance, total volume). For: "total market cap?", "BTC dominance?", "how's the overall market?".
+"""
+
+ROUTER_CMC_ROUTING_RULES = """- "How is BTC doing?" / "BTC performance" / "is ETH up?" → get_crypto_info (CMC market data)
+- "What's BTC price and how is it doing?" → get_live_price AND get_crypto_info
+- "What's the total market cap?" / "BTC dominance" → get_global_market_data
+- "What's trending?" / "top gainers" / "what's pumping?" → get_trending_cryptos
+- "Should I buy BTC?" → get_live_price AND get_crypto_info AND get_market_sentiment
+"""
 
 CASUAL_SYSTEM_PROMPT = """You are Nadobro, a friendly and knowledgeable crypto trading companion on Telegram for Nado DEX.
 
@@ -450,9 +531,9 @@ RULES:
 7. For market sentiment, present it conversationally with the Fear & Greed reading
 
 SOURCE RULES:
-- ONLY cite: docs.nado.xyz, nado.xyz, x.com/nadoHQ, x.com/inkonchain
+- ONLY cite: docs.nado.xyz, nado.xyz, x.com/nadoHQ, x.com/inkonchain, coinmarketcap.com
 - NEVER include search engine links
-- End with "Sources:" followed by 1-3 relevant official URLs (skip for price/sentiment queries)
+- End with "Sources:" followed by 1-3 relevant official URLs (skip for price/sentiment/market data queries)
 
 CONTEXT:
 {context}"""
@@ -632,6 +713,58 @@ def _execute_market_sentiment(query: str) -> tuple[str, list[str]]:
     return f"[MARKET SENTIMENT]\n{fng}\n\nNo additional sentiment data available.", []
 
 
+def _execute_crypto_info(symbols_str: str) -> tuple[str, list[str]]:
+    if not _is_cmc_available():
+        return "[CRYPTO INFO] CoinMarketCap data not available — CMC_API_KEY not set.", []
+    try:
+        from src.nadobro.services.cmc_client import get_crypto_quotes, format_crypto_quote
+        symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
+        if not symbols:
+            symbols = ["BTC"]
+        data = get_crypto_quotes(symbols)
+        if not data:
+            return f"[CRYPTO INFO] No data found for: {', '.join(symbols)}", []
+        lines = ["[CRYPTO MARKET DATA FROM COINMARKETCAP]"]
+        for sym in symbols:
+            if sym in data:
+                lines.append(format_crypto_quote(data[sym]))
+                lines.append("")
+        return "\n".join(lines).strip(), ["https://coinmarketcap.com"]
+    except Exception as e:
+        logger.warning(f"CMC crypto info failed: {e}")
+        return f"[CRYPTO INFO] Could not fetch data right now: {e}", []
+
+
+def _execute_trending_cryptos() -> tuple[str, list[str]]:
+    if not _is_cmc_available():
+        return "[TRENDING] CoinMarketCap data not available — CMC_API_KEY not set.", []
+    try:
+        from src.nadobro.services.cmc_client import get_trending, format_trending
+        data = get_trending()
+        formatted = format_trending(data)
+        return f"[TRENDING CRYPTO DATA FROM COINMARKETCAP]\n{formatted}", ["https://coinmarketcap.com"]
+    except Exception as e:
+        logger.warning(f"CMC trending failed: {e}")
+        return f"[TRENDING] Could not fetch trending data right now: {e}", []
+
+
+def _execute_global_market_data() -> tuple[str, list[str]]:
+    if not _is_cmc_available():
+        return "[GLOBAL MARKET] CoinMarketCap data not available — CMC_API_KEY not set.", []
+    try:
+        from src.nadobro.services.cmc_client import get_global_metrics, format_global_metrics
+        data = get_global_metrics()
+        formatted = format_global_metrics(data)
+        fng = _fetch_fear_greed_index()
+        return (
+            f"[GLOBAL CRYPTO MARKET DATA FROM COINMARKETCAP]\n{formatted}\n{fng}",
+            ["https://coinmarketcap.com"],
+        )
+    except Exception as e:
+        logger.warning(f"CMC global market data failed: {e}")
+        return f"[GLOBAL MARKET] Could not fetch global data right now: {e}", []
+
+
 def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str, list[str]]:
     if tool_name == "search_knowledge_base":
         query = args.get("query", question)
@@ -652,6 +785,16 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str,
         query = args.get("query", question)
         return _execute_market_sentiment(query)
 
+    elif tool_name == "get_crypto_info":
+        symbols_str = args.get("symbols", "BTC")
+        return _execute_crypto_info(symbols_str)
+
+    elif tool_name == "get_trending_cryptos":
+        return _execute_trending_cryptos()
+
+    elif tool_name == "get_global_market_data":
+        return _execute_global_market_data()
+
     elif tool_name == "search_web":
         query = args.get("query", question)
         sections = _search_knowledge_sections(query, top_k=5)
@@ -670,7 +813,16 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
     now = datetime.utcnow()
     current_date = now.strftime("%Y-%m-%d")
 
-    router_system = ROUTER_SYSTEM_PROMPT.format(current_date=current_date)
+    active_tools = AGENT_TOOLS
+    cmc_enabled = _is_cmc_available()
+    if not cmc_enabled:
+        cmc_tool_names = {"get_crypto_info", "get_trending_cryptos", "get_global_market_data"}
+        active_tools = [t for t in AGENT_TOOLS if t["function"]["name"] not in cmc_tool_names]
+    router_system = ROUTER_SYSTEM_PROMPT_BASE.format(
+        current_date=current_date,
+        cmc_tools_section=ROUTER_CMC_TOOLS_SECTION if cmc_enabled else "",
+        cmc_routing_rules=ROUTER_CMC_ROUTING_RULES if cmc_enabled else "",
+    )
     router_model = _model_for(provider)
 
     try:
@@ -680,7 +832,7 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
                 {"role": "system", "content": router_system},
                 {"role": "user", "content": question},
             ],
-            tools=AGENT_TOOLS,
+            tools=active_tools,
             tool_choice="auto",
             max_tokens=200,
             temperature=0.0,
@@ -724,7 +876,7 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
 
 
 def _filter_official_sources(sources: list[str]) -> list[str]:
-    allowed = set(OFFICIAL_SOURCES.values())
+    allowed = set(OFFICIAL_SOURCES.values()) | {"https://coinmarketcap.com"}
     filtered = [s for s in sources if s in allowed]
     if not filtered:
         filtered = [OFFICIAL_SOURCES["docs"], OFFICIAL_SOURCES["website"]]
@@ -774,7 +926,9 @@ def _is_price_question(question: str) -> bool:
     q = _normalize_question(question)
     price_signals = ["price of", "price for", "how much is", "what's btc", "what's eth",
                      "btc price", "eth price", "sol price", "current price", "live price",
-                     "market price", "what is btc at", "what is eth at"]
+                     "market price", "what is btc at", "what is eth at",
+                     "market cap", "trending", "gainers", "losers", "pumping", "dumping",
+                     "dominance", "total market", "how is", "performing"]
     return any(sig in q for sig in price_signals)
 
 
