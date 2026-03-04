@@ -3,6 +3,7 @@
 ## Latest Updates (March 2026)
 
 - CoinMarketCap AI Skills integrated: 3 new agent tools (get_crypto_info, get_trending_cryptos, get_global_market_data) powered by CMC API. Provides market cap, volume, price changes, trending coins, gainers/losers, BTC dominance, total market cap. CMC Fear & Greed Index replaces api.alternative.me as primary source. Agent tools now 7 total (4 base + 3 CMC). CMC tools conditionally loaded only when CMC_API_KEY is set. Caching: 2min for quotes/trending/global, 5min for sentiment/news.
+- Strategy dashboard simplified: removed 5-section layout (Setup Flow, How It Works, Settings, Config, Analytics), replaced with compact title+explainer, Settings block, key Analytics (margin, volume, max loss, net estimate). Onboarding messages shortened. Intro video sent to new users on first /start.
 - AI agent transformed into conversational trading companion ("mini Alexa"): conversation memory (8-msg buffer, 15min TTL), personalized greetings using Telegram name, casual chat handling, trade format suggestions.
 - Added live price tool: get_live_price fetches real-time bid/ask/mid from Nado API via NadoClient.
 - Enhanced market sentiment: Fear & Greed Index (CMC primary, api.alternative.me fallback) + broader crypto news from WatcherGuru, CoinDesk, Cointelegraph, whale_alert via xAI search.

@@ -136,37 +136,22 @@ async def handle_callback(update: Update, context: CallbackContext):
 
 
 # New onboarding (language → ToS) message text
-_ONB_WELCOME_LANG_MSG = """Yo what's good, future Nado whale?! 👋💰
+_ONB_WELCOME_LANG_MSG = """Welcome to Nadobro 👋
 
-Welcome to **Nadobro** — your ultimate trading bro for Perps on Nado!
+Your trading companion for perps on Nado DEX — fast execution, automated strategies, and AI-powered insights, all from Telegram.
 
-We're building the dopest Telegram bot on the planet:
-• MM Bot (Grid + RGRID that actually prints)
-• Delta Neutral (spot + short = chill funding gains)
-• Volume Bot (farm that leaderboard volume like a boss)
+Pick your language:"""
 
-Unified margin. 5-15ms execution. Zero drama.
+_ONB_WELCOME_CARD = """🔥 You're in!
 
-First, pick your language vibe:"""
+By tapping **"Let's Get It"** you accept the Terms of Use & Privacy Policy.
 
-_ONB_WELCOME_CARD = """🔥 Nadobro Activated! You're in the squad bro 🔥
+🔐 How it works:
+We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
 
-Sup, you're now locked in.
-We run on Nado's lightning CLOB with unified margin — the cleanest perps game in crypto.
+Ready?"""
 
-By tapping **"Let's Get It"** you're saying:
-✅ I accept the Terms of Use & Privacy Policy
-
-⚡ Bro-Note (read this):
-We'll generate a secure 1CT key for your default subaccount (we NEVER touch your main wallet keys).
-You paste the key into Nado → Settings → 1-Click Trading → Advanced 1CT (1 tx, 1 USDT0).
-Main wallet stays untouched. Revoke anytime. Funds 100% yours.
-
-Ready to start printing money?"""
-
-_ONB_DASHBOARD_MSG = """🚀 Nadobro Dashboard — You're In, Legend!
-
-What we smashing today?"""
+_ONB_DASHBOARD_MSG = """🚀 You're all set! Pick a module below to get started."""
 
 
 async def _handle_onb_new(query, data, telegram_id, context):
@@ -1385,24 +1370,12 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
     status_dot = "🟢" if est_net >= 0 else "🟠"
     how_it_works = {
-        "mm": (
-            "Places maker buy/sell quotes around mid price, "
-            "captures spread, then auto\\-reposts every cycle\\."
-        ),
-        "grid": (
-            "Builds staggered levels above and below mid, "
-            "buys lower and sells higher as price oscillates\\."
-        ),
-        "dn": (
-            "Runs offsetting long/short exposure to reduce directional risk "
-            "while aiming to earn spread \\+ funding edge\\."
-        ),
-        "vol": (
-            "Executes balanced two\\-sided flow with risk caps "
-            "to generate consistent trading activity and volume\\."
-        ),
+        "mm": "Quotes around mid price, captures spread, auto\\-reposts each cycle\\.",
+        "grid": "Staggered levels above/below mid — buys low, sells high as price moves\\.",
+        "dn": "Offsetting long/short to earn spread \\+ funding with reduced risk\\.",
+        "vol": "Balanced two\\-sided flow with risk caps for consistent volume\\.",
     }
-    selected_explainer = how_it_works.get(strategy_id, "Automates recurring trade cycles with configured risk controls\\.")
+    selected_explainer = how_it_works.get(strategy_id, "Automates trade cycles with configured risk controls\\.")
     extra_cfg = ""
     if strategy_id == "grid":
         min_range = f"{float(conf.get('min_range_pct', 1.0)):.2f}%"
@@ -1437,35 +1410,19 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         extra_cfg = f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
     return (
         f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
-        f"Strategy Status: {status_dot} *READY*\n\n"
-        "*01 SETUP FLOW*\n"
-        "1\\. Account/Mode\n"
-        "2\\. Pair\n"
-        "3\\. Margin \\& Risk\n"
-        "4\\. Exit Controls\n"
-        "5\\. Review analytics \\& launch\n\n"
-        "*02 HOW IT WORKS*\n"
+        f"Status: {status_dot} *READY*\n"
         f"{escape_md(selected_explainer)}\n\n"
-        "*03 CURRENT SETTINGS*\n"
-        f"Mode: *{escape_md(network.upper())}* \\| "
-        f"Risk: *{escape_md(settings.get('risk_profile', 'balanced').upper())}* \\| "
-        f"Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| "
-        f"Slippage: *{escape_md(f'{slippage:.2f}%')}*\n"
-        f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}*\n\n"
-        "*04 STRATEGY CONFIGURATION*\n"
-        f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
-        f"Interval: *{escape_md(f'{interval_seconds}s')}* \\| TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*"
+        f"📊 *Settings*\n"
+        f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}*\n"
+        f"Mode: *{escape_md(network.upper())}* \\| Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| Slippage: *{escape_md(f'{slippage:.2f}%')}*\n"
+        f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+        f"TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*"
         f"{extra_cfg}\n\n"
-        "*05 PRE\\-TRADE ANALYTICS*\n"
-        f"Available Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}*\n"
-        f"Required Margin: *{escape_md(f'${required_margin:,.2f}')}*\n"
+        f"📈 *Analytics*\n"
+        f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *{escape_md(f'${required_margin:,.2f}')}* required\n"
         f"Est\\. Daily Volume: *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
-        f"Est\\. Fees \\(builder\\+maker\\): *{escape_md(f'${est_fees:,.2f}')}*\n"
-        f"Est\\. Spread PnL: *{escape_md(f'${est_spread_pnl:,.2f}')}*\n"
-        f"Est\\. Funding \\(DN\\): *{escape_md(f'${est_funding:,.2f}')}* \\| Funding index: *{escape_md(funding_str)}*\n"
-        f"Max Loss \\(from SL\\): *{escape_md(f'${max_loss:,.2f}')}*\n"
-        f"Net Estimate: *{escape_md(net_str)}*\n\n"
-        "Use controls below to tune risk, edit parameters, and launch\\."
+        f"Max Loss: *{escape_md(f'${max_loss:,.2f}')}* \\| Net Estimate: *{escape_md(net_str)}*\n\n"
+        "Tune risk, edit parameters, or launch below\\."
     )
 
 
