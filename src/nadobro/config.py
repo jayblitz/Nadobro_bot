@@ -42,7 +42,7 @@ def get_product_name(product_id: int) -> str:
             return info.get("symbol", name)
     return f"ID:{product_id}"
 
-RATE_LIMIT_SECONDS = 60
+RATE_LIMIT_SECONDS = 5
 MAX_LEVERAGE = 40
 MIN_TRADE_SIZE_USD = 1.0
 
