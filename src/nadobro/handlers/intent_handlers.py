@@ -131,9 +131,15 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
     if is_trading_paused():
         await update.message.reply_text("⏸ Trading is temporarily paused by admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return True
-    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(f"⚠️ {escape_md(wallet_msg)}", parse_mode=ParseMode.MARKDOWN_V2)
+        from src.nadobro.handlers.callbacks import prompt_wallet_setup
+        await prompt_wallet_setup(
+            update.message,
+            context,
+            telegram_id,
+            lead_text="⚠️ Link your wallet first to execute this trade.",
+        )
         return True
 
     from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
@@ -162,11 +168,14 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
         )
         return True
 
-    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(
-            f"⚠️ {escape_md(wallet_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
+        from src.nadobro.handlers.callbacks import prompt_wallet_setup
+        await prompt_wallet_setup(
+            update.message,
+            context,
+            telegram_id,
+            lead_text="⚠️ Wallet setup is required before placing text trades.",
         )
         return True
 

@@ -525,6 +525,15 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         await update.message.chat.send_action(ChatAction.TYPING)
         with timed_metric("msg.wallet.view"):
             info = await run_blocking(get_user_wallet_info, telegram_id)
+        if not info or not info.get("linked_signer_address"):
+            from src.nadobro.handlers.callbacks import prompt_wallet_setup
+            await prompt_wallet_setup(
+                update.message,
+                context,
+                telegram_id,
+                lead_text="⚠️ Wallet not linked yet. Complete setup to unlock trading.",
+            )
+            return
         msg = fmt_wallet_info(info)
         await update.message.reply_text(
             msg,
@@ -655,12 +664,14 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             )
             _clear_trade_flow(context)
             return
-        wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+        wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
-            await update.message.reply_text(
-                f"⚠️ {escape_md(wallet_msg)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=persistent_menu_kb(),
+            from src.nadobro.handlers.callbacks import prompt_wallet_setup
+            await prompt_wallet_setup(
+                update.message,
+                context,
+                telegram_id,
+                lead_text="⚠️ You need a linked signer before opening trades.",
             )
             _clear_trade_flow(context)
             return
@@ -942,12 +953,14 @@ async def _execute_trade_flow(update, context, telegram_id, flow):
         )
         return
 
-    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(
-            f"⚠️ {escape_md(wallet_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
+        from src.nadobro.handlers.callbacks import prompt_wallet_setup
+        await prompt_wallet_setup(
+            update.message,
+            context,
+            telegram_id,
+            lead_text="⚠️ Wallet setup required before trade execution.",
         )
         return
 

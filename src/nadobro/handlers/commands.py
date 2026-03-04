@@ -1,9 +1,9 @@
 import logging
 import os
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
-from src.nadobro.services.user_service import get_or_create_user, get_user
+from src.nadobro.services.user_service import get_or_create_user, get_user, ensure_active_wallet_ready
 
 INTRO_VIDEO_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "intro_video.mov")
 START_IMAGE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "start-bot.png")
@@ -53,6 +53,11 @@ Yo legend, your trading copilot is online and ready to cook\\.
 
 Pick a module below and let's trade smarter \\(and faster\\) ⚡"""
 
+WALLET_SETUP_CTA_MSG = """👛 *Let's connect your wallet first*
+
+Before trading, you need to link your signer once.
+Tap below and follow the guided steps to finish setup in a minute."""
+
 
 async def _send_start_image(update: Update):
     if not update.message or not os.path.exists(START_IMAGE_PATH):
@@ -94,6 +99,18 @@ async def cmd_start(update: Update, context: CallbackContext):
         return
 
     # Onboarding complete → show dashboard (8 buttons)
+    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
+    if not wallet_ready:
+        await update.message.reply_text(
+            WALLET_SETUP_CTA_MSG,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👛 Start Wallet Setup", callback_data="wallet:setup")],
+                [InlineKeyboardButton("🏠 Open Dashboard", callback_data="nav:main")],
+            ]),
+        )
+        return
+
     if DUAL_MODE_CARD_FLOW:
         await _send_dashboard_card(update, context, telegram_id)
         return
