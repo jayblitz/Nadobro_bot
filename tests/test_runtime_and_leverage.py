@@ -92,7 +92,10 @@ if "requests" not in sys.modules:
     sys.modules["requests"] = requests_mod
 
 from src.nadobro.handlers.intent_handlers import _enrich_trade_payload
+from src.nadobro.handlers.intent_parser import parse_interaction_intent
 from src.nadobro.services import bot_runtime
+from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
+from src.nadobro.services.trade_service import _place_take_profit_order
 
 
 class RuntimeAndLeverageTests(unittest.TestCase):
@@ -241,6 +244,64 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             bot_runtime._session_passphrases = old_pass
 
         self.assertEqual(result, (True, None))
+
+    def test_ensure_task_uses_cached_loop_when_called_off_loop(self):
+        calls = []
+
+        class FakeLoop:
+            def is_running(self):
+                return True
+
+            def call_soon_threadsafe(self, fn, *args):
+                calls.append((fn, args))
+                fn(*args)
+
+        old_loop = bot_runtime._runtime_loop
+        old_tasks = dict(bot_runtime._tasks)
+        try:
+            bot_runtime._runtime_loop = FakeLoop()
+            bot_runtime._tasks = {}
+            with patch.object(bot_runtime, "_schedule_task_on_loop") as schedule_mock:
+                bot_runtime._ensure_task(telegram_id=123, network="testnet")
+                schedule_mock.assert_called_once_with(123, "testnet")
+            self.assertEqual(len(calls), 1)
+        finally:
+            bot_runtime._runtime_loop = old_loop
+            bot_runtime._tasks = old_tasks
+
+    def test_parse_interaction_intent_routes_current_pnl_question(self):
+        intent = parse_interaction_intent("What is my current pnl?")
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.get("action"), "open_view")
+        self.assertEqual(intent.get("target"), "portfolio:view")
+
+    def test_parse_interaction_intent_does_not_hijack_generic_pnl_question(self):
+        intent = parse_interaction_intent("What is pnl?")
+        self.assertIsNone(intent)
+
+    def test_place_take_profit_order_places_opposite_side_limit(self):
+        calls = []
+
+        class FakeClient:
+            def place_limit_order(self, product_id, size, price, is_buy=True):
+                calls.append((product_id, size, price, is_buy))
+                return {"success": True, "digest": "tp-digest"}
+
+        result = _place_take_profit_order(
+            client=FakeClient(),
+            product_id=1,
+            size=2.5,
+            is_long=True,
+            tp_price=70000.0,
+        )
+        self.assertTrue(result.get("tp_set"))
+        self.assertEqual(calls, [(1, 2.5, 70000.0, False)])
+
+    def test_should_trigger_stop_loss_for_long_and_short(self):
+        self.assertTrue(_should_trigger_stop_loss("LONG", 68000.0, 68500.0))
+        self.assertFalse(_should_trigger_stop_loss("LONG", 69000.0, 68500.0))
+        self.assertTrue(_should_trigger_stop_loss("SHORT", 69000.0, 68500.0))
+        self.assertFalse(_should_trigger_stop_loss("SHORT", 68000.0, 68500.0))
 
 
 if __name__ == "__main__":

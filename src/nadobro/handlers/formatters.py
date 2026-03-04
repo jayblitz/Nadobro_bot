@@ -243,6 +243,16 @@ def fmt_trade_result(result):
             "",
             f"🌐 *Network:* {escape_md(result.get('network', '?'))}",
         ]
+        if result.get("tp_requested"):
+            if result.get("tp_set"):
+                lines.append(f"📈 *Take Profit:* {escape_md(str(result.get('tp_price')))}")
+            else:
+                lines.append(f"⚠️ *Take Profit:* {escape_md(str(result.get('tp_error', 'Failed to place TP order.')))}")
+        if result.get("sl_requested"):
+            if result.get("sl_armed"):
+                lines.append(f"🛡 *Stop Loss:* {escape_md(str(result.get('sl_price')))}")
+            else:
+                lines.append(f"⚠️ *Stop Loss:* {escape_md(str(result.get('sl_error', 'Failed to arm SL rule.')))}")
         order_type = result.get("type", "MARKET")
         if order_type != "MARKET":
             lines.insert(3, f"📋 *Type:* {escape_md(order_type)}")
@@ -454,7 +464,7 @@ def fmt_help():
         "Place market or limit orders from guided flow or natural language commands\\.\n"
         "\n"
         "🧠 *Strategy Lab*\n"
-        "Configure and run automated strategies: Mirror MM, Grid Reactor, Mirror DN, and Volume Engine\\.\n"
+        "Configure and run automated strategies: MM Bot, Grid Reactor, Mirror DN, and Volume Engine\\.\n"
         "Each dashboard includes a \"How it works\" explainer and pre\\-trade analytics\\.\n"
         "\n"
         "📁 *Portfolio Deck*\n"

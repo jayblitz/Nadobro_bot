@@ -90,6 +90,8 @@ def _execute_trade_payload(telegram_id: int, payload: dict, passphrase: str = No
             is_long=(direction == "long"),
             leverage=leverage,
             passphrase=passphrase,
+            tp_price=payload.get("tp"),
+            sl_price=payload.get("sl"),
         )
     return execute_market_order(
         telegram_id,
@@ -99,6 +101,8 @@ def _execute_trade_payload(telegram_id: int, payload: dict, passphrase: str = No
         leverage=leverage,
         slippage_pct=slippage_pct,
         passphrase=passphrase,
+        tp_price=payload.get("tp"),
+        sl_price=payload.get("sl"),
     )
 
 

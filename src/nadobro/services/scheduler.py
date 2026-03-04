@@ -1,7 +1,9 @@
 import logging
 import asyncio
+import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.nadobro.services.alert_service import get_triggered_alerts
+from src.nadobro.services.stop_loss_service import process_stop_losses
 from src.nadobro.services.nado_client import NadoClient
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric
@@ -12,6 +14,7 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 _bot_app = None
 _check_client = None
+_ALERT_SCAN_SECONDS = int(os.environ.get("ALERT_SCAN_SECONDS", "5"))
 
 
 def set_bot_app(app):
@@ -56,14 +59,20 @@ async def handle_alert_job(payload: dict):
                 logger.info(f"Alert sent to user {alert['user_id']}: {alert['product']} {alert['condition']}")
             except Exception as e:
                 logger.error(f"Failed to send alert to {alert['user_id']}: {e}")
+        sl_notifications = await run_blocking(process_stop_losses, prices)
+        for note in sl_notifications:
+            try:
+                await _bot_app.bot.send_message(chat_id=note["user_id"], text=note["text"])
+            except Exception as e:
+                logger.error("Failed to send stop-loss notification to %s: %s", note.get("user_id"), e)
     except Exception as e:
         logger.error(f"Alert check failed: {e}")
 
 
 def start_scheduler():
-    scheduler.add_job(check_alerts, "interval", seconds=30, id="check_alerts", replace_existing=True)
+    scheduler.add_job(check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS, id="check_alerts", replace_existing=True)
     scheduler.start()
-    logger.info("Scheduler started - checking alerts every 30s")
+    logger.info("Scheduler started - checking alerts every %ss", _ALERT_SCAN_SECONDS)
 
 
 def stop_scheduler():
