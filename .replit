@@ -3,27 +3,6 @@ modules = ["python-3.11"]
 expertMode = true
 
 [workflows]
-runButton = "Project"
-
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Nadobro Bot"
-
-[[workflows.workflow]]
-name = "Nadobro Bot"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python main.py"
-
-[workflows.workflow.metadata]
-outputType = "console"
 
 [[ports]]
 localPort = 8080
