@@ -137,7 +137,7 @@ def _strategy_defaults(strategy: str) -> dict:
         "mm": {"notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "threshold_bp": 12.0, "close_offset_bp": 24.0},
         "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0},
         "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "auto_close_on_maintenance": 1.0},
-        "vol": {"notional_usd": 100.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
+        "vol": {"notional_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
     }
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
 

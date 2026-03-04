@@ -1118,7 +1118,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "type": "start_strategy",
             "strategy": strategy_id,
             "product": product,
-            "leverage": settings.get("default_leverage", 3),
+            "leverage": 1 if strategy_id == "vol" else settings.get("default_leverage", 3),
             "slippage_pct": settings.get("slippage", 1),
         })
     elif action == "status":
@@ -1337,7 +1337,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
-    leverage = float(settings.get("default_leverage", 3))
+    leverage = 1.0 if strategy_id == "vol" else float(settings.get("default_leverage", 3))
     slippage = float(settings.get("slippage", 1))
 
     available_margin = 0.0
