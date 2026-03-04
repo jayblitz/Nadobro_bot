@@ -11,7 +11,7 @@ from src.nadobro.services.onboarding_service import get_resume_step
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client
-from src.nadobro.config import get_product_id
+from src.nadobro.config import get_product_id, get_product_max_leverage
 
 PENDING_TEXT_TRADE_KEY = "pending_text_trade"
 logger = logging.getLogger(__name__)
@@ -28,7 +28,10 @@ def _settings_for_user(telegram_id: int) -> dict:
 
 def _enrich_trade_payload(telegram_id: int, payload: dict, settings: dict) -> dict:
     result = dict(payload)
-    result["leverage"] = int(payload.get("leverage") or settings.get("default_leverage", 3))
+    requested_leverage = int(payload.get("leverage") or settings.get("default_leverage", 3))
+    product = str(result.get("product") or "BTC")
+    max_leverage = get_product_max_leverage(product)
+    result["leverage"] = max(1, min(requested_leverage, max_leverage))
     result["slippage_pct"] = float(settings.get("slippage", 1))
 
     price = 0.0
@@ -129,8 +132,8 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
         await update.message.reply_text(f"⚠️ {escape_md(wallet_msg)}", parse_mode=ParseMode.MARKDOWN_V2)
         return True
 
-    from src.nadobro.handlers.messages import _prompt_passphrase
-    await _prompt_passphrase(update, context, {"type": "execute_trade", "payload": pending})
+    from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+    await authorize_or_prompt_passphrase(update, context, telegram_id, {"type": "execute_trade", "payload": pending})
     return True
 
 
@@ -181,8 +184,8 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
         if is_trading_paused():
             await update.message.reply_text("⏸ Trading is temporarily paused by admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
             return True
-        from src.nadobro.handlers.messages import _prompt_passphrase
-        await _prompt_passphrase(update, context, {"type": "execute_trade", "payload": payload})
+        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+        await authorize_or_prompt_passphrase(update, context, telegram_id, {"type": "execute_trade", "payload": payload})
         return True
 
     context.user_data[PENDING_TEXT_TRADE_KEY] = payload

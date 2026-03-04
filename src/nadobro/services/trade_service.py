@@ -5,7 +5,13 @@ from src.nadobro.models.database import (
     get_last_trade_for_rate_limit, insert_trade, update_trade, get_trades_by_user,
     find_open_trade,
 )
-from src.nadobro.config import get_product_id, get_product_name, RATE_LIMIT_SECONDS, MAX_LEVERAGE, MIN_TRADE_SIZE_USD
+from src.nadobro.config import (
+    get_product_id,
+    get_product_name,
+    get_product_max_leverage,
+    RATE_LIMIT_SECONDS,
+    MIN_TRADE_SIZE_USD,
+)
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 
 logger = logging.getLogger(__name__)
@@ -14,15 +20,22 @@ logger = logging.getLogger(__name__)
 def check_rate_limit(telegram_id: int) -> tuple[bool, str]:
     last_trade = get_last_trade_for_rate_limit(telegram_id)
     if last_trade and last_trade.get("created_at"):
+        elapsed = None
         try:
             raw = last_trade["created_at"]
             if isinstance(raw, str):
                 created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                created = created.replace(tzinfo=None) if created.tzinfo else created
             else:
                 created = raw
-            elapsed = (datetime.utcnow() - created).total_seconds()
-        except Exception:
+            if created.tzinfo:
+                now = datetime.now(created.tzinfo)
+            else:
+                now = datetime.utcnow()
+            elapsed = (now - created).total_seconds()
+        except Exception as e:
+            logger.warning("Rate-limit timestamp parse failed for user %s: %s", telegram_id, e)
+            return True, ""
+        if elapsed < 0:
             elapsed = 0
         if elapsed < RATE_LIMIT_SECONDS:
             remaining = int(RATE_LIMIT_SECONDS - elapsed)
@@ -46,8 +59,9 @@ def validate_trade(
     if size <= 0:
         return False, "Trade size must be positive."
 
-    if leverage > MAX_LEVERAGE:
-        return False, f"Max leverage is {MAX_LEVERAGE}x."
+    max_leverage = get_product_max_leverage(product)
+    if leverage > max_leverage:
+        return False, f"Max leverage for {product.upper()} is {max_leverage}x."
 
     if leverage < 1:
         return False, "Leverage must be at least 1x."

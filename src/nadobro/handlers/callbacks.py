@@ -44,7 +44,7 @@ from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
     get_new_onboarding_state,
 )
-from src.nadobro.config import get_product_name, get_product_id, PRODUCTS
+from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
 
@@ -109,7 +109,7 @@ async def handle_callback(update: Update, context: CallbackContext):
                 reply_markup=mode_kb(current_network),
             )
         elif data.startswith("mode:"):
-            await _handle_mode(query, data, telegram_id)
+            await _handle_mode(query, data, telegram_id, context)
         else:
             await query.edit_message_text(
                 "Unknown action\\.",
@@ -195,7 +195,7 @@ async def _show_dashboard(query, telegram_id):
     )
 
 
-async def _handle_mode(query, data, telegram_id):
+async def _handle_mode(query, data, telegram_id, context=None):
     parts = data.split(":")
     target_network = parts[1] if len(parts) > 1 else ""
     if target_network not in ("testnet", "mainnet"):
@@ -220,6 +220,9 @@ async def _handle_mode(query, data, telegram_id):
 
     success, result_msg = switch_network(telegram_id, target_network)
     if success:
+        if context is not None:
+            from src.nadobro.handlers.messages import clear_session_passphrase
+            clear_session_passphrase(context)
         network_label = "🧪 TESTNET" if target_network == "testnet" else "🌐 MAINNET"
         await query.edit_message_text(
             f"✅ *Switched to {escape_md(network_label)}*\n\n{escape_md(result_msg)}",
@@ -242,6 +245,9 @@ async def _handle_nav(query, data, telegram_id, context=None):
         context.user_data.pop("pending_trade", None)
 
     if target in ("main", "refresh"):
+        if context is not None:
+            from src.nadobro.handlers.messages import clear_session_passphrase
+            clear_session_passphrase(context)
         await _show_dashboard(query, telegram_id)
     elif target == "help":
         try:
@@ -266,7 +272,7 @@ async def _handle_nav(query, data, telegram_id, context=None):
     elif target == "ask_nado" and context is not None:
         context.user_data["pending_question"] = True
         await query.edit_message_text(
-            "🧠 *Ask Nado AI Console*\n\n"
+            "🧠 *Ask NadoBro AI Console*\n\n"
             "Ask me anything about Nado \\(docs, dev docs, API, website, X updates, troubleshooting\\)\\!\n\n"
             "Examples:\n"
             "  • `What is unified margin?`\n"
@@ -406,6 +412,14 @@ async def _handle_leverage(query, data, telegram_id, context):
     product = parts[2]
     size = float(parts[3])
     leverage = int(parts[4])
+    max_leverage = get_product_max_leverage(product)
+    if leverage > max_leverage:
+        await query.edit_message_text(
+            f"⚠️ Max leverage for *{escape_md(product)}* is *{escape_md(str(max_leverage))}x*\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_leverage_kb(product, action, size),
+        )
+        return
 
     price = 0
     try:
@@ -472,8 +486,8 @@ async def _handle_exec_trade(query, data, telegram_id, context):
         )
         return
 
-    from src.nadobro.handlers.messages import _prompt_passphrase
-    await _prompt_passphrase(query, context, {
+    from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+    await authorize_or_prompt_passphrase(query, context, telegram_id, {
         "type": "exec_trade_callback",
         "pending": {
             "action": action,
@@ -516,8 +530,8 @@ async def _handle_positions(query, data, telegram_id, context):
 
     elif action == "close" and len(parts) >= 3:
         product = parts[2]
-        from src.nadobro.handlers.messages import _prompt_passphrase
-        await _prompt_passphrase(query, context, {"type": "close_position", "product": product})
+        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+        await authorize_or_prompt_passphrase(query, context, telegram_id, {"type": "close_position", "product": product})
 
     elif action == "close_all":
         await query.edit_message_text(
@@ -527,8 +541,8 @@ async def _handle_positions(query, data, telegram_id, context):
         )
 
     elif action == "confirm_close_all":
-        from src.nadobro.handlers.messages import _prompt_passphrase
-        await _prompt_passphrase(query, context, {"type": "close_all"})
+        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+        await authorize_or_prompt_passphrase(query, context, telegram_id, {"type": "close_all"})
 
 
 async def _handle_portfolio(query, data, telegram_id):
@@ -618,6 +632,9 @@ async def _handle_wallet(query, data, telegram_id, context):
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "testnet"
         ok, msg = remove_user_private_key(telegram_id, network)
+        if ok:
+            from src.nadobro.handlers.messages import clear_session_passphrase
+            clear_session_passphrase(context)
         prefix = "✅" if ok else "❌"
         await query.edit_message_text(
             f"{prefix} {escape_md(msg)}",
@@ -632,6 +649,8 @@ async def _handle_wallet(query, data, telegram_id, context):
         success, result_msg = switch_network(telegram_id, net)
 
         if success:
+            from src.nadobro.handlers.messages import clear_session_passphrase
+            clear_session_passphrase(context)
             info = get_user_wallet_info(telegram_id)
             msg = fmt_wallet_info(info)
             await query.edit_message_text(
@@ -916,7 +935,7 @@ async def _handle_settings(query, data, telegram_id, context):
 
 
 async def _handle_strategy(query, data, context, telegram_id):
-    supported = ("mm", "grid", "dn", "vol", "dca")
+    supported = ("mm", "grid", "dn", "vol")
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     strategy_id = parts[2] if len(parts) > 2 else ""
@@ -965,7 +984,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         value = float(raw_value)
         int_fields = {
-            "interval_seconds", "levels", "max_open_orders", "max_dca_orders",
+            "interval_seconds", "levels", "max_open_orders",
             "auto_close_on_maintenance", "is_long_bias",
         }
 
@@ -984,6 +1003,32 @@ async def _handle_strategy(query, data, context, telegram_id):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=_strategy_config_kb(strategy_id),
         )
+    elif action == "set_text" and len(parts) >= 5:
+        strategy_id = parts[2]
+        field = parts[3]
+        raw_value = parts[4]
+        if strategy_id not in supported:
+            return
+        allowed_text = {
+            "reference_mode": {"mid", "ema_fast", "ema_slow"},
+            "directional_bias": {"neutral", "long_bias", "short_bias"},
+        }
+        allowed_vals = allowed_text.get(field, set())
+        if raw_value not in allowed_vals:
+            return
+
+        def _mutate(s):
+            strategies = s.setdefault("strategies", {})
+            cfg = strategies.setdefault(strategy_id, {})
+            cfg[field] = raw_value
+
+        network, settings = update_user_settings(telegram_id, _mutate)
+        conf = settings.get("strategies", {}).get(strategy_id, {})
+        await query.edit_message_text(
+            _fmt_strategy_config_text(strategy_id, conf, network),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_strategy_config_kb(strategy_id),
+        )
     elif action == "input" and len(parts) >= 4:
         strategy_id = parts[2]
         field = parts[3]
@@ -992,7 +1037,8 @@ async def _handle_strategy(query, data, context, telegram_id):
         allowed_inputs = (
             "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
             "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
-            "base_order_usd", "dca_order_usd", "max_dca_orders", "deviation_pct", "size_multiplier",
+            "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
+            "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
         )
         if field not in allowed_inputs:
             return
@@ -1011,11 +1057,13 @@ async def _handle_strategy(query, data, context, telegram_id):
             "max_range_pct": "Enter max range % \\(example: `2\\.0`\\)",
             "threshold_bp": "Enter threshold in bps \\(example: `12`\\)",
             "close_offset_bp": "Enter close offset in bps \\(example: `25`\\)",
-            "base_order_usd": "Enter base order USD \\(example: `25`\\)",
-            "dca_order_usd": "Enter DCA order USD \\(example: `30`\\)",
-            "max_dca_orders": "Enter max DCA orders \\(example: `3`\\)",
-            "deviation_pct": "Enter DCA deviation % \\(example: `1\\.2`\\)",
-            "size_multiplier": "Enter DCA size multiplier \\(example: `1\\.5`\\)",
+            "cycle_notional_usd": "Enter cycle notional in USD \\(example: `75`\\)",
+            "session_notional_cap_usd": "Enter optional session cap in USD \\(example: `5000`, or `0` to disable\\)",
+            "inventory_soft_limit_usd": "Enter inventory soft limit in USD \\(example: `45`\\)",
+            "quote_ttl_seconds": "Enter quote TTL seconds \\(example: `90`\\)",
+            "min_spread_bp": "Enter minimum spread in bps \\(example: `2`\\)",
+            "max_spread_bp": "Enter maximum spread in bps \\(example: `20`\\)",
+            "vol_sensitivity": "Enter volatility sensitivity \\(example: `0\\.02`\\)",
         }
         await query.edit_message_text(
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -1055,8 +1103,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             )
             return
         settings = _get_user_settings(telegram_id, context)
-        from src.nadobro.handlers.messages import _prompt_passphrase
-        await _prompt_passphrase(query, context, {
+        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+        await authorize_or_prompt_passphrase(query, context, telegram_id, {
             "type": "start_strategy",
             "strategy": strategy_id,
             "product": product,
@@ -1116,24 +1164,29 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
     elif strategy == "mm":
         threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
         close_offset = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
+        ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
+        bias = str(conf.get("directional_bias", "neutral")).upper()
+        cycle_notional = float(conf.get("cycle_notional_usd", notional))
+        session_cap = float(conf.get("session_notional_cap_usd", 0) or 0)
+        inv_soft = float(conf.get("inventory_soft_limit_usd", notional * 0.6))
+        quote_ttl = int(conf.get("quote_ttl_seconds", 90))
+        min_spread = float(conf.get("min_spread_bp", 2.0))
+        max_spread = float(conf.get("max_spread_bp", 20.0))
+        vol_sensitivity = float(conf.get("vol_sensitivity", 0.02))
+        cap_str = f"${session_cap:,.0f}" if session_cap > 0 else "OFF"
+        spread_band = f"{min_spread:.1f} - {max_spread:.1f} bp"
         extra = (
             f"Threshold: *{escape_md(threshold)}* \\| "
-            f"Close Offset: *{escape_md(close_offset)}*\n\n"
+            f"Close Offset: *{escape_md(close_offset)}*\n"
+            f"Ref Mode: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias)}*\n"
+            f"Cycle Notional: *{escape_md(f'${cycle_notional:,.2f}')}* \\| Session Cap: *{escape_md(cap_str)}*\n"
+            f"Inv Soft Limit: *{escape_md(f'${inv_soft:,.2f}')}* \\| Quote TTL: *{escape_md(f'{quote_ttl}s')}*\n"
+            f"Spread Band: *{escape_md(spread_band)}* \\| "
+            f"Vol Sensitivity: *{escape_md(f'{vol_sensitivity:.3f}')}*\n\n"
         )
     elif strategy == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
         extra = f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
-    elif strategy == "dca":
-        base_order = f"${float(conf.get('base_order_usd', 25.0)):,.2f}"
-        dca_order = f"${float(conf.get('dca_order_usd', 25.0)):,.2f}"
-        deviation = f"{float(conf.get('deviation_pct', 1.0)):.2f}%"
-        multiplier = f"{float(conf.get('size_multiplier', 1.5)):.2f}x"
-        extra = (
-            f"Base/DCA: *{escape_md(base_order)}* / *{escape_md(dca_order)}*\n"
-            f"Max DCA: *{escape_md(str(int(conf.get('max_dca_orders', 3))))}* \\| "
-            f"Deviation: *{escape_md(deviation)}* \\| "
-            f"Multiplier: *{escape_md(multiplier)}*\n\n"
-        )
     return base + extra + "Use presets or set custom values below\\."
 
 
@@ -1209,33 +1262,49 @@ def _strategy_config_kb(strategy: str):
                 InlineKeyboardButton("Custom Threshold", callback_data=f"strategy:input:{strategy}:threshold_bp"),
                 InlineKeyboardButton("Custom Close", callback_data=f"strategy:input:{strategy}:close_offset_bp"),
             ],
+            [
+                InlineKeyboardButton("Ref MID", callback_data=f"strategy:set_text:{strategy}:reference_mode:mid"),
+                InlineKeyboardButton("Ref EMA Fast", callback_data=f"strategy:set_text:{strategy}:reference_mode:ema_fast"),
+                InlineKeyboardButton("Ref EMA Slow", callback_data=f"strategy:set_text:{strategy}:reference_mode:ema_slow"),
+            ],
+            [
+                InlineKeyboardButton("Bias Neutral", callback_data=f"strategy:set_text:{strategy}:directional_bias:neutral"),
+                InlineKeyboardButton("Bias Long", callback_data=f"strategy:set_text:{strategy}:directional_bias:long_bias"),
+                InlineKeyboardButton("Bias Short", callback_data=f"strategy:set_text:{strategy}:directional_bias:short_bias"),
+            ],
+            [
+                InlineKeyboardButton("Cycle $50", callback_data=f"strategy:set:{strategy}:cycle_notional_usd:50"),
+                InlineKeyboardButton("Cycle $100", callback_data=f"strategy:set:{strategy}:cycle_notional_usd:100"),
+                InlineKeyboardButton("Cycle $250", callback_data=f"strategy:set:{strategy}:cycle_notional_usd:250"),
+            ],
+            [
+                InlineKeyboardButton("Inv Limit $30", callback_data=f"strategy:set:{strategy}:inventory_soft_limit_usd:30"),
+                InlineKeyboardButton("Inv Limit $60", callback_data=f"strategy:set:{strategy}:inventory_soft_limit_usd:60"),
+                InlineKeyboardButton("Inv Limit $120", callback_data=f"strategy:set:{strategy}:inventory_soft_limit_usd:120"),
+            ],
+            [
+                InlineKeyboardButton("Custom Cycle", callback_data=f"strategy:input:{strategy}:cycle_notional_usd"),
+                InlineKeyboardButton("Custom Inv Limit", callback_data=f"strategy:input:{strategy}:inventory_soft_limit_usd"),
+            ],
+            [
+                InlineKeyboardButton("TTL 60s", callback_data=f"strategy:set:{strategy}:quote_ttl_seconds:60"),
+                InlineKeyboardButton("TTL 90s", callback_data=f"strategy:set:{strategy}:quote_ttl_seconds:90"),
+                InlineKeyboardButton("TTL 120s", callback_data=f"strategy:set:{strategy}:quote_ttl_seconds:120"),
+            ],
+            [
+                InlineKeyboardButton("Spread Min 2bp", callback_data=f"strategy:set:{strategy}:min_spread_bp:2"),
+                InlineKeyboardButton("Spread Max 20bp", callback_data=f"strategy:set:{strategy}:max_spread_bp:20"),
+            ],
+            [
+                InlineKeyboardButton("Custom TTL", callback_data=f"strategy:input:{strategy}:quote_ttl_seconds"),
+                InlineKeyboardButton("Custom Session Cap", callback_data=f"strategy:input:{strategy}:session_notional_cap_usd"),
+            ],
         ])
     if strategy == "dn":
         rows.extend([
             [
                 InlineKeyboardButton("Auto-Close ON", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:1"),
                 InlineKeyboardButton("Auto-Close OFF", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:0"),
-            ],
-        ])
-    if strategy == "dca":
-        rows.extend([
-            [
-                InlineKeyboardButton("Base $25", callback_data=f"strategy:set:{strategy}:base_order_usd:25"),
-                InlineKeyboardButton("Base $50", callback_data=f"strategy:set:{strategy}:base_order_usd:50"),
-                InlineKeyboardButton("DCA $25", callback_data=f"strategy:set:{strategy}:dca_order_usd:25"),
-            ],
-            [
-                InlineKeyboardButton("Max 3", callback_data=f"strategy:set:{strategy}:max_dca_orders:3"),
-                InlineKeyboardButton("Max 5", callback_data=f"strategy:set:{strategy}:max_dca_orders:5"),
-                InlineKeyboardButton("Dev 1%", callback_data=f"strategy:set:{strategy}:deviation_pct:1"),
-            ],
-            [
-                InlineKeyboardButton("Mul 1.5x", callback_data=f"strategy:set:{strategy}:size_multiplier:1.5"),
-                InlineKeyboardButton("Mul 2.0x", callback_data=f"strategy:set:{strategy}:size_multiplier:2.0"),
-            ],
-            [
-                InlineKeyboardButton("Custom Base", callback_data=f"strategy:input:{strategy}:base_order_usd"),
-                InlineKeyboardButton("Custom DCA", callback_data=f"strategy:input:{strategy}:dca_order_usd"),
             ],
         ])
     rows.append([InlineKeyboardButton("◀ Back", callback_data=f"strategy:preview:{strategy}")])
@@ -1248,11 +1317,12 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         "grid": "Grid Reactor",
         "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",
-        "dca": "DCA Engine",
     }
     network, settings = get_user_settings(telegram_id)
     conf = settings.get("strategies", {}).get(strategy_id, {})
     notional = float(conf.get("notional_usd", 100.0))
+    cycle_notional = float(conf.get("cycle_notional_usd", notional))
+    session_cap = float(conf.get("session_notional_cap_usd", 0) or 0)
     spread_bp = float(conf.get("spread_bp", 5.0))
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
@@ -1283,9 +1353,9 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         except Exception:
             pass
 
-    required_margin = notional / leverage if leverage > 0 else notional
+    required_margin = cycle_notional / leverage if leverage > 0 else cycle_notional
     cycles_per_day = 86400 / max(interval_seconds, 10)
-    est_daily_volume = notional * 2.0 * cycles_per_day
+    est_daily_volume = cycle_notional * 2.0 * cycles_per_day
 
     # Conservative fee estimate using builder fee (2 bps) + maker fee proxy (1 bp).
     from src.nadobro.config import EST_FEE_RATE, EST_FILL_EFFICIENCY
@@ -1320,10 +1390,6 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             "Executes balanced two\\-sided flow with risk caps "
             "to generate consistent trading activity and volume\\."
         ),
-        "dca": (
-            "Opens a base position and adds DCA legs as price moves against entry, "
-            "using configured deviation and size multiplier controls\\."
-        ),
     }
     selected_explainer = how_it_works.get(strategy_id, "Automates recurring trade cycles with configured risk controls\\.")
     extra_cfg = ""
@@ -1337,25 +1403,27 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     elif strategy_id == "mm":
         threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
         close_offset = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
+        ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
+        bias = str(conf.get("directional_bias", "neutral")).upper()
+        inv_soft = float(conf.get("inventory_soft_limit_usd", notional * 0.6))
+        min_spread = float(conf.get("min_spread_bp", 2.0))
+        max_spread = float(conf.get("max_spread_bp", 20.0))
+        quote_ttl = int(conf.get("quote_ttl_seconds", max(60, interval_seconds * 2)))
+        cap_str = f"${session_cap:,.0f}" if session_cap > 0 else "OFF"
+        spread_band = f"{min_spread:.1f} - {max_spread:.1f} bp"
         extra_cfg = (
             f"\nThreshold: *{escape_md(threshold)}* \\| "
             f"Close Offset: *{escape_md(close_offset)}*"
+            f"\nRef Mode: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias)}*"
+            f"\nSpread Band: *{escape_md(spread_band)}* \\| "
+            f"Quote TTL: *{escape_md(f'{quote_ttl}s')}*"
+            f"\nCycle Notional: *{escape_md(f'${cycle_notional:,.2f}')}* \\| "
+            f"Session Cap: *{escape_md(cap_str)}*"
+            f"\nInv Soft Limit: *{escape_md(f'${inv_soft:,.2f}')}*"
         )
     elif strategy_id == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
         extra_cfg = f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
-    elif strategy_id == "dca":
-        base_order = f"${float(conf.get('base_order_usd', 25.0)):,.2f}"
-        dca_order = f"${float(conf.get('dca_order_usd', 25.0)):,.2f}"
-        deviation = f"{float(conf.get('deviation_pct', 1.0)):.2f}%"
-        multiplier = f"{float(conf.get('size_multiplier', 1.5)):.2f}x"
-        extra_cfg = (
-            f"\nBase/DCA: *{escape_md(base_order)}* / *{escape_md(dca_order)}*"
-            f"\nMax DCA: *{escape_md(str(int(conf.get('max_dca_orders', 3))))}* \\| "
-            f"Deviation: *{escape_md(deviation)}* \\| "
-            f"Multiplier: *{escape_md(multiplier)}*"
-        )
-
     return (
         f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
         f"Strategy Status: {status_dot} *READY*\n\n"

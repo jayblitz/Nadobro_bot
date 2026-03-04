@@ -1,5 +1,5 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW
+from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW, get_product_max_leverage
 
 PERP_PRODUCTS = [name for name, info in PRODUCTS.items() if info["type"] == "perp"]
 
@@ -192,15 +192,15 @@ def trade_product_reply_kb():
     )
 
 
-def trade_leverage_reply_kb():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("1x"), KeyboardButton("2x"), KeyboardButton("3x")],
-            [KeyboardButton("5x"), KeyboardButton("10x"), KeyboardButton("20x")],
-            [KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
-        ],
-        resize_keyboard=True,
-    )
+def trade_leverage_reply_kb(product: str = "BTC"):
+    leverages = [lev for lev in [1, 2, 3, 5, 10, 20, 40] if lev <= get_product_max_leverage(product)]
+    rows = []
+    if leverages[:3]:
+        rows.append([KeyboardButton(f"{lev}x") for lev in leverages[:3]])
+    if leverages[3:]:
+        rows.append([KeyboardButton(f"{lev}x") for lev in leverages[3:]])
+    rows.append([KeyboardButton("◀ Back"), KeyboardButton("◀ Home")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def trade_size_reply_kb(product):
@@ -305,8 +305,9 @@ def trade_card_product_kb(session_id: str):
     return InlineKeyboardMarkup(rows)
 
 
-def trade_card_leverage_kb(session_id: str):
-    leverages = [1, 2, 3, 5, 10, 20, 40]
+def trade_card_leverage_kb(session_id: str, product: str = "BTC"):
+    max_leverage = get_product_max_leverage(product)
+    leverages = [lev for lev in [1, 2, 3, 5, 10, 20, 40] if lev <= max_leverage]
     rows = []
     row = []
     for lev in leverages:
@@ -434,7 +435,8 @@ def trade_size_kb(product, action):
 
 
 def trade_leverage_kb(product, action, size):
-    leverages = [1, 2, 3, 5, 10, 20, 40]
+    max_leverage = get_product_max_leverage(product)
+    leverages = [lev for lev in [1, 2, 3, 5, 10, 20, 40] if lev <= max_leverage]
     rows = []
     row = []
     for lev in leverages:
@@ -636,9 +638,6 @@ def strategy_hub_kb():
         [
             InlineKeyboardButton("⚖️ Mirror DN", callback_data="strategy:preview:dn"),
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
-        ],
-        [
-            InlineKeyboardButton("📉 DCA Engine", callback_data="strategy:preview:dca"),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),

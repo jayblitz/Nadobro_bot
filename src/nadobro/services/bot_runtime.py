@@ -4,7 +4,7 @@ import logging
 import time
 from datetime import datetime
 
-from src.nadobro.config import get_product_id
+from src.nadobro.config import get_product_id, get_product_max_leverage
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 STATE_PREFIX = "strategy_bot:"
 RUNTIME_TICK_SECONDS = 20
 MAX_OPEN_ORDERS_PER_PRODUCT = 6
+STRATEGY_ERROR_ALERT_STREAK = 3
 
 _bot_app = None
 _tasks: dict[str, asyncio.Task] = {}
@@ -61,6 +62,7 @@ def _default_state() -> dict:
         "started_at": None,
         "last_run_ts": 0.0,
         "last_error": None,
+        "error_streak": 0,
         "runs": 0,
     }
 
@@ -98,12 +100,11 @@ def _strategy_defaults(strategy: str) -> dict:
         "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0},
         "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "auto_close_on_maintenance": 1.0},
         "vol": {"notional_usd": 100.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
-        "dca": {"notional_usd": 100.0, "interval_seconds": 60, "base_order_usd": 25.0, "dca_order_usd": 25.0, "max_dca_orders": 3},
     }
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
 
 
-SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol", "dca")
+SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol")
 
 
 def start_user_bot(
@@ -121,6 +122,11 @@ def start_user_bot(
     product_id = get_product_id(product)
     if product_id is None:
         return False, f"Unknown product '{product}'."
+    max_leverage = get_product_max_leverage(product)
+    if float(leverage or 0) > max_leverage:
+        return False, f"Max leverage for {product.upper()} is {max_leverage}x."
+    if float(leverage or 0) < 1:
+        return False, "Leverage must be at least 1x."
 
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
@@ -177,6 +183,7 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
 
 def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[bool, str]:
     stopped = 0
+    close_errors: list[str] = []
     rows = query_all(
         "SELECT key, value FROM bot_state WHERE key LIKE %s",
         (f"{STATE_PREFIX}{telegram_id}:%",),
@@ -193,16 +200,25 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
                 continue
             state["running"] = False
             set_bot_state(key, state)
-            task = _tasks.pop(_task_key(telegram_id, network), None)
+            tk = _task_key(telegram_id, network)
+            task = _tasks.pop(tk, None)
             if task:
                 task.cancel()
-            _session_passphrases.pop(_task_key(telegram_id, network), None)
+            if cancel_orders:
+                passphrase = _session_passphrases.get(tk)
+                if passphrase:
+                    close_res = close_all_positions(telegram_id, passphrase=passphrase)
+                    if not close_res.get("success"):
+                        close_errors.append(f"{network}: {close_res.get('error', 'close_all_positions failed')}")
+                else:
+                    close_errors.append(f"{network}: no active strategy session passphrase; skipped close-all")
+            _session_passphrases.pop(tk, None)
             stopped += 1
         except Exception:
             continue
-    if cancel_orders:
-        close_all_positions(telegram_id)
     if stopped > 0:
+        if cancel_orders and close_errors:
+            return True, f"Stopped {stopped} running strategy loop(s). Some close-all actions failed: {'; '.join(close_errors)}"
         return True, f"Stopped {stopped} running strategy loop(s)."
     return False, "No running strategy bot found."
 
@@ -224,6 +240,14 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "started_at": state.get("started_at"),
         "runs": state.get("runs", 0),
         "last_error": state.get("last_error"),
+        "pause_reason": state.get("mm_pause_reason") or "",
+        "is_paused": bool(state.get("mm_paused")),
+        "maker_fill_ratio": (state.get("mm_last_metrics") or {}).get("maker_fill_ratio"),
+        "cancellation_ratio": (state.get("mm_last_metrics") or {}).get("cancellation_ratio"),
+        "avg_quote_distance_bp": (state.get("mm_last_metrics") or {}).get("avg_quote_distance_bp"),
+        "quote_refresh_rate": (state.get("mm_last_metrics") or {}).get("quote_refresh_rate"),
+        "inventory_skew_usd": (state.get("mm_last_metrics") or {}).get("inventory_skew_usd"),
+        "session_notional_done_usd": (state.get("mm_last_metrics") or {}).get("session_notional_done_usd"),
     }
 
 
@@ -295,14 +319,48 @@ async def handle_strategy_job(payload: dict):
     if not state.get("running"):
         return
     cycle_started = time.perf_counter()
-    await _run_cycle(telegram_id, network, state)
-    record_metric("runtime.strategy_cycle.total", (time.perf_counter() - cycle_started) * 1000.0)
+    try:
+        ok, error_msg = await _run_cycle(telegram_id, network, state)
+        if ok:
+            refreshed = _load_state(telegram_id, network)
+            if refreshed.get("error_streak") or refreshed.get("last_error"):
+                refreshed["error_streak"] = 0
+                refreshed["last_error"] = None
+                _save_state(telegram_id, network, refreshed)
+        else:
+            await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
+    except Exception as e:
+        logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
+        await _mark_cycle_error(telegram_id, network, str(e))
+    finally:
+        record_metric("runtime.strategy_cycle.total", (time.perf_counter() - cycle_started) * 1000.0)
+
+
+async def _mark_cycle_error(telegram_id: int, network: str, error_msg: str):
+    state = _load_state(telegram_id, network)
+    if not state.get("running"):
+        return
+    state["last_error"] = str(error_msg)[:300]
+    streak = int(state.get("error_streak") or 0) + 1
+    state["error_streak"] = streak
+    _save_state(telegram_id, network, state)
+    if streak == STRATEGY_ERROR_ALERT_STREAK:
+        strategy = str(state.get("strategy") or "").upper() or "STRATEGY"
+        product = str(state.get("product") or "?")
+        await _notify(
+            telegram_id,
+            (
+                f"⚠️ {strategy} health alert on {product}-PERP ({network}): "
+                f"{streak} consecutive cycle errors.\n"
+                f"Latest: {str(error_msg)[:220]}"
+            ),
+        )
 
 
 def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dict,
                        client, mid: float, product_id: int, product: str, open_orders: list,
                        passphrase: str) -> dict:
-    from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot, dca_bot
+    from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
 
     if strategy in ("mm", "grid"):
         return mm_bot.run_cycle(
@@ -317,16 +375,11 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
         )
     elif strategy == "vol":
         return volume_bot.run_cycle(telegram_id, network, state, passphrase=passphrase)
-    elif strategy == "dca":
-        return dca_bot.run_cycle(
-            telegram_id, network, state,
-            client=client, mid=mid, product_id=product_id, product=product, passphrase=passphrase,
-        )
     else:
         return {"success": False, "error": f"Unknown strategy '{strategy}'"}
 
 
-async def _run_cycle(telegram_id: int, network: str, state: dict):
+async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
     if is_trading_paused():
         if str(state.get("strategy", "")).lower() == "dn" and float(state.get("auto_close_on_maintenance") or 0) >= 0.5:
             state["running"] = False
@@ -335,12 +388,12 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
             tk = _task_key(telegram_id, network)
             await run_blocking(close_all_positions, telegram_id, _session_passphrases.get(tk))
             await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
-        return
+        return True, None
     user = await run_blocking(get_user, telegram_id)
     if not user:
         state["running"] = False
         _save_state(telegram_id, network, state)
-        return
+        return True, None
     if user.network_mode.value != network:
         state["running"] = False
         state["last_error"] = f"Stopped because active mode switched to {user.network_mode.value}"
@@ -349,7 +402,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
             telegram_id,
             f"Stopped {state.get('strategy', '').upper()} loop on {network}: active mode changed to {user.network_mode.value}.",
         )
-        return
+        return True, None
 
     tk = _task_key(telegram_id, network)
     session_passphrase = _session_passphrases.get(tk)
@@ -362,12 +415,12 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
             f"⚠️ {str(state.get('strategy', '')).upper()} stopped on {network}: strategy session expired. "
             f"Restart strategy and enter passphrase again.",
         )
-        return
+        return True, None
 
     last_run = float(state.get("last_run_ts") or 0.0)
     interval = int(state.get("interval_seconds") or 60)
     if time.time() - last_run < interval:
-        return
+        return True, None
 
     product = state.get("product", "BTC")
     strategy = state.get("strategy")
@@ -403,7 +456,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
             telegram_id,
             f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}) - SL hit ({move_pct:.2f}%).",
         )
-        return
+        return True, None
     if tp_pct > 0 and move_pct >= tp_pct:
         state["running"] = False
         state["last_error"] = None
@@ -413,7 +466,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
             telegram_id,
             f"✅ {strategy.upper()} target reached on {product}-PERP ({network}) - TP hit ({move_pct:.2f}%).",
         )
-        return
+        return True, None
 
     with timed_metric("runtime.open_orders.fetch"):
         open_orders = await run_blocking(client.get_open_orders, product_id)
@@ -428,7 +481,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
     if not state.get("running", True):
         _save_state(telegram_id, network, state)
         await _notify(telegram_id, f"✅ {strategy.upper()} completed on {product}-PERP ({network}).")
-        return
+        return True, None
 
     state["last_run_ts"] = time.time()
     state["runs"] = int(state.get("runs") or 0) + 1
@@ -440,4 +493,5 @@ async def _run_cycle(telegram_id: int, network: str, state: dict):
 
     if not result.get("success", True):
         error_msg = str(result.get("error", "unknown"))[:300]
-        await _notify(telegram_id, f"{strategy.upper()} cycle error: {error_msg}")
+        return False, error_msg
+    return True, None

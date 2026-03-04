@@ -454,7 +454,7 @@ def fmt_help():
         "Place market or limit orders from guided flow or natural language commands\\.\n"
         "\n"
         "🧠 *Strategy Lab*\n"
-        "Configure and run automated strategies: Mirror MM, Grid Reactor, Mirror DN, Volume Engine, and DCA Engine\\.\n"
+        "Configure and run automated strategies: Mirror MM, Grid Reactor, Mirror DN, and Volume Engine\\.\n"
         "Each dashboard includes a \"How it works\" explainer and pre\\-trade analytics\\.\n"
         "\n"
         "📁 *Portfolio Deck*\n"
@@ -465,7 +465,7 @@ def fmt_help():
         "• Never share your passphrase, private key, or seed phrase\n"
         "• Use dedicated wallets for automation\n"
         "\n"
-        "🧠 *Ask Nado AI*\n"
+        "🧠 *Ask NadoBro AI*\n"
         "Ask docs, API, trading, and troubleshooting questions directly in chat\\.\n"
         "\n"
         "*Examples:*\n"
@@ -506,6 +506,25 @@ def fmt_status_overview(status: dict, onboarding: dict):
             f"Cycles: *{escape_md(str(status.get('runs', 0)))}*",
             f"Interval: *{escape_md(str(status.get('interval_seconds', 0)))}s*",
         ])
+        if status.get("is_paused"):
+            lines.append(f"Pause: *{escape_md(str(status.get('pause_reason') or 'PAUSED'))}*")
+        maker_fill_ratio = status.get("maker_fill_ratio")
+        cancellation_ratio = status.get("cancellation_ratio")
+        avg_quote_distance_bp = status.get("avg_quote_distance_bp")
+        quote_refresh_rate = status.get("quote_refresh_rate")
+        inventory_skew_usd = status.get("inventory_skew_usd")
+        if maker_fill_ratio is not None:
+            lines.append(
+                f"Maker Fill Ratio: *{escape_md(f'{float(maker_fill_ratio) * 100:.1f}%')}* \\| "
+                f"Cancel Ratio: *{escape_md(f'{float(cancellation_ratio or 0) * 100:.1f}%')}*"
+            )
+        if avg_quote_distance_bp is not None:
+            lines.append(
+                f"Quote Dist: *{escape_md(f'{float(avg_quote_distance_bp):.2f} bp')}* \\| "
+                f"Refresh Rate: *{escape_md(f'{float(quote_refresh_rate or 0):.2f}/s')}*"
+            )
+        if inventory_skew_usd is not None:
+            lines.append(f"Inventory Skew: *{escape_md(f'${float(inventory_skew_usd):,.2f}')}*")
     return "\n".join(lines)
 
 

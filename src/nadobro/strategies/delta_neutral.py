@@ -51,6 +51,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
 
     notional = float(state.get("notional_usd") or 100.0)
     leverage = float(state.get("leverage") or 3.0)
+    if notional <= 0:
+        return {"success": False, "error": "Invalid notional_usd; must be > 0"}
     target_size = notional / mid
 
     fr_data = client.get_funding_rate(product_id) or {}
@@ -69,7 +71,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             current_position = p
             break
 
-    current_size = float(current_position.get("amount", 0)) if current_position else 0.0
+    current_size = abs(float(current_position.get("amount", 0) or 0)) if current_position else 0.0
     current_side = current_position.get("side") if current_position else None
 
     result = {
@@ -104,12 +106,16 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 enforce_rate_limit=False,
                 passphrase=passphrase,
             )
-            state["dn_position_side"] = None
-            state["dn_entry_price"] = 0.0
-            state["dn_unfavorable_count"] = 0
             result["action"] = "exit"
             result["exit_reason"] = f"Funding unfavorable for {unfavorable_count} cycles"
             result["close_result"] = close_result.get("success", False)
+            if close_result.get("success"):
+                state["dn_position_side"] = None
+                state["dn_entry_price"] = 0.0
+                state["dn_unfavorable_count"] = 0
+            else:
+                result["success"] = False
+                result["order_error"] = close_result.get("error", "Failed to close position")
             return result
 
         result["action"] = "wait_unfavorable"
@@ -125,7 +131,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         result["total_funding_earned"] = total_funding
 
         size_diff = abs(current_size - target_size)
-        if size_diff / target_size > POSITION_SIZE_TOLERANCE and target_size > 0:
+        if target_size > 0 and (size_diff / target_size > POSITION_SIZE_TOLERANCE):
             if current_size < target_size:
                 add_size = target_size - current_size
                 logger.info("DN user %s: increasing short by %.6f", telegram_id, add_size)
@@ -141,6 +147,9 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 )
                 result["action"] = "adjust_increase"
                 result["adjust_result"] = adj_result.get("success", False)
+                if not adj_result.get("success"):
+                    result["success"] = False
+                    result["order_error"] = adj_result.get("error", "Adjust increase failed")
             else:
                 reduce_size = current_size - target_size
                 logger.info("DN user %s: reducing short by %.6f", telegram_id, reduce_size)
@@ -156,6 +165,9 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 )
                 result["action"] = "adjust_decrease"
                 result["adjust_result"] = adj_result.get("success", False)
+                if not adj_result.get("success"):
+                    result["success"] = False
+                    result["order_error"] = adj_result.get("error", "Adjust decrease failed")
         else:
             result["action"] = "hold"
 
@@ -163,7 +175,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
 
     if current_position and current_side == "LONG":
         logger.info("DN user %s: closing unexpected LONG position before opening SHORT", telegram_id)
-        execute_market_order(
+        close_wrong_side = execute_market_order(
             telegram_id,
             product,
             current_size,
@@ -173,7 +185,12 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             enforce_rate_limit=False,
             passphrase=passphrase,
         )
-        result["action"] = "close_wrong_side"
+        if close_wrong_side.get("success"):
+            result["action"] = "close_wrong_side"
+        else:
+            result["action"] = "close_wrong_side_failed"
+            result["success"] = False
+            result["order_error"] = close_wrong_side.get("error", "Failed to close wrong-side position")
         return result
 
     logger.info(
