@@ -35,6 +35,7 @@ from src.nadobro.handlers.trade_card import (
     open_trade_card_from_message,
     handle_trade_card_text_input,
     is_trade_card_mode_enabled,
+    TRADE_CARD_SESSION_KEY,
 )
 from src.nadobro.handlers.home_card import open_home_card_view_from_message
 from src.nadobro.handlers.intent_handlers import (
@@ -101,6 +102,23 @@ def clear_session_passphrase(context: CallbackContext, telegram_id: int | None =
         from src.nadobro.services.bot_runtime import clear_manual_passphrase, clear_runtime_passphrase
         clear_manual_passphrase(telegram_id, network)
         clear_runtime_passphrase(telegram_id, network)
+
+
+def terminate_active_processes(context: CallbackContext, telegram_id: int | None = None):
+    # Clear all pending conversational/process state when user exits to home/back.
+    _clear_trade_flow(context)
+    context.user_data.pop(PENDING_PASSPHRASE_ACTION, None)
+    context.user_data.pop(PENDING_TEXT_CLOSE_ALL_KEY, None)
+    context.user_data.pop("pending_trade", None)
+    context.user_data.pop("pending_alert", None)
+    context.user_data.pop("pending_strategy_input", None)
+    context.user_data.pop("pending_question", None)
+    context.user_data.pop("wallet_flow", None)
+    context.user_data.pop("wallet_linked_signer_pk", None)
+    context.user_data.pop("wallet_main_address", None)
+    context.user_data.pop("wallet_linked_signer_address", None)
+    context.user_data.pop(TRADE_CARD_SESSION_KEY, None)
+    clear_session_passphrase(context, telegram_id=telegram_id)
 
 
 def _cache_session_passphrase(context: CallbackContext, telegram_id: int, passphrase: str):
@@ -428,6 +446,7 @@ async def handle_message(update: Update, context: CallbackContext):
 
 async def _dispatch_reply_button(update, context, telegram_id, callback_data, text):
     if callback_data == "nav:main":
+        terminate_active_processes(context, telegram_id=telegram_id)
         if is_trade_card_mode_enabled():
             await open_home_card_view_from_message(update, context, telegram_id, "nav:main")
             return
@@ -468,7 +487,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data.startswith("trade_flow:"):
         if is_trade_card_mode_enabled():
             if callback_data in ("trade_flow:home", "trade_flow:cancel"):
-                _clear_trade_flow(context)
+                terminate_active_processes(context, telegram_id=telegram_id)
                 await update.message.reply_text(
                     "↩️ Returned to home\\.",
                     parse_mode=ParseMode.MARKDOWN_V2,
@@ -605,7 +624,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
     flow = _get_trade_flow(context)
 
     if action == "home" or action == "cancel":
-        _clear_trade_flow(context)
+        terminate_active_processes(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -615,7 +634,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
 
     if action == "back":
         if not flow:
-            _clear_trade_flow(context)
+            terminate_active_processes(context, telegram_id=telegram_id)
             await update.message.reply_text(
                 "↩️ Returned to home\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
@@ -791,7 +810,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
 
 async def _go_back(update, context, flow, state, telegram_id):
     if state in ("direction", "order_type"):
-        _clear_trade_flow(context)
+        terminate_active_processes(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -847,7 +866,7 @@ async def _go_back(update, context, flow, state, telegram_id):
                     reply_markup=trade_leverage_reply_kb(product),
                 )
     else:
-        _clear_trade_flow(context)
+        terminate_active_processes(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
