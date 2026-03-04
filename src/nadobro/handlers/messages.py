@@ -117,16 +117,22 @@ def _cache_session_passphrase(context: CallbackContext, telegram_id: int, passph
 
 
 def _get_session_passphrase(context: CallbackContext, telegram_id: int) -> str | None:
-    payload = context.user_data.get(SESSION_PASSPHRASE_KEY)
-    if not isinstance(payload, dict):
-        return None
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
-    if payload.get("network") != network:
-        clear_session_passphrase(context, telegram_id=telegram_id)
-        return None
-    value = payload.get("value")
-    return value if isinstance(value, str) and value else None
+    payload = context.user_data.get(SESSION_PASSPHRASE_KEY)
+    if isinstance(payload, dict):
+        if payload.get("network") != network:
+            context.user_data.pop(SESSION_PASSPHRASE_KEY, None)
+        else:
+            value = payload.get("value")
+            if isinstance(value, str) and value:
+                return value
+
+    # Fallback to runtime/manual session cache so users do not need to
+    # re-enter passphrase repeatedly during an active session.
+    from src.nadobro.services.bot_runtime import get_runtime_passphrase
+
+    return get_runtime_passphrase(telegram_id, network)
 
 
 async def _execute_authorized_action(message, context, telegram_id: int, action_data: dict, passphrase: str) -> tuple[bool, str]:
@@ -421,7 +427,6 @@ async def handle_message(update: Update, context: CallbackContext):
 
 async def _dispatch_reply_button(update, context, telegram_id, callback_data, text):
     if callback_data == "nav:main":
-        clear_session_passphrase(context)
         if is_trade_card_mode_enabled():
             await open_home_card_view_from_message(update, context, telegram_id, "nav:main")
             return
@@ -463,7 +468,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         if is_trade_card_mode_enabled():
             if callback_data in ("trade_flow:home", "trade_flow:cancel"):
                 _clear_trade_flow(context)
-                clear_session_passphrase(context, telegram_id=telegram_id)
                 await update.message.reply_text(
                     "↩️ Returned to home\\.",
                     parse_mode=ParseMode.MARKDOWN_V2,
@@ -601,7 +605,6 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
 
     if action == "home" or action == "cancel":
         _clear_trade_flow(context)
-        clear_session_passphrase(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -612,7 +615,6 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
     if action == "back":
         if not flow:
             _clear_trade_flow(context)
-            clear_session_passphrase(context, telegram_id=telegram_id)
             await update.message.reply_text(
                 "↩️ Returned to home\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
@@ -789,7 +791,6 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
 async def _go_back(update, context, flow, state, telegram_id):
     if state in ("direction", "order_type"):
         _clear_trade_flow(context)
-        clear_session_passphrase(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -846,7 +847,6 @@ async def _go_back(update, context, flow, state, telegram_id):
                 )
     else:
         _clear_trade_flow(context)
-        clear_session_passphrase(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
