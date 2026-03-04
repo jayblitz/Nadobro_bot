@@ -116,6 +116,8 @@ def execute_market_order(
     slippage_pct: float = 1.0,
     enforce_rate_limit: bool = True,
     passphrase: str = None,
+    tp_price: float = None,
+    sl_price: float = None,
 ) -> dict:
     valid, msg = validate_trade(
         telegram_id,
@@ -166,7 +168,7 @@ def execute_market_order(
     if result["success"]:
         mp = client.get_market_price(product_id)
         update_trade_stats(telegram_id, size * mp["mid"])
-        return {
+        payload = {
             "success": True,
             "side": "LONG" if is_long else "SHORT",
             "size": size,
@@ -175,6 +177,26 @@ def execute_market_order(
             "digest": result.get("digest"),
             "network": user.network_mode.value,
         }
+        tp_result = _place_take_profit_order(
+            client=client,
+            product_id=product_id,
+            size=size,
+            is_long=is_long,
+            tp_price=tp_price,
+        )
+        if tp_result:
+            payload.update(tp_result)
+        sl_result = _arm_stop_loss_rule(
+            telegram_id=telegram_id,
+            network=user.network_mode.value,
+            product=get_product_name(product_id),
+            is_long=is_long,
+            stop_price=sl_price,
+            size=size,
+        )
+        if sl_result:
+            payload.update(sl_result)
+        return payload
 
     return result
 
@@ -188,6 +210,8 @@ def execute_limit_order(
     leverage: float = 1.0,
     enforce_rate_limit: bool = True,
     passphrase: str = None,
+    tp_price: float = None,
+    sl_price: float = None,
 ) -> dict:
     valid, msg = validate_trade(
         telegram_id,
@@ -230,7 +254,7 @@ def execute_limit_order(
 
     if result["success"]:
         update_trade_stats(telegram_id, size * price)
-        return {
+        payload = {
             "success": True,
             "side": "LONG" if is_long else "SHORT",
             "size": size,
@@ -240,8 +264,91 @@ def execute_limit_order(
             "network": user.network_mode.value,
             "type": "LIMIT",
         }
+        tp_result = _place_take_profit_order(
+            client=client,
+            product_id=product_id,
+            size=size,
+            is_long=is_long,
+            tp_price=tp_price,
+        )
+        if tp_result:
+            payload.update(tp_result)
+        sl_result = _arm_stop_loss_rule(
+            telegram_id=telegram_id,
+            network=user.network_mode.value,
+            product=get_product_name(product_id),
+            is_long=is_long,
+            stop_price=sl_price,
+            size=size,
+        )
+        if sl_result:
+            payload.update(sl_result)
+        return payload
 
     return result
+
+
+def _place_take_profit_order(client, product_id: int, size: float, is_long: bool, tp_price: float | None) -> dict:
+    if tp_price is None:
+        return {}
+    try:
+        tp = float(tp_price)
+    except (TypeError, ValueError):
+        return {"tp_requested": True, "tp_set": False, "tp_error": "Invalid TP price."}
+    if tp <= 0:
+        return {"tp_requested": True, "tp_set": False, "tp_error": "TP price must be greater than 0."}
+
+    # TP for a long is a sell limit, for a short is a buy limit.
+    tp_result = client.place_limit_order(product_id, float(size), tp, is_buy=(not is_long))
+    if tp_result.get("success"):
+        return {
+            "tp_requested": True,
+            "tp_set": True,
+            "tp_price": tp,
+            "tp_digest": tp_result.get("digest"),
+        }
+    return {
+        "tp_requested": True,
+        "tp_set": False,
+        "tp_price": tp,
+        "tp_error": tp_result.get("error", "Failed to place TP order."),
+    }
+
+
+def _arm_stop_loss_rule(
+    telegram_id: int,
+    network: str,
+    product: str,
+    is_long: bool,
+    stop_price: float | None,
+    size: float,
+) -> dict:
+    if stop_price is None:
+        return {}
+    from src.nadobro.services.stop_loss_service import register_stop_loss_rule
+
+    side = "LONG" if is_long else "SHORT"
+    result = register_stop_loss_rule(
+        telegram_id=telegram_id,
+        network=network,
+        product=product,
+        side=side,
+        stop_price=stop_price,
+        size=size,
+    )
+    if result.get("success"):
+        return {
+            "sl_requested": True,
+            "sl_armed": True,
+            "sl_price": float(result.get("stop_price") or 0),
+            "sl_rule_id": result.get("rule_id"),
+        }
+    return {
+        "sl_requested": True,
+        "sl_armed": False,
+        "sl_price": float(stop_price or 0),
+        "sl_error": result.get("error", "Failed to arm stop-loss."),
+    }
 
 
 def _normalize_net_positions(positions: list) -> dict[int, dict]:

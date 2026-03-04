@@ -861,7 +861,7 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
             ],
             tools=active_tools,
             tool_choice="auto",
-            max_tokens=200,
+            max_tokens=120,
             temperature=0.0,
         )
     except Exception as e:
@@ -919,7 +919,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 800 if (_wants_detailed_answer(question) or x_search) else 600
+    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 420
 
     messages = [{"role": "system", "content": system}]
     if history:
@@ -930,7 +930,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
         model=XAI_X_SEARCH_MODEL if (x_search and provider == "xai") else _model_for(provider),
         messages=messages,
         max_tokens=max_tokens,
-        temperature=0.3,
+        temperature=0.2,
         stream=True,
     )
     if x_search and provider == "xai":
@@ -957,6 +957,20 @@ def _is_price_question(question: str) -> bool:
                      "market cap", "trending", "gainers", "losers", "pumping", "dumping",
                      "dominance", "total market", "how is", "performing"]
     return any(sig in q for sig in price_signals)
+
+
+def _should_skip_router(question: str) -> bool:
+    q = _normalize_question(question)
+    if not q:
+        return True
+    if _is_price_question(q) or _is_sentiment_question(q) or _is_x_twitter_question(q):
+        return False
+    fast_signals = (
+        "what is", "how to", "how do", "where", "when", "why", "explain",
+        "fee", "fees", "margin", "leverage", "liquidation", "deposit", "withdraw",
+        "wallet", "funding", "unified margin", "nado",
+    )
+    return len(q) <= 160 and any(sig in q for sig in fast_signals)
 
 
 async def stream_nado_answer(question: str, telegram_id: int = None, user_name: str = None):
@@ -1050,14 +1064,18 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         loop = asyncio.get_event_loop()
 
         primary = _pick_primary_provider(question)
-        try:
-            gathered_context, used_sources = await loop.run_in_executor(
-                None, _run_agent_pipeline, question, primary
-            )
-        except Exception as e:
-            logger.warning(f"Agent pipeline failed: {e}")
+        if _should_skip_router(question):
             gathered_context = _search_knowledge_sections(question, top_k=5)
             used_sources = _pick_sources_for_question(question, context_text=gathered_context)
+        else:
+            try:
+                gathered_context, used_sources = await loop.run_in_executor(
+                    None, _run_agent_pipeline, question, primary
+                )
+            except Exception as e:
+                logger.warning(f"Agent pipeline failed: {e}")
+                gathered_context = _search_knowledge_sections(question, top_k=5)
+                used_sources = _pick_sources_for_question(question, context_text=gathered_context)
 
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
@@ -1203,14 +1221,18 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         loop = asyncio.get_event_loop()
 
         primary = _pick_primary_provider(question)
-        try:
-            gathered_context, used_sources = await loop.run_in_executor(
-                None, _run_agent_pipeline, question, primary
-            )
-        except Exception as e:
-            logger.warning(f"Agent pipeline failed: {e}")
+        if _should_skip_router(question):
             gathered_context = _search_knowledge_sections(question, top_k=5)
             used_sources = _pick_sources_for_question(question, context_text=gathered_context)
+        else:
+            try:
+                gathered_context, used_sources = await loop.run_in_executor(
+                    None, _run_agent_pipeline, question, primary
+                )
+            except Exception as e:
+                logger.warning(f"Agent pipeline failed: {e}")
+                gathered_context = _search_knowledge_sections(question, top_k=5)
+                used_sources = _pick_sources_for_question(question, context_text=gathered_context)
 
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
@@ -1243,7 +1265,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             try:
                 def _call(p=provider):
                     client = _get_xai_client() if p == "xai" else _get_openai_client()
-                    max_tokens = 800 if (_wants_detailed_answer(question) or use_x_prompt) else 600
+                    max_tokens = 700 if (_wants_detailed_answer(question) or use_x_prompt) else 420
                     messages = [{"role": "system", "content": system}]
                     if history_msgs:
                         messages.extend(history_msgs[-6:])
@@ -1252,7 +1274,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                         model=XAI_X_SEARCH_MODEL if (use_x_prompt and p == "xai") else _model_for(p),
                         messages=messages,
                         max_tokens=max_tokens,
-                        temperature=0.3,
+                        temperature=0.2,
                     )
                     if use_x_prompt and p == "xai":
                         kwargs["extra_body"] = {"search_parameters": X_NADO_SEARCH_PARAMS}

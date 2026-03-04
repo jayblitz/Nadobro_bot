@@ -23,13 +23,21 @@ MAX_OPEN_ORDERS_PER_PRODUCT = 6
 STRATEGY_ERROR_ALERT_STREAK = 3
 
 _bot_app = None
+_runtime_loop: asyncio.AbstractEventLoop | None = None
 _tasks: dict[str, asyncio.Task] = {}
 _session_passphrases: dict[str, str] = {}
+_manual_session_passphrases: dict[str, dict] = {}
+_MANUAL_SESSION_TTL_SECONDS = 1800
 
 
 def set_bot_app(app):
-    global _bot_app
+    global _bot_app, _runtime_loop
     _bot_app = app
+    try:
+        _runtime_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Called outside of event loop; _ensure_task will latch loop later.
+        pass
 
 
 def _task_key(telegram_id: int, network: str) -> str:
@@ -44,6 +52,36 @@ def set_runtime_passphrase(telegram_id: int, network: str, passphrase: str):
     if not passphrase:
         return
     _session_passphrases[_task_key(telegram_id, network)] = passphrase
+
+
+def set_manual_passphrase(telegram_id: int, network: str, passphrase: str):
+    if not passphrase:
+        return
+    _manual_session_passphrases[_task_key(telegram_id, network)] = {
+        "passphrase": passphrase,
+        "set_at": time.time(),
+    }
+
+
+def clear_manual_passphrase(telegram_id: int, network: str):
+    _manual_session_passphrases.pop(_task_key(telegram_id, network), None)
+
+
+def get_runtime_passphrase(telegram_id: int, network: str) -> str | None:
+    tk = _task_key(telegram_id, network)
+    strategy_passphrase = _session_passphrases.get(tk)
+    if strategy_passphrase:
+        return strategy_passphrase
+
+    payload = _manual_session_passphrases.get(tk)
+    if not payload:
+        return None
+    passphrase = payload.get("passphrase")
+    set_at = float(payload.get("set_at") or 0)
+    if not passphrase or (time.time() - set_at > _MANUAL_SESSION_TTL_SECONDS):
+        _manual_session_passphrases.pop(tk, None)
+        return None
+    return passphrase
 
 
 def _default_state() -> dict:
@@ -256,6 +294,7 @@ def stop_runtime():
         task.cancel()
         _tasks.pop(task_id, None)
     _session_passphrases.clear()
+    _manual_session_passphrases.clear()
 
 
 def restore_running_bots(enabled: bool = False):
@@ -279,12 +318,35 @@ def restore_running_bots(enabled: bool = False):
             continue
 
 
-def _ensure_task(telegram_id: int, network: str):
+def _schedule_task_on_loop(telegram_id: int, network: str):
     tk = _task_key(telegram_id, network)
     task = _tasks.get(tk)
     if task and not task.done():
         return
     _tasks[tk] = asyncio.create_task(_bot_loop(telegram_id, network))
+
+
+def _ensure_task(telegram_id: int, network: str):
+    global _runtime_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        _runtime_loop = loop
+        _schedule_task_on_loop(telegram_id, network)
+        return
+
+    if _runtime_loop and _runtime_loop.is_running():
+        _runtime_loop.call_soon_threadsafe(_schedule_task_on_loop, telegram_id, network)
+        return
+
+    logger.error(
+        "Could not start strategy loop for user %s on %s: no running event loop",
+        telegram_id,
+        network,
+    )
 
 
 async def _bot_loop(telegram_id: int, network: str):

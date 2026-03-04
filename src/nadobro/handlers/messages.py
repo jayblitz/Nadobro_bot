@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
@@ -92,8 +93,13 @@ def _is_contextual_button(callback_data: str, context) -> bool:
     return True
 
 
-def clear_session_passphrase(context: CallbackContext):
+def clear_session_passphrase(context: CallbackContext, telegram_id: int | None = None):
     context.user_data.pop(SESSION_PASSPHRASE_KEY, None)
+    if telegram_id is not None:
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        from src.nadobro.services.bot_runtime import clear_manual_passphrase
+        clear_manual_passphrase(telegram_id, network)
 
 
 def _cache_session_passphrase(context: CallbackContext, telegram_id: int, passphrase: str):
@@ -101,6 +107,8 @@ def _cache_session_passphrase(context: CallbackContext, telegram_id: int, passph
         return
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
+    from src.nadobro.services.bot_runtime import set_manual_passphrase
+    set_manual_passphrase(telegram_id, network, passphrase)
     context.user_data[SESSION_PASSPHRASE_KEY] = {
         "value": passphrase,
         "network": network,
@@ -115,7 +123,7 @@ def _get_session_passphrase(context: CallbackContext, telegram_id: int) -> str |
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
     if payload.get("network") != network:
-        clear_session_passphrase(context)
+        clear_session_passphrase(context, telegram_id=telegram_id)
         return None
     value = payload.get("value")
     return value if isinstance(value, str) and value else None
@@ -149,13 +157,15 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             is_long = direction == "long"
             result = await run_blocking(
                 execute_limit_order, telegram_id, product, size, price,
-                is_long=is_long, leverage=leverage, passphrase=passphrase
+                is_long=is_long, leverage=leverage, passphrase=passphrase,
+                tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         else:
             is_long = direction == "long"
             result = await run_blocking(
                 execute_market_order, telegram_id, product, size,
-                is_long=is_long, leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase
+                is_long=is_long, leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase,
+                tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         await message.reply_text(
             fmt_trade_result(result),
@@ -225,12 +235,14 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             price = float(flow.get("limit_price", flow.get("price", 0)) or 0)
             result = await run_blocking(
                 execute_limit_order, telegram_id, product, size, price,
-                is_long=(direction == "long"), leverage=leverage, passphrase=passphrase
+                is_long=(direction == "long"), leverage=leverage, passphrase=passphrase,
+                tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         else:
             result = await run_blocking(
                 execute_market_order, telegram_id, product, size,
-                is_long=(direction == "long"), leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase
+                is_long=(direction == "long"), leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase,
+                tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         result_msg = fmt_trade_result(result)
         await message.reply_text(
@@ -300,7 +312,7 @@ async def authorize_or_prompt_passphrase(update_or_query, context, telegram_id: 
                 if ok:
                     _cache_session_passphrase(context, telegram_id, cached)
                 return
-        clear_session_passphrase(context)
+        clear_session_passphrase(context, telegram_id=telegram_id)
     await _prompt_passphrase(update_or_query, context, action_data)
 
 
@@ -451,7 +463,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         if is_trade_card_mode_enabled():
             if callback_data in ("trade_flow:home", "trade_flow:cancel"):
                 _clear_trade_flow(context)
-                clear_session_passphrase(context)
+                clear_session_passphrase(context, telegram_id=telegram_id)
                 await update.message.reply_text(
                     "↩️ Returned to home\\.",
                     parse_mode=ParseMode.MARKDOWN_V2,
@@ -589,7 +601,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
 
     if action == "home" or action == "cancel":
         _clear_trade_flow(context)
-        clear_session_passphrase(context)
+        clear_session_passphrase(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -600,7 +612,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
     if action == "back":
         if not flow:
             _clear_trade_flow(context)
-            clear_session_passphrase(context)
+            clear_session_passphrase(context, telegram_id=telegram_id)
             await update.message.reply_text(
                 "↩️ Returned to home\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
@@ -608,7 +620,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             )
             return
         state = flow.get("state", "direction")
-        await _go_back(update, context, flow, state)
+        await _go_back(update, context, flow, state, telegram_id)
         return
 
     if action == "direction":
@@ -774,10 +786,10 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         return
 
 
-async def _go_back(update, context, flow, state):
+async def _go_back(update, context, flow, state, telegram_id):
     if state in ("direction", "order_type"):
         _clear_trade_flow(context)
-        clear_session_passphrase(context)
+        clear_session_passphrase(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -834,7 +846,7 @@ async def _go_back(update, context, flow, state):
                 )
     else:
         _clear_trade_flow(context)
-        clear_session_passphrase(context)
+        clear_session_passphrase(context, telegram_id=telegram_id)
         await update.message.reply_text(
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -929,6 +941,8 @@ async def _execute_trade_flow(update, context, telegram_id, flow):
             "leverage": leverage,
             "slippage_pct": slippage_pct,
             "limit_price": flow.get("limit_price", flow.get("price", 0)),
+            "tp": flow.get("tp"),
+            "sl": flow.get("sl"),
         },
     })
 
@@ -1370,14 +1384,43 @@ async def _handle_nado_question(update, context, question):
     except Exception:
         pass
 
+    typing_task = None
+    stop_typing = asyncio.Event()
+
+    async def _typing_heartbeat():
+        # Telegram typing indicator expires quickly; refresh while LLM is running.
+        while not stop_typing.is_set():
+            try:
+                await update.message.chat.send_action(ChatAction.TYPING)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop_typing.wait(), timeout=4.0)
+            except asyncio.TimeoutError:
+                continue
+
     full_text = ""
     last_draft_len = 0
+    last_draft_ts = 0.0
     draft_ok = True
 
     try:
+        typing_task = asyncio.create_task(_typing_heartbeat())
+        try:
+            # Show immediate visual feedback while retrieval/LLM warm-up happens.
+            await context.bot.send_message_draft(
+                chat_id=chat_id,
+                draft_id=draft_id,
+                text="🧠 Ask NadoBro\n\nThinking...",
+            )
+            last_draft_ts = time.time()
+        except Exception:
+            draft_ok = False
+
         async for chunk in stream_nado_answer(question, telegram_id=telegram_id, user_name=user_name):
             full_text += chunk
-            if draft_ok and len(full_text) - last_draft_len >= 40:
+            now_ts = time.time()
+            if draft_ok and (len(full_text) - last_draft_len >= 120) and (now_ts - last_draft_ts >= 1.2):
                 try:
                     await context.bot.send_message_draft(
                         chat_id=chat_id,
@@ -1385,6 +1428,7 @@ async def _handle_nado_question(update, context, question):
                         text=f"🧠 Ask NadoBro\n\n{full_text}",
                     )
                     last_draft_len = len(full_text)
+                    last_draft_ts = now_ts
                 except Exception:
                     draft_ok = False
 
@@ -1425,6 +1469,13 @@ async def _handle_nado_question(update, context, question):
                 [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
             ]),
         )
+    finally:
+        stop_typing.set()
+        if typing_task:
+            try:
+                await typing_task
+            except Exception:
+                pass
 
 
 async def _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):

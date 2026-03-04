@@ -140,6 +140,14 @@ def parse_interaction_intent(text: str) -> Optional[dict]:
         return None
     is_short_command = len(words) <= 5
 
+    # PnL/account-profit checks should route to live portfolio data, even when
+    # phrased as a question.
+    if re.search(r"\b(pnl|profit|unrealized|realized)\b", text_lower) and re.search(
+        r"\b(my|current|now|account|portfolio|positions?|am i|how much)\b",
+        text_lower,
+    ):
+        return {"kind": "interaction", "action": "open_view", "target": "portfolio:view", "raw": raw}
+
     # Position-closing intents.
     if re.search(r"\b(close|exit)\b", text_lower):
         if re.search(r"\b(all|everything)\b", text_lower) and re.search(

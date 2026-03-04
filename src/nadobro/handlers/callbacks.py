@@ -55,13 +55,18 @@ LIVE_PRICE_TASKS = {}
 async def handle_callback(update: Update, context: CallbackContext):
     started = time.perf_counter()
     query = update.callback_query
-    await query.answer()
-    await query.message.chat.send_action(ChatAction.TYPING)
-
     data = query.data
     telegram_id = query.from_user.id
 
     try:
+        try:
+            await query.answer()
+        except BadRequest as e:
+            # Callback queries expire quickly; ignore stale answers and continue.
+            if "Query is too old" not in str(e) and "query id is invalid" not in str(e):
+                raise
+        await query.message.chat.send_action(ChatAction.TYPING)
+
         if data.startswith("onb:"):
             await _handle_onb_new(query, data, telegram_id, context)
         elif data.startswith("nav:"):
@@ -222,7 +227,7 @@ async def _handle_mode(query, data, telegram_id, context=None):
     if success:
         if context is not None:
             from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context)
+            clear_session_passphrase(context, telegram_id=telegram_id)
         network_label = "🧪 TESTNET" if target_network == "testnet" else "🌐 MAINNET"
         await query.edit_message_text(
             f"✅ *Switched to {escape_md(network_label)}*\n\n{escape_md(result_msg)}",
@@ -247,7 +252,7 @@ async def _handle_nav(query, data, telegram_id, context=None):
     if target in ("main", "refresh"):
         if context is not None:
             from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context)
+            clear_session_passphrase(context, telegram_id=telegram_id)
         await _show_dashboard(query, telegram_id)
     elif target == "help":
         try:
@@ -564,11 +569,16 @@ async def _handle_portfolio(query, data, telegram_id):
         pass
     stats = await run_blocking(get_trade_analytics, telegram_id)
     msg = fmt_portfolio(stats, positions, prices)
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=portfolio_kb(has_positions=bool(positions)),
-    )
+    try:
+        await query.edit_message_text(
+            msg,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=portfolio_kb(has_positions=bool(positions)),
+        )
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
+        raise
 
 
 async def _handle_wallet(query, data, telegram_id, context):
@@ -634,7 +644,7 @@ async def _handle_wallet(query, data, telegram_id, context):
         ok, msg = remove_user_private_key(telegram_id, network)
         if ok:
             from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context)
+            clear_session_passphrase(context, telegram_id=telegram_id)
         prefix = "✅" if ok else "❌"
         await query.edit_message_text(
             f"{prefix} {escape_md(msg)}",
@@ -650,7 +660,7 @@ async def _handle_wallet(query, data, telegram_id, context):
 
         if success:
             from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context)
+            clear_session_passphrase(context, telegram_id=telegram_id)
             info = get_user_wallet_info(telegram_id)
             msg = fmt_wallet_info(info)
             await query.edit_message_text(
@@ -1313,7 +1323,7 @@ def _strategy_config_kb(strategy: str):
 
 def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: str) -> str:
     names = {
-        "mm": "Mirror Market Maker",
+        "mm": "MM Bot",
         "grid": "Grid Reactor",
         "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",

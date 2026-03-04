@@ -632,7 +632,7 @@ def settings_language_kb(current_language: str = "en"):
 def strategy_hub_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🤖 Mirror MM", callback_data="strategy:preview:mm"),
+            InlineKeyboardButton("🤖 MM Bot", callback_data="strategy:preview:mm"),
             InlineKeyboardButton("🧮 Grid Reactor", callback_data="strategy:preview:grid"),
         ],
         [

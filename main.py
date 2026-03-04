@@ -35,7 +35,7 @@ except RuntimeError as e:
 
 
 def check_config():
-    transport_mode = os.environ.get("TELEGRAM_TRANSPORT", "polling").strip().lower()
+    transport_mode, webhook_url, webhook_path = _resolve_transport_settings()
     missing = []
     if not TELEGRAM_TOKEN:
         missing.append("TELEGRAM_TOKEN")
@@ -43,7 +43,7 @@ def check_config():
         missing.append("DATABASE_URL or SUPABASE_DATABASE_URL")
     if transport_mode not in ("polling", "webhook"):
         missing.append("TELEGRAM_TRANSPORT must be polling or webhook")
-    if transport_mode == "webhook" and not os.environ.get("TELEGRAM_WEBHOOK_URL"):
+    if transport_mode == "webhook" and not webhook_url:
         missing.append("TELEGRAM_WEBHOOK_URL (required when TELEGRAM_TRANSPORT=webhook)")
     xai_key = os.environ.get("XAI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
@@ -63,6 +63,32 @@ def check_config():
     logger.info("Configuration check passed (transport=%s)", transport_mode)
 
 
+def _resolve_transport_settings():
+    transport_mode = (os.environ.get("TELEGRAM_TRANSPORT") or "").strip().lower()
+    webhook_path = (os.environ.get("TELEGRAM_WEBHOOK_PATH") or "/telegram/webhook").strip()
+    if not webhook_path.startswith("/"):
+        webhook_path = "/" + webhook_path
+    webhook_url = (os.environ.get("TELEGRAM_WEBHOOK_URL") or "").strip()
+
+    if not transport_mode:
+        # Auto-prefer webhook on Fly deployments to reduce update polling latency.
+        if os.environ.get("FLY_APP_NAME"):
+            transport_mode = "webhook"
+        elif webhook_url:
+            transport_mode = "webhook"
+        else:
+            transport_mode = "polling"
+    if transport_mode not in ("polling", "webhook"):
+        transport_mode = "polling"
+
+    if transport_mode == "webhook" and not webhook_url:
+        fly_app = os.environ.get("FLY_APP_NAME", "").strip()
+        if fly_app:
+            webhook_url = f"https://{fly_app}.fly.dev{webhook_path}"
+
+    return transport_mode, webhook_url, webhook_path
+
+
 def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
@@ -70,7 +96,12 @@ def setup_bot():
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -127,11 +158,7 @@ async def run_bot():
     auto_restore = os.environ.get("NADO_AUTO_RESTORE_STRATEGIES", "true").strip().lower() in ("1", "true", "yes", "on")
     restore_running_bots(enabled=auto_restore)
 
-    transport_mode = os.environ.get("TELEGRAM_TRANSPORT", "polling").strip().lower()
-    webhook_url = (os.environ.get("TELEGRAM_WEBHOOK_URL") or "").strip()
-    webhook_path = (os.environ.get("TELEGRAM_WEBHOOK_PATH") or "/telegram/webhook").strip()
-    if not webhook_path.startswith("/"):
-        webhook_path = "/" + webhook_path
+    transport_mode, webhook_url, webhook_path = _resolve_transport_settings()
     webhook_secret = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
     if transport_mode == "webhook" and webhook_url:
         parsed = urlparse(webhook_url)

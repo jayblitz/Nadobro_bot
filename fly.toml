@@ -8,6 +8,10 @@ primary_region = 'ams'
 
 [build]
 
+[env]
+  TELEGRAM_TRANSPORT = "webhook"
+  TELEGRAM_WEBHOOK_PATH = "/telegram/webhook"
+
 [http_service]
   internal_port = 8080
   force_https = true

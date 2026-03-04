@@ -369,6 +369,8 @@ async def _execute_card_trade(query, context: CallbackContext, telegram_id: int,
             "leverage": leverage,
             "slippage_pct": slippage_pct,
             "limit_price": session.get("limit_price", session.get("price", 0)),
+            "tp": session.get("tp"),
+            "sl": session.get("sl"),
         },
     })
 
