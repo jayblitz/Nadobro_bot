@@ -45,7 +45,8 @@ def _cmc_get(path: str, params: dict = None, timeout: int = 8) -> dict:
     resp = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
-    if data.get("status", {}).get("error_code", 0) != 0:
+    error_code = data.get("status", {}).get("error_code", 0)
+    if str(error_code) not in ("0", ""):
         err = data["status"].get("error_message", "Unknown CMC error")
         raise RuntimeError(f"CMC API error: {err}")
     return data.get("data", {})
@@ -214,14 +215,14 @@ def get_latest_news(limit: int = 5) -> list[dict]:
 def format_crypto_quote(data: dict) -> str:
     sym = data.get("symbol", "?")
     name = data.get("name", sym)
-    price = data.get("price", 0)
-    mc = data.get("market_cap", 0)
-    vol = data.get("volume_24h", 0)
-    c1h = data.get("change_1h", 0)
-    c24h = data.get("change_24h", 0)
-    c7d = data.get("change_7d", 0)
-    c30d = data.get("change_30d", 0)
-    dom = data.get("market_cap_dominance", 0)
+    price = data.get("price") or 0
+    mc = data.get("market_cap") or 0
+    vol = data.get("volume_24h") or 0
+    c1h = data.get("change_1h") or 0
+    c24h = data.get("change_24h") or 0
+    c7d = data.get("change_7d") or 0
+    c30d = data.get("change_30d") or 0
+    dom = data.get("market_cap_dominance") or 0
 
     arrow_24h = "+" if c24h >= 0 else ""
     arrow_7d = "+" if c7d >= 0 else ""
@@ -241,12 +242,12 @@ def format_crypto_quote(data: dict) -> str:
 
 
 def format_global_metrics(data: dict) -> str:
-    mc = data.get("total_market_cap", 0)
-    vol = data.get("total_volume_24h", 0)
-    btc_dom = data.get("btc_dominance", 0)
-    eth_dom = data.get("eth_dominance", 0)
-    active = data.get("active_cryptocurrencies", 0)
-    mc_change = data.get("total_market_cap_change_24h", 0)
+    mc = data.get("total_market_cap") or 0
+    vol = data.get("total_volume_24h") or 0
+    btc_dom = data.get("btc_dominance") or 0
+    eth_dom = data.get("eth_dominance") or 0
+    active = data.get("active_cryptocurrencies") or 0
+    mc_change = data.get("total_market_cap_change_24h") or 0
     arrow = "+" if mc_change >= 0 else ""
 
     return (
