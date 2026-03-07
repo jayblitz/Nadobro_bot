@@ -10,7 +10,7 @@ from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions,
     fmt_prices, fmt_funding, fmt_trade_preview, fmt_trade_result,
     fmt_wallet_info, fmt_alerts, fmt_portfolio,
-    fmt_settings, fmt_help, fmt_price, fmt_status_overview,
+    fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
@@ -22,6 +22,7 @@ from src.nadobro.handlers.keyboards import (
     markets_kb, live_price_asset_kb, live_price_controls_kb,
     mode_kb,     home_card_kb, portfolio_kb,
     onboarding_accept_tos_kb,
+    points_scope_kb,
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback
 from src.nadobro.handlers.home_card import build_home_card_text
@@ -48,6 +49,8 @@ from src.nadobro.services.onboarding_service import (
 from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
+from src.nadobro.services.points_service import get_points_dashboard
+from src.nadobro.handlers.points_mascot import mascot_path_for_cost, mascot_caption_for_cost
 
 logger = logging.getLogger(__name__)
 LIVE_PRICE_TASKS = {}
@@ -141,6 +144,8 @@ async def handle_callback(update: Update, context: CallbackContext):
             await _handle_alert(query, data, telegram_id, context)
         elif data.startswith("settings:"):
             await _handle_settings(query, data, telegram_id, context)
+        elif data.startswith("points:"):
+            await _handle_points(query, data, telegram_id)
         elif data.startswith("strategy:"):
             await _handle_strategy(query, data, context, telegram_id)
         elif data == "home:mode":
@@ -177,22 +182,34 @@ async def handle_callback(update: Update, context: CallbackContext):
 
 
 # New onboarding (language → ToS) message text
-_ONB_WELCOME_LANG_MSG = """Welcome to Nadobro 👋
+_ONB_WELCOME_LANG_MSG = """Yo what’s good, future Nado whale?! 👋💰
 
-Your trading companion for perps on Nado DEX — fast execution, automated strategies, and AI-powered insights, all from Telegram.
+Welcome to Nadobro — the best Telegram bot for trading Perps on Nado.
 
-Pick your language:"""
+We’re giving you pro tools in the palm of your hand:
+• MM Bot (Grid + RGRID that prints)
+• Delta Neutral Bot (spot + 1-5x short = easy funding)
+• Volume Bot (farm leaderboards on autopilot)
+• AI chat: just type your trade ideas in English
 
-_ONB_WELCOME_CARD = """🔥 You're in!
+First, pick your language vibe:"""
 
-By tapping **"Let's Get It"** you accept the Terms of Use & Privacy Policy.
+_ONB_WELCOME_CARD = """🔥 Nadobro Activated! You’re in the squad 🔥
 
-🔐 How it works:
-We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
+We run on Nado’s lightning CLOB with unified margin.
 
-Ready?"""
+By tapping "Let’s Get It" you accept our Terms of Use & Privacy Policy.
 
-_ONB_DASHBOARD_MSG = """🚀 You're all set! Pick a module below to get started."""
+⚡ Security First (this is why we’re better):
+We generate a secure Linked Signer for your default subaccount only.
+You paste the PUBLIC address into Nado Settings -> 1-Click Trading (1 tx, 5 seconds).
+Your private keys NEVER leave your wallet. Revoke anytime. 100% self-custody.
+
+Ready to start printing?"""
+
+_ONB_DASHBOARD_MSG = """🚀 Nadobro Dashboard — You’re Live, Legend!
+
+What we smashing today?"""
 
 
 async def _handle_onb_new(query, data, telegram_id, context):
@@ -213,9 +230,41 @@ async def _handle_onb_new(query, data, telegram_id, context):
         update_user_language(telegram_id, lang)
         await query.edit_message_text(
             _ONB_WELCOME_CARD,
-            parse_mode=ParseMode.MARKDOWN,
             reply_markup=onboarding_accept_tos_kb(),
         )
+
+
+async def _handle_points(query, data, telegram_id):
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else "view"
+    scope = "current"
+    if len(parts) > 2:
+        scope = (parts[2] or "current").lower()
+    if scope not in ("current", "all", "epoch"):
+        scope = "current"
+
+    if action not in ("view", "refresh"):
+        action = "view"
+
+    points = await run_blocking(get_points_dashboard, telegram_id, scope)
+    msg = fmt_points_dashboard(points)
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=points_scope_kb(scope),
+    )
+
+    if points.get("ok"):
+        mascot_path = mascot_path_for_cost(float(points.get("cost_per_point", 0) or 0))
+        if mascot_path:
+            try:
+                with open(mascot_path, "rb") as img:
+                    await query.message.reply_photo(
+                        photo=img,
+                        caption=mascot_caption_for_cost(float(points.get("cost_per_point", 0) or 0)),
+                    )
+            except Exception:
+                logger.warning("Failed to send points mascot image", exc_info=True)
 
 
 async def _show_dashboard(query, telegram_id):
@@ -1465,13 +1514,11 @@ async def _handle_onboarding(query, data, telegram_id, context):
     if not state.get("language"):
         await query.edit_message_text(
             _ONB_WELCOME_LANG_MSG,
-            parse_mode=ParseMode.MARKDOWN,
             reply_markup=onboarding_language_kb(),
         )
     else:
         await query.edit_message_text(
             _ONB_WELCOME_CARD,
-            parse_mode=ParseMode.MARKDOWN,
             reply_markup=onboarding_accept_tos_kb(),
         )
 
