@@ -18,9 +18,8 @@ SIZE_PRESETS = {
 HOME_BTN_TRADE = "🤖 Trade Console"
 HOME_BTN_PORTFOLIO = "📁 Portfolio Deck"
 HOME_BTN_HOME = "🏠 Home"
-HOME_BTN_WALLET = "👛 Wallet"
-HOME_BTN_MARKETS = "📡 Market Radar"
-HOME_BTN_STRATEGIES = "⚡ Strategies"
+HOME_BTN_WALLET = "💼 Wallet Vault"
+HOME_BTN_STRATEGIES = "🧠 Strategy Lab"
 HOME_BTN_ALERTS = "🔔 Alert Engine"
 HOME_BTN_SETTINGS = "⚙️ Control Panel"
 HOME_BTN_MODE = "🌐 Execution Mode"
@@ -34,7 +33,6 @@ REPLY_BUTTON_MAP = {
     HOME_BTN_TRADE: "nav:trade",
     HOME_BTN_PORTFOLIO: "portfolio:view",
     HOME_BTN_WALLET: "wallet:view",
-    HOME_BTN_MARKETS: "mkt:menu",
     HOME_BTN_STRATEGIES: "nav:strategy_hub",
     HOME_BTN_POSITIONS: "pos:view",
     HOME_BTN_POINTS: "points:view:current",
@@ -74,7 +72,7 @@ REPLY_BUTTON_MAP.update({
     "Home": "nav:main",
     "Positions": "pos:view",
     "Wallet": "wallet:view",
-    "Markets": "mkt:menu",
+    "Markets": "points:view:current",
     "Strategies": "nav:strategy_hub",
     "My Positions": "pos:view",
     "Nado Points": "points:view:current",
@@ -128,9 +126,10 @@ def persistent_menu_kb():
         )
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_STRATEGIES)],
-            [KeyboardButton(HOME_BTN_POSITIONS), KeyboardButton(HOME_BTN_POINTS)],
-            [KeyboardButton(HOME_BTN_HELP), KeyboardButton(HOME_BTN_HOME)],
+            [KeyboardButton(HOME_BTN_TRADE), KeyboardButton(HOME_BTN_PORTFOLIO)],
+            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_POINTS)],
+            [KeyboardButton(HOME_BTN_STRATEGIES), KeyboardButton(HOME_BTN_ALERTS)],
+            [KeyboardButton(HOME_BTN_SETTINGS), KeyboardButton(HOME_BTN_MODE)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -140,16 +139,20 @@ def persistent_menu_kb():
 def home_card_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("👛 Wallet", callback_data="wallet:view"),
-            InlineKeyboardButton("⚡ Strategies", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
+            InlineKeyboardButton("📁 Portfolio Deck", callback_data="portfolio:view"),
         ],
         [
-            InlineKeyboardButton("📊 My Positions", callback_data="pos:view"),
+            InlineKeyboardButton("💼 Wallet Vault", callback_data="wallet:view"),
             InlineKeyboardButton("🏆 Nado Points", callback_data="points:view:current"),
         ],
         [
-            InlineKeyboardButton("❓ Help / Support", callback_data="nav:help"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="nav:refresh"),
+            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🔔 Alert Engine", callback_data="alert:menu"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Control Panel", callback_data="settings:view"),
+            InlineKeyboardButton("🌐 Execution Mode", callback_data="home:mode"),
         ],
     ])
 
@@ -665,51 +668,6 @@ def strategy_hub_kb():
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
-        ],
-    ])
-
-
-def markets_kb():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💹 Price Grid", callback_data="mkt:prices"),
-            InlineKeyboardButton("📊 Funding", callback_data="mkt:funding"),
-        ],
-        [
-            InlineKeyboardButton("🔴 Live Last Price", callback_data="mkt:live_menu"),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="nav:main"),
-        ],
-    ])
-
-
-def live_price_asset_kb():
-    rows = []
-    row = []
-    for name in PERP_PRODUCTS:
-        row.append(InlineKeyboardButton(name, callback_data=f"mkt:live:{name}"))
-        if len(row) == 4:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([
-        InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
-        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def live_price_controls_kb(product: str):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🛑 Stop Live", callback_data="mkt:live_stop"),
-            InlineKeyboardButton("Switch Asset", callback_data="mkt:live_menu"),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
-            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
 

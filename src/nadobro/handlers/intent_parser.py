@@ -183,7 +183,7 @@ def parse_interaction_intent(text: str) -> Optional[dict]:
         if re.search(r"\b(position|positions|portfolio)\b", text_lower):
             return {"kind": "interaction", "action": "open_view", "target": "pos:view", "raw": raw}
         if re.search(r"\b(markets?|prices?|funding)\b", text_lower):
-            return {"kind": "interaction", "action": "open_view", "target": "mkt:menu", "raw": raw}
+            return {"kind": "interaction", "action": "open_view", "target": "points:view:current", "raw": raw}
         if re.search(r"\b(mode|network|testnet|mainnet)\b", text_lower):
             return {"kind": "interaction", "action": "open_view", "target": "nav:mode", "raw": raw}
         if re.search(r"\b(trade|long|short|buy|sell)\b", text_lower):

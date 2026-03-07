@@ -28,7 +28,7 @@ from src.nadobro.handlers.keyboards import (
     trade_direction_kb, trade_order_type_kb, trade_product_reply_kb,
     trade_leverage_reply_kb, trade_size_reply_kb, trade_tpsl_kb,
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
-    mode_kb, strategy_hub_kb, wallet_kb, positions_kb, markets_kb,
+    mode_kb, strategy_hub_kb, wallet_kb, positions_kb,
     alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb, points_scope_kb,
 )
 from src.nadobro.handlers.trade_card import (
@@ -463,12 +463,11 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         "pos:view",
         "portfolio:view",
         "wallet:view",
-        "mkt:menu",
+        "points:view:current",
         "nav:strategy_hub",
         "alert:menu",
         "settings:view",
         "nav:mode",
-        "points:view:current",
         "points:view:all",
         "points:view:epoch",
         "nav:help",
@@ -594,14 +593,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=portfolio_kb(has_positions=bool(positions)),
-        )
-        return
-
-    if callback_data == "mkt:menu":
-        await update.message.reply_text(
-            "📡 *Market Radar*\n\nPick a market view:",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=markets_kb(),
         )
         return
 

@@ -155,51 +155,6 @@ def fmt_balance(balance_data, wallet_addr=None):
     return "\n".join(lines)
 
 
-def fmt_prices(prices):
-    if not prices:
-        return "📡 *Market Radar*\n\nCould not fetch prices\\."
-
-    lines = [
-        "📡 *Market Radar*",
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        "",
-    ]
-
-    for name, p in prices.items():
-        mid = p.get("mid", 0)
-        bid = p.get("bid", 0)
-        ask = p.get("ask", 0)
-        spread = ask - bid if ask and bid else 0
-
-        lines.append(
-            f"*{escape_md(name)}\\-PERP:* {escape_md(f'${fmt_price(mid, name)}')}"
-        )
-        lines.append(
-            f"  Bid: {escape_md(f'${fmt_price(bid, name)}')} \\| "
-            f"Ask: {escape_md(f'${fmt_price(ask, name)}')}"
-        )
-
-    return "\n".join(lines)
-
-
-def fmt_funding(funding_data):
-    if not funding_data:
-        return "📊 *Funding Scanner*\n\nCould not fetch funding data\\."
-
-    lines = [
-        "📊 *Funding Scanner*",
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        "",
-    ]
-
-    for name, rate in funding_data.items():
-        lines.append(
-            f"*{escape_md(name)}\\-PERP:* {escape_md(f'{rate:.6f}')} \\(index\\)"
-        )
-
-    return "\n".join(lines)
-
-
 def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None):
     action_upper = action.upper()
     emoji = "🟢" if "LONG" in action_upper else "🔴"

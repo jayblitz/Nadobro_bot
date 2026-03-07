@@ -18,7 +18,6 @@ from src.nadobro.handlers.keyboards import (
     strategy_hub_kb,
     wallet_kb,
     positions_kb,
-    markets_kb,
     alerts_kb,
     settings_kb,
     portfolio_kb,
@@ -177,10 +176,6 @@ def _view_portfolio_text(telegram_id: int):
     return msg, portfolio_kb(has_positions=bool(positions))
 
 
-def _view_markets_text():
-    return "📡 *Market Radar*\n\nPick a market view:", markets_kb()
-
-
 def _view_alerts_text():
     return "🔔 *Alert Engine*\n\nManage your trigger alerts\\.", alerts_kb()
 
@@ -209,8 +204,6 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
         return _view_portfolio_text(telegram_id)
     if callback_data == "pos:view":
         return _view_positions_text(telegram_id)
-    if callback_data == "mkt:menu":
-        return _view_markets_text()
     if callback_data == "alert:menu":
         return _view_alerts_text()
     if callback_data == "settings:view":
