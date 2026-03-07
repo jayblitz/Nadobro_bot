@@ -1,6 +1,7 @@
 import logging
 import time
 import os
+import json
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
@@ -27,6 +28,26 @@ _min_size_x18_cache = {}
 _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
 _FANOUT_WORKERS = int(os.environ.get("NADO_FANOUT_WORKERS", "8"))
 _rest_session = requests.Session()
+_DEBUG_LOG_PATH = "/Users/jerry/Nadobro_bot/.cursor/debug-086b41.log"
+_DEBUG_SESSION_ID = "086b41"
+
+
+def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict):
+    try:
+        payload = {
+            "sessionId": _DEBUG_SESSION_ID,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+            "id": f"{_DEBUG_SESSION_ID}_{int(time.time() * 1000)}_{hypothesis_id}",
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
 
 
 class NadoClient:
@@ -118,6 +139,23 @@ class NadoClient:
             return resp.json()
         except Exception as e:
             logger.error("REST query failed type=%s: %s", query_type, e)
+            return None
+
+    def query_archive(self, payload: dict) -> Optional[dict]:
+        try:
+            headers = {
+                "Accept-Encoding": "gzip",
+                "Content-Type": "application/json",
+            }
+            resp = _rest_session.post(
+                self._archive_url(),
+                json=payload,
+                headers=headers,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+            return resp.json()
+        except Exception as e:
+            logger.error("Archive query failed payload_keys=%s err=%s", list((payload or {}).keys()), e)
             return None
 
     def get_market_price(self, product_id: int) -> dict:
@@ -1018,7 +1056,44 @@ class NadoClient:
         slippage_pct = max(0.1, min(slippage_pct, 10.0))
         multiplier = 1.0 + (slippage_pct / 100.0)
         price = mp["ask"] * multiplier if is_buy else mp["bid"] / multiplier
-        return self.place_order(product_id, size, price, order_type="ioc", is_buy=is_buy)
+        # region agent log
+        _debug_log(
+            run_id="pre-fix-1",
+            hypothesis_id="H1",
+            location="nado_client.py:place_market_order:pre_place_order",
+            message="Computed IOC order price from top-of-book and slippage",
+            data={
+                "network": self.network,
+                "product_id": product_id,
+                "size": float(size or 0),
+                "is_buy": bool(is_buy),
+                "market_bid": float(mp.get("bid", 0) or 0),
+                "market_ask": float(mp.get("ask", 0) or 0),
+                "market_mid": float(mp.get("mid", 0) or 0),
+                "slippage_pct": float(slippage_pct),
+                "computed_ioc_price": float(price or 0),
+            },
+        )
+        # endregion
+        result = self.place_order(product_id, size, price, order_type="ioc", is_buy=is_buy)
+        # region agent log
+        _debug_log(
+            run_id="pre-fix-1",
+            hypothesis_id="H1",
+            location="nado_client.py:place_market_order:post_place_order",
+            message="Observed place_order return payload for market close path",
+            data={
+                "network": self.network,
+                "product_id": product_id,
+                "success": bool(result.get("success")),
+                "result_price": float(result.get("price", 0) or 0),
+                "result_digest": str(result.get("digest", ""))[:24],
+                "result_side": result.get("side"),
+                "error": str(result.get("error", ""))[:120],
+            },
+        )
+        # endregion
+        return result
 
     def place_limit_order(self, product_id: int, size: float, price: float, is_buy: bool = True) -> dict:
         return self.place_order(product_id, size, price, order_type="default", is_buy=is_buy)

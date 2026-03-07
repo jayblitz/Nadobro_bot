@@ -3,7 +3,15 @@ import logging
 from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
 
-from src.nadobro.handlers.formatters import escape_md, fmt_positions, fmt_settings, fmt_wallet_info, fmt_portfolio, fmt_help
+from src.nadobro.handlers.formatters import (
+    escape_md,
+    fmt_positions,
+    fmt_settings,
+    fmt_wallet_info,
+    fmt_portfolio,
+    fmt_help,
+    fmt_points_dashboard,
+)
 from src.nadobro.handlers.keyboards import (
     home_card_kb,
     mode_kb,
@@ -15,12 +23,14 @@ from src.nadobro.handlers.keyboards import (
     settings_kb,
     portfolio_kb,
     persistent_menu_kb,
+    points_scope_kb,
 )
 from src.nadobro.services.trade_service import get_trade_analytics
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric
+from src.nadobro.services.points_service import get_points_dashboard
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +193,11 @@ def _view_settings_text(telegram_id: int):
     return msg, settings_kb(lev, slip)
 
 
+def _view_points_text(telegram_id: int, scope: str = "current"):
+    points = get_points_dashboard(telegram_id, scope)
+    return fmt_points_dashboard(points), points_scope_kb(scope)
+
+
 async def resolve_home_view(callback_data: str, telegram_id: int):
     if callback_data == "home:mode":
         return _view_mode_text(telegram_id)
@@ -200,6 +215,14 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
         return _view_alerts_text()
     if callback_data == "settings:view":
         return _view_settings_text(telegram_id)
+    if callback_data == "nav:help":
+        return fmt_help(), home_card_kb()
+    if callback_data.startswith("points:view:"):
+        scope = callback_data.split(":")[2] if len(callback_data.split(":")) > 2 else "current"
+        return _view_points_text(telegram_id, scope)
+    if callback_data.startswith("points:refresh:"):
+        scope = callback_data.split(":")[2] if len(callback_data.split(":")) > 2 else "current"
+        return _view_points_text(telegram_id, scope)
     return await build_home_card_text_async(telegram_id), home_card_kb()
 
 

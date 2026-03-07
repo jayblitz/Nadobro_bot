@@ -18,12 +18,15 @@ SIZE_PRESETS = {
 HOME_BTN_TRADE = "🤖 Trade Console"
 HOME_BTN_PORTFOLIO = "📁 Portfolio Deck"
 HOME_BTN_HOME = "🏠 Home"
-HOME_BTN_WALLET = "💼 Wallet Vault"
+HOME_BTN_WALLET = "👛 Wallet"
 HOME_BTN_MARKETS = "📡 Market Radar"
-HOME_BTN_STRATEGIES = "🧠 Strategy Lab"
+HOME_BTN_STRATEGIES = "⚡ Strategies"
 HOME_BTN_ALERTS = "🔔 Alert Engine"
 HOME_BTN_SETTINGS = "⚙️ Control Panel"
 HOME_BTN_MODE = "🌐 Execution Mode"
+HOME_BTN_POSITIONS = "📊 My Positions"
+HOME_BTN_POINTS = "🏆 Nado Points"
+HOME_BTN_HELP = "❓ Help / Support"
 
 
 REPLY_BUTTON_MAP = {
@@ -33,6 +36,9 @@ REPLY_BUTTON_MAP = {
     HOME_BTN_WALLET: "wallet:view",
     HOME_BTN_MARKETS: "mkt:menu",
     HOME_BTN_STRATEGIES: "nav:strategy_hub",
+    HOME_BTN_POSITIONS: "pos:view",
+    HOME_BTN_POINTS: "points:view:current",
+    HOME_BTN_HELP: "nav:help",
     HOME_BTN_ALERTS: "alert:menu",
     HOME_BTN_SETTINGS: "settings:view",
     HOME_BTN_MODE: "nav:mode",
@@ -70,6 +76,9 @@ REPLY_BUTTON_MAP.update({
     "Wallet": "wallet:view",
     "Markets": "mkt:menu",
     "Strategies": "nav:strategy_hub",
+    "My Positions": "pos:view",
+    "Nado Points": "points:view:current",
+    "Help / Support": "nav:help",
     "Alerts": "alert:menu",
     "Settings": "settings:view",
     "Mode": "nav:mode",
@@ -119,10 +128,9 @@ def persistent_menu_kb():
         )
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(HOME_BTN_TRADE), KeyboardButton(HOME_BTN_PORTFOLIO)],
-            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_MARKETS)],
-            [KeyboardButton(HOME_BTN_STRATEGIES), KeyboardButton(HOME_BTN_ALERTS)],
-            [KeyboardButton(HOME_BTN_SETTINGS), KeyboardButton(HOME_BTN_MODE)],
+            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_STRATEGIES)],
+            [KeyboardButton(HOME_BTN_POSITIONS), KeyboardButton(HOME_BTN_POINTS)],
+            [KeyboardButton(HOME_BTN_HELP), KeyboardButton(HOME_BTN_HOME)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -132,20 +140,36 @@ def persistent_menu_kb():
 def home_card_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
-            InlineKeyboardButton("📁 Portfolio Deck", callback_data="portfolio:view"),
+            InlineKeyboardButton("👛 Wallet", callback_data="wallet:view"),
+            InlineKeyboardButton("⚡ Strategies", callback_data="nav:strategy_hub"),
         ],
         [
-            InlineKeyboardButton("💼 Wallet Vault", callback_data="wallet:view"),
-            InlineKeyboardButton("📡 Market Radar", callback_data="mkt:menu"),
+            InlineKeyboardButton("📊 My Positions", callback_data="pos:view"),
+            InlineKeyboardButton("🏆 Nado Points", callback_data="points:view:current"),
         ],
         [
-            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
-            InlineKeyboardButton("🔔 Alert Engine", callback_data="alert:menu"),
+            InlineKeyboardButton("❓ Help / Support", callback_data="nav:help"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="nav:refresh"),
+        ],
+    ])
+
+
+def points_scope_kb(scope: str = "current"):
+    current = (scope or "current").lower()
+    def _label(base: str, code: str) -> str:
+        return f"{base} ✅" if current == code else base
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(_label("Current Mode", "current"), callback_data="points:view:current"),
+            InlineKeyboardButton(_label("Scope All", "all"), callback_data="points:view:all"),
         ],
         [
-            InlineKeyboardButton("⚙️ Control Panel", callback_data="settings:view"),
-            InlineKeyboardButton("🌐 Execution Mode", callback_data="home:mode"),
+            InlineKeyboardButton(_label("Scope Epoch", "epoch"), callback_data="points:view:epoch"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"points:refresh:{current}"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
 

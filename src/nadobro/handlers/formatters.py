@@ -552,3 +552,56 @@ def fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
         f"TP: {escape_md(f'{tp_pct:.2f}%')}\n"
         f"SL: {escape_md(f'{sl_pct:.2f}%')}"
     )
+
+
+def _fmt_duration_compact(total_seconds: int) -> str:
+    if total_seconds <= 0:
+        return "0m"
+    minutes = total_seconds // 60
+    hours = minutes // 60
+    rem_minutes = minutes % 60
+    if hours <= 0:
+        return f"{int(rem_minutes)}m"
+    return f"{int(hours)}h {int(rem_minutes)}m"
+
+
+def fmt_points_dashboard(points: dict) -> str:
+    if not points or not points.get("ok"):
+        err = (points or {}).get("error", "Could not load Nado points.")
+        return f"🏆 *Nado Points*\n\n{escape_md(err)}"
+
+    points_label = " \\(estimated\\)" if points.get("points_estimated") else ""
+    points_source = points.get("points_source", "estimated")
+    maker_pct = float(points.get("maker_pct", 0) or 0)
+    taker_pct = float(points.get("taker_pct", 0) or 0)
+    maker_count = int(points.get("maker_count", 0) or 0)
+    taker_count = int(points.get("taker_count", 0) or 0)
+    volume_str = f"${float(points.get('volume_usd', 0) or 0):,.2f}"
+    points_str = f"{float(points.get('points', 0) or 0):.2f}"
+    cpp_str = f"${float(points.get('cost_per_point', 0) or 0):.2f}"
+    fees_str = f"${float(points.get('fees_paid', 0) or 0):,.2f}"
+    ppm_str = f"{float(points.get('ppm', 0) or 0):.0f}"
+    positions_str = str(points.get("positions", 0) or 0)
+    avg_hold_str = _fmt_duration_compact(int(points.get("avg_hold_seconds", 0) or 0))
+    missing_fields = points.get("missing_fields") or []
+    partial = ""
+    if missing_fields:
+        partial = f"\n\n⚠️ Partial data: {escape_md(', '.join(str(x) for x in missing_fields))}"
+    source_line = "estimated from fills/fees" if points.get("points_estimated") else str(points_source)
+
+    return (
+        "🏆 *Your Nado Points Dashboard*\n\n"
+        f"📊 Current Epoch {escape_md(str(points.get('epoch', 1)))}\n"
+        f"Volume:          {escape_md(volume_str)}\n"
+        f"Points{points_label}:          {escape_md(points_str)}\n"
+        f"Cost/Point:      {escape_md(cpp_str)}\n\n"
+        f"Maker {escape_md(f'{maker_pct:.1f}%')} {escape_md(points.get('maker_bar', '░░░░░░░░░░'))} "
+        f"{escape_md(f'{taker_pct:.1f}%')} Taker\n"
+        f"Fills: Maker {escape_md(str(maker_count))} \\| Taker {escape_md(str(taker_count))}\n"
+        f"Fees: {escape_md(fees_str)}     "
+        f"PPM: {escape_md(ppm_str)}     "
+        f"Positions: {escape_md(positions_str)}     "
+        f"Avg Hold: {escape_md(avg_hold_str)}\n"
+        f"Source: {escape_md(source_line)}"
+        f"{partial}"
+    )

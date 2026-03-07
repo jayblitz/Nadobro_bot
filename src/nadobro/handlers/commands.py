@@ -31,27 +31,35 @@ from src.nadobro.services.perf import summary_lines
 logger = logging.getLogger(__name__)
 
 
-# New onboarding messages (exact copy from spec)
-WELCOME_MSG = """Welcome to Nadobro 👋
+# New onboarding messages
+WELCOME_MSG = """Yo what’s good, future Nado whale?! 👋💰
 
-Your trading companion for perps on Nado DEX — fast execution, automated strategies, and AI-powered insights, all from Telegram.
+Welcome to Nadobro — the best Telegram bot for trading Perps on Nado.
 
-Pick your language:"""
+We’re giving you pro tools in the palm of your hand:
+• MM Bot (Grid + RGRID that prints)
+• Delta Neutral Bot (spot + 1-5x short = easy funding)
+• Volume Bot (farm leaderboards on autopilot)
+• AI chat: just type your trade ideas in English
 
-WELCOME_CARD_MSG = """🔥 You're in!
+First, pick your language vibe:"""
 
-By tapping **"Let's Get It"** you accept the Terms of Use & Privacy Policy.
+WELCOME_CARD_MSG = """🔥 Nadobro Activated! You’re in the squad 🔥
 
-🔐 How it works:
-We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
+We run on Nado’s lightning CLOB with unified margin.
 
-Ready?"""
+By tapping "Let’s Get It" you accept our Terms of Use & Privacy Policy.
 
-DASHBOARD_MSG = """🚀 *Nadobro Command Center is live\\!*
+⚡ Security First (this is why we’re better):
+We generate a secure Linked Signer for your default subaccount only.
+You paste the PUBLIC address into Nado Settings -> 1-Click Trading (1 tx, 5 seconds).
+Your private keys NEVER leave your wallet. Revoke anytime. 100% self-custody.
 
-Yo legend, your trading copilot is online and ready to cook\\.
+Ready to start printing?"""
 
-Pick a module below and let's trade smarter \\(and faster\\) ⚡"""
+DASHBOARD_MSG = """🚀 Nadobro Dashboard — You’re Live, Legend!
+
+What we smashing today?"""
 
 START_HERO_CAPTION = """👋 *Welcome back to Nadobro\\!*
 
@@ -92,13 +100,11 @@ async def cmd_start(update: Update, context: CallbackContext):
                     logger.warning("Failed to send intro video: %s", e)
             await update.message.reply_text(
                 WELCOME_MSG,
-                parse_mode=ParseMode.MARKDOWN,
                 reply_markup=onboarding_language_kb(),
             )
             return
         await update.message.reply_text(
             WELCOME_CARD_MSG,
-            parse_mode=ParseMode.MARKDOWN,
             reply_markup=onboarding_accept_tos_kb(),
         )
         return

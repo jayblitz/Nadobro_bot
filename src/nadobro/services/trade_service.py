@@ -1,4 +1,6 @@
 import logging
+import json
+import time
 from datetime import datetime, timedelta
 from src.nadobro.models.database import (
     TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
@@ -16,6 +18,26 @@ from src.nadobro.config import (
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 
 logger = logging.getLogger(__name__)
+_DEBUG_LOG_PATH = "/Users/jerry/Nadobro_bot/.cursor/debug-086b41.log"
+_DEBUG_SESSION_ID = "086b41"
+
+
+def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict):
+    try:
+        payload = {
+            "sessionId": _DEBUG_SESSION_ID,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+            "id": f"{_DEBUG_SESSION_ID}_{int(time.time() * 1000)}_{hypothesis_id}",
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
 
 
 def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[str]]:
@@ -419,6 +441,7 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
         network = user.network_mode.value if user else "mainnet"
 
         close_price = fill_price or 0.0
+        close_price_source = "fill_price" if close_price else "market_mid_fallback"
         if not close_price:
             try:
                 price_data = client.get_market_price(product_id)
@@ -428,6 +451,28 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
 
         open_trade = find_open_trade(telegram_id, product_id, network=network)
         is_full_close = close_size >= pos_size
+        # region agent log
+        _debug_log(
+            run_id="pre-fix-1",
+            hypothesis_id="H2",
+            location="trade_service.py:_record_close_in_db:pre_pnl",
+            message="Close price selection and open trade chosen for DB close update",
+            data={
+                "product_id": product_id,
+                "network": network,
+                "close_size": float(close_size or 0),
+                "position_size": float(pos_size or 0),
+                "close_price_source": close_price_source,
+                "input_fill_price": float(fill_price or 0),
+                "selected_close_price": float(close_price or 0),
+                "open_trade_id": open_trade.get("id") if open_trade else None,
+                "open_trade_side": open_trade.get("side") if open_trade else None,
+                "open_trade_price": float((open_trade or {}).get("price") or 0),
+                "open_trade_status": (open_trade or {}).get("status"),
+                "is_full_close": bool(is_full_close),
+            },
+        )
+        # endregion
 
         if open_trade:
             open_price = float(open_trade.get("price") or 0)
@@ -438,6 +483,23 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
                     pnl = (close_price - open_price) * close_size
                 elif open_side == "short":
                     pnl = (open_price - close_price) * close_size
+            # region agent log
+            _debug_log(
+                run_id="pre-fix-1",
+                hypothesis_id="H3",
+                location="trade_service.py:_record_close_in_db:pnl_calc",
+                message="Computed close PnL from open trade side and selected close price",
+                data={
+                    "product_id": product_id,
+                    "open_trade_id": open_trade.get("id"),
+                    "open_side": open_side,
+                    "open_price": float(open_price or 0),
+                    "close_price": float(close_price or 0),
+                    "close_size": float(close_size or 0),
+                    "computed_pnl": float(pnl or 0),
+                },
+            )
+            # endregion
 
             if is_full_close:
                 update_trade(open_trade["id"], {
@@ -517,6 +579,23 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
     close_size = min(pos_size, float(size)) if size else pos_size
     full_close_requested = size is None or close_size >= pos_size
     close_side = "short" if signed_amount > 0 else "long"
+    # region agent log
+    _debug_log(
+        run_id="pre-fix-1",
+        hypothesis_id="H4",
+        location="trade_service.py:close_position:pre_close_loop",
+        message="Close request normalized from current net position",
+        data={
+            "product_id": product_id,
+            "requested_size": float(size or 0) if size is not None else None,
+            "net_signed_amount": float(signed_amount or 0),
+            "position_size": float(pos_size or 0),
+            "close_size": float(close_size or 0),
+            "close_side": close_side,
+            "full_close_requested": bool(full_close_requested),
+        },
+    )
+    # endregion
 
     remaining_size = close_size
     attempts = 0
@@ -539,6 +618,24 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
         if not r.get("success"):
             return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
         fill_price = float(r.get("price") or 0) if r.get("price") else None
+        # region agent log
+        _debug_log(
+            run_id="pre-fix-1",
+            hypothesis_id="H1",
+            location="trade_service.py:close_position:post_place_market_order",
+            message="Close loop received market order response before DB update",
+            data={
+                "product_id": product_id,
+                "attempt": attempts,
+                "is_buy": bool(is_buy),
+                "this_close_size": float(this_close_size or 0),
+                "remaining_size_before_decrement": float(remaining_size or 0),
+                "result_success": bool(r.get("success")),
+                "result_price": float(r.get("price", 0) or 0),
+                "result_digest": str(r.get("digest", ""))[:24],
+            },
+        )
+        # endregion
         _record_close_in_db(telegram_id, product_id, this_close_size, pos_size, close_side, client, fill_price=fill_price)
         remaining_size -= this_close_size
 

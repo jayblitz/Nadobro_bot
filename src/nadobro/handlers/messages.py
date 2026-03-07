@@ -21,7 +21,7 @@ from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id, get_product_max_leverage
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
-    fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio,
+    fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, fmt_help, fmt_points_dashboard,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
@@ -29,7 +29,7 @@ from src.nadobro.handlers.keyboards import (
     trade_leverage_reply_kb, trade_size_reply_kb, trade_tpsl_kb,
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
     mode_kb, strategy_hub_kb, wallet_kb, positions_kb, markets_kb,
-    alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb,
+    alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb, points_scope_kb,
 )
 from src.nadobro.handlers.trade_card import (
     open_trade_card_from_message,
@@ -45,6 +45,8 @@ from src.nadobro.handlers.intent_handlers import (
 from src.nadobro.handlers.intent_parser import parse_interaction_intent
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow
+from src.nadobro.services.points_service import get_points_dashboard
+from src.nadobro.handlers.points_mascot import mascot_path_for_cost, mascot_caption_for_cost
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +468,10 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         "alert:menu",
         "settings:view",
         "nav:mode",
+        "points:view:current",
+        "points:view:all",
+        "points:view:epoch",
+        "nav:help",
     ):
         target = "home:mode" if callback_data == "nav:mode" else callback_data
         await open_home_card_view_from_message(update, context, telegram_id, target)
@@ -616,6 +622,35 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(lev, slip),
+        )
+        return
+
+    if callback_data.startswith("points:view:"):
+        scope = (callback_data.split(":")[2] if len(callback_data.split(":")) > 2 else "current").lower()
+        points = await run_blocking(get_points_dashboard, telegram_id, scope)
+        await update.message.reply_text(
+            fmt_points_dashboard(points),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=points_scope_kb(scope),
+        )
+        if points.get("ok"):
+            mascot_path = mascot_path_for_cost(float(points.get("cost_per_point", 0) or 0))
+            if mascot_path:
+                try:
+                    with open(mascot_path, "rb") as img:
+                        await update.message.reply_photo(
+                            photo=img,
+                            caption=mascot_caption_for_cost(float(points.get("cost_per_point", 0) or 0)),
+                        )
+                except Exception:
+                    logger.warning("Failed to send points mascot image", exc_info=True)
+        return
+
+    if callback_data == "nav:help":
+        await update.message.reply_text(
+            fmt_help(),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
         )
         return
 
