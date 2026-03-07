@@ -41,6 +41,85 @@ def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, dat
         pass
 
 
+def _from_x18(raw) -> float:
+    try:
+        return float(raw) / 1e18
+    except Exception:
+        return 0.0
+
+
+def _fetch_close_execution_report(client, product_id: int, order_digest: str | None) -> dict:
+    if not order_digest:
+        return {}
+    if not getattr(client, "subaccount_hex", None):
+        return {}
+    if not hasattr(client, "query_archive"):
+        return {}
+
+    digest = str(order_digest).lower()
+    max_time = int(datetime.utcnow().timestamp())
+    report = {"digest": digest, "filled_size": 0.0, "fill_price": 0.0, "realized_pnl": None}
+
+    # Matches give actual executed base/quote so we can compute weighted fill price.
+    try:
+        match_payload = {
+            "matches": {
+                "subaccounts": [client.subaccount_hex],
+                "max_time": max_time,
+                "limit": 300,
+                "isolated": False,
+            }
+        }
+        m_resp = client.query_archive(match_payload) or {}
+        matches = m_resp.get("matches") or []
+        rel_matches = []
+        for m in matches:
+            try:
+                if int(m.get("product_id")) != int(product_id):
+                    continue
+            except Exception:
+                continue
+            m_digest = str(m.get("digest", "")).lower()
+            if m_digest == digest:
+                rel_matches.append(m)
+        base_total = sum(abs(_from_x18(m.get("base_filled", 0))) for m in rel_matches)
+        quote_total = sum(abs(_from_x18(m.get("quote_filled", 0))) for m in rel_matches)
+        report["filled_size"] = float(base_total)
+        report["fill_price"] = float((quote_total / base_total) if base_total > 0 else 0.0)
+    except Exception:
+        pass
+
+    # Orders can expose exchange-realized pnl directly.
+    try:
+        order_payload = {
+            "orders": {
+                "subaccounts": [client.subaccount_hex],
+                "max_time": max_time,
+                "limit": 300,
+                "isolated": False,
+            }
+        }
+        o_resp = client.query_archive(order_payload) or {}
+        orders = o_resp.get("orders") or []
+        rel_orders = []
+        for o in orders:
+            try:
+                if int(o.get("product_id")) != int(product_id):
+                    continue
+            except Exception:
+                continue
+            o_digest = str(o.get("digest", "")).lower()
+            if o_digest == digest:
+                rel_orders.append(o)
+        if rel_orders:
+            realized = sum(_from_x18(o.get("realized_pnl", 0)) for o in rel_orders)
+            report["realized_pnl"] = float(realized)
+    except Exception:
+        pass
+
+    return report
+
+
 def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[str]]:
     cancelled = 0
     errors: list[str] = []
@@ -436,7 +515,16 @@ def _normalize_net_positions(positions: list) -> dict[int, dict]:
     return net_by_product
 
 
-def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, pos_size: float, side: str, client, fill_price: float = None):
+def _record_close_in_db(
+    telegram_id: int,
+    product_id: int,
+    close_size: float,
+    pos_size: float,
+    side: str,
+    client,
+    fill_price: float = None,
+    realized_pnl_override: float | None = None,
+):
     try:
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
@@ -479,7 +567,9 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
             open_price = float(open_trade.get("price") or 0)
             open_side = open_trade.get("side", "")
             pnl = 0.0
-            if open_price > 0 and close_price > 0:
+            if realized_pnl_override is not None:
+                pnl = float(realized_pnl_override)
+            elif open_price > 0 and close_price > 0:
                 if open_side == "long":
                     pnl = (close_price - open_price) * close_size
                 elif open_side == "short":
@@ -619,10 +709,19 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
         if not r.get("success"):
             return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
         fill_price = float(r.get("price") or 0) if r.get("price") else None
+        execution_report = _fetch_close_execution_report(client, product_id, r.get("digest"))
         latest_after_positions = _normalize_net_positions(client.get_all_positions() or [])
         latest_after_pos = latest_after_positions.get(product_id)
         latest_after_abs = abs(float((latest_after_pos or {}).get("signed_amount", 0) or 0))
         actual_reduction = max(0.0, latest_abs - latest_after_abs)
+        reported_filled = float(execution_report.get("filled_size") or 0.0)
+        executed_size = reported_filled if reported_filled > 0 else actual_reduction
+        effective_fill_price = (
+            float(execution_report.get("fill_price") or 0.0)
+            if float(execution_report.get("fill_price") or 0.0) > 0
+            else fill_price
+        )
+        realized_pnl = execution_report.get("realized_pnl")
         # region agent log
         _debug_log(
             run_id="pre-fix-1",
@@ -641,6 +740,11 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
                 "latest_abs_before": float(latest_abs or 0),
                 "latest_abs_after": float(latest_after_abs or 0),
                 "actual_position_reduction": float(actual_reduction or 0),
+                "archive_reported_filled": float(reported_filled or 0),
+                "executed_size_used": float(executed_size or 0),
+                "archive_fill_price": float(execution_report.get("fill_price") or 0),
+                "effective_fill_price_used": float(effective_fill_price or 0),
+                "archive_realized_pnl": float(realized_pnl or 0) if realized_pnl is not None else None,
             },
         )
         # endregion
@@ -654,14 +758,27 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
                 "product_id": product_id,
                 "requested_close_size": float(this_close_size or 0),
                 "actual_position_reduction": float(actual_reduction or 0),
+                "archive_reported_filled": float(reported_filled or 0),
+                "executed_size_used": float(executed_size or 0),
                 "latest_abs_before": float(latest_abs or 0),
                 "latest_abs_after": float(latest_after_abs or 0),
-                "partial_fill_detected": bool(actual_reduction + 1e-12 < float(this_close_size or 0)),
+                "partial_fill_detected": bool((executed_size + 1e-12) < float(this_close_size or 0)),
             },
         )
         # endregion
-        _record_close_in_db(telegram_id, product_id, this_close_size, pos_size, close_side, client, fill_price=fill_price)
-        remaining_size -= this_close_size
+        if executed_size <= 0:
+            return {"success": False, "error": f"Close verification failed for {product}: no executed size detected."}
+        _record_close_in_db(
+            telegram_id,
+            product_id,
+            executed_size,
+            latest_abs,
+            close_side,
+            client,
+            fill_price=effective_fill_price,
+            realized_pnl_override=realized_pnl,
+        )
+        remaining_size -= executed_size
 
     post_positions = _normalize_net_positions(client.get_all_positions() or [])
     post_pos = post_positions.get(product_id)
