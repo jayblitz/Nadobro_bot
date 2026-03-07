@@ -46,6 +46,7 @@ def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, dat
         }
         with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        logger.warning("AGENTDBG %s", json.dumps(payload, ensure_ascii=True))
     except Exception:
         pass
 

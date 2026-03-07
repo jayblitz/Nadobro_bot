@@ -36,6 +36,7 @@ def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, dat
         }
         with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        logger.warning("AGENTDBG %s", json.dumps(payload, ensure_ascii=True))
     except Exception:
         pass
 
@@ -618,6 +619,10 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
         if not r.get("success"):
             return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
         fill_price = float(r.get("price") or 0) if r.get("price") else None
+        latest_after_positions = _normalize_net_positions(client.get_all_positions() or [])
+        latest_after_pos = latest_after_positions.get(product_id)
+        latest_after_abs = abs(float((latest_after_pos or {}).get("signed_amount", 0) or 0))
+        actual_reduction = max(0.0, latest_abs - latest_after_abs)
         # region agent log
         _debug_log(
             run_id="pre-fix-1",
@@ -633,6 +638,25 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
                 "result_success": bool(r.get("success")),
                 "result_price": float(r.get("price", 0) or 0),
                 "result_digest": str(r.get("digest", ""))[:24],
+                "latest_abs_before": float(latest_abs or 0),
+                "latest_abs_after": float(latest_after_abs or 0),
+                "actual_position_reduction": float(actual_reduction or 0),
+            },
+        )
+        # endregion
+        # region agent log
+        _debug_log(
+            run_id="pre-fix-1",
+            hypothesis_id="H6",
+            location="trade_service.py:close_position:fill_vs_requested",
+            message="Compared requested close size versus actual position delta after exchange response",
+            data={
+                "product_id": product_id,
+                "requested_close_size": float(this_close_size or 0),
+                "actual_position_reduction": float(actual_reduction or 0),
+                "latest_abs_before": float(latest_abs or 0),
+                "latest_abs_after": float(latest_after_abs or 0),
+                "partial_fill_detected": bool(actual_reduction + 1e-12 < float(this_close_size or 0)),
             },
         )
         # endregion
