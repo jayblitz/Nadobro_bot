@@ -2,8 +2,13 @@ import logging
 import re
 from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
+from src.nadobro.i18n import get_active_language, localize_text
 
 logger = logging.getLogger(__name__)
+
+
+def _loc(text: str) -> str:
+    return localize_text(text, get_active_language())
 
 
 def escape_md(text):
@@ -395,11 +400,11 @@ def fmt_settings(user_data):
         f"📊 *Slippage:* {escape_md(f'{slippage}%')}",
     ]
 
-    return "\n".join(lines)
+    return _loc("\n".join(lines))
 
 
 def fmt_help():
-    return (
+    return _loc(
         "📖 *Trading Bot Guide*\n"
         + escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n"
         "\n"
@@ -490,7 +495,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
             )
         if inventory_skew_usd is not None:
             lines.append(f"Inventory Skew: *{escape_md(f'${float(inventory_skew_usd):,.2f}')}*")
-    return "\n".join(lines)
+    return _loc("\n".join(lines))
 
 
 def fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
@@ -499,7 +504,7 @@ def fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
-    return (
+    return _loc(
         f"✅ *{escape_md(strategy.upper())} updated* \\({escape_md(network.upper())}\\)\n\n"
         f"Notional: {escape_md(f'${notional:,.2f}')}\n"
         f"Spread: {escape_md(f'{spread_bp:.1f} bp')}\n"
@@ -523,7 +528,7 @@ def _fmt_duration_compact(total_seconds: int) -> str:
 def fmt_points_dashboard(points: dict) -> str:
     if not points or not points.get("ok"):
         err = (points or {}).get("error", "Could not load Nado points.")
-        return f"🏆 *Nado Points*\n\n{escape_md(err)}"
+        return _loc(f"🏆 *Nado Points*\n\n{escape_md(err)}")
 
     points_label = " \\(estimated\\)" if points.get("points_estimated") else ""
     points_source = points.get("points_source", "estimated")
@@ -544,7 +549,7 @@ def fmt_points_dashboard(points: dict) -> str:
         partial = f"\n\n⚠️ Partial data: {escape_md(', '.join(str(x) for x in missing_fields))}"
     source_line = "estimated from fills/fees" if points.get("points_estimated") else str(points_source)
 
-    return (
+    return _loc(
         "🏆 *Your Nado Points Dashboard*\n\n"
         f"📊 Current Epoch {escape_md(str(points.get('epoch', 1)))}\n"
         f"Volume:          {escape_md(volume_str)}\n"

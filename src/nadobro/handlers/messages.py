@@ -24,7 +24,7 @@ from src.nadobro.handlers.formatters import (
     fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, fmt_help, fmt_points_dashboard,
 )
 from src.nadobro.handlers.keyboards import (
-    persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
+    persistent_menu_kb, trade_confirm_kb, get_reply_button_map,
     trade_direction_kb, trade_order_type_kb, trade_product_reply_kb,
     trade_leverage_reply_kb, trade_size_reply_kb, trade_tpsl_kb,
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
@@ -47,6 +47,11 @@ from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow
 from src.nadobro.services.points_service import get_points_dashboard
 from src.nadobro.handlers.points_mascot import mascot_path_for_cost, mascot_caption_for_cost
+from src.nadobro.i18n import (
+    get_user_language,
+    language_context,
+    localize_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -390,58 +395,73 @@ async def handle_message(update: Update, context: CallbackContext):
         text = update.message.text.strip()
 
         get_or_create_user(telegram_id, username)
+        user_lang = get_user_language(telegram_id)
 
-        if text in REPLY_BUTTON_MAP:
-            callback_data = REPLY_BUTTON_MAP[text]
-            if _is_contextual_button(callback_data, context):
-                try:
-                    await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
-                except Exception as e:
-                    logger.error(f"Button dispatch error for '{text}': {e}", exc_info=True)
+        try:
+            original_reply = update.message.reply_text
+
+            async def _localized_reply_text(text=None, *args, **kwargs):
+                loc_text, loc_kb = localize_payload(text, kwargs.get("reply_markup"), user_lang)
+                kwargs["reply_markup"] = loc_kb
+                return await original_reply(loc_text, *args, **kwargs)
+
+            update.message.reply_text = _localized_reply_text
+        except Exception:
+            pass
+
+        with language_context(user_lang):
+            reply_button_map = get_reply_button_map(user_lang)
+            if text in reply_button_map:
+                callback_data = reply_button_map[text]
+                if _is_contextual_button(callback_data, context):
                     try:
-                        await update.message.reply_text(
-                            "⚠️ Something went wrong\\. Please try again\\.",
-                            parse_mode=ParseMode.MARKDOWN_V2,
-                            reply_markup=persistent_menu_kb(),
-                        )
-                    except Exception:
-                        pass
+                        await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
+                    except Exception as e:
+                        logger.error(f"Button dispatch error for '{text}': {e}", exc_info=True)
+                        try:
+                            await update.message.reply_text(
+                                "⚠️ Something went wrong\\. Please try again\\.",
+                                parse_mode=ParseMode.MARKDOWN_V2,
+                                reply_markup=persistent_menu_kb(),
+                            )
+                        except Exception:
+                            pass
+                    return
+
+            if await _handle_passphrase_input(update, context, telegram_id, text):
                 return
 
-        if await _handle_passphrase_input(update, context, telegram_id, text):
-            return
+            if await handle_trade_card_text_input(update, context, telegram_id, text):
+                return
 
-        if await handle_trade_card_text_input(update, context, telegram_id, text):
-            return
+            if await handle_pending_text_trade_confirmation(update, context, telegram_id, text):
+                return
 
-        if await handle_pending_text_trade_confirmation(update, context, telegram_id, text):
-            return
+            if await _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
+                return
 
-        if await _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
-            return
+            if await _handle_wallet_flow(update, context, telegram_id, text):
+                return
 
-        if await _handle_wallet_flow(update, context, telegram_id, text):
-            return
+            if await _handle_trade_flow_free_text(update, context, telegram_id, text):
+                return
 
-        if await _handle_trade_flow_free_text(update, context, telegram_id, text):
-            return
+            if await _handle_pending_trade(update, context, telegram_id, text):
+                return
 
-        if await _handle_pending_trade(update, context, telegram_id, text):
-            return
+            if await _handle_pending_alert(update, context, telegram_id, text):
+                return
 
-        if await _handle_pending_alert(update, context, telegram_id, text):
-            return
+            if await _handle_pending_strategy_input(update, context, telegram_id, text):
+                return
 
-        if await _handle_pending_strategy_input(update, context, telegram_id, text):
-            return
+            if await handle_trade_intent_message(update, context, telegram_id, text):
+                return
 
-        if await handle_trade_intent_message(update, context, telegram_id, text):
-            return
+            if await _handle_interaction_intent_message(update, context, telegram_id, text):
+                return
 
-        if await _handle_interaction_intent_message(update, context, telegram_id, text):
-            return
-
-        await _handle_nado_question(update, context, text)
+            await _handle_nado_question(update, context, text)
     finally:
         log_slow("message.total", threshold_ms=1000.0, started_at=started)
 

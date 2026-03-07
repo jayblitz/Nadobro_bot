@@ -1,5 +1,6 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW, get_product_max_leverage
+from src.nadobro.i18n import get_active_language, localize_markup, localize_label
 
 PERP_PRODUCTS = [name for name, info in PRODUCTS.items() if info["type"] == "perp"]
 
@@ -89,6 +90,18 @@ for preset_product, presets in SIZE_PRESETS.items():
     for s in presets:
         label = str(int(s)) if s == int(s) else str(s)
         REPLY_BUTTON_MAP[label] = f"trade_flow:size:{label}"
+
+
+def get_reply_button_map(lang: str | None = None):
+    selected_lang = lang or get_active_language()
+    if selected_lang == "en":
+        return REPLY_BUTTON_MAP
+    localized = dict(REPLY_BUTTON_MAP)
+    for label, callback in REPLY_BUTTON_MAP.items():
+        localized_label = localize_label(label, selected_lang)
+        if localized_label and localized_label not in localized:
+            localized[localized_label] = callback
+    return localized
 
 
 # --- New onboarding (language + ToS) ---
@@ -746,5 +759,64 @@ def back_kb(target="main"):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(label, callback_data=f"nav:{target}")],
     ])
+
+
+def _localize_kb_factory(fn):
+    def _wrapped(*args, **kwargs):
+        return localize_markup(fn(*args, **kwargs), get_active_language())
+    _wrapped.__name__ = fn.__name__
+    _wrapped.__doc__ = fn.__doc__
+    return _wrapped
+
+
+for _fn_name in [
+    "onboarding_language_kb",
+    "onboarding_accept_tos_kb",
+    "persistent_menu_kb",
+    "home_card_kb",
+    "points_scope_kb",
+    "portfolio_kb",
+    "trade_direction_kb",
+    "trade_order_type_kb",
+    "trade_product_reply_kb",
+    "trade_leverage_reply_kb",
+    "trade_size_reply_kb",
+    "trade_tpsl_kb",
+    "trade_tpsl_edit_kb",
+    "trade_confirm_reply_kb",
+    "trade_card_start_kb",
+    "trade_card_direction_kb",
+    "trade_card_order_type_kb",
+    "trade_card_product_kb",
+    "trade_card_leverage_kb",
+    "trade_card_size_kb",
+    "trade_card_limit_price_input_kb",
+    "trade_card_tpsl_kb",
+    "trade_card_tpsl_edit_kb",
+    "trade_card_text_input_kb",
+    "trade_card_confirm_kb",
+    "trade_product_kb",
+    "trade_size_kb",
+    "trade_leverage_kb",
+    "trade_confirm_kb",
+    "positions_kb",
+    "wallet_kb",
+    "wallet_kb_not_linked",
+    "alerts_kb",
+    "alert_product_kb",
+    "alert_delete_kb",
+    "settings_kb",
+    "settings_leverage_kb",
+    "settings_slippage_kb",
+    "risk_profile_kb",
+    "settings_language_kb",
+    "strategy_hub_kb",
+    "strategy_action_kb",
+    "close_product_kb",
+    "confirm_close_all_kb",
+    "mode_kb",
+    "back_kb",
+]:
+    globals()[_fn_name] = _localize_kb_factory(globals()[_fn_name])
 
 

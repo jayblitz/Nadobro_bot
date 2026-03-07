@@ -27,6 +27,12 @@ from src.nadobro.handlers.home_card import (
     open_status_card_from_command,
 )
 from src.nadobro.services.perf import summary_lines
+from src.nadobro.i18n import (
+    get_user_language,
+    language_context,
+    localize_payload,
+    localize_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,140 +95,153 @@ async def cmd_start(update: Update, context: CallbackContext):
     username = update.effective_user.username
 
     user, is_new, _ = get_or_create_user(telegram_id, username)
-    if not is_new_onboarding_complete(telegram_id):
-        state = get_new_onboarding_state(telegram_id)
-        if not state.get("language"):
-            if is_new and os.path.exists(INTRO_VIDEO_PATH):
-                try:
-                    with open(INTRO_VIDEO_PATH, "rb") as vf:
-                        await update.message.reply_video(video=vf)
-                except Exception as e:
-                    logger.warning("Failed to send intro video: %s", e)
-            await update.message.reply_text(
-                WELCOME_MSG,
-                reply_markup=onboarding_language_kb(),
-            )
+    with language_context(getattr(user, "language", "en")):
+        if not is_new_onboarding_complete(telegram_id):
+            state = get_new_onboarding_state(telegram_id)
+            if not state.get("language"):
+                if is_new and os.path.exists(INTRO_VIDEO_PATH):
+                    try:
+                        with open(INTRO_VIDEO_PATH, "rb") as vf:
+                            await update.message.reply_video(video=vf)
+                    except Exception as e:
+                        logger.warning("Failed to send intro video: %s", e)
+                text, kb = localize_payload(WELCOME_MSG, onboarding_language_kb())
+                await update.message.reply_text(text, reply_markup=kb)
+                return
+            text, kb = localize_payload(WELCOME_CARD_MSG, onboarding_accept_tos_kb())
+            await update.message.reply_text(text, reply_markup=kb)
             return
-        await update.message.reply_text(
-            WELCOME_CARD_MSG,
-            reply_markup=onboarding_accept_tos_kb(),
-        )
-        return
 
-    # Onboarding complete → show dashboard (8 buttons)
-    sent_hero = await _send_start_image(
-        update,
-        caption=START_HERO_CAPTION,
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
-    if not sent_hero:
-        await update.message.reply_text(
-            "👋 Welcome back to Nadobro! Your trading copilot is ready.",
+        # Onboarding complete → show dashboard (8 buttons)
+        sent_hero = await _send_start_image(
+            update,
+            caption=localize_text(START_HERO_CAPTION),
+            parse_mode=ParseMode.MARKDOWN_V2,
         )
-
-    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
-    if not wallet_ready:
-        try:
+        if not sent_hero:
             await update.message.reply_text(
-                WALLET_SETUP_CTA_MSG,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=InlineKeyboardMarkup([
+                localize_text("👋 Welcome back to Nadobro! Your trading copilot is ready."),
+            )
+
+        wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
+        if not wallet_ready:
+            try:
+                cta_kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("👛 Start Wallet Setup", callback_data="wallet:setup")],
                     [InlineKeyboardButton("🏠 Open Dashboard", callback_data="nav:main")],
-                ]),
+                ])
+                text, kb = localize_payload(WALLET_SETUP_CTA_MSG, cta_kb)
+                await update.message.reply_text(
+                    text,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=kb,
+                )
+            except Exception as e:
+                logger.warning("Failed to send wallet setup CTA in MarkdownV2: %s", e)
+                fallback_text, fallback_kb = localize_payload(
+                    "👛 Let's connect your wallet first.\n\n"
+                    "Before trading, link your signer once. Tap below to start setup.",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("👛 Start Wallet Setup", callback_data="wallet:setup")],
+                        [InlineKeyboardButton("🏠 Open Dashboard", callback_data="nav:main")],
+                    ]),
+                )
+                await update.message.reply_text(fallback_text, reply_markup=fallback_kb)
+            return
+
+        if DUAL_MODE_CARD_FLOW:
+            await _send_dashboard_card(update, context, telegram_id)
+            return
+        try:
+            text, kb = localize_payload(DASHBOARD_MSG, persistent_menu_kb())
+            await update.message.reply_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=kb,
             )
         except Exception as e:
-            logger.warning("Failed to send wallet setup CTA in MarkdownV2: %s", e)
-            await update.message.reply_text(
-                "👛 Let's connect your wallet first.\n\n"
-                "Before trading, link your signer once. Tap below to start setup.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("👛 Start Wallet Setup", callback_data="wallet:setup")],
-                    [InlineKeyboardButton("🏠 Open Dashboard", callback_data="nav:main")],
-                ]),
+            logger.warning("Failed to send dashboard in MarkdownV2: %s", e)
+            fallback_text, fallback_kb = localize_payload(
+                "🚀 Nadobro Command Center is live!\n\n"
+                "Your trading copilot is online and ready.\n"
+                "Pick a module below and let's trade smarter.",
+                persistent_menu_kb(),
             )
-        return
-
-    if DUAL_MODE_CARD_FLOW:
-        await _send_dashboard_card(update, context, telegram_id)
-        return
-    try:
-        await update.message.reply_text(
-            DASHBOARD_MSG,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
-        )
-    except Exception as e:
-        logger.warning("Failed to send dashboard in MarkdownV2: %s", e)
-        await update.message.reply_text(
-            "🚀 Nadobro Command Center is live!\n\n"
-            "Your trading copilot is online and ready.\n"
-            "Pick a module below and let's trade smarter.",
-            reply_markup=persistent_menu_kb(),
-        )
+            await update.message.reply_text(fallback_text, reply_markup=fallback_kb)
 
 
 async def _send_dashboard_card(update: Update, context: CallbackContext, telegram_id: int):
     """Send dashboard text + home card inline keyboard (8 buttons)."""
-    try:
-        await update.message.reply_text(
-            DASHBOARD_MSG,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=home_card_kb(),
-        )
-    except Exception as e:
-        logger.warning("Failed to send dashboard card in MarkdownV2: %s", e)
-        await update.message.reply_text(
-            "🚀 Nadobro Command Center is live!\n\n"
-            "Your trading copilot is online and ready.\n"
-            "Pick a module below and let's trade smarter.",
-            reply_markup=home_card_kb(),
-        )
+    with language_context(get_user_language(telegram_id)):
+        try:
+            text, kb = localize_payload(DASHBOARD_MSG, home_card_kb())
+            await update.message.reply_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=kb,
+            )
+        except Exception as e:
+            logger.warning("Failed to send dashboard card in MarkdownV2: %s", e)
+            fallback_text, fallback_kb = localize_payload(
+                "🚀 Nadobro Command Center is live!\n\n"
+                "Your trading copilot is online and ready.\n"
+                "Pick a module below and let's trade smarter.",
+                home_card_kb(),
+            )
+            await update.message.reply_text(fallback_text, reply_markup=fallback_kb)
 
 
 async def cmd_help(update: Update, context: CallbackContext):
-    if DUAL_MODE_CARD_FLOW:
-        await open_help_card_from_command(update, context)
-        return
-    await update.message.reply_text(
-        fmt_help(),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=persistent_menu_kb(),
-    )
+    telegram_id = update.effective_user.id
+    with language_context(get_user_language(telegram_id)):
+        if DUAL_MODE_CARD_FLOW:
+            await open_help_card_from_command(update, context)
+            return
+        _, kb = localize_payload(reply_markup=persistent_menu_kb())
+        await update.message.reply_text(
+            fmt_help(),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=kb,
+        )
+    return
 
 
 async def cmd_status(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    status = get_user_bot_status(telegram_id)
-    onboarding = evaluate_readiness(telegram_id)
-    text = fmt_status_overview(status, onboarding)
-    if status.get("last_error"):
-        text += f"\nLast error: {escape_md(str(status.get('last_error')))}"
-    perf_lines = summary_lines(top_n=5)
-    if perf_lines:
-        text += "\n\n*Perf Snapshot*"
-        for line in perf_lines:
-            text += f"\n• {escape_md(line)}"
+    with language_context(get_user_language(telegram_id)):
+        status = get_user_bot_status(telegram_id)
+        onboarding = evaluate_readiness(telegram_id)
+        text = fmt_status_overview(status, onboarding)
+        if status.get("last_error"):
+            text += localize_text(f"\nLast error: {escape_md(str(status.get('last_error')))}")
+        perf_lines = summary_lines(top_n=5)
+        if perf_lines:
+            text += localize_text("\n\n*Perf Snapshot*")
+            for line in perf_lines:
+                text += f"\n• {escape_md(line)}"
 
-    if DUAL_MODE_CARD_FLOW:
-        await open_status_card_from_command(update, context, text)
-        return
+        if DUAL_MODE_CARD_FLOW:
+            await open_status_card_from_command(update, context, text)
+            return
 
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=persistent_menu_kb(),
-    )
+        _, kb = localize_payload(reply_markup=persistent_menu_kb())
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=kb,
+        )
 
 
 async def cmd_stop_all(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
-    prefix = "🛑" if ok else "⚠️"
-    await update.message.reply_text(
-        f"{prefix} {msg}\n\nTo close open positions, use the Positions menu.",
-        reply_markup=persistent_menu_kb(),
-    )
+    with language_context(get_user_language(telegram_id)):
+        ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
+        prefix = "🛑" if ok else "⚠️"
+        text, kb = localize_payload(
+            f"{prefix} {msg}\n\nTo close open positions, use the Positions menu.",
+            persistent_menu_kb(),
+        )
+        await update.message.reply_text(text, reply_markup=kb)
 
 
 async def cmd_revoke(update: Update, context: CallbackContext):
@@ -234,6 +253,9 @@ async def cmd_revoke(update: Update, context: CallbackContext):
         "3. Disable the toggle and save\n\n"
         "Your main wallet and funds stay safe. You can link again anytime via Wallet."
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=persistent_menu_kb())
+    telegram_id = update.effective_user.id
+    with language_context(get_user_language(telegram_id)):
+        text, kb = localize_payload(msg, persistent_menu_kb())
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 

@@ -50,6 +50,11 @@ from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
 from src.nadobro.services.points_service import get_points_dashboard
 from src.nadobro.handlers.points_mascot import mascot_path_for_cost, mascot_caption_for_cost
+from src.nadobro.i18n import (
+    get_user_language,
+    language_context,
+    localize_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,70 +104,97 @@ async def handle_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     data = query.data
     telegram_id = query.from_user.id
+    user_lang = get_user_language(telegram_id)
 
     try:
         try:
-            await query.answer()
-        except BadRequest as e:
-            # Callback queries expire quickly; ignore stale answers and continue.
-            if "Query is too old" not in str(e) and "query id is invalid" not in str(e):
-                raise
-        await query.message.chat.send_action(ChatAction.TYPING)
+            original_edit = query.edit_message_text
 
-        if data.startswith("onb:"):
-            await _handle_onb_new(query, data, telegram_id, context)
-        elif data.startswith("nav:"):
-            await _handle_nav(query, data, telegram_id, context)
-        elif data.startswith("card:trade:"):
-            await handle_trade_card_callback(update, context, telegram_id, data)
-        elif data.startswith("onboarding:"):
-            await _handle_onboarding(query, data, telegram_id, context)
-        elif data.startswith("trade:"):
-            await _handle_trade(query, data, telegram_id, context)
-        elif data.startswith("product:"):
-            await _handle_product(query, data, telegram_id, context)
-        elif data.startswith("size:"):
-            await _handle_size(query, data, telegram_id, context)
-        elif data.startswith("leverage:"):
-            await _handle_leverage(query, data, telegram_id, context)
-        elif data.startswith("exec_trade:"):
-            await _handle_exec_trade(query, data, telegram_id, context)
-        elif data == "cancel_trade":
-            context.user_data.pop("pending_trade", None)
-            await _show_dashboard(query, telegram_id)
-        elif data.startswith("pos:"):
-            await _handle_positions(query, data, telegram_id, context)
-        elif data.startswith("portfolio:"):
-            await _handle_portfolio(query, data, telegram_id)
-        elif data.startswith("wallet:"):
-            await _handle_wallet(query, data, telegram_id, context)
-        elif data.startswith("alert:"):
-            await _handle_alert(query, data, telegram_id, context)
-        elif data.startswith("settings:"):
-            await _handle_settings(query, data, telegram_id, context)
-        elif data.startswith("points:"):
-            await _handle_points(query, data, telegram_id)
-        elif data.startswith("strategy:"):
-            await _handle_strategy(query, data, context, telegram_id)
-        elif data == "home:mode":
-            user = get_user(telegram_id)
-            current_network = user.network_mode.value if user else "testnet"
-            network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
-            await query.edit_message_text(
-                f"🌐 *Execution Mode Control*\n\n"
-                f"Current Mode: *{escape_md(network_label)}*\n\n"
-                f"Switch mode below:",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=mode_kb(current_network),
-            )
-        elif data.startswith("mode:"):
-            await _handle_mode(query, data, telegram_id, context)
-        else:
-            await query.edit_message_text(
-                "Unknown action\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-            )
+            async def _localized_edit_message_text(text=None, *args, **kwargs):
+                loc_text, loc_kb = localize_payload(text, kwargs.get("reply_markup"), user_lang)
+                kwargs["reply_markup"] = loc_kb
+                return await original_edit(loc_text, *args, **kwargs)
+
+            query.edit_message_text = _localized_edit_message_text
+        except Exception:
+            pass
+
+        if query.message and hasattr(query.message, "reply_text"):
+            try:
+                original_reply = query.message.reply_text
+
+                async def _localized_reply_text(text=None, *args, **kwargs):
+                    loc_text, loc_kb = localize_payload(text, kwargs.get("reply_markup"), user_lang)
+                    kwargs["reply_markup"] = loc_kb
+                    return await original_reply(loc_text, *args, **kwargs)
+
+                query.message.reply_text = _localized_reply_text
+            except Exception:
+                pass
+
+        with language_context(user_lang):
+            try:
+                await query.answer()
+            except BadRequest as e:
+                # Callback queries expire quickly; ignore stale answers and continue.
+                if "Query is too old" not in str(e) and "query id is invalid" not in str(e):
+                    raise
+            await query.message.chat.send_action(ChatAction.TYPING)
+
+            if data.startswith("onb:"):
+                await _handle_onb_new(query, data, telegram_id, context)
+            elif data.startswith("nav:"):
+                await _handle_nav(query, data, telegram_id, context)
+            elif data.startswith("card:trade:"):
+                await handle_trade_card_callback(update, context, telegram_id, data)
+            elif data.startswith("onboarding:"):
+                await _handle_onboarding(query, data, telegram_id, context)
+            elif data.startswith("trade:"):
+                await _handle_trade(query, data, telegram_id, context)
+            elif data.startswith("product:"):
+                await _handle_product(query, data, telegram_id, context)
+            elif data.startswith("size:"):
+                await _handle_size(query, data, telegram_id, context)
+            elif data.startswith("leverage:"):
+                await _handle_leverage(query, data, telegram_id, context)
+            elif data.startswith("exec_trade:"):
+                await _handle_exec_trade(query, data, telegram_id, context)
+            elif data == "cancel_trade":
+                context.user_data.pop("pending_trade", None)
+                await _show_dashboard(query, telegram_id)
+            elif data.startswith("pos:"):
+                await _handle_positions(query, data, telegram_id, context)
+            elif data.startswith("portfolio:"):
+                await _handle_portfolio(query, data, telegram_id)
+            elif data.startswith("wallet:"):
+                await _handle_wallet(query, data, telegram_id, context)
+            elif data.startswith("alert:"):
+                await _handle_alert(query, data, telegram_id, context)
+            elif data.startswith("settings:"):
+                await _handle_settings(query, data, telegram_id, context)
+            elif data.startswith("points:"):
+                await _handle_points(query, data, telegram_id)
+            elif data.startswith("strategy:"):
+                await _handle_strategy(query, data, context, telegram_id)
+            elif data == "home:mode":
+                user = get_user(telegram_id)
+                current_network = user.network_mode.value if user else "testnet"
+                network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
+                await query.edit_message_text(
+                    f"🌐 *Execution Mode Control*\n\n"
+                    f"Current Mode: *{escape_md(network_label)}*\n\n"
+                    f"Switch mode below:",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=mode_kb(current_network),
+                )
+            elif data.startswith("mode:"):
+                await _handle_mode(query, data, telegram_id, context)
+            else:
+                await query.edit_message_text(
+                    "Unknown action\\.",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=back_kb(),
+                )
     except Exception as e:
         logger.error(f"Callback error for '{data}': {e}", exc_info=True)
         try:
@@ -857,11 +889,15 @@ async def _handle_settings(query, data, telegram_id, context):
         update_user_language(telegram_id, lang)
         user = get_user(telegram_id)
         current = (getattr(user, "language", None) or lang).lower()
-        await query.edit_message_text(
-            f"✅ Language updated to *{escape_md(lang.upper())}*\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_language_kb(current),
-        )
+        with language_context(current):
+            msg = fmt_settings(user_settings)
+            lev = user_settings.get("default_leverage", 1)
+            slip = user_settings.get("slippage", 1)
+            await query.edit_message_text(
+                f"✅ Language updated to *{escape_md(current.upper())}*\\.\n\n{msg}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=settings_kb(lev, slip),
+            )
 
     elif action == "slippage" and len(parts) >= 3:
         slip = float(parts[2])

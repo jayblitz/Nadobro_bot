@@ -30,6 +30,12 @@ from src.nadobro.services.user_service import get_user, get_user_readonly_client
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric
 from src.nadobro.services.points_service import get_points_dashboard
+from src.nadobro.i18n import (
+    language_context,
+    get_user_language,
+    localize_payload,
+    localize_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +63,7 @@ def build_home_card_text(telegram_id: int) -> str:
     except Exception:
         pass
 
-    return (
+    return localize_text(
         "🤖 *Nadobro Command Center*\n\n"
         f"Mode: *{escape_md(network_label)}*\n"
         f"Balance: *{escape_md(balance_str)}*\n\n"
@@ -84,10 +90,11 @@ async def _edit_or_send_card(update, context: CallbackContext, text: str, reply_
     if not context.user_data.get(KEYBOARD_REMOVED_KEY):
         try:
             # Ensure message-mode has an always-available Home shortcut.
+            loc_text, loc_kb = localize_payload("Home shortcut enabled.", persistent_menu_kb())
             shortcut_msg = await context.bot.send_message(
                 chat_id=chat_id,
-                text="Home shortcut enabled.",
-                reply_markup=persistent_menu_kb(),
+                text=loc_text,
+                reply_markup=loc_kb,
             )
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=shortcut_msg.message_id)
@@ -106,19 +113,20 @@ async def _edit_or_send_card(update, context: CallbackContext, text: str, reply_
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=text,
+                text=localize_text(text),
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=reply_markup,
+                reply_markup=localize_payload(reply_markup=reply_markup)[1],
             )
             return
         except Exception:
             logger.info("home_card_edit_failed_new_message chat_id=%s", chat_id)
 
+    loc_text, loc_kb = localize_payload(text, reply_markup)
     message = await context.bot.send_message(
         chat_id=chat_id,
-        text=text,
+        text=loc_text,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=reply_markup,
+        reply_markup=loc_kb,
     )
     _remember_home_card(context, chat_id, message.message_id)
 
@@ -220,19 +228,25 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
 
 
 async def open_home_card_view_from_message(update, context: CallbackContext, telegram_id: int, callback_data: str):
-    text, kb = await resolve_home_view(callback_data, telegram_id)
-    await _edit_or_send_card(update, context, text, kb)
+    with language_context(get_user_language(telegram_id)):
+        text, kb = await resolve_home_view(callback_data, telegram_id)
+        await _edit_or_send_card(update, context, text, kb)
 
 
 async def open_home_card_from_command(update, context: CallbackContext, telegram_id: int):
-    text = await build_home_card_text_async(telegram_id)
-    await _edit_or_send_card(update, context, text, home_card_kb())
+    with language_context(get_user_language(telegram_id)):
+        text = await build_home_card_text_async(telegram_id)
+        await _edit_or_send_card(update, context, text, home_card_kb())
 
 
 async def open_help_card_from_command(update, context: CallbackContext):
-    await _edit_or_send_card(update, context, fmt_help(), home_card_kb())
+    telegram_id = update.effective_user.id
+    with language_context(get_user_language(telegram_id)):
+        await _edit_or_send_card(update, context, fmt_help(), home_card_kb())
 
 
 async def open_status_card_from_command(update, context: CallbackContext, text: str):
-    await _edit_or_send_card(update, context, text, home_card_kb())
+    telegram_id = update.effective_user.id
+    with language_context(get_user_language(telegram_id)):
+        await _edit_or_send_card(update, context, text, home_card_kb())
 
