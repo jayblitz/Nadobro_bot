@@ -21,21 +21,10 @@ Nadobro is a Telegram trading bot for Nado DEX that lets users manage wallets, p
 
 ## Quick Start
 
-1. Install dependencies:
-   - `pip install -r requirements.txt`
-2. Configure environment variables:
-   - `TELEGRAM_TOKEN`
-   - `DATABASE_URL`
-   - `ENCRYPTION_KEY`
-   - `XAI_API_KEY` (optional)
-   - `OPENAI_API_KEY` (optional)
-   - `TELEGRAM_TRANSPORT` (`polling` or `webhook`, default `polling`)
-   - `TELEGRAM_WEBHOOK_URL` (required for webhook mode)
-   - `TELEGRAM_WEBHOOK_PATH` (optional, default `/telegram/webhook`)
-   - `TELEGRAM_WEBHOOK_SECRET` (recommended in webhook mode)
-3. Start the bot:
-   - `python main.py`
+**The bot runs on Fly.io only.** Do not run it locally in production; use deployments.
 
-## Deployment
+1. Install the [Fly CLI](https://fly.io/docs/flyctl/install/)
+2. Log in: `fly auth login`
+3. Deploy: `fly deploy -a nadobro-bot`
 
-For Fly.io deployment instructions, see `deploy.md`.
+Secrets (e.g. `TELEGRAM_TOKEN`, `DATABASE_URL`, `ENCRYPTION_KEY`) are set via `fly secrets set`. See `deploy.md` for full setup and configuration.

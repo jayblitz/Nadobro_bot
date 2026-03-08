@@ -555,6 +555,9 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
             sep = " \\| "
             eq_change = f" \\({sep.join(parts)}\\)"
 
+    perp_fmt = f'${breakdown.get("perp", 0):,.2f}'
+    spot_fmt = f'${breakdown.get("spot", 0):,.2f}'
+    cash_fmt = f'${breakdown.get("cash", 0):,.2f}'
     lines = [
         "📁 *Portfolio Deck*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
@@ -567,16 +570,18 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
         f"{upnl_emoji} *Unrealized PnL:* {escape_md(upnl_str)} \\(ROI: {escape_md(roi_str)}\\)",
         "",
         "*Asset Breakdown*",
-        f"📈 Perpetual Futures: {escape_md(f'${breakdown[\"perp\"]:,.2f}')}",
-        f"📉 Spot: {escape_md(f'${breakdown[\"spot\"]:,.2f}')}",
-        f"💵 Cash \\(USDT0\\): {escape_md(f'${breakdown[\"cash\"]:,.2f}')}",
+        f"📈 Perpetual Futures: {escape_md(perp_fmt)}",
+        f"📉 Spot: {escape_md(spot_fmt)}",
+        f"💵 Cash \\(USDT0\\): {escape_md(cash_fmt)}",
     ]
     if liq.get("margin_used", 0) > 0:
+        margin_fmt = f'${liq.get("margin_used", 0):,.2f}'
+        avg_lev_fmt = f'{liq.get("avg_leverage", 0):.1f}x'
         lines.extend([
             "",
             "*Liquidation Risk \\(est\\.\\)*",
-            f"Margin Used: {escape_md(f'${liq[\"margin_used\"]:,.2f}')} \\| "
-            f"Avg Leverage: {escape_md(f'{liq[\"avg_leverage\"]:.1f}x')}",
+            f"Margin Used: {escape_md(margin_fmt)} \\| "
+            f"Avg Leverage: {escape_md(avg_lev_fmt)}",
         ])
 
     if total_trades > 0:
