@@ -146,7 +146,7 @@ def _view_mode_text(telegram_id: int):
 def _view_strategy_text():
     return (
         "🤖 *Nadobro Strategy Lab*\n\n"
-        "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
+        "Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
         strategy_hub_kb(),
     )
 

@@ -211,20 +211,6 @@ _LABELS = {
         "ru": "🔁 Volume Engine",
         "ko": "🔁 볼륨 엔진",
     },
-    "✅ Arm Strategy": {
-        "zh": "✅ 启用策略",
-        "fr": "✅ Activer stratégie",
-        "ar": "✅ تفعيل الاستراتيجية",
-        "ru": "✅ Активировать стратегию",
-        "ko": "✅ 전략 실행",
-    },
-    "⚙️ Tune Risk": {
-        "zh": "⚙️ 调整风险",
-        "fr": "⚙️ Ajuster le risque",
-        "ar": "⚙️ ضبط المخاطر",
-        "ru": "⚙️ Настроить риск",
-        "ko": "⚙️ 리스크 조정",
-    },
     "🧩 Edit Parameters": {
         "zh": "🧩 编辑参数",
         "fr": "🧩 Modifier paramètres",
@@ -544,12 +530,12 @@ _TEXTS = {
         "ru": "🤖 *Лаборатория стратегий Nadobro*",
         "ko": "🤖 *Nadobro 전략 랩*",
     },
-    "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.": {
-        "zh": "选择一个策略，打开控制面板、调整风险，并结合预交易分析启动\\.",
-        "fr": "Choisissez une stratégie pour ouvrir son cockpit, ajuster le risque et lancer avec analytics pré-trade\\.",
-        "ar": "اختر استراتيجية لفتح لوحة التحكم وضبط المخاطر والتشغيل مع تحليلات ما قبل التداول\\.",
-        "ru": "Выберите стратегию, откройте ее панель, настройте риск и запустите с предторговой аналитикой\\.",
-        "ko": "전략을 선택해 대시보드를 열고 리스크를 조정한 뒤 사전 분석과 함께 실행하세요\\.",
+    "Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.": {
+        "zh": "选择一个策略，打开控制面板、编辑参数，并结合预交易分析启动\\.",
+        "fr": "Choisissez une stratégie pour ouvrir son cockpit, modifier les paramètres et lancer avec analytics pré-trade\\.",
+        "ar": "اختر استراتيجية لفتح لوحة التحكم وتعديل الإعدادات والتشغيل مع تحليلات ما قبل التداول\\.",
+        "ru": "Выберите стратегию, откройте ее панель, настройте параметры и запустите с предторговой аналитикой\\.",
+        "ko": "전략을 선택해 대시보드를 열고 파라미터를 수정한 뒤 사전 분석과 함께 실행하세요\\.",
     },
     "🔔 *Alert Engine*\n\nManage your trigger alerts\\.": {
         "zh": "🔔 *提醒中心*\n\n管理你的价格提醒\\.",

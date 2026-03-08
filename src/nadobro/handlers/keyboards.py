@@ -700,10 +700,6 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
         ]
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Arm Strategy", callback_data=f"strategy:activate:{strategy_id}"),
-            InlineKeyboardButton("⚙️ Tune Risk", callback_data="settings:risk_menu"),
-        ],
-        [
             InlineKeyboardButton("🧩 Edit Parameters", callback_data=f"strategy:config:{strategy_id}"),
         ],
         pair_row,

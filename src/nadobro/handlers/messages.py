@@ -375,12 +375,12 @@ async def _handle_passphrase_input(update, context, telegram_id, text):
 
     prompt_message_id = pending.get("prompt_message_id")
     reply_to = getattr(update.message, "reply_to_message", None)
-    if prompt_message_id and (not reply_to or reply_to.message_id != prompt_message_id):
-        await update.message.reply_text(
-            "Reply directly to the passphrase prompt message to authorize this action.",
-            parse_mode=ParseMode.MARKDOWN,
+    # Allow plain passphrase messages while an auth challenge is pending.
+    # Users often type the passphrase directly instead of replying.
+    if prompt_message_id and reply_to and reply_to.message_id != prompt_message_id:
+        logger.info(
+            "Passphrase entered as reply to different message; accepting due to active auth challenge."
         )
-        return True
 
     passphrase = text.strip()
     context.user_data.pop(PENDING_PASSPHRASE_ACTION, None)
@@ -570,7 +570,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "nav:strategy_hub":
         await update.message.reply_text(
             "🤖 *Nadobro Strategy Lab*\n\n"
-            "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
+            "Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )

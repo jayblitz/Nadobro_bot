@@ -244,6 +244,10 @@ async def handle_callback(update: Update, context: CallbackContext):
                     reply_markup=back_kb(),
                 )
     except Exception as e:
+        if isinstance(e, BadRequest) and "Message is not modified" in str(e):
+            # Harmless: user tapped a button that would render identical content.
+            logger.info("Callback no-op for '%s': %s", data, e)
+            return
         logger.error(f"Callback error for '{data}': {e}", exc_info=True)
         try:
             await query.edit_message_text(
@@ -430,7 +434,7 @@ async def _handle_nav(query, data, telegram_id, context=None):
     elif target == "strategy_hub":
         await query.edit_message_text(
             "🤖 *Nadobro Strategy Lab*\n\n"
-            "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
+            "Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )
@@ -1138,13 +1142,6 @@ async def _handle_strategy(query, data, context, telegram_id):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb("strategy_hub"),
         )
-    elif action == "activate":
-        context.user_data["active_setup"] = strategy_id
-        await query.edit_message_text(
-            f"✅ Active setup is now *{escape_md(strategy_id.upper())}*\\.\n\n"
-            "Next: open Buy/Long or Sell/Short and execute with preview\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
     elif action == "start" and len(parts) >= 4:
         strategy_id = parts[2]
         product = parts[3]
@@ -1583,7 +1580,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *{escape_md(f'${required_margin:,.2f}')}* required\n"
         f"Est\\. Daily Volume: *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
         f"Max Loss: *{escape_md(f'${max_loss:,.2f}')}* \\| Net Estimate: *{escape_md(net_str)}*\n\n"
-        "Tune risk, edit parameters, or launch below\\."
+        "Edit parameters or launch below\\."
     )
 
 
