@@ -676,7 +676,7 @@ def strategy_hub_kb():
             InlineKeyboardButton("🧮 Grid Reactor", callback_data="strategy:preview:grid"),
         ],
         [
-            InlineKeyboardButton("⚖️ Mirror DN", callback_data="strategy:preview:dn"),
+            InlineKeyboardButton("⚖️ Delta Neutral", callback_data="strategy:preview:dn"),
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],
         [

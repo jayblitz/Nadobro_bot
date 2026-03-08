@@ -197,12 +197,12 @@ _LABELS = {
         "ru": "🧮 Grid Reactor",
         "ko": "🧮 그리드 리액터",
     },
-    "⚖️ Mirror DN": {
-        "zh": "⚖️ 镜像 DN",
-        "fr": "⚖️ Mirror DN",
-        "ar": "⚖️ ميرور DN",
-        "ru": "⚖️ Mirror DN",
-        "ko": "⚖️ 미러 DN",
+    "⚖️ Delta Neutral": {
+        "zh": "⚖️ 德尔塔中性",
+        "fr": "⚖️ Delta Neutral",
+        "ar": "⚖️ دلتا نيوترال",
+        "ru": "⚖️ Delta Neutral",
+        "ko": "⚖️ 델타 뉴트럴",
     },
     "🔁 Volume Engine": {
         "zh": "🔁 成交量引擎",

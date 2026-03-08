@@ -64,6 +64,21 @@ WALLET_SEED_TTL_SECONDS = 900
 _WALLET_SEED_CACHE: dict[str, dict] = {}
 
 
+def _safe_float(value, default: float) -> float:
+    """Parse numeric settings safely, tolerating legacy values like '3x'."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        cleaned = value.strip().lower().replace("x", "")
+        try:
+            return float(cleaned)
+        except (TypeError, ValueError):
+            pass
+    return float(default)
+
+
 def _prune_wallet_seed_cache() -> None:
     now = time.time()
     expired = [token for token, payload in _WALLET_SEED_CACHE.items() if now - float(payload.get("ts", 0)) > WALLET_SEED_TTL_SECONDS]
@@ -1160,7 +1175,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             strategy_leverage = 1
         elif strategy_id == "dn":
             dn_cfg = ((settings.get("strategies", {}) or {}).get("dn", {}) or {})
-            strategy_leverage = min(float(dn_cfg.get("dn_perp_leverage", 3) or 3), 5.0)
+            strategy_leverage = min(_safe_float(dn_cfg.get("dn_perp_leverage", 3), 3.0), 5.0)
         else:
             strategy_leverage = settings.get("default_leverage", 3)
         await authorize_or_prompt_passphrase(query, context, telegram_id, {
@@ -1289,10 +1304,10 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         )
     elif strategy == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
-        dn_lev = min(float(conf.get("dn_perp_leverage", 3) or 3), 5.0)
+        dn_lev = min(_safe_float(conf.get("dn_perp_leverage", 3), 3.0), 5.0)
         extra = (
             f"DN Perp Leverage: *{escape_md(f'{dn_lev:.0f}x')}* \\(max 5x\\)\n"
-            f"Auto-close on maintenance: *{escape_md(auto_close)}*\n"
+            f"Auto\\-close on maintenance: *{escape_md(auto_close)}*\n"
             f"Cycle window: *{escape_md('2.0h')}* \\(fixed auto close and restart\\)\n"
             "Execution: *Limit orders only* \\(spot \\+ perp at same limit price\\)\n\n"
         )
@@ -1432,7 +1447,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     names = {
         "mm": "MM Bot",
         "grid": "Grid Reactor",
-        "dn": "Mirror Delta Neutral",
+        "dn": "Delta Neutral",
         "vol": "Volume Bot",
     }
     network, settings = get_user_settings(telegram_id)
@@ -1446,7 +1461,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     sl_pct = float(conf.get("sl_pct", 0.5))
     leverage = 1.0 if strategy_id in ("vol", "mm") else float(settings.get("default_leverage", 3))
     if strategy_id == "dn":
-        leverage = min(float(conf.get("dn_perp_leverage", leverage) or leverage), 5.0)
+        leverage = min(_safe_float(conf.get("dn_perp_leverage", leverage), leverage), 5.0)
     slippage = float(settings.get("slippage", 1))
     runtime_status = get_user_bot_status(telegram_id)
 
@@ -1537,7 +1552,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         dn_margin = notional / leverage if leverage > 0 else notional
         extra_cfg = (
             f"\nPerp Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| Perp Margin: *{escape_md(f'${dn_margin:,.2f}')}*"
-            f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
+            f"\nAuto\\-close on maintenance: *{escape_md(auto_close)}*"
             f"\nCycle window: *{escape_md('2h')}* \\(fixed auto roll\\)"
             f"\nExecution: *{escape_md('Limit orders only')}*"
         )
