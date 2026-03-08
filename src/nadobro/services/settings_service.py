@@ -34,8 +34,8 @@ def _default_strategy_settings() -> dict:
             "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0,
         },
         "dn": {
-            "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6,
-            "auto_close_on_maintenance": 1.0,
+            "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 60, "tp_pct": 0.8, "sl_pct": 0.6,
+            "auto_close_on_maintenance": 1.0, "dn_cycle_duration_seconds": 7200, "dn_perp_leverage": 3.0,
         },
         "vol": {"notional_usd": 100.0, "spread_bp": 6.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
     }

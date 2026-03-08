@@ -470,8 +470,9 @@ def fmt_status_overview(status: dict, onboarding: dict):
     if not running:
         lines.append("Strategy Runtime: *IDLE*")
     else:
+        strategy_name = str(status.get("strategy") or "").upper()
         lines.extend([
-            f"Strategy Runtime: *{escape_md((status.get('strategy') or '').upper())}*",
+            f"Strategy Runtime: *{escape_md(strategy_name)}*",
             f"Pair: *{escape_md(str(status.get('product', 'BTC')))}\\-PERP*",
             f"Cycles: *{escape_md(str(status.get('runs', 0)))}*",
             f"Interval: *{escape_md(str(status.get('interval_seconds', 0)))}s*",
@@ -495,6 +496,36 @@ def fmt_status_overview(status: dict, onboarding: dict):
             )
         if inventory_skew_usd is not None:
             lines.append(f"Inventory Skew: *{escape_md(f'${float(inventory_skew_usd):,.2f}')}*")
+        if strategy_name == "DN":
+            dn_asset = str(status.get("product") or "BTC").upper()
+            fr = float(status.get("dn_last_funding_rate") or 0.0)
+            f_cycle = float(status.get("dn_last_funding_cycle") or 0.0)
+            f_recv = float(status.get("dn_funding_received") or 0.0)
+            f_paid = float(status.get("dn_funding_paid") or 0.0)
+            f_net = float(status.get("dn_funding_net") or 0.0)
+            spot_size = float(status.get("dn_spot_size") or 0.0)
+            perp_size = float(status.get("dn_perp_size") or 0.0)
+            hedge_diff = float(status.get("dn_hedge_diff_size") or 0.0)
+            cycle_remaining = int(status.get("dn_cycle_remaining_seconds") or 0)
+            cycle_duration = int(status.get("dn_cycle_duration_seconds") or 0)
+            f_cycle_str = f"+${f_cycle:,.4f}" if f_cycle >= 0 else f"-${abs(f_cycle):,.4f}"
+            f_net_str = f"+${f_net:,.4f}" if f_net >= 0 else f"-${abs(f_net):,.4f}"
+            lines.extend([
+                "",
+                "*DN Funding Report \\(live est\\.)*",
+                f"Rate: *{escape_md(f'{fr:.8f}')}* \\| Last Cycle: *{escape_md(f_cycle_str)}*",
+                f"Received: *{escape_md(f'${f_recv:,.4f}')}* \\| Paid: *{escape_md(f'${f_paid:,.4f}')}*",
+                f"Net Funding: *{escape_md(f_net_str)}*",
+                "",
+                "*DN Hedge Progress*",
+                f"Spot {escape_md(dn_asset)}: *{escape_md(f'{spot_size:.6f}')}* \\| "
+                f"Perp {escape_md(dn_asset)}: *{escape_md(f'{perp_size:.6f}')}*",
+                f"Hedge Diff: *{escape_md(f'{hedge_diff:.6f} {dn_asset}')}*",
+            ])
+            if cycle_duration > 0:
+                lines.append(
+                    f"Roll Window: *{escape_md(_fmt_duration_compact(cycle_remaining))}* remaining"
+                )
     return _loc("\n".join(lines))
 
 

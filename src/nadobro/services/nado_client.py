@@ -1156,9 +1156,21 @@ class NadoClient:
         try:
             if self._initialized and self.client:
                 products = self.client.context.engine_client.get_all_products()
+                def _normalize_product_meta(p):
+                    return {
+                        "id": int(getattr(p, "product_id", -1)),
+                        "symbol": str(
+                            getattr(p, "symbol", None)
+                            or getattr(p, "name", None)
+                            or getattr(p, "product_name", None)
+                            or ""
+                        ),
+                        "base_asset": str(getattr(p, "base_asset", None) or getattr(p, "base", None) or ""),
+                        "quote_asset": str(getattr(p, "quote_asset", None) or getattr(p, "quote", None) or ""),
+                    }
                 data = {
-                    "perp": [{"id": p.product_id} for p in products.perp_products],
-                    "spot": [{"id": p.product_id} for p in products.spot_products],
+                    "perp": [_normalize_product_meta(p) for p in products.perp_products],
+                    "spot": [_normalize_product_meta(p) for p in products.spot_products],
                 }
                 _ALL_PRODUCTS_CACHE[cache_key] = {"data": data, "ts": time.time()}
                 return data

@@ -686,6 +686,18 @@ def strategy_hub_kb():
 
 
 def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
+    sid = (strategy_id or "").lower()
+    if sid == "dn":
+        pair_row = [
+            InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
+            InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
+        ]
+    else:
+        pair_row = [
+            InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
+            InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
+            InlineKeyboardButton("SOL", callback_data=f"strategy:pair:{strategy_id}:SOL"),
+        ]
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Arm Strategy", callback_data=f"strategy:activate:{strategy_id}"),
@@ -694,11 +706,7 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
         [
             InlineKeyboardButton("🧩 Edit Parameters", callback_data=f"strategy:config:{strategy_id}"),
         ],
-        [
-            InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
-            InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
-            InlineKeyboardButton("SOL", callback_data=f"strategy:pair:{strategy_id}:SOL"),
-        ],
+        pair_row,
         [
             InlineKeyboardButton(
                 f"🚀 Launch {selected_product.upper()}",
@@ -712,6 +720,34 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
             InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status"),
             InlineKeyboardButton("🛑 Stop Runtime", callback_data="strategy:stop"),
         ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+        ],
+    ])
+
+
+def strategy_status_kb(strategy_id: str | None = None):
+    rows = [
+        [InlineKeyboardButton("🔄 Refresh Status", callback_data="strategy:status")],
+    ]
+    if str(strategy_id or "").lower() == "dn":
+        rows.append([InlineKeyboardButton("📈 Funding Details", callback_data="strategy:funding:dn")])
+    if strategy_id:
+        rows.append([InlineKeyboardButton("📊 Open Strategy Dashboard", callback_data=f"strategy:preview:{strategy_id}")])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def strategy_funding_kb(strategy_id: str = "dn"):
+    sid = (strategy_id or "dn").lower()
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh Funding", callback_data=f"strategy:funding:{sid}")],
+        [InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status")],
+        [InlineKeyboardButton("📊 Open Strategy Dashboard", callback_data=f"strategy:preview:{sid}")],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
@@ -812,6 +848,8 @@ for _fn_name in [
     "settings_language_kb",
     "strategy_hub_kb",
     "strategy_action_kb",
+    "strategy_status_kb",
+    "strategy_funding_kb",
     "close_product_kb",
     "confirm_close_all_kb",
     "mode_kb",

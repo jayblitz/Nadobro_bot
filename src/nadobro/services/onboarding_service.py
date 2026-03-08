@@ -48,7 +48,7 @@ def set_new_onboarding_tos_accepted(telegram_id: int):
 
 def is_new_onboarding_complete(telegram_id: int) -> bool:
     state = get_new_onboarding_state(telegram_id)
-    return bool(state.get("tos_accepted"))
+    return bool(state.get("language")) and bool(state.get("tos_accepted"))
 
 
 def _state_key(telegram_id: int, network: str) -> str:

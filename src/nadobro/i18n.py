@@ -421,6 +421,41 @@ _LABELS = {
         "ru": "🇰🇷 Корейский",
         "ko": "🇰🇷 한국어",
     },
+    "✅ Let's Get It 🔥": {
+        "zh": "✅ 开始吧 🔥",
+        "fr": "✅ C'est parti 🔥",
+        "ar": "✅ هيا بنا 🔥",
+        "ru": "✅ Поехали 🔥",
+        "ko": "✅ 시작하기 🔥",
+    },
+    "▶ Complete setup": {
+        "zh": "▶ 完成设置",
+        "fr": "▶ Terminer la configuration",
+        "ar": "▶ إكمال الإعداد",
+        "ru": "▶ Завершить настройку",
+        "ko": "▶ 설정 완료",
+    },
+    "Exit": {
+        "zh": "退出",
+        "fr": "Quitter",
+        "ar": "خروج",
+        "ru": "Выйти",
+        "ko": "종료",
+    },
+    "👛 Start Wallet Setup": {
+        "zh": "👛 开始钱包设置",
+        "fr": "👛 Démarrer la configuration du wallet",
+        "ar": "👛 بدء إعداد المحفظة",
+        "ru": "👛 Начать настройку кошелька",
+        "ko": "👛 월렛 설정 시작",
+    },
+    "🏠 Open Dashboard": {
+        "zh": "🏠 打开面板",
+        "fr": "🏠 Ouvrir le tableau de bord",
+        "ar": "🏠 فتح لوحة التحكم",
+        "ru": "🏠 Открыть дашборд",
+        "ko": "🏠 대시보드 열기",
+    },
 }
 
 
@@ -670,6 +705,223 @@ _TEXTS = {
         "ru": "🔐 Введите пароль-фразу для авторизации команды:",
         "ko": "🔐 이 명령을 승인하려면 패스프레이즈를 입력하세요:",
     },
+    "Yo what’s good, future Nado whale?! 👋💰\n\nWelcome to Nadobro — the best Telegram bot for trading Perps on Nado.\n\nWe’re giving you pro tools in the palm of your hand:\n• MM Bot (Grid + RGRID that prints)\n• Delta Neutral Bot (spot + 1-5x short = easy funding)\n• Volume Bot (farm leaderboards on autopilot)\n• AI chat: just type your trade ideas in English\n\nFirst, pick your language vibe:": {
+        "zh": "Yo，未来的 Nado 巨鲸你好！👋💰\n\n欢迎来到 Nadobro —— 在 Nado 上交易永续合约的顶级 Telegram 机器人。\n\n我们把专业工具放进你的掌心：\n• MM Bot（Grid + RGRID，持续输出）\n• Delta Neutral Bot（现货 + 1-5x 空单，轻松吃资金费）\n• Volume Bot（自动冲榜）\n• AI 聊天：直接输入你的交易想法\n\n先选择你的语言：",
+        "fr": "Salut, futur whale Nado ! 👋💰\n\nBienvenue sur Nadobro — le meilleur bot Telegram pour trader les Perps sur Nado.\n\nOn te met des outils pro dans la main :\n• MM Bot (Grid + RGRID qui envoie)\n• Delta Neutral Bot (spot + short 1-5x = funding simplifié)\n• Volume Bot (farm des leaderboards en automatique)\n• Chat IA : tape simplement tes idées de trade\n\nD'abord, choisis ta langue :",
+        "ar": "يا نجم نادو القادم! 👋💰\n\nمرحبًا بك في Nadobro — أفضل بوت تيليجرام لتداول العقود الدائمة على Nado.\n\nنضع بين يديك أدوات احترافية:\n• MM Bot (Grid + RGRID)\n• Delta Neutral Bot (سبوت + شورت 1-5x = تمويل أسهل)\n• Volume Bot (جمع النقاط تلقائيًا)\n• دردشة AI: فقط اكتب أفكارك للتداول\n\nأولًا، اختر لغتك:",
+        "ru": "Привет, будущий кит Nado! 👋💰\n\nДобро пожаловать в Nadobro — лучший Telegram-бот для торговли перпами на Nado.\n\nМы даем тебе профи-инструменты прямо в руки:\n• MM Bot (Grid + RGRID)\n• Delta Neutral Bot (спот + шорт 1-5x = проще забирать фандинг)\n• Volume Bot (фарм лидбордов на автопилоте)\n• AI-чат: просто пиши идеи для сделок\n\nСначала выбери язык:",
+        "ko": "안녕하세요, 미래의 Nado 고래님! 👋💰\n\nNado 퍼프 거래를 위한 최고의 텔레그램 봇 Nadobro에 오신 것을 환영합니다.\n\n손안에서 바로 쓰는 프로 도구를 제공합니다:\n• MM Bot (Grid + RGRID)\n• Delta Neutral Bot (현물 + 1-5x 숏 = 쉬운 펀딩)\n• Volume Bot (리더보드 자동 운영)\n• AI 채팅: 거래 아이디어를 바로 입력하세요\n\n먼저 사용할 언어를 선택하세요:",
+    },
+    "🔥 Nadobro Activated! You’re in the squad 🔥\n\nWe run on Nado’s lightning CLOB with unified margin.\n\nBy tapping \"Let’s Get It\" you accept our Terms of Use & Privacy Policy.\n\n⚡ Security First (this is why we’re better):\nWe generate a secure Linked Signer for your default subaccount only.\nYou paste the PUBLIC address into Nado Settings -> 1-Click Trading (1 tx, 5 seconds).\nYour private keys NEVER leave your wallet. Revoke anytime. 100% self-custody.\n\nReady to start printing?": {
+        "zh": "🔥 Nadobro 已激活！你已加入战队 🔥\n\n我们基于 Nado 的高速 CLOB 和统一保证金运行。\n\n点击“开始吧”即表示你同意我们的使用条款和隐私政策。\n\n⚡ 安全第一（这就是我们更强的原因）：\n我们只为你的默认子账户生成安全的 Linked Signer。\n把 PUBLIC 地址粘贴到 Nado 设置 -> 1-Click Trading（1 笔交易，5 秒完成）。\n你的私钥绝不会离开钱包。可随时撤销。100% 自托管。\n\n准备好开始了吗？",
+        "fr": "🔥 Nadobro activé ! Tu es dans l'équipe 🔥\n\nNous tournons sur le CLOB ultra-rapide de Nado avec marge unifiée.\n\nEn appuyant sur \"C'est parti\", tu acceptes nos Conditions d'utilisation et notre Politique de confidentialité.\n\n⚡ Sécurité d'abord (voilà pourquoi on est meilleurs) :\nNous générons un Linked Signer sécurisé uniquement pour ton sous-compte par défaut.\nTu colles l'adresse PUBLIQUE dans les réglages Nado -> 1-Click Trading (1 tx, 5 secondes).\nTes clés privées ne quittent JAMAIS ton wallet. Révocation à tout moment. 100% self-custody.\n\nPrêt à démarrer ?",
+        "ar": "🔥 تم تفعيل Nadobro! أنت ضمن الفريق 🔥\n\nنعمل على CLOB السريع من Nado مع هامش موحّد.\n\nبالضغط على \"هيا بنا\" فإنك توافق على شروط الاستخدام وسياسة الخصوصية.\n\n⚡ الأمان أولًا (وهذا سبب تميزنا):\nننشئ Linked Signer آمنًا لحسابك الفرعي الافتراضي فقط.\nالصق العنوان العام في إعدادات Nado -> 1-Click Trading (معاملة واحدة، 5 ثوانٍ).\nمفاتيحك الخاصة لا تغادر محفظتك أبدًا. يمكنك الإلغاء في أي وقت. حفظ ذاتي 100%.\n\nجاهز للانطلاق؟",
+        "ru": "🔥 Nadobro активирован! Ты в команде 🔥\n\nМы работаем на молниеносном CLOB от Nado с единой маржой.\n\nНажимая \"Поехали\", ты принимаешь Условия использования и Политику конфиденциальности.\n\n⚡ Безопасность прежде всего (поэтому мы лучше):\nМы создаем защищенный Linked Signer только для твоего основного субаккаунта.\nВставь ПУБЛИЧНЫЙ адрес в настройках Nado -> 1-Click Trading (1 транзакция, 5 секунд).\nПриватные ключи НИКОГДА не покидают твой кошелек. Отозвать можно в любой момент. 100% self-custody.\n\nГотов стартовать?",
+        "ko": "🔥 Nadobro 활성화 완료! 이제 팀에 합류했습니다 🔥\n\nNado의 초고속 CLOB와 통합 마진 환경에서 동작합니다.\n\n\"시작하기\"를 누르면 이용약관 및 개인정보 처리방침에 동의하게 됩니다.\n\n⚡ 보안 우선 (우리가 더 나은 이유):\n기본 서브계정용 보안 Linked Signer를 생성합니다.\nNado 설정 -> 1-Click Trading에 PUBLIC 주소를 붙여 넣으세요 (1회 트랜잭션, 5초).\n개인 키는 절대 지갑을 떠나지 않습니다. 언제든지 해제 가능. 100% 셀프 커스터디.\n\n시작할 준비가 되었나요?",
+    },
+    "🚀 Nadobro Dashboard — You’re Live, Legend!\n\nWhat we smashing today?": {
+        "zh": "🚀 Nadobro 面板已开启——你已上线！\n\n今天我们要做什么？",
+        "fr": "🚀 Tableau de bord Nadobro — Tu es en ligne, champion !\n\nOn attaque quoi aujourd'hui ?",
+        "ar": "🚀 لوحة Nadobro جاهزة — أنت الآن مباشر!\n\nما الذي سننجزه اليوم؟",
+        "ru": "🚀 Дашборд Nadobro — ты в эфире, легенда!\n\nЧто делаем сегодня?",
+        "ko": "🚀 Nadobro 대시보드 준비 완료 — 지금 라이브입니다!\n\n오늘 무엇부터 시작할까요?",
+    },
+    "⚠️ Complete setup first (language + accept terms).": {
+        "zh": "⚠️ 请先完成设置（选择语言 + 接受条款）。",
+        "fr": "⚠️ Terminez d'abord la configuration (langue + acceptation des conditions).",
+        "ar": "⚠️ أكمل الإعداد أولًا (اللغة + قبول الشروط).",
+        "ru": "⚠️ Сначала завершите настройку (язык + принятие условий).",
+        "ko": "⚠️ 먼저 설정을 완료하세요 (언어 + 약관 동의).",
+    },
+    "👛 Let's connect your wallet first.\n\nBefore trading, link your signer once. Tap below to start setup.": {
+        "zh": "👛 先连接你的钱包。\n\n开始交易前，请先完成一次 signer 绑定。点击下方开始设置。",
+        "fr": "👛 Connectons d'abord ton wallet.\n\nAvant de trader, lie ton signer une fois. Appuie ci-dessous pour démarrer la configuration.",
+        "ar": "👛 لنقم أولًا بربط محفظتك.\n\nقبل التداول، اربط الـ signer مرة واحدة. اضغط بالأسفل لبدء الإعداد.",
+        "ru": "👛 Сначала подключим ваш кошелек.\n\nПеред торговлей привяжите signer один раз. Нажмите ниже, чтобы начать настройку.",
+        "ko": "👛 먼저 월렛을 연결하세요.\n\n거래 전에 signer를 한 번 연결해야 합니다. 아래를 눌러 설정을 시작하세요.",
+    },
+    "🚀 Nadobro Command Center is live!\n\nYour trading copilot is online and ready.\nPick a module below and let's trade smarter.": {
+        "zh": "🚀 Nadobro 指挥中心已上线！\n\n你的交易副驾已就绪。\n在下方选择模块，开始更聪明地交易。",
+        "fr": "🚀 Le centre de commande Nadobro est en ligne !\n\nTon copilote de trading est prêt.\nChoisis un module ci-dessous et tradons plus intelligemment.",
+        "ar": "🚀 مركز قيادة Nadobro أصبح مباشرًا!\n\nمساعد التداول لديك جاهز.\nاختر وحدة من الأسفل ولنبدأ تداولًا أذكى.",
+        "ru": "🚀 Командный центр Nadobro уже в эфире!\n\nВаш торговый помощник онлайн и готов.\nВыберите модуль ниже и торгуйте умнее.",
+        "ko": "🚀 Nadobro 커맨드 센터가 활성화되었습니다!\n\n트레이딩 코파일럿이 준비되었습니다.\n아래에서 모듈을 선택해 더 스마트하게 거래하세요.",
+    },
+    "⚠️ Wallet not initialized\\. Use /start first\\.": {
+        "zh": "⚠️ 钱包尚未初始化\\。请先使用 /start\\。",
+        "fr": "⚠️ Wallet non initialisé\\. Utilisez /start d'abord\\.",
+        "ar": "⚠️ لم يتم تهيئة المحفظة بعد\\. استخدم /start أولًا\\.",
+        "ru": "⚠️ Кошелек не инициализирован\\. Сначала используйте /start\\.",
+        "ko": "⚠️ 월렛이 초기화되지 않았습니다\\. 먼저 /start를 사용하세요\\.",
+    },
+    "💰 Link your wallet first to check balance.": {
+        "zh": "💰 请先连接钱包后再查看余额。",
+        "fr": "💰 Connectez d'abord votre wallet pour vérifier le solde.",
+        "ar": "💰 اربط محفظتك أولًا للتحقق من الرصيد.",
+        "ru": "💰 Сначала подключите кошелек, чтобы проверить баланс.",
+        "ko": "💰 잔액을 확인하려면 먼저 월렛을 연결하세요.",
+    },
+    "Could not fetch balance. Try again.": {
+        "zh": "无法获取余额，请重试。",
+        "fr": "Impossible de récupérer le solde. Réessayez.",
+        "ar": "تعذّر جلب الرصيد. حاول مرة أخرى.",
+        "ru": "Не удалось получить баланс. Попробуйте снова.",
+        "ko": "잔액을 가져오지 못했습니다. 다시 시도하세요.",
+    },
+    "⚠️ Wallet not linked yet. Complete this quick setup to start trading.": {
+        "zh": "⚠️ 钱包尚未绑定。请先完成这个快速设置以开始交易。",
+        "fr": "⚠️ Wallet pas encore lié. Terminez cette configuration rapide pour commencer à trader.",
+        "ar": "⚠️ المحفظة غير مرتبطة بعد. أكمل هذا الإعداد السريع لبدء التداول.",
+        "ru": "⚠️ Кошелек еще не привязан. Завершите быструю настройку, чтобы начать торговать.",
+        "ko": "⚠️ 월렛이 아직 연결되지 않았습니다. 빠른 설정을 완료한 뒤 거래를 시작하세요.",
+    },
+    "⚠️ You need a linked signer before executing trades.": {
+        "zh": "⚠️ 执行交易前需要先绑定 signer。",
+        "fr": "⚠️ Vous avez besoin d'un signer lié avant d'exécuter des trades.",
+        "ar": "⚠️ تحتاج إلى signer مرتبط قبل تنفيذ الصفقات.",
+        "ru": "⚠️ Перед исполнением сделок требуется привязанный signer.",
+        "ko": "⚠️ 거래를 실행하기 전에 연결된 signer가 필요합니다.",
+    },
+    "⚠️ Link your wallet first to launch strategy automation.": {
+        "zh": "⚠️ 启动策略自动化前请先连接钱包。",
+        "fr": "⚠️ Connectez d'abord votre wallet pour lancer l'automatisation de stratégie.",
+        "ar": "⚠️ اربط محفظتك أولًا لتشغيل أتمتة الاستراتيجية.",
+        "ru": "⚠️ Сначала подключите кошелек, чтобы запустить автоматизацию стратегии.",
+        "ko": "⚠️ 전략 자동화를 시작하려면 먼저 월렛을 연결하세요.",
+    },
+    "⚠️ Setup incomplete\\. Resume onboarding at ": {
+        "zh": "⚠️ 设置未完成\\。请从以下步骤继续引导：",
+        "fr": "⚠️ Configuration incomplète\\. Reprenez l'onboarding à l'étape ",
+        "ar": "⚠️ الإعداد غير مكتمل\\. تابع الإعداد من خطوة ",
+        "ru": "⚠️ Настройка не завершена\\. Продолжите онбординг с шага ",
+        "ko": "⚠️ 설정이 완료되지 않았습니다\\. 다음 단계부터 온보딩을 재개하세요: ",
+    },
+    "↩️ Returned to home\\.": {
+        "zh": "↩️ 已返回首页\\。",
+        "fr": "↩️ Retour à l'accueil\\.",
+        "ar": "↩️ تمت العودة إلى الصفحة الرئيسية\\.",
+        "ru": "↩️ Возврат на главную\\.",
+        "ko": "↩️ 홈으로 돌아왔습니다\\.",
+    },
+    "Use /start to open the dashboard\\.": {
+        "zh": "使用 /start 打开面板\\。",
+        "fr": "Utilisez /start pour ouvrir le tableau de bord\\.",
+        "ar": "استخدم /start لفتح لوحة التحكم\\.",
+        "ru": "Используйте /start, чтобы открыть дашборд\\.",
+        "ko": "/start를 사용해 대시보드를 여세요\\.",
+    },
+    "Use the menu for your next action\\.": {
+        "zh": "请使用菜单执行下一步操作\\。",
+        "fr": "Utilisez le menu pour votre prochaine action\\.",
+        "ar": "استخدم القائمة للإجراء التالي\\.",
+        "ru": "Используйте меню для следующего действия\\.",
+        "ko": "다음 작업은 메뉴를 사용하세요\\.",
+    },
+    "⚠️ Unknown action\\. Please try again\\.": {
+        "zh": "⚠️ 未知操作\\。请重试\\。",
+        "fr": "⚠️ Action inconnue\\. Veuillez réessayer\\.",
+        "ar": "⚠️ إجراء غير معروف\\. حاول مرة أخرى\\.",
+        "ru": "⚠️ Неизвестное действие\\. Попробуйте снова\\.",
+        "ko": "⚠️ 알 수 없는 작업입니다\\. 다시 시도해 주세요\\.",
+    },
+    "❌ Close-all request cancelled\\.": {
+        "zh": "❌ 已取消全部平仓请求\\。",
+        "fr": "❌ Demande de fermeture totale annulée\\.",
+        "ar": "❌ تم إلغاء طلب إغلاق جميع المراكز\\.",
+        "ru": "❌ Запрос на закрытие всех позиций отменен\\.",
+        "ko": "❌ 전체 종료 요청이 취소되었습니다\\.",
+    },
+    "Type `confirm` to close all positions or `cancel` to discard\\.": {
+        "zh": "输入 `confirm` 以平掉全部仓位，或输入 `cancel` 取消\\。",
+        "fr": "Tapez `confirm` pour fermer toutes les positions ou `cancel` pour annuler\\.",
+        "ar": "اكتب `confirm` لإغلاق كل المراكز أو `cancel` للإلغاء\\.",
+        "ru": "Введите `confirm`, чтобы закрыть все позиции, или `cancel`, чтобы отменить\\.",
+        "ko": "모든 포지션을 닫으려면 `confirm`, 취소하려면 `cancel`을 입력하세요\\.",
+    },
+    "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?\n\nType `confirm` to execute or `cancel` to discard\\.": {
+        "zh": "⚠️ *全部平仓*\n\n确定要关闭所有未平仓订单吗？\n\n输入 `confirm` 执行，或输入 `cancel` 取消\\。",
+        "fr": "⚠️ *Fermer toutes les positions*\n\nVoulez-vous vraiment fermer TOUS les ordres ouverts ?\n\nTapez `confirm` pour exécuter ou `cancel` pour annuler\\.",
+        "ar": "⚠️ *إغلاق جميع المراكز*\n\nهل أنت متأكد من إغلاق جميع الأوامر المفتوحة؟\n\nاكتب `confirm` للتنفيذ أو `cancel` للإلغاء\\.",
+        "ru": "⚠️ *Закрыть все позиции*\n\nВы уверены, что хотите закрыть ВСЕ открытые ордера?\n\nВведите `confirm` для выполнения или `cancel` для отмены\\.",
+        "ko": "⚠️ *모든 포지션 종료*\n\n모든 오픈 주문을 종료하시겠습니까?\n\n실행하려면 `confirm`, 취소하려면 `cancel`을 입력하세요\\.",
+    },
+    "❌ Trade cancelled\\.": {
+        "zh": "❌ 交易已取消\\。",
+        "fr": "❌ Trade annulé\\.",
+        "ar": "❌ تم إلغاء الصفقة\\.",
+        "ru": "❌ Сделка отменена\\.",
+        "ko": "❌ 거래가 취소되었습니다\\.",
+    },
+    "Type `confirm` to execute this trade or `cancel` to discard it\\.": {
+        "zh": "输入 `confirm` 执行该交易，或输入 `cancel` 放弃\\。",
+        "fr": "Tapez `confirm` pour exécuter ce trade ou `cancel` pour l'annuler\\.",
+        "ar": "اكتب `confirm` لتنفيذ هذه الصفقة أو `cancel` لإلغائها\\.",
+        "ru": "Введите `confirm`, чтобы выполнить эту сделку, или `cancel`, чтобы отменить\\.",
+        "ko": "이 거래를 실행하려면 `confirm`, 취소하려면 `cancel`을 입력하세요\\.",
+    },
+    "⚠️ Link your wallet first to execute this trade.": {
+        "zh": "⚠️ 请先连接钱包后再执行此交易。",
+        "fr": "⚠️ Connectez d'abord votre wallet pour exécuter ce trade.",
+        "ar": "⚠️ اربط محفظتك أولًا لتنفيذ هذه الصفقة.",
+        "ru": "⚠️ Сначала подключите кошелек, чтобы выполнить эту сделку.",
+        "ko": "⚠️ 이 거래를 실행하려면 먼저 월렛을 연결하세요.",
+    },
+    "⚠️ Wallet setup is required before placing text trades.": {
+        "zh": "⚠️ 进行文本交易前需要先完成钱包设置。",
+        "fr": "⚠️ La configuration du wallet est requise avant les trades en texte.",
+        "ar": "⚠️ إعداد المحفظة مطلوب قبل تنفيذ صفقات نصية.",
+        "ru": "⚠️ Перед текстовыми сделками требуется настройка кошелька.",
+        "ko": "⚠️ 텍스트 거래를 하기 전에 월렛 설정이 필요합니다.",
+    },
+    "I can place this trade from text, but I need a bit more info\\.\n\nMissing: ": {
+        "zh": "我可以根据文本下单，但还需要更多信息\\。\n\n缺少：",
+        "fr": "Je peux placer ce trade depuis le texte, mais il me manque encore quelques infos\\.\n\nManquant : ",
+        "ar": "يمكنني تنفيذ هذه الصفقة من النص، لكن أحتاج بعض المعلومات الإضافية\\.\n\nالمفقود: ",
+        "ru": "Я могу выставить эту сделку по тексту, но мне нужно немного больше данных\\.\n\nНе хватает: ",
+        "ko": "텍스트로 이 거래를 실행할 수 있지만, 정보가 조금 더 필요합니다\\.\n\n누락 항목: ",
+    },
+    "Example: `buy 0\\.01 BTC 5x market` or `sell 0\\.2 ETH limit 3200`": {
+        "zh": "示例：`buy 0\\.01 BTC 5x market` 或 `sell 0\\.2 ETH limit 3200`",
+        "fr": "Exemple : `buy 0\\.01 BTC 5x market` ou `sell 0\\.2 ETH limit 3200`",
+        "ar": "مثال: `buy 0\\.01 BTC 5x market` أو `sell 0\\.2 ETH limit 3200`",
+        "ru": "Пример: `buy 0\\.01 BTC 5x market` или `sell 0\\.2 ETH limit 3200`",
+        "ko": "예시: `buy 0\\.01 BTC 5x market` 또는 `sell 0\\.2 ETH limit 3200`",
+    },
+    "Type `confirm` to execute or `cancel` to discard\\.": {
+        "zh": "输入 `confirm` 执行，或输入 `cancel` 取消\\。",
+        "fr": "Tapez `confirm` pour exécuter ou `cancel` pour annuler\\.",
+        "ar": "اكتب `confirm` للتنفيذ أو `cancel` للإلغاء\\.",
+        "ru": "Введите `confirm` для выполнения или `cancel` для отмены\\.",
+        "ko": "실행하려면 `confirm`, 취소하려면 `cancel`을 입력하세요\\.",
+    },
+    "⌛ Trade card expired\\. Start a new guided trade\\.": {
+        "zh": "⌛ 交易卡片已过期\\。请重新开始一笔引导交易\\。",
+        "fr": "⌛ La carte de trade a expiré\\. Lancez un nouveau trade guidé\\.",
+        "ar": "⌛ انتهت صلاحية بطاقة التداول\\. ابدأ صفقة إرشادية جديدة\\.",
+        "ru": "⌛ Карточка сделки истекла\\. Начните новую пошаговую сделку\\.",
+        "ko": "⌛ 트레이드 카드가 만료되었습니다\\. 새 가이드 거래를 시작하세요\\.",
+    },
+    "Setup incomplete. Resume onboarding at ": {
+        "zh": "设置未完成。请从以下步骤继续引导：",
+        "fr": "Configuration incomplète. Reprenez l'onboarding à l'étape ",
+        "ar": "الإعداد غير مكتمل. تابع الإعداد من خطوة ",
+        "ru": "Настройка не завершена. Продолжите онбординг с шага ",
+        "ko": "설정이 완료되지 않았습니다. 다음 단계부터 온보딩을 재개하세요: ",
+    },
+    "Invalid size selected\\.": {
+        "zh": "所选仓位大小无效\\。",
+        "fr": "Taille sélectionnée invalide\\.",
+        "ar": "حجم الصفقة المحدد غير صالح\\.",
+        "ru": "Выбран некорректный размер\\.",
+        "ko": "선택한 수량이 올바르지 않습니다\\.",
+    },
+    "Invalid number. Try again\\.": {
+        "zh": "数字无效，请重试\\。",
+        "fr": "Nombre invalide. Réessayez\\.",
+        "ar": "رقم غير صالح. حاول مرة أخرى\\.",
+        "ru": "Неверное число. Попробуйте снова\\.",
+        "ko": "잘못된 숫자입니다. 다시 시도하세요\\.",
+    },
 }
 
 
@@ -687,7 +939,7 @@ def localize_label(text: str, lang: str | None = None) -> str:
 
 
 def localize_text(text: str, lang: str | None = None) -> str:
-    selected = normalize_lang(lang)
+    selected = normalize_lang(lang if lang is not None else get_active_language())
     if selected == "en" or not text:
         return text
     out = text
@@ -742,7 +994,7 @@ def localize_markup(markup, lang: str | None = None):
 
 
 def localize_payload(text: str | None = None, reply_markup=None, lang: str | None = None):
-    selected = normalize_lang(lang)
+    selected = normalize_lang(lang if lang is not None else get_active_language())
     localized_text = localize_text(text, selected) if text is not None else text
     localized_markup = localize_markup(reply_markup, selected) if reply_markup is not None else reply_markup
     return localized_text, localized_markup

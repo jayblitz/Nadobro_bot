@@ -41,9 +41,67 @@ OFFICIAL_SOURCES = {
     "get_started": "https://docs.nado.xyz/developer-resources/get-started",
 }
 
+SUPPORTED_CHAT_LANGS = {"en", "zh", "fr", "ar", "ru", "ko"}
+CHAT_LANG_NAMES = {
+    "en": "English",
+    "zh": "Chinese",
+    "fr": "French",
+    "ar": "Arabic",
+    "ru": "Russian",
+    "ko": "Korean",
+}
+
 
 def _normalize_question(question: str) -> str:
     return re.sub(r"\s+", " ", (question or "").strip().lower())
+
+
+def _normalize_chat_lang(lang: str | None) -> str:
+    value = (lang or "en").strip().lower()
+    return value if value in SUPPORTED_CHAT_LANGS else "en"
+
+
+def _response_language_instruction(lang: str | None) -> str:
+    code = _normalize_chat_lang(lang)
+    if code == "en":
+        return (
+            "Reply in English. If the user writes in another language, still respond in English "
+            "unless the user explicitly asks to switch language."
+        )
+    lang_name = CHAT_LANG_NAMES.get(code, "English")
+    return (
+        f"Reply in {lang_name}. Keep all assistant output in {lang_name}, including greetings and explanations."
+    )
+
+
+def _localized_fallback_greeting(lang: str, user_name: str) -> str:
+    code = _normalize_chat_lang(lang)
+    if code == "zh":
+        return f"嗨，{user_name}！我可以帮你做什么？"
+    if code == "fr":
+        return f"Salut {user_name} ! Je peux t'aider sur quoi ?"
+    if code == "ar":
+        return f"مرحبًا {user_name}! كيف أقدر أساعدك؟"
+    if code == "ru":
+        return f"Привет, {user_name}! Чем помочь?"
+    if code == "ko":
+        return f"안녕하세요, {user_name}! 무엇을 도와드릴까요?"
+    return f"GM {user_name}! How can I help you today?"
+
+
+def _localized_generation_error(lang: str) -> str:
+    code = _normalize_chat_lang(lang)
+    if code == "zh":
+        return "我暂时无法生成回复，请再试一次。"
+    if code == "fr":
+        return "Je n'ai pas pu générer une réponse. Réessaie."
+    if code == "ar":
+        return "تعذر علي توليد إجابة الآن. حاول مرة أخرى."
+    if code == "ru":
+        return "Не удалось сформировать ответ. Попробуйте еще раз."
+    if code == "ko":
+        return "답변을 생성하지 못했습니다. 다시 시도해 주세요."
+    return "I couldn't generate an answer. Please try again."
 
 
 def _is_ink_question(text: str) -> bool:
@@ -507,6 +565,7 @@ CASUAL_SYSTEM_PROMPT = """You are Nadobro, a friendly and knowledgeable crypto t
 
 Today's date: {current_date}
 User's name: {user_name}
+Language rule: {response_language_instruction}
 
 You are chatting with {user_name}. Be warm, natural, and engaging — like a knowledgeable crypto friend.
 
@@ -533,6 +592,7 @@ SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro, an expert crypto trading compani
 
 Today's date: {current_date}
 User's name: {user_name}
+Language rule: {response_language_instruction}
 
 You have context from Nado's knowledge base and/or live data. Use it to answer accurately and conversationally.
 
@@ -561,6 +621,7 @@ CONTEXT:
 X_TWITTER_SYSTEM_PROMPT = """You are Nadobro, the expert AI assistant for Nado DEX, with real-time access to X (Twitter).
 
 Today's date: {current_date}
+Language rule: {response_language_instruction}
 
 Official X accounts:
 - @nadoHQ (https://x.com/nadoHQ) — Nado DEX official
@@ -973,15 +1034,22 @@ def _should_skip_router(question: str) -> bool:
     return len(q) <= 160 and any(sig in q for sig in fast_signals)
 
 
-async def stream_nado_answer(question: str, telegram_id: int = None, user_name: str = None):
+async def stream_nado_answer(
+    question: str,
+    telegram_id: int = None,
+    user_name: str = None,
+    response_lang: str | None = None,
+):
     started_at = time.time()
     xai_client = _get_xai_client()
     openai_client = _get_openai_client()
+    selected_lang = _normalize_chat_lang(response_lang)
     if not xai_client and not openai_client:
         yield "AI service is not configured. Add XAI_API_KEY and/or OPENAI_API_KEY then restart the bot."
         return
 
     display_name = user_name or "trader"
+    language_instruction = _response_language_instruction(selected_lang)
     history_msgs = _build_history_messages(telegram_id) if telegram_id else []
 
     if telegram_id:
@@ -994,6 +1062,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         system = CASUAL_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
+            response_language_instruction=language_instruction,
         )
         primary = _pick_primary_provider(question)
         try:
@@ -1013,17 +1082,26 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
             thread = threading.Thread(target=_run_casual, daemon=True)
             thread.start()
 
+            stream_completed = False
+            buffered_chunks: list[str] = []
             while True:
                 try:
                     item = await loop.run_in_executor(None, lambda: chunk_queue.get(timeout=15))
-                except Exception:
-                    break
+                except Exception as e:
+                    raise TimeoutError("Casual stream timed out") from e
                 if item is None:
+                    stream_completed = True
                     break
                 if isinstance(item, Exception):
                     raise item
-                full_answer += item
-                yield item
+                buffered_chunks.append(item)
+
+            if not stream_completed:
+                raise TimeoutError("Casual stream did not complete")
+
+            for chunk in buffered_chunks:
+                full_answer += chunk
+                yield chunk
 
             if full_answer.strip() and telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", full_answer.strip())
@@ -1033,9 +1111,10 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         except Exception as e:
             logger.warning(f"Casual response failed: {e}")
 
-        yield f"GM {display_name}! How can I help you today?"
+        fallback_greeting = _localized_fallback_greeting(selected_lang, display_name)
+        yield fallback_greeting
         if telegram_id:
-            _add_to_chat_history(telegram_id, "assistant", f"GM {display_name}! How can I help you today?")
+            _add_to_chat_history(telegram_id, "assistant", fallback_greeting)
         return
 
     if _is_x_twitter_question(question) and not xai_client:
@@ -1056,6 +1135,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
             knowledge_base=_search_knowledge_sections(question, top_k=2),
             current_date=current_date,
             current_year=str(now.year),
+            response_language_instruction=language_instruction,
         )
         gathered_context = "[X/TWITTER RESULTS]"
         used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
@@ -1080,6 +1160,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
+            response_language_instruction=language_instruction,
             context=gathered_context[:12000],
         )
 
@@ -1115,18 +1196,27 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
             thread = threading.Thread(target=_run_stream, daemon=True)
             thread.start()
 
+            stream_completed = False
+            buffered_chunks: list[str] = []
             full_answer = ""
             while True:
                 try:
                     item = await loop.run_in_executor(None, lambda: chunk_queue.get(timeout=30))
-                except Exception:
-                    break
+                except Exception as e:
+                    raise TimeoutError(f"Stream timed out for provider={provider}") from e
                 if item is None:
+                    stream_completed = True
                     break
                 if isinstance(item, Exception):
                     raise item
-                full_answer += item
-                yield item
+                buffered_chunks.append(item)
+
+            if not stream_completed:
+                raise TimeoutError(f"Stream incomplete for provider={provider}")
+
+            for chunk in buffered_chunks:
+                full_answer += chunk
+                yield chunk
 
             if not full_answer.strip():
                 continue
@@ -1146,10 +1236,15 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
             logger.warning("Stream answer failed on provider=%s: %s", provider, provider_error)
             continue
 
-    yield "I couldn't generate an answer. Please try again."
+    yield _localized_generation_error(selected_lang)
 
 
-async def answer_nado_question(question: str, telegram_id: int = None, user_name: str = None) -> str:
+async def answer_nado_question(
+    question: str,
+    telegram_id: int = None,
+    user_name: str = None,
+    response_lang: str | None = None,
+) -> str:
     started_at = time.time()
     xai_client = _get_xai_client()
     openai_client = _get_openai_client()
@@ -1160,6 +1255,8 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         )
 
     display_name = user_name or "trader"
+    selected_lang = _normalize_chat_lang(response_lang)
+    language_instruction = _response_language_instruction(selected_lang)
     history_msgs = _build_history_messages(telegram_id) if telegram_id else []
 
     if telegram_id:
@@ -1169,7 +1266,11 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
     current_date = now.strftime("%Y-%m-%d")
 
     if _is_casual_message(question):
-        system = CASUAL_SYSTEM_PROMPT.format(current_date=current_date, user_name=display_name)
+        system = CASUAL_SYSTEM_PROMPT.format(
+            current_date=current_date,
+            user_name=display_name,
+            response_language_instruction=language_instruction,
+        )
         primary = _pick_primary_provider(question)
         try:
             import asyncio
@@ -1192,7 +1293,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             return answer
         except Exception as e:
             logger.warning(f"Casual answer failed: {e}")
-            fallback = f"GM {display_name}! How can I help you today?"
+            fallback = _localized_fallback_greeting(selected_lang, display_name)
             if telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", fallback)
             return fallback
@@ -1213,6 +1314,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             knowledge_base=_search_knowledge_sections(question, top_k=2),
             current_date=current_date,
             current_year=str(now.year),
+            response_language_instruction=language_instruction,
         )
         gathered_context = "[X/TWITTER RESULTS]"
         used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
@@ -1237,6 +1339,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
+            response_language_instruction=language_instruction,
             context=gathered_context[:12000],
         )
 
@@ -1295,7 +1398,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         if not answer:
             if last_error:
                 raise last_error
-            return "I couldn't generate an answer. Please try again."
+            return _localized_generation_error(selected_lang)
 
         logger.info("Support answer generated via provider=%s in %.1fs", used_provider, time.time() - started_at)
         if not skip_sources and "Sources:" not in answer:
@@ -1309,4 +1412,4 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         return answer
     except Exception as e:
         logger.error(f"Knowledge Q&A failed: {e}", exc_info=True)
-        return "Something went wrong while answering your question. Please try again."
+        return _localized_generation_error(selected_lang)

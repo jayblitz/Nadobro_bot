@@ -1,222 +1,341 @@
 """
-Delta Neutral — funding rate farming strategy.
+Delta Neutral strategy.
 
-Opens a short perp position to earn funding when the funding rate is positive
-(shorts get paid). Monitors funding rate and auto-exits if it flips unfavorable
-for an extended period. Adjusts position size toward target notional.
-
-Note: Nado DEX is perps-only, so true delta-neutral would require external
-spot hedging. This strategy focuses on funding rate farming with protective
-TP/SL managed by bot_runtime.
+Rules enforced:
+- Spot and perp legs use equal base size (BTC/ETH only)
+- Perp leverage is capped at 5x
+- Runtime window is fixed at 2 hours per cycle
+- Limit orders only (same reference limit price per attempt)
+- Auto-requote on timeout: cancel stale limits and retry
 """
 import logging
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
 MIN_FAVORABLE_FUNDING = 0.000001
 UNFAVORABLE_EXIT_CYCLES = 5
-POSITION_SIZE_TOLERANCE = 0.10
+POSITION_SIZE_TOLERANCE = 0.001
+SIZE_EPSILON = 1e-8
+DN_MAX_PERP_LEVERAGE = 5.0
+DN_DEFAULT_CYCLE_SECONDS = 2 * 60 * 60
+DN_ALLOWED_PRODUCTS = {"BTC", "ETH"}
+REQUOTE_MAX_ATTEMPTS = 3
+REQUOTE_WAIT_SECONDS = 1.0
 
 
-def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
-    """
-    One cycle of the delta-neutral funding farm strategy.
+def _resolve_spot_product_id(client, state: dict, asset: str) -> int | None:
+    asset = str(asset or "").upper().strip()
+    if asset not in DN_ALLOWED_PRODUCTS:
+        return None
 
-    Expects kwargs:
-        client: NadoClient instance
-        mid: float current mid price
-        product_id: int
-        product: str product name (e.g. "BTC")
-        open_orders: list of current open orders
+    cached = state.get("dn_spot_product_id")
+    cached_asset = str(state.get("dn_spot_product_asset") or "").upper().strip()
+    if cached is not None and cached_asset == asset:
+        try:
+            return int(cached)
+        except (TypeError, ValueError):
+            pass
 
-    State fields used/set:
-        notional_usd: target notional in USD
-        leverage: leverage multiplier
-        dn_unfavorable_count: consecutive unfavorable funding cycles
-        dn_total_funding_earned: cumulative estimated funding earned
-        dn_position_side: current position side ("SHORT" or None)
-        dn_entry_price: price at which position was entered
-        dn_last_funding_rate: last observed funding rate
-    """
-    client = kwargs.get("client")
-    mid = kwargs.get("mid", 0.0)
-    product_id = kwargs.get("product_id")
-    product = kwargs.get("product", state.get("product", "BTC"))
-    passphrase = kwargs.get("passphrase")
+    env_spot_id = os.environ.get(f"NADO_DN_{asset}_SPOT_PRODUCT_ID") or os.environ.get(f"NADO_{asset}_SPOT_PRODUCT_ID")
+    if env_spot_id:
+        try:
+            sid = int(env_spot_id)
+            state["dn_spot_product_id"] = sid
+            state["dn_spot_product_asset"] = asset
+            return sid
+        except (TypeError, ValueError):
+            logger.warning("Invalid %s spot override: %s", asset, env_spot_id)
 
-    if not client or mid <= 0 or product_id is None:
-        return {"success": False, "error": "Missing client, price, or product_id"}
+    try:
+        products = client.get_all_products_info() or {}
+        for spot in products.get("spot", []) or []:
+            sid = int(spot.get("id", -1))
+            if sid < 0:
+                continue
+            symbol = str(spot.get("symbol", "") or "").upper()
+            base_asset = str(spot.get("base_asset", "") or "").upper()
+            if asset in symbol or base_asset == asset:
+                state["dn_spot_product_id"] = sid
+                state["dn_spot_product_asset"] = asset
+                return sid
+    except Exception as e:
+        logger.warning("Spot product resolution failed for %s: %s", asset, e)
+    return None
 
-    from src.nadobro.services.trade_service import execute_market_order
 
-    notional = float(state.get("notional_usd") or 100.0)
-    leverage = float(state.get("leverage") or 3.0)
-    if notional <= 0:
-        return {"success": False, "error": "Invalid notional_usd; must be > 0"}
-    target_size = notional / mid
+def _get_spot_balance_size(client, spot_product_id: int) -> float:
+    bal = client.get_balance() or {}
+    balances = bal.get("balances", {}) or {}
+    return float(balances.get(spot_product_id, balances.get(str(spot_product_id), 0)) or 0.0)
 
-    fr_data = client.get_funding_rate(product_id) or {}
-    funding_rate = float(fr_data.get("funding_rate", 0) or 0)
-    state["dn_last_funding_rate"] = funding_rate
 
-    unfavorable_count = int(state.get("dn_unfavorable_count") or 0)
-    total_funding = float(state.get("dn_total_funding_earned") or 0.0)
-    position_side = state.get("dn_position_side")
-    entry_price = float(state.get("dn_entry_price") or 0.0)
-
+def _get_signed_perp_size(client, perp_product_id: int) -> float:
     positions = client.get_all_positions() or []
-    current_position = None
     for p in positions:
-        if int(p.get("product_id", -1)) == product_id:
-            current_position = p
-            break
+        if int(p.get("product_id", -1)) != int(perp_product_id):
+            continue
+        size = abs(float(p.get("amount", 0) or 0.0))
+        side = str(p.get("side") or "").upper()
+        return size if side == "LONG" else -size
+    return 0.0
 
-    current_size = abs(float(current_position.get("amount", 0) or 0)) if current_position else 0.0
-    current_side = current_position.get("side") if current_position else None
 
-    result = {
-        "success": True,
-        "action": "hold",
-        "funding_rate": funding_rate,
-        "position_size": current_size,
-        "position_side": current_side,
-        "total_funding_earned": total_funding,
-        "unfavorable_cycles": unfavorable_count,
-    }
+def _place_spot_limit(client, spot_product_id: int, size: float, is_buy: bool, limit_price: float) -> dict:
+    if size <= SIZE_EPSILON:
+        return {"success": True}
+    try:
+        return client.place_limit_order(spot_product_id, size, limit_price, is_buy=is_buy)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-    funding_favorable = funding_rate > MIN_FAVORABLE_FUNDING
 
-    if not funding_favorable:
-        unfavorable_count += 1
-        state["dn_unfavorable_count"] = unfavorable_count
+def _place_perp_limit(
+    telegram_id: int,
+    product: str,
+    size: float,
+    is_long: bool,
+    leverage: float,
+    passphrase: str | None,
+    limit_price: float,
+) -> dict:
+    from src.nadobro.services.trade_service import execute_limit_order
 
-        if current_position and unfavorable_count >= UNFAVORABLE_EXIT_CYCLES:
-            logger.info(
-                "DN user %s: funding unfavorable for %d cycles, exiting position",
-                telegram_id, unfavorable_count,
-            )
-            close_side = current_side != "LONG"
-            close_result = execute_market_order(
-                telegram_id,
-                product,
-                current_size,
-                is_long=close_side,
-                leverage=leverage,
-                slippage_pct=float(state.get("slippage_pct") or 1.0),
-                enforce_rate_limit=False,
-                passphrase=passphrase,
-            )
-            result["action"] = "exit"
-            result["exit_reason"] = f"Funding unfavorable for {unfavorable_count} cycles"
-            result["close_result"] = close_result.get("success", False)
-            if close_result.get("success"):
-                state["dn_position_side"] = None
-                state["dn_entry_price"] = 0.0
-                state["dn_unfavorable_count"] = 0
-            else:
-                result["success"] = False
-                result["order_error"] = close_result.get("error", "Failed to close position")
-            return result
-
-        result["action"] = "wait_unfavorable"
-        return result
-
-    state["dn_unfavorable_count"] = 0
-
-    if current_position and current_side == "SHORT":
-        est_funding_this_cycle = abs(funding_rate) * current_size * mid
-        total_funding += est_funding_this_cycle
-        state["dn_total_funding_earned"] = total_funding
-        result["funding_earned_this_cycle"] = est_funding_this_cycle
-        result["total_funding_earned"] = total_funding
-
-        size_diff = abs(current_size - target_size)
-        if target_size > 0 and (size_diff / target_size > POSITION_SIZE_TOLERANCE):
-            if current_size < target_size:
-                add_size = target_size - current_size
-                logger.info("DN user %s: increasing short by %.6f", telegram_id, add_size)
-                adj_result = execute_market_order(
-                    telegram_id,
-                    product,
-                    add_size,
-                    is_long=False,
-                    leverage=leverage,
-                    slippage_pct=float(state.get("slippage_pct") or 1.0),
-                    enforce_rate_limit=False,
-                    passphrase=passphrase,
-                )
-                result["action"] = "adjust_increase"
-                result["adjust_result"] = adj_result.get("success", False)
-                if not adj_result.get("success"):
-                    result["success"] = False
-                    result["order_error"] = adj_result.get("error", "Adjust increase failed")
-            else:
-                reduce_size = current_size - target_size
-                logger.info("DN user %s: reducing short by %.6f", telegram_id, reduce_size)
-                adj_result = execute_market_order(
-                    telegram_id,
-                    product,
-                    reduce_size,
-                    is_long=True,
-                    leverage=leverage,
-                    slippage_pct=float(state.get("slippage_pct") or 1.0),
-                    enforce_rate_limit=False,
-                    passphrase=passphrase,
-                )
-                result["action"] = "adjust_decrease"
-                result["adjust_result"] = adj_result.get("success", False)
-                if not adj_result.get("success"):
-                    result["success"] = False
-                    result["order_error"] = adj_result.get("error", "Adjust decrease failed")
-        else:
-            result["action"] = "hold"
-
-        return result
-
-    if current_position and current_side == "LONG":
-        logger.info("DN user %s: closing unexpected LONG position before opening SHORT", telegram_id)
-        close_wrong_side = execute_market_order(
-            telegram_id,
-            product,
-            current_size,
-            is_long=False,
-            leverage=leverage,
-            slippage_pct=float(state.get("slippage_pct") or 1.0),
-            enforce_rate_limit=False,
-            passphrase=passphrase,
-        )
-        if close_wrong_side.get("success"):
-            result["action"] = "close_wrong_side"
-        else:
-            result["action"] = "close_wrong_side_failed"
-            result["success"] = False
-            result["order_error"] = close_wrong_side.get("error", "Failed to close wrong-side position")
-        return result
-
-    logger.info(
-        "DN user %s: opening short position, size=%.6f, funding_rate=%.8f",
-        telegram_id, target_size, funding_rate,
-    )
-    order_result = execute_market_order(
+    if size <= SIZE_EPSILON:
+        return {"success": True}
+    return execute_limit_order(
         telegram_id,
         product,
-        target_size,
-        is_long=False,
+        size,
+        price=limit_price,
+        is_long=is_long,
         leverage=leverage,
-        slippage_pct=float(state.get("slippage_pct") or 1.0),
         enforce_rate_limit=False,
         passphrase=passphrase,
     )
 
-    if order_result.get("success"):
+
+def _cancel_stale_limits(client, perp_product_id: int, spot_product_id: int):
+    try:
+        client.cancel_all_orders(perp_product_id)
+    except Exception:
+        pass
+    try:
+        client.cancel_all_orders(spot_product_id)
+    except Exception:
+        pass
+
+
+def _drive_to_target_sizes(
+    telegram_id: int,
+    read_client,
+    exec_client,
+    state: dict,
+    product: str,
+    perp_product_id: int,
+    spot_product_id: int,
+    target_size: float,
+    leverage: float,
+    passphrase: str | None,
+) -> tuple[bool, str | None]:
+    # Desired: perp short of target size; spot long of target size.
+    for attempt in range(1, REQUOTE_MAX_ATTEMPTS + 1):
+        current_signed_perp = _get_signed_perp_size(exec_client, perp_product_id)
+        current_spot = _get_spot_balance_size(exec_client, spot_product_id)
+        desired_signed_perp = -target_size
+        perp_delta_signed = desired_signed_perp - current_signed_perp
+        spot_delta = target_size - current_spot
+
+        perp_ok = abs(perp_delta_signed) <= max(SIZE_EPSILON, target_size * POSITION_SIZE_TOLERANCE)
+        spot_ok = abs(spot_delta) <= max(SIZE_EPSILON, target_size * POSITION_SIZE_TOLERANCE)
+        if perp_ok and spot_ok:
+            return True, None
+
+        mp = read_client.get_market_price(perp_product_id) or {}
+        limit_price = float(mp.get("mid") or 0.0)
+        if limit_price <= 0:
+            return False, "Could not fetch market price for requote."
+
+        if abs(perp_delta_signed) > max(SIZE_EPSILON, target_size * POSITION_SIZE_TOLERANCE):
+            perp_size = abs(perp_delta_signed)
+            perp_is_long = perp_delta_signed > 0
+            perp_r = _place_perp_limit(
+                telegram_id,
+                product,
+                perp_size,
+                perp_is_long,
+                leverage,
+                passphrase,
+                limit_price,
+            )
+            if not perp_r.get("success"):
+                return False, perp_r.get("error", "Perp limit order failed")
+
+        if abs(spot_delta) > max(SIZE_EPSILON, target_size * POSITION_SIZE_TOLERANCE):
+            spot_size = abs(spot_delta)
+            spot_is_buy = spot_delta > 0
+            spot_r = _place_spot_limit(exec_client, spot_product_id, spot_size, spot_is_buy, limit_price)
+            if not spot_r.get("success"):
+                return False, spot_r.get("error", "Spot limit order failed")
+
+        time.sleep(REQUOTE_WAIT_SECONDS)
+
+        # If not done yet, cancel stale resting limits before next re-quote.
+        if attempt < REQUOTE_MAX_ATTEMPTS:
+            _cancel_stale_limits(exec_client, perp_product_id, spot_product_id)
+
+    return False, "Requote timeout: limit orders not filled after retries."
+
+
+def close_open_hedge_legs(telegram_id: int, state: dict, passphrase: str | None) -> dict:
+    from src.nadobro.config import get_product_id
+    from src.nadobro.services.user_service import get_user_nado_client
+
+    exec_client = get_user_nado_client(telegram_id, passphrase=passphrase)
+    if not exec_client:
+        return {"success": False, "error": "Wallet client unavailable for DN cleanup."}
+
+    product = str(state.get("product") or "BTC").upper()
+    perp_pid = get_product_id(product)
+    leverage = min(float(state.get("dn_perp_leverage") or state.get("leverage") or 3.0), DN_MAX_PERP_LEVERAGE)
+    if perp_pid is None:
+        return {"success": False, "error": f"Invalid DN product '{product}'."}
+
+    spot_pid = _resolve_spot_product_id(exec_client, state, product)
+    if spot_pid is None:
+        return {"success": False, "error": f"{product} spot product not found for DN cleanup."}
+
+    # Closing both legs means driving target base sizes to zero.
+    ok, err = _drive_to_target_sizes(
+        telegram_id=telegram_id,
+        read_client=exec_client,
+        exec_client=exec_client,
+        state=state,
+        product=product,
+        perp_product_id=perp_pid,
+        spot_product_id=spot_pid,
+        target_size=0.0,
+        leverage=leverage,
+        passphrase=passphrase,
+    )
+    if not ok:
+        return {"success": False, "error": err or "DN cleanup failed"}
+    return {"success": True}
+
+
+def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
+    from src.nadobro.services.user_service import get_user_nado_client
+
+    read_client = kwargs.get("client")
+    mid = float(kwargs.get("mid", 0.0) or 0.0)
+    perp_product_id = kwargs.get("product_id")
+    product = str(kwargs.get("product", state.get("product", "BTC"))).upper()
+    passphrase = kwargs.get("passphrase")
+    if not read_client or mid <= 0 or perp_product_id is None:
+        return {"success": False, "error": "Missing client, price, or product_id"}
+    if product not in DN_ALLOWED_PRODUCTS:
+        return {"success": False, "error": "Delta Neutral supports BTC and ETH only (spot + perp short)."}
+
+    exec_client = get_user_nado_client(telegram_id, passphrase=passphrase)
+    if not exec_client:
+        return {"success": False, "error": "DN runtime requires an active passphrase session."}
+
+    spot_notional = float(state.get("notional_usd") or 100.0)
+    leverage = min(float(state.get("dn_perp_leverage") or state.get("leverage") or 3.0), DN_MAX_PERP_LEVERAGE)
+    if spot_notional <= 0:
+        return {"success": False, "error": "Invalid notional_usd; must be > 0"}
+
+    state["dn_perp_leverage"] = leverage
+    state["leverage"] = leverage
+    # Example: $100 spot @ 5x => $20 perp collateral.
+    state["dn_perp_margin_usd"] = spot_notional / leverage if leverage > 0 else spot_notional
+    target_size = spot_notional / mid
+
+    spot_pid = _resolve_spot_product_id(exec_client, state, product)
+    if spot_pid is None:
+        return {"success": False, "error": f"{product} spot product not found. Set NADO_DN_{product}_SPOT_PRODUCT_ID."}
+
+    fr_data = read_client.get_funding_rate(perp_product_id) or {}
+    funding_rate = float(fr_data.get("funding_rate", 0) or 0)
+    state["dn_last_funding_rate"] = funding_rate
+
+    signed_perp = _get_signed_perp_size(exec_client, perp_product_id)
+    perp_size = abs(signed_perp)
+    perp_side = "LONG" if signed_perp > 0 else ("SHORT" if signed_perp < 0 else None)
+    spot_size = _get_spot_balance_size(exec_client, spot_pid)
+    state["dn_last_spot_size"] = spot_size
+    state["dn_last_perp_size"] = perp_size
+    state["dn_last_hedge_diff_size"] = abs(spot_size - perp_size)
+
+    now = time.time()
+    cycle_started = float(state.get("dn_cycle_started_at") or 0.0)
+    if cycle_started > 0 and (now - cycle_started) >= DN_DEFAULT_CYCLE_SECONDS:
+        close = close_open_hedge_legs(telegram_id, state, passphrase)
+        if close.get("success"):
+            state["dn_cycle_started_at"] = 0.0
+            state["dn_unfavorable_count"] = 0
+            state["dn_position_side"] = None
+            state["dn_entry_price"] = 0.0
+            return {"success": True, "action": "rollover_close", "rolled": True}
+        return {"success": False, "action": "rollover_close_failed", "error": close.get("error", "DN rollover close failed")}
+
+    unfavorable = int(state.get("dn_unfavorable_count") or 0)
+    if funding_rate <= MIN_FAVORABLE_FUNDING:
+        unfavorable += 1
+        state["dn_unfavorable_count"] = unfavorable
+        if perp_side == "SHORT" and unfavorable >= UNFAVORABLE_EXIT_CYCLES:
+            close = close_open_hedge_legs(telegram_id, state, passphrase)
+            if close.get("success"):
+                state["dn_unfavorable_count"] = 0
+                state["dn_cycle_started_at"] = 0.0
+                return {"success": True, "action": "exit", "exit_reason": f"Funding unfavorable for {unfavorable} cycles"}
+            return {"success": False, "action": "exit_failed", "error": close.get("error", "DN exit close failed")}
+        return {"success": True, "action": "wait_unfavorable", "funding_rate": funding_rate}
+    state["dn_unfavorable_count"] = 0
+
+    if perp_side == "LONG":
+        ok, err = _drive_to_target_sizes(
+            telegram_id, read_client, exec_client, state, product, perp_product_id, spot_pid, 0.0, leverage, passphrase
+        )
+        if ok:
+            return {"success": True, "action": "close_wrong_side"}
+        return {"success": False, "action": "close_wrong_side_failed", "error": err or "Failed to close wrong-side position"}
+
+    # Live funding estimate
+    if perp_side == "SHORT":
+        est = funding_rate * perp_size * mid
+        recv = float(state.get("dn_total_funding_received") or 0.0)
+        paid = float(state.get("dn_total_funding_paid") or 0.0)
+        if est >= 0:
+            recv += est
+        else:
+            paid += abs(est)
+        state["dn_total_funding_received"] = recv
+        state["dn_total_funding_paid"] = paid
+        state["dn_total_funding_net"] = recv - paid
+        state["dn_total_funding_earned"] = recv
+        state["dn_last_funding_cycle"] = est
+
+    # Enforce equal spot/perp base size at target using requote loop.
+    ok, err = _drive_to_target_sizes(
+        telegram_id=telegram_id,
+        read_client=read_client,
+        exec_client=exec_client,
+        state=state,
+        product=product,
+        perp_product_id=perp_product_id,
+        spot_product_id=spot_pid,
+        target_size=target_size,
+        leverage=leverage,
+        passphrase=passphrase,
+    )
+    if not ok:
+        return {"success": False, "action": "requote_failed", "error": err or "DN requote failed"}
+
+    if not cycle_started:
         state["dn_position_side"] = "SHORT"
         state["dn_entry_price"] = mid
-        result["action"] = "enter_short"
-        result["entry_price"] = mid
-        result["order_success"] = True
-    else:
-        result["action"] = "entry_failed"
-        result["order_error"] = order_result.get("error", "Unknown")
-        result["success"] = False
-
-    return result
+        state["dn_cycle_started_at"] = now
+        return {"success": True, "action": "enter_short", "entry_price": mid}
+    return {"success": True, "action": "hold", "funding_rate": funding_rate}

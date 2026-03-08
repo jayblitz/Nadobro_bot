@@ -71,6 +71,14 @@ def clear_runtime_passphrase(telegram_id: int, network: str):
     _session_passphrases.pop(_task_key(telegram_id, network), None)
 
 
+def clear_all_user_passphrases(telegram_id: int):
+    prefix = f"{telegram_id}:"
+    for key in [k for k in _session_passphrases.keys() if k.startswith(prefix)]:
+        _session_passphrases.pop(key, None)
+    for key in [k for k in _manual_session_passphrases.keys() if k.startswith(prefix)]:
+        _manual_session_passphrases.pop(key, None)
+
+
 def get_runtime_passphrase(telegram_id: int, network: str) -> str | None:
     tk = _task_key(telegram_id, network)
     strategy_passphrase = _session_passphrases.get(tk)
@@ -147,7 +155,14 @@ def _strategy_defaults(strategy: str) -> dict:
             "close_offset_bp": 24.0,
         },
         "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0},
-        "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "auto_close_on_maintenance": 1.0},
+        "dn": {
+            "notional_usd": 50.0,
+            "spread_bp": 3.0,
+            "interval_seconds": 60,
+            "auto_close_on_maintenance": 1.0,
+            "dn_cycle_duration_seconds": 7200,
+            "dn_perp_leverage": 3.0,
+        },
         "vol": {"notional_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
     }
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
@@ -167,12 +182,17 @@ def start_user_bot(
     strategy = (strategy or "").lower()
     if strategy not in SUPPORTED_STRATEGIES:
         return False, "Unknown strategy."
+    if strategy == "dn" and str(product or "").upper() not in {"BTC", "ETH"}:
+        return False, "Delta Neutral supports BTC and ETH only (spot + perp short)."
 
     product_id = get_product_id(product)
     if product_id is None:
         return False, f"Unknown product '{product}'."
     max_leverage = get_product_max_leverage(product)
-    if float(leverage or 0) > max_leverage:
+    leverage_cap = 5.0 if strategy == "dn" else float(max_leverage)
+    if float(leverage or 0) > leverage_cap:
+        if strategy == "dn":
+            return False, "Max leverage for Delta Neutral is 5x."
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
     if float(leverage or 0) < 1:
         return False, "Leverage must be at least 1x."
@@ -233,7 +253,16 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
         task.cancel()
 
     if cancel_orders:
-        close_res = close_all_positions(telegram_id, passphrase=_session_passphrases.get(tk))
+        passphrase = _session_passphrases.get(tk)
+        if str(state.get("strategy", "")).lower() == "dn":
+            from src.nadobro.strategies import delta_neutral
+            close_res = delta_neutral.close_open_hedge_legs(
+                telegram_id=telegram_id,
+                state=state,
+                passphrase=passphrase,
+            )
+        else:
+            close_res = close_all_positions(telegram_id, passphrase=passphrase)
         if not close_res.get("success"):
             _session_passphrases.pop(tk, None)
             return False, f"Strategy loop stopped, but cleanup failed: {close_res.get('error', 'unknown')}"
@@ -288,6 +317,12 @@ def get_user_bot_status(telegram_id: int) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
     state = _load_state(telegram_id, network)
+    dn_cycle_duration = int(state.get("dn_cycle_duration_seconds") or 0)
+    dn_cycle_started = float(state.get("dn_cycle_started_at") or 0.0)
+    dn_cycle_remaining = 0
+    if dn_cycle_duration > 0 and dn_cycle_started > 0:
+        elapsed = int(max(0.0, time.time() - dn_cycle_started))
+        dn_cycle_remaining = max(0, dn_cycle_duration - elapsed)
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -309,6 +344,16 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "quote_refresh_rate": (state.get("mm_last_metrics") or {}).get("quote_refresh_rate"),
         "inventory_skew_usd": (state.get("mm_last_metrics") or {}).get("inventory_skew_usd"),
         "session_notional_done_usd": (state.get("mm_last_metrics") or {}).get("session_notional_done_usd"),
+        "dn_last_funding_rate": state.get("dn_last_funding_rate"),
+        "dn_last_funding_cycle": state.get("dn_last_funding_cycle"),
+        "dn_funding_received": state.get("dn_total_funding_received", 0.0),
+        "dn_funding_paid": state.get("dn_total_funding_paid", 0.0),
+        "dn_funding_net": state.get("dn_total_funding_net", 0.0),
+        "dn_spot_size": state.get("dn_last_spot_size", 0.0),
+        "dn_perp_size": state.get("dn_last_perp_size", 0.0),
+        "dn_hedge_diff_size": state.get("dn_last_hedge_diff_size", 0.0),
+        "dn_cycle_duration_seconds": dn_cycle_duration,
+        "dn_cycle_remaining_seconds": dn_cycle_remaining,
     }
 
 
@@ -492,7 +537,13 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             state["last_error"] = "Auto-closed on maintenance pause."
             _save_state(telegram_id, network, state)
             tk = _task_key(telegram_id, network)
-            close_res = await run_blocking(close_all_positions, telegram_id, _session_passphrases.get(tk))
+            from src.nadobro.strategies import delta_neutral
+            close_res = await run_blocking(
+                delta_neutral.close_open_hedge_legs,
+                telegram_id,
+                state,
+                _session_passphrases.get(tk),
+            )
             if close_res.get("success"):
                 await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
             else:
@@ -564,7 +615,16 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["running"] = False
         state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
         _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, session_passphrase)
+        if str(strategy).lower() == "dn":
+            from src.nadobro.strategies import delta_neutral
+            close_res = await run_blocking(
+                delta_neutral.close_open_hedge_legs,
+                telegram_id,
+                state,
+                session_passphrase,
+            )
+        else:
+            close_res = await run_blocking(close_all_positions, telegram_id, session_passphrase)
         if close_res.get("success"):
             await _notify(
                 telegram_id,
@@ -588,7 +648,16 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["running"] = False
         state["last_error"] = None
         _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, session_passphrase)
+        if str(strategy).lower() == "dn":
+            from src.nadobro.strategies import delta_neutral
+            close_res = await run_blocking(
+                delta_neutral.close_open_hedge_legs,
+                telegram_id,
+                state,
+                session_passphrase,
+            )
+        else:
+            close_res = await run_blocking(close_all_positions, telegram_id, session_passphrase)
         if close_res.get("success"):
             await _notify(
                 telegram_id,

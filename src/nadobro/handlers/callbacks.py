@@ -1,6 +1,7 @@
 import logging
 import time
 import asyncio
+import secrets
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
@@ -18,6 +19,8 @@ from src.nadobro.handlers.keyboards import (
     alert_product_kb, alert_delete_kb, settings_kb, settings_leverage_kb,
     settings_slippage_kb, settings_language_kb, close_product_kb, confirm_close_all_kb, back_kb,
     risk_profile_kb, strategy_hub_kb, strategy_action_kb,
+    strategy_status_kb,
+    strategy_funding_kb,
     onboarding_language_kb,
     mode_kb,     home_card_kb, portfolio_kb,
     onboarding_accept_tos_kb,
@@ -57,20 +60,50 @@ from src.nadobro.i18n import (
 )
 
 logger = logging.getLogger(__name__)
+WALLET_SEED_TTL_SECONDS = 900
+_WALLET_SEED_CACHE: dict[str, dict] = {}
 
 
-def _wallet_setup_message(pk_hex: str) -> str:
+def _prune_wallet_seed_cache() -> None:
+    now = time.time()
+    expired = [token for token, payload in _WALLET_SEED_CACHE.items() if now - float(payload.get("ts", 0)) > WALLET_SEED_TTL_SECONDS]
+    for token in expired:
+        _WALLET_SEED_CACHE.pop(token, None)
+
+
+def _store_wallet_seed(pk_hex: str, linked_addr: str) -> str:
+    _prune_wallet_seed_cache()
+    token = secrets.token_urlsafe(24)
+    _WALLET_SEED_CACHE[token] = {
+        "pk_hex": pk_hex,
+        "linked_addr": linked_addr,
+        "ts": time.time(),
+    }
+    return token
+
+
+def pop_wallet_seed(token: str | None) -> tuple[str, str] | tuple[None, None]:
+    _prune_wallet_seed_cache()
+    if not token:
+        return None, None
+    payload = _WALLET_SEED_CACHE.pop(token, None)
+    if not payload:
+        return None, None
+    return payload.get("pk_hex"), payload.get("linked_addr")
+
+
+def _wallet_setup_message(linked_addr: str) -> str:
     return (
         "👛 *Wallet Connect Guide*\n\n"
         "*Step 1:* Open https://app.nado.xyz and connect your main wallet.\n"
         "Deposit at least $5 USDT0 to activate trading.\n\n"
         "*Step 2:* Go to Settings → 1-Click Trading → Advanced 1CT.\n\n"
-        "*Step 3:* Paste this generated 1CT key:\n\n"
-        f"`{pk_hex}`\n\n"
+        "*Step 3:* Paste this linked signer *PUBLIC* address:\n\n"
+        f"`{linked_addr}`\n\n"
         "*Step 4:* Enable 1CT, click *Save*, and confirm the transaction in wallet "
         "(~1 USDT0 network/auth cost).\n\n"
         "*Step 5:* Return here and send your *main wallet address* (0x...).\n\n"
-        "_This key is trading-only and cannot withdraw funds._"
+        "_Private key is never shown in chat and will only be encrypted after you set your passphrase._"
     )
 
 
@@ -79,10 +112,10 @@ def seed_wallet_setup_flow(context: CallbackContext) -> str:
     pk_hex = account.key.hex()
     if not pk_hex.startswith("0x"):
         pk_hex = "0x" + pk_hex
+    seed_token = _store_wallet_seed(pk_hex, account.address)
     context.user_data["wallet_flow"] = "awaiting_main_address"
-    context.user_data["wallet_linked_signer_pk"] = pk_hex
-    context.user_data["wallet_linked_signer_address"] = account.address
-    return _wallet_setup_message(pk_hex)
+    context.user_data["wallet_seed_token"] = seed_token
+    return _wallet_setup_message(account.address)
 
 
 async def prompt_wallet_setup(target, context: CallbackContext, telegram_id: int, lead_text: str | None = None):
@@ -104,14 +137,13 @@ async def handle_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     data = query.data
     telegram_id = query.from_user.id
-    user_lang = get_user_language(telegram_id)
-
     try:
         try:
             original_edit = query.edit_message_text
 
             async def _localized_edit_message_text(text=None, *args, **kwargs):
-                loc_text, loc_kb = localize_payload(text, kwargs.get("reply_markup"), user_lang)
+                active_lang = get_user_language(telegram_id)
+                loc_text, loc_kb = localize_payload(text, kwargs.get("reply_markup"), active_lang)
                 kwargs["reply_markup"] = loc_kb
                 return await original_edit(loc_text, *args, **kwargs)
 
@@ -124,7 +156,8 @@ async def handle_callback(update: Update, context: CallbackContext):
                 original_reply = query.message.reply_text
 
                 async def _localized_reply_text(text=None, *args, **kwargs):
-                    loc_text, loc_kb = localize_payload(text, kwargs.get("reply_markup"), user_lang)
+                    active_lang = get_user_language(telegram_id)
+                    loc_text, loc_kb = localize_payload(text, kwargs.get("reply_markup"), active_lang)
                     kwargs["reply_markup"] = loc_kb
                     return await original_reply(loc_text, *args, **kwargs)
 
@@ -132,7 +165,7 @@ async def handle_callback(update: Update, context: CallbackContext):
             except Exception:
                 pass
 
-        with language_context(user_lang):
+        with language_context(get_user_language(telegram_id)):
             try:
                 await query.answer()
             except BadRequest as e:
@@ -242,6 +275,13 @@ What we smashing today?"""
 
 async def _handle_onb_new(query, data, telegram_id, context):
     if data == "onb:accept_tos":
+        state = get_new_onboarding_state(telegram_id)
+        if not state.get("language"):
+            await query.edit_message_text(
+                _ONB_WELCOME_LANG_MSG,
+                reply_markup=onboarding_language_kb(),
+            )
+            return
         set_new_onboarding_tos_accepted(telegram_id)
         await query.edit_message_text(
             _ONB_DASHBOARD_MSG,
@@ -256,9 +296,11 @@ async def _handle_onb_new(query, data, telegram_id, context):
         set_new_onboarding_language(telegram_id, lang)
         from src.nadobro.services.user_service import update_user_language
         update_user_language(telegram_id, lang)
+        # Use the newly selected language immediately for this response.
+        text, kb = localize_payload(_ONB_WELCOME_CARD, onboarding_accept_tos_kb(), lang)
         await query.edit_message_text(
-            _ONB_WELCOME_CARD,
-            reply_markup=onboarding_accept_tos_kb(),
+            text,
+            reply_markup=kb,
         )
 
 
@@ -962,7 +1004,8 @@ async def _handle_strategy(query, data, context, telegram_id):
         selected_product = parts[3].upper()
         if strategy_id not in supported:
             return
-        if selected_product not in ("BTC", "ETH", "SOL"):
+        allowed_pairs = ("BTC", "ETH") if strategy_id == "dn" else ("BTC", "ETH", "SOL")
+        if selected_product not in allowed_pairs:
             return
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
         with timed_metric("cb.strategy.preview"):
@@ -1045,6 +1088,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
             "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
             "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
+            "dn_perp_leverage",
         )
         if field not in allowed_inputs:
             return
@@ -1070,6 +1114,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "min_spread_bp": "Enter minimum spread in bps \\(example: `2`\\)",
             "max_spread_bp": "Enter maximum spread in bps \\(example: `20`\\)",
             "vol_sensitivity": "Enter volatility sensitivity \\(example: `0\\.02`\\)",
+            "dn_perp_leverage": "Enter DN perp leverage from `1` to `5` \\(example: `3`\\)",
         }
         await query.edit_message_text(
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -1111,7 +1156,13 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         settings = _get_user_settings(telegram_id, context)
         from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
-        strategy_leverage = 1 if strategy_id in ("vol", "mm") else settings.get("default_leverage", 3)
+        if strategy_id in ("vol", "mm"):
+            strategy_leverage = 1
+        elif strategy_id == "dn":
+            dn_cfg = ((settings.get("strategies", {}) or {}).get("dn", {}) or {})
+            strategy_leverage = min(float(dn_cfg.get("dn_perp_leverage", 3) or 3), 5.0)
+        else:
+            strategy_leverage = settings.get("default_leverage", 3)
         await authorize_or_prompt_passphrase(query, context, telegram_id, {
             "type": "start_strategy",
             "strategy": strategy_id,
@@ -1133,6 +1184,50 @@ async def _handle_strategy(query, data, context, telegram_id):
         await query.edit_message_text(
             text,
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=strategy_status_kb(st.get("strategy")),
+        )
+    elif action == "funding":
+        strategy_target = (parts[2] if len(parts) > 2 else "dn").lower()
+        st = get_user_bot_status(telegram_id)
+        active_strategy = str(st.get("strategy") or "").lower()
+        if strategy_target != "dn" and active_strategy != "dn":
+            await query.edit_message_text(
+                "📈 Funding details are available for Delta Neutral runtime only.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=strategy_status_kb(st.get("strategy")),
+            )
+            return
+        fr = float(st.get("dn_last_funding_rate") or 0.0)
+        f_cycle = float(st.get("dn_last_funding_cycle") or 0.0)
+        f_recv = float(st.get("dn_funding_received") or 0.0)
+        f_paid = float(st.get("dn_funding_paid") or 0.0)
+        f_net = float(st.get("dn_funding_net") or 0.0)
+        spot_size = float(st.get("dn_spot_size") or 0.0)
+        perp_size = float(st.get("dn_perp_size") or 0.0)
+        hedge_diff = float(st.get("dn_hedge_diff_size") or 0.0)
+        cycle_left = int(st.get("dn_cycle_remaining_seconds") or 0)
+        f_cycle_str = f"+${f_cycle:,.4f}" if f_cycle >= 0 else f"-${abs(f_cycle):,.4f}"
+        f_net_str = f"+${f_net:,.4f}" if f_net >= 0 else f"-${abs(f_net):,.4f}"
+        runtime_state = "LIVE" if st.get("running") and active_strategy == "dn" else "IDLE"
+        asset = str(st.get("product") or "BTC").upper()
+        text = (
+            "📈 *Delta Neutral Funding Details*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Runtime: *{escape_md(runtime_state)}*\n"
+            f"Funding Rate: *{escape_md(f'{fr:.8f}')}*\n"
+            f"Last Cycle Estimate: *{escape_md(f_cycle_str)}*\n\n"
+            f"Total Received: *{escape_md(f'${f_recv:,.4f}')}*\n"
+            f"Total Paid: *{escape_md(f'${f_paid:,.4f}')}*\n"
+            f"Net Funding: *{escape_md(f_net_str)}*\n\n"
+            f"Spot Size: *{escape_md(f'{spot_size:.6f} {asset}')}*\n"
+            f"Perp Size: *{escape_md(f'{perp_size:.6f} {asset}')}*\n"
+            f"Hedge Diff: *{escape_md(f'{hedge_diff:.6f} {asset}')}*\n"
+            f"Cycle Remaining: *{escape_md(f'{max(0, cycle_left // 60)}m')}*"
+        )
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=strategy_funding_kb("dn"),
         )
     elif action == "stop":
         ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
@@ -1194,7 +1289,13 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         )
     elif strategy == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
-        extra = f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+        dn_lev = min(float(conf.get("dn_perp_leverage", 3) or 3), 5.0)
+        extra = (
+            f"DN Perp Leverage: *{escape_md(f'{dn_lev:.0f}x')}* \\(max 5x\\)\n"
+            f"Auto-close on maintenance: *{escape_md(auto_close)}*\n"
+            f"Cycle window: *{escape_md('2.0h')}* \\(fixed auto close and restart\\)\n"
+            "Execution: *Limit orders only* \\(spot \\+ perp at same limit price\\)\n\n"
+        )
     return base + extra + "Use presets or set custom values below\\."
 
 
@@ -1311,6 +1412,14 @@ def _strategy_config_kb(strategy: str):
     if strategy == "dn":
         rows.extend([
             [
+                InlineKeyboardButton("Leverage 2x", callback_data=f"strategy:set:{strategy}:dn_perp_leverage:2"),
+                InlineKeyboardButton("Leverage 3x", callback_data=f"strategy:set:{strategy}:dn_perp_leverage:3"),
+                InlineKeyboardButton("Leverage 5x", callback_data=f"strategy:set:{strategy}:dn_perp_leverage:5"),
+            ],
+            [
+                InlineKeyboardButton("Custom Leverage", callback_data=f"strategy:input:{strategy}:dn_perp_leverage"),
+            ],
+            [
                 InlineKeyboardButton("Auto-Close ON", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:1"),
                 InlineKeyboardButton("Auto-Close OFF", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:0"),
             ],
@@ -1336,7 +1445,10 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
     leverage = 1.0 if strategy_id in ("vol", "mm") else float(settings.get("default_leverage", 3))
+    if strategy_id == "dn":
+        leverage = min(float(conf.get("dn_perp_leverage", leverage) or leverage), 5.0)
     slippage = float(settings.get("slippage", 1))
+    runtime_status = get_user_bot_status(telegram_id)
 
     available_margin = 0.0
     mid = 0.0
@@ -1388,6 +1500,9 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         "vol": "Balanced two\\-sided flow with risk caps for consistent volume\\.",
     }
     selected_explainer = how_it_works.get(strategy_id, "Automates trade cycles with configured risk controls\\.")
+    pair_support_line = ""
+    if strategy_id == "dn":
+        pair_support_line = "\nSupported DN Pairs: *BTC, ETH*"
     extra_cfg = ""
     if strategy_id == "grid":
         min_range = f"{float(conf.get('min_range_pct', 1.0)):.2f}%"
@@ -1419,12 +1534,31 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         )
     elif strategy_id == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
-        extra_cfg = f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
+        dn_margin = notional / leverage if leverage > 0 else notional
+        extra_cfg = (
+            f"\nPerp Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| Perp Margin: *{escape_md(f'${dn_margin:,.2f}')}*"
+            f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
+            f"\nCycle window: *{escape_md('2h')}* \\(fixed auto roll\\)"
+            f"\nExecution: *{escape_md('Limit orders only')}*"
+        )
+        if runtime_status.get("running") and str(runtime_status.get("strategy", "")).lower() == "dn":
+            f_recv = float(runtime_status.get("dn_funding_received") or 0.0)
+            f_paid = float(runtime_status.get("dn_funding_paid") or 0.0)
+            f_net = float(runtime_status.get("dn_funding_net") or 0.0)
+            f_net_str = f"+${f_net:,.4f}" if f_net >= 0 else f"-${abs(f_net):,.4f}"
+            cycle_left = int(runtime_status.get("dn_cycle_remaining_seconds") or 0)
+            extra_cfg += (
+                f"\nFunding Received/Paid: *{escape_md(f'${f_recv:,.4f}')}"
+                f" / {escape_md(f'${f_paid:,.4f}')}*"
+                f"\nFunding Net: *{escape_md(f_net_str)}*"
+                f"\nCycle Remaining: *{escape_md(f'{max(0, cycle_left // 60)}m')}*"
+            )
     return (
         f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
         f"Status: {status_dot} *READY*\n"
         f"{escape_md(selected_explainer)}\n\n"
         f"📊 *Settings*\n"
+        f"{pair_support_line}\n"
         f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}*\n"
         f"Mode: *{escape_md(network.upper())}* \\| Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| Slippage: *{escape_md(f'{slippage:.2f}%')}*\n"
         f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"

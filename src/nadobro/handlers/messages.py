@@ -59,6 +59,8 @@ TRADE_FLOW_STEPS = ["direction", "order_type", "product", "leverage", "size", "l
 PENDING_TEXT_CLOSE_ALL_KEY = "pending_text_close_all"
 PENDING_PASSPHRASE_ACTION = "pending_passphrase_action"
 SESSION_PASSPHRASE_KEY = "session_passphrase"
+SESSION_PASSPHRASE_TTL_SECONDS = 1800
+PENDING_PASSPHRASE_TTL_SECONDS = 180
 
 
 _STATE_REQUIRED_ACTIONS = {
@@ -104,11 +106,8 @@ def _is_contextual_button(callback_data: str, context) -> bool:
 def clear_session_passphrase(context: CallbackContext, telegram_id: int | None = None):
     context.user_data.pop(SESSION_PASSPHRASE_KEY, None)
     if telegram_id is not None:
-        user = get_user(telegram_id)
-        network = user.network_mode.value if user else "mainnet"
-        from src.nadobro.services.bot_runtime import clear_manual_passphrase, clear_runtime_passphrase
-        clear_manual_passphrase(telegram_id, network)
-        clear_runtime_passphrase(telegram_id, network)
+        from src.nadobro.services.bot_runtime import clear_all_user_passphrases
+        clear_all_user_passphrases(telegram_id)
 
 
 def terminate_active_processes(context: CallbackContext, telegram_id: int | None = None):
@@ -121,6 +120,8 @@ def terminate_active_processes(context: CallbackContext, telegram_id: int | None
     context.user_data.pop("pending_strategy_input", None)
     context.user_data.pop("pending_question", None)
     context.user_data.pop("wallet_flow", None)
+    context.user_data.pop("wallet_seed_token", None)
+    # Backward-compatible cleanup for old key names.
     context.user_data.pop("wallet_linked_signer_pk", None)
     context.user_data.pop("wallet_main_address", None)
     context.user_data.pop("wallet_linked_signer_address", None)
@@ -150,6 +151,10 @@ def _get_session_passphrase(context: CallbackContext, telegram_id: int) -> str |
         if payload.get("network") != network:
             context.user_data.pop(SESSION_PASSPHRASE_KEY, None)
         else:
+            set_at = float(payload.get("set_at") or 0)
+            if not set_at or (time.time() - set_at > SESSION_PASSPHRASE_TTL_SECONDS):
+                context.user_data.pop(SESSION_PASSPHRASE_KEY, None)
+                return None
             value = payload.get("value")
             if isinstance(value, str) and value:
                 return value
@@ -318,19 +323,25 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
 
 
 async def _prompt_passphrase(update_or_query, context, action_data: dict):
-    context.user_data[PENDING_PASSPHRASE_ACTION] = action_data
     msg_text = "🔐 Enter your passphrase to authorize this command:"
+    prompt_msg = None
     if hasattr(update_or_query, 'message') and update_or_query.message:
-        await update_or_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup([
+        prompt_msg = await update_or_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
         ]))
-    elif hasattr(update_or_query, 'edit_message_text'):
-        await update_or_query.edit_message_text(
+    elif hasattr(update_or_query, 'message') and update_or_query.message and hasattr(update_or_query.message, "reply_text"):
+        prompt_msg = await update_or_query.message.reply_text(
             msg_text,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
             ]),
         )
+    if prompt_msg:
+        context.user_data[PENDING_PASSPHRASE_ACTION] = {
+            "action": action_data,
+            "prompt_message_id": prompt_msg.message_id,
+            "expires_at": time.time() + PENDING_PASSPHRASE_TTL_SECONDS,
+        }
 
 
 async def authorize_or_prompt_passphrase(update_or_query, context, telegram_id: int, action_data: dict):
@@ -349,9 +360,27 @@ async def authorize_or_prompt_passphrase(update_or_query, context, telegram_id: 
 
 
 async def _handle_passphrase_input(update, context, telegram_id, text):
-    action_data = context.user_data.get(PENDING_PASSPHRASE_ACTION)
-    if not action_data:
+    pending = context.user_data.get(PENDING_PASSPHRASE_ACTION)
+    if not isinstance(pending, dict):
         return False
+    expires_at = float(pending.get("expires_at") or 0)
+    if not expires_at or time.time() > expires_at:
+        context.user_data.pop(PENDING_PASSPHRASE_ACTION, None)
+        await update.message.reply_text(
+            "⚠️ Authorization expired. Please retry the action.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=persistent_menu_kb(),
+        )
+        return True
+
+    prompt_message_id = pending.get("prompt_message_id")
+    reply_to = getattr(update.message, "reply_to_message", None)
+    if prompt_message_id and (not reply_to or reply_to.message_id != prompt_message_id):
+        await update.message.reply_text(
+            "Reply directly to the passphrase prompt message to authorize this action.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return True
 
     passphrase = text.strip()
     context.user_data.pop(PENDING_PASSPHRASE_ACTION, None)
@@ -361,6 +390,7 @@ async def _handle_passphrase_input(update, context, telegram_id, text):
     except Exception:
         pass
 
+    action_data = pending.get("action", {})
     ok, _ = await _execute_authorized_action(update.message, context, telegram_id, action_data, passphrase)
     if ok:
         _cache_session_passphrase(context, telegram_id, passphrase)
@@ -1304,9 +1334,10 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
         if not ok:
             await update.message.reply_text(f"❌ {msg}", parse_mode=ParseMode.MARKDOWN)
             return True
-        pk_hex = context.user_data.get("wallet_linked_signer_pk")
+        wallet_seed_token = context.user_data.get("wallet_seed_token")
+        from src.nadobro.handlers.callbacks import pop_wallet_seed
+        pk_hex, linked_addr = pop_wallet_seed(wallet_seed_token)
         main_addr = context.user_data.get("wallet_main_address")
-        linked_addr = context.user_data.get("wallet_linked_signer_address")
         if not pk_hex or not main_addr or not linked_addr:
             context.user_data.pop("wallet_flow", None)
             await update.message.reply_text("⚠️ Session expired. Tap the Wallet button to start again.")
@@ -1315,7 +1346,7 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
         pk_bytes = pk_hex.encode("utf-8")
         ciphertext, salt = encrypt_with_passphrase(pk_bytes, passphrase)
         save_linked_signer(telegram_id, main_addr, linked_addr, ciphertext, salt)
-        for key in ("wallet_flow", "wallet_linked_signer_pk", "wallet_main_address", "wallet_linked_signer_address"):
+        for key in ("wallet_flow", "wallet_seed_token", "wallet_linked_signer_pk", "wallet_main_address", "wallet_linked_signer_address"):
             context.user_data.pop(key, None)
         try:
             await update.message.delete()
@@ -1394,6 +1425,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     supported_fields = (
         "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
         "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
+        "dn_perp_leverage",
     )
     if strategy not in supported or field not in supported_fields:
         context.user_data.pop("pending_strategy_input", None)
@@ -1419,6 +1451,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "max_range_pct": (0.1, 40),
         "threshold_bp": (1, 500),
         "close_offset_bp": (1, 1000),
+        "dn_perp_leverage": (1, 5),
     }
     lo, hi = limits[field]
     if value < lo or value > hi:
@@ -1455,6 +1488,7 @@ async def _handle_nado_question(update, context, question):
     chat_id = update.effective_chat.id
     draft_id = random.randint(1, 2**31 - 1)
     telegram_id = update.effective_user.id
+    user_lang = get_user_language(telegram_id)
     user = update.effective_user
     user_name = user.first_name or user.username or "trader"
 
@@ -1496,7 +1530,12 @@ async def _handle_nado_question(update, context, question):
         except Exception:
             draft_ok = False
 
-        async for chunk in stream_nado_answer(question, telegram_id=telegram_id, user_name=user_name):
+        async for chunk in stream_nado_answer(
+            question,
+            telegram_id=telegram_id,
+            user_name=user_name,
+            response_lang=user_lang,
+        ):
             full_text += chunk
             now_ts = time.time()
             if draft_ok and (len(full_text) - last_draft_len >= 120) and (now_ts - last_draft_ts >= 1.2):
@@ -1512,16 +1551,18 @@ async def _handle_nado_question(update, context, question):
                     draft_ok = False
 
         if full_text.strip():
-            await update.message.reply_text(
-                f"🧠 *Ask NadoBro*\n\n{escape_md(full_text)}",
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🧠 *Ask NadoBro*\n\n{escape_md(full_text)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
                 ]),
             )
         else:
-            await update.message.reply_text(
-                "⚠️ I couldn't generate an answer\\. Please try again\\.",
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ I couldn't generate an answer\\. Please try again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
@@ -1531,8 +1572,9 @@ async def _handle_nado_question(update, context, question):
         logger.error(f"Nado Q&A error: {e}", exc_info=True)
         if full_text.strip():
             try:
-                await update.message.reply_text(
-                    f"🧠 *Ask NadoBro*\n\n{escape_md(full_text)}",
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🧠 *Ask NadoBro*\n\n{escape_md(full_text)}",
                     parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
@@ -1541,8 +1583,9 @@ async def _handle_nado_question(update, context, question):
                 return
             except Exception:
                 pass
-        await update.message.reply_text(
-            "⚠️ Something went wrong answering your question\\. Please try again\\.",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Something went wrong answering your question\\. Please try again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
