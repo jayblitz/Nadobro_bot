@@ -552,7 +552,8 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
         if equity_7d_pct is not None:
             parts.append(f"7d: {escape_md(f'{equity_7d_pct:+.2f}%')}")
         if parts:
-            eq_change = f" \\({\" \\| \".join(parts)}\\)"
+            sep = " \\| "
+            eq_change = f" \\({sep.join(parts)}\\)"
 
     lines = [
         "📁 *Portfolio Deck*",
