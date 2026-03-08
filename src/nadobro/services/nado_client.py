@@ -467,6 +467,29 @@ class NadoClient:
                 return orders
             except Exception as e:
                 logger.error(f"SDK get_open_orders failed: {e}")
+        if self.subaccount_hex:
+            try:
+                data = self._query_rest("subaccount_orders", {"sender": self.subaccount_hex, "product_id": product_id}) or {}
+                if data.get("status") == "success":
+                    payload = data.get("data", {}) or {}
+                    raw_orders = payload.get("orders", [])
+                    orders = []
+                    for o in raw_orders:
+                        amount_raw = o.get("amount") or o.get("unfilled_amount", "0")
+                        price_raw = o.get("price_x18", "0")
+                        amount = self._from_x18_dynamic(amount_raw)
+                        price = self._from_x18_dynamic(price_raw)
+                        orders.append({
+                            "digest": o.get("digest"),
+                            "amount": abs(float(amount)),
+                            "price": float(price),
+                            "side": "LONG" if float(amount) > 0 else "SHORT",
+                            "product_id": product_id,
+                            "product_name": get_product_name(product_id),
+                        })
+                    return orders
+            except Exception as e:
+                logger.error(f"REST get_open_orders failed: {e}")
         return []
 
     @staticmethod

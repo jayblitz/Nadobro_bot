@@ -57,7 +57,7 @@ By tapping "Let’s Get It" you accept our Terms of Use & Privacy Policy.
 
 ⚡ Security First (this is why we’re better):
 We generate a secure Linked Signer for your default subaccount only.
-You paste the PUBLIC address into Nado Settings -> 1-Click Trading (1 tx, 5 seconds).
+You paste the 1CT private key into Nado Settings -> 1-Click Trading -> Advanced 1CT (1 tx, 5 seconds).
 Your private keys NEVER leave your wallet. Revoke anytime. 100% self-custody.
 
 Ready to start printing?"""

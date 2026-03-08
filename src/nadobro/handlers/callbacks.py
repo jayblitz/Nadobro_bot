@@ -108,18 +108,19 @@ def pop_wallet_seed(token: str | None) -> tuple[str, str] | tuple[None, None]:
     return payload.get("pk_hex"), payload.get("linked_addr")
 
 
-def _wallet_setup_message(linked_addr: str) -> str:
+def _wallet_setup_message(pk_hex: str) -> str:
     return (
         "👛 *Wallet Connect Guide*\n\n"
         "*Step 1:* Open https://app.nado.xyz and connect your main wallet.\n"
         "Deposit at least $5 USDT0 to activate trading.\n\n"
         "*Step 2:* Go to Settings → 1-Click Trading → Advanced 1CT.\n\n"
-        "*Step 3:* Paste this linked signer *PUBLIC* address:\n\n"
-        f"`{linked_addr}`\n\n"
+        "*Step 3:* Paste this *1CT private key* into the \"1CT Private Key\" field:\n\n"
+        f"`{pk_hex}`\n\n"
+        "_⚠️ Copy immediately, paste into Nado, then delete this message. Do not share._\n\n"
         "*Step 4:* Enable 1CT, click *Save*, and confirm the transaction in wallet "
         "(~1 USDT0 network/auth cost).\n\n"
         "*Step 5:* Return here and send your *main wallet address* (0x...).\n\n"
-        "_Private key is never shown in chat and will only be encrypted after you set your passphrase._"
+        "After you send your address, you'll set a passphrase to encrypt this key for future use."
     )
 
 
@@ -131,7 +132,7 @@ def seed_wallet_setup_flow(context: CallbackContext) -> str:
     seed_token = _store_wallet_seed(pk_hex, account.address)
     context.user_data["wallet_flow"] = "awaiting_main_address"
     context.user_data["wallet_seed_token"] = seed_token
-    return _wallet_setup_message(account.address)
+    return _wallet_setup_message(pk_hex)
 
 
 async def prompt_wallet_setup(target, context: CallbackContext, telegram_id: int, lead_text: str | None = None):
@@ -283,8 +284,8 @@ By tapping "Let’s Get It" you accept our Terms of Use & Privacy Policy.
 
 ⚡ Security First (this is why we’re better):
 We generate a secure Linked Signer for your default subaccount only.
-You paste the PUBLIC address into Nado Settings -> 1-Click Trading (1 tx, 5 seconds).
-Your private keys NEVER leave your wallet. Revoke anytime. 100% self-custody.
+You paste the 1CT private key into Nado Settings -> 1-Click Trading -> Advanced 1CT (1 tx, 5 seconds).
+Your main wallet key stays in your wallet. Revoke anytime. 100% self-custody.
 
 Ready to start printing?"""
 
