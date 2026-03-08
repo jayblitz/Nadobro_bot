@@ -11,7 +11,7 @@ from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions,
     fmt_trade_preview, fmt_trade_result,
     fmt_wallet_info, fmt_alerts, fmt_portfolio,
-    fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard,
+    fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard, fmt_position_pnl_panel,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
@@ -25,6 +25,7 @@ from src.nadobro.handlers.keyboards import (
     mode_kb,     home_card_kb, portfolio_kb,
     onboarding_accept_tos_kb,
     points_scope_kb,
+    position_manage_kb,
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback
 from src.nadobro.handlers.home_card import build_home_card_text
@@ -50,9 +51,9 @@ from src.nadobro.services.onboarding_service import (
 )
 from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS
 from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
-from src.nadobro.services.points_service import get_points_dashboard
-from src.nadobro.handlers.points_mascot import mascot_path_for_cost, mascot_caption_for_cost
+from src.nadobro.services.perf import timed_metric, log_slow
+from src.nadobro.services.points_service import get_points_dashboard, request_points_refresh
+from src.nadobro.services.equity_snapshots import record_snapshot, get_1d_7d_changes, get_history_for_csv
 from src.nadobro.i18n import (
     get_user_language,
     language_context,
@@ -213,7 +214,7 @@ async def handle_callback(update: Update, context: CallbackContext):
             elif data.startswith("pos:"):
                 await _handle_positions(query, data, telegram_id, context)
             elif data.startswith("portfolio:"):
-                await _handle_portfolio(query, data, telegram_id)
+                await _handle_portfolio(query, data, telegram_id, context)
             elif data.startswith("wallet:"):
                 await _handle_wallet(query, data, telegram_id, context)
             elif data.startswith("alert:"):
@@ -221,7 +222,7 @@ async def handle_callback(update: Update, context: CallbackContext):
             elif data.startswith("settings:"):
                 await _handle_settings(query, data, telegram_id, context)
             elif data.startswith("points:"):
-                await _handle_points(query, data, telegram_id)
+                await _handle_points(query, data, telegram_id, context)
             elif data.startswith("strategy:"):
                 await _handle_strategy(query, data, context, telegram_id)
             elif data == "home:mode":
@@ -323,37 +324,42 @@ async def _handle_onb_new(query, data, telegram_id, context):
         )
 
 
-async def _handle_points(query, data, telegram_id):
+async def _handle_points(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "view"
-    scope = "current"
+    scope = "week"
     if len(parts) > 2:
-        scope = (parts[2] or "current").lower()
-    if scope not in ("current", "all", "epoch"):
-        scope = "current"
+        raw_scope = (parts[2] or "week").lower()
+        scope = "week" if raw_scope in ("week", "current", "all", "epoch") else "week"
 
     if action not in ("view", "refresh"):
         action = "view"
 
     points = await run_blocking(get_points_dashboard, telegram_id, scope)
-    msg = fmt_points_dashboard(points)
+    should_refresh = action == "refresh" or not points.get("ok")
+    if should_refresh:
+        bridge_result = await request_points_refresh(context=context, telegram_id=telegram_id, chat_id=query.message.chat_id)
+        if not bridge_result.get("ok"):
+            await query.edit_message_text(
+                escape_md(bridge_result.get("error", "Could not fetch points right now.")),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=points_scope_kb("week"),
+            )
+            return
+        if points.get("ok"):
+            msg = (
+                f"{fmt_points_dashboard(points)}\n\n"
+                "🔄 Refreshing from bridge\\. Updated card will be posted below shortly\\."
+            )
+        else:
+            msg = "🔄 Fetching your Nado points from the last week\\. Updated card will appear below\\."
+    else:
+        msg = fmt_points_dashboard(points)
     await query.edit_message_text(
         msg,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=points_scope_kb(scope),
+        reply_markup=points_scope_kb("week"),
     )
-
-    if points.get("ok"):
-        mascot_path = mascot_path_for_cost(float(points.get("cost_per_point", 0) or 0))
-        if mascot_path:
-            try:
-                with open(mascot_path, "rb") as img:
-                    await query.message.reply_photo(
-                        photo=img,
-                        caption=mascot_caption_for_cost(float(points.get("cost_per_point", 0) or 0)),
-                    )
-            except Exception:
-                logger.warning("Failed to send points mascot image", exc_info=True)
 
 
 async def _show_dashboard(query, telegram_id):
@@ -417,7 +423,31 @@ async def _handle_nav(query, data, telegram_id, context=None):
         if context is not None:
             from src.nadobro.handlers.messages import terminate_active_processes
             terminate_active_processes(context, telegram_id=telegram_id)
-        await _show_dashboard(query, telegram_id)
+        if target == "main":
+            # UX: Home should always open a fresh dashboard at the bottom.
+            try:
+                await query.message.reply_text(
+                    build_home_card_text(telegram_id),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=home_card_kb(),
+                )
+            except BadRequest as e:
+                if "Can't parse entities" not in str(e):
+                    raise
+                cleaned = build_home_card_text(telegram_id).replace("\\", "")
+                try:
+                    await query.message.reply_text(
+                        cleaned,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=home_card_kb(),
+                    )
+                except BadRequest:
+                    await query.message.reply_text(
+                        cleaned,
+                        reply_markup=home_card_kb(),
+                    )
+        else:
+            await _show_dashboard(query, telegram_id)
     elif target == "help":
         try:
             await query.edit_message_text(
@@ -614,7 +644,16 @@ async def _handle_leverage(query, data, telegram_id, context):
         "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
     }
 
-    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
+    analytics = None
+    try:
+        from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
+        user = get_user(telegram_id)
+        network = getattr(user.network_mode, "value", "testnet") if user else "testnet"
+        order_notional = size * price if price > 0 else 0
+        analytics = await run_blocking(get_pre_trade_analytics, product, order_notional, 0.017, network, get_user_readonly_client(telegram_id))
+    except Exception:
+        pass
+    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
     await query.edit_message_text(
         preview,
         parse_mode=ParseMode.MARKDOWN_V2,
@@ -667,6 +706,7 @@ async def _handle_exec_trade(query, data, telegram_id, context):
             "leverage": leverage,
             "slippage_pct": slippage_pct,
             "price": pending.get("price", 0),
+            "reduce_only": bool(pending.get("reduce_only", False)),
         },
     })
 
@@ -674,6 +714,60 @@ async def _handle_exec_trade(query, data, telegram_id, context):
 async def _handle_positions(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "view"
+
+    async def _render_position_panel(product: str):
+        client = get_user_readonly_client(telegram_id)
+        if not client:
+            await query.edit_message_text(
+                "⚠️ Wallet not initialized\\. Use /start first\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
+            return
+        with timed_metric("cb.positions.manage"):
+            positions = (await run_blocking(client.get_all_positions)) or []
+        target = (product or "").replace("-PERP", "").upper()
+        selected = None
+        for p in positions:
+            pname = str(p.get("product_name", "")).replace("-PERP", "").upper()
+            if pname == target:
+                selected = p
+                break
+        if not selected:
+            await query.edit_message_text(
+                f"⚠️ No open {escape_md(target)} position found\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=positions_kb(positions),
+            )
+            return
+
+        current_price = 0.0
+        try:
+            prices = await run_blocking(client.get_all_market_prices)
+            if prices and target in prices:
+                current_price = float(prices[target].get("mid") or 0)
+        except Exception:
+            current_price = 0.0
+        if current_price <= 0:
+            try:
+                pid = get_product_id(target)
+                if pid is not None:
+                    mp = await run_blocking(client.get_market_price, pid)
+                    current_price = float(mp.get("mid") or 0)
+            except Exception:
+                current_price = 0.0
+
+        msg = fmt_position_pnl_panel(selected, current_price)
+        try:
+            await query.edit_message_text(
+                msg,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=position_manage_kb(target),
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
+            raise
 
     if action == "view":
         client = get_user_readonly_client(telegram_id)
@@ -704,6 +798,62 @@ async def _handle_positions(query, data, telegram_id, context):
         from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
         await authorize_or_prompt_passphrase(query, context, telegram_id, {"type": "close_position", "product": product})
 
+    elif action == "manage" and len(parts) >= 3:
+        await _render_position_panel(parts[2])
+
+    elif action == "refresh" and len(parts) >= 3:
+        await _render_position_panel(parts[2])
+
+    elif action == "close_market" and len(parts) >= 3:
+        product = parts[2]
+        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+        await authorize_or_prompt_passphrase(
+            query, context, telegram_id, {"type": "close_position", "product": product}
+        )
+
+    elif action == "close_limit" and len(parts) >= 3:
+        product = parts[2].replace("-PERP", "").upper()
+        client = get_user_readonly_client(telegram_id)
+        if not client:
+            await query.edit_message_text(
+                "⚠️ Wallet not initialized\\. Use /start first\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
+            return
+        positions = (await run_blocking(client.get_all_positions)) or []
+        selected = None
+        for p in positions:
+            pname = str(p.get("product_name", "")).replace("-PERP", "").upper()
+            if pname == product:
+                selected = p
+                break
+        if not selected:
+            await query.edit_message_text(
+                f"⚠️ No open {escape_md(product)} position found\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=positions_kb(positions),
+            )
+            return
+        size = abs(float(selected.get("amount", 0) or 0))
+        close_action = "limit_short" if str(selected.get("side", "LONG")).upper() == "LONG" else "limit_long"
+        context.user_data["pending_trade"] = {
+            "action": close_action,
+            "product": product,
+            "size": size,
+            "step": "limit_close_price",
+            "close_only": True,
+            "reduce_only": True,
+        }
+        await query.edit_message_text(
+            f"📉 *Limit Close {escape_md(product)}*\n\n"
+            f"Position size: *{escape_md(f'{size:.6f}')}*\n"
+            "Send limit close price only\\.\n"
+            "Example: `67250\\.50`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=position_manage_kb(product),
+        )
+
     elif action == "close_all":
         await query.edit_message_text(
             "⚠️ *Close All Orders*\n\nAre you sure?",
@@ -716,7 +866,11 @@ async def _handle_positions(query, data, telegram_id, context):
         await authorize_or_prompt_passphrase(query, context, telegram_id, {"type": "close_all"})
 
 
-async def _handle_portfolio(query, data, telegram_id):
+async def _handle_portfolio(query, data, telegram_id, context):
+    if data == "portfolio:csv_export":
+        await _handle_portfolio_csv_export(query, telegram_id, context)
+        return
+
     client = get_user_readonly_client(telegram_id)
     if not client:
         await query.edit_message_text(
@@ -729,12 +883,21 @@ async def _handle_portfolio(query, data, telegram_id):
     with timed_metric("cb.portfolio.view"):
         positions = (await run_blocking(client.get_all_positions)) or []
     prices = None
+    balance = None
     try:
         prices = await run_blocking(client.get_all_market_prices)
     except Exception:
         pass
+    try:
+        balance = await run_blocking(client.get_balance)
+    except Exception:
+        pass
     stats = await run_blocking(get_trade_analytics, telegram_id)
-    msg = fmt_portfolio(stats, positions, prices)
+    from src.nadobro.handlers.formatters import _compute_total_equity
+    total_equity, _, _, _ = _compute_total_equity(balance, positions, prices)
+    record_snapshot(telegram_id, total_equity)
+    p1d, p7d = get_1d_7d_changes(telegram_id)
+    msg = fmt_portfolio(stats, positions, prices, balance=balance, equity_1d_pct=p1d, equity_7d_pct=p7d)
     try:
         await query.edit_message_text(
             msg,
@@ -745,6 +908,37 @@ async def _handle_portfolio(query, data, telegram_id):
         if "Message is not modified" in str(e):
             return
         raise
+
+
+async def _handle_portfolio_csv_export(query, telegram_id, context):
+    import io
+    from datetime import datetime
+
+    history = get_history_for_csv(telegram_id)
+    if not history:
+        await query.answer("No equity history yet. View portfolio to start recording.", show_alert=True)
+        return
+    buf = io.StringIO()
+    buf.write("timestamp,datetime_utc,equity_usd\n")
+    for h in history:
+        ts = h.get("ts", 0)
+        eq = h.get("equity", 0)
+        dt = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+        buf.write(f"{ts},{dt},{eq:.2f}\n")
+    csv_bytes = io.BytesIO(buf.getvalue().encode("utf-8"))
+    csv_bytes.seek(0)
+    chat_id = query.message.chat_id
+    try:
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=csv_bytes,
+            filename="equity_history.csv",
+            caption="📥 Equity history export",
+        )
+        await query.answer("CSV sent.", show_alert=False)
+    except Exception as e:
+        logger.warning("Portfolio CSV export failed: %s", e)
+        await query.answer("Could not send CSV. Try again.", show_alert=True)
 
 
 async def _handle_wallet(query, data, telegram_id, context):
@@ -1078,7 +1272,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id not in supported:
             return
         allowed_text = {
-            "reference_mode": {"mid", "ema_fast", "ema_slow"},
+            "reference_mode": {"mid", "ema_fast", "ema_slow", "last_fill"},
             "directional_bias": {"neutral", "long_bias", "short_bias"},
         }
         allowed_vals = allowed_text.get(field, set())
@@ -1107,7 +1301,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
             "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
             "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
-            "dn_perp_leverage",
+            "dn_perp_leverage", "grid_reset_pct",
         )
         if field not in allowed_inputs:
             return
@@ -1134,6 +1328,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "max_spread_bp": "Enter maximum spread in bps \\(example: `20`\\)",
             "vol_sensitivity": "Enter volatility sensitivity \\(example: `0\\.02`\\)",
             "dn_perp_leverage": "Enter DN perp leverage from `1` to `5` \\(example: `3`\\)",
+            "grid_reset_pct": "Enter grid reset % when mid drifts from last fill \\(example: `2`\\)",
         }
         await query.edit_message_text(
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -1188,16 +1383,29 @@ async def _handle_strategy(query, data, context, telegram_id):
         text = fmt_status_overview(st, readiness)
         if st.get("last_error"):
             text += f"\nLast error: {escape_md(str(st.get('last_error')))}"
-        perf_lines = summary_lines(top_n=5)
-        if perf_lines:
-            text += "\n\n*Perf Snapshot*"
-            for line in perf_lines:
-                text += f"\n• {escape_md(line)}"
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=strategy_status_kb(st.get("strategy")),
-        )
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=strategy_status_kb(st.get("strategy")),
+            )
+        except BadRequest as e:
+            # Keep status usable even if a runtime error string carries markdown-unsafe chars.
+            if "Can't parse entities" not in str(e):
+                raise
+            logger.warning("Status markdown parse failed, falling back to plain text: %s", e)
+            cleaned = text.replace("\\", "")
+            try:
+                await query.edit_message_text(
+                    cleaned,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=strategy_status_kb(st.get("strategy")),
+                )
+            except BadRequest:
+                await query.edit_message_text(
+                    cleaned,
+                    reply_markup=strategy_status_kb(st.get("strategy")),
+                )
     elif action == "funding":
         strategy_target = (parts[2] if len(parts) > 2 else "dn").lower()
         st = get_user_bot_status(telegram_id)
@@ -1272,9 +1480,13 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
     if strategy == "grid":
         min_range = f"{float(conf.get('min_range_pct', 1.0)):.2f}%"
         max_range = f"{float(conf.get('max_range_pct', 1.0)):.2f}%"
+        ref_mode = str(conf.get("reference_mode", "last_fill")).upper()
+        bias = str(conf.get("directional_bias", "neutral")).upper()
+        reset_pct = float(conf.get("grid_reset_pct", 2.0))
         extra = (
             f"Grid Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
-            f"Range: *{escape_md(min_range)} \\- {escape_md(max_range)}*\n\n"
+            f"Range: *{escape_md(min_range)} \\- {escape_md(max_range)}*\n"
+            f"Ref: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias)}* \\| Reset: *{escape_md(f'{reset_pct:.2f}%')}*\n\n"
         )
     elif strategy == "mm":
         threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
@@ -1364,8 +1576,23 @@ def _strategy_config_kb(strategy: str):
                 InlineKeyboardButton("Range 1%/2%", callback_data=f"strategy:set:{strategy}:max_range_pct:2"),
             ],
             [
+                InlineKeyboardButton("Ref Last Fill", callback_data=f"strategy:set_text:{strategy}:reference_mode:last_fill"),
+                InlineKeyboardButton("Ref MID", callback_data=f"strategy:set_text:{strategy}:reference_mode:mid"),
+            ],
+            [
+                InlineKeyboardButton("Bias Neutral", callback_data=f"strategy:set_text:{strategy}:directional_bias:neutral"),
+                InlineKeyboardButton("Bias Long", callback_data=f"strategy:set_text:{strategy}:directional_bias:long_bias"),
+                InlineKeyboardButton("Bias Short", callback_data=f"strategy:set_text:{strategy}:directional_bias:short_bias"),
+            ],
+            [
+                InlineKeyboardButton("Reset 1.5%", callback_data=f"strategy:set:{strategy}:grid_reset_pct:1.5"),
+                InlineKeyboardButton("Reset 2%", callback_data=f"strategy:set:{strategy}:grid_reset_pct:2"),
+                InlineKeyboardButton("Reset 3%", callback_data=f"strategy:set:{strategy}:grid_reset_pct:3"),
+            ],
+            [
                 InlineKeyboardButton("Custom Levels", callback_data=f"strategy:input:{strategy}:levels"),
                 InlineKeyboardButton("Custom Range", callback_data=f"strategy:input:{strategy}:max_range_pct"),
+                InlineKeyboardButton("Custom Reset %", callback_data=f"strategy:input:{strategy}:grid_reset_pct"),
             ],
         ])
     if strategy == "mm":
@@ -1387,6 +1614,7 @@ def _strategy_config_kb(strategy: str):
                 InlineKeyboardButton("Ref MID", callback_data=f"strategy:set_text:{strategy}:reference_mode:mid"),
                 InlineKeyboardButton("Ref EMA Fast", callback_data=f"strategy:set_text:{strategy}:reference_mode:ema_fast"),
                 InlineKeyboardButton("Ref EMA Slow", callback_data=f"strategy:set_text:{strategy}:reference_mode:ema_slow"),
+                InlineKeyboardButton("Ref Last Fill", callback_data=f"strategy:set_text:{strategy}:reference_mode:last_fill"),
             ],
             [
                 InlineKeyboardButton("Bias Neutral", callback_data=f"strategy:set_text:{strategy}:directional_bias:neutral"),
@@ -1502,6 +1730,17 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
 
     margin_flag = "✅" if available_margin >= required_margin else "⚠️"
     mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
+
+    duration_hours = interval_seconds / 3600.0
+    pre_trade_block = ""
+    try:
+        from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
+        from src.nadobro.handlers.formatters import fmt_pre_trade_analytics
+        ana = get_pre_trade_analytics(product, cycle_notional, duration_hours, network, client)
+        if ana.get("data_ok"):
+            pre_trade_block = fmt_pre_trade_analytics(ana) + "\n"
+    except Exception:
+        pass
     funding_str = f"{funding_rate:.6f}"
     net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
     status_dot = "🟢" if est_net >= 0 else "🟠"
@@ -1519,9 +1758,13 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     if strategy_id == "grid":
         min_range = f"{float(conf.get('min_range_pct', 1.0)):.2f}%"
         max_range = f"{float(conf.get('max_range_pct', 1.0)):.2f}%"
+        ref_mode = str(conf.get("reference_mode", "last_fill")).upper()
+        bias = str(conf.get("directional_bias", "neutral")).upper()
+        reset_pct = float(conf.get("grid_reset_pct", 2.0))
         extra_cfg = (
             f"\nGrid Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
             f"Range: *{escape_md(min_range)} \\- {escape_md(max_range)}*"
+            f"\nRef: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias)}* \\| Reset: *{escape_md(f'{reset_pct:.2f}%')}*"
         )
     elif strategy_id == "mm":
         threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
@@ -1579,7 +1822,8 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"📈 *Analytics*\n"
         f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *{escape_md(f'${required_margin:,.2f}')}* required\n"
         f"Est\\. Daily Volume: *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
-        f"Max Loss: *{escape_md(f'${max_loss:,.2f}')}* \\| Net Estimate: *{escape_md(net_str)}*\n\n"
+        f"Max Loss: *{escape_md(f'${max_loss:,.2f}')}* \\| Net Estimate: *{escape_md(net_str)}*\n"
+        f"{pre_trade_block}\n"
         "Edit parameters or launch below\\."
     )
 

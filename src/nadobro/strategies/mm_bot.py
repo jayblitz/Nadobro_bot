@@ -7,7 +7,7 @@ Cancels stale orders that drifted beyond threshold from current mid.
 import logging
 import time
 from src.nadobro.config import get_product_id
-from src.nadobro.services.trade_service import execute_limit_order
+from src.nadobro.services.trade_service import execute_limit_order, get_last_fill_price
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,10 @@ def _compute_reference_price(state: dict, mid: float, mode: str, ema_fast_alpha:
         ema = (ema_slow_alpha * mid) + ((1.0 - ema_slow_alpha) * prev)
         state["mm_ref_ema_slow"] = ema
         return ema
+    if mode in ("last_fill", "last_executed"):
+        # Use last executed (fill) price when available; fallback to mid. Updated when fills detected.
+        last = float(state.get("mm_last_fill_price") or 0)
+        return last if last > 0 else mid
     return mid
 
 
@@ -258,6 +262,32 @@ def run_cycle(
     reference_price = _compute_reference_price(state, mid, reference_mode, ema_fast_alpha, ema_slow_alpha)
     reference_price = reference_price if reference_price > 0 else mid
 
+    # Grid Reset: when using last_fill reference, re-anchor to mid if market has drifted beyond threshold
+    if strategy == "grid" and reference_mode in ("last_fill", "last_executed"):
+        last_fill = float(state.get("mm_last_fill_price") or 0)
+        grid_reset_pct = max(0.5, float(state.get("grid_reset_pct") or 2.0))
+        if last_fill > 0:
+            drift_pct = abs(mid - last_fill) / last_fill * 100.0
+            if drift_pct >= grid_reset_pct:
+                cancelled = 0
+                if hasattr(client, "cancel_all_orders"):
+                    res = client.cancel_all_orders(product_id)
+                    cancelled = res.get("cancelled", 0)
+                state["mm_last_fill_price"] = round(mid, 8)
+                obts = state.get("mm_order_birth_ts")
+                if isinstance(obts, dict):
+                    obts.clear()
+                logger.info("Grid reset: mid drifted %.2f%% from last fill, re-anchored to %.2f (cancelled %d orders)",
+                            drift_pct, mid, cancelled)
+                return {
+                    "success": True,
+                    "orders_placed": 0,
+                    "orders_cancelled": cancelled,
+                    "reason": f"grid reset (drift {drift_pct:.2f}% >= {grid_reset_pct}%)",
+                    "spread_bp": dynamic_spread_bp,
+                    "reference_price": mid,
+                }
+
     if threshold_bp > 0 and strategy == "mm":
         reference = float(state.get("reference_price") or mid)
         moved_bp = abs(mid - reference) / max(reference, 1e-9) * 10000.0
@@ -432,6 +462,12 @@ def run_cycle(
     final_open_orders = client.get_open_orders(product_id)
     final_open_count = len(final_open_orders or [])
     est_fills = max(0, (len(open_orders) + orders_placed) - final_open_count)
+    if est_fills > 0:
+        last_fill = get_last_fill_price(client, product_id)
+        if last_fill > 0:
+            state["mm_last_fill_price"] = round(last_fill, 8)
+        else:
+            state["mm_last_fill_price"] = round(mid, 8)
     maker_fill_ratio = est_fills / max(1, est_fills + orders_placed)
     cancellation_ratio = orders_cancelled / max(1, orders_cancelled + est_fills)
     avg_quote_distance_bp = sum(quote_distances_bp) / len(quote_distances_bp) if quote_distances_bp else 0.0

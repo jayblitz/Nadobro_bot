@@ -118,8 +118,9 @@ def update_trade(trade_id: int, data: dict):
 
 
 def get_last_trade_for_rate_limit(telegram_id: int) -> Optional[dict]:
+    """Last trade attempt (filled or failed) for rate limiting. Prevents DoS via repeated invalid attempts."""
     return query_one(
-        "SELECT created_at FROM trades WHERE user_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
+        "SELECT created_at FROM trades WHERE user_id = %s AND status IN ('filled','failed') ORDER BY created_at DESC LIMIT 1",
         (telegram_id,),
     )
 

@@ -1,7 +1,7 @@
 import logging
 import re
 from typing import Optional
-from src.nadobro.config import get_product_name, PRODUCTS
+from src.nadobro.config import get_product_name, get_product_base_symbol, PRODUCTS
 from src.nadobro.i18n import get_active_language, localize_text
 
 logger = logging.getLogger(__name__)
@@ -123,6 +123,35 @@ def fmt_positions(positions, prices=None):
     return "\n".join(lines)
 
 
+def fmt_position_pnl_panel(position: dict, current_price: float) -> str:
+    side = str(position.get("side", "LONG")).upper()
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    amount = abs(float(position.get("amount", 0) or 0))
+    pname = str(position.get("product_name", "BTC-PERP"))
+    base = pname.replace("-PERP", "")
+    entry = float(position.get("price", 0) or 0)
+    mark = float(current_price or 0)
+    value = amount * mark if mark > 0 else 0.0
+    lev = float(position.get("leverage", 1) or 1)
+    pnl = _calc_position_pnl(position, mark) if mark > 0 else None
+    pnl_str = f"+${pnl:,.2f}" if pnl is not None and pnl >= 0 else f"-${abs(pnl):,.2f}" if pnl is not None else "N/A"
+    pnl_emoji = "🟢" if pnl is None or pnl >= 0 else "🔴"
+    entry_str = f"${fmt_price(entry, base)}" if entry > 0 else "N/A"
+    mark_str = f"${fmt_price(mark, base)}" if mark > 0 else "N/A"
+    return "\n".join([
+        "💼 *Position PnL Monitor*",
+        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        "",
+        f"{escape_md(base)} {side_emoji} *{escape_md(side)}*",
+        f"├ Size: *{escape_md(f'{amount:.6f}')}*",
+        f"├ Value: *{escape_md(f'${value:,.2f}')}*",
+        f"├ Entry: *{escape_md(entry_str)}*",
+        f"├ Mark: *{escape_md(mark_str)}*",
+        f"├ Leverage: *{escape_md(f'{lev:g}x')}*",
+        f"└ PnL: {pnl_emoji} *{escape_md(pnl_str)}*",
+    ])
+
+
 def fmt_balance(balance_data, wallet_addr=None):
     lines = [
         "💰 *Wallet Vault Balance*",
@@ -160,7 +189,45 @@ def fmt_balance(balance_data, wallet_addr=None):
     return "\n".join(lines)
 
 
-def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None):
+def fmt_pre_trade_analytics(analytics: dict) -> str:
+    """Format Participation Rate, Market Volatility, Market Volume (Tread.fi-style)."""
+    if not analytics or not analytics.get("data_ok"):
+        return ""
+    lines = [
+        "",
+        "*Pre\\-Trade Analytics*",
+        f"Participation Rate: {escape_md(_fmt_pct(analytics.get('participation_rate_pct')))}",
+        f"Market Volatility \\(1σ\\): {escape_md(_fmt_vol(analytics))}",
+        f"Market Volume: {escape_md(_fmt_vol_ratio(analytics))}",
+    ]
+    return "\n".join(lines)
+
+
+def _fmt_pct(v) -> str:
+    if v is None:
+        return "N/A"
+    return f"{v:.2f}%"
+
+
+def _fmt_vol(a: dict) -> str:
+    proj = a.get("market_volatility_projected_pct")
+    if proj is not None and proj > 0:
+        return f"±{proj:.2f}%"
+    h = a.get("market_volatility_1s_pct")
+    if h is not None and h > 0:
+        return f"±{h:.2f}%"
+    return "N/A"
+
+
+def _fmt_vol_ratio(a: dict) -> str:
+    r = a.get("market_volume_ratio")
+    v24 = a.get("market_24h_volume_usd")
+    if r is not None:
+        return f"{r:.2f}x vs typical \\(24h: ${v24:,.0f}\\)" if v24 else f"{r:.2f}x vs typical"
+    return "N/A"
+
+
+def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None, analytics=None):
     action_upper = action.upper()
     emoji = "🟢" if "LONG" in action_upper else "🔴"
 
@@ -181,6 +248,9 @@ def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None)
     if est_margin is not None:
         lines.append(f"💰 *Est\\. Margin:* {escape_md(f'${est_margin:,.2f}')}")
 
+    if analytics:
+        lines.append(fmt_pre_trade_analytics(analytics))
+
     lines.append("")
     lines.append("Confirm to execute this trade\\.")
 
@@ -192,8 +262,10 @@ def fmt_trade_result(result):
         r_price = result.get("price", 0)
         r_product = result.get("product", "BTC")
         price_str = "$" + fmt_price(r_price, r_product)
+        order_type = result.get("type", "MARKET")
+        is_limit_pending = order_type == "LIMIT" and not bool(result.get("filled", True))
         lines = [
-            "✅ *Trade Executed\\!*",
+            "✅ *Limit Order Placed\\!*" if is_limit_pending else "✅ *Trade Executed\\!*",
             escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             "",
             f"📌 *Side:* {escape_md(result.get('side', '?'))}",
@@ -213,9 +285,10 @@ def fmt_trade_result(result):
                 lines.append(f"🛡 *Stop Loss:* {escape_md(str(result.get('sl_price')))}")
             else:
                 lines.append(f"⚠️ *Stop Loss:* {escape_md(str(result.get('sl_error', 'Failed to arm SL rule.')))}")
-        order_type = result.get("type", "MARKET")
         if order_type != "MARKET":
             lines.insert(3, f"📋 *Type:* {escape_md(order_type)}")
+        if is_limit_pending:
+            lines.append("⏳ *Status:* OPEN")
         return "\n".join(lines)
     else:
         error = result.get("error", "Unknown error")
@@ -324,22 +397,186 @@ def _compute_exchange_stats(positions, prices):
     return unrealized_pnl, position_value
 
 
-def fmt_portfolio(stats, positions, prices=None):
+def _compute_directional_bias(positions, prices):
+    """Returns (bias_label, long_value, short_value, ls_ratio_str)."""
+    long_value = 0.0
+    short_value = 0.0
+    for p in (positions or []):
+        side = str(p.get("side", "LONG")).upper()
+        amount = abs(float(p.get("amount", 0) or 0))
+        pname = p.get("product_name", "???")
+        base = pname.replace("-PERP", "")
+        current = 0.0
+        if prices and base in prices:
+            try:
+                current = float((prices.get(base) or {}).get("mid", 0) or 0)
+            except Exception:
+                current = 0.0
+        if not current:
+            continue
+        val = amount * current
+        if side == "LONG":
+            long_value += val
+        else:
+            short_value += val
+
+    total = long_value + short_value
+    if total <= 0:
+        return "Delta Neutral", 0.0, 0.0, "1.00"
+    diff_ratio = abs(long_value - short_value) / total
+    if diff_ratio < 0.1:
+        bias = "Delta Neutral"
+    elif long_value > short_value:
+        bias = "Long"
+    else:
+        bias = "Short"
+    if short_value > 0:
+        ls_ratio = long_value / short_value
+        ls_str = f"{ls_ratio:.2f}"
+    elif long_value > 0:
+        ls_str = "∞"
+    else:
+        ls_str = "1.00"
+    return bias, long_value, short_value, ls_str
+
+
+def _compute_liquidation_metrics(positions, total_equity, prices):
+    """Compute estimated liquidation-related metrics. Full health from API not yet available."""
+    if not positions:
+        return {"margin_used": 0.0, "avg_leverage": 0.0}
+    margin_used = 0.0
+    total_notional = 0.0
+    for p in positions:
+        amount = abs(float(p.get("amount", 0) or 0))
+        pname = p.get("product_name", "???")
+        base = pname.replace("-PERP", "")
+        current = 0.0
+        if prices and base in prices:
+            try:
+                current = float((prices.get(base) or {}).get("mid", 0) or 0)
+            except Exception:
+                current = 0.0
+        if current > 0:
+            notional = amount * current
+            lev = float(p.get("leverage", 1) or 1)
+            lev = max(1.0, lev)
+            margin_used += notional / lev
+            total_notional += notional
+    avg_lev = total_notional / margin_used if margin_used > 0 else 0.0
+    return {"margin_used": margin_used, "avg_leverage": avg_lev, "total_notional": total_notional}
+
+
+def _compute_asset_breakdown(balance, positions, prices):
+    """Returns dict with perp_usd, spot_usd, cash_usd."""
+    cash_usd = 0.0
+    spot_usd = 0.0
+    perp_usd = 0.0
+    if balance and balance.get("exists"):
+        balances = balance.get("balances", {}) or {}
+        for pid_raw, amount in balances.items():
+            try:
+                pid = int(pid_raw)
+            except (TypeError, ValueError):
+                continue
+            amt = float(amount or 0)
+            if pid == 0:
+                cash_usd += amt
+            elif amt > 0:
+                base = get_product_base_symbol(pid)
+                if base and prices and base in prices:
+                    try:
+                        mid = float((prices.get(base) or {}).get("mid", 0) or 0)
+                        spot_usd += amt * mid
+                    except Exception:
+                        pass
+    for p in (positions or []):
+        amount = abs(float(p.get("amount", 0) or 0))
+        pname = p.get("product_name", "???")
+        base = pname.replace("-PERP", "")
+        current = 0.0
+        if prices and base in prices:
+            try:
+                current = float((prices.get(base) or {}).get("mid", 0) or 0)
+            except Exception:
+                current = 0.0
+        if current:
+            perp_usd += amount * current
+    return {"cash": cash_usd, "spot": spot_usd, "perp": perp_usd}
+
+
+def _compute_total_equity(balance, positions, prices):
+    """Total equity = cash (USDT0) + spot value + unrealized perp PnL."""
+    cash = 0.0
+    spot_value = 0.0
+    if balance and balance.get("exists"):
+        balances = balance.get("balances", {}) or {}
+        for pid_raw, amount in balances.items():
+            try:
+                pid = int(pid_raw)
+            except (TypeError, ValueError):
+                continue
+            amt = float(amount or 0)
+            if pid == 0:
+                cash += amt
+            elif amt > 0:
+                base = get_product_base_symbol(pid)
+                if base and prices and base in prices:
+                    try:
+                        mid = float((prices.get(base) or {}).get("mid", 0) or 0)
+                        spot_value += amt * mid
+                    except Exception:
+                        pass
+    unrealized_pnl, _ = _compute_exchange_stats(positions, prices)
+    return cash + spot_value + unrealized_pnl, cash, spot_value, unrealized_pnl
+
+
+def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=None, equity_7d_pct=None):
     total_trades = int(stats.get("total_trades", 0) or 0)
 
     unrealized_pnl, position_value = _compute_exchange_stats(positions, prices)
+    total_equity, cash, spot_value, _ = _compute_total_equity(balance, positions, prices)
+    bias_label, long_val, short_val, ls_ratio = _compute_directional_bias(positions, prices)
+    breakdown = _compute_asset_breakdown(balance, positions, prices)
+    liq = _compute_liquidation_metrics(positions, total_equity, prices)
 
     upnl_emoji = "🟢" if unrealized_pnl >= 0 else "🔴"
     upnl_str = f"+${unrealized_pnl:,.2f}" if unrealized_pnl >= 0 else f"-${abs(unrealized_pnl):,.2f}"
+    roi_pct = (unrealized_pnl / position_value * 100) if position_value > 0 else None
+    roi_str = f"{roi_pct:+.2f}%" if roi_pct is not None else "N/A"
+
+    eq_change = ""
+    if equity_1d_pct is not None or equity_7d_pct is not None:
+        parts = []
+        if equity_1d_pct is not None:
+            parts.append(f"1d: {escape_md(f'{equity_1d_pct:+.2f}%')}")
+        if equity_7d_pct is not None:
+            parts.append(f"7d: {escape_md(f'{equity_7d_pct:+.2f}%')}")
+        if parts:
+            eq_change = f" \\({\" \\| \".join(parts)}\\)"
 
     lines = [
         "📁 *Portfolio Deck*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
+        f"💰 *Total Equity:* {escape_md(f'${total_equity:,.2f}')}{eq_change}",
+        f"📊 *Directional Bias:* {escape_md(bias_label)} \\(L/S: {escape_md(ls_ratio)}\\)",
+        "",
         f"📌 *Open Positions:* {escape_md(str(len(positions or [])))}",
         f"💎 *Position Value:* {escape_md(f'${position_value:,.2f}')}",
-        f"{upnl_emoji} *Unrealized PnL:* {escape_md(upnl_str)}",
+        f"{upnl_emoji} *Unrealized PnL:* {escape_md(upnl_str)} \\(ROI: {escape_md(roi_str)}\\)",
+        "",
+        "*Asset Breakdown*",
+        f"📈 Perpetual Futures: {escape_md(f'${breakdown[\"perp\"]:,.2f}')}",
+        f"📉 Spot: {escape_md(f'${breakdown[\"spot\"]:,.2f}')}",
+        f"💵 Cash \\(USDT0\\): {escape_md(f'${breakdown[\"cash\"]:,.2f}')}",
     ]
+    if liq.get("margin_used", 0) > 0:
+        lines.extend([
+            "",
+            "*Liquidation Risk \\(est\\.\\)*",
+            f"Margin Used: {escape_md(f'${liq[\"margin_used\"]:,.2f}')} \\| "
+            f"Avg Leverage: {escape_md(f'{liq[\"avg_leverage\"]:.1f}x')}",
+        ])
 
     if total_trades > 0:
         total_volume = float(stats.get("total_volume", 0) or 0)
@@ -560,6 +797,38 @@ def fmt_points_dashboard(points: dict) -> str:
     if not points or not points.get("ok"):
         err = (points or {}).get("error", "Could not load Nado points.")
         return _loc(f"🏆 *Nado Points*\n\n{escape_md(err)}")
+
+    if str(points.get("points_source", "")).lower() == "lowiqpts_bridge":
+        volume = float(points.get("volume_usd", 0) or 0)
+        score = float(points.get("points", 0) or 0)
+        cpp = float(points.get("cost_per_point", 0) or 0)
+        if bool(points.get("no_activity")):
+            return _loc(
+                "🏆 *Nado Points Dashboard*\n\n"
+                f"Window: *{escape_md(str(points.get('window_label', 'Last 7 Days')))}*\n"
+                "No mainnet points activity found yet\\.\n\n"
+                "If you've only traded on testnet, this is expected\\."
+            )
+        if cpp <= 0:
+            mood = "⚪"
+            mascot = "🤖 Awaiting full bridge stats"
+        elif cpp < 8:
+            mood = "🟢"
+            mascot = "😎 Super happy robot"
+        elif cpp <= 15:
+            mood = "🟡"
+            mascot = "😊 Confident robot"
+        else:
+            mood = "🔴"
+            mascot = "😤 We can improve this legend"
+        return _loc(
+            "🏆 *Nado Points Dashboard*\n\n"
+            f"Window: *{escape_md(str(points.get('window_label', 'Last 7 Days')))}*\n"
+            f"Volume: *{escape_md(f'${volume:,.2f}')}*\n"
+            f"Points: *{escape_md(f'{score:,.2f}')}*\n"
+            f"Cost/Point: *{escape_md(f'${cpp:,.2f}')}* {mood}\n\n"
+            f"{escape_md(mascot)}"
+        )
 
     points_label = " \\(estimated\\)" if points.get("points_estimated") else ""
     points_source = points.get("points_source", "estimated")

@@ -274,6 +274,14 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
 def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[bool, str]:
     stopped = 0
     close_errors: list[str] = []
+    # Cancel any in-memory tasks for this user up front, even if persisted
+    # state is stale or already marked not running.
+    task_prefix = f"{telegram_id}:"
+    for tk in [k for k in _tasks.keys() if k.startswith(task_prefix)]:
+        task = _tasks.pop(tk, None)
+        if task:
+            task.cancel()
+
     rows = query_all(
         "SELECT key, value FROM bot_state WHERE key LIKE %s",
         (f"{STATE_PREFIX}{telegram_id}:%",),
@@ -306,6 +314,10 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             stopped += 1
         except Exception:
             continue
+
+    # Ensure no stale passphrase session can accidentally resume privileged actions.
+    clear_all_user_passphrases(telegram_id)
+
     if stopped > 0:
         if cancel_orders and close_errors:
             return True, f"Stopped {stopped} running strategy loop(s). Some close-all actions failed: {'; '.join(close_errors)}"
@@ -611,9 +623,25 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
     sl_pct = float(state.get("sl_pct") or 0.0)
     tp_pct = float(state.get("tp_pct") or 0.0)
-    if sl_pct > 0 and move_pct >= sl_pct:
+
+    # PnL-based Stop Loss: Max Loss = (SL % / 100) × Margin. Trigger when unrealized loss exceeds.
+    sl_triggered = False
+    sl_reason = ""
+    if sl_pct > 0:
+        positions = await run_blocking(client.get_all_positions) or []
+        product_positions = [p for p in positions if int(p.get("product_id", -1)) == product_id]
+        from src.nadobro.handlers.formatters import _compute_exchange_stats
+        prices_map = {product: {"mid": mid}}
+        unrealized_pnl, _ = _compute_exchange_stats(product_positions, prices_map)
+        margin = float(state.get("notional_usd") or 100.0)
+        max_loss = margin * (sl_pct / 100.0)
+        if unrealized_pnl < -max_loss:
+            sl_triggered = True
+            sl_reason = f"PnL SL: ${abs(unrealized_pnl):,.2f} loss >= ${max_loss:,.2f} max"
+
+    if sl_triggered:
         state["running"] = False
-        state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
+        state["last_error"] = sl_reason
         _save_state(telegram_id, network, state)
         if str(strategy).lower() == "dn":
             from src.nadobro.strategies import delta_neutral
@@ -628,7 +656,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         if close_res.get("success"):
             await _notify(
                 telegram_id,
-                f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}) - SL hit ({move_pct:.2f}%).",
+                f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}) - SL hit ({sl_reason}).",
             )
         else:
             logger.warning(
@@ -692,6 +720,18 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         await _notify(telegram_id, f"✅ {strategy.upper()} completed on {product}-PERP ({network}).")
         return True, None
+
+    if (
+        str(strategy).lower() == "dn"
+        and str(result.get("action") or "") == "wait_unfavorable"
+        and int(state.get("runs") or 0) == 0
+    ):
+        fr = float(result.get("funding_rate") or 0.0)
+        await _notify(
+            telegram_id,
+            f"ℹ️ DN is running but waiting for favorable funding (current rate: {fr:.8f}). "
+            "No hedge orders are placed until funding improves.",
+        )
 
     state["last_run_ts"] = time.time()
     state["runs"] = int(state.get("runs") or 0) + 1

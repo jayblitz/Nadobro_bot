@@ -45,8 +45,7 @@ from src.nadobro.handlers.intent_handlers import (
 from src.nadobro.handlers.intent_parser import parse_interaction_intent
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow
-from src.nadobro.services.points_service import get_points_dashboard
-from src.nadobro.handlers.points_mascot import mascot_path_for_cost, mascot_caption_for_cost
+from src.nadobro.services.points_service import get_points_dashboard, request_points_refresh
 from src.nadobro.i18n import (
     get_user_language,
     language_context,
@@ -168,6 +167,10 @@ def _get_session_passphrase(context: CallbackContext, telegram_id: int) -> str |
 
 async def _execute_authorized_action(message, context, telegram_id: int, action_data: dict, passphrase: str) -> tuple[bool, str]:
     action_type = action_data.get("type")
+    pnl_cta_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💼 Open PnL Monitor", callback_data="pos:view")],
+        [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+    ])
 
     if action_type == "execute_trade":
         payload = action_data.get("payload", {})
@@ -176,7 +179,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         await message.reply_text(
             fmt_trade_result(result),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
+            reply_markup=pnl_cta_kb,
         )
         return bool(result.get("success")), str(result.get("error", ""))
 
@@ -207,7 +210,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         await message.reply_text(
             fmt_trade_result(result),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
+            reply_markup=pnl_cta_kb,
         )
         return bool(result.get("success")), str(result.get("error", ""))
 
@@ -224,7 +227,10 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             is_long = action == "limit_long"
             result = await run_blocking(
                 execute_limit_order, telegram_id, product, size, price,
-                is_long=is_long, leverage=leverage, passphrase=passphrase
+                is_long=is_long,
+                leverage=leverage,
+                passphrase=passphrase,
+                reduce_only=bool(pending.get("reduce_only") or pending.get("close_only")),
             )
         else:
             is_long = action == "long"
@@ -246,7 +252,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             msg = f"✅ Closed {escape_md(str(result.get('cancelled', 0)))} {escape_md(result.get('product', product))} position size\\."
         else:
             msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
-        await message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
+        await message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=pnl_cta_kb)
         return bool(result.get("success")), str(result.get("error", ""))
 
     if action_type == "close_all":
@@ -256,7 +262,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             msg = f"✅ Closed total size {escape_md(str(result.get('cancelled', 0)))} across {escape_md(products)}\\."
         else:
             msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
-        await message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
+        await message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=pnl_cta_kb)
         return bool(result.get("success")), str(result.get("error", ""))
 
     if action_type == "trade_card":
@@ -285,7 +291,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         await message.reply_text(
             f"{result_msg}\n\nUse the menu for your next action\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
+            reply_markup=pnl_cta_kb,
         )
         return bool(result.get("success")), str(result.get("error", ""))
 
@@ -500,7 +506,13 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "nav:main":
         terminate_active_processes(context, telegram_id=telegram_id)
         if is_trade_card_mode_enabled():
-            await open_home_card_view_from_message(update, context, telegram_id, "nav:main")
+            await open_home_card_view_from_message(
+                update,
+                context,
+                telegram_id,
+                "nav:main",
+                force_new=True,
+            )
             return
         await update.message.reply_text(
             "Use /start to open the dashboard\\.",
@@ -513,17 +525,24 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         "pos:view",
         "portfolio:view",
         "wallet:view",
-        "points:view:current",
+        "points:view:week",
         "nav:strategy_hub",
         "alert:menu",
         "settings:view",
         "nav:mode",
+        "points:view:current",
         "points:view:all",
         "points:view:epoch",
         "nav:help",
     ):
         target = "home:mode" if callback_data == "nav:mode" else callback_data
-        await open_home_card_view_from_message(update, context, telegram_id, target)
+        await open_home_card_view_from_message(
+            update,
+            context,
+            telegram_id,
+            target,
+            force_new=True,
+        )
         return
 
     if callback_data == "nav:trade":
@@ -633,12 +652,22 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         with timed_metric("msg.portfolio.view"):
             positions = (await run_blocking(client.get_all_positions)) or []
         prices = None
+        balance = None
         try:
             prices = await run_blocking(client.get_all_market_prices)
         except Exception:
             pass
+        try:
+            balance = await run_blocking(client.get_balance)
+        except Exception:
+            pass
         stats = await run_blocking(get_trade_analytics, telegram_id)
-        msg = fmt_portfolio(stats, positions, prices)
+        from src.nadobro.handlers.formatters import _compute_total_equity
+        from src.nadobro.services.equity_snapshots import record_snapshot, get_1d_7d_changes
+        total_equity, _, _, _ = _compute_total_equity(balance, positions, prices)
+        record_snapshot(telegram_id, total_equity)
+        p1d, p7d = get_1d_7d_changes(telegram_id)
+        msg = fmt_portfolio(stats, positions, prices, balance=balance, equity_1d_pct=p1d, equity_7d_pct=p7d)
         await update.message.reply_text(
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -667,24 +696,33 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data.startswith("points:view:"):
-        scope = (callback_data.split(":")[2] if len(callback_data.split(":")) > 2 else "current").lower()
+        scope_raw = (callback_data.split(":")[2] if len(callback_data.split(":")) > 2 else "week").lower()
+        scope = "week" if scope_raw in ("week", "current", "all", "epoch") else "week"
         points = await run_blocking(get_points_dashboard, telegram_id, scope)
+        should_refresh = callback_data.startswith("points:refresh:") or not points.get("ok")
+        if should_refresh:
+            bridge_result = await request_points_refresh(context, telegram_id, update.effective_chat.id)
+            if not bridge_result.get("ok"):
+                await update.message.reply_text(
+                    escape_md(bridge_result.get("error", "Could not fetch points right now.")),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=points_scope_kb("week"),
+                )
+                return
+            if points.get("ok"):
+                text = (
+                    f"{fmt_points_dashboard(points)}\n\n"
+                    "🔄 Refreshing from bridge\\. Updated card will be posted below shortly\\."
+                )
+            else:
+                text = "🔄 Fetching your Nado points from the last week\\. Updated card will appear below\\."
+        else:
+            text = fmt_points_dashboard(points)
         await update.message.reply_text(
-            fmt_points_dashboard(points),
+            text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=points_scope_kb(scope),
+            reply_markup=points_scope_kb("week"),
         )
-        if points.get("ok"):
-            mascot_path = mascot_path_for_cost(float(points.get("cost_per_point", 0) or 0))
-            if mascot_path:
-                try:
-                    with open(mascot_path, "rb") as img:
-                        await update.message.reply_photo(
-                            photo=img,
-                            caption=mascot_caption_for_cost(float(points.get("cost_per_point", 0) or 0)),
-                        )
-                except Exception:
-                    logger.warning("Failed to send points mascot image", exc_info=True)
         return
 
     if callback_data == "nav:help":
@@ -961,6 +999,20 @@ async def _go_back(update, context, flow, state, telegram_id):
         )
 
 
+async def _fetch_pre_trade_analytics(telegram_id, product, size, price, is_limit_order):
+    """Fetch pre-trade analytics; returns None on any failure."""
+    try:
+        from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
+        user = get_user(telegram_id)
+        network = getattr(user.network_mode, "value", "testnet") if user else "testnet"
+        order_notional = size * price if price and price > 0 else 0
+        duration_h = 1.0 if is_limit_order else 0.017
+        client = get_user_readonly_client(telegram_id)
+        return await run_blocking(get_pre_trade_analytics, product, order_notional, duration_h, network, client)
+    except Exception:
+        return None
+
+
 async def _move_to_confirm(update, context, telegram_id, flow):
     product = flow.get("product", "BTC")
     size = flow.get("size", 0)
@@ -994,7 +1046,8 @@ async def _move_to_confirm(update, context, telegram_id, flow):
     flow["est_margin"] = est_margin
     _set_trade_flow(context, flow)
 
-    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
+    analytics = await _fetch_pre_trade_analytics(telegram_id, product, size, price, order_type == "limit")
+    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
     tp_val = flow.get("tp")
     sl_val = flow.get("sl")
     if tp_val or sl_val:
@@ -1228,7 +1281,8 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
         }
 
-        preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
+        analytics = await _fetch_pre_trade_analytics(telegram_id, product, size, price, False)
+        preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
         await update.message.reply_text(
             preview,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -1262,17 +1316,55 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             "leverage": leverage,
             "price": price,
             "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
+            "reduce_only": bool(pending.get("reduce_only", False)),
         }
 
+        analytics = await _fetch_pre_trade_analytics(telegram_id, product, size, price, True)
         preview = fmt_trade_preview(
             action,
             product,
             size,
             price,
             leverage,
+            analytics=analytics,
         )
         await update.message.reply_text(
             preview,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=trade_confirm_kb(),
+        )
+        return True
+
+    if step == "limit_close_price":
+        try:
+            price = float(text.strip())
+        except (TypeError, ValueError):
+            await update.message.reply_text(
+                "⚠️ Enter a valid limit price \\(e\\.g\\. `67250\\.50`\\)\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return True
+
+        action = pending["action"]
+        product = pending["product"]
+        size = float(pending.get("size", 0) or 0)
+        leverage = _get_user_settings(telegram_id, context).get("default_leverage", 3)
+        max_leverage = get_product_max_leverage(product)
+        if leverage > max_leverage:
+            leverage = max_leverage
+
+        context.user_data["pending_trade"] = {
+            "action": action,
+            "product": product,
+            "size": size,
+            "leverage": leverage,
+            "price": price,
+            "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
+        }
+        analytics = await _fetch_pre_trade_analytics(telegram_id, product, size, price, True)
+        preview = fmt_trade_preview(action, product, size, price, leverage, analytics=analytics)
+        await update.message.reply_text(
+            f"{preview}\n\nℹ️ This limit order is prepared as a close action for your open position\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_confirm_kb(),
         )

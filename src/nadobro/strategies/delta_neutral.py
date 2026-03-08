@@ -23,6 +23,11 @@ DN_DEFAULT_CYCLE_SECONDS = 2 * 60 * 60
 DN_ALLOWED_PRODUCTS = {"BTC", "ETH"}
 REQUOTE_MAX_ATTEMPTS = 3
 REQUOTE_WAIT_SECONDS = 1.0
+# Fallback spot product ids used when exchange metadata omits symbol/base fields.
+DN_FALLBACK_SPOT_PRODUCT_IDS = {
+    "BTC": 1,
+    "ETH": 3,
+}
 
 
 def _resolve_spot_product_id(client, state: dict, asset: str) -> int | None:
@@ -62,6 +67,17 @@ def _resolve_spot_product_id(client, state: dict, asset: str) -> int | None:
                 return sid
     except Exception as e:
         logger.warning("Spot product resolution failed for %s: %s", asset, e)
+
+    fallback_sid = DN_FALLBACK_SPOT_PRODUCT_IDS.get(asset)
+    if fallback_sid is not None:
+        state["dn_spot_product_id"] = fallback_sid
+        state["dn_spot_product_asset"] = asset
+        logger.info(
+            "Using fallback %s spot product id=%s for DN (metadata lookup unavailable).",
+            asset,
+            fallback_sid,
+        )
+        return fallback_sid
     return None
 
 

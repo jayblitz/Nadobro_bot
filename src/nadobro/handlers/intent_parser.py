@@ -148,6 +148,12 @@ def parse_interaction_intent(text: str) -> Optional[dict]:
     ):
         return {"kind": "interaction", "action": "open_view", "target": "portfolio:view", "raw": raw}
 
+    if (
+        re.search(r"\b(points?|cost\s*/?\s*per\s*point)\b", text_lower)
+        or (re.search(r"\blast\s+week\b", text_lower) and re.search(r"\b(points?|cost)\b", text_lower))
+    ):
+        return {"kind": "interaction", "action": "open_view", "target": "points:view:week", "raw": raw}
+
     # Position-closing intents.
     if re.search(r"\b(close|exit)\b", text_lower):
         if re.search(r"\b(all|everything)\b", text_lower) and re.search(
@@ -183,7 +189,7 @@ def parse_interaction_intent(text: str) -> Optional[dict]:
         if re.search(r"\b(position|positions|portfolio)\b", text_lower):
             return {"kind": "interaction", "action": "open_view", "target": "pos:view", "raw": raw}
         if re.search(r"\b(markets?|prices?|funding)\b", text_lower):
-            return {"kind": "interaction", "action": "open_view", "target": "points:view:current", "raw": raw}
+            return {"kind": "interaction", "action": "open_view", "target": "points:view:week", "raw": raw}
         if re.search(r"\b(mode|network|testnet|mainnet)\b", text_lower):
             return {"kind": "interaction", "action": "open_view", "target": "nav:mode", "raw": raw}
         if re.search(r"\b(trade|long|short|buy|sell)\b", text_lower):

@@ -13,6 +13,10 @@ _user_cache = {}
 _USER_CACHE_TTL = 10
 
 
+def _normalize_network(network: str | None) -> str:
+    return "mainnet" if str(network or "").strip().lower() == "mainnet" else "testnet"
+
+
 def _cache_user(user: UserRow):
     _user_cache[user.telegram_id] = {"user": user, "ts": time.time()}
 
@@ -74,6 +78,8 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     user = get_user(telegram_id)
     if not user:
         return False, "User not found. Use /start first."
+    if network not in ("testnet", "mainnet"):
+        return False, "Invalid network mode. Choose testnet or mainnet."
 
     execute("UPDATE users SET network_mode = %s WHERE telegram_id = %s", (network, telegram_id))
     clear_client_cache()
@@ -106,7 +112,7 @@ def get_user_nado_client(telegram_id: int, passphrase: Optional[str] = None) -> 
         salt_b = base64.b64decode(salt) if isinstance(salt, str) else salt
         pk_bytes = decrypt_with_passphrase(ciphertext, salt_b, passphrase)
         pk = pk_bytes.decode("utf-8") if isinstance(pk_bytes, bytes) else pk_bytes
-        network = user.network_mode.value
+        network = _normalize_network(getattr(user.network_mode, "value", "testnet"))
         return get_nado_client(pk, network, main_address=user.main_address)
     except Exception as e:
         logger.warning("Failed to get Nado client for user %s: %s", telegram_id, e)
@@ -121,7 +127,7 @@ def get_user_readonly_client(telegram_id: int) -> Optional[NadoClient]:
     user = get_user(telegram_id)
     if not user or not user.main_address:
         return None
-    network = user.network_mode.value
+    network = _normalize_network(getattr(user.network_mode, "value", "testnet"))
     cache_key = f"ro:{user.main_address}:{network}"
     cached = _readonly_cache.get(cache_key)
     if cached:

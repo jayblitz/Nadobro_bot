@@ -36,7 +36,7 @@ REPLY_BUTTON_MAP = {
     HOME_BTN_WALLET: "wallet:view",
     HOME_BTN_STRATEGIES: "nav:strategy_hub",
     HOME_BTN_POSITIONS: "pos:view",
-    HOME_BTN_POINTS: "points:view:current",
+    HOME_BTN_POINTS: "points:view:week",
     HOME_BTN_HELP: "nav:help",
     HOME_BTN_ALERTS: "alert:menu",
     HOME_BTN_SETTINGS: "settings:view",
@@ -73,10 +73,10 @@ REPLY_BUTTON_MAP.update({
     "Home": "nav:main",
     "Positions": "pos:view",
     "Wallet": "wallet:view",
-    "Markets": "points:view:current",
+    "Markets": "points:view:week",
     "Strategies": "nav:strategy_hub",
     "My Positions": "pos:view",
-    "Nado Points": "points:view:current",
+    "Nado Points": "points:view:week",
     "Help / Support": "nav:help",
     "Alerts": "alert:menu",
     "Settings": "settings:view",
@@ -157,7 +157,7 @@ def home_card_kb():
         ],
         [
             InlineKeyboardButton("💼 Wallet Vault", callback_data="wallet:view"),
-            InlineKeyboardButton("🏆 Nado Points", callback_data="points:view:current"),
+            InlineKeyboardButton("🏆 Nado Points", callback_data="points:view:week"),
         ],
         [
             InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
@@ -170,21 +170,14 @@ def home_card_kb():
     ])
 
 
-def points_scope_kb(scope: str = "current"):
-    current = (scope or "current").lower()
-    def _label(base: str, code: str) -> str:
-        return f"{base} ✅" if current == code else base
-
+def points_scope_kb(scope: str = "week"):
+    _ = scope
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(_label("Current Mode", "current"), callback_data="points:view:current"),
-            InlineKeyboardButton(_label("Scope All", "all"), callback_data="points:view:all"),
+            InlineKeyboardButton("Last Week ✅", callback_data="points:view:week"),
         ],
         [
-            InlineKeyboardButton(_label("Scope Epoch", "epoch"), callback_data="points:view:epoch"),
-        ],
-        [
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"points:refresh:{current}"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="points:refresh:week"),
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
@@ -193,7 +186,7 @@ def points_scope_kb(scope: str = "current"):
 def portfolio_kb(has_positions: bool = False):
     rows = [
         [InlineKeyboardButton("📌 Open Positions", callback_data="pos:view")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:view")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:view"), InlineKeyboardButton("📥 CSV Export", callback_data="portfolio:csv_export")],
     ]
     if has_positions:
         rows.insert(1, [InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
@@ -501,16 +494,36 @@ def trade_confirm_kb(trade_id="pending"):
 
 def positions_kb(positions):
     rows = []
-    seen = set()
     for p in positions:
-        pname = p.get("product_name", "").replace("-PERP", "")
-        if pname and pname not in seen:
-            seen.add(pname)
-            rows.append([InlineKeyboardButton(f"❌ Close {pname}-PERP", callback_data=f"pos:close:{pname}")])
+        pname = str(p.get("product_name", "")).replace("-PERP", "").strip()
+        side = str(p.get("side", "")).upper()
+        side_icon = "🟢" if side == "LONG" else "🔴" if side == "SHORT" else "⚪"
+        if pname:
+            rows.append([
+                InlineKeyboardButton(
+                    f"📊 Manage {pname} {side_icon}",
+                    callback_data=f"pos:manage:{pname}",
+                )
+            ])
     if positions:
         rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
     rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
+
+
+def position_manage_kb(product: str):
+    base = (product or "").replace("-PERP", "").upper()
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"pos:refresh:{base}")],
+        [
+            InlineKeyboardButton("🧨 Close Market", callback_data=f"pos:close_market:{base}"),
+            InlineKeyboardButton("📉 Close Limit", callback_data=f"pos:close_limit:{base}"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="pos:view"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+        ],
+    ])
 
 
 def wallet_kb():
@@ -832,6 +845,7 @@ for _fn_name in [
     "trade_leverage_kb",
     "trade_confirm_kb",
     "positions_kb",
+    "position_manage_kb",
     "wallet_kb",
     "wallet_kb_not_linked",
     "alerts_kb",

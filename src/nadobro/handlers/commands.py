@@ -26,7 +26,6 @@ from src.nadobro.handlers.home_card import (
     open_help_card_from_command,
     open_status_card_from_command,
 )
-from src.nadobro.services.perf import summary_lines
 from src.nadobro.i18n import (
     get_user_language,
     language_context,
@@ -214,11 +213,6 @@ async def cmd_status(update: Update, context: CallbackContext):
         text = fmt_status_overview(status, onboarding)
         if status.get("last_error"):
             text += localize_text(f"\nLast error: {escape_md(str(status.get('last_error')))}")
-        perf_lines = summary_lines(top_n=5)
-        if perf_lines:
-            text += localize_text("\n\n*Perf Snapshot*")
-            for line in perf_lines:
-                text += f"\n• {escape_md(line)}"
 
         if DUAL_MODE_CARD_FLOW:
             await open_status_card_from_command(update, context, text)
@@ -235,10 +229,25 @@ async def cmd_status(update: Update, context: CallbackContext):
 async def cmd_stop_all(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     with language_context(get_user_language(telegram_id)):
-        ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
+        # Hard-stop all strategy/runtime state and clear any pending auth actions
+        # so stale passphrase prompts cannot relaunch a bot after stop-all.
+        try:
+            from src.nadobro.handlers.messages import terminate_active_processes
+            terminate_active_processes(context, telegram_id=telegram_id)
+        except Exception:
+            context.user_data.pop("pending_passphrase_action", None)
+            context.user_data.pop("pending_trade", None)
+            context.user_data.pop("pending_question", None)
+
+        ok, msg = stop_all_user_bots(telegram_id, cancel_orders=True)
         prefix = "🛑" if ok else "⚠️"
+        suffix = (
+            "Close-all was requested for active strategy sessions."
+            if ok
+            else "No active strategy runtime found."
+        )
         text, kb = localize_payload(
-            f"{prefix} {msg}\n\nTo close open positions, use the Positions menu.",
+            f"{prefix} {msg}\n\n{suffix}",
             persistent_menu_kb(),
         )
         await update.message.reply_text(text, reply_markup=kb)

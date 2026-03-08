@@ -266,6 +266,18 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             def get_market_price(self, _product_id):
                 return {"mid": 90.0}
 
+            def get_all_positions(self):
+                # Long 1 BTC @ 100, mark 90 -> unrealized -10. max_loss = 100*0.05 = 5. Triggers PnL SL.
+                return [
+                    {
+                        "product_id": 2,
+                        "product_name": "BTC-PERP",
+                        "amount": 1.0,
+                        "price": 100.0,
+                        "side": "LONG",
+                    }
+                ]
+
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
 
         async def _run_blocking_stub(func, *args, **kwargs):

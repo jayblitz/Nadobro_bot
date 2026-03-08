@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 import time
 from datetime import datetime, timedelta
 from src.nadobro.models.database import (
@@ -18,27 +19,25 @@ from src.nadobro.config import (
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 
 logger = logging.getLogger(__name__)
-_DEBUG_LOG_PATH = "/Users/jerry/Nadobro_bot/.cursor/debug-086b41.log"
-_DEBUG_SESSION_ID = "086b41"
 
 
 def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict):
-    try:
-        payload = {
-            "sessionId": _DEBUG_SESSION_ID,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-            "id": f"{_DEBUG_SESSION_ID}_{int(time.time() * 1000)}_{hypothesis_id}",
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
-        logger.warning("AGENTDBG %s", json.dumps(payload, ensure_ascii=True))
-    except Exception:
-        pass
+    """Optional debug logging when NADO_DEBUG_LOG_PATH is set. No-op in production."""
+    path = os.environ.get("NADO_DEBUG_LOG_PATH")
+    if path:
+        try:
+            payload = {
+                "runId": run_id,
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
 
 
 def _from_x18(raw) -> float:
@@ -60,64 +59,102 @@ def _fetch_close_execution_report(client, product_id: int, order_digest: str | N
     max_time = int(datetime.utcnow().timestamp())
     report = {"digest": digest, "filled_size": 0.0, "fill_price": 0.0, "realized_pnl": None}
 
-    # Matches give actual executed base/quote so we can compute weighted fill price.
+    # Archive propagation can lag briefly after execution; probe a couple times.
+    for wait_s in (0.0, 0.25):
+        if wait_s > 0:
+            time.sleep(wait_s)
+        # Matches give actual executed base/quote so we can compute weighted fill price.
+        try:
+            match_payload = {
+                "matches": {
+                    "subaccounts": [client.subaccount_hex],
+                    "max_time": max_time,
+                    "limit": 300,
+                    "isolated": False,
+                }
+            }
+            m_resp = client.query_archive(match_payload) or {}
+            matches = m_resp.get("matches") or []
+            rel_matches = []
+            for m in matches:
+                try:
+                    if int(m.get("product_id")) != int(product_id):
+                        continue
+                except Exception:
+                    continue
+                m_digest = str(m.get("digest", "")).lower()
+                if m_digest == digest:
+                    rel_matches.append(m)
+            base_total = sum(abs(_from_x18(m.get("base_filled", 0))) for m in rel_matches)
+            quote_total = sum(abs(_from_x18(m.get("quote_filled", 0))) for m in rel_matches)
+            if base_total > 0:
+                report["filled_size"] = float(base_total)
+                report["fill_price"] = float(quote_total / base_total)
+        except Exception:
+            pass
+
+        # Orders can expose exchange-realized pnl directly.
+        try:
+            order_payload = {
+                "orders": {
+                    "subaccounts": [client.subaccount_hex],
+                    "max_time": max_time,
+                    "limit": 300,
+                    "isolated": False,
+                }
+            }
+            o_resp = client.query_archive(order_payload) or {}
+            orders = o_resp.get("orders") or []
+            rel_orders = []
+            for o in orders:
+                try:
+                    if int(o.get("product_id")) != int(product_id):
+                        continue
+                except Exception:
+                    continue
+                o_digest = str(o.get("digest", "")).lower()
+                if o_digest == digest:
+                    rel_orders.append(o)
+            if rel_orders:
+                realized = sum(_from_x18(o.get("realized_pnl", 0)) for o in rel_orders)
+                report["realized_pnl"] = float(realized)
+        except Exception:
+            pass
+
+        if report.get("fill_price", 0) > 0 or report.get("filled_size", 0) > 0:
+            break
+
+    return report
+
+
+def get_last_fill_price(client, product_id: int) -> float:
+    """Fetch the most recent fill price for product from archive matches. Returns 0 if unavailable."""
+    if not getattr(client, "subaccount_hex", None) or not hasattr(client, "query_archive"):
+        return 0.0
     try:
-        match_payload = {
+        payload = {
             "matches": {
                 "subaccounts": [client.subaccount_hex],
-                "max_time": max_time,
-                "limit": 300,
+                "max_time": int(datetime.utcnow().timestamp()),
+                "limit": 50,
                 "isolated": False,
             }
         }
-        m_resp = client.query_archive(match_payload) or {}
-        matches = m_resp.get("matches") or []
-        rel_matches = []
+        resp = client.query_archive(payload) or {}
+        matches = resp.get("matches") or []
         for m in matches:
             try:
                 if int(m.get("product_id")) != int(product_id):
                     continue
             except Exception:
                 continue
-            m_digest = str(m.get("digest", "")).lower()
-            if m_digest == digest:
-                rel_matches.append(m)
-        base_total = sum(abs(_from_x18(m.get("base_filled", 0))) for m in rel_matches)
-        quote_total = sum(abs(_from_x18(m.get("quote_filled", 0))) for m in rel_matches)
-        report["filled_size"] = float(base_total)
-        report["fill_price"] = float((quote_total / base_total) if base_total > 0 else 0.0)
+            base = abs(_from_x18(m.get("base_filled", 0)))
+            quote = abs(_from_x18(m.get("quote_filled", 0)))
+            if base > 0:
+                return float(quote / base)
+        return 0.0
     except Exception:
-        pass
-
-    # Orders can expose exchange-realized pnl directly.
-    try:
-        order_payload = {
-            "orders": {
-                "subaccounts": [client.subaccount_hex],
-                "max_time": max_time,
-                "limit": 300,
-                "isolated": False,
-            }
-        }
-        o_resp = client.query_archive(order_payload) or {}
-        orders = o_resp.get("orders") or []
-        rel_orders = []
-        for o in orders:
-            try:
-                if int(o.get("product_id")) != int(product_id):
-                    continue
-            except Exception:
-                continue
-            o_digest = str(o.get("digest", "")).lower()
-            if o_digest == digest:
-                rel_orders.append(o)
-        if rel_orders:
-            realized = sum(_from_x18(o.get("realized_pnl", 0)) for o in rel_orders)
-            report["realized_pnl"] = float(realized)
-    except Exception:
-        pass
-
-    return report
+        return 0.0
 
 
 def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[str]]:
@@ -276,12 +313,24 @@ def execute_market_order(
         return {"success": False, "error": "Failed to record trade."}
 
     result = client.place_market_order(product_id, size, is_buy=is_long, slippage_pct=slippage_pct)
+    execution_report = {}
+    executed_size = float(size)
+    executed_price = 0.0
 
     if result["success"]:
+        execution_report = _fetch_close_execution_report(client, product_id, result.get("digest"))
+        filled_size = float(execution_report.get("filled_size") or 0.0)
+        fill_price = float(execution_report.get("fill_price") or 0.0)
+        executed_size = filled_size if filled_size > 0 else float(size)
+        executed_price = (
+            fill_price
+            if fill_price > 0
+            else float(result.get("price") or client.get_market_price(product_id)["mid"] or 0.0)
+        )
         update_trade(trade_id, {
             "status": TradeStatus.FILLED.value,
             "order_digest": result.get("digest"),
-            "price": result.get("price") or client.get_market_price(product_id)["mid"],
+            "price": executed_price,
             "filled_at": datetime.utcnow().isoformat(),
         })
     else:
@@ -291,14 +340,15 @@ def execute_market_order(
         })
 
     if result["success"]:
-        mp = client.get_market_price(product_id)
-        update_trade_stats(telegram_id, size * mp["mid"])
+        traded_notional = executed_size * executed_price if executed_price > 0 else 0.0
+        if traded_notional > 0:
+            update_trade_stats(telegram_id, traded_notional)
         payload = {
             "success": True,
             "side": "LONG" if is_long else "SHORT",
-            "size": size,
+            "size": executed_size,
             "product": get_product_name(product_id),
-            "price": mp["mid"],
+            "price": executed_price,
             "digest": result.get("digest"),
             "network": user.network_mode.value,
         }
@@ -318,6 +368,7 @@ def execute_market_order(
             is_long=is_long,
             stop_price=sl_price,
             size=size,
+            client=client,
         )
         if sl_result:
             payload.update(sl_result)
@@ -337,18 +388,31 @@ def execute_limit_order(
     passphrase: str = None,
     tp_price: float = None,
     sl_price: float = None,
+    reduce_only: bool = False,
 ) -> dict:
-    valid, msg = validate_trade(
-        telegram_id,
-        product,
-        size,
-        leverage,
-        enforce_rate_limit=enforce_rate_limit,
-    )
-    if not valid:
-        return {"success": False, "error": msg}
-
     product_id = get_product_id(product)
+    if product_id is None:
+        from src.nadobro.config import PRODUCTS as _P
+        available = ", ".join([n for n, i in _P.items() if i["type"] == "perp"])
+        return {"success": False, "error": f"Unknown product '{product}'. Available: {available}"}
+    if float(size or 0) <= 0:
+        return {"success": False, "error": "Trade size must be positive."}
+
+    if not reduce_only:
+        valid, msg = validate_trade(
+            telegram_id,
+            product,
+            size,
+            leverage,
+            enforce_rate_limit=enforce_rate_limit,
+        )
+        if not valid:
+            return {"success": False, "error": msg}
+    else:
+        wallet_ok, wallet_msg = ensure_active_wallet_ready(telegram_id)
+        if not wallet_ok:
+            return {"success": False, "error": wallet_msg}
+
     client = get_user_nado_client(telegram_id, passphrase=passphrase)
     user = get_user(telegram_id)
     if not client:
@@ -370,15 +434,26 @@ def execute_limit_order(
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
 
-    result = client.place_limit_order(product_id, size, price, is_buy=is_long)
+    result = client.place_limit_order(
+        product_id,
+        size,
+        price,
+        is_buy=is_long,
+        reduce_only=reduce_only,
+    )
 
     if result["success"]:
-        update_trade(trade_id, {"status": TradeStatus.FILLED.value, "order_digest": result.get("digest"), "filled_at": datetime.utcnow().isoformat()})
+        update_trade(
+            trade_id,
+            {
+                "status": TradeStatus.PENDING.value,
+                "order_digest": result.get("digest"),
+            },
+        )
     else:
         update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")})
 
     if result["success"]:
-        update_trade_stats(telegram_id, size * price)
         payload = {
             "success": True,
             "side": "LONG" if is_long else "SHORT",
@@ -388,6 +463,8 @@ def execute_limit_order(
             "digest": result.get("digest"),
             "network": user.network_mode.value,
             "type": "LIMIT",
+            "filled": False,
+            "reduce_only": bool(reduce_only),
         }
         tp_result = _place_take_profit_order(
             client=client,
@@ -405,6 +482,7 @@ def execute_limit_order(
             is_long=is_long,
             stop_price=sl_price,
             size=size,
+            client=client,
         )
         if sl_result:
             payload.update(sl_result)
@@ -423,20 +501,47 @@ def _place_take_profit_order(client, product_id: int, size: float, is_long: bool
     if tp <= 0:
         return {"tp_requested": True, "tp_set": False, "tp_error": "TP price must be greater than 0."}
 
-    # TP for a long is a sell limit, for a short is a buy limit.
-    tp_result = client.place_limit_order(product_id, float(size), tp, is_buy=(not is_long))
+    # Prefer native trigger TP (server-side), fallback to plain reduce-only limit order.
+    trigger_when = "oracle_price_above" if is_long else "oracle_price_below"
+    trigger_result = client.place_price_trigger_order(
+        product_id=product_id,
+        size=float(size),
+        trigger_price=tp,
+        order_price=tp,
+        is_buy=(not is_long),
+        trigger_when=trigger_when,
+        reduce_only=True,
+        order_type="default",
+    )
+    if trigger_result.get("success"):
+        return {
+            "tp_requested": True,
+            "tp_set": True,
+            "tp_price": tp,
+            "tp_digest": trigger_result.get("digest"),
+            "tp_mode": "trigger",
+        }
+
+    tp_result = client.place_limit_order(
+        product_id,
+        float(size),
+        tp,
+        is_buy=(not is_long),
+        reduce_only=True,
+    )
     if tp_result.get("success"):
         return {
             "tp_requested": True,
             "tp_set": True,
             "tp_price": tp,
             "tp_digest": tp_result.get("digest"),
+            "tp_mode": "limit_fallback",
         }
     return {
         "tp_requested": True,
         "tp_set": False,
         "tp_price": tp,
-        "tp_error": tp_result.get("error", "Failed to place TP order."),
+        "tp_error": trigger_result.get("error") or tp_result.get("error", "Failed to place TP order."),
     }
 
 
@@ -447,10 +552,38 @@ def _arm_stop_loss_rule(
     is_long: bool,
     stop_price: float | None,
     size: float,
+    client=None,
 ) -> dict:
     if stop_price is None:
         return {}
     from src.nadobro.services.stop_loss_service import register_stop_loss_rule
+    from src.nadobro.config import get_product_id
+
+    stop_price_f = float(stop_price)
+    product_base = str(product or "").replace("-PERP", "").upper()
+    product_id = get_product_id(product_base)
+    if client and product_id is not None and size > 0 and stop_price_f > 0:
+        trigger_when = "oracle_price_below" if is_long else "oracle_price_above"
+        # Use IOC with conservative stop-to-limit conversion for higher execution certainty.
+        order_price = stop_price_f * (0.995 if is_long else 1.005)
+        trigger_result = client.place_price_trigger_order(
+            product_id=product_id,
+            size=float(size),
+            trigger_price=stop_price_f,
+            order_price=order_price,
+            is_buy=(not is_long),
+            trigger_when=trigger_when,
+            reduce_only=True,
+            order_type="ioc",
+        )
+        if trigger_result.get("success"):
+            return {
+                "sl_requested": True,
+                "sl_armed": True,
+                "sl_price": stop_price_f,
+                "sl_rule_id": trigger_result.get("digest") or trigger_result.get("request_id"),
+                "sl_mode": "trigger",
+            }
 
     side = "LONG" if is_long else "SHORT"
     result = register_stop_loss_rule(
@@ -458,7 +591,7 @@ def _arm_stop_loss_rule(
         network=network,
         product=product,
         side=side,
-        stop_price=stop_price,
+        stop_price=stop_price_f,
         size=size,
     )
     if result.get("success"):
@@ -467,11 +600,12 @@ def _arm_stop_loss_rule(
             "sl_armed": True,
             "sl_price": float(result.get("stop_price") or 0),
             "sl_rule_id": result.get("rule_id"),
+            "sl_mode": "bot_fallback",
         }
     return {
         "sl_requested": True,
         "sl_armed": False,
-        "sl_price": float(stop_price or 0),
+        "sl_price": stop_price_f,
         "sl_error": result.get("error", "Failed to arm stop-loss."),
     }
 
@@ -856,12 +990,17 @@ def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
             is_buy = signed_amount < 0
             r = client.place_market_order(pid, pos_size, is_buy=is_buy, slippage_pct=1.0)
             if r["success"]:
-                cancelled += pos_size
+                execution_report = _fetch_close_execution_report(client, pid, r.get("digest"))
+                reported_size = float(execution_report.get("filled_size") or 0.0)
+                executed_size = reported_size if reported_size > 0 else pos_size
+                cancelled += executed_size
                 product_name = p.get("product_name", get_product_name(pid))
                 products_closed.add(product_name)
                 close_side = "short" if signed_amount > 0 else "long"
-                fill_price = float(r.get("price") or 0) if r.get("price") else None
-                _record_close_in_db(telegram_id, pid, pos_size, pos_size, close_side, client, fill_price=fill_price)
+                execution_fill = float(execution_report.get("fill_price") or 0.0)
+                fallback_fill = float(r.get("price") or 0) if r.get("price") else 0.0
+                fill_price = execution_fill if execution_fill > 0 else (fallback_fill if fallback_fill > 0 else None)
+                _record_close_in_db(telegram_id, pid, executed_size, pos_size, close_side, client, fill_price=fill_price)
             else:
                 errors.append(f"{p.get('product_name', get_product_name(pid))}: {r.get('error', 'unknown')}")
         except Exception as e:
