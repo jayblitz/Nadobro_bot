@@ -516,8 +516,8 @@ def _compute_asset_breakdown(balance, positions, prices):
                     try:
                         mid = float((prices.get(base) or {}).get("mid", 0) or 0)
                         spot_usd += amt * mid
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
     for p in (positions or []):
         if p.get("is_limit_order"):
             continue  # Resting limit orders are not open positions
