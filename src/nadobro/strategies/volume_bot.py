@@ -123,7 +123,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
                 logger.warning("Volume bot order cancel sweep failed for user %s: %s", telegram_id, e)
 
         pos = None
-        for p in (client.get_all_positions() or []):
+        for p in (client.get_positions_only() or []):
             if int(p.get("product_id", -1)) == product_id:
                 pos = p
                 break

@@ -88,7 +88,7 @@ def _get_spot_balance_size(client, spot_product_id: int) -> float:
 
 
 def _get_signed_perp_size(client, perp_product_id: int) -> float:
-    positions = client.get_all_positions() or []
+    positions = client.get_positions_only() or []
     for p in positions:
         if int(p.get("product_id", -1)) != int(perp_product_id):
             continue

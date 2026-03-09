@@ -628,7 +628,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     sl_triggered = False
     sl_reason = ""
     if sl_pct > 0:
-        positions = await run_blocking(client.get_all_positions) or []
+        positions = await run_blocking(client.get_positions_only) or []
         product_positions = [p for p in positions if int(p.get("product_id", -1)) == product_id]
         from src.nadobro.handlers.formatters import _compute_exchange_stats
         prices_map = {product: {"mid": mid}}

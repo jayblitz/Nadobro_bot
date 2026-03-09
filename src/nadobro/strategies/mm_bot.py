@@ -301,8 +301,8 @@ def run_cycle(
                 "reference_price": reference_price,
             }
 
-    # Position-aware risk guardrails.
-    positions = client.get_all_positions() or []
+    # Position-aware risk guardrails (filled positions only, not resting limit orders).
+    positions = client.get_positions_only() or []
     net_units = 0.0
     for p in positions:
         if int(p.get("product_id", -1)) != product_id:

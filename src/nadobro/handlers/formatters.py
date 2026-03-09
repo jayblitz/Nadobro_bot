@@ -97,12 +97,17 @@ def fmt_positions(positions, prices=None):
         pname = p.get("product_name", "???")
         entry = p.get("price", 0)
         base = pname.replace("-PERP", "")
+        is_limit = p.get("is_limit_order", False)
 
+        limit_tag = " (Limit)" if is_limit else ""
         lines.append(
             f"{side_emoji} *{escape_md(side)}* {escape_md(f'{amount:.4f}')} "
-            f"{escape_md(pname)} @ {escape_md(f'${entry:,.2f}')}"
+            f"{escape_md(pname)} @ {escape_md(f'${entry:,.2f}')}{escape_md(limit_tag)}"
         )
 
+        # PnL only for filled positions, not resting limit orders
+        if is_limit:
+            continue
         current = 0
         if prices and base in prices:
             current = prices[base].get("mid", 0)
@@ -398,6 +403,8 @@ def _compute_exchange_stats(positions, prices):
     unrealized_pnl = 0.0
     position_value = 0.0
     for p in (positions or []):
+        if p.get("is_limit_order"):
+            continue  # Resting limit orders have no position/PnL yet
         amount = abs(float(p.get("amount", 0) or 0))
         pname = p.get("product_name", "???")
         base = pname.replace("-PERP", "")
@@ -420,6 +427,8 @@ def _compute_directional_bias(positions, prices):
     long_value = 0.0
     short_value = 0.0
     for p in (positions or []):
+        if p.get("is_limit_order"):
+            continue  # Resting limit orders are not positions
         side = str(p.get("side", "LONG")).upper()
         amount = abs(float(p.get("amount", 0) or 0))
         pname = p.get("product_name", "???")
@@ -465,6 +474,8 @@ def _compute_liquidation_metrics(positions, total_equity, prices):
     margin_used = 0.0
     total_notional = 0.0
     for p in positions:
+        if p.get("is_limit_order"):
+            continue  # Resting limit orders don't use margin yet
         amount = abs(float(p.get("amount", 0) or 0))
         pname = p.get("product_name", "???")
         base = pname.replace("-PERP", "")
@@ -505,9 +516,11 @@ def _compute_asset_breakdown(balance, positions, prices):
                     try:
                         mid = float((prices.get(base) or {}).get("mid", 0) or 0)
                         spot_usd += amt * mid
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
     for p in (positions or []):
+        if p.get("is_limit_order"):
+            continue  # Resting limit orders are not open positions
         amount = abs(float(p.get("amount", 0) or 0))
         pname = p.get("product_name", "???")
         base = pname.replace("-PERP", "")
@@ -625,6 +638,7 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
 
     lines.extend(["", "*Top Open Positions*"])
     for p in (positions or [])[:5]:
+        is_limit = p.get("is_limit_order", False)
         side = p.get("side", "LONG")
         amount = abs(float(p.get("amount", 0) or 0))
         pname = p.get("product_name", "???")
@@ -637,13 +651,14 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
                 current = 0.0
 
         pnl_text = "N/A"
-        if current:
+        if not is_limit and current:
             pnl = _calc_position_pnl(p, current)
             if pnl is not None:
                 pnl_text = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
 
+        limit_suffix = " (Limit)" if is_limit else ""
         lines.append(
-            f"• {escape_md(side)} {escape_md(f'{amount:.4f}')} {escape_md(pname)} \\| PnL: {escape_md(pnl_text)}"
+            f"• {escape_md(side)} {escape_md(f'{amount:.4f}')} {escape_md(pname)}{escape_md(limit_suffix)} \\| PnL: {escape_md(pnl_text)}"
         )
 
     if len(positions) > 5:

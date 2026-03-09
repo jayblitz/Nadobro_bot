@@ -690,34 +690,45 @@ class NadoClient:
                 positions.append(pos)
         return positions
 
-    def get_all_positions(self) -> list:
-        # Prefer true perp positions from subaccount info.
+    def _fetch_open_orders_all_perps(self) -> list:
+        """Fetch resting limit orders for all perp products. Each order dict gets is_limit_order=True."""
+        orders = []
+        for name, info in PRODUCTS.items():
+            if info["type"] == "perp":
+                for o in self.get_open_orders(info["id"]) or []:
+                    o = dict(o)
+                    o["is_limit_order"] = True
+                    orders.append(o)
+        return orders
+
+    def get_positions_only(self) -> list:
+        """Return only filled perp positions (no resting limit orders). Use for trading/strategy logic."""
         if self._initialized and self.client:
             try:
                 info = self.client.context.engine_client.get_subaccount_info(self.subaccount_hex)
-                sdk_positions = self._extract_positions_from_sdk_info(info)
-                if sdk_positions:
-                    return sdk_positions
+                positions = self._extract_positions_from_sdk_info(info)
+                if positions:
+                    return positions
             except Exception as e:
-                logger.warning(f"SDK get_all_positions via subaccount_info failed: {e}")
+                logger.warning(f"SDK get_positions_only failed: {e}")
 
         try:
             data = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
             if data.get("status") == "success":
                 payload = data.get("data", {}) or {}
-                rest_positions = self._extract_positions_from_rest_payload(payload)
-                if rest_positions:
-                    return rest_positions
+                positions = self._extract_positions_from_rest_payload(payload)
+                if positions:
+                    return positions
         except Exception as e:
-            logger.warning(f"REST get_all_positions via subaccount_info failed: {e}")
+            logger.warning(f"REST get_positions_only failed: {e}")
 
-        # Fallback to open orders for backward compatibility.
-        positions = []
-        for name, info in PRODUCTS.items():
-            if info["type"] == "perp":
-                orders = self.get_open_orders(info["id"])
-                positions.extend(orders)
-        return positions
+        return []
+
+    def get_all_positions(self) -> list:
+        """Positions + resting limit orders for Portfolio/UI display."""
+        positions = self.get_positions_only()
+        open_orders = self._fetch_open_orders_all_perps()
+        return positions + open_orders
 
     def verify_linked_signer(self, expected_signer_address: str = None) -> dict:
         expected = (expected_signer_address or self.address or "").lower()

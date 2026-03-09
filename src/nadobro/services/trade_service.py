@@ -51,7 +51,7 @@ def _from_x18(raw) -> float:
 def _get_position_entry_price(client, product_id: int) -> float:
     """Fetch the position's entry (avg fill) price for product from the exchange. Returns 0 if unavailable."""
     try:
-        positions = client.get_all_positions() or []
+        positions = client.get_positions_only() or []
         for p in positions:
             if int(p.get("product_id", -1)) != int(product_id):
                 continue
@@ -645,6 +645,8 @@ def _normalize_net_positions(positions: list) -> dict[int, dict]:
 
     for p in positions or []:
         try:
+            if p.get("is_limit_order"):
+                continue  # Resting limit orders are not positions
             pid = int(p.get("product_id", -1))
             if pid < 0:
                 continue
