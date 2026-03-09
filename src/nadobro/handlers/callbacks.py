@@ -1303,6 +1303,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
             "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
             "dn_perp_leverage", "grid_reset_pct",
+            "target_volume_usd", "flip_size_usd",
         )
         if field not in allowed_inputs:
             return
@@ -1330,6 +1331,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "vol_sensitivity": "Enter volatility sensitivity \\(example: `0\\.02`\\)",
             "dn_perp_leverage": "Enter DN perp leverage from `1` to `5` \\(example: `3`\\)",
             "grid_reset_pct": "Enter grid reset % when mid drifts from last fill \\(example: `2`\\)",
+            "target_volume_usd": "Enter target volume in USD to complete \\(example: `10000`\\)",
+            "flip_size_usd": "Enter per\\-flip notional in USD \\(example: `200`\\)",
         }
         await query.edit_message_text(
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -1521,6 +1524,13 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
             f"Cycle window: *{escape_md('2.0h')}* \\(fixed auto close and restart\\)\n"
             "Execution: *Limit orders only* \\(spot \\+ perp at same limit price\\)\n\n"
         )
+    elif strategy == "vol":
+        target_vol = float(conf.get("target_volume_usd", 10000.0) or 10000.0)
+        flip_size = float(conf.get("flip_size_usd", 200.0) or conf.get("notional_usd", 200.0) or 200.0)
+        extra = (
+            f"Target Volume: *{escape_md(f'${target_vol:,.0f}')}*\n"
+            f"Flip Size \\(per cycle\\): *{escape_md(f'${flip_size:,.2f}')}*\n\n"
+        )
     return base + extra + "Use presets or set custom values below\\."
 
 
@@ -1665,6 +1675,23 @@ def _strategy_config_kb(strategy: str):
                 InlineKeyboardButton("Auto-Close OFF", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:0"),
             ],
         ])
+    if strategy == "vol":
+        rows.extend([
+            [
+                InlineKeyboardButton("Target $5K", callback_data=f"strategy:set:{strategy}:target_volume_usd:5000"),
+                InlineKeyboardButton("Target $10K", callback_data=f"strategy:set:{strategy}:target_volume_usd:10000"),
+                InlineKeyboardButton("Target $25K", callback_data=f"strategy:set:{strategy}:target_volume_usd:25000"),
+            ],
+            [
+                InlineKeyboardButton("Flip $50", callback_data=f"strategy:set:{strategy}:flip_size_usd:50"),
+                InlineKeyboardButton("Flip $100", callback_data=f"strategy:set:{strategy}:flip_size_usd:100"),
+                InlineKeyboardButton("Flip $200", callback_data=f"strategy:set:{strategy}:flip_size_usd:200"),
+            ],
+            [
+                InlineKeyboardButton("Custom Target", callback_data=f"strategy:input:{strategy}:target_volume_usd"),
+                InlineKeyboardButton("Custom Flip", callback_data=f"strategy:input:{strategy}:flip_size_usd"),
+            ],
+        ])
     rows.append([InlineKeyboardButton("◀ Back", callback_data=f"strategy:preview:{strategy}")])
     return InlineKeyboardMarkup(rows)
 
@@ -1714,7 +1741,14 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         except Exception:
             pass
 
-    required_margin = cycle_notional / leverage if leverage > 0 else cycle_notional
+    # Vol strategy uses flip_size for margin; others use cycle_notional
+    flip_size_usd = float(conf.get("flip_size_usd") or conf.get("notional_usd") or 200.0)
+    target_volume_usd = float(conf.get("target_volume_usd", 10000.0) or 10000.0)
+    if strategy_id == "vol":
+        required_margin = flip_size_usd
+    else:
+        required_margin = cycle_notional / leverage if leverage > 0 else cycle_notional
+
     cycles_per_day = 86400 / max(interval_seconds, 10)
     est_daily_volume = cycle_notional * 2.0 * cycles_per_day
 
@@ -1727,21 +1761,33 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     if strategy_id == "dn":
         est_funding = abs(funding_rate) * notional * 3
     max_loss = required_margin * (sl_pct / 100.0)
-    est_net = est_spread_pnl + est_funding - est_fees
+    if strategy_id == "vol":
+        est_net = -est_fees  # Vol bot pays fees; no spread capture
+        est_fees_vol = target_volume_usd * EST_FEE_RATE
+    else:
+        est_net = est_spread_pnl + est_funding - est_fees
 
     margin_flag = "✅" if available_margin >= required_margin else "⚠️"
     mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
 
     duration_hours = interval_seconds / 3600.0
     pre_trade_block = ""
-    try:
-        from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
-        from src.nadobro.handlers.formatters import fmt_pre_trade_analytics
-        ana = get_pre_trade_analytics(product, cycle_notional, duration_hours, network, client)
-        if ana.get("data_ok"):
-            pre_trade_block = fmt_pre_trade_analytics(ana) + "\n"
-    except Exception:
-        pass
+    if strategy_id == "vol":
+        from src.nadobro.handlers.formatters import fmt_pre_trade_analytics_vol
+        pre_trade_block = fmt_pre_trade_analytics_vol(
+            estimated_fees=est_fees_vol,
+            max_loss_per_flip=max_loss,
+            volume_to_complete=target_volume_usd,
+        ) + "\n"
+    else:
+        try:
+            from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
+            from src.nadobro.handlers.formatters import fmt_pre_trade_analytics
+            ana = get_pre_trade_analytics(product, cycle_notional, duration_hours, network, client)
+            if ana.get("data_ok"):
+                pre_trade_block = fmt_pre_trade_analytics(ana) + "\n"
+        except Exception:
+            pass
     funding_str = f"{funding_rate:.6f}"
     net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
     status_dot = "🟢" if est_net >= 0 else "🟠"
@@ -1788,6 +1834,12 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             f"Session Cap: *{escape_md(cap_str)}*"
             f"\nInv Soft Limit: *{escape_md(f'${inv_soft:,.2f}')}*"
         )
+    elif strategy_id == "vol":
+        target_vol = float(conf.get("target_volume_usd", 10000.0) or 10000.0)
+        extra_cfg = (
+            f"\nTarget Volume: *{escape_md(f'${target_vol:,.0f}')}* \\| "
+            f"Flip Size: *{escape_md(f'${flip_size_usd:,.2f}')}*"
+        )
     elif strategy_id == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
         dn_margin = notional / leverage if leverage > 0 else notional
@@ -1809,6 +1861,11 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
                 f"\nFunding Net: *{escape_md(f_net_str)}*"
                 f"\nCycle Remaining: *{escape_md(f'{max(0, cycle_left // 60)}m')}*"
             )
+    volume_line = (
+        f"Target Volume: *{escape_md(f'${target_volume_usd:,.0f}')}*\n"
+        if strategy_id == "vol"
+        else f"Est\\. Daily Volume: *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
+    )
     return (
         f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
         f"Status: {status_dot} *READY*\n"
@@ -1822,7 +1879,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"{extra_cfg}\n\n"
         f"📈 *Analytics*\n"
         f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *{escape_md(f'${required_margin:,.2f}')}* required\n"
-        f"Est\\. Daily Volume: *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
+        f"{volume_line}"
         f"Max Loss: *{escape_md(f'${max_loss:,.2f}')}* \\| Net Estimate: *{escape_md(net_str)}*\n"
         f"{pre_trade_block}\n"
         "Edit parameters or launch below\\."

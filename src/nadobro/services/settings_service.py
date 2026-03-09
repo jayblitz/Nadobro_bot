@@ -42,7 +42,7 @@ def _default_strategy_settings() -> dict:
             "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 60, "tp_pct": 0.8, "sl_pct": 0.6,
             "auto_close_on_maintenance": 1.0, "dn_cycle_duration_seconds": 7200, "dn_perp_leverage": 3.0,
         },
-        "vol": {"notional_usd": 100.0, "spread_bp": 6.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
+        "vol": {"notional_usd": 200.0, "flip_size_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
     }
 
 

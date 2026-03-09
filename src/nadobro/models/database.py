@@ -126,13 +126,14 @@ def get_last_trade_for_rate_limit(telegram_id: int) -> Optional[dict]:
 
 
 def find_open_trade(telegram_id: int, product_id: int, network: str = None) -> Optional[dict]:
+    # Match filled (market) or pending (limit that filled on exchange but we never updated status)
     if network:
         return query_one(
-            "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND network = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND network = %s AND status IN ('filled', 'pending') ORDER BY created_at DESC LIMIT 1",
             (telegram_id, product_id, network),
         )
     return query_one(
-        "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND status IN ('filled', 'pending') ORDER BY created_at DESC LIMIT 1",
         (telegram_id, product_id),
     )
 

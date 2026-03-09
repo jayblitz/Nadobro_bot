@@ -163,7 +163,7 @@ def _strategy_defaults(strategy: str) -> dict:
             "dn_cycle_duration_seconds": 7200,
             "dn_perp_leverage": 3.0,
         },
-        "vol": {"notional_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
+        "vol": {"notional_usd": 200.0, "flip_size_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
     }
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
 

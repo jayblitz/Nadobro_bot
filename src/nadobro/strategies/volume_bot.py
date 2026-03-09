@@ -2,13 +2,15 @@
 Volume Bot cycle:
 1) Place a LIMIT order at current mid (alternating long/short each round)
 2) Wait until strategy interval elapses
-3) Cancel leftover open orders and close the opened position immediately
+3) Close the opened position (via close_position for proper DB recording)
+4) Check cumulative PnL: stop if SL (cumulative loss) or TP (cumulative profit) hit
+5) Repeat until target volume or SL/TP
 """
 import logging
 import time
 
 from src.nadobro.config import EST_FEE_RATE, get_product_id
-from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
+from src.nadobro.services.trade_service import close_position, execute_limit_order
 from src.nadobro.services.user_service import get_user_readonly_client, get_user_nado_client
 
 logger = logging.getLogger(__name__)
@@ -46,10 +48,12 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
       - target_volume_usd  : total volume goal
       - volume_done_usd    : cumulative volume executed so far
       - fees_paid          : cumulative fees estimate
+      - cumulative_pnl     : sum of cycle PnLs this run (for SL/TP)
       - last_side          : "long" | "short" — last direction executed
       - leverage           : leverage multiplier
       - slippage_pct       : slippage tolerance %
       - flip_size_usd      : per-flip notional (default 200)
+      - tp_pct, sl_pct     : take-profit / stop-loss % (cumulative, applied to flip_size)
 
     Returns dict with cycle results.
     """
@@ -57,7 +61,10 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
     target_volume = float(state.get("target_volume_usd") or 0)
     volume_done = float(state.get("volume_done_usd") or 0)
     fees_paid = float(state.get("fees_paid") or 0)
+    cumulative_pnl = float(state.get("cumulative_pnl") or 0.0)
     last_side = state.get("last_side", "short")
+    tp_pct = float(state.get("tp_pct") or 0.8)
+    sl_pct = float(state.get("sl_pct") or 0.6)
     leverage = float(state.get("leverage") or 1.0)
     slippage_pct = float(state.get("slippage_pct") or 1.0)
     interval_seconds = int(state.get("interval_seconds") or 30)
@@ -124,16 +131,11 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
         if pos:
             pos_size = abs(float(pos.get("amount", 0) or 0))
             if pos_size > 0:
-                side = str(pos.get("side", "") or "").upper()
-                close_is_long = side == "SHORT"
-                close_result = execute_market_order(
+                entry_price = float(state.get("vol_entry_price") or mid)
+                close_result = close_position(
                     telegram_id,
                     product,
-                    pos_size,
-                    is_long=close_is_long,
-                    leverage=leverage,
-                    slippage_pct=slippage_pct,
-                    enforce_rate_limit=False,
+                    size=pos_size,
                     passphrase=passphrase,
                 )
                 if not close_result.get("success"):
@@ -142,18 +144,52 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
                         "error": close_result.get("error", "Close after interval failed"),
                         "volume_done_usd": round(volume_done, 4),
                         "fees_paid": round(fees_paid, 6),
+                        "cumulative_pnl": round(cumulative_pnl, 4),
                     }
                 close_notional = pos_size * mid
                 close_fee = close_notional * EST_FEE_RATE
                 volume_done += close_notional
                 fees_paid += close_fee
+                # Cycle PnL: (close - entry) * size for long, (entry - close) * size for short
+                pos_side = str(pos.get("side", "") or "").upper()
+                if pos_side == "LONG":
+                    cycle_pnl = (mid - entry_price) * pos_size
+                else:
+                    cycle_pnl = (entry_price - mid) * pos_size
+                cumulative_pnl += cycle_pnl
                 state["volume_done_usd"] = round(volume_done, 4)
                 state["fees_paid"] = round(fees_paid, 6)
+                state["cumulative_pnl"] = round(cumulative_pnl, 4)
+
+                # Cumulative SL/TP: stop when cumulative PnL hits threshold
+                sl_threshold_usd = flip_size_usd * (sl_pct / 100.0)
+                tp_threshold_usd = flip_size_usd * (tp_pct / 100.0)
+                if cumulative_pnl <= -sl_threshold_usd:
+                    state["running"] = False
+                    return {
+                        "success": True,
+                        "done": True,
+                        "volume_done_usd": round(volume_done, 4),
+                        "fees_paid": round(fees_paid, 6),
+                        "cumulative_pnl": round(cumulative_pnl, 4),
+                        "message": f"Cumulative SL hit ({sl_pct}% of flip size ≈ ${sl_threshold_usd:.2f}). Stopped.",
+                    }
+                if cumulative_pnl >= tp_threshold_usd:
+                    state["running"] = False
+                    return {
+                        "success": True,
+                        "done": True,
+                        "volume_done_usd": round(volume_done, 4),
+                        "fees_paid": round(fees_paid, 6),
+                        "cumulative_pnl": round(cumulative_pnl, 4),
+                        "message": f"Cumulative TP hit ({tp_pct}% of flip size ≈ ${tp_threshold_usd:.2f}). Stopped.",
+                    }
 
         state["vol_phase"] = "idle"
         state["vol_opened_at"] = 0.0
         state["vol_position_size"] = 0.0
         state["vol_position_side"] = None
+        state["vol_entry_price"] = 0.0
 
         if target_volume > 0 and volume_done >= target_volume:
             state["running"] = False
@@ -199,6 +235,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
         state["vol_opened_at"] = now_ts
         state["vol_position_size"] = size
         state["vol_position_side"] = "LONG" if is_long else "SHORT"
+        state["vol_entry_price"] = mid
 
         return {
             "success": True,

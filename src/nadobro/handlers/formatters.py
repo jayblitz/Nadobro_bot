@@ -203,6 +203,24 @@ def fmt_pre_trade_analytics(analytics: dict) -> str:
     return "\n".join(lines)
 
 
+def fmt_pre_trade_analytics_vol(
+    estimated_fees: float,
+    max_loss_per_flip: float,
+    volume_to_complete: float,
+) -> str:
+    """Format Volume Bot pre-trade: estimated fees, max loss (from SL), volume to complete."""
+    if volume_to_complete <= 0:
+        return ""
+    lines = [
+        "",
+        "*Pre\\-Trade Analytics*",
+        f"Est\\. Fees: *{escape_md(f'${estimated_fees:,.2f}')}*",
+        f"Max Loss \\(per flip\\): *{escape_md(f'${max_loss_per_flip:,.2f}')}*",
+        f"Volume to Complete: *{escape_md(f'${volume_to_complete:,.0f}')}*",
+    ]
+    return "\n".join(lines)
+
+
 def _fmt_pct(v) -> str:
     if v is None:
         return "N/A"
@@ -587,6 +605,7 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
     if total_trades > 0:
         total_volume = float(stats.get("total_volume", 0) or 0)
         total_pnl = float(stats.get("total_pnl", 0) or 0)
+        total_fees = float(stats.get("total_fees", 0) or 0)
         win_rate = float(stats.get("win_rate", 0) or 0)
         rpnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
         rpnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
@@ -595,6 +614,7 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
             "*Bot Trading Stats*",
             f"💰 *Volume:* {escape_md(f'${total_volume:,.2f}')}",
             f"{rpnl_emoji} *Realized PnL:* {escape_md(rpnl_str)}",
+            f"📋 *Fees:* {escape_md(f'${total_fees:,.2f}')}",
             f"🏆 *Win Rate:* {escape_md(f'{win_rate:.1f}%')} \\| Trades: {escape_md(str(total_trades))}",
         ])
 

@@ -15,6 +15,7 @@ from src.nadobro.config import (
     RATE_LIMIT_SECONDS,
     MIN_TRADE_SIZE_USD,
     PRODUCTS,
+    EST_FEE_RATE,
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 
@@ -45,6 +46,21 @@ def _from_x18(raw) -> float:
         return float(raw) / 1e18
     except Exception:
         return 0.0
+
+
+def _get_position_entry_price(client, product_id: int) -> float:
+    """Fetch the position's entry (avg fill) price for product from the exchange. Returns 0 if unavailable."""
+    try:
+        positions = client.get_all_positions() or []
+        for p in positions:
+            if int(p.get("product_id", -1)) != int(product_id):
+                continue
+            price = float(p.get("price", 0) or 0)
+            if price > 0:
+                return price
+    except Exception:
+        pass
+    return 0.0
 
 
 def _fetch_close_execution_report(client, product_id: int, order_digest: str | None) -> dict:
@@ -322,10 +338,16 @@ def execute_market_order(
         filled_size = float(execution_report.get("filled_size") or 0.0)
         fill_price = float(execution_report.get("fill_price") or 0.0)
         executed_size = filled_size if filled_size > 0 else float(size)
+        # Prefer archive fill_price; fallback to position entry (exchange source of truth), then IOC limit/mid
+        if fill_price <= 0:
+            time.sleep(0.3)  # Let exchange update position before we fetch entry price
+            position_entry = _get_position_entry_price(client, product_id)
+        else:
+            position_entry = 0.0
         executed_price = (
             fill_price
             if fill_price > 0
-            else float(result.get("price") or client.get_market_price(product_id)["mid"] or 0.0)
+            else (position_entry if position_entry > 0 else float(result.get("price") or client.get_market_price(product_id)["mid"] or 0.0))
         )
         update_trade(trade_id, {
             "status": TradeStatus.FILLED.value,
@@ -699,6 +721,7 @@ def _record_close_in_db(
 
         if open_trade:
             open_price = float(open_trade.get("price") or 0)
+            open_size = float(open_trade.get("size") or 0)
             open_side = open_trade.get("side", "")
             pnl = 0.0
             if realized_pnl_override is not None:
@@ -708,6 +731,9 @@ def _record_close_in_db(
                     pnl = (close_price - open_price) * close_size
                 elif open_side == "short":
                     pnl = (open_price - close_price) * close_size
+            open_notional = open_size * open_price if open_size and open_price else 0
+            close_notional = close_size * close_price if close_size and close_price else 0
+            fees = round((open_notional + close_notional) * EST_FEE_RATE, 6)
             # region agent log
             _debug_log(
                 run_id="pre-fix-1",
@@ -732,6 +758,7 @@ def _record_close_in_db(
                     "close_price": close_price,
                     "closed_at": datetime.utcnow().isoformat(),
                     "pnl": round(pnl, 4),
+                    "fees": fees,
                 })
                 logger.info(
                     "Trade #%d fully closed: %s %s size=%.4f open=%.2f close=%.2f pnl=%.4f",
@@ -741,6 +768,7 @@ def _record_close_in_db(
             else:
                 update_trade(open_trade["id"], {
                     "pnl": round(pnl, 4),
+                    "fees": fees,
                     "close_price": close_price,
                 })
                 logger.info(
@@ -749,7 +777,9 @@ def _record_close_in_db(
                     close_size, pos_size, open_price, close_price, pnl,
                 )
         else:
-            insert_trade({
+            close_notional = close_size * close_price if close_size and close_price else 0
+            fees = round(close_notional * EST_FEE_RATE, 6)
+            insert_data = {
                 "user_id": telegram_id,
                 "product_id": product_id,
                 "product_name": get_product_name(product_id),
@@ -764,7 +794,11 @@ def _record_close_in_db(
                 "closed_at": datetime.utcnow().isoformat(),
                 "created_at": datetime.utcnow().isoformat(),
                 "filled_at": datetime.utcnow().isoformat(),
-            })
+                "fees": fees,
+            }
+            if realized_pnl_override is not None:
+                insert_data["pnl"] = round(float(realized_pnl_override), 4)
+            insert_trade(insert_data)
             logger.info(
                 "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f",
                 side, get_product_name(product_id), close_size, close_price,
@@ -1000,7 +1034,12 @@ def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
                 execution_fill = float(execution_report.get("fill_price") or 0.0)
                 fallback_fill = float(r.get("price") or 0) if r.get("price") else 0.0
                 fill_price = execution_fill if execution_fill > 0 else (fallback_fill if fallback_fill > 0 else None)
-                _record_close_in_db(telegram_id, pid, executed_size, pos_size, close_side, client, fill_price=fill_price)
+                realized_pnl = execution_report.get("realized_pnl")
+                _record_close_in_db(
+                    telegram_id, pid, executed_size, pos_size, close_side, client,
+                    fill_price=fill_price,
+                    realized_pnl_override=float(realized_pnl) if realized_pnl is not None else None,
+                )
             else:
                 errors.append(f"{p.get('product_name', get_product_name(pid))}: {r.get('error', 'unknown')}")
         except Exception as e:
@@ -1058,6 +1097,7 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
             "price": t.get("price"),
             "status": t.get("status"),
             "pnl": t.get("pnl"),
+            "fees": t.get("fees"),
             "close_price": t.get("close_price"),
             "network": t.get("network"),
             "created_at": t.get("created_at", "")[:19] if t.get("created_at") else "",
@@ -1078,6 +1118,7 @@ def get_trade_analytics(telegram_id: int) -> dict:
     completed = filled + closed
     pnl_trades = [t for t in completed if t.get("pnl") is not None]
     total_pnl = sum(float(t["pnl"]) for t in pnl_trades) if pnl_trades else 0
+    total_fees = sum(float(t.get("fees") or 0) for t in completed)
     wins = len([t for t in pnl_trades if float(t["pnl"]) > 0])
     losses = len([t for t in pnl_trades if float(t["pnl"]) <= 0])
     win_rate = (wins / len(pnl_trades) * 100) if pnl_trades else 0
@@ -1088,6 +1129,7 @@ def get_trade_analytics(telegram_id: int) -> dict:
         "closed": len(closed),
         "failed": len(failed),
         "total_pnl": total_pnl,
+        "total_fees": total_fees,
         "win_rate": win_rate,
         "wins": wins,
         "losses": losses,
