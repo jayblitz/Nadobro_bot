@@ -184,6 +184,8 @@ def parse_interaction_intent(text: str) -> Optional[dict]:
         re.search(r"\b(points?|cost\s*/?\s*per\s*point)\b", text_lower)
         or (re.search(r"\blast\s+week\b", text_lower) and re.search(r"\b(points?|cost)\b", text_lower))
     ):
+        if _looks_like_question(text_lower):
+            return None  # Let AI handle the question
         return {"kind": "interaction", "action": "open_view", "target": "points:view:week", "raw": raw}
 
     # Position-closing intents.

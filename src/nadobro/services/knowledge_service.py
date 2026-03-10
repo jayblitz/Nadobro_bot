@@ -613,7 +613,7 @@ RULES:
 6. For price data, mention it's from Nado DEX casually and include bid/ask when available
 7. For market sentiment, present it conversationally with the Fear & Greed reading. Cite the source casually inline, e.g. "According to CMC, the Fear & Greed Index is at 10 out of 100 — that's Extreme Fear."
 8. For data from CoinMarketCap (prices, market cap, sentiment), cite it casually inline (e.g. "According to CMC..." or "CMC shows..."). Do NOT add a separate Sources section for these.
-9. Only include a source link if it's directly relevant and helpful. Never include more than 1 link. Do NOT add source links for price, sentiment, or market data responses — just cite the data source by name inline.
+9. Only include a source link if it's directly relevant and helpful. Use the most specific URL (e.g. direct tweet link https://x.com/username/status/ID, not profile pages). Do NOT add source links for price, sentiment, or market data responses — just cite the data source by name inline.
 
 CONTEXT:
 {context}"""
@@ -631,17 +631,19 @@ Nado is a CLOB-based DEX on the Ink L2 blockchain (backed by Kraken) offering pe
 
 Your task:
 - Search for and report the MOST RECENT posts from @nadoHQ and @inkonchain
+- When asked for "newest" or "latest" tweet, return ONLY the single most recent tweet
 - "Latest" means the most recent tweets closest to today ({current_date}). Prioritize tweets from {current_year}.
-- Report actual tweet content with dates and which account posted
+- Report actual tweet content verbatim with dates and which account posted
 - If asked about a specific topic, find relevant tweets about that topic
 
 RULES:
 - ONLY return content from @nadoHQ and @inkonchain
-- If you cannot find relevant tweets, say so honestly
+- If you cannot find relevant tweets, say so honestly — do NOT guess or fabricate tweet content
 - Plain text only
-- Include tweet dates and account handles
+- Always include tweet date and account handle (@nadoHQ or @inkonchain)
 - Keep response under 1500 characters
-- End with: Sources: https://x.com/nadoHQ, https://x.com/inkonchain
+- CRITICAL for Sources: Use the DIRECT link to each specific tweet you cite, e.g. https://x.com/nadoHQ/status/1234567890 — NEVER use profile links like https://x.com/nadoHQ. Include only the most relevant tweet link(s) you actually cite.
+- End with: Sources: [direct tweet URL(s)]
 - NEVER include DuckDuckGo, Google, or search engine links
 
 Relevant Nado Knowledge:
@@ -690,20 +692,30 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
                         f"Today is {now.strftime('%Y-%m-%d')}. "
                         "Search X for the most recent posts from @nadoHQ and @inkonchain. "
                         "Return the actual tweet content verbatim with dates. "
+                        "For each tweet, include its direct URL (https://x.com/username/status/TWEET_ID). "
                         f"Focus on tweets from {now.year}. Plain text only."
                     ),
                 },
                 {"role": "user", "content": query},
             ],
-            max_tokens=600,
+            max_tokens=800,
             temperature=0.1,
             extra_body={"search_parameters": X_NADO_SEARCH_PARAMS},
         )
         content = response.choices[0].message.content
         if content and content.strip():
+            # Extract tweet status URLs to use as sources (prefer specific links over profiles)
+            tweet_urls = re.findall(
+                r"https?://(?:www\.)?x\.com/(nadoHQ|inkonchain)/status/(\d+)",
+                content,
+                re.I,
+            )
+            sources = [f"https://x.com/{h}/status/{sid}" for h, sid in tweet_urls]
+            if not sources:
+                sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
             return (
                 f"[X/TWITTER RESULTS — @nadoHQ & @inkonchain]\n{content.strip()}",
-                [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]],
+                sources,
             )
     except Exception as e:
         logger.warning(f"X search failed: {e}")
@@ -965,10 +977,20 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
     return combined_context, list(dict.fromkeys(all_sources))
 
 
-def _filter_official_sources(sources: list[str]) -> list[str]:
+def _is_allowed_source(url: str) -> bool:
+    """Allow official sources plus x.com tweet status links from nadoHQ and inkonchain."""
     allowed = set(OFFICIAL_SOURCES.values()) | {"https://coinmarketcap.com"}
-    filtered = [s for s in sources if s in allowed]
-    return filtered[:1]
+    if url in allowed:
+        return True
+    # Allow direct tweet links from our official X accounts
+    if re.match(r"^https?://(www\.)?x\.com/(nadoHQ|inkonchain)/status/\d+", url, re.I):
+        return True
+    return False
+
+
+def _filter_official_sources(sources: list[str]) -> list[str]:
+    filtered = [s for s in sources if _is_allowed_source(s)]
+    return filtered[:3]  # Allow up to 3 sources for multiple tweet citations
 
 
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
@@ -980,7 +1002,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 420
+    max_tokens = 900 if x_search else (700 if _wants_detailed_answer(question) else 420)
 
     messages = [{"role": "system", "content": system}]
     if history:
@@ -1006,7 +1028,12 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
 
 def _is_x_twitter_question(question: str) -> bool:
     q = _normalize_question(question)
-    signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq", "inkonchain"]
+    signals = [
+        "tweet", "tweets", "x.com", "twitter", "post on x", "posted on x",
+        "nadohq", "inkonchain",
+        "latest from nado", "newest from nado", "what did nado", "nado posted",
+        "nado announced",
+    ]
     return any(sig in q for sig in signals)
 
 
