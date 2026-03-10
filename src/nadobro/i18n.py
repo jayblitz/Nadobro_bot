@@ -824,7 +824,7 @@ _TEXTS = {
         "ru": "Введите `confirm`, чтобы закрыть все позиции, или `cancel`, чтобы отменить\\.",
         "ko": "모든 포지션을 닫으려면 `confirm`, 취소하려면 `cancel`을 입력하세요\\.",
     },
-    "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?\n\nType `confirm` to execute or `cancel` to discard\\.": {
+    "⚠️ *Close All Positions*\n\nAre you sure you want to close *ALL open positions*\\?\n\nType `confirm` to execute or `cancel` to discard\\.": {
         "zh": "⚠️ *全部平仓*\n\n确定要关闭所有未平仓订单吗？\n\n输入 `confirm` 执行，或输入 `cancel` 取消\\。",
         "fr": "⚠️ *Fermer toutes les positions*\n\nVoulez-vous vraiment fermer TOUS les ordres ouverts ?\n\nTapez `confirm` pour exécuter ou `cancel` pour annuler\\.",
         "ar": "⚠️ *إغلاق جميع المراكز*\n\nهل أنت متأكد من إغلاق جميع الأوامر المفتوحة؟\n\nاكتب `confirm` للتنفيذ أو `cancel` للإلغاء\\.",

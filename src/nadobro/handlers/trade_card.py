@@ -241,25 +241,14 @@ def _build_confirm_preview(session: dict, analytics: dict | None = None) -> str:
 
 
 async def _build_confirm_preview_with_analytics(session: dict, telegram_id: int) -> str:
-    analytics = None
-    try:
-        from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
-        from src.nadobro.services.user_service import get_user, get_user_readonly_client
-        from src.nadobro.services.async_utils import run_blocking
-
-        user = get_user(telegram_id)
-        network = getattr(user.network_mode, "value", "testnet") if user else "testnet"
-        product = session.get("product", "BTC")
-        size = float(session.get("size", 0) or 0)
-        price = float(session.get("price", 0) or 0)
-        order_notional = size * price if price > 0 else 0
-        duration_h = 1.0 if session.get("order_type") == "limit" else 0.017  # market ~1 min equiv
-        client = get_user_readonly_client(telegram_id)
-        analytics = await run_blocking(
-            get_pre_trade_analytics, product, order_notional, duration_h, network, client
-        )
-    except Exception as e:
-        logger.debug("Pre-trade analytics fetch failed: %s", e)
+    from src.nadobro.handlers.messages import _compute_trade_analytics
+    product = session.get("product", "BTC")
+    size = float(session.get("size", 0) or 0)
+    price = float(session.get("price", 0) or 0)
+    leverage = int(session.get("leverage", 1) or 1)
+    direction = session.get("direction", "long")
+    sl_val = session.get("sl")
+    analytics = _compute_trade_analytics(size, price, leverage, sl_val, direction)
     return _build_confirm_preview(session, analytics=analytics)
 
 

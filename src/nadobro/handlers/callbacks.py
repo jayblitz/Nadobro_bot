@@ -9,7 +9,7 @@ from telegram.constants import ParseMode, ChatAction
 from eth_account import Account
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions,
-    fmt_trade_preview, fmt_trade_result,
+    fmt_trade_preview, fmt_trade_result, fmt_pre_trade_analytics,
     fmt_wallet_info, fmt_alerts, fmt_portfolio,
     fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard, fmt_position_pnl_panel,
 )
@@ -529,13 +529,14 @@ async def _handle_trade(query, data, telegram_id, context):
         )
     elif action == "close":
         await query.edit_message_text(
-            "*Close Position*\n\nSelect the product to close:",
+            "*Close Position*\n\n*Select the product to close:*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=close_product_kb(),
         )
     elif action == "close_all":
         await query.edit_message_text(
-            "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?",
+            "⚠️ *Close All Positions*\n\nAre you sure you want to close *ALL open positions*\\?\n\n"
+            "Type `confirm` to execute or `cancel` to discard\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
         )
@@ -645,15 +646,8 @@ async def _handle_leverage(query, data, telegram_id, context):
         "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
     }
 
-    analytics = None
-    try:
-        from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
-        user = get_user(telegram_id)
-        network = getattr(user.network_mode, "value", "testnet") if user else "testnet"
-        order_notional = size * price if price > 0 else 0
-        analytics = await run_blocking(get_pre_trade_analytics, product, order_notional, 0.017, network, get_user_readonly_client(telegram_id))
-    except Exception:
-        pass
+    from src.nadobro.handlers.messages import _compute_trade_analytics
+    analytics = _compute_trade_analytics(size, price, leverage, None, action)
     preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
     await query.edit_message_text(
         preview,
@@ -857,7 +851,8 @@ async def _handle_positions(query, data, telegram_id, context):
 
     elif action == "close_all":
         await query.edit_message_text(
-            "⚠️ *Close All Orders*\n\nAre you sure?",
+            "⚠️ *Close All Positions*\n\nAre you sure you want to close *ALL open positions*\\?\n\n"
+            "Type `confirm` to execute or `cancel` to discard\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
         )
@@ -1770,24 +1765,21 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     margin_flag = "✅" if available_margin >= required_margin else "⚠️"
     mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
 
-    duration_hours = interval_seconds / 3600.0
     pre_trade_block = ""
     if strategy_id == "vol":
-        from src.nadobro.handlers.formatters import fmt_pre_trade_analytics_vol
-        pre_trade_block = fmt_pre_trade_analytics_vol(
+        pre_trade_block = fmt_pre_trade_analytics(
+            margin=flip_size_usd,
+            est_volume=target_volume_usd,
+            max_loss=max_loss,
             estimated_fees=est_fees_vol,
-            max_loss_per_flip=max_loss,
-            volume_to_complete=target_volume_usd,
         ) + "\n"
     else:
-        try:
-            from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
-            from src.nadobro.handlers.formatters import fmt_pre_trade_analytics
-            ana = get_pre_trade_analytics(product, cycle_notional, duration_hours, network, client)
-            if ana.get("data_ok"):
-                pre_trade_block = fmt_pre_trade_analytics(ana) + "\n"
-        except Exception:
-            pass
+        pre_trade_block = fmt_pre_trade_analytics(
+            margin=required_margin,
+            est_volume=est_daily_volume,
+            max_loss=max_loss,
+            estimated_fees=est_fees,
+        ) + "\n"
     funding_str = f"{funding_rate:.6f}"
     net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
     status_dot = "🟢" if est_net >= 0 else "🟠"

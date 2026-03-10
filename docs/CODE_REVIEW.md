@@ -60,7 +60,6 @@ _DEBUG_LOG_PATH = "/Users/jerry/Nadobro_bot/.cursor/debug-086b41.log"
 ### 3. Unbounded In-Memory Caches
 
 **Files:**
-- `src/nadobro/services/pre_trade_analytics.py`: `_ANALYTICS_CACHE`
 - `src/nadobro/services/user_service.py`: `_user_cache`, `_readonly_cache`
 - `src/nadobro/services/nado_client.py`: `_price_cache`, `_CONTRACTS_CACHE`, etc.
 - `src/nadobro/services/execution_queue.py`: `_dedupe_seen`
@@ -69,8 +68,6 @@ _DEBUG_LOG_PATH = "/Users/jerry/Nadobro_bot/.cursor/debug-086b41.log"
 - No max size or eviction; caches grow unbounded with unique keys
 - Under load or long uptime, memory can grow indefinitely
 - `_dedupe_seen` has TTL-based cleanup but no cap
-- `_ANALYTICS_CACHE` key is `f"{network}:{product}:{int(time.time() // 60)}"` — new key every minute per product
-
 **Fix:** Add max size + LRU eviction (e.g. `functools.lru_cache`, `cachetools.TTLCache`) or periodic cleanup.
 
 ---
@@ -128,7 +125,7 @@ def find_open_trade(telegram_id: int, product_id: int, network: str = None) -> O
 
 **Problem:**
 - Many `except Exception: pass` blocks hide real bugs
-- Example: `_fetch_pre_trade_analytics` returns `None` on any exception; caller has no idea why analytics failed
+- Example: Broad exception swallowing in various handlers can hide real bugs
 - Production debugging becomes difficult
 
 **Fix:** Log exceptions before `pass`; use specific exception types where possible; surface user-friendly errors where appropriate.
@@ -247,16 +244,6 @@ ADMIN_USER_IDS = [int(uid.strip()) for uid in os.environ.get("ADMIN_USER_IDS", "
 
 - `int(bridge_chat_id)` can raise if chat ID is non-numeric
 - Wrapped in `try/except (TypeError, ValueError)` — good
-
----
-
-### 19. Pre-trade Analytics Cache Key Collision
-
-**File:** `src/nadobro/services/pre_trade_analytics.py`
-
-- `cache_key = f"{network}:{product}:{int(time.time() // 60)}"`
-- Order notional and duration not in key; base metrics cached and enriched per-request
-- Behavior is correct; no collision
 
 ---
 

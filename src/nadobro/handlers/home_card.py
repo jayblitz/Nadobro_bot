@@ -183,8 +183,8 @@ def _view_mode_text(telegram_id: int):
     network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
     text = (
         f"🌐 *Execution Mode Control*\n\n"
-        f"Current Mode: *{escape_md(network_label)}*\n\n"
-        f"Switch mode below:"
+        f"*Current Mode:* *{escape_md(network_label)}*\n\n"
+        f"*Switch mode below:*"
     )
     return text, mode_kb(current_network)
 
@@ -192,7 +192,7 @@ def _view_mode_text(telegram_id: int):
 def _view_strategy_text():
     return (
         "🤖 *Nadobro Strategy Lab*\n\n"
-        "Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
+        "*Pick a strategy* to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
         strategy_hub_kb(),
     )
 
@@ -239,7 +239,7 @@ def _view_portfolio_text(telegram_id: int):
 
 
 def _view_alerts_text():
-    return "🔔 *Alert Engine*\n\nManage your trigger alerts\\.", alerts_kb()
+    return "🔔 *Alert Engine*\n\n*Manage your trigger alerts\\.*", alerts_kb()
 
 
 def _view_settings_text(telegram_id: int):

@@ -18,7 +18,7 @@ from src.nadobro.services.bot_runtime import start_user_bot
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
 from src.nadobro.services.crypto import encrypt_with_passphrase
 from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.config import get_product_id, get_product_max_leverage
+from src.nadobro.config import get_product_id, get_product_max_leverage, EST_FEE_RATE
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
     fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, fmt_help, fmt_points_dashboard,
@@ -550,7 +550,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             await open_trade_card_from_message(update, context, telegram_id)
             return
         await update.message.reply_text(
-            "🤖 *Trade Console*\n\nSelect direction:",
+            "🤖 *Trade Console*\n\n*Select direction:*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_direction_kb(),
         )
@@ -579,8 +579,8 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
         await update.message.reply_text(
             f"🌐 *Execution Mode Control*\n\n"
-            f"Current Mode: *{escape_md(network_label)}*\n\n"
-            f"Switch mode below:",
+            f"*Current Mode:* *{escape_md(network_label)}*\n\n"
+            f"*Switch mode below:*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=mode_kb(current_network),
         )
@@ -589,7 +589,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "nav:strategy_hub":
         await update.message.reply_text(
             "🤖 *Nadobro Strategy Lab*\n\n"
-            "Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
+            "*Pick a strategy* to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )
@@ -677,7 +677,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "alert:menu":
         await update.message.reply_text(
-            "🔔 *Alert Engine*\n\nManage your trigger alerts\\.",
+            "🔔 *Alert Engine*\n\n*Manage your trigger alerts\\.*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=alerts_kb(),
         )
@@ -734,7 +734,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     await update.message.reply_text(
-        f"Use the keyboard buttons or type a question for AI chat\\.",
+        "*Use the keyboard buttons* or type a question for AI chat\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
 
@@ -794,7 +794,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
         _set_trade_flow(context, {"state": "order_type", "direction": direction})
         await update.message.reply_text(
-            f"{direction_label} → Select order type:",
+            f"{direction_label} → *Select order type:*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_order_type_kb(),
         )
@@ -808,7 +808,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         _set_trade_flow(context, flow)
         order_label = "📈 MARKET" if value == "market" else "📉 LIMIT"
         await update.message.reply_text(
-            f"{order_label} → Select product:",
+            f"{order_label} → *Select product:*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_product_reply_kb(),
         )
@@ -821,7 +821,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         flow["state"] = "leverage"
         _set_trade_flow(context, flow)
         await update.message.reply_text(
-            f"🪙 {escape_md(value)}\\-PERP → Select leverage:",
+            f"🪙 {escape_md(value)}\\-PERP → *Select leverage:*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_leverage_reply_kb(value),
         )
@@ -848,7 +848,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         flow["state"] = "size"
         _set_trade_flow(context, flow)
         await update.message.reply_text(
-            f"⚡ {escape_md(str(leverage))}x → Select size for {escape_md(product)}:",
+            f"⚡ {escape_md(str(leverage))}x → *Select size* for {escape_md(product)}:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_size_reply_kb(product),
         )
@@ -860,7 +860,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         if value == "custom":
             context.user_data["trade_flow_custom_size"] = True
             await update.message.reply_text(
-                "✏️ Enter custom size \\(e\\.g\\. `0\\.01`\\):",
+                "✏️ *Enter custom size* \\(e\\.g\\. `0\\.01`\\):",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
             return
@@ -875,14 +875,14 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             _set_trade_flow(context, flow)
             context.user_data["trade_flow_limit_price_input"] = True
             await update.message.reply_text(
-                f"📏 Size: {escape_md(str(size))} → Enter limit price:",
+                f"📏 *Size:* {escape_md(str(size))} → *Enter limit price:*",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
         else:
             flow["state"] = "tpsl"
             _set_trade_flow(context, flow)
             await update.message.reply_text(
-                f"📏 Size: {escape_md(str(size))} → Set TP/SL or skip:",
+                f"📏 *Size:* {escape_md(str(size))} → *Set TP/SL* or skip:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=trade_tpsl_kb(),
             )
@@ -902,7 +902,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             tp_str = f"TP: {escape_md(str(tp_val))}" if tp_val else "TP: not set"
             sl_str = f"SL: {escape_md(str(sl_val))}" if sl_val else "SL: not set"
             await update.message.reply_text(
-                f"📐 *TP/SL Settings*\n{tp_str} \\| {sl_str}\n\nTap Set TP or Set SL to enter values:",
+                f"📐 *TP/SL Settings*\n{tp_str} \\| {sl_str}\n\n*Tap Set TP or Set SL* to enter values:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=trade_tpsl_edit_kb(),
             )
@@ -910,14 +910,14 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         if value == "set_tp":
             context.user_data["trade_flow_tp_input"] = True
             await update.message.reply_text(
-                "Enter take profit price:",
+                "*Enter take profit price:*",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
             return
         if value == "set_sl":
             context.user_data["trade_flow_sl_input"] = True
             await update.message.reply_text(
-                "Enter stop loss price:",
+                "*Enter stop loss price:*",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
             return
@@ -999,18 +999,24 @@ async def _go_back(update, context, flow, state, telegram_id):
         )
 
 
-async def _fetch_pre_trade_analytics(telegram_id, product, size, price, is_limit_order):
-    """Fetch pre-trade analytics; returns None on any failure."""
-    try:
-        from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
-        user = get_user(telegram_id)
-        network = getattr(user.network_mode, "value", "testnet") if user else "testnet"
-        order_notional = size * price if price and price > 0 else 0
-        duration_h = 1.0 if is_limit_order else 0.017
-        client = get_user_readonly_client(telegram_id)
-        return await run_blocking(get_pre_trade_analytics, product, order_notional, duration_h, network, client)
-    except Exception:
+def _compute_trade_analytics(size, price, leverage, sl_val, direction):
+    """Compute pre-trade analytics dict: margin, est_volume, max_loss, estimated_fees."""
+    if not price or not size or price <= 0:
         return None
+    margin = (size * price) / leverage if leverage > 0 else size * price
+    est_volume = size * price
+    max_loss = None
+    if sl_val is not None:
+        try:
+            sl_price = float(sl_val)
+            if direction == "long" and sl_price < price:
+                max_loss = size * (price - sl_price)
+            elif direction == "short" and sl_price > price:
+                max_loss = size * (sl_price - price)
+        except (TypeError, ValueError):
+            pass
+    estimated_fees = est_volume * EST_FEE_RATE
+    return {"margin": margin, "est_volume": est_volume, "max_loss": max_loss, "estimated_fees": estimated_fees}
 
 
 async def _move_to_confirm(update, context, telegram_id, flow):
@@ -1046,7 +1052,8 @@ async def _move_to_confirm(update, context, telegram_id, flow):
     flow["est_margin"] = est_margin
     _set_trade_flow(context, flow)
 
-    analytics = await _fetch_pre_trade_analytics(telegram_id, product, size, price, order_type == "limit")
+    sl_val = flow.get("sl")
+    analytics = _compute_trade_analytics(size, price, leverage, sl_val, direction)
     preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
     tp_val = flow.get("tp")
     sl_val = flow.get("sl")
@@ -1130,14 +1137,14 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
             _set_trade_flow(context, flow)
             context.user_data["trade_flow_limit_price_input"] = True
             await update.message.reply_text(
-                f"📏 Size: {escape_md(str(size))} → Enter limit price:",
+                f"📏 *Size:* {escape_md(str(size))} → *Enter limit price:*",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
         else:
             flow["state"] = "tpsl"
             _set_trade_flow(context, flow)
             await update.message.reply_text(
-                f"📏 Size: {escape_md(str(size))} → Set TP/SL or skip:",
+                f"📏 *Size:* {escape_md(str(size))} → *Set TP/SL* or skip:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=trade_tpsl_kb(),
             )
@@ -1281,7 +1288,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
         }
 
-        analytics = await _fetch_pre_trade_analytics(telegram_id, product, size, price, False)
+        analytics = _compute_trade_analytics(size, price, leverage, None, action.replace("limit_", ""))
         preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
         await update.message.reply_text(
             preview,
@@ -1309,6 +1316,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         if leverage > max_leverage:
             leverage = max_leverage
 
+        est_margin = (size * price) / leverage if leverage > 0 else None
         context.user_data["pending_trade"] = {
             "action": action,
             "product": product,
@@ -1319,13 +1327,14 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             "reduce_only": bool(pending.get("reduce_only", False)),
         }
 
-        analytics = await _fetch_pre_trade_analytics(telegram_id, product, size, price, True)
+        analytics = _compute_trade_analytics(size, price, leverage, None, action.replace("limit_", ""))
         preview = fmt_trade_preview(
             action,
             product,
             size,
             price,
             leverage,
+            est_margin,
             analytics=analytics,
         )
         await update.message.reply_text(
@@ -1353,6 +1362,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         if leverage > max_leverage:
             leverage = max_leverage
 
+        est_margin = (size * price) / leverage if leverage > 0 else None
         context.user_data["pending_trade"] = {
             "action": action,
             "product": product,
@@ -1361,8 +1371,8 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             "price": price,
             "slippage_pct": _get_user_settings(telegram_id, context).get("slippage", 1),
         }
-        analytics = await _fetch_pre_trade_analytics(telegram_id, product, size, price, True)
-        preview = fmt_trade_preview(action, product, size, price, leverage, analytics=analytics)
+        analytics = _compute_trade_analytics(size, price, leverage, None, action.replace("limit_", ""))
+        preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
         await update.message.reply_text(
             f"{preview}\n\nℹ️ This limit order is prepared as a close action for your open position\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -1743,7 +1753,7 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
     if action == "close_all":
         context.user_data[PENDING_TEXT_CLOSE_ALL_KEY] = True
         await update.message.reply_text(
-            "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?\n\n"
+            "⚠️ *Close All Positions*\n\nAre you sure you want to close *ALL open positions*\\?\n\n"
             "Type `confirm` to execute or `cancel` to discard\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),

@@ -82,10 +82,10 @@ def fmt_price(price, product="BTC"):
 
 def fmt_positions(positions, prices=None):
     if not positions:
-        return "📋 *Open Orders*\n\nNo open orders found\\."
+        return "📋 *Open Positions*\n\nNo open positions or orders found\\."
 
     lines = [
-        "📋 *Open Orders*",
+        "📋 *Open Positions*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -124,7 +124,7 @@ def fmt_positions(positions, prices=None):
                 )
 
     lines.append("")
-    lines.append(f"Total: {escape_md(str(len(positions)))} order\\(s\\)")
+    lines.append(f"*Total:* {escape_md(str(len(positions)))} position\\(s\\)")
     return "\n".join(lines)
 
 
@@ -159,13 +159,13 @@ def fmt_position_pnl_panel(position: dict, current_price: float) -> str:
 
 def fmt_balance(balance_data, wallet_addr=None):
     lines = [
-        "💰 *Wallet Vault Balance*",
+        "💰 *Wallet Vault*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
 
     if not balance_data or not balance_data.get("exists"):
-        lines.append("⚠️ No subaccount found\\.")
+        lines.append("⚠️ *No subaccount found*\\. ")
         lines.append("")
         if wallet_addr:
             lines.append(f"Deposit ≥ \\$5 USDT0 to:")
@@ -176,7 +176,7 @@ def fmt_balance(balance_data, wallet_addr=None):
 
     balances = balance_data.get("balances", {}) or {}
     usdt = balances.get(0, balances.get("0", 0))
-    lines.append(f"💵 *USDT0:* {escape_md(f'${usdt:,.2f}')}")
+    lines.append(f"💵 *USDT0:* *{escape_md(f'${usdt:,.2f}')}*")
 
     for pid_raw, bal in balances.items():
         try:
@@ -194,60 +194,25 @@ def fmt_balance(balance_data, wallet_addr=None):
     return "\n".join(lines)
 
 
-def fmt_pre_trade_analytics(analytics: dict) -> str:
-    """Format Participation Rate, Market Volatility, Market Volume (Tread.fi-style)."""
-    if not analytics or not analytics.get("data_ok"):
-        return ""
-    lines = [
-        "",
-        "*Pre\\-Trade Analytics*",
-        f"Participation Rate: {escape_md(_fmt_pct(analytics.get('participation_rate_pct')))}",
-        f"Market Volatility \\(1σ\\): {escape_md(_fmt_vol(analytics))}",
-        f"Market Volume: {escape_md(_fmt_vol_ratio(analytics))}",
-    ]
-    return "\n".join(lines)
-
-
-def fmt_pre_trade_analytics_vol(
+def fmt_pre_trade_analytics(
+    margin: float,
+    est_volume: float,
+    max_loss: float | None,
     estimated_fees: float,
-    max_loss_per_flip: float,
-    volume_to_complete: float,
 ) -> str:
-    """Format Volume Bot pre-trade: estimated fees, max loss (from SL), volume to complete."""
-    if volume_to_complete <= 0:
+    """Format Pre-Trade Analytics: Margin, Est. Volume, Max Loss, Est. Fees."""
+    if margin <= 0 and est_volume <= 0:
         return ""
+    max_loss_str = escape_md(f"${max_loss:,.2f}") if max_loss is not None else "N/A"
     lines = [
         "",
         "*Pre\\-Trade Analytics*",
-        f"Est\\. Fees: *{escape_md(f'${estimated_fees:,.2f}')}*",
-        f"Max Loss \\(per flip\\): *{escape_md(f'${max_loss_per_flip:,.2f}')}*",
-        f"Volume to Complete: *{escape_md(f'${volume_to_complete:,.0f}')}*",
+        f"*Margin:* {escape_md(f'${margin:,.2f}')}",
+        f"*Est\\. Volume:* {escape_md(f'${est_volume:,.2f}')}",
+        f"*Max Loss:* {max_loss_str}",
+        f"*Est\\. Fees:* {escape_md(f'${estimated_fees:,.2f}')}",
     ]
     return "\n".join(lines)
-
-
-def _fmt_pct(v) -> str:
-    if v is None:
-        return "N/A"
-    return f"{v:.2f}%"
-
-
-def _fmt_vol(a: dict) -> str:
-    proj = a.get("market_volatility_projected_pct")
-    if proj is not None and proj > 0:
-        return f"±{proj:.2f}%"
-    h = a.get("market_volatility_1s_pct")
-    if h is not None and h > 0:
-        return f"±{h:.2f}%"
-    return "N/A"
-
-
-def _fmt_vol_ratio(a: dict) -> str:
-    r = a.get("market_volume_ratio")
-    v24 = a.get("market_24h_volume_usd")
-    if r is not None:
-        return f"{r:.2f}x vs typical \\(24h: ${v24:,.0f}\\)" if v24 else f"{r:.2f}x vs typical"
-    return "N/A"
 
 
 def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None, analytics=None):
@@ -271,11 +236,16 @@ def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None,
     if est_margin is not None:
         lines.append(f"💰 *Est\\. Margin:* {escape_md(f'${est_margin:,.2f}')}")
 
-    if analytics:
-        lines.append(fmt_pre_trade_analytics(analytics))
+    if analytics and isinstance(analytics, dict) and "margin" in analytics:
+        lines.append(fmt_pre_trade_analytics(
+            margin=analytics["margin"],
+            est_volume=analytics["est_volume"],
+            max_loss=analytics.get("max_loss"),
+            estimated_fees=analytics["estimated_fees"],
+        ))
 
     lines.append("")
-    lines.append("Confirm to execute this trade\\.")
+    lines.append("*Confirm to execute this trade\\.*")
 
     return "\n".join(lines)
 
@@ -379,7 +349,7 @@ def fmt_wallet_info(wallet_info):
 
 def fmt_alerts(alerts):
     if not alerts:
-        return "🔔 *Alert Engine*\n\nNo active alerts\\. Use Set Alert to create one\\."
+        return "🔔 *Alert Engine*\n\nNo active alerts\\. Use *Set Alert* to create one\\."
 
     lines = [
         "🔔 *Alert Engine*",
@@ -390,8 +360,8 @@ def fmt_alerts(alerts):
     for a in alerts:
         target_str = f"${a['target']:,.2f}"
         lines.append(
-            f"\\#{escape_md(str(a['id']))} {escape_md(a['product'])} "
-            f"{escape_md(a['condition'])} {escape_md(target_str)} "
+            f"*\\#{escape_md(str(a['id']))}* {escape_md(a['product'])} "
+            f"*{escape_md(a['condition'])}* {escape_md(target_str)} "
             f"\\({escape_md(a['network'])}\\)"
         )
 
@@ -601,9 +571,9 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
         f"{upnl_emoji} *Unrealized PnL:* {escape_md(upnl_str)} \\(ROI: {escape_md(roi_str)}\\)",
         "",
         "*Asset Breakdown*",
-        f"📈 Perpetual Futures: {escape_md(perp_fmt)}",
-        f"📉 Spot: {escape_md(spot_fmt)}",
-        f"💵 Cash \\(USDT0\\): {escape_md(cash_fmt)}",
+        f"*📈 Perpetual Futures:* {escape_md(perp_fmt)}",
+        f"*📉 Spot:* {escape_md(spot_fmt)}",
+        f"*💵 Cash \\(USDT0\\):* {escape_md(cash_fmt)}",
     ]
     if liq.get("margin_used", 0) > 0:
         margin_fmt = f'${liq.get("margin_used", 0):,.2f}'
@@ -611,8 +581,8 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
         lines.extend([
             "",
             "*Liquidation Risk \\(est\\.\\)*",
-            f"Margin Used: {escape_md(margin_fmt)} \\| "
-            f"Avg Leverage: {escape_md(avg_lev_fmt)}",
+            f"*Margin Used:* {escape_md(margin_fmt)} \\| "
+            f"*Avg Leverage:* {escape_md(avg_lev_fmt)}",
         ])
 
     if total_trades > 0:
@@ -625,10 +595,10 @@ def fmt_portfolio(stats, positions, prices=None, balance=None, equity_1d_pct=Non
         lines.extend([
             "",
             "*Bot Trading Stats*",
-            f"💰 *Volume:* {escape_md(f'${total_volume:,.2f}')}",
+            f"*💰 Volume:* {escape_md(f'${total_volume:,.2f}')}",
             f"{rpnl_emoji} *Realized PnL:* {escape_md(rpnl_str)}",
-            f"📋 *Fees:* {escape_md(f'${total_fees:,.2f}')}",
-            f"🏆 *Win Rate:* {escape_md(f'{win_rate:.1f}%')} \\| Trades: {escape_md(str(total_trades))}",
+            f"*📋 Fees:* {escape_md(f'${total_fees:,.2f}')}",
+            f"*🏆 Win Rate:* {escape_md(f'{win_rate:.1f}%')} \\| *Trades:* {escape_md(str(total_trades))}",
         ])
 
     if not positions:
@@ -846,8 +816,8 @@ def fmt_points_dashboard(points: dict) -> str:
         if bool(points.get("no_activity")):
             return _loc(
                 "🏆 *Nado Points Dashboard*\n\n"
-                f"Window: *{escape_md(str(points.get('window_label', 'Last 7 Days')))}*\n"
-                "No mainnet points activity found yet\\.\n\n"
+                f"*Window:* *{escape_md(str(points.get('window_label', 'Last 7 Days')))}*\n\n"
+                "*No mainnet points activity found yet\\.*\n\n"
                 "If you've only traded on testnet, this is expected\\."
             )
         if cpp <= 0:
@@ -864,10 +834,10 @@ def fmt_points_dashboard(points: dict) -> str:
             mascot = "😤 We can improve this legend"
         return _loc(
             "🏆 *Nado Points Dashboard*\n\n"
-            f"Window: *{escape_md(str(points.get('window_label', 'Last 7 Days')))}*\n"
-            f"Volume: *{escape_md(f'${volume:,.2f}')}*\n"
-            f"Points: *{escape_md(f'{score:,.2f}')}*\n"
-            f"Cost/Point: *{escape_md(f'${cpp:,.2f}')}* {mood}\n\n"
+            f"*Window:* *{escape_md(str(points.get('window_label', 'Last 7 Days')))}*\n"
+            f"*Volume:* *{escape_md(f'${volume:,.2f}')}*\n"
+            f"*Points:* *{escape_md(f'{score:,.2f}')}*\n"
+            f"*Cost/Point:* *{escape_md(f'${cpp:,.2f}')}* {mood}\n\n"
             f"{escape_md(mascot)}"
         )
 
@@ -891,18 +861,16 @@ def fmt_points_dashboard(points: dict) -> str:
     source_line = "estimated from fills/fees" if points.get("points_estimated") else str(points_source)
 
     return _loc(
-        "🏆 *Your Nado Points Dashboard*\n\n"
-        f"📊 Current Epoch {escape_md(str(points.get('epoch', 1)))}\n"
-        f"Volume:          {escape_md(volume_str)}\n"
-        f"Points{points_label}:          {escape_md(points_str)}\n"
-        f"Cost/Point:      {escape_md(cpp_str)}\n\n"
-        f"Maker {escape_md(f'{maker_pct:.1f}%')} {escape_md(points.get('maker_bar', '░░░░░░░░░░'))} "
-        f"{escape_md(f'{taker_pct:.1f}%')} Taker\n"
-        f"Fills: Maker {escape_md(str(maker_count))} \\| Taker {escape_md(str(taker_count))}\n"
-        f"Fees: {escape_md(fees_str)}     "
-        f"PPM: {escape_md(ppm_str)}     "
-        f"Positions: {escape_md(positions_str)}     "
-        f"Avg Hold: {escape_md(avg_hold_str)}\n"
-        f"Source: {escape_md(source_line)}"
+        "🏆 *Nado Points Dashboard*\n\n"
+        f"*📊 Epoch:* {escape_md(str(points.get('epoch', 1)))}\n"
+        f"*Volume:* {escape_md(volume_str)}\n"
+        f"*Points{points_label}:* {escape_md(points_str)}\n"
+        f"*Cost/Point:* {escape_md(cpp_str)}\n\n"
+        f"*Maker* {escape_md(f'{maker_pct:.1f}%')} {escape_md(points.get('maker_bar', '░░░░░░░░░░'))} "
+        f"{escape_md(f'{taker_pct:.1f}%')} *Taker*\n"
+        f"*Fills:* Maker {escape_md(str(maker_count))} \\| Taker {escape_md(str(taker_count))}\n"
+        f"*Fees:* {escape_md(fees_str)}  \\|  *PPM:* {escape_md(ppm_str)}  \\|  "
+        f"*Positions:* {escape_md(positions_str)}  \\|  *Avg Hold:* {escape_md(avg_hold_str)}\n"
+        f"*Source:* {escape_md(source_line)}"
         f"{partial}"
     )

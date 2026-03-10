@@ -36,9 +36,10 @@ async def lowiqpts_bridge_reply_handler(update, context):
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                "⚠️ Could not parse points response from bridge bot.\n"
-                "Try again with `🏆 Nado Points`."
+                "⚠️ *Could not parse points response*\n\n"
+                "Try again using the *🏆 Nado Points* button\\."
             ),
+            parse_mode=ParseMode.MARKDOWN_V2,
         )
         return
 

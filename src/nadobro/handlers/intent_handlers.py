@@ -191,22 +191,14 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
 
     settings = _settings_for_user(telegram_id)
     payload = _enrich_trade_payload(telegram_id, intent, settings)
-    analytics = None
-    try:
-        from src.nadobro.services.pre_trade_analytics import get_pre_trade_analytics
-        from src.nadobro.services.user_service import get_user, get_user_readonly_client
-        from src.nadobro.services.async_utils import run_blocking
-        user = get_user(telegram_id)
-        network = getattr(user.network_mode, "value", "testnet") if user else "testnet"
-        product = payload.get("product", "BTC")
-        size = float(payload.get("size") or 0)
-        price = float(payload.get("price") or 0)
-        order_notional = size * price if price > 0 else 0
-        duration_h = 1.0 if payload.get("order_type") == "limit" else 0.017
-        client = get_user_readonly_client(telegram_id)
-        analytics = await run_blocking(get_pre_trade_analytics, product, order_notional, duration_h, network, client)
-    except Exception:
-        pass
+    from src.nadobro.handlers.messages import _compute_trade_analytics
+    product = payload.get("product", "BTC")
+    size = float(payload.get("size") or 0)
+    price = float(payload.get("price") or 0)
+    leverage = int(payload.get("leverage") or 1)
+    direction = payload.get("direction", "long")
+    sl_val = payload.get("sl")
+    analytics = _compute_trade_analytics(size, price, leverage, sl_val, direction)
     preview = _preview_text(payload, analytics=analytics)
 
     if _auto_execute_requested(text):
