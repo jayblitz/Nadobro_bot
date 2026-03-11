@@ -199,8 +199,10 @@ def fmt_pre_trade_analytics(
     est_volume: float,
     max_loss: float | None,
     estimated_fees: float,
+    fees_label: str = "Est\\. Fees",
 ) -> str:
-    """Format Pre-Trade Analytics: Margin, Est. Volume, Max Loss, Est. Fees."""
+    """Format Pre-Trade Analytics: Margin, Est. Volume, Max Loss, Est. Fees.
+    Use fees_label='Est\\. Fees/cycle' for strategy dashboard per-cycle fees."""
     if margin <= 0 and est_volume <= 0:
         return ""
     max_loss_str = escape_md(f"${max_loss:,.2f}") if max_loss is not None else "N/A"
@@ -210,7 +212,7 @@ def fmt_pre_trade_analytics(
         f"*Margin:* {escape_md(f'${margin:,.2f}')}",
         f"*Est\\. Volume:* {escape_md(f'${est_volume:,.2f}')}",
         f"*Max Loss:* {max_loss_str}",
-        f"*Est\\. Fees:* {escape_md(f'${estimated_fees:,.2f}')}",
+        f"*{fees_label}:* {escape_md(f'${estimated_fees:,.2f}')}",
     ]
     return "\n".join(lines)
 

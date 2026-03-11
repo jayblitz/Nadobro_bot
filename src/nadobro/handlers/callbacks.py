@@ -1713,19 +1713,10 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     slippage = float(settings.get("slippage", 1))
     runtime_status = get_user_bot_status(telegram_id)
 
-    available_margin = 0.0
     mid = 0.0
     funding_rate = 0.0
     client = get_user_readonly_client(telegram_id)
     if client:
-        try:
-            bal = client.get_balance()
-            if bal and bal.get("exists"):
-                available_margin = float((bal.get("balances", {}) or {}).get(0, 0) or 0)
-                if available_margin == 0:
-                    available_margin = float((bal.get("balances", {}) or {}).get("0", 0) or 0)
-        except Exception:
-            pass
         try:
             pid = get_product_id(product)
             if pid is not None:
@@ -1736,52 +1727,62 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         except Exception:
             pass
 
-    # Vol strategy uses flip_size for margin; others use cycle_notional
+    # Vol strategy uses flip_size for margin; mm/grid use notional; dn uses notional
     flip_size_usd = float(conf.get("flip_size_usd") or conf.get("notional_usd") or 200.0)
     target_volume_usd = float(conf.get("target_volume_usd", 10000.0) or 10000.0)
     if strategy_id == "vol":
-        required_margin = flip_size_usd
+        pre_trade_margin = flip_size_usd
+    elif strategy_id in ("mm", "grid"):
+        pre_trade_margin = notional / leverage if leverage > 0 else notional
     else:
-        required_margin = cycle_notional / leverage if leverage > 0 else cycle_notional
+        pre_trade_margin = notional / leverage if leverage > 0 else notional
 
     cycles_per_day = 86400 / max(interval_seconds, 10)
-    est_daily_volume = cycle_notional * 2.0 * cycles_per_day
+    if strategy_id in ("mm", "grid"):
+        est_daily_volume = notional * 2.0 * cycles_per_day
+    else:
+        est_daily_volume = cycle_notional * 2.0 * cycles_per_day
 
     # Conservative fee estimate using builder fee (2 bps) + maker fee proxy (1 bp).
     from src.nadobro.config import EST_FEE_RATE, EST_FILL_EFFICIENCY
     est_fees = est_daily_volume * EST_FEE_RATE
+    if strategy_id in ("mm", "grid"):
+        # Per-cycle fees (bid + ask) for display, comparable to per-cycle margin
+        est_fees_display = 2.0 * notional * EST_FEE_RATE
+    else:
+        est_fees_display = est_fees / cycles_per_day if cycles_per_day > 0 else est_fees
 
     est_spread_pnl = est_daily_volume * (spread_bp / 10000.0) * EST_FILL_EFFICIENCY
     est_funding = 0.0
     if strategy_id == "dn":
         est_funding = abs(funding_rate) * notional * 3
-    max_loss = required_margin * (sl_pct / 100.0)
+    max_loss = pre_trade_margin * (sl_pct / 100.0)
+    est_fees_vol = target_volume_usd * EST_FEE_RATE if strategy_id == "vol" else 0.0
     if strategy_id == "vol":
-        est_net = -est_fees  # Vol bot pays fees; no spread capture
-        est_fees_vol = target_volume_usd * EST_FEE_RATE
+        est_net = -est_fees_vol  # Vol bot pays fees on target volume; no spread capture
     else:
         est_net = est_spread_pnl + est_funding - est_fees
 
-    margin_flag = "✅" if available_margin >= required_margin else "⚠️"
     mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
 
     pre_trade_block = ""
     if strategy_id == "vol":
+        vol_fees_per_cycle = est_fees_vol / cycles_per_day if cycles_per_day > 0 else est_fees_vol
         pre_trade_block = fmt_pre_trade_analytics(
             margin=flip_size_usd,
             est_volume=target_volume_usd,
             max_loss=max_loss,
-            estimated_fees=est_fees_vol,
+            estimated_fees=vol_fees_per_cycle,
+            fees_label="Est\\. Fees/cycle",
         ) + "\n"
     else:
         pre_trade_block = fmt_pre_trade_analytics(
-            margin=required_margin,
+            margin=pre_trade_margin,
             est_volume=est_daily_volume,
             max_loss=max_loss,
-            estimated_fees=est_fees,
+            estimated_fees=est_fees_display,
+            fees_label="Est\\. Fees/cycle",
         ) + "\n"
-    funding_str = f"{funding_rate:.6f}"
-    net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
     status_dot = "🟢" if est_net >= 0 else "🟠"
     how_it_works = {
         "mm": "Quotes around mid price, captures spread, auto\\-reposts each cycle\\.",
@@ -1853,11 +1854,6 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
                 f"\nFunding Net: *{escape_md(f_net_str)}*"
                 f"\nCycle Remaining: *{escape_md(f'{max(0, cycle_left // 60)}m')}*"
             )
-    volume_line = (
-        f"Target Volume: *{escape_md(f'${target_volume_usd:,.0f}')}*\n"
-        if strategy_id == "vol"
-        else f"Est\\. Daily Volume: *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
-    )
     return (
         f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
         f"Status: {status_dot} *READY*\n"
@@ -1869,10 +1865,6 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
         f"TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*"
         f"{extra_cfg}\n\n"
-        f"📈 *Analytics*\n"
-        f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *{escape_md(f'${required_margin:,.2f}')}* required\n"
-        f"{volume_line}"
-        f"Max Loss: *{escape_md(f'${max_loss:,.2f}')}* \\| Net Estimate: *{escape_md(net_str)}*\n"
         f"{pre_trade_block}\n"
         "Edit parameters or launch below\\."
     )
