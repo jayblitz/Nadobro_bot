@@ -247,6 +247,7 @@ def run_cycle(
     if session_cap_notional > 0 and session_done >= session_cap_notional:
         state["running"] = False
         state["mm_pause_reason"] = "Session notional cap reached"
+        state["mm_stop_reason"] = "session_cap_reached"
         return {
             "success": True,
             "done": True,

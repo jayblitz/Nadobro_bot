@@ -74,6 +74,7 @@ def get_product_max_leverage(product: str) -> int:
     product_key = (product or "").upper().strip()
     return int(PRODUCT_MAX_LEVERAGE.get(product_key, MAX_LEVERAGE))
 
+VOL_MAX_LEVERAGE = 5
 EST_FEE_RATE = 0.0003
 EST_FILL_EFFICIENCY = 0.45
 DUAL_MODE_CARD_FLOW = os.environ.get("DUAL_MODE_CARD_FLOW", "true").strip().lower() in ("1", "true", "yes", "on")

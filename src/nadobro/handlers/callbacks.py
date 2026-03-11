@@ -49,7 +49,7 @@ from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
     get_new_onboarding_state,
 )
-from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS
+from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS, VOL_MAX_LEVERAGE
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow
 from src.nadobro.services.points_service import get_points_dashboard, request_points_refresh
@@ -1362,8 +1362,18 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         settings = _get_user_settings(telegram_id, context)
         from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
-        if strategy_id in ("vol", "mm"):
+        if strategy_id == "mm":
             strategy_leverage = 1
+        elif strategy_id == "vol":
+            vol_conf = (settings.get("strategies", {}) or {}).get("vol", {}) or {}
+            fs = float(vol_conf.get("flip_size_usd") or vol_conf.get("notional_usd") or 200.0)
+            vn = float(vol_conf.get("notional_usd", 100.0))
+            if vn > 0 and fs > vn:
+                import math
+                req = fs / vn
+                strategy_leverage = min(VOL_MAX_LEVERAGE, max(1.0, math.ceil(req * 10) / 10))
+            else:
+                strategy_leverage = 1
         elif strategy_id == "dn":
             dn_cfg = ((settings.get("strategies", {}) or {}).get("dn", {}) or {})
             strategy_leverage = min(_safe_float(dn_cfg.get("dn_perp_leverage", 3), 3.0), 5.0)
@@ -1710,6 +1720,16 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     leverage = 1.0 if strategy_id in ("vol", "mm") else float(settings.get("default_leverage", 3))
     if strategy_id == "dn":
         leverage = min(_safe_float(conf.get("dn_perp_leverage", leverage), leverage), 5.0)
+    elif strategy_id == "vol":
+        # Auto-compute leverage: flip_size/notional (min to support flip with given margin), capped 1-5x
+        flip_size_usd = float(conf.get("flip_size_usd") or conf.get("notional_usd") or 200.0)
+        vol_notional = float(conf.get("notional_usd", 100.0))
+        if vol_notional > 0 and flip_size_usd > vol_notional:
+            import math
+            required = flip_size_usd / vol_notional
+            leverage = min(float(VOL_MAX_LEVERAGE), max(1.0, math.ceil(required * 10) / 10))
+        else:
+            leverage = 1.0
     slippage = float(settings.get("slippage", 1))
     runtime_status = get_user_bot_status(telegram_id)
 
@@ -1727,11 +1747,12 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         except Exception:
             pass
 
-    # Vol strategy uses flip_size for margin; mm/grid use notional; dn uses notional
+    # Vol strategy: notional = margin/capital, flip_size = trade notional; leverage = flip/margin
     flip_size_usd = float(conf.get("flip_size_usd") or conf.get("notional_usd") or 200.0)
     target_volume_usd = float(conf.get("target_volume_usd", 10000.0) or 10000.0)
     if strategy_id == "vol":
-        pre_trade_margin = flip_size_usd
+        vol_margin = notional  # notional = capital per flip
+        pre_trade_margin = vol_margin
     elif strategy_id in ("mm", "grid"):
         pre_trade_margin = notional / leverage if leverage > 0 else notional
     else:
@@ -1769,7 +1790,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     if strategy_id == "vol":
         vol_fees_per_cycle = est_fees_vol / cycles_per_day if cycles_per_day > 0 else est_fees_vol
         pre_trade_block = fmt_pre_trade_analytics(
-            margin=flip_size_usd,
+            margin=vol_margin,
             est_volume=target_volume_usd,
             max_loss=max_loss,
             estimated_fees=vol_fees_per_cycle,
@@ -1829,10 +1850,18 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         )
     elif strategy_id == "vol":
         target_vol = float(conf.get("target_volume_usd", 10000.0) or 10000.0)
+        max_flip_at_cap = notional * VOL_MAX_LEVERAGE
+        flip_exceeds = flip_size_usd > max_flip_at_cap
         extra_cfg = (
             f"\nTarget Volume: *{escape_md(f'${target_vol:,.0f}')}* \\| "
             f"Flip Size: *{escape_md(f'${flip_size_usd:,.2f}')}*"
         )
+        if flip_exceeds:
+            extra_cfg += (
+                f"\n⚠️ Flip size exceeds max at 5x leverage with margin "
+                f"{escape_md(f'${notional:,.0f}')}\\. "
+                f"Reduce flip to {escape_md(f'${max_flip_at_cap:,.0f}')} or increase margin\\."
+            )
     elif strategy_id == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
         dn_margin = notional / leverage if leverage > 0 else notional
@@ -1861,8 +1890,10 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"📊 *Settings*\n"
         f"{pair_support_line}\n"
         f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}*\n"
-        f"Mode: *{escape_md(network.upper())}* \\| Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| Slippage: *{escape_md(f'{slippage:.2f}%')}*\n"
-        f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+        f"Mode: *{escape_md(network.upper())}* \\| "
+        f"Leverage: *{escape_md(f'{leverage:.1f}x' if strategy_id == 'vol' and leverage != int(leverage) else f'{leverage:.0f}x')}* \\| "
+        f"Slippage: *{escape_md(f'{slippage:.2f}%')}*\n"
+        f"{'Notional \\(margin\\)' if strategy_id == 'vol' else 'Notional'}: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
         f"TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*"
         f"{extra_cfg}\n\n"
         f"{pre_trade_block}\n"

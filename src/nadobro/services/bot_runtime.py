@@ -4,7 +4,7 @@ import logging
 import time
 from datetime import datetime
 
-from src.nadobro.config import get_product_id, get_product_max_leverage
+from src.nadobro.config import get_product_id, get_product_max_leverage, VOL_MAX_LEVERAGE
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
@@ -189,10 +189,12 @@ def start_user_bot(
     if product_id is None:
         return False, f"Unknown product '{product}'."
     max_leverage = get_product_max_leverage(product)
-    leverage_cap = 5.0 if strategy == "dn" else float(max_leverage)
+    leverage_cap = 5.0 if strategy == "dn" else (float(VOL_MAX_LEVERAGE) if strategy == "vol" else float(max_leverage))
     if float(leverage or 0) > leverage_cap:
         if strategy == "dn":
             return False, "Max leverage for Delta Neutral is 5x."
+        if strategy == "vol":
+            return False, f"Max leverage for Volume bot is {VOL_MAX_LEVERAGE}x. Reduce flip size or increase margin."
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
     if float(leverage or 0) < 1:
         return False, "Leverage must be at least 1x."
@@ -213,12 +215,20 @@ def start_user_bot(
     state = _default_state()
     state.update(_strategy_defaults(strategy))
     state.update(strat_cfg)
+    effective_leverage = float(leverage or 3.0)
+    if strategy == "vol":
+        fs = float(state.get("flip_size_usd") or state.get("notional_usd") or 200.0)
+        vn = float(state.get("notional_usd", 100.0))
+        if vn > 0 and fs > vn:
+            import math
+            req = fs / vn
+            effective_leverage = min(float(VOL_MAX_LEVERAGE), max(1.0, math.ceil(req * 10) / 10))
     state.update(
         {
             "running": True,
             "strategy": strategy,
             "product": product.upper(),
-            "leverage": float(leverage or 3.0),
+            "leverage": effective_leverage,
             "slippage_pct": float(slippage_pct or 1.0),
             "reference_price": 0.0,
             "started_at": datetime.utcnow().isoformat(),
@@ -366,6 +376,14 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "dn_hedge_diff_size": state.get("dn_last_hedge_diff_size", 0.0),
         "dn_cycle_duration_seconds": dn_cycle_duration,
         "dn_cycle_remaining_seconds": dn_cycle_remaining,
+        "vol_volume_done_usd": float(state.get("volume_done_usd") or 0.0),
+        "vol_target_volume_usd": float(state.get("target_volume_usd") or 0.0),
+        "mm_session_done_usd": float(
+            (state.get("mm_last_metrics") or {}).get("session_notional_done_usd")
+            or state.get("mm_session_notional_done_usd")
+            or 0.0
+        ),
+        "mm_session_cap_usd": float(state.get("session_notional_cap_usd") or 0.0),
     }
 
 
@@ -718,7 +736,45 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
 
     if not state.get("running", True):
         _save_state(telegram_id, network, state)
-        await _notify(telegram_id, f"✅ {strategy.upper()} completed on {product}-PERP ({network}).")
+        strat_lower = str(strategy).lower()
+        if strat_lower == "vol":
+            reason = state.get("vol_stop_reason") or "stopped"
+            if reason == "target_reached":
+                vol_done = float(state.get("volume_done_usd") or 0)
+                await _notify(
+                    telegram_id,
+                    f"✅ VOL completed on {product}-PERP ({network}). Target volume reached (${vol_done:,.2f}).",
+                )
+            else:
+                await _notify(
+                    telegram_id,
+                    f"🛑 VOL stopped on {product}-PERP ({network}). ({reason.replace('_', ' ')})",
+                )
+        elif strat_lower in ("mm", "grid"):
+            reason = state.get("mm_stop_reason") or "stopped"
+            if reason == "session_cap_reached":
+                session_done = float(
+                    (state.get("mm_last_metrics") or {}).get("session_notional_done_usd")
+                    or state.get("mm_session_notional_done_usd")
+                    or 0
+                )
+                await _notify(
+                    telegram_id,
+                    f"✅ {strategy.upper()} completed on {product}-PERP ({network}). "
+                    f"Session cap reached (${session_done:,.2f}).",
+                )
+            else:
+                await _notify(
+                    telegram_id,
+                    f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}). ({reason.replace('_', ' ')})",
+                )
+        elif strat_lower == "dn":
+            await _notify(
+                telegram_id,
+                f"🛑 DN stopped on {product}-PERP ({network}).",
+            )
+        else:
+            await _notify(telegram_id, f"✅ {strategy.upper()} completed on {product}-PERP ({network}).")
         return True, None
 
     if (

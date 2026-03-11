@@ -746,7 +746,35 @@ def fmt_status_overview(status: dict, onboarding: dict):
             )
         if inventory_skew_usd is not None:
             lines.append(f"Inventory Skew: *{escape_md(f'${float(inventory_skew_usd):,.2f}')}*")
-        if strategy_name == "DN":
+        if strategy_name in ("MM", "GRID"):
+            session_done = float(status.get("mm_session_done_usd") or 0.0)
+            session_cap = float(status.get("mm_session_cap_usd") or 0.0)
+            if session_cap > 0:
+                pct = min(100.0, (session_done / session_cap) * 100.0)
+                lines.append(
+                    f"Session: *{escape_md(f'${session_done:,.2f}')}* / *{escape_md(f'${session_cap:,.2f}')}* "
+                    f"\\(*{escape_md(f'{pct:.1f}')}%*\\)"
+                )
+                lines.append(
+                    f"Status: *{escape_md('In progress' if session_done < session_cap else 'Session complete')}*"
+                )
+            else:
+                lines.append(f"Session Volume: *{escape_md(f'${session_done:,.2f}')}*")
+        elif strategy_name == "VOL":
+            vol_done = float(status.get("vol_volume_done_usd") or 0.0)
+            vol_target = float(status.get("vol_target_volume_usd") or 0.0)
+            if vol_target > 0:
+                pct = min(100.0, (vol_done / vol_target) * 100.0)
+                lines.append(
+                    f"Volume: *{escape_md(f'${vol_done:,.2f}')}* / *{escape_md(f'${vol_target:,.2f}')}* "
+                    f"\\(*{escape_md(f'{pct:.1f}')}%*\\)"
+                )
+                lines.append(
+                    f"Status: *{escape_md('In progress' if vol_done < vol_target else 'Target reached')}*"
+                )
+            else:
+                lines.append(f"Volume: *{escape_md(f'${vol_done:,.2f}')}* completed")
+        elif strategy_name == "DN":
             dn_asset = str(status.get("product") or "BTC").upper()
             fr = float(status.get("dn_last_funding_rate") or 0.0)
             f_cycle = float(status.get("dn_last_funding_cycle") or 0.0)
@@ -776,6 +804,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
                 lines.append(
                     f"Roll Window: *{escape_md(_fmt_duration_compact(cycle_remaining))}* remaining"
                 )
+            lines.append("Status: *In progress*")
     return _loc("\n".join(lines))
 
 
