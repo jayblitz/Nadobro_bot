@@ -1883,6 +1883,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
                 f"\nFunding Net: *{escape_md(f_net_str)}*"
                 f"\nCycle Remaining: *{escape_md(f'{max(0, cycle_left // 60)}m')}*"
             )
+    notional_label = "Notional \\(margin\\)" if strategy_id == "vol" else "Notional"
     return (
         f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
         f"Status: {status_dot} *READY*\n"
@@ -1893,7 +1894,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Mode: *{escape_md(network.upper())}* \\| "
         f"Leverage: *{escape_md(f'{leverage:.1f}x' if strategy_id == 'vol' and leverage != int(leverage) else f'{leverage:.0f}x')}* \\| "
         f"Slippage: *{escape_md(f'{slippage:.2f}%')}*\n"
-        f"{'Notional \\(margin\\)' if strategy_id == 'vol' else 'Notional'}: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+        f"{notional_label}: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
         f"TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*"
         f"{extra_cfg}\n\n"
         f"{pre_trade_block}\n"
