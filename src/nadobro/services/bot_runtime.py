@@ -570,10 +570,53 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 return True, None
             await _notify(telegram_id, f"🧠 Bro Mode completed on {network}.")
             return True, None
+        prev_runs = int(state.get("runs") or 0)
         state["last_run_ts"] = time.time()
-        state["runs"] = int(state.get("runs") or 0) + 1
+        state["runs"] = prev_runs + 1
         state["last_error"] = result.get("error")
         _save_state(telegram_id, network, state)
+
+        bro_action = result.get("action", "")
+        bro_detail = result.get("detail", "")
+        bro_confidence = result.get("confidence", 0)
+        if prev_runs == 0 or bro_action in ("open_long", "open_short", "close", "emergency_flatten", "blocked"):
+            if bro_action == "hold":
+                await _notify(
+                    telegram_id,
+                    f"🧠 Bro Mode cycle #{state['runs']} ({network}): "
+                    f"HOLD — {bro_detail[:150]}\n"
+                    f"Confidence: {bro_confidence:.0%} | Next scan in {int(state.get('interval_seconds', 300))}s",
+                )
+            elif bro_action in ("open_long", "open_short"):
+                side_label = "LONG 📈" if bro_action == "open_long" else "SHORT 📉"
+                await _notify(
+                    telegram_id,
+                    f"🧠 Bro Mode cycle #{state['runs']} ({network}): "
+                    f"{side_label} — {bro_detail[:150]}",
+                )
+            elif bro_action == "blocked":
+                await _notify(
+                    telegram_id,
+                    f"🧠 Bro Mode cycle #{state['runs']} ({network}): "
+                    f"Blocked — {bro_detail[:150]}",
+                )
+            elif bro_action:
+                await _notify(
+                    telegram_id,
+                    f"🧠 Bro Mode cycle #{state['runs']} ({network}): "
+                    f"{bro_action.upper()} — {bro_detail[:150]}",
+                )
+        elif bro_action == "hold" and state["runs"] % 6 == 0:
+            await _notify(
+                telegram_id,
+                f"🧠 Bro Mode update ({network}): Still scanning, {state['runs']} cycles run. "
+                f"Last: HOLD — {bro_detail[:100]}",
+            )
+        logger.info(
+            "Bro Mode cycle #%d for user %s: action=%s confidence=%.2f detail=%s",
+            state["runs"], telegram_id, bro_action, bro_confidence, bro_detail[:100],
+        )
+
         if not result.get("success", True):
             return False, str(result.get("error", "unknown"))[:300]
         return True, None

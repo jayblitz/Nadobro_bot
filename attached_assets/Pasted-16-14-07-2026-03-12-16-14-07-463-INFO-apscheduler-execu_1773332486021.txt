@@ -1,0 +1,544 @@
+16:14:07
+2026-03-12 16:14:07,463 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:12 UTC)" executed successfully
+16:14:12
+2026-03-12 16:14:12,460 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:17 UTC)" (scheduled at 2026-03-12 16:14:12.458316+00:00)
+16:14:12
+2026-03-12 16:14:12,460 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:17 UTC)" executed successfully
+16:14:17
+2026-03-12 16:14:17,464 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:22 UTC)" (scheduled at 2026-03-12 16:14:17.458316+00:00)
+16:14:17
+2026-03-12 16:14:17,464 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:22 UTC)" executed successfully
+16:14:22
+2026-03-12 16:14:22,463 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:27 UTC)" (scheduled at 2026-03-12 16:14:22.458316+00:00)
+16:14:22
+2026-03-12 16:14:22,464 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:27 UTC)" executed successfully
+16:14:27
+2026-03-12 16:14:27,464 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:32 UTC)" (scheduled at 2026-03-12 16:14:27.458316+00:00)
+16:14:27
+2026-03-12 16:14:27,464 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:32 UTC)" executed successfully
+16:14:32
+2026-03-12 16:14:32,463 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:37 UTC)" (scheduled at 2026-03-12 16:14:32.458316+00:00)
+16:14:32
+2026-03-12 16:14:32,463 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:37 UTC)" executed successfully
+16:14:35
+Pulling container image registry.fly.io/nadobro-bot@sha256:fddabbdc14d25acb9c056b382491fa25c3b94c7c9c6702e43919e0e3c60d873a
+16:14:36
+Pulling container image registry.fly.io/nadobro-bot@sha256:fddabbdc14d25acb9c056b382491fa25c3b94c7c9c6702e43919e0e3c60d873a
+16:14:37
+2026-03-12 16:14:37,464 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:42 UTC)" (scheduled at 2026-03-12 16:14:37.458316+00:00)
+16:14:37
+2026-03-12 16:14:37,464 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:42 UTC)" executed successfully
+16:14:42
+Successfully prepared image registry.fly.io/nadobro-bot@sha256:fddabbdc14d25acb9c056b382491fa25c3b94c7c9c6702e43919e0e3c60d873a (6.179893356s)
+16:14:42
+2026-03-12 16:14:42,464 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:47 UTC)" (scheduled at 2026-03-12 16:14:42.458316+00:00)
+16:14:42
+2026-03-12 16:14:42,465 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:14:47 UTC)" executed successfully
+16:14:43
+Configuring firecracker
+16:14:43
+Successfully prepared image registry.fly.io/nadobro-bot@sha256:fddabbdc14d25acb9c056b382491fa25c3b94c7c9c6702e43919e0e3c60d873a (6.745220424s)
+16:14:44
+Configuring firecracker
+16:14:44
+ INFO Sending signal SIGINT to main child process w/ PID 648
+16:14:44
+2026-03-12 16:14:44,873 [INFO] nadobro: Received signal 2, shutting down...
+16:14:47
+2026-03-12 16:14:47,461 [INFO] nadobro: Shutting down...
+16:14:47
+2026-03-12 16:14:47,461 [INFO] src.nadobro.services.scheduler: Scheduler stopped
+16:14:47
+2026-03-12 16:14:47,462 [INFO] telegram.ext.Application: Application is stopping. This might take a moment.
+16:14:47
+2026-03-12 16:14:47,462 [INFO] apscheduler.scheduler: Scheduler has been shut down
+16:14:47
+2026-03-12 16:14:47,462 [INFO] apscheduler.scheduler: Scheduler has been shut down
+16:14:47
+2026-03-12 16:14:47,473 [INFO] telegram.ext.Application: Application.stop() complete
+16:14:47
+2026-03-12 16:14:47,474 [INFO] nadobro: Bot stopped cleanly
+16:14:48
+ INFO Main child exited normally with code: 0
+16:14:48
+ INFO Starting clean up.
+16:14:48
+[42422.874694] reboot: Restarting system
+16:14:50
+ INFO Starting init (commit: 350f2667)...
+16:14:50
+ INFO Preparing to run: `python main.py` as root
+16:14:50
+ INFO [fly api proxy] listening at /.fly/api
+16:14:50
+Machine created and started in 14.547s
+16:14:50
+2026/03/12 16:14:50 INFO SSH listening listen_address=[fdaa:4b:a29c:a7b:4d6:fafa:718b:2]:22
+16:14:51
+2026-03-12 16:14:51,693 [INFO] nadobro: Encryption key validated successfully
+16:14:51
+2026-03-12 16:14:51,693 [INFO] nadobro: Configuration check passed (transport=webhook)
+16:14:51
+2026-03-12 16:14:51,755 [INFO] nadobro: Initializing database...
+16:14:51
+2026-03-12 16:14:51,786 [INFO] src.nadobro.db: Resolved aws-1-eu-north-1.pooler.supabase.com -> 13.60.102.132 (IPv4)
+16:14:51
+2026-03-12 16:14:51,990 [INFO] src.nadobro.db: PostgreSQL connection pool initialized (Supabase) min=1 max=12
+16:14:52
+2026-03-12 16:14:52,340 [INFO] src.nadobro.db: Database tables verified/created
+16:14:52
+2026-03-12 16:14:52,340 [INFO] nadobro: Database initialized
+16:14:52
+2026-03-12 16:14:52,341 [INFO] nadobro: Setting up Telegram bot...
+16:14:53
+2026-03-12 16:14:53,971 [INFO] nadobro: Bot handlers registered (pure bot mode)
+16:14:53
+2026-03-12 16:14:53,974 [INFO] src.nadobro.services.execution_queue: Execution queues started (strategy_workers=2 alert_workers=1)
+16:14:55
+2026-03-12 16:14:55,258 [INFO] root: Initializing default testnet context
+16:14:55
+2026-03-12 16:14:55,725 [INFO] src.nadobro.services.nado_client: Nado client initialized: signer=0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf, query=0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf, network=testnet
+16:14:55
+2026-03-12 16:14:55,725 [INFO] nadobro: Alert price-check client initialized
+16:14:55
+2026-03-12 16:14:55,726 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+16:14:55
+2026-03-12 16:14:55,726 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+16:14:55
+2026-03-12 16:14:55,731 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+16:14:55
+2026-03-12 16:14:55,732 [INFO] apscheduler.scheduler: Added job "check_alerts" to job store "default"
+16:14:55
+2026-03-12 16:14:55,732 [INFO] apscheduler.scheduler: Added job "tick_price_tracker" to job store "default"
+16:14:55
+2026-03-12 16:14:55,732 [INFO] apscheduler.scheduler: Added job "tick_howl" to job store "default"
+16:14:55
+2026-03-12 16:14:55,732 [INFO] apscheduler.scheduler: Scheduler started
+16:14:55
+2026-03-12 16:14:55,732 [INFO] src.nadobro.services.scheduler: Scheduler started - alerts 5s, price tracker 60s, HOWL nightly 02:00 UTC
+16:14:55
+2026-03-12 16:14:55,841 [INFO] nadobro: Starting bot (transport=webhook)...
+16:14:55
+2026-03-12 16:14:55,864 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/getMe "HTTP/1.1 200 OK"
+16:14:55
+2026-03-12 16:14:55,865 [INFO] apscheduler.scheduler: Scheduler started
+16:14:55
+2026-03-12 16:14:55,865 [INFO] telegram.ext.Application: Application started
+16:14:55
+2026-03-12 16:14:55,911 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/setMyCommands "HTTP/1.1 200 OK"
+16:14:55
+2026-03-12 16:14:55,912 [INFO] nadobro: Bot commands registered in Menu
+16:14:55
+2026-03-12 16:14:55,912 [INFO] nadobro: Starting webhook server listen=0.0.0.0 port=8080 path=/telegram/webhook
+16:14:55
+2026-03-12 16:14:55,923 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/deleteWebhook "HTTP/1.1 200 OK"
+16:14:55
+2026-03-12 16:14:55,933 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/setWebhook "HTTP/1.1 200 OK"
+16:14:55
+2026-03-12 16:14:55,938 [INFO] nadobro: Nadobro is live in webhook mode.
+16:15:00
+2026-03-12 16:15:00,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:05 UTC)" (scheduled at 2026-03-12 16:15:00.726344+00:00)
+16:15:00
+2026-03-12 16:15:00,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:05 UTC)" executed successfully
+16:15:05
+2026-03-12 16:15:05,730 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:10 UTC)" (scheduled at 2026-03-12 16:15:05.726344+00:00)
+16:15:05
+2026-03-12 16:15:05,730 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:10 UTC)" executed successfully
+16:15:10
+2026-03-12 16:15:10,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:15 UTC)" (scheduled at 2026-03-12 16:15:10.726344+00:00)
+16:15:10
+2026-03-12 16:15:10,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:15 UTC)" executed successfully
+16:15:15
+2026-03-12 16:15:15,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:20 UTC)" (scheduled at 2026-03-12 16:15:15.726344+00:00)
+16:15:15
+2026-03-12 16:15:15,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:20 UTC)" executed successfully
+16:15:20
+2026-03-12 16:15:20,733 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:25 UTC)" (scheduled at 2026-03-12 16:15:20.726344+00:00)
+16:15:20
+2026-03-12 16:15:20,733 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:25 UTC)" executed successfully
+16:15:25
+2026-03-12 16:15:25,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:30 UTC)" (scheduled at 2026-03-12 16:15:25.726344+00:00)
+16:15:25
+2026-03-12 16:15:25,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:30 UTC)" executed successfully
+16:15:30
+2026-03-12 16:15:30,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:35 UTC)" (scheduled at 2026-03-12 16:15:30.726344+00:00)
+16:15:30
+2026-03-12 16:15:30,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:35 UTC)" executed successfully
+16:15:35
+2026-03-12 16:15:35,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:40 UTC)" (scheduled at 2026-03-12 16:15:35.726344+00:00)
+16:15:35
+2026-03-12 16:15:35,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:40 UTC)" executed successfully
+16:15:40
+2026-03-12 16:15:40,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:45 UTC)" (scheduled at 2026-03-12 16:15:40.726344+00:00)
+16:15:40
+2026-03-12 16:15:40,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:45 UTC)" executed successfully
+16:15:45
+2026-03-12 16:15:45,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:50 UTC)" (scheduled at 2026-03-12 16:15:45.726344+00:00)
+16:15:45
+2026-03-12 16:15:45,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:50 UTC)" executed successfully
+16:15:50
+2026-03-12 16:15:50,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:55 UTC)" (scheduled at 2026-03-12 16:15:50.726344+00:00)
+16:15:50
+2026-03-12 16:15:50,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:15:55 UTC)" executed successfully
+16:15:55
+2026-03-12 16:15:55,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:00 UTC)" (scheduled at 2026-03-12 16:15:55.726344+00:00)
+16:15:55
+2026-03-12 16:15:55,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:00 UTC)" executed successfully
+16:15:55
+2026-03-12 16:15:55,732 [INFO] apscheduler.executors.default: Running job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:16:55 UTC)" (scheduled at 2026-03-12 16:15:55.726577+00:00)
+16:15:55
+2026-03-12 16:15:55,735 [INFO] apscheduler.executors.default: Job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:16:55 UTC)" executed successfully
+16:16:00
+2026-03-12 16:16:00,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:05 UTC)" (scheduled at 2026-03-12 16:16:00.726344+00:00)
+16:16:00
+2026-03-12 16:16:00,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:05 UTC)" executed successfully
+16:16:05
+2026-03-12 16:16:05,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:10 UTC)" (scheduled at 2026-03-12 16:16:05.726344+00:00)
+16:16:05
+2026-03-12 16:16:05,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:10 UTC)" executed successfully
+16:16:10
+2026-03-12 16:16:10,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:15 UTC)" (scheduled at 2026-03-12 16:16:10.726344+00:00)
+16:16:10
+2026-03-12 16:16:10,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:15 UTC)" executed successfully
+16:16:15
+2026-03-12 16:16:15,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:20 UTC)" (scheduled at 2026-03-12 16:16:15.726344+00:00)
+16:16:15
+2026-03-12 16:16:15,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:20 UTC)" executed successfully
+16:16:20
+2026-03-12 16:16:20,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:25 UTC)" (scheduled at 2026-03-12 16:16:20.726344+00:00)
+16:16:20
+2026-03-12 16:16:20,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:25 UTC)" executed successfully
+16:16:25
+2026-03-12 16:16:25,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:30 UTC)" (scheduled at 2026-03-12 16:16:25.726344+00:00)
+16:16:25
+2026-03-12 16:16:25,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:30 UTC)" executed successfully
+16:16:30
+2026-03-12 16:16:30,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:35 UTC)" (scheduled at 2026-03-12 16:16:30.726344+00:00)
+16:16:30
+2026-03-12 16:16:30,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:35 UTC)" executed successfully
+16:16:35
+2026-03-12 16:16:35,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:40 UTC)" (scheduled at 2026-03-12 16:16:35.726344+00:00)
+16:16:35
+2026-03-12 16:16:35,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:40 UTC)" executed successfully
+16:16:40
+2026-03-12 16:16:40,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:45 UTC)" (scheduled at 2026-03-12 16:16:40.726344+00:00)
+16:16:40
+2026-03-12 16:16:40,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:45 UTC)" executed successfully
+16:16:45
+2026-03-12 16:16:45,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:50 UTC)" (scheduled at 2026-03-12 16:16:45.726344+00:00)
+16:16:45
+2026-03-12 16:16:45,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:50 UTC)" executed successfully
+16:16:50
+2026-03-12 16:16:50,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:55 UTC)" (scheduled at 2026-03-12 16:16:50.726344+00:00)
+16:16:50
+2026-03-12 16:16:50,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:16:55 UTC)" executed successfully
+16:16:55
+2026-03-12 16:16:55,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:00 UTC)" (scheduled at 2026-03-12 16:16:55.726344+00:00)
+16:16:55
+2026-03-12 16:16:55,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:00 UTC)" executed successfully
+16:16:55
+2026-03-12 16:16:55,732 [INFO] apscheduler.executors.default: Running job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:17:55 UTC)" (scheduled at 2026-03-12 16:16:55.726577+00:00)
+16:16:55
+2026-03-12 16:16:55,734 [INFO] apscheduler.executors.default: Job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:17:55 UTC)" executed successfully
+16:17:00
+2026-03-12 16:17:00,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:05 UTC)" (scheduled at 2026-03-12 16:17:00.726344+00:00)
+16:17:00
+2026-03-12 16:17:00,733 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:05 UTC)" executed successfully
+16:17:05
+2026-03-12 16:17:05,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:10 UTC)" (scheduled at 2026-03-12 16:17:05.726344+00:00)
+16:17:05
+2026-03-12 16:17:05,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:10 UTC)" executed successfully
+16:17:10
+2026-03-12 16:17:10,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:15 UTC)" (scheduled at 2026-03-12 16:17:10.726344+00:00)
+16:17:10
+2026-03-12 16:17:10,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:15 UTC)" executed successfully
+16:17:15
+2026-03-12 16:17:15,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:20 UTC)" (scheduled at 2026-03-12 16:17:15.726344+00:00)
+16:17:15
+2026-03-12 16:17:15,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:20 UTC)" executed successfully
+16:17:20
+2026-03-12 16:17:20,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:25 UTC)" (scheduled at 2026-03-12 16:17:20.726344+00:00)
+16:17:20
+2026-03-12 16:17:20,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:25 UTC)" executed successfully
+16:17:25
+2026-03-12 16:17:25,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:30 UTC)" (scheduled at 2026-03-12 16:17:25.726344+00:00)
+16:17:25
+2026-03-12 16:17:25,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:30 UTC)" executed successfully
+16:17:30
+2026-03-12 16:17:30,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:35 UTC)" (scheduled at 2026-03-12 16:17:30.726344+00:00)
+16:17:30
+2026-03-12 16:17:30,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:35 UTC)" executed successfully
+16:17:35
+2026-03-12 16:17:35,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:40 UTC)" (scheduled at 2026-03-12 16:17:35.726344+00:00)
+16:17:35
+2026-03-12 16:17:35,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:40 UTC)" executed successfully
+16:17:40
+2026-03-12 16:17:40,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:45 UTC)" (scheduled at 2026-03-12 16:17:40.726344+00:00)
+16:17:40
+2026-03-12 16:17:40,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:45 UTC)" executed successfully
+16:17:45
+2026-03-12 16:17:45,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:50 UTC)" (scheduled at 2026-03-12 16:17:45.726344+00:00)
+16:17:45
+2026-03-12 16:17:45,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:50 UTC)" executed successfully
+16:17:48
+2026-03-12 16:17:48,174 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:17:48
+2026-03-12 16:17:48,193 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:17:48
+2026-03-12 16:17:48,644 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:17:50
+2026-03-12 16:17:50,729 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:55 UTC)" (scheduled at 2026-03-12 16:17:50.726344+00:00)
+16:17:50
+2026-03-12 16:17:50,729 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:17:55 UTC)" executed successfully
+16:17:51
+2026-03-12 16:17:51,074 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:17:55
+2026-03-12 16:17:55,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:00 UTC)" (scheduled at 2026-03-12 16:17:55.726344+00:00)
+16:17:55
+2026-03-12 16:17:55,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:00 UTC)" executed successfully
+16:17:55
+2026-03-12 16:17:55,732 [INFO] apscheduler.executors.default: Running job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:18:55 UTC)" (scheduled at 2026-03-12 16:17:55.726577+00:00)
+16:17:55
+2026-03-12 16:17:55,734 [INFO] apscheduler.executors.default: Job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:18:55 UTC)" executed successfully
+16:18:00
+2026-03-12 16:18:00,728 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:05 UTC)" (scheduled at 2026-03-12 16:18:00.726344+00:00)
+16:18:00
+2026-03-12 16:18:00,728 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:05 UTC)" executed successfully
+16:18:05
+2026-03-12 16:18:05,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:10 UTC)" (scheduled at 2026-03-12 16:18:05.726344+00:00)
+16:18:05
+2026-03-12 16:18:05,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:10 UTC)" executed successfully
+16:18:10
+2026-03-12 16:18:10,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:15 UTC)" (scheduled at 2026-03-12 16:18:10.726344+00:00)
+16:18:10
+2026-03-12 16:18:10,733 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:15 UTC)" executed successfully
+16:18:15
+2026-03-12 16:18:15,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:20 UTC)" (scheduled at 2026-03-12 16:18:15.726344+00:00)
+16:18:15
+2026-03-12 16:18:15,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:20 UTC)" executed successfully
+16:18:16
+2026-03-12 16:18:16,914 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:18:16
+2026-03-12 16:18:16,929 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:18:16
+2026-03-12 16:18:16,961 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:18:20
+2026-03-12 16:18:20,730 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:25 UTC)" (scheduled at 2026-03-12 16:18:20.726344+00:00)
+16:18:20
+2026-03-12 16:18:20,730 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:25 UTC)" executed successfully
+16:18:21
+2026-03-12 16:18:21,700 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:18:21
+2026-03-12 16:18:21,721 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:18:22
+2026-03-12 16:18:22,312 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:18:25
+2026-03-12 16:18:25,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:30 UTC)" (scheduled at 2026-03-12 16:18:25.726344+00:00)
+16:18:25
+2026-03-12 16:18:25,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:30 UTC)" executed successfully
+16:18:30
+2026-03-12 16:18:30,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:35 UTC)" (scheduled at 2026-03-12 16:18:30.726344+00:00)
+16:18:30
+2026-03-12 16:18:30,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:35 UTC)" executed successfully
+16:18:35
+2026-03-12 16:18:35,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:40 UTC)" (scheduled at 2026-03-12 16:18:35.726344+00:00)
+16:18:35
+2026-03-12 16:18:35,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:40 UTC)" executed successfully
+16:18:40
+2026-03-12 16:18:40,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:45 UTC)" (scheduled at 2026-03-12 16:18:40.726344+00:00)
+16:18:40
+2026-03-12 16:18:40,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:45 UTC)" executed successfully
+16:18:45
+2026-03-12 16:18:45,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:50 UTC)" (scheduled at 2026-03-12 16:18:45.726344+00:00)
+16:18:45
+2026-03-12 16:18:45,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:50 UTC)" executed successfully
+16:18:49
+2026-03-12 16:18:49,610 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:18:49
+2026-03-12 16:18:49,626 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:18:49
+2026-03-12 16:18:49,846 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:18:50
+2026-03-12 16:18:50,728 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:55 UTC)" (scheduled at 2026-03-12 16:18:50.726344+00:00)
+16:18:50
+2026-03-12 16:18:50,728 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:18:55 UTC)" executed successfully
+16:18:51
+2026-03-12 16:18:51,414 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:18:51
+2026-03-12 16:18:51,429 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:18:51
+2026-03-12 16:18:51,460 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:18:55
+2026-03-12 16:18:55,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:00 UTC)" (scheduled at 2026-03-12 16:18:55.726344+00:00)
+16:18:55
+2026-03-12 16:18:55,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:00 UTC)" executed successfully
+16:18:55
+2026-03-12 16:18:55,731 [INFO] apscheduler.executors.default: Running job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:19:55 UTC)" (scheduled at 2026-03-12 16:18:55.726577+00:00)
+16:18:55
+2026-03-12 16:18:55,733 [INFO] apscheduler.executors.default: Job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:19:55 UTC)" executed successfully
+16:18:57
+2026-03-12 16:18:57,593 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:19:00
+2026-03-12 16:19:00,730 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:05 UTC)" (scheduled at 2026-03-12 16:19:00.726344+00:00)
+16:19:00
+2026-03-12 16:19:00,730 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:05 UTC)" executed successfully
+16:19:01
+2026-03-12 16:19:01,095 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:19:01
+2026-03-12 16:19:01,122 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:19:01
+2026-03-12 16:19:01,795 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:19:05
+2026-03-12 16:19:05,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:10 UTC)" (scheduled at 2026-03-12 16:19:05.726344+00:00)
+16:19:05
+2026-03-12 16:19:05,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:10 UTC)" executed successfully
+16:19:08
+2026-03-12 16:19:08,659 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:19:08
+2026-03-12 16:19:08,681 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:19:08
+2026-03-12 16:19:08,945 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:19:10
+2026-03-12 16:19:10,729 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:15 UTC)" (scheduled at 2026-03-12 16:19:10.726344+00:00)
+16:19:10
+2026-03-12 16:19:10,729 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:15 UTC)" executed successfully
+16:19:11
+2026-03-12 16:19:11,352 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:19:11
+2026-03-12 16:19:11,376 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:19:11
+2026-03-12 16:19:11,405 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:19:15
+2026-03-12 16:19:15,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:20 UTC)" (scheduled at 2026-03-12 16:19:15.726344+00:00)
+16:19:15
+2026-03-12 16:19:15,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:20 UTC)" executed successfully
+16:19:17
+2026-03-12 16:19:17,375 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:19:18
+2026-03-12 16:19:18,710 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:19:18
+2026-03-12 16:19:18,743 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:19:19
+2026-03-12 16:19:19,233 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:19:20
+2026-03-12 16:19:20,729 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:25 UTC)" (scheduled at 2026-03-12 16:19:20.726344+00:00)
+16:19:20
+2026-03-12 16:19:20,729 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:25 UTC)" executed successfully
+16:19:23
+2026-03-12 16:19:23,715 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:19:23
+2026-03-12 16:19:23,732 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:19:23
+2026-03-12 16:19:23,857 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:19:25
+2026-03-12 16:19:25,729 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:30 UTC)" (scheduled at 2026-03-12 16:19:25.726344+00:00)
+16:19:25
+2026-03-12 16:19:25,729 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:30 UTC)" executed successfully
+16:19:26
+2026-03-12 16:19:26,595 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:19:26
+2026-03-12 16:19:26,615 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:19:26
+2026-03-12 16:19:26,644 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:19:30
+2026-03-12 16:19:30,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:35 UTC)" (scheduled at 2026-03-12 16:19:30.726344+00:00)
+16:19:30
+2026-03-12 16:19:30,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:35 UTC)" executed successfully
+16:19:35
+2026-03-12 16:19:35,733 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:40 UTC)" (scheduled at 2026-03-12 16:19:35.726344+00:00)
+16:19:35
+2026-03-12 16:19:35,733 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:40 UTC)" executed successfully
+16:19:40
+2026-03-12 16:19:40,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:45 UTC)" (scheduled at 2026-03-12 16:19:40.726344+00:00)
+16:19:40
+2026-03-12 16:19:40,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:45 UTC)" executed successfully
+16:19:43
+2026-03-12 16:19:43,125 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:19:45
+2026-03-12 16:19:45,730 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:50 UTC)" (scheduled at 2026-03-12 16:19:45.726344+00:00)
+16:19:45
+2026-03-12 16:19:45,730 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:50 UTC)" executed successfully
+16:19:46
+2026-03-12 16:19:46,189 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:19:46
+2026-03-12 16:19:46,204 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:19:46
+2026-03-12 16:19:46,696 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/editMessageText "HTTP/1.1 200 OK"
+16:19:50
+2026-03-12 16:19:50,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:55 UTC)" (scheduled at 2026-03-12 16:19:50.726344+00:00)
+16:19:50
+2026-03-12 16:19:50,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:19:55 UTC)" executed successfully
+16:19:55
+2026-03-12 16:19:55,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:00 UTC)" (scheduled at 2026-03-12 16:19:55.726344+00:00)
+16:19:55
+2026-03-12 16:19:55,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:00 UTC)" executed successfully
+16:19:55
+2026-03-12 16:19:55,732 [INFO] apscheduler.executors.default: Running job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:20:55 UTC)" (scheduled at 2026-03-12 16:19:55.726577+00:00)
+16:19:55
+2026-03-12 16:19:55,734 [INFO] apscheduler.executors.default: Job "tick_price_tracker (trigger: interval[0:01:00], next run at: 2026-03-12 16:20:55 UTC)" executed successfully
+16:20:00
+2026-03-12 16:20:00,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:05 UTC)" (scheduled at 2026-03-12 16:20:00.726344+00:00)
+16:20:00
+2026-03-12 16:20:00,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:05 UTC)" executed successfully
+16:20:01
+2026-03-12 16:20:01,218 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/answerCallbackQuery "HTTP/1.1 200 OK"
+16:20:01
+2026-03-12 16:20:01,236 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendChatAction "HTTP/1.1 200 OK"
+16:20:01
+2026-03-12 16:20:01,659 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:20:05
+2026-03-12 16:20:05,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:10 UTC)" (scheduled at 2026-03-12 16:20:05.726344+00:00)
+16:20:05
+2026-03-12 16:20:05,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:10 UTC)" executed successfully
+16:20:10
+2026-03-12 16:20:10,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:15 UTC)" (scheduled at 2026-03-12 16:20:10.726344+00:00)
+16:20:10
+2026-03-12 16:20:10,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:15 UTC)" executed successfully
+16:20:12
+2026-03-12 16:20:12,332 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/deleteMessage "HTTP/1.1 200 OK"
+16:20:12
+2026-03-12 16:20:12,522 [INFO] src.nadobro.services.bot_runtime: Starting strategy loop for user 5776741680 on mainnet
+16:20:12
+2026-03-12 16:20:12,565 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:20:12
+2026-03-12 16:20:12,847 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:20:15
+2026-03-12 16:20:15,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:20 UTC)" (scheduled at 2026-03-12 16:20:15.726344+00:00)
+16:20:15
+2026-03-12 16:20:15,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:20 UTC)" executed successfully
+16:20:15
+2026-03-12 16:20:15,857 [INFO] httpx: HTTP Request: POST https://api.x.ai/v1/chat/completions "HTTP/1.1 410 Gone"
+16:20:15
+2026-03-12 16:20:15,858 [WARNING] src.nadobro.services.market_scanner: Sentiment fetch failed: Error code: 410 - {'error': 'Live search is deprecated. Please switch to the Agent Tools API: https://docs.x.ai/docs/guides/tools/overview'}
+16:20:16
+2026-03-12 16:20:16,642 [INFO] httpx: HTTP Request: POST https://api.x.ai/v1/chat/completions "HTTP/1.1 200 OK"
+16:20:17
+2026-03-12 16:20:17,510 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:20:17
+2026-03-12 16:20:17,527 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/deleteMessage "HTTP/1.1 200 OK"
+16:20:17
+2026-03-12 16:20:17,567 [INFO] httpx: HTTP Request: POST https://api.telegram.org/botREDACTED_TOKEN/sendMessage "HTTP/1.1 200 OK"
+16:20:20
+2026-03-12 16:20:20,730 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:25 UTC)" (scheduled at 2026-03-12 16:20:20.726344+00:00)
+16:20:20
+2026-03-12 16:20:20,731 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:25 UTC)" executed successfully
+16:20:25
+2026-03-12 16:20:25,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:30 UTC)" (scheduled at 2026-03-12 16:20:25.726344+00:00)
+16:20:25
+2026-03-12 16:20:25,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:30 UTC)" executed successfully
+16:20:30
+2026-03-12 16:20:30,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:35 UTC)" (scheduled at 2026-03-12 16:20:30.726344+00:00)
+16:20:30
+2026-03-12 16:20:30,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:35 UTC)" executed successfully
+16:20:35
+2026-03-12 16:20:35,730 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:40 UTC)" (scheduled at 2026-03-12 16:20:35.726344+00:00)
+16:20:35
+2026-03-12 16:20:35,730 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:40 UTC)" executed successfully
+16:20:40
+2026-03-12 16:20:40,731 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:45 UTC)" (scheduled at 2026-03-12 16:20:40.726344+00:00)
+16:20:40
+2026-03-12 16:20:40,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:45 UTC)" executed successfully
+16:20:45
+2026-03-12 16:20:45,732 [INFO] apscheduler.executors.default: Running job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:50 UTC)" (scheduled at 2026-03-12 16:20:45.726344+00:00)
+16:20:45
+2026-03-12 16:20:45,732 [INFO] apscheduler.executors.default: Job "check_alerts (trigger: interval[0:00:05], next run at: 2026-03-12 16:20:50 UTC)" executed successfully
