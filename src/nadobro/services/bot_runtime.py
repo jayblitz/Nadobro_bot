@@ -145,11 +145,19 @@ def _strategy_defaults(strategy: str) -> dict:
         "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0},
         "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "auto_close_on_maintenance": 1.0},
         "vol": {"notional_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
+        "bro": {
+            "budget_usd": 500.0, "risk_level": "balanced", "max_positions": 3,
+            "interval_seconds": 300, "cycle_seconds": 300,
+            "tp_pct": 2.0, "sl_pct": 1.5, "max_loss_pct": 15.0,
+            "leverage_cap": 5, "products": ["BTC", "ETH", "SOL"],
+            "use_sentiment": True, "use_cmc": True, "min_confidence": 0.65,
+            "howl_enabled": True, "howl_hour_utc": 2,
+        },
     }
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
 
 
-SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol")
+SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol", "bro")
 
 
 def start_user_bot(
@@ -163,6 +171,40 @@ def start_user_bot(
     strategy = (strategy or "").lower()
     if strategy not in SUPPORTED_STRATEGIES:
         return False, "Unknown strategy."
+
+    if strategy == "bro":
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        _, strat_cfg = get_strategy_settings(telegram_id, strategy)
+        state = _default_state()
+        state.update(_strategy_defaults(strategy))
+        state.update(strat_cfg)
+        state.update(
+            {
+                "running": True,
+                "strategy": "bro",
+                "product": "MULTI",
+                "leverage": float(strat_cfg.get("leverage_cap", 5)),
+                "slippage_pct": float(slippage_pct or 1.0),
+                "reference_price": 0.0,
+                "started_at": datetime.utcnow().isoformat(),
+                "last_run_ts": 0.0,
+                "last_error": None,
+                "runs": 0,
+                "bro_state": {
+                    "started_at": datetime.utcnow().isoformat(),
+                    "total_pnl": 0.0,
+                    "trade_count": 0,
+                    "active_positions": [],
+                    "paused": False,
+                },
+            }
+        )
+        _save_state(telegram_id, network, state)
+        if passphrase:
+            set_runtime_passphrase(telegram_id, network, passphrase)
+        _ensure_task(telegram_id, network)
+        return True, "Bro Mode activated 🧠"
 
     product_id = get_product_id(product)
     if product_id is None:
@@ -447,6 +489,12 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
         )
     elif strategy == "vol":
         return volume_bot.run_cycle(telegram_id, network, state, passphrase=passphrase)
+    elif strategy == "bro":
+        from src.nadobro.strategies import bro_mode
+        return bro_mode.run_cycle(
+            telegram_id, network, state,
+            client=client, passphrase=passphrase,
+        )
     else:
         return {"success": False, "error": f"Unknown strategy '{strategy}'"}
 
@@ -503,6 +551,29 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
 
     product = state.get("product", "BTC")
     strategy = state.get("strategy")
+
+    if strategy == "bro":
+        client = await run_blocking(get_user_readonly_client, telegram_id)
+        if not client:
+            raise RuntimeError("Wallet client unavailable")
+        with timed_metric("runtime.strategy.dispatch.bro"):
+            result = await run_blocking(
+                _dispatch_strategy,
+                strategy, telegram_id, network, state,
+                client, 0.0, 0, "MULTI", [], session_passphrase,
+            )
+        if not state.get("running", True):
+            _save_state(telegram_id, network, state)
+            await _notify(telegram_id, f"🧠 Bro Mode completed on {network}.")
+            return True, None
+        state["last_run_ts"] = time.time()
+        state["runs"] = int(state.get("runs") or 0) + 1
+        state["last_error"] = result.get("error")
+        _save_state(telegram_id, network, state)
+        if not result.get("success", True):
+            return False, str(result.get("error", "unknown"))[:300]
+        return True, None
+
     product_id = get_product_id(product)
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")

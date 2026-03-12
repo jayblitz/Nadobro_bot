@@ -640,6 +640,9 @@ def strategy_hub_kb():
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],
         [
+            InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro"),
+        ],
+        [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
         ],
     ])
@@ -722,6 +725,71 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
+
+
+def bro_action_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🚀 Launch Bro Mode", callback_data="strategy:start:bro:MULTI"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Configure", callback_data="bro:config"),
+            InlineKeyboardButton("📊 Status", callback_data="bro:status"),
+        ],
+        [
+            InlineKeyboardButton("🐺 HOWL Report", callback_data="bro:howl"),
+        ],
+        [
+            InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status"),
+            InlineKeyboardButton("🛑 Stop Runtime", callback_data="strategy:stop"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+        ],
+    ])
+
+
+def bro_config_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💰 Budget", callback_data="bro:set:budget_usd"),
+            InlineKeyboardButton("⚡ Risk Level", callback_data="bro:set:risk_level"),
+        ],
+        [
+            InlineKeyboardButton("🎯 Confidence", callback_data="bro:set:min_confidence"),
+            InlineKeyboardButton("📐 Max Leverage", callback_data="bro:set:leverage_cap"),
+        ],
+        [
+            InlineKeyboardButton("📊 TP/SL", callback_data="bro:set:tp_sl"),
+            InlineKeyboardButton("🔢 Max Positions", callback_data="bro:set:max_positions"),
+        ],
+        [
+            InlineKeyboardButton("Conservative", callback_data="bro:risk:conservative"),
+            InlineKeyboardButton("Balanced", callback_data="bro:risk:balanced"),
+            InlineKeyboardButton("Aggressive", callback_data="bro:risk:aggressive"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="strategy:preview:bro"),
+        ],
+    ])
+
+
+def howl_approval_kb(suggestion_count: int):
+    rows = []
+    for i in range(suggestion_count):
+        rows.append([
+            InlineKeyboardButton(f"✅ Apply #{i+1}", callback_data=f"howl:approve:{i}"),
+            InlineKeyboardButton(f"❌ Reject #{i+1}", callback_data=f"howl:reject:{i}"),
+        ])
+    rows.append([
+        InlineKeyboardButton("✅ Apply All", callback_data="howl:approve_all"),
+        InlineKeyboardButton("❌ Dismiss All", callback_data="howl:dismiss"),
+    ])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="strategy:preview:bro"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 def close_product_kb():

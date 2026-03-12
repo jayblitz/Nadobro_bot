@@ -408,6 +408,9 @@ async def handle_message(update: Update, context: CallbackContext):
         if await _handle_pending_strategy_input(update, context, telegram_id, text):
             return
 
+        if await _handle_pending_bro_input(update, context, telegram_id, text):
+            return
+
         if await handle_trade_intent_message(update, context, telegram_id, text):
             return
 
@@ -1369,6 +1372,87 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         ]),
     )
     return True
+
+
+async def _handle_pending_bro_input(update, context, telegram_id, text):
+    pending = context.user_data.get("pending_bro_input")
+    if not pending:
+        return False
+
+    field = pending.get("field")
+    context.user_data.pop("pending_bro_input", None)
+
+    if field == "tp_sl":
+        try:
+            parts = text.strip().split(",")
+            tp = float(parts[0].strip())
+            sl = float(parts[1].strip())
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "⚠️ Invalid format\\. Use `TP,SL` \\(example: `2.0,1.5`\\)",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return True
+        if tp < 0.3 or tp > 20 or sl < 0.3 or sl > 10:
+            await update.message.reply_text("⚠️ TP: 0\\.3\\-20%, SL: 0\\.3\\-10%", parse_mode=ParseMode.MARKDOWN_V2)
+            return True
+        def _mutate(s):
+            bro = s.setdefault("strategies", {}).setdefault("bro", {})
+            bro["tp_pct"] = tp
+            bro["sl_pct"] = sl
+        update_user_settings(telegram_id, _mutate)
+        await update.message.reply_text(
+            f"✅ Bro Mode TP/SL set to {tp:.1f}%/{sl:.1f}%",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
+            ]),
+        )
+        return True
+
+    elif field == "risk_level":
+        val = text.strip().lower()
+        if val not in ("conservative", "balanced", "aggressive"):
+            await update.message.reply_text("⚠️ Choose: conservative, balanced, or aggressive")
+            return True
+        def _mutate(s):
+            s.setdefault("strategies", {}).setdefault("bro", {})["risk_level"] = val
+        update_user_settings(telegram_id, _mutate)
+        await update.message.reply_text(
+            f"✅ Bro Mode risk set to {val.upper()}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
+            ]),
+        )
+        return True
+
+    else:
+        try:
+            value = float(text.strip())
+        except ValueError:
+            await update.message.reply_text("⚠️ Please enter a number\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            return True
+        limits = {
+            "budget_usd": (10, 100000),
+            "min_confidence": (0.1, 1.0),
+            "leverage_cap": (1, 40),
+            "max_positions": (1, 10),
+        }
+        lo, hi = limits.get(field, (0, 99999))
+        if value < lo or value > hi:
+            await update.message.reply_text(f"⚠️ Range: {lo} to {hi}")
+            return True
+        int_fields = {"leverage_cap", "max_positions"}
+        def _mutate(s):
+            bro = s.setdefault("strategies", {}).setdefault("bro", {})
+            bro[field] = int(value) if field in int_fields else value
+        update_user_settings(telegram_id, _mutate)
+        await update.message.reply_text(
+            f"✅ Bro Mode {field} set to {value}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
+            ]),
+        )
+        return True
 
 
 async def _handle_nado_question(update, context, question):

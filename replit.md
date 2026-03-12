@@ -115,8 +115,18 @@ src/nadobro/
 ### Trading Strategies (Background Bots)
 - `bot_runtime.py` manages per-user asyncio tasks that run strategy cycles on a timer.
 - Strategy state (running, parameters, last tick) is persisted in the `bot_state` table under a `strategy_bot:{user_id}:{network}` key.
-- `_dispatch_strategy()` routes: mm/grid → `strategies/mm_bot.py`, dn → `strategies/delta_neutral.py`, vol → `strategies/volume_bot.py`
-- SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol")
+- `_dispatch_strategy()` routes: mm/grid → `strategies/mm_bot.py`, dn → `strategies/delta_neutral.py`, vol → `strategies/volume_bot.py`, bro → `strategies/bro_mode.py`
+- SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol", "bro")
+
+### Bro Mode — Autonomous LLM Quant Agent
+- **Architecture**: Grok-3 structured JSON decision engine (`services/bro_llm.py`), market scanner (`services/market_scanner.py`), budget guard (`services/budget_guard.py`), price tracker (`services/price_tracker.py`)
+- **Strategy cycle** (`strategies/bro_mode.py`): 5-min cycle scans all assets, builds market snapshots (technicals + funding + CMC + X sentiment), sends to Grok-3 for structured decisions (open/close/hold/emergency_flatten), manages full position lifecycle
+- **Product**: Uses "MULTI" as product (not single-asset); `start_user_bot` has dedicated bro early-return that skips product_id validation
+- **Budget Guard**: 3 risk profiles (conservative/balanced/aggressive), exposure tracking, emergency flatten, min margin buffer
+- **Price Tracker**: Rolling price history, RSI-14, EMA-9/21/50, MACD, Bollinger Bands, 1hr/4hr signals, 60s tick
+- **HOWL** (nightly optimization): `services/howl_service.py` runs at 02:00 UTC via scheduler, sends suggestions to Telegram with approve/reject/dismiss keyboard
+- **Settings**: `strategies.bro` in user settings — budget_usd, risk_level, min_confidence, leverage_cap, max_positions, tp_pct, sl_pct, max_loss_pct, cycle_seconds, products
+- **UI**: Bro Mode card in strategy hub, config keyboard, risk preset picker, HOWL approval flow, pending bro input handler in messages.py
 
 ### Configuration
 All configuration lives in `src/nadobro/config.py` and is read from environment variables. Key flags:

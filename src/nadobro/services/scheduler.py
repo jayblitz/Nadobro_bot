@@ -11,7 +11,7 @@ from src.nadobro.services.execution_queue import enqueue_alert
 
 logger = logging.getLogger(__name__)
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone="UTC")
 _bot_app = None
 _check_client = None
 _ALERT_SCAN_SECONDS = int(os.environ.get("ALERT_SCAN_SECONDS", "5"))
@@ -69,10 +69,78 @@ async def handle_alert_job(payload: dict):
         logger.error(f"Alert check failed: {e}")
 
 
+async def tick_price_tracker():
+    global _check_client
+    if not _check_client:
+        return
+    try:
+        from src.nadobro.services.price_tracker import record_prices_from_client
+        await run_blocking(record_prices_from_client, _check_client)
+    except Exception as e:
+        logger.error("Price tracker tick failed: %s", e)
+
+
+async def tick_howl():
+    global _bot_app
+    if not _bot_app:
+        return
+    try:
+        from src.nadobro.services.howl_service import run_howl_analysis, format_howl_message, get_pending_howl
+        from src.nadobro.services.bot_runtime import _load_state
+        from src.nadobro.db import query_all
+        import json
+
+        rows = await run_blocking(
+            query_all,
+            "SELECT key, value FROM bot_state WHERE key LIKE %s",
+            ("strategy_bot:%",),
+        )
+        for row in rows:
+            try:
+                key = row.get("key", "")
+                state = json.loads(row.get("value") or "{}")
+                if not state.get("running") or state.get("strategy") != "bro":
+                    continue
+                if not state.get("bro_state", {}).get("started_at"):
+                    continue
+
+                settings = state.get("bro_state", {})
+                if not bool(state.get("howl_enabled", True)):
+                    continue
+
+                user_network = key.replace("strategy_bot:", "")
+                user_id_str, network = user_network.split(":", 1)
+                telegram_id = int(user_id_str)
+
+                existing = await run_blocking(get_pending_howl, telegram_id, network)
+                if existing:
+                    continue
+
+                howl_data = await run_blocking(run_howl_analysis, telegram_id, network, state)
+                if howl_data and howl_data.get("suggestions"):
+                    msg = format_howl_message(howl_data)
+                    from src.nadobro.handlers.keyboards import howl_approval_kb
+                    suggestions_count = len(howl_data.get("suggestions", []))
+                    try:
+                        await _bot_app.bot.send_message(
+                            chat_id=telegram_id,
+                            text=msg,
+                            reply_markup=howl_approval_kb(suggestions_count),
+                        )
+                    except Exception as e:
+                        logger.error("Failed to send HOWL to user %s: %s", telegram_id, e)
+            except Exception as e:
+                logger.debug("HOWL skip for row: %s", e)
+    except Exception as e:
+        logger.error("HOWL ticker failed: %s", e)
+
+
 def start_scheduler():
     scheduler.add_job(check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS, id="check_alerts", replace_existing=True)
+    scheduler.add_job(tick_price_tracker, "interval", seconds=60, id="price_tracker", replace_existing=True)
+    scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True)
     scheduler.start()
-    logger.info("Scheduler started - checking alerts every %ss", _ALERT_SCAN_SECONDS)
+    logger.info("Scheduler started - alerts %ss, price tracker 60s, HOWL nightly 02:00 UTC", _ALERT_SCAN_SECONDS)
 
 
 def stop_scheduler():

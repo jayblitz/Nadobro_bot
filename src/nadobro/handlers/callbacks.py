@@ -102,6 +102,10 @@ async def handle_callback(update: Update, context: CallbackContext):
             await _handle_settings(query, data, telegram_id, context)
         elif data.startswith("strategy:"):
             await _handle_strategy(query, data, context, telegram_id)
+        elif data.startswith("bro:"):
+            await _handle_bro(query, data, telegram_id, context)
+        elif data.startswith("howl:"):
+            await _handle_howl(query, data, telegram_id, context)
         elif data == "home:mode":
             user = get_user(telegram_id)
             current_network = user.network_mode.value if user else "testnet"
@@ -930,13 +934,23 @@ async def _handle_settings(query, data, telegram_id, context):
 
 
 async def _handle_strategy(query, data, context, telegram_id):
-    supported = ("mm", "grid", "dn", "vol")
+    supported = ("mm", "grid", "dn", "vol", "bro")
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     strategy_id = parts[2] if len(parts) > 2 else ""
 
     if action == "preview":
         if strategy_id not in supported:
+            return
+        if strategy_id == "bro":
+            from src.nadobro.handlers.keyboards import bro_action_kb
+            with timed_metric("cb.strategy.preview.bro"):
+                preview_text = await run_blocking(_build_bro_preview_text, telegram_id)
+            await query.edit_message_text(
+                preview_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=bro_action_kb(),
+            )
             return
         selected_product = context.user_data.get(f"strategy_pair:{strategy_id}", "BTC")
         with timed_metric("cb.strategy.preview"):
@@ -1131,6 +1145,204 @@ async def _handle_strategy(query, data, context, telegram_id):
         )
 
 
+async def _handle_bro(query, data, telegram_id, context):
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+
+    if action == "config":
+        from src.nadobro.handlers.keyboards import bro_config_kb
+        network, settings = get_user_settings(telegram_id)
+        conf = settings.get("strategies", {}).get("bro", {})
+        b_budget = float(conf.get("budget_usd", 500))
+        b_risk = conf.get("risk_level", "balanced").upper()
+        b_conf_val = float(conf.get("min_confidence", 0.65))
+        b_lev = int(conf.get("leverage_cap", 5))
+        b_tp = float(conf.get("tp_pct", 2.0))
+        b_sl = float(conf.get("sl_pct", 1.5))
+        b_maxp = int(conf.get("max_positions", 3))
+        b_maxl = float(conf.get("max_loss_pct", 15))
+        text = (
+            f"⚙️ *Bro Mode Configuration*\n\n"
+            f"Budget: *{escape_md(f'${b_budget:,.0f}')}*\n"
+            f"Risk Level: *{escape_md(b_risk)}*\n"
+            f"Min Confidence: *{escape_md(f'{b_conf_val:.0%}')}*\n"
+            f"Max Leverage: *{escape_md(f'{b_lev}x')}*\n"
+            f"TP/SL: *{escape_md(f'{b_tp:.1f}%/{b_sl:.1f}%')}*\n"
+            f"Max Positions: *{escape_md(str(b_maxp))}*\n"
+            f"Max Loss: *{escape_md(f'{b_maxl:.0f}%')}*\n\n"
+            "Tap a parameter to change, or pick a risk preset below\\."
+        )
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_config_kb())
+
+    elif action == "risk" and len(parts) >= 3:
+        profile = parts[2]
+        presets = {
+            "conservative": {"risk_level": "conservative", "leverage_cap": 3, "max_positions": 2, "min_confidence": 0.75, "tp_pct": 1.5, "sl_pct": 1.0},
+            "balanced": {"risk_level": "balanced", "leverage_cap": 5, "max_positions": 3, "min_confidence": 0.65, "tp_pct": 2.0, "sl_pct": 1.5},
+            "aggressive": {"risk_level": "aggressive", "leverage_cap": 10, "max_positions": 4, "min_confidence": 0.55, "tp_pct": 3.0, "sl_pct": 2.0},
+        }
+        chosen = presets.get(profile)
+        if not chosen:
+            return
+        def _mutate(s):
+            strategies = s.setdefault("strategies", {})
+            bro = strategies.setdefault("bro", {})
+            bro.update(chosen)
+        update_user_settings(telegram_id, _mutate)
+        from src.nadobro.handlers.keyboards import bro_config_kb
+        await query.edit_message_text(
+            f"✅ Bro Mode risk set to *{escape_md(profile.upper())}*\n\n"
+            f"Leverage cap: {chosen['leverage_cap']}x \\| Confidence: {chosen['min_confidence']:.0%}\n"
+            f"TP/SL: {chosen['tp_pct']:.1f}%/{chosen['sl_pct']:.1f}%\n"
+            f"Max positions: {chosen['max_positions']}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=bro_config_kb(),
+        )
+
+    elif action == "set" and len(parts) >= 3:
+        field = parts[2]
+        allowed = {"budget_usd", "min_confidence", "leverage_cap", "max_positions", "tp_sl", "risk_level"}
+        if field not in allowed:
+            return
+        if field == "tp_sl":
+            context.user_data["pending_bro_input"] = {"field": "tp_sl"}
+            await query.edit_message_text(
+                "✏️ *Set TP/SL*\n\nEnter as `TP,SL` \\(example: `2.0,1.5`\\)",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb("strategy:preview:bro"),
+            )
+        else:
+            context.user_data["pending_bro_input"] = {"field": field}
+            hints = {
+                "budget_usd": "Enter budget in USD \\(example: `500`\\)",
+                "min_confidence": "Enter min confidence 0\\-1 \\(example: `0.65`\\)",
+                "leverage_cap": "Enter max leverage \\(example: `5`\\)",
+                "max_positions": "Enter max simultaneous positions \\(example: `3`\\)",
+                "risk_level": "Enter: `conservative`, `balanced`, or `aggressive`",
+            }
+            await query.edit_message_text(
+                f"✏️ *Set {escape_md(field)}*\n\n{hints.get(field, 'Enter value')}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb("strategy:preview:bro"),
+            )
+
+    elif action == "status":
+        from src.nadobro.services.bot_runtime import get_user_bot_status
+        from src.nadobro.services.budget_guard import get_budget_status
+        from src.nadobro.services.settings_service import get_strategy_settings
+        bot_status = get_user_bot_status(telegram_id)
+        _, bro_conf = get_strategy_settings(telegram_id, "bro")
+        bro_settings = {"budget_usd": bro_conf.get("budget_usd", 500), "risk_level": bro_conf.get("risk_level", "balanced"), "max_loss_pct": bro_conf.get("max_loss_pct", 15)}
+
+        is_running = bot_status.get("running") and bot_status.get("strategy") == "bro"
+        status_text = "🟢 ACTIVE" if is_running else "⚪ INACTIVE"
+        runs = bot_status.get("runs", 0)
+        last_error = bot_status.get("last_error", "")
+
+        budget_status = await run_blocking(get_budget_status, telegram_id, bro_settings)
+        exposure = budget_status.get("current_exposure", 0)
+        remaining = budget_status.get("remaining_budget", 0)
+        positions = budget_status.get("position_count", 0)
+        util = budget_status.get("utilization_pct", 0)
+
+        text = (
+            f"📊 *Bro Mode Status*\n\n"
+            f"Status: {escape_md(status_text)}\n"
+            f"Cycles: *{escape_md(str(runs))}*\n"
+            f"Exposure: *{escape_md(f'${exposure:,.0f}')}* \\| Remaining: *{escape_md(f'${remaining:,.0f}')}*\n"
+            f"Positions: *{escape_md(str(positions))}* \\| Utilization: *{escape_md(f'{util:.0f}%')}*\n"
+        )
+        if last_error:
+            text += f"\nLast error: _{escape_md(str(last_error)[:150])}_"
+        from src.nadobro.handlers.keyboards import bro_action_kb
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_action_kb())
+
+    elif action == "howl":
+        from src.nadobro.services.howl_service import get_pending_howl, format_howl_message
+        from src.nadobro.handlers.keyboards import howl_approval_kb
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        pending = get_pending_howl(telegram_id, network)
+        if pending:
+            text = format_howl_message(pending)
+            suggestions = pending.get("suggestions", [])
+            pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
+            await query.edit_message_text(
+                escape_md(text),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
+            )
+        else:
+            from src.nadobro.handlers.keyboards import bro_action_kb
+            await query.edit_message_text(
+                "🐺 *HOWL*\n\nNo pending optimization suggestions\\.\nHOWL runs nightly and will notify you when it has suggestions\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=bro_action_kb(),
+            )
+
+
+async def _handle_howl(query, data, telegram_id, context):
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+
+    if action == "approve" and len(parts) >= 3:
+        index = int(parts[2])
+        from src.nadobro.services.howl_service import approve_howl_suggestion, get_pending_howl, format_howl_message
+        ok, msg = approve_howl_suggestion(telegram_id, network, index)
+        pending = get_pending_howl(telegram_id, network)
+        if pending:
+            text = format_howl_message(pending)
+            suggestions = pending.get("suggestions", [])
+            pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
+            from src.nadobro.handlers.keyboards import howl_approval_kb
+            await query.edit_message_text(
+                escape_md(f"{'✅' if ok else '⚠️'} {msg}\n\n{text}"),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
+            )
+        else:
+            await query.edit_message_text(f"{'✅' if ok else '⚠️'} {escape_md(msg)}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+
+    elif action == "reject" and len(parts) >= 3:
+        index = int(parts[2])
+        from src.nadobro.services.howl_service import reject_howl_suggestion, get_pending_howl, format_howl_message
+        ok, msg = reject_howl_suggestion(telegram_id, network, index)
+        pending = get_pending_howl(telegram_id, network)
+        if pending:
+            text = format_howl_message(pending)
+            suggestions = pending.get("suggestions", [])
+            pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
+            from src.nadobro.handlers.keyboards import howl_approval_kb
+            await query.edit_message_text(
+                escape_md(f"{'❌' if ok else '⚠️'} {msg}\n\n{text}"),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
+            )
+        else:
+            await query.edit_message_text(f"{'❌' if ok else '⚠️'} {escape_md(msg)}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+
+    elif action == "approve_all":
+        from src.nadobro.services.howl_service import approve_howl_suggestion, get_pending_howl
+        pending = get_pending_howl(telegram_id, network)
+        if pending:
+            results = []
+            for i, s in enumerate(pending.get("suggestions", [])):
+                if s.get("status", "pending") == "pending":
+                    ok, msg = approve_howl_suggestion(telegram_id, network, i)
+                    results.append(f"{'✅' if ok else '⚠️'} {msg}")
+            text = "\n".join(results) if results else "No pending suggestions"
+            await query.edit_message_text(escape_md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+        else:
+            await query.edit_message_text("No pending HOWL suggestions\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+
+    elif action == "dismiss":
+        from src.nadobro.services.howl_service import dismiss_all_howl
+        dismiss_all_howl(telegram_id, network)
+        await query.edit_message_text("🐺 HOWL suggestions dismissed\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+
+
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
     from src.nadobro.handlers import shared_get_user_settings
     return shared_get_user_settings(telegram_id, context)
@@ -1305,6 +1517,61 @@ def _strategy_config_kb(strategy: str):
         ])
     rows.append([InlineKeyboardButton("◀ Back", callback_data=f"strategy:preview:{strategy}")])
     return InlineKeyboardMarkup(rows)
+
+
+def _build_bro_preview_text(telegram_id: int) -> str:
+    network, settings = get_user_settings(telegram_id)
+    conf = settings.get("strategies", {}).get("bro", {})
+    budget = float(conf.get("budget_usd", 500))
+    risk_level = conf.get("risk_level", "balanced")
+    max_positions = int(conf.get("max_positions", 3))
+    leverage_cap = int(conf.get("leverage_cap", 5))
+    tp_pct = float(conf.get("tp_pct", 2.0))
+    sl_pct = float(conf.get("sl_pct", 1.5))
+    min_confidence = float(conf.get("min_confidence", 0.65))
+    products = conf.get("products", ["BTC", "ETH", "SOL"])
+    max_loss = float(conf.get("max_loss_pct", 15))
+    cycle_seconds = int(conf.get("cycle_seconds", 300))
+
+    available_margin = 0.0
+    client = get_user_readonly_client(telegram_id)
+    if client:
+        try:
+            bal = client.get_balance()
+            if bal and bal.get("exists"):
+                available_margin = float((bal.get("balances", {}) or {}).get(0, 0) or 0)
+                if available_margin == 0:
+                    available_margin = float((bal.get("balances", {}) or {}).get("0", 0) or 0)
+        except Exception:
+            pass
+
+    from src.nadobro.services.bot_runtime import get_user_bot_status
+    bot_status = get_user_bot_status(telegram_id)
+    is_running = bot_status.get("running") and bot_status.get("strategy") == "bro"
+    status_emoji = "🟢 RUNNING" if is_running else "⚪ READY"
+
+    risk_emoji = {"conservative": "🛡️", "balanced": "⚖️", "aggressive": "🔥"}.get(risk_level, "⚖️")
+    products_str = ", ".join(products)
+    margin_flag = "✅" if available_margin >= budget * 0.2 else "⚠️"
+
+    return (
+        f"🧠 *Bro Mode — AI Quant Agent*\n"
+        f"Status: {escape_md(status_emoji)}\n"
+        f"Autonomous LLM\\-powered trading agent that scans markets,\n"
+        f"analyzes technicals \\+ sentiment, and executes trades\\.\n\n"
+        f"📊 *Configuration*\n"
+        f"Budget: *{escape_md(f'${budget:,.0f}')}* \\| Risk: {escape_md(risk_emoji)} *{escape_md(risk_level.upper())}*\n"
+        f"Assets: *{escape_md(products_str)}*\n"
+        f"Max Positions: *{escape_md(str(max_positions))}* \\| Max Leverage: *{escape_md(f'{leverage_cap}x')}*\n"
+        f"TP/SL: *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}* \\| Min Confidence: *{escape_md(f'{min_confidence:.0%}')}*\n"
+        f"Cycle: *{escape_md(f'{cycle_seconds}s')}* \\| Max Loss: *{escape_md(f'{max_loss:.0f}%')}*\n\n"
+        f"📈 *Account*\n"
+        f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}*\n"
+        f"Mode: *{escape_md(network.upper())}*\n\n"
+        f"Data: Prices \\+ Technicals \\+ Funding \\+ CMC \\+ Twitter Sentiment\n"
+        f"Engine: Grok\\-3 full power\n\n"
+        "Configure, check status, or launch below\\."
+    )
 
 
 def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: str) -> str:

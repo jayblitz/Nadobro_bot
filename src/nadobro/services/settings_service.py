@@ -38,6 +38,22 @@ def _default_strategy_settings() -> dict:
             "auto_close_on_maintenance": 1.0,
         },
         "vol": {"notional_usd": 100.0, "spread_bp": 6.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
+        "bro": {
+            "budget_usd": 500.0,
+            "risk_level": "balanced",
+            "max_positions": 3,
+            "cycle_seconds": 300,
+            "tp_pct": 2.0,
+            "sl_pct": 1.5,
+            "max_loss_pct": 15.0,
+            "leverage_cap": 5,
+            "products": ["BTC", "ETH", "SOL"],
+            "use_sentiment": True,
+            "use_cmc": True,
+            "min_confidence": 0.65,
+            "howl_enabled": True,
+            "howl_hour_utc": 2,
+        },
     }
 
 
