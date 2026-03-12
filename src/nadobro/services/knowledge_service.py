@@ -19,8 +19,8 @@ _openai_client = None
 _answer_cache = {}
 
 _chat_history: dict[int, list[dict]] = defaultdict(list)
-CHAT_HISTORY_MAX_MESSAGES = 8
-CHAT_HISTORY_TTL_SECONDS = 900
+CHAT_HISTORY_MAX_MESSAGES = 12
+CHAT_HISTORY_TTL_SECONDS = 1800
 
 _fng_cache: dict = {}
 FNG_CACHE_TTL_SECONDS = 300
@@ -86,6 +86,8 @@ def _is_casual_message(text: str) -> bool:
         "bye", "goodbye", "cya", "see ya", "later", "peace",
         "how are you", "how r u", "hows it going", "how's it going",
         "wassup", "wsg", "wagmi", "gm fam", "lfg",
+        "lol", "lmao", "haha", "nice", "cool", "based", "true", "fr",
+        "tell me a joke", "make me laugh",
     }
     return t in casual_patterns or len(t) <= 3
 
@@ -485,9 +487,11 @@ ROUTING RULES:
 - "What's BTC price?" / "price of ETH" → get_live_price (Nado DEX price)
 {cmc_routing_rules}- "What are Nado fees?" / "how does margin work?" → search_knowledge_base
 - "Is the market bullish?" / "fear and greed" → get_market_sentiment
-- "What did Nado tweet?" → search_x_twitter
+- "What did Nado tweet?" / "any Nado news?" → search_x_twitter
+- "Have the points been distributed?" / "points this week?" / "weekly epoch?" → search_x_twitter (search for points distribution announcements)
 - Casual greetings (gm, hi, hello, thanks, bye) → do NOT call any tools
-- When in doubt about Nado → search_knowledge_base
+- General chat, jokes, opinions, non-crypto questions → do NOT call any tools (the main AI will handle these)
+- When in doubt about Nado specifically → search_knowledge_base
 
 You can call multiple tools for complex queries. Do NOT answer the question yourself — only call tools."""
 
@@ -503,62 +507,56 @@ ROUTER_CMC_ROUTING_RULES = """- "How is BTC doing?" / "BTC performance" / "is ET
 - "Should I buy BTC?" → get_live_price AND get_crypto_info AND get_market_sentiment
 """
 
-CASUAL_SYSTEM_PROMPT = """You are Nadobro, a friendly and knowledgeable crypto trading companion on Telegram for Nado DEX.
+CASUAL_SYSTEM_PROMPT = """You are Nadobro — a witty, sharp, and brutally honest crypto trading AI on Telegram. Think of yourself as Grok meets a degen trader who actually knows what they're talking about.
 
 Today's date: {current_date}
 User's name: {user_name}
 
-You are chatting with {user_name}. Be warm, natural, and engaging — like a knowledgeable crypto friend.
+PERSONALITY — THIS IS WHO YOU ARE:
+- You're funny, quick-witted, and a little sarcastic. You have OPINIONS about crypto and you're not afraid to share them.
+- You drop crypto slang naturally — WAGMI, LFG, NGMI, degen, ape, rekt, ser, fren, based, copium, hopium, diamond hands, paper hands, anon, chad move
+- You make jokes. You roast bad takes (gently). You hype good trades.
+- You're the friend who happens to be a quant — you can joke around but when someone asks a real question, you deliver.
+- You have a bit of edge. Not mean, but definitely not a corporate chatbot. Think "your funniest friend who also trades."
+- GM responses should have ENERGY. Not just "GM!" but something with personality.
+- Keep casual responses SHORT and punchy (1-3 sentences). No essays for "hello."
+- If thanked, be smooth about it. "That's what I'm here for, fren" > "You're welcome!"
+- You can reference memes, crypto culture, CT (Crypto Twitter) vibes naturally.
 
-PERSONALITY:
-- Respond to greetings enthusiastically but naturally (GM {user_name}! / Hey! / What's good!)
-- Use the user's name occasionally but not every message
-- Be encouraging about trading but never give financial advice
-- Match the user's energy — casual if they're casual, detailed if they ask specifics
-- You can use crypto slang naturally (WAGMI, LFG, degen, alpha, etc.)
-- Keep casual responses SHORT (1-3 sentences max)
-- If thanked, be gracious and offer to help more
-- If they say bye/gn, wish them well and remind them you're always here
+You run on Nado DEX. Users can trade by typing things like "long BTC 0.01 5x market" — mention this casually when it fits, don't force it.
 
-You are a trading bot for Nado DEX. Users can:
-- Ask about prices, market sentiment, Nado features
-- Execute trades by typing: "long BTC 0.01 5x market" or "short ETH 0.05 10x limit 2500"
-- Supported assets: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX (perpetuals up to 20x leverage)
+IMPORTANT: You are NOT limited to Nado topics. You can chat about anything — crypto, life, jokes, opinions, memes. Be a real conversationalist.
 
-If the conversation naturally leads to trading, you can mention: "Just type something like 'long BTC 0.01 5x market' and I'll set it up for you!"
+Plain text only. No markdown. No source links for casual chat."""
 
-Plain text only. No markdown. No source links needed for casual chat."""
-
-SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro, an expert crypto trading companion for Nado DEX — a high-performance CLOB exchange on Ink L2 (backed by Kraken) with perpetual futures and spot trading.
+SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro — a witty, sharp, and opinionated crypto trading AI on Telegram. You're built into Nado DEX (a CLOB exchange on Ink L2, backed by Kraken). Think Grok on X, but for crypto trading.
 
 Today's date: {current_date}
 User's name: {user_name}
 
-You have context from Nado's knowledge base and/or live data. Use it to answer accurately and conversationally.
+PERSONALITY — THIS IS WHO YOU ARE:
+- You're funny, clever, and real. Not a corporate support bot. You have actual opinions about crypto.
+- You're the smartest degen in the room — technically sharp but you talk like a human, not a textbook.
+- Use crypto slang when it fits naturally (WAGMI, LFG, ser, fren, rekt, based, chad move, copium, etc.)
+- Be direct — answer first, then elaborate if needed. Don't hedge everything with disclaimers.
+- Make jokes when the moment is right. If someone asks about a coin that's down 90%, you can acknowledge the pain with humor.
+- You can roast bad takes gently, hype good trades, and have genuine opinions.
+- For trading ideas, casually mention: "you could try: long BTC 0.01 5x market" — Nado supports BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX (perps up to 20x).
 
-PERSONALITY:
-- You're a knowledgeable crypto friend, not a stiff support bot
-- Address the user by name occasionally
-- Be direct — answer first, then elaborate
-- If discussing trading ideas, you can suggest trades: "You could try typing: long BTC 0.01 5x market"
-- Supported trade format: "[long/short] [asset] [size] [leverage]x [market/limit] [price]"
-- Supported assets: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX (perps, up to 20x)
+ANSWERING RULES:
+1. Answer the question DIRECTLY first, then add color/details.
+2. For Nado-specific questions (fees, features, margin, points, etc.), use the provided context. Be accurate about Nado facts.
+3. For general crypto questions, market opinions, or anything outside Nado — USE YOUR OWN KNOWLEDGE. You are NOT limited to the context below. Be a real conversationalist.
+4. For price data, mention it's from Nado DEX casually. For CMC data, cite inline ("CMC shows..."). No separate Sources section for data.
+5. Plain text only — no markdown formatting.
+6. Keep it conversational: 2-6 sentences for simple things, longer for complex stuff. Don't pad responses with filler.
+7. If you genuinely don't know something specific about Nado and it's not in context, say so — but for everything else (crypto, markets, general knowledge, opinions), just answer.
+8. Only include a source link if directly useful. Max 1 link. No links for price/sentiment/data responses.
 
-RULES:
-1. Answer the question DIRECTLY first, then provide supporting details
-2. Use ONLY the provided context. If not in context, say: "I don't have that info right now. Check Nado's docs or ask in the community!"
-3. NEVER fabricate or guess information
-4. Plain text only — no markdown formatting
-5. Keep responses focused: 2-6 sentences for simple questions, more for complex ones
-6. For price data, mention it's from Nado DEX casually and include bid/ask when available
-7. For market sentiment, present it conversationally with the Fear & Greed reading. Cite the source casually inline, e.g. "According to CMC, the Fear & Greed Index is at 10 out of 100 — that's Extreme Fear."
-8. For data from CoinMarketCap (prices, market cap, sentiment), cite it casually inline (e.g. "According to CMC..." or "CMC shows..."). Do NOT add a separate Sources section for these.
-9. Only include a source link if it's directly relevant and helpful. Never include more than 1 link. Do NOT add source links for price, sentiment, or market data responses — just cite the data source by name inline.
-
-CONTEXT:
+CONTEXT (use for Nado-specific facts, supplement with your own knowledge for everything else):
 {context}"""
 
-X_TWITTER_SYSTEM_PROMPT = """You are Nadobro, the expert AI assistant for Nado DEX, with real-time access to X (Twitter).
+X_TWITTER_SYSTEM_PROMPT = """You are Nadobro — a witty, opinionated crypto AI with real-time access to X (Twitter). Think Grok but for Nado DEX.
 
 Today's date: {current_date}
 
@@ -566,22 +564,33 @@ Official X accounts:
 - @nadoHQ (https://x.com/nadoHQ) — Nado DEX official
 - @inkonchain (https://x.com/inkonchain) — Ink L2 blockchain (Nado's chain)
 
-Nado is a CLOB-based DEX on the Ink L2 blockchain (backed by Kraken) offering perpetual futures and spot trading with unified margin.
+Nado is a CLOB-based DEX on Ink L2 (backed by Kraken) — perpetual futures and spot trading with unified margin.
+
+PERSONALITY:
+- Be conversational and add your own take on what you find. Don't just list tweets robotically.
+- Have opinions. If there's big news, react to it like a real person would.
+- Use crypto slang naturally when it fits.
+- Be witty, not boring.
 
 Your task:
-- Search for and report the MOST RECENT posts from @nadoHQ and @inkonchain
-- "Latest" means the most recent tweets closest to today ({current_date}). Prioritize tweets from {current_year}.
-- Report actual tweet content with dates and which account posted
-- If asked about a specific topic, find relevant tweets about that topic
+- Search for the MOST RECENT posts from @nadoHQ and @inkonchain
+- Focus on tweets from {current_year}, closest to today ({current_date})
+- Report tweet content with dates, but weave it into a natural response
+- Add your own commentary/reaction to make it conversational
+
+For POINTS DISTRIBUTION questions:
+- Nado distributes points every Friday in weekly epochs
+- If you find a distribution announcement, report it clearly
+- If no distribution found this week, tell the user points haven't dropped yet and to check back Friday
+- Be real about it: "No points drop yet this week, ser. They usually hit on Fridays."
 
 RULES:
-- ONLY return content from @nadoHQ and @inkonchain
-- If you cannot find relevant tweets, say so honestly
+- Focus on @nadoHQ and @inkonchain content
+- If you can't find relevant tweets, say so honestly but with personality
 - Plain text only
-- Include tweet dates and account handles
-- Keep response under 1500 characters
+- Keep under 1500 chars
 - End with: Sources: https://x.com/nadoHQ, https://x.com/inkonchain
-- NEVER include DuckDuckGo, Google, or search engine links
+- NEVER include search engine links
 
 Relevant Nado Knowledge:
 {knowledge_base}
@@ -619,20 +628,36 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
         return "[X SEARCH] xAI client not available — cannot search X/Twitter.", []
 
     now = datetime.utcnow()
+    is_points_q = _is_points_distribution_question(query)
+    weekday = now.strftime("%A")
+
+    if is_points_q:
+        search_query = "Nado points distributed rewards epoch weekly"
+        system_content = (
+            f"Today is {now.strftime('%Y-%m-%d')} ({weekday}). "
+            "Search X for the most recent posts from @nadoHQ about points distribution, "
+            "weekly epoch rewards, or points being distributed to users. "
+            "Look for any announcement about points being distributed THIS week. "
+            "If you find a distribution announcement, report it with dates. "
+            "If you find NO recent points distribution announcement for this week, "
+            "explicitly say 'No points distribution announcement found for this week.' "
+            f"Focus on tweets from {now.year}. Plain text only."
+        )
+    else:
+        search_query = query
+        system_content = (
+            f"Today is {now.strftime('%Y-%m-%d')}. "
+            "Search X for the most recent posts from @nadoHQ and @inkonchain. "
+            "Return the actual tweet content verbatim with dates. "
+            f"Focus on tweets from {now.year}. Plain text only."
+        )
+
     try:
         response = client.chat.completions.create(
             model=XAI_X_SEARCH_MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"Today is {now.strftime('%Y-%m-%d')}. "
-                        "Search X for the most recent posts from @nadoHQ and @inkonchain. "
-                        "Return the actual tweet content verbatim with dates. "
-                        f"Focus on tweets from {now.year}. Plain text only."
-                    ),
-                },
-                {"role": "user", "content": query},
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": search_query},
             ],
             max_tokens=600,
             temperature=0.1,
@@ -640,6 +665,25 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
         )
         content = response.choices[0].message.content
         if content and content.strip():
+            if is_points_q:
+                no_distro = any(phrase in content.lower() for phrase in [
+                    "no points distribution", "no recent", "not found", "no announcement",
+                    "couldn't find", "could not find", "no results",
+                ])
+                if no_distro:
+                    return (
+                        f"[X/TWITTER RESULTS — POINTS DISTRIBUTION]\n"
+                        f"No points distribution announcement found for this week on @nadoHQ.\n"
+                        f"Today is {weekday}. Nado points are typically distributed every Friday.\n"
+                        f"{'Points for the week have not been distributed yet. Check back on Friday!' if weekday != 'Friday' else 'It is Friday — points may still be distributed later today. Keep an eye on @nadoHQ!'}\n\n"
+                        f"Raw search results:\n{content.strip()}",
+                        [OFFICIAL_SOURCES["x_nado"]],
+                    )
+                return (
+                    f"[X/TWITTER RESULTS — POINTS DISTRIBUTION]\n{content.strip()}\n\n"
+                    f"Note: Nado distributes points every Friday in weekly epochs.",
+                    [OFFICIAL_SOURCES["x_nado"]],
+                )
             return (
                 f"[X/TWITTER RESULTS — @nadoHQ & @inkonchain]\n{content.strip()}",
                 [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]],
@@ -647,6 +691,14 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
     except Exception as e:
         logger.warning(f"X search failed: {e}")
 
+    if is_points_q:
+        points_note = "Points for this week likely haven't been distributed yet." if weekday != "Friday" else "It's Friday — check @nadoHQ for updates!"
+        return (
+            f"[X/TWITTER RESULTS — POINTS DISTRIBUTION]\n"
+            f"Could not search X right now. Based on Nado's schedule, points are distributed every Friday. "
+            f"Today is {weekday}. {points_note}",
+            [OFFICIAL_SOURCES["x_nado"]],
+        )
     return "[X SEARCH] No results found from @nadoHQ or @inkonchain.", []
 
 
@@ -875,9 +927,11 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
         tool_calls = router_response.choices[0].message.tool_calls
 
     if not tool_calls:
-        kb_context = _search_knowledge_sections(question, top_k=5)
-        packed_context = f"[KNOWLEDGE BASE]\n{kb_context}"
-        return packed_context, _pick_sources_for_question(question, context_text=packed_context)
+        if _is_nado_specific_question(question):
+            kb_context = _search_knowledge_sections(question, top_k=5)
+            packed_context = f"[KNOWLEDGE BASE]\n{kb_context}"
+            return packed_context, _pick_sources_for_question(question, context_text=packed_context)
+        return "", []
 
     all_context_parts = []
     all_sources = []
@@ -919,18 +973,18 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 420
+    max_tokens = 800 if (_wants_detailed_answer(question) or x_search) else 550
 
     messages = [{"role": "system", "content": system}]
     if history:
-        messages.extend(history[-6:])
+        messages.extend(history[-8:])
     messages.append({"role": "user", "content": question})
 
     kwargs = dict(
         model=XAI_X_SEARCH_MODEL if (x_search and provider == "xai") else _model_for(provider),
         messages=messages,
         max_tokens=max_tokens,
-        temperature=0.2,
+        temperature=0.5,
         stream=True,
     )
     if x_search and provider == "xai":
@@ -943,10 +997,27 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
             yield delta.content
 
 
+def _is_points_distribution_question(question: str) -> bool:
+    q = _normalize_question(question)
+    points_signals = [
+        "points distributed", "points been distributed", "points dropped",
+        "points this week", "weekly points", "points yet", "when are points",
+        "when do points", "point distribution", "points distribution",
+        "points come", "points arrived", "got my points", "received points",
+        "points update", "epoch", "weekly epoch", "points epoch",
+        "rewards distributed", "rewards this week", "rewards dropped",
+    ]
+    return any(sig in q for sig in points_signals)
+
+
 def _is_x_twitter_question(question: str) -> bool:
     q = _normalize_question(question)
     signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq", "inkonchain"]
-    return any(sig in q for sig in signals)
+    if any(sig in q for sig in signals):
+        return True
+    if _is_points_distribution_question(question):
+        return True
+    return False
 
 
 def _is_price_question(question: str) -> bool:
@@ -959,18 +1030,28 @@ def _is_price_question(question: str) -> bool:
     return any(sig in q for sig in price_signals)
 
 
+def _is_nado_specific_question(question: str) -> bool:
+    q = _normalize_question(question)
+    nado_signals = (
+        "nado", "ink l2", "inkonchain", "nadobro", "nado dex",
+        "fee", "fees", "margin", "leverage", "liquidation", "deposit", "withdraw",
+        "wallet", "funding", "unified margin", "nlp", "vault",
+        "points", "rewards", "referral", "invite code", "season",
+        "templars", "nft", "templar", "subaccount",
+        "1-click", "1ct", "linked signer", "how to trade on nado",
+    )
+    return any(sig in q for sig in nado_signals)
+
+
 def _should_skip_router(question: str) -> bool:
     q = _normalize_question(question)
     if not q:
         return True
     if _is_price_question(q) or _is_sentiment_question(q) or _is_x_twitter_question(q):
         return False
-    fast_signals = (
-        "what is", "how to", "how do", "where", "when", "why", "explain",
-        "fee", "fees", "margin", "leverage", "liquidation", "deposit", "withdraw",
-        "wallet", "funding", "unified margin", "nado",
-    )
-    return len(q) <= 160 and any(sig in q for sig in fast_signals)
+    if _is_nado_specific_question(q):
+        return True
+    return False
 
 
 async def stream_nado_answer(question: str, telegram_id: int = None, user_name: str = None):
@@ -1033,19 +1114,17 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         except Exception as e:
             logger.warning(f"Casual response failed: {e}")
 
-        yield f"GM {display_name}! How can I help you today?"
+        fallback_msg = f"Yo {display_name}! What's good? Ready to talk crypto, drop alpha, or just vibe. What do you need?"
+        yield fallback_msg
         if telegram_id:
-            _add_to_chat_history(telegram_id, "assistant", f"GM {display_name}! How can I help you today?")
+            _add_to_chat_history(telegram_id, "assistant", fallback_msg)
         return
 
     if _is_x_twitter_question(question) and not xai_client:
-        yield "X/Twitter search requires the xAI (Grok) service. Please ask a different question or contact support."
+        yield "X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!"
         return
 
-    knowledge = _load_knowledge_base()
-    if not knowledge:
-        yield "Knowledge base is not loaded. Please contact support."
-        return
+    _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
@@ -1179,10 +1258,10 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                 client = _get_xai_client() if p == "xai" else _get_openai_client()
                 messages = [{"role": "system", "content": system}]
                 if history_msgs:
-                    messages.extend(history_msgs[-6:])
+                    messages.extend(history_msgs[-8:])
                 messages.append({"role": "user", "content": question})
                 resp = client.chat.completions.create(
-                    model=_model_for(p), messages=messages, max_tokens=300, temperature=0.4,
+                    model=_model_for(p), messages=messages, max_tokens=350, temperature=0.6,
                 )
                 return resp.choices[0].message.content.strip()
 
@@ -1192,17 +1271,15 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             return answer
         except Exception as e:
             logger.warning(f"Casual answer failed: {e}")
-            fallback = f"GM {display_name}! How can I help you today?"
+            fallback = f"Yo {display_name}! What's good? I'm ready to talk crypto, drop alpha, or just vibe. What do you need?"
             if telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", fallback)
             return fallback
 
     if _is_x_twitter_question(question) and not xai_client:
-        return "X/Twitter search requires the xAI (Grok) service. Please ask a different question or contact support."
+        return "X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!"
 
-    knowledge = _load_knowledge_base()
-    if not knowledge:
-        return "Knowledge base is not loaded. Please contact support."
+    _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
     use_x_prompt = is_x_question and xai_client is not None
@@ -1265,16 +1342,16 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             try:
                 def _call(p=provider):
                     client = _get_xai_client() if p == "xai" else _get_openai_client()
-                    max_tokens = 700 if (_wants_detailed_answer(question) or use_x_prompt) else 420
+                    max_tokens = 800 if (_wants_detailed_answer(question) or use_x_prompt) else 550
                     messages = [{"role": "system", "content": system}]
                     if history_msgs:
-                        messages.extend(history_msgs[-6:])
+                        messages.extend(history_msgs[-8:])
                     messages.append({"role": "user", "content": question})
                     kwargs = dict(
                         model=XAI_X_SEARCH_MODEL if (use_x_prompt and p == "xai") else _model_for(p),
                         messages=messages,
                         max_tokens=max_tokens,
-                        temperature=0.2,
+                        temperature=0.5,
                     )
                     if use_x_prompt and p == "xai":
                         kwargs["extra_body"] = {"search_parameters": X_NADO_SEARCH_PARAMS}
