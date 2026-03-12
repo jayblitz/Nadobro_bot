@@ -557,7 +557,7 @@ ANSWERING RULES:
 CONTEXT (use for Nado-specific facts, supplement with your own knowledge for everything else):
 {context}"""
 
-X_TWITTER_SYSTEM_PROMPT = """You are Nadobro — a witty, opinionated crypto AI with real-time access to X (Twitter). Think Grok but for Nado DEX.
+X_TWITTER_NADO_PROMPT = """You are Nadobro — a witty, opinionated crypto AI with real-time access to X (Twitter). Think Grok but for Nado DEX.
 
 Today's date: {current_date}
 
@@ -595,6 +595,31 @@ RULES:
 
 Relevant Nado Knowledge:
 {knowledge_base}
+"""
+
+X_TWITTER_BROAD_PROMPT = """You are Nadobro — a witty, opinionated crypto AI with real-time access to crypto Twitter (X). Think Grok vibes.
+
+Today's date: {current_date}
+
+PERSONALITY:
+- Be conversational, have opinions, react to what you find like a real crypto native.
+- Use crypto slang naturally (CT, ser, anon, alpha, ngmi, wagmi, etc.)
+- Be witty and entertaining, not robotic.
+- If the news is bullish, be hype. If bearish, keep it real.
+
+Your task:
+- Search crypto Twitter for the latest discussion, news, alpha, and takes on the topic
+- Focus on content from {current_year}, closest to today ({current_date})
+- Report what crypto Twitter (CT) is saying, with your own commentary
+- Mention notable accounts/KOLs if they come up
+
+RULES:
+- Search broadly across crypto Twitter, not limited to any specific accounts
+- If you can't find relevant tweets, say so honestly but with personality
+- Plain text only
+- Keep under 1500 chars
+- End with: Source: https://x.com
+- NEVER include search engine links
 """
 
 
@@ -646,12 +671,21 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
         )
     else:
         search_query = query
-        system_content = (
-            f"Today is {now.strftime('%Y-%m-%d')}. "
-            "Search X for the most recent posts from @nadoHQ and @inkonchain. "
-            "Return the actual tweet content verbatim with dates. "
-            f"Focus on tweets from {now.year}. Plain text only."
-        )
+        is_nado_q = _is_nado_x_question(query)
+        if is_nado_q:
+            system_content = (
+                f"Today is {now.strftime('%Y-%m-%d')}. "
+                "Search X for the most recent posts from @nadoHQ and @inkonchain. "
+                "Return the actual tweet content verbatim with dates. "
+                f"Focus on tweets from {now.year}. Plain text only."
+            )
+        else:
+            system_content = (
+                f"Today is {now.strftime('%Y-%m-%d')}. "
+                "Search crypto Twitter broadly for the latest discussion, news, and takes on this topic. "
+                "Report what people are saying with dates and account handles when available. "
+                f"Focus on tweets from {now.year}. Plain text only."
+            )
 
     try:
         response = client.chat.completions.create(
@@ -1013,8 +1047,12 @@ def _is_points_distribution_question(question: str) -> bool:
 
 def _is_x_twitter_question(question: str) -> bool:
     q = _normalize_question(question)
-    signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq", "inkonchain"]
-    if any(sig in q for sig in signals):
+    nado_signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq", "inkonchain"]
+    broad_signals = ["crypto news", "latest news", "ct saying", "crypto twitter", "any alpha", "what's alpha",
+                     "whats alpha", "news today", "breaking news", "latest from ct"]
+    if any(sig in q for sig in nado_signals):
+        return True
+    if any(sig in q for sig in broad_signals):
         return True
     if _is_points_distribution_question(question):
         return True
@@ -1146,13 +1184,21 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
 
     gathered_context = ""
     if use_x_prompt:
-        system = X_TWITTER_SYSTEM_PROMPT.format(
-            knowledge_base=_search_knowledge_sections(question, top_k=2),
-            current_date=current_date,
-            current_year=str(now.year),
-        )
+        is_nado_x = _is_nado_x_question(question)
+        if is_nado_x:
+            system = X_TWITTER_NADO_PROMPT.format(
+                knowledge_base=_search_knowledge_sections(question, top_k=2),
+                current_date=current_date,
+                current_year=str(now.year),
+            )
+            used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
+        else:
+            system = X_TWITTER_BROAD_PROMPT.format(
+                current_date=current_date,
+                current_year=str(now.year),
+            )
+            used_sources = ["https://x.com"]
         gathered_context = "[X/TWITTER RESULTS]"
-        used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
     else:
         import asyncio
         loop = asyncio.get_event_loop()
@@ -1301,13 +1347,21 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
 
     gathered_context = ""
     if use_x_prompt:
-        system = X_TWITTER_SYSTEM_PROMPT.format(
-            knowledge_base=_search_knowledge_sections(question, top_k=2),
-            current_date=current_date,
-            current_year=str(now.year),
-        )
+        is_nado_x = _is_nado_x_question(question)
+        if is_nado_x:
+            system = X_TWITTER_NADO_PROMPT.format(
+                knowledge_base=_search_knowledge_sections(question, top_k=2),
+                current_date=current_date,
+                current_year=str(now.year),
+            )
+            used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
+        else:
+            system = X_TWITTER_BROAD_PROMPT.format(
+                current_date=current_date,
+                current_year=str(now.year),
+            )
+            used_sources = ["https://x.com"]
         gathered_context = "[X/TWITTER RESULTS]"
-        used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
     else:
         import asyncio
         loop = asyncio.get_event_loop()
