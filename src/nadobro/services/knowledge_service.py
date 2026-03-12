@@ -388,8 +388,8 @@ AGENT_TOOLS = [
         "function": {
             "name": "search_x_twitter",
             "description": (
-                "Search X (Twitter) for latest posts from @nadoHQ and @inkonchain. "
-                "ONLY for questions about Nado tweets, social media posts, or recent announcements."
+                "Search X (Twitter) for latest crypto posts. For Nado-specific queries, searches @nadoHQ and @inkonchain. "
+                "For broader crypto news, alpha, or CT discussion, searches wider crypto Twitter."
             ),
             "parameters": {
                 "type": "object",
