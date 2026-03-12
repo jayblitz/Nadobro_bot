@@ -21,13 +21,15 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "fly deploy -a nadobro-bot"
-waitForPort = 0
+args = "python main.py"
+waitForPort = 8080
 
 [workflows.workflow.metadata]
 outputType = "console"
 
-# Bot runs on Fly.io only; use `fly logs` to view output
+[[ports]]
+localPort = 8080
+externalPort = 8080
 
 [nix]
 channel = "stable-25_05"

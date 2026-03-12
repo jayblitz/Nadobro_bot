@@ -29,7 +29,6 @@ from src.nadobro.services.onboarding_service import get_resume_step
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client
-from src.nadobro.i18n import get_user_language, localize_payload
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +216,7 @@ async def _load_preview_fields(session: dict, telegram_id: int) -> None:
     session["est_margin"] = est_margin
 
 
-def _build_confirm_preview(session: dict, analytics: dict | None = None) -> str:
+def _build_confirm_preview(session: dict) -> str:
     product = session.get("product", "BTC")
     size = float(session.get("size", 0) or 0)
     leverage = int(session.get("leverage", 1) or 1)
@@ -230,7 +229,7 @@ def _build_confirm_preview(session: dict, analytics: dict | None = None) -> str:
     if order_type == "limit":
         action = "limit_long" if direction == "long" else "limit_short"
 
-    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
+    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
     tp = session.get("tp")
     sl = session.get("sl")
     if tp:
@@ -238,18 +237,6 @@ def _build_confirm_preview(session: dict, analytics: dict | None = None) -> str:
     if sl:
         preview += f"\n📉 *Stop Loss:* {escape_md(str(sl))}"
     return preview
-
-
-async def _build_confirm_preview_with_analytics(session: dict, telegram_id: int) -> str:
-    from src.nadobro.handlers.messages import _compute_trade_analytics
-    product = session.get("product", "BTC")
-    size = float(session.get("size", 0) or 0)
-    price = float(session.get("price", 0) or 0)
-    leverage = int(session.get("leverage", 1) or 1)
-    direction = session.get("direction", "long")
-    sl_val = session.get("sl")
-    analytics = _compute_trade_analytics(size, price, leverage, sl_val, direction)
-    return _build_confirm_preview(session, analytics=analytics)
 
 
 async def _edit_or_send_trade_card(
@@ -261,16 +248,14 @@ async def _edit_or_send_trade_card(
 ):
     text = _build_trade_card_text(session)
     kb = _card_keyboard(session)
-    selected_lang = get_user_language(telegram_id)
-    loc_text, loc_kb = localize_payload(text, kb, selected_lang)
     if message_id:
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=loc_text,
+                text=text,
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=loc_kb,
+                reply_markup=kb,
             )
             return message_id
         except Exception:
@@ -278,21 +263,19 @@ async def _edit_or_send_trade_card(
 
     message = await context.bot.send_message(
         chat_id=chat_id,
-        text=loc_text,
+        text=text,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=loc_kb,
+        reply_markup=kb,
     )
     return message.message_id
 
 
-async def _edit_message_safely(query, text: str, reply_markup=None, telegram_id: int | None = None):
-    selected_lang = get_user_language(telegram_id or query.from_user.id)
-    loc_text, loc_kb = localize_payload(text, reply_markup, selected_lang)
+async def _edit_message_safely(query, text: str, reply_markup=None):
     try:
         await query.edit_message_text(
-            loc_text,
+            text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=loc_kb,
+            reply_markup=reply_markup,
         )
     except BadRequest as e:
         if "Message is not modified" in str(e):
@@ -337,13 +320,13 @@ async def open_trade_card_from_callback(query, context: CallbackContext, telegra
         "origin_message_id": query.message.message_id,
     }
     _set_trade_card_session(context, session)
-    await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session), telegram_id)
+    await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
     return True
 
 
 async def _render_home_on_card(query, telegram_id: int):
     text = build_home_card_text(telegram_id)
-    await _edit_message_safely(query, text, home_card_kb(), telegram_id)
+    await _edit_message_safely(query, text, home_card_kb())
 
 
 def _session_matches_query(session: dict, query, session_id: str) -> bool:
@@ -365,12 +348,12 @@ async def _execute_card_trade(query, context: CallbackContext, telegram_id: int,
     slippage_pct = get_user_settings(telegram_id)[1].get("slippage", 1)
 
     if is_trading_paused():
-        await _edit_message_safely(query, "⏸ Trading is temporarily paused by admin\\.", home_card_kb(), telegram_id)
+        await _edit_message_safely(query, "⏸ Trading is temporarily paused by admin\\.", home_card_kb())
         _clear_trade_card_session(context)
         return
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await _edit_message_safely(query, f"⚠️ {escape_md(wallet_msg)}", home_card_kb(), telegram_id)
+        await _edit_message_safely(query, f"⚠️ {escape_md(wallet_msg)}", home_card_kb())
         _clear_trade_card_session(context)
         return
 
@@ -411,7 +394,7 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
     session = _get_trade_card_session(context, touch=True)
     if not session:
         logger.info("trade_card_expired telegram_id=%s", telegram_id)
-        await _edit_message_safely(query, "⌛ Trade card expired\\. Start a new guided trade\\.", home_card_kb(), telegram_id)
+        await _edit_message_safely(query, "⌛ Trade card expired\\. Start a new guided trade\\.", home_card_kb())
         return True
     if not _session_matches_query(session, query, session_id):
         logger.info(
@@ -441,13 +424,13 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
         if step != "complete":
             session["error"] = f"Setup incomplete. Resume onboarding at {step.upper()}."
             _set_trade_card_session(context, session)
-            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session), telegram_id)
+            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
             return True
         wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
             session["error"] = wallet_msg
             _set_trade_card_session(context, session)
-            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session), telegram_id)
+            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
             return True
         session["direction"] = value
         session["state"] = "order_type"
@@ -466,7 +449,7 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
         if selected > max_leverage:
             session["error"] = f"Max leverage for {session.get('product', 'BTC')} is {max_leverage}x."
             _set_trade_card_session(context, session)
-            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session), telegram_id)
+            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
             return True
         session["leverage"] = selected
         session["state"] = "size"
@@ -476,7 +459,7 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
         except (TypeError, ValueError):
             session["error"] = "Invalid size selected."
             _set_trade_card_session(context, session)
-            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session), telegram_id)
+            await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
             return True
         session["state"] = "limit_price" if session.get("order_type") == "limit" else "tpsl"
     elif action == "size_custom":
@@ -486,8 +469,7 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
             await _load_preview_fields(session, telegram_id)
             session["state"] = "confirm"
             _set_trade_card_session(context, session)
-            preview_text = await _build_confirm_preview_with_analytics(session, telegram_id)
-            await _edit_message_safely(query, preview_text, trade_card_confirm_kb(session["session_id"]), telegram_id)
+            await _edit_message_safely(query, _build_confirm_preview(session), trade_card_confirm_kb(session["session_id"]))
             return True
         session["state"] = "tpsl_edit"
     elif action == "tp_prompt":
@@ -498,8 +480,7 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
         await _load_preview_fields(session, telegram_id)
         session["state"] = "confirm"
         _set_trade_card_session(context, session)
-        preview_text = await _build_confirm_preview_with_analytics(session, telegram_id)
-        await _edit_message_safely(query, preview_text, trade_card_confirm_kb(session["session_id"]), telegram_id)
+        await _edit_message_safely(query, _build_confirm_preview(session), trade_card_confirm_kb(session["session_id"]))
         return True
     elif action == "confirm":
         await _execute_card_trade(query, context, telegram_id, session)
@@ -508,7 +489,7 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
         return False
 
     _set_trade_card_session(context, session)
-    await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session), telegram_id)
+    await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
     return True
 
 
@@ -528,15 +509,13 @@ async def handle_trade_card_text_input(update: Update, context: CallbackContext,
     except (TypeError, ValueError):
         session["error"] = "Invalid number. Try again."
         _set_trade_card_session(context, session)
-        selected_lang = get_user_language(telegram_id)
-        loc_text, loc_kb = localize_payload(_build_trade_card_text(session), _card_keyboard(session), selected_lang)
         try:
             await context.bot.edit_message_text(
                 chat_id=session["origin_chat_id"],
                 message_id=session["origin_message_id"],
-                text=loc_text,
+                text=_build_trade_card_text(session),
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=loc_kb,
+                reply_markup=_card_keyboard(session),
             )
         except Exception:
             pass
@@ -557,15 +536,13 @@ async def handle_trade_card_text_input(update: Update, context: CallbackContext,
         session["state"] = "tpsl_edit"
 
     _set_trade_card_session(context, session)
-    selected_lang = get_user_language(telegram_id)
-    loc_text, loc_kb = localize_payload(_build_trade_card_text(session), _card_keyboard(session), selected_lang)
     try:
         await context.bot.edit_message_text(
             chat_id=session["origin_chat_id"],
             message_id=session["origin_message_id"],
-            text=loc_text,
+            text=_build_trade_card_text(session),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=loc_kb,
+            reply_markup=_card_keyboard(session),
         )
     except Exception:
         logger.exception("Failed to edit trade card after text input")

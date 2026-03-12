@@ -1,8 +1,6 @@
 import logging
 import time
 import os
-import json
-import secrets
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
@@ -10,7 +8,6 @@ from typing import Optional
 from src.nadobro.config import (
     NADO_TESTNET_REST, NADO_MAINNET_REST,
     NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE,
-    NADO_TESTNET_TRIGGER, NADO_MAINNET_TRIGGER,
     PRODUCTS, get_product_name
 )
 
@@ -27,36 +24,15 @@ _price_increment_cache = {}
 _size_increment_x18_cache = {}
 _price_increment_x18_cache = {}
 _min_size_x18_cache = {}
-_CONTRACTS_CACHE = {}
-_CONTRACTS_TTL = 120
 _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
 _FANOUT_WORKERS = int(os.environ.get("NADO_FANOUT_WORKERS", "8"))
 _rest_session = requests.Session()
 
 
-def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict):
-    """Optional debug logging when NADO_DEBUG_LOG_PATH is set. No-op in production."""
-    path = os.environ.get("NADO_DEBUG_LOG_PATH")
-    if path:
-        try:
-            payload = {
-                "runId": run_id,
-                "hypothesisId": hypothesis_id,
-                "location": location,
-                "message": message,
-                "data": data,
-                "timestamp": int(time.time() * 1000),
-            }
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=True) + "\n")
-        except Exception:
-            pass
-
-
 class NadoClient:
     def __init__(self, private_key: str, network: str = "testnet", main_address: str = None):
         self.private_key = private_key
-        self.network = "mainnet" if str(network).strip().lower() == "mainnet" else "testnet"
+        self.network = network
         self.client = None
         self.subaccount_hex = None
         self.address = None
@@ -68,7 +44,7 @@ class NadoClient:
     def from_address(cls, address: str, network: str = "testnet") -> "NadoClient":
         instance = cls.__new__(cls)
         instance.private_key = None
-        instance.network = "mainnet" if str(network).strip().lower() == "mainnet" else "testnet"
+        instance.network = network
         instance.client = None
         instance.address = address
         instance.main_address = address
@@ -131,9 +107,6 @@ class NadoClient:
     def _archive_url(self):
         return NADO_MAINNET_ARCHIVE if self.network == "mainnet" else NADO_TESTNET_ARCHIVE
 
-    def _trigger_url(self):
-        return NADO_MAINNET_TRIGGER if self.network == "mainnet" else NADO_TESTNET_TRIGGER
-
     def _query_rest(self, query_type: str, extra_params: dict | None = None) -> Optional[dict]:
         params = {"type": query_type}
         if extra_params:
@@ -146,232 +119,6 @@ class NadoClient:
         except Exception as e:
             logger.error("REST query failed type=%s: %s", query_type, e)
             return None
-
-    def query_archive(self, payload: dict) -> Optional[dict]:
-        try:
-            headers = {
-                "Accept-Encoding": "gzip",
-                "Content-Type": "application/json",
-            }
-            resp = _rest_session.post(
-                self._archive_url(),
-                json=payload,
-                headers=headers,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-            return resp.json()
-        except Exception as e:
-            logger.error("Archive query failed payload_keys=%s err=%s", list((payload or {}).keys()), e)
-            return None
-
-    def _query_trigger(self, payload: dict) -> Optional[dict]:
-        try:
-            headers = {
-                "Accept-Encoding": "gzip",
-                "Content-Type": "application/json",
-            }
-            resp = _rest_session.post(
-                f"{self._trigger_url()}/query",
-                json=payload,
-                headers=headers,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-            return resp.json()
-        except Exception as e:
-            logger.error("Trigger query failed payload_keys=%s err=%s", list((payload or {}).keys()), e)
-            return None
-
-    def _execute_trigger(self, payload: dict) -> Optional[dict]:
-        try:
-            headers = {
-                "Accept-Encoding": "gzip",
-                "Content-Type": "application/json",
-            }
-            resp = _rest_session.post(
-                f"{self._trigger_url()}/execute",
-                json=payload,
-                headers=headers,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-            return resp.json()
-        except Exception as e:
-            logger.error("Trigger execute failed payload_keys=%s err=%s", list((payload or {}).keys()), e)
-            return None
-
-    def _get_contracts(self) -> Optional[dict]:
-        cache_key = f"{self.network}:contracts"
-        cached = _CONTRACTS_CACHE.get(cache_key)
-        if cached and (time.time() - float(cached.get("ts", 0))) < _CONTRACTS_TTL:
-            return cached.get("data")
-        data = self._query_rest("contracts") or {}
-        if data.get("status") == "success":
-            payload = data.get("data", {}) or {}
-            _CONTRACTS_CACHE[cache_key] = {"data": payload, "ts": time.time()}
-            return payload
-        return None
-
-    @staticmethod
-    def _product_verifying_contract(product_id: int) -> str:
-        return "0x" + int(product_id).to_bytes(20, byteorder="big", signed=False).hex()
-
-    def _sign_typed(self, domain: dict, primary_type: str, types: dict, message: dict) -> str:
-        from eth_account import Account
-        try:
-            from eth_account.messages import encode_typed_data
-            _encoder = "encode_typed_data"
-        except Exception:
-            from eth_account.messages import encode_structured_data  # type: ignore
-            _encoder = "encode_structured_data"
-
-        typed = {
-            "types": {
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                    {"name": "verifyingContract", "type": "address"},
-                ],
-                **types,
-            },
-            "domain": domain,
-            "primaryType": primary_type,
-            "message": message,
-        }
-        if _encoder == "encode_structured_data":
-            signable = encode_structured_data(primitive=typed)  # type: ignore[name-defined]
-        else:
-            try:
-                signable = encode_typed_data(full_message=typed)  # type: ignore[name-defined]
-            except TypeError:
-                # Backward compatibility for older eth-account versions.
-                signable = encode_typed_data(primitive=typed)  # type: ignore[name-defined]
-        signed = Account.sign_message(signable, private_key=self.private_key)
-        return signed.signature.hex()
-
-    def place_price_trigger_order(
-        self,
-        product_id: int,
-        size: float,
-        trigger_price: float,
-        order_price: float,
-        is_buy: bool = True,
-        trigger_when: str = "oracle_price_above",
-        reduce_only: bool = True,
-        order_type: str = "default",
-    ) -> dict:
-        if not self.private_key:
-            return {"success": False, "error": "Trigger orders require a signing client."}
-        if size <= 0 or trigger_price <= 0 or order_price <= 0:
-            return {"success": False, "error": "Invalid trigger order values."}
-
-        contracts = self._get_contracts() or {}
-        chain_id_raw = contracts.get("chain_id")
-        chain_id = int(chain_id_raw) if str(chain_id_raw or "").strip() else (763373 if self.network == "testnet" else 0)
-        if chain_id <= 0:
-            return {"success": False, "error": "Could not fetch chain id for trigger signing."}
-
-        from nado_protocol.utils.expiration import OrderType
-        from nado_protocol.utils.order import build_appendix
-        from nado_protocol.utils.nonce import gen_order_nonce
-        try:
-            from nado_protocol.utils.appendix import OrderAppendixTriggerType
-            trigger_type_value = OrderAppendixTriggerType.PRICE
-        except Exception:
-            trigger_type_value = 1
-
-        ot_map = {
-            "default": OrderType.DEFAULT,
-            "ioc": OrderType.IOC,
-            "fok": OrderType.FOK,
-            "post_only": OrderType.POST_ONLY,
-        }
-        ot = ot_map.get(order_type, OrderType.DEFAULT)
-
-        # Trigger orders should not expire quickly like normal IOC/limit routes.
-        expiration = int((1 << 32) - 1)
-        nonce = int(gen_order_nonce()) if callable(gen_order_nonce) else int(time.time_ns() & ((1 << 63) - 1))
-        amount = float(size) if is_buy else -float(size)
-        amount_x18 = self._to_x18_int(amount)
-        price_x18 = self._to_x18_int(order_price)
-        trigger_x18 = self._to_x18_int(trigger_price)
-
-        appendix = 0
-        try:
-            appendix = int(build_appendix(ot, reduce_only=bool(reduce_only), trigger_type=trigger_type_value))
-        except TypeError:
-            try:
-                appendix = int(build_appendix(ot, bool(reduce_only), trigger_type_value))
-            except Exception:
-                # Fallback: bits 12..13 trigger=1 (price), bit 11 reduce_only.
-                base = int(build_appendix(ot))
-                appendix = base | (1 << 12)
-                if bool(reduce_only):
-                    appendix |= (1 << 11)
-
-        order = {
-            "sender": self.subaccount_hex,
-            "priceX18": str(price_x18),
-            "amount": str(amount_x18),
-            "expiration": str(expiration),
-            "nonce": str(nonce),
-            "appendix": str(appendix),
-        }
-        trigger = {
-            "price_trigger": {
-                "price_requirement": {
-                    trigger_when: str(trigger_x18),
-                }
-            }
-        }
-
-        domain = {
-            "name": "Nado",
-            "version": "0.0.1",
-            "chainId": chain_id,
-            "verifyingContract": self._product_verifying_contract(product_id),
-        }
-        types = {
-            "Order": [
-                {"name": "sender", "type": "bytes32"},
-                {"name": "priceX18", "type": "int128"},
-                {"name": "amount", "type": "int128"},
-                {"name": "expiration", "type": "uint64"},
-                {"name": "nonce", "type": "uint64"},
-                {"name": "appendix", "type": "uint128"},
-            ]
-        }
-        message = {
-            "sender": order["sender"],
-            "priceX18": int(price_x18),
-            "amount": int(amount_x18),
-            "expiration": int(expiration),
-            "nonce": int(nonce),
-            "appendix": int(appendix),
-        }
-        signature = self._sign_typed(domain, "Order", types, message)
-
-        req_id = int(secrets.randbelow(10_000_000))
-        payload = {
-            "place_order": {
-                "product_id": int(product_id),
-                "order": order,
-                "trigger": trigger,
-                "signature": signature,
-                "id": req_id,
-            }
-        }
-        resp = self._execute_trigger(payload) or {}
-        if resp.get("status") != "success":
-            return {"success": False, "error": resp.get("error", "Trigger placement failed")}
-        digest = ((resp.get("data") or {}).get("digest")) if isinstance(resp.get("data"), dict) else None
-        return {
-            "success": True,
-            "digest": digest,
-            "request_id": req_id,
-            "order_price": order_price,
-            "trigger_price": trigger_price,
-            "trigger_when": trigger_when,
-        }
 
     def get_market_price(self, product_id: int) -> dict:
         cache_key = f"{self.network}:{product_id}"
@@ -467,29 +214,6 @@ class NadoClient:
                 return orders
             except Exception as e:
                 logger.error(f"SDK get_open_orders failed: {e}")
-        if self.subaccount_hex:
-            try:
-                data = self._query_rest("subaccount_orders", {"sender": self.subaccount_hex, "product_id": product_id}) or {}
-                if data.get("status") == "success":
-                    payload = data.get("data", {}) or {}
-                    raw_orders = payload.get("orders", [])
-                    orders = []
-                    for o in raw_orders:
-                        amount_raw = o.get("amount") or o.get("unfilled_amount", "0")
-                        price_raw = o.get("price_x18", "0")
-                        amount = self._from_x18_dynamic(amount_raw)
-                        price = self._from_x18_dynamic(price_raw)
-                        orders.append({
-                            "digest": o.get("digest"),
-                            "amount": abs(float(amount)),
-                            "price": float(price),
-                            "side": "LONG" if float(amount) > 0 else "SHORT",
-                            "product_id": product_id,
-                            "product_name": get_product_name(product_id),
-                        })
-                    return orders
-            except Exception as e:
-                logger.error(f"REST get_open_orders failed: {e}")
         return []
 
     @staticmethod
@@ -690,45 +414,34 @@ class NadoClient:
                 positions.append(pos)
         return positions
 
-    def _fetch_open_orders_all_perps(self) -> list:
-        """Fetch resting limit orders for all perp products. Each order dict gets is_limit_order=True."""
-        orders = []
-        for name, info in PRODUCTS.items():
-            if info["type"] == "perp":
-                for o in self.get_open_orders(info["id"]) or []:
-                    o = dict(o)
-                    o["is_limit_order"] = True
-                    orders.append(o)
-        return orders
-
-    def get_positions_only(self) -> list:
-        """Return only filled perp positions (no resting limit orders). Use for trading/strategy logic."""
+    def get_all_positions(self) -> list:
+        # Prefer true perp positions from subaccount info.
         if self._initialized and self.client:
             try:
                 info = self.client.context.engine_client.get_subaccount_info(self.subaccount_hex)
-                positions = self._extract_positions_from_sdk_info(info)
-                if positions:
-                    return positions
+                sdk_positions = self._extract_positions_from_sdk_info(info)
+                if sdk_positions:
+                    return sdk_positions
             except Exception as e:
-                logger.warning(f"SDK get_positions_only failed: {e}")
+                logger.warning(f"SDK get_all_positions via subaccount_info failed: {e}")
 
         try:
             data = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
             if data.get("status") == "success":
                 payload = data.get("data", {}) or {}
-                positions = self._extract_positions_from_rest_payload(payload)
-                if positions:
-                    return positions
+                rest_positions = self._extract_positions_from_rest_payload(payload)
+                if rest_positions:
+                    return rest_positions
         except Exception as e:
-            logger.warning(f"REST get_positions_only failed: {e}")
+            logger.warning(f"REST get_all_positions via subaccount_info failed: {e}")
 
-        return []
-
-    def get_all_positions(self) -> list:
-        """Positions + resting limit orders for Portfolio/UI display."""
-        positions = self.get_positions_only()
-        open_orders = self._fetch_open_orders_all_perps()
-        return positions + open_orders
+        # Fallback to open orders for backward compatibility.
+        positions = []
+        for name, info in PRODUCTS.items():
+            if info["type"] == "perp":
+                orders = self.get_open_orders(info["id"])
+                positions.extend(orders)
+        return positions
 
     def verify_linked_signer(self, expected_signer_address: str = None) -> dict:
         expected = (expected_signer_address or self.address or "").lower()
@@ -1040,7 +753,6 @@ class NadoClient:
         price: float,
         order_type: str = "default",
         is_buy: bool = True,
-        reduce_only: bool = False,
         _retry_count: int = 0,
     ) -> dict:
         if not self._initialized or not self.client:
@@ -1083,7 +795,7 @@ class NadoClient:
             ot = ot_map.get(order_type, OrderType.DEFAULT)
 
             amount = size if is_buy else -size
-            expiration_secs = 10 if order_type == "ioc" else 604800
+            expiration_secs = 10 if order_type == "ioc" else 3600
 
             amount_x18 = self._to_x18_int(amount)
             if size_increment_x18 and size_increment_x18 > 0:
@@ -1124,22 +836,13 @@ class NadoClient:
                         amount_x18 = int(bumped_amount_x18)
                         size = abs(float(amount_x18) / 1e18)
 
-            appendix = None
-            try:
-                appendix = build_appendix(ot, reduce_only=bool(reduce_only))
-            except TypeError:
-                try:
-                    appendix = build_appendix(ot, bool(reduce_only))
-                except TypeError:
-                    appendix = build_appendix(ot)
-
             order = OrderParams(
                 sender=self.subaccount_hex,
                 priceX18=price_x18,
                 amount=amount_x18,
                 expiration=get_expiration_timestamp(expiration_secs),
                 nonce=gen_order_nonce(),
-                appendix=appendix,
+                appendix=build_appendix(ot),
             )
 
             params = PlaceOrderParams(product_id=product_id, order=order)
@@ -1213,7 +916,6 @@ class NadoClient:
                             price=retry_price,
                             order_type=order_type,
                             is_buy=is_buy,
-                            reduce_only=reduce_only,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -1245,7 +947,6 @@ class NadoClient:
                                 price=price,
                                 order_type=order_type,
                                 is_buy=is_buy,
-                                reduce_only=reduce_only,
                                 _retry_count=_retry_count + 1,
                             )
                         except Exception as retry_e:
@@ -1271,7 +972,6 @@ class NadoClient:
                             price=price,
                             order_type=order_type,
                             is_buy=is_buy,
-                            reduce_only=reduce_only,
                             _retry_count=_retry_count + 1,
                         )
                         if retry_result.get("success"):
@@ -1298,7 +998,6 @@ class NadoClient:
                             price=aligned_price,
                             order_type=order_type,
                             is_buy=is_buy,
-                            reduce_only=reduce_only,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -1319,61 +1018,10 @@ class NadoClient:
         slippage_pct = max(0.1, min(slippage_pct, 10.0))
         multiplier = 1.0 + (slippage_pct / 100.0)
         price = mp["ask"] * multiplier if is_buy else mp["bid"] / multiplier
-        # region agent log
-        _debug_log(
-            run_id="pre-fix-1",
-            hypothesis_id="H1",
-            location="nado_client.py:place_market_order:pre_place_order",
-            message="Computed IOC order price from top-of-book and slippage",
-            data={
-                "network": self.network,
-                "product_id": product_id,
-                "size": float(size or 0),
-                "is_buy": bool(is_buy),
-                "market_bid": float(mp.get("bid", 0) or 0),
-                "market_ask": float(mp.get("ask", 0) or 0),
-                "market_mid": float(mp.get("mid", 0) or 0),
-                "slippage_pct": float(slippage_pct),
-                "computed_ioc_price": float(price or 0),
-            },
-        )
-        # endregion
-        result = self.place_order(product_id, size, price, order_type="ioc", is_buy=is_buy)
-        # region agent log
-        _debug_log(
-            run_id="pre-fix-1",
-            hypothesis_id="H1",
-            location="nado_client.py:place_market_order:post_place_order",
-            message="Observed place_order return payload for market close path",
-            data={
-                "network": self.network,
-                "product_id": product_id,
-                "success": bool(result.get("success")),
-                "result_price": float(result.get("price", 0) or 0),
-                "result_digest": str(result.get("digest", ""))[:24],
-                "result_side": result.get("side"),
-                "error": str(result.get("error", ""))[:120],
-            },
-        )
-        # endregion
-        return result
+        return self.place_order(product_id, size, price, order_type="ioc", is_buy=is_buy)
 
-    def place_limit_order(
-        self,
-        product_id: int,
-        size: float,
-        price: float,
-        is_buy: bool = True,
-        reduce_only: bool = False,
-    ) -> dict:
-        return self.place_order(
-            product_id,
-            size,
-            price,
-            order_type="default",
-            is_buy=is_buy,
-            reduce_only=reduce_only,
-        )
+    def place_limit_order(self, product_id: int, size: float, price: float, is_buy: bool = True) -> dict:
+        return self.place_order(product_id, size, price, order_type="default", is_buy=is_buy)
 
     def cancel_order(self, product_id: int, digest: str) -> dict:
         if not self._initialized or not self.client:
@@ -1432,21 +1080,9 @@ class NadoClient:
         try:
             if self._initialized and self.client:
                 products = self.client.context.engine_client.get_all_products()
-                def _normalize_product_meta(p):
-                    return {
-                        "id": int(getattr(p, "product_id", -1)),
-                        "symbol": str(
-                            getattr(p, "symbol", None)
-                            or getattr(p, "name", None)
-                            or getattr(p, "product_name", None)
-                            or ""
-                        ),
-                        "base_asset": str(getattr(p, "base_asset", None) or getattr(p, "base", None) or ""),
-                        "quote_asset": str(getattr(p, "quote_asset", None) or getattr(p, "quote", None) or ""),
-                    }
                 data = {
-                    "perp": [_normalize_product_meta(p) for p in products.perp_products],
-                    "spot": [_normalize_product_meta(p) for p in products.spot_products],
+                    "perp": [{"id": p.product_id} for p in products.perp_products],
+                    "spot": [{"id": p.product_id} for p in products.spot_products],
                 }
                 _ALL_PRODUCTS_CACHE[cache_key] = {"data": data, "ts": time.time()}
                 return data

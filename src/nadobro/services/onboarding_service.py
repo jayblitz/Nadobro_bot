@@ -23,7 +23,7 @@ def _onb_v2_key(telegram_id: int) -> str:
 
 def get_new_onboarding_state(telegram_id: int) -> dict:
     raw = get_bot_state_raw(_onb_v2_key(telegram_id))
-    state = {"language": None, "tos_accepted": False}
+    state = {"language": "en", "tos_accepted": False}
     if raw:
         try:
             loaded = json.loads(raw)
@@ -48,7 +48,7 @@ def set_new_onboarding_tos_accepted(telegram_id: int):
 
 def is_new_onboarding_complete(telegram_id: int) -> bool:
     state = get_new_onboarding_state(telegram_id)
-    return bool(state.get("language")) and bool(state.get("tos_accepted"))
+    return bool(state.get("tos_accepted"))
 
 
 def _state_key(telegram_id: int, network: str) -> str:

@@ -139,9 +139,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
         with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
             bot_runtime, "get_strategy_settings", return_value=("mainnet", {})
-        ), patch.object(bot_runtime, "get_user_nado_client", return_value=object()), patch.object(
-            bot_runtime, "_save_state"
-        ), patch.object(bot_runtime, "_ensure_task"):
+        ), patch.object(bot_runtime, "_save_state"), patch.object(bot_runtime, "_ensure_task"):
             ok, msg = bot_runtime.start_user_bot(
                 telegram_id=1,
                 strategy="mm",
@@ -152,20 +150,6 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertIn("MM bot started on BTC-PERP", msg)
-
-    def test_start_user_bot_requires_passphrase_authorization(self):
-        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
-        with patch.object(bot_runtime, "get_user", return_value=fake_user):
-            ok, msg = bot_runtime.start_user_bot(
-                telegram_id=1,
-                strategy="mm",
-                product="BTC",
-                leverage=2,
-                slippage_pct=1,
-                passphrase=None,
-            )
-        self.assertFalse(ok)
-        self.assertIn("Passphrase authorization is required", msg)
 
     def test_stop_all_user_bots_uses_network_passphrase_for_close_all(self):
         telegram_id = 42
@@ -217,36 +201,6 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIn("testnet: no active strategy session passphrase", msg)
         self.assertEqual(close_calls, [(telegram_id, "main-pass")])
 
-    def test_restore_running_bots_marks_sessions_expired_after_restart(self):
-        telegram_id = 77
-        key = f"{bot_runtime.STATE_PREFIX}{telegram_id}:testnet"
-        rows = [{"key": key, "value": json.dumps({"running": True, "strategy": "mm"})}]
-        saved = []
-
-        with patch.object(bot_runtime, "query_all", return_value=rows), patch.object(
-            bot_runtime, "set_bot_state", side_effect=lambda k, v: saved.append((k, v))
-        ):
-            bot_runtime.restore_running_bots(enabled=True)
-
-        self.assertEqual(len(saved), 1)
-        saved_key, saved_state = saved[0]
-        self.assertEqual(saved_key, key)
-        self.assertFalse(saved_state.get("running"))
-        self.assertIn("session expired after restart", str(saved_state.get("last_error", "")).lower())
-
-    def test_clear_runtime_passphrase_removes_only_target_session(self):
-        old_pass = dict(bot_runtime._session_passphrases)
-        try:
-            bot_runtime._session_passphrases = {
-                "1:testnet": "pw1",
-                "1:mainnet": "pw2",
-            }
-            bot_runtime.clear_runtime_passphrase(1, "testnet")
-            self.assertNotIn("1:testnet", bot_runtime._session_passphrases)
-            self.assertEqual(bot_runtime._session_passphrases.get("1:mainnet"), "pw2")
-        finally:
-            bot_runtime._session_passphrases = old_pass
-
     def test_run_cycle_sl_path_returns_tuple(self):
         telegram_id = 7
         network = "mainnet"
@@ -265,18 +219,6 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         class FakeClient:
             def get_market_price(self, _product_id):
                 return {"mid": 90.0}
-
-            def get_all_positions(self):
-                # Long 1 BTC @ 100, mark 90 -> unrealized -10. max_loss = 100*0.05 = 5. Triggers PnL SL.
-                return [
-                    {
-                        "product_id": 2,
-                        "product_name": "BTC-PERP",
-                        "amount": 1.0,
-                        "price": 100.0,
-                        "side": "LONG",
-                    }
-                ]
 
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
 

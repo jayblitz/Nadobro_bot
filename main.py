@@ -16,7 +16,7 @@ logger = logging.getLogger("nadobro")
 # Load local .env during development before reading config vars.
 load_dotenv()
 
-from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL, LOWIQPTS_BRIDGE_CHAT_ID
+from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
 from src.nadobro.services.crypto import validate_encryption_key
 
 if not ENCRYPTION_KEY:
@@ -95,12 +95,11 @@ def setup_bot():
     from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_revoke
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
-    from src.nadobro.handlers.points_bridge import lowiqpts_bridge_reply_handler
 
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
-        .concurrent_updates(False)
+        .concurrent_updates(True)
         .build()
     )
 
@@ -111,15 +110,6 @@ def setup_bot():
     app.add_handler(CommandHandler("revoke", cmd_revoke))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
-    bridge_chat_id = (LOWIQPTS_BRIDGE_CHAT_ID or "").strip()
-    if bridge_chat_id:
-        try:
-            app.add_handler(
-                MessageHandler(filters.Chat(chat_id=int(bridge_chat_id)) & filters.TEXT, lowiqpts_bridge_reply_handler)
-            )
-            logger.info("Registered lowiqpts bridge listener for chat_id=%s", bridge_chat_id)
-        except (TypeError, ValueError):
-            logger.warning("LOWIQPTS_BRIDGE_CHAT_ID is invalid: %s", bridge_chat_id)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot handlers registered (pure bot mode)")

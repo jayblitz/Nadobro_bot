@@ -56,7 +56,7 @@ def _enrich_trade_payload(telegram_id: int, payload: dict, settings: dict) -> di
     return result
 
 
-def _preview_text(payload: dict, analytics: dict | None = None) -> str:
+def _preview_text(payload: dict) -> str:
     direction = payload.get("direction", "long")
     order_type = payload.get("order_type", "market")
     product = payload.get("product", "BTC")
@@ -65,7 +65,7 @@ def _preview_text(payload: dict, analytics: dict | None = None) -> str:
     price = float(payload.get("price") or 0)
     est_margin = payload.get("est_margin")
     action = "limit_long" if (order_type == "limit" and direction == "long") else "limit_short" if order_type == "limit" else direction
-    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin, analytics=analytics)
+    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
     if payload.get("tp"):
         preview += f"\n\n📈 *Take Profit:* {escape_md(str(payload['tp']))}"
     if payload.get("sl"):
@@ -131,15 +131,9 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
     if is_trading_paused():
         await update.message.reply_text("⏸ Trading is temporarily paused by admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return True
-    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
+    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        from src.nadobro.handlers.callbacks import prompt_wallet_setup
-        await prompt_wallet_setup(
-            update.message,
-            context,
-            telegram_id,
-            lead_text="⚠️ Link your wallet first to execute this trade.",
-        )
+        await update.message.reply_text(f"⚠️ {escape_md(wallet_msg)}", parse_mode=ParseMode.MARKDOWN_V2)
         return True
 
     from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
@@ -168,14 +162,11 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
         )
         return True
 
-    wallet_ready, _ = ensure_active_wallet_ready(telegram_id)
+    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        from src.nadobro.handlers.callbacks import prompt_wallet_setup
-        await prompt_wallet_setup(
-            update.message,
-            context,
-            telegram_id,
-            lead_text="⚠️ Wallet setup is required before placing text trades.",
+        await update.message.reply_text(
+            f"⚠️ {escape_md(wallet_msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
 
@@ -191,15 +182,7 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
 
     settings = _settings_for_user(telegram_id)
     payload = _enrich_trade_payload(telegram_id, intent, settings)
-    from src.nadobro.handlers.messages import _compute_trade_analytics
-    product = payload.get("product", "BTC")
-    size = float(payload.get("size") or 0)
-    price = float(payload.get("price") or 0)
-    leverage = int(payload.get("leverage") or 1)
-    direction = payload.get("direction", "long")
-    sl_val = payload.get("sl")
-    analytics = _compute_trade_analytics(size, price, leverage, sl_val, direction)
-    preview = _preview_text(payload, analytics=analytics)
+    preview = _preview_text(payload)
 
     if _auto_execute_requested(text):
         if is_trading_paused():

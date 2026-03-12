@@ -1,6 +1,5 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW, get_product_max_leverage
-from src.nadobro.i18n import get_active_language, localize_markup, localize_label
 
 PERP_PRODUCTS = [name for name, info in PRODUCTS.items() if info["type"] == "perp"]
 
@@ -20,13 +19,11 @@ HOME_BTN_TRADE = "🤖 Trade Console"
 HOME_BTN_PORTFOLIO = "📁 Portfolio Deck"
 HOME_BTN_HOME = "🏠 Home"
 HOME_BTN_WALLET = "💼 Wallet Vault"
+HOME_BTN_MARKETS = "📡 Market Radar"
 HOME_BTN_STRATEGIES = "🧠 Strategy Lab"
 HOME_BTN_ALERTS = "🔔 Alert Engine"
 HOME_BTN_SETTINGS = "⚙️ Control Panel"
 HOME_BTN_MODE = "🌐 Execution Mode"
-HOME_BTN_POSITIONS = "📊 My Positions"
-HOME_BTN_POINTS = "🏆 Nado Points"
-HOME_BTN_HELP = "❓ Help / Support"
 
 
 REPLY_BUTTON_MAP = {
@@ -34,10 +31,8 @@ REPLY_BUTTON_MAP = {
     HOME_BTN_TRADE: "nav:trade",
     HOME_BTN_PORTFOLIO: "portfolio:view",
     HOME_BTN_WALLET: "wallet:view",
+    HOME_BTN_MARKETS: "mkt:menu",
     HOME_BTN_STRATEGIES: "nav:strategy_hub",
-    HOME_BTN_POSITIONS: "pos:view",
-    HOME_BTN_POINTS: "points:view:week",
-    HOME_BTN_HELP: "nav:help",
     HOME_BTN_ALERTS: "alert:menu",
     HOME_BTN_SETTINGS: "settings:view",
     HOME_BTN_MODE: "nav:mode",
@@ -73,11 +68,8 @@ REPLY_BUTTON_MAP.update({
     "Home": "nav:main",
     "Positions": "pos:view",
     "Wallet": "wallet:view",
-    "Markets": "points:view:week",
+    "Markets": "mkt:menu",
     "Strategies": "nav:strategy_hub",
-    "My Positions": "pos:view",
-    "Nado Points": "points:view:week",
-    "Help / Support": "nav:help",
     "Alerts": "alert:menu",
     "Settings": "settings:view",
     "Mode": "nav:mode",
@@ -90,18 +82,6 @@ for preset_product, presets in SIZE_PRESETS.items():
     for s in presets:
         label = str(int(s)) if s == int(s) else str(s)
         REPLY_BUTTON_MAP[label] = f"trade_flow:size:{label}"
-
-
-def get_reply_button_map(lang: str | None = None):
-    selected_lang = lang or get_active_language()
-    if selected_lang == "en":
-        return REPLY_BUTTON_MAP
-    localized = dict(REPLY_BUTTON_MAP)
-    for label, callback in REPLY_BUTTON_MAP.items():
-        localized_label = localize_label(label, selected_lang)
-        if localized_label and localized_label not in localized:
-            localized[localized_label] = callback
-    return localized
 
 
 # --- New onboarding (language + ToS) ---
@@ -140,7 +120,7 @@ def persistent_menu_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(HOME_BTN_TRADE), KeyboardButton(HOME_BTN_PORTFOLIO)],
-            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_POINTS)],
+            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_MARKETS)],
             [KeyboardButton(HOME_BTN_STRATEGIES), KeyboardButton(HOME_BTN_ALERTS)],
             [KeyboardButton(HOME_BTN_SETTINGS), KeyboardButton(HOME_BTN_MODE)],
         ],
@@ -157,7 +137,7 @@ def home_card_kb():
         ],
         [
             InlineKeyboardButton("💼 Wallet Vault", callback_data="wallet:view"),
-            InlineKeyboardButton("🏆 Nado Points", callback_data="points:view:week"),
+            InlineKeyboardButton("📡 Market Radar", callback_data="mkt:menu"),
         ],
         [
             InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
@@ -170,23 +150,10 @@ def home_card_kb():
     ])
 
 
-def points_scope_kb(scope: str = "week"):
-    _ = scope
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Last Week ✅", callback_data="points:view:week"),
-        ],
-        [
-            InlineKeyboardButton("🔄 Refresh", callback_data="points:refresh:week"),
-            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-        ],
-    ])
-
-
 def portfolio_kb(has_positions: bool = False):
     rows = [
         [InlineKeyboardButton("📌 Open Positions", callback_data="pos:view")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:view"), InlineKeyboardButton("📥 CSV Export", callback_data="portfolio:csv_export")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:view")],
     ]
     if has_positions:
         rows.insert(1, [InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
@@ -494,36 +461,16 @@ def trade_confirm_kb(trade_id="pending"):
 
 def positions_kb(positions):
     rows = []
+    seen = set()
     for p in positions:
-        pname = str(p.get("product_name", "")).replace("-PERP", "").strip()
-        side = str(p.get("side", "")).upper()
-        side_icon = "🟢" if side == "LONG" else "🔴" if side == "SHORT" else "⚪"
-        if pname:
-            rows.append([
-                InlineKeyboardButton(
-                    f"📊 Manage {pname} {side_icon}",
-                    callback_data=f"pos:manage:{pname}",
-                )
-            ])
+        pname = p.get("product_name", "").replace("-PERP", "")
+        if pname and pname not in seen:
+            seen.add(pname)
+            rows.append([InlineKeyboardButton(f"❌ Close {pname}-PERP", callback_data=f"pos:close:{pname}")])
     if positions:
         rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
     rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
-
-
-def position_manage_kb(product: str):
-    base = (product or "").replace("-PERP", "").upper()
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh", callback_data=f"pos:refresh:{base}")],
-        [
-            InlineKeyboardButton("🧨 Close Market", callback_data=f"pos:close_market:{base}"),
-            InlineKeyboardButton("📉 Close Limit", callback_data=f"pos:close_limit:{base}"),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="pos:view"),
-            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-        ],
-    ])
 
 
 def wallet_kb():
@@ -689,7 +636,7 @@ def strategy_hub_kb():
             InlineKeyboardButton("🧮 Grid Reactor", callback_data="strategy:preview:grid"),
         ],
         [
-            InlineKeyboardButton("⚖️ Delta Neutral", callback_data="strategy:preview:dn"),
+            InlineKeyboardButton("⚖️ Mirror DN", callback_data="strategy:preview:dn"),
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],
         [
@@ -698,24 +645,65 @@ def strategy_hub_kb():
     ])
 
 
-def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
-    sid = (strategy_id or "").lower()
-    if sid == "dn":
-        pair_row = [
-            InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
-            InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
-        ]
-    else:
-        pair_row = [
-            InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
-            InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
-            InlineKeyboardButton("SOL", callback_data=f"strategy:pair:{strategy_id}:SOL"),
-        ]
+def markets_kb():
     return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💹 Price Grid", callback_data="mkt:prices"),
+            InlineKeyboardButton("📊 Funding", callback_data="mkt:funding"),
+        ],
+        [
+            InlineKeyboardButton("🔴 Live Last Price", callback_data="mkt:live_menu"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="nav:main"),
+        ],
+    ])
+
+
+def live_price_asset_kb():
+    rows = []
+    row = []
+    for name in PERP_PRODUCTS:
+        row.append(InlineKeyboardButton(name, callback_data=f"mkt:live:{name}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def live_price_controls_kb(product: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🛑 Stop Live", callback_data="mkt:live_stop"),
+            InlineKeyboardButton("Switch Asset", callback_data="mkt:live_menu"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+        ],
+    ])
+
+
+def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Arm Strategy", callback_data=f"strategy:activate:{strategy_id}"),
+            InlineKeyboardButton("⚙️ Tune Risk", callback_data="settings:risk_menu"),
+        ],
         [
             InlineKeyboardButton("🧩 Edit Parameters", callback_data=f"strategy:config:{strategy_id}"),
         ],
-        pair_row,
+        [
+            InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
+            InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
+            InlineKeyboardButton("SOL", callback_data=f"strategy:pair:{strategy_id}:SOL"),
+        ],
         [
             InlineKeyboardButton(
                 f"🚀 Launch {selected_product.upper()}",
@@ -729,34 +717,6 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
             InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status"),
             InlineKeyboardButton("🛑 Stop Runtime", callback_data="strategy:stop"),
         ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
-            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-        ],
-    ])
-
-
-def strategy_status_kb(strategy_id: str | None = None):
-    rows = [
-        [InlineKeyboardButton("🔄 Refresh Status", callback_data="strategy:status")],
-    ]
-    if str(strategy_id or "").lower() == "dn":
-        rows.append([InlineKeyboardButton("📈 Funding Details", callback_data="strategy:funding:dn")])
-    if strategy_id:
-        rows.append([InlineKeyboardButton("📊 Open Strategy Dashboard", callback_data=f"strategy:preview:{strategy_id}")])
-    rows.append([
-        InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
-        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def strategy_funding_kb(strategy_id: str = "dn"):
-    sid = (strategy_id or "dn").lower()
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh Funding", callback_data=f"strategy:funding:{sid}")],
-        [InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status")],
-        [InlineKeyboardButton("📊 Open Strategy Dashboard", callback_data=f"strategy:preview:{sid}")],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
@@ -804,67 +764,5 @@ def back_kb(target="main"):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(label, callback_data=f"nav:{target}")],
     ])
-
-
-def _localize_kb_factory(fn):
-    def _wrapped(*args, **kwargs):
-        return localize_markup(fn(*args, **kwargs), get_active_language())
-    _wrapped.__name__ = fn.__name__
-    _wrapped.__doc__ = fn.__doc__
-    return _wrapped
-
-
-for _fn_name in [
-    "onboarding_language_kb",
-    "onboarding_accept_tos_kb",
-    "persistent_menu_kb",
-    "home_card_kb",
-    "points_scope_kb",
-    "portfolio_kb",
-    "trade_direction_kb",
-    "trade_order_type_kb",
-    "trade_product_reply_kb",
-    "trade_leverage_reply_kb",
-    "trade_size_reply_kb",
-    "trade_tpsl_kb",
-    "trade_tpsl_edit_kb",
-    "trade_confirm_reply_kb",
-    "trade_card_start_kb",
-    "trade_card_direction_kb",
-    "trade_card_order_type_kb",
-    "trade_card_product_kb",
-    "trade_card_leverage_kb",
-    "trade_card_size_kb",
-    "trade_card_limit_price_input_kb",
-    "trade_card_tpsl_kb",
-    "trade_card_tpsl_edit_kb",
-    "trade_card_text_input_kb",
-    "trade_card_confirm_kb",
-    "trade_product_kb",
-    "trade_size_kb",
-    "trade_leverage_kb",
-    "trade_confirm_kb",
-    "positions_kb",
-    "position_manage_kb",
-    "wallet_kb",
-    "wallet_kb_not_linked",
-    "alerts_kb",
-    "alert_product_kb",
-    "alert_delete_kb",
-    "settings_kb",
-    "settings_leverage_kb",
-    "settings_slippage_kb",
-    "risk_profile_kb",
-    "settings_language_kb",
-    "strategy_hub_kb",
-    "strategy_action_kb",
-    "strategy_status_kb",
-    "strategy_funding_kb",
-    "close_product_kb",
-    "confirm_close_all_kb",
-    "mode_kb",
-    "back_kb",
-]:
-    globals()[_fn_name] = _localize_kb_factory(globals()[_fn_name])
 
 

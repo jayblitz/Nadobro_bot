@@ -41,24 +41,16 @@ def parse_trade_intent(text: str) -> Optional[dict]:
     order_type = "limit" if re.search(r"\blimit\b", text_lower) else "market"
 
     leverage = None
-    lev_match = re.search(r"\bleverage\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:x)?\b", text_lower)
+    lev_match = re.search(r"\b(\d+(?:\.\d+)?)\s*x\b", text_lower)
     if lev_match:
         try:
             leverage = int(float(lev_match.group(1)))
         except (TypeError, ValueError):
             leverage = None
-    if leverage is None:
-        lev_match = re.search(r"\b(\d+(?:\.\d+)?)\s*x\b", text_lower)
-        if lev_match:
-            try:
-                leverage = int(float(lev_match.group(1)))
-            except (TypeError, ValueError):
-                leverage = None
 
     tp = None
     sl = None
     limit_price = None
-    size = None
     consumed = []
 
     tp_match = re.search(r"\btp\s*[:=]?\s*(\d+(?:\.\d+)?)\b", text_lower)
@@ -78,22 +70,6 @@ def parse_trade_intent(text: str) -> Optional[dict]:
             consumed.append(limit_match.span(1))
         except (TypeError, ValueError):
             limit_price = None
-    if limit_price is None and order_type == "limit":
-        at_match = re.search(r"\b(?:at|@)\s*(\d+(?:\.\d+)?)\b", text_lower)
-        if at_match:
-            try:
-                limit_price = float(at_match.group(1))
-                consumed.append(at_match.span(1))
-            except (TypeError, ValueError):
-                pass
-
-    size_match = re.search(r"\bsize\s*[:=]?\s*(\d+(?:\.\d+)?)\b", text_lower)
-    if size_match:
-        try:
-            size = float(size_match.group(1))
-            consumed.append(size_match.span(1))
-        except (TypeError, ValueError):
-            pass
 
     if lev_match:
         consumed.append(lev_match.span(1))
@@ -108,18 +84,10 @@ def parse_trade_intent(text: str) -> Optional[dict]:
         except ValueError:
             pass
 
-    if size is None or (order_type == "limit" and limit_price is None):
-        if order_type == "limit" and len(numeric_tokens) >= 2:
-            vals = sorted([nt[0] for nt in numeric_tokens])
-            if size is None and limit_price is None:
-                size = vals[0]
-                limit_price = vals[1]
-            elif size is None:
-                size = vals[0] if vals[0] != limit_price else vals[1]
-            elif limit_price is None:
-                limit_price = vals[1] if vals[0] == size else vals[0]
-        elif size is None and numeric_tokens:
-            size = numeric_tokens[0][0]
+    size = numeric_tokens[0][0] if numeric_tokens else None
+    if order_type == "limit" and limit_price is None and len(numeric_tokens) >= 2:
+        size = numeric_tokens[0][0]
+        limit_price = numeric_tokens[1][0]
 
     looks_like_trade = bool(direction or (product and (size is not None or order_type == "limit")))
     if not looks_like_trade:
@@ -180,14 +148,6 @@ def parse_interaction_intent(text: str) -> Optional[dict]:
     ):
         return {"kind": "interaction", "action": "open_view", "target": "portfolio:view", "raw": raw}
 
-    if (
-        re.search(r"\b(points?|cost\s*/?\s*per\s*point)\b", text_lower)
-        or (re.search(r"\blast\s+week\b", text_lower) and re.search(r"\b(points?|cost)\b", text_lower))
-    ):
-        if _looks_like_question(text_lower):
-            return None  # Let AI handle the question
-        return {"kind": "interaction", "action": "open_view", "target": "points:view:week", "raw": raw}
-
     # Position-closing intents.
     if re.search(r"\b(close|exit)\b", text_lower):
         if re.search(r"\b(all|everything)\b", text_lower) and re.search(
@@ -223,7 +183,7 @@ def parse_interaction_intent(text: str) -> Optional[dict]:
         if re.search(r"\b(position|positions|portfolio)\b", text_lower):
             return {"kind": "interaction", "action": "open_view", "target": "pos:view", "raw": raw}
         if re.search(r"\b(markets?|prices?|funding)\b", text_lower):
-            return {"kind": "interaction", "action": "open_view", "target": "points:view:week", "raw": raw}
+            return {"kind": "interaction", "action": "open_view", "target": "mkt:menu", "raw": raw}
         if re.search(r"\b(mode|network|testnet|mainnet)\b", text_lower):
             return {"kind": "interaction", "action": "open_view", "target": "nav:mode", "raw": raw}
         if re.search(r"\b(trade|long|short|buy|sell)\b", text_lower):

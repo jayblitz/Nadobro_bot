@@ -118,22 +118,20 @@ def update_trade(trade_id: int, data: dict):
 
 
 def get_last_trade_for_rate_limit(telegram_id: int) -> Optional[dict]:
-    """Last trade attempt (filled or failed) for rate limiting. Prevents DoS via repeated invalid attempts."""
     return query_one(
-        "SELECT created_at FROM trades WHERE user_id = %s AND status IN ('filled','failed') ORDER BY created_at DESC LIMIT 1",
+        "SELECT created_at FROM trades WHERE user_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
         (telegram_id,),
     )
 
 
 def find_open_trade(telegram_id: int, product_id: int, network: str = None) -> Optional[dict]:
-    # Match filled (market) or pending (limit that filled on exchange but we never updated status)
     if network:
         return query_one(
-            "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND network = %s AND status IN ('filled', 'pending') ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND network = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
             (telegram_id, product_id, network),
         )
     return query_one(
-        "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND status IN ('filled', 'pending') ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
         (telegram_id, product_id),
     )
 
@@ -142,14 +140,6 @@ def get_trades_by_user(telegram_id: int, limit: int = 50) -> list:
     return query_all(
         "SELECT * FROM trades WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
         (telegram_id, limit),
-    )
-
-
-def get_pending_limit_trades(telegram_id: int) -> list:
-    """Pending limit trades with order_digest, for reconciliation with exchange state."""
-    return query_all(
-        "SELECT * FROM trades WHERE user_id = %s AND status = 'pending' AND order_type = 'limit' AND order_digest IS NOT NULL",
-        (telegram_id,),
     )
 
 

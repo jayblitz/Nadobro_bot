@@ -16,7 +16,7 @@ def _default_strategy_settings() -> dict:
         "mm": {
             "notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "tp_pct": 0.6, "sl_pct": 0.5,
             "levels": 2, "threshold_bp": 12.0, "close_offset_bp": 24.0,
-            "reference_mode": "ema_fast",  # or mid, ema_slow, last_fill (Grid: anchor to last executed price)
+            "reference_mode": "ema_fast",
             "ema_fast_alpha": 0.45,
             "ema_slow_alpha": 0.20,
             "vol_window_points": 12,
@@ -32,17 +32,12 @@ def _default_strategy_settings() -> dict:
         "grid": {
             "notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "tp_pct": 1.2, "sl_pct": 0.8,
             "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0,
-            "reference_mode": "last_fill",
-            "grid_reset_pct": 2.0,  # soft reset when mid drifts this % from last fill
-            "directional_bias": "neutral",  # neutral, long_bias, short_bias
-            "cycle_notional_usd": 100.0,
-            "inventory_soft_limit_usd": 60.0,
         },
         "dn": {
-            "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 60, "tp_pct": 0.8, "sl_pct": 0.6,
-            "auto_close_on_maintenance": 1.0, "dn_cycle_duration_seconds": 7200, "dn_perp_leverage": 3.0,
+            "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6,
+            "auto_close_on_maintenance": 1.0,
         },
-        "vol": {"notional_usd": 200.0, "flip_size_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
+        "vol": {"notional_usd": 100.0, "spread_bp": 6.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
     }
 
 

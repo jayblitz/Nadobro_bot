@@ -41,67 +41,9 @@ OFFICIAL_SOURCES = {
     "get_started": "https://docs.nado.xyz/developer-resources/get-started",
 }
 
-SUPPORTED_CHAT_LANGS = {"en", "zh", "fr", "ar", "ru", "ko"}
-CHAT_LANG_NAMES = {
-    "en": "English",
-    "zh": "Chinese",
-    "fr": "French",
-    "ar": "Arabic",
-    "ru": "Russian",
-    "ko": "Korean",
-}
-
 
 def _normalize_question(question: str) -> str:
     return re.sub(r"\s+", " ", (question or "").strip().lower())
-
-
-def _normalize_chat_lang(lang: str | None) -> str:
-    value = (lang or "en").strip().lower()
-    return value if value in SUPPORTED_CHAT_LANGS else "en"
-
-
-def _response_language_instruction(lang: str | None) -> str:
-    code = _normalize_chat_lang(lang)
-    if code == "en":
-        return (
-            "Reply in English. If the user writes in another language, still respond in English "
-            "unless the user explicitly asks to switch language."
-        )
-    lang_name = CHAT_LANG_NAMES.get(code, "English")
-    return (
-        f"Reply in {lang_name}. Keep all assistant output in {lang_name}, including greetings and explanations."
-    )
-
-
-def _localized_fallback_greeting(lang: str, user_name: str) -> str:
-    code = _normalize_chat_lang(lang)
-    if code == "zh":
-        return f"嗨，{user_name}！我可以帮你做什么？"
-    if code == "fr":
-        return f"Salut {user_name} ! Je peux t'aider sur quoi ?"
-    if code == "ar":
-        return f"مرحبًا {user_name}! كيف أقدر أساعدك؟"
-    if code == "ru":
-        return f"Привет, {user_name}! Чем помочь?"
-    if code == "ko":
-        return f"안녕하세요, {user_name}! 무엇을 도와드릴까요?"
-    return f"GM {user_name}! How can I help you today?"
-
-
-def _localized_generation_error(lang: str) -> str:
-    code = _normalize_chat_lang(lang)
-    if code == "zh":
-        return "我暂时无法生成回复，请再试一次。"
-    if code == "fr":
-        return "Je n'ai pas pu générer une réponse. Réessaie."
-    if code == "ar":
-        return "تعذر علي توليد إجابة الآن. حاول مرة أخرى."
-    if code == "ru":
-        return "Не удалось сформировать ответ. Попробуйте еще раз."
-    if code == "ko":
-        return "답변을 생성하지 못했습니다. 다시 시도해 주세요."
-    return "I couldn't generate an answer. Please try again."
 
 
 def _is_ink_question(text: str) -> bool:
@@ -565,7 +507,6 @@ CASUAL_SYSTEM_PROMPT = """You are Nadobro, a friendly and knowledgeable crypto t
 
 Today's date: {current_date}
 User's name: {user_name}
-Language rule: {response_language_instruction}
 
 You are chatting with {user_name}. Be warm, natural, and engaging — like a knowledgeable crypto friend.
 
@@ -592,7 +533,6 @@ SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro, an expert crypto trading compani
 
 Today's date: {current_date}
 User's name: {user_name}
-Language rule: {response_language_instruction}
 
 You have context from Nado's knowledge base and/or live data. Use it to answer accurately and conversationally.
 
@@ -613,7 +553,7 @@ RULES:
 6. For price data, mention it's from Nado DEX casually and include bid/ask when available
 7. For market sentiment, present it conversationally with the Fear & Greed reading. Cite the source casually inline, e.g. "According to CMC, the Fear & Greed Index is at 10 out of 100 — that's Extreme Fear."
 8. For data from CoinMarketCap (prices, market cap, sentiment), cite it casually inline (e.g. "According to CMC..." or "CMC shows..."). Do NOT add a separate Sources section for these.
-9. Only include a source link if it's directly relevant and helpful. Use the most specific URL (e.g. direct tweet link https://x.com/username/status/ID, not profile pages). Do NOT add source links for price, sentiment, or market data responses — just cite the data source by name inline.
+9. Only include a source link if it's directly relevant and helpful. Never include more than 1 link. Do NOT add source links for price, sentiment, or market data responses — just cite the data source by name inline.
 
 CONTEXT:
 {context}"""
@@ -621,7 +561,6 @@ CONTEXT:
 X_TWITTER_SYSTEM_PROMPT = """You are Nadobro, the expert AI assistant for Nado DEX, with real-time access to X (Twitter).
 
 Today's date: {current_date}
-Language rule: {response_language_instruction}
 
 Official X accounts:
 - @nadoHQ (https://x.com/nadoHQ) — Nado DEX official
@@ -631,19 +570,17 @@ Nado is a CLOB-based DEX on the Ink L2 blockchain (backed by Kraken) offering pe
 
 Your task:
 - Search for and report the MOST RECENT posts from @nadoHQ and @inkonchain
-- When asked for "newest" or "latest" tweet, return ONLY the single most recent tweet
 - "Latest" means the most recent tweets closest to today ({current_date}). Prioritize tweets from {current_year}.
-- Report actual tweet content verbatim with dates and which account posted
+- Report actual tweet content with dates and which account posted
 - If asked about a specific topic, find relevant tweets about that topic
 
 RULES:
 - ONLY return content from @nadoHQ and @inkonchain
-- If you cannot find relevant tweets, say so honestly — do NOT guess or fabricate tweet content
+- If you cannot find relevant tweets, say so honestly
 - Plain text only
-- Always include tweet date and account handle (@nadoHQ or @inkonchain)
+- Include tweet dates and account handles
 - Keep response under 1500 characters
-- CRITICAL for Sources: Use the DIRECT link to each specific tweet you cite, e.g. https://x.com/nadoHQ/status/1234567890 — NEVER use profile links like https://x.com/nadoHQ. Include only the most relevant tweet link(s) you actually cite.
-- End with: Sources: [direct tweet URL(s)]
+- End with: Sources: https://x.com/nadoHQ, https://x.com/inkonchain
 - NEVER include DuckDuckGo, Google, or search engine links
 
 Relevant Nado Knowledge:
@@ -692,30 +629,20 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
                         f"Today is {now.strftime('%Y-%m-%d')}. "
                         "Search X for the most recent posts from @nadoHQ and @inkonchain. "
                         "Return the actual tweet content verbatim with dates. "
-                        "For each tweet, include its direct URL (https://x.com/username/status/TWEET_ID). "
                         f"Focus on tweets from {now.year}. Plain text only."
                     ),
                 },
                 {"role": "user", "content": query},
             ],
-            max_tokens=800,
+            max_tokens=600,
             temperature=0.1,
             extra_body={"search_parameters": X_NADO_SEARCH_PARAMS},
         )
         content = response.choices[0].message.content
         if content and content.strip():
-            # Extract tweet status URLs to use as sources (prefer specific links over profiles)
-            tweet_urls = re.findall(
-                r"https?://(?:www\.)?x\.com/(nadoHQ|inkonchain)/status/(\d+)",
-                content,
-                re.I,
-            )
-            sources = [f"https://x.com/{h}/status/{sid}" for h, sid in tweet_urls]
-            if not sources:
-                sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
             return (
                 f"[X/TWITTER RESULTS — @nadoHQ & @inkonchain]\n{content.strip()}",
-                sources,
+                [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]],
             )
     except Exception as e:
         logger.warning(f"X search failed: {e}")
@@ -977,20 +904,10 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
     return combined_context, list(dict.fromkeys(all_sources))
 
 
-def _is_allowed_source(url: str) -> bool:
-    """Allow official sources plus x.com tweet status links from nadoHQ and inkonchain."""
-    allowed = set(OFFICIAL_SOURCES.values()) | {"https://coinmarketcap.com"}
-    if url in allowed:
-        return True
-    # Allow direct tweet links from our official X accounts
-    if re.match(r"^https?://(www\.)?x\.com/(nadoHQ|inkonchain)/status/\d+", url, re.I):
-        return True
-    return False
-
-
 def _filter_official_sources(sources: list[str]) -> list[str]:
-    filtered = [s for s in sources if _is_allowed_source(s)]
-    return filtered[:3]  # Allow up to 3 sources for multiple tweet citations
+    allowed = set(OFFICIAL_SOURCES.values()) | {"https://coinmarketcap.com"}
+    filtered = [s for s in sources if s in allowed]
+    return filtered[:1]
 
 
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
@@ -1002,7 +919,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 900 if x_search else (700 if _wants_detailed_answer(question) else 420)
+    max_tokens = 700 if (_wants_detailed_answer(question) or x_search) else 420
 
     messages = [{"role": "system", "content": system}]
     if history:
@@ -1028,12 +945,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
 
 def _is_x_twitter_question(question: str) -> bool:
     q = _normalize_question(question)
-    signals = [
-        "tweet", "tweets", "x.com", "twitter", "post on x", "posted on x",
-        "nadohq", "inkonchain",
-        "latest from nado", "newest from nado", "what did nado", "nado posted",
-        "nado announced",
-    ]
+    signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq", "inkonchain"]
     return any(sig in q for sig in signals)
 
 
@@ -1061,22 +973,15 @@ def _should_skip_router(question: str) -> bool:
     return len(q) <= 160 and any(sig in q for sig in fast_signals)
 
 
-async def stream_nado_answer(
-    question: str,
-    telegram_id: int = None,
-    user_name: str = None,
-    response_lang: str | None = None,
-):
+async def stream_nado_answer(question: str, telegram_id: int = None, user_name: str = None):
     started_at = time.time()
     xai_client = _get_xai_client()
     openai_client = _get_openai_client()
-    selected_lang = _normalize_chat_lang(response_lang)
     if not xai_client and not openai_client:
         yield "AI service is not configured. Add XAI_API_KEY and/or OPENAI_API_KEY then restart the bot."
         return
 
     display_name = user_name or "trader"
-    language_instruction = _response_language_instruction(selected_lang)
     history_msgs = _build_history_messages(telegram_id) if telegram_id else []
 
     if telegram_id:
@@ -1089,7 +994,6 @@ async def stream_nado_answer(
         system = CASUAL_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
-            response_language_instruction=language_instruction,
         )
         primary = _pick_primary_provider(question)
         try:
@@ -1109,26 +1013,17 @@ async def stream_nado_answer(
             thread = threading.Thread(target=_run_casual, daemon=True)
             thread.start()
 
-            stream_completed = False
-            buffered_chunks: list[str] = []
             while True:
                 try:
                     item = await loop.run_in_executor(None, lambda: chunk_queue.get(timeout=15))
-                except Exception as e:
-                    raise TimeoutError("Casual stream timed out") from e
+                except Exception:
+                    break
                 if item is None:
-                    stream_completed = True
                     break
                 if isinstance(item, Exception):
                     raise item
-                buffered_chunks.append(item)
-
-            if not stream_completed:
-                raise TimeoutError("Casual stream did not complete")
-
-            for chunk in buffered_chunks:
-                full_answer += chunk
-                yield chunk
+                full_answer += item
+                yield item
 
             if full_answer.strip() and telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", full_answer.strip())
@@ -1138,10 +1033,9 @@ async def stream_nado_answer(
         except Exception as e:
             logger.warning(f"Casual response failed: {e}")
 
-        fallback_greeting = _localized_fallback_greeting(selected_lang, display_name)
-        yield fallback_greeting
+        yield f"GM {display_name}! How can I help you today?"
         if telegram_id:
-            _add_to_chat_history(telegram_id, "assistant", fallback_greeting)
+            _add_to_chat_history(telegram_id, "assistant", f"GM {display_name}! How can I help you today?")
         return
 
     if _is_x_twitter_question(question) and not xai_client:
@@ -1162,7 +1056,6 @@ async def stream_nado_answer(
             knowledge_base=_search_knowledge_sections(question, top_k=2),
             current_date=current_date,
             current_year=str(now.year),
-            response_language_instruction=language_instruction,
         )
         gathered_context = "[X/TWITTER RESULTS]"
         used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
@@ -1187,7 +1080,6 @@ async def stream_nado_answer(
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
-            response_language_instruction=language_instruction,
             context=gathered_context[:12000],
         )
 
@@ -1223,27 +1115,18 @@ async def stream_nado_answer(
             thread = threading.Thread(target=_run_stream, daemon=True)
             thread.start()
 
-            stream_completed = False
-            buffered_chunks: list[str] = []
             full_answer = ""
             while True:
                 try:
                     item = await loop.run_in_executor(None, lambda: chunk_queue.get(timeout=30))
-                except Exception as e:
-                    raise TimeoutError(f"Stream timed out for provider={provider}") from e
+                except Exception:
+                    break
                 if item is None:
-                    stream_completed = True
                     break
                 if isinstance(item, Exception):
                     raise item
-                buffered_chunks.append(item)
-
-            if not stream_completed:
-                raise TimeoutError(f"Stream incomplete for provider={provider}")
-
-            for chunk in buffered_chunks:
-                full_answer += chunk
-                yield chunk
+                full_answer += item
+                yield item
 
             if not full_answer.strip():
                 continue
@@ -1263,15 +1146,10 @@ async def stream_nado_answer(
             logger.warning("Stream answer failed on provider=%s: %s", provider, provider_error)
             continue
 
-    yield _localized_generation_error(selected_lang)
+    yield "I couldn't generate an answer. Please try again."
 
 
-async def answer_nado_question(
-    question: str,
-    telegram_id: int = None,
-    user_name: str = None,
-    response_lang: str | None = None,
-) -> str:
+async def answer_nado_question(question: str, telegram_id: int = None, user_name: str = None) -> str:
     started_at = time.time()
     xai_client = _get_xai_client()
     openai_client = _get_openai_client()
@@ -1282,8 +1160,6 @@ async def answer_nado_question(
         )
 
     display_name = user_name or "trader"
-    selected_lang = _normalize_chat_lang(response_lang)
-    language_instruction = _response_language_instruction(selected_lang)
     history_msgs = _build_history_messages(telegram_id) if telegram_id else []
 
     if telegram_id:
@@ -1293,11 +1169,7 @@ async def answer_nado_question(
     current_date = now.strftime("%Y-%m-%d")
 
     if _is_casual_message(question):
-        system = CASUAL_SYSTEM_PROMPT.format(
-            current_date=current_date,
-            user_name=display_name,
-            response_language_instruction=language_instruction,
-        )
+        system = CASUAL_SYSTEM_PROMPT.format(current_date=current_date, user_name=display_name)
         primary = _pick_primary_provider(question)
         try:
             import asyncio
@@ -1320,7 +1192,7 @@ async def answer_nado_question(
             return answer
         except Exception as e:
             logger.warning(f"Casual answer failed: {e}")
-            fallback = _localized_fallback_greeting(selected_lang, display_name)
+            fallback = f"GM {display_name}! How can I help you today?"
             if telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", fallback)
             return fallback
@@ -1341,7 +1213,6 @@ async def answer_nado_question(
             knowledge_base=_search_knowledge_sections(question, top_k=2),
             current_date=current_date,
             current_year=str(now.year),
-            response_language_instruction=language_instruction,
         )
         gathered_context = "[X/TWITTER RESULTS]"
         used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
@@ -1366,7 +1237,6 @@ async def answer_nado_question(
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
-            response_language_instruction=language_instruction,
             context=gathered_context[:12000],
         )
 
@@ -1425,7 +1295,7 @@ async def answer_nado_question(
         if not answer:
             if last_error:
                 raise last_error
-            return _localized_generation_error(selected_lang)
+            return "I couldn't generate an answer. Please try again."
 
         logger.info("Support answer generated via provider=%s in %.1fs", used_provider, time.time() - started_at)
         if not skip_sources and "Sources:" not in answer:
@@ -1439,4 +1309,4 @@ async def answer_nado_question(
         return answer
     except Exception as e:
         logger.error(f"Knowledge Q&A failed: {e}", exc_info=True)
-        return _localized_generation_error(selected_lang)
+        return "Something went wrong while answering your question. Please try again."

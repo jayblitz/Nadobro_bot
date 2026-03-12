@@ -13,9 +13,6 @@ NADO_MAINNET_REST = "https://gateway.prod.nado.xyz/v1"
 
 NADO_TESTNET_ARCHIVE = "https://archive.test.nado.xyz/v1"
 NADO_MAINNET_ARCHIVE = "https://archive.prod.nado.xyz/v1"
-NADO_TESTNET_TRIGGER = os.environ.get("NADO_TESTNET_TRIGGER", "https://trigger.test.nado.xyz/v1")
-NADO_MAINNET_TRIGGER = os.environ.get("NADO_MAINNET_TRIGGER", "https://trigger.prod.nado.xyz/v1")
-LOWIQPTS_BRIDGE_CHAT_ID = os.environ.get("LOWIQPTS_BRIDGE_CHAT_ID", "")
 
 PRODUCTS = {
     "USDT0": {"id": 0, "type": "spot"},
@@ -45,14 +42,6 @@ def get_product_name(product_id: int) -> str:
             return info.get("symbol", name)
     return f"ID:{product_id}"
 
-
-def get_product_base_symbol(product_id: int) -> Optional[str]:
-    """Base symbol for price lookup (e.g. BTC, ETH). Used for spot valuation."""
-    name = get_product_name(product_id)
-    if name.startswith("ID:"):
-        return None
-    return name.replace("-PERP", "").strip() or None
-
 RATE_LIMIT_SECONDS = 5
 MAX_LEVERAGE = 40
 MIN_TRADE_SIZE_USD = 1.0
@@ -74,7 +63,6 @@ def get_product_max_leverage(product: str) -> int:
     product_key = (product or "").upper().strip()
     return int(PRODUCT_MAX_LEVERAGE.get(product_key, MAX_LEVERAGE))
 
-VOL_MAX_LEVERAGE = 5
 EST_FEE_RATE = 0.0003
 EST_FILL_EFFICIENCY = 0.45
 DUAL_MODE_CARD_FLOW = os.environ.get("DUAL_MODE_CARD_FLOW", "true").strip().lower() in ("1", "true", "yes", "on")
