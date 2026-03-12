@@ -9,22 +9,34 @@ from dotenv import load_dotenv
 
 
 class _TokenRedactFilter(logging.Filter):
-    _BOT_TOKEN_RE = re.compile(r"/bot(\d+:[A-Za-z0-9_-]+)/")
+    _BOT_TOKEN_RE = re.compile(r"/bot\d+:[A-Za-z0-9_-]+/")
+
+    def _redact(self, val):
+        s = str(val)
+        if self._BOT_TOKEN_RE.search(s):
+            return self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", s)
+        return val
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if hasattr(record, "msg") and isinstance(record.msg, str):
+        if isinstance(record.msg, str):
             record.msg = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: self._redact(v) for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(self._redact(a) for a in record.args)
         return True
 
+
+_redact_filter = _TokenRedactFilter()
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.addFilter(_redact_filter)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[_stream_handler],
 )
-
-logging.getLogger("httpx").addFilter(_TokenRedactFilter())
-logging.getLogger("telegram").addFilter(_TokenRedactFilter())
 
 logger = logging.getLogger("nadobro")
 
