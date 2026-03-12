@@ -150,6 +150,15 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
                 state["volume_done_usd"] = round(volume_done, 4)
                 state["fees_paid"] = round(fees_paid, 6)
 
+        if not pos and signer_client:
+            try:
+                for order in (client.get_open_orders(product_id) or []):
+                    digest = order.get("digest")
+                    if digest:
+                        signer_client.cancel_order(product_id, digest)
+            except Exception as e:
+                logger.warning("Volume bot stale order cleanup failed for user %s: %s", telegram_id, e)
+
         state["vol_phase"] = "idle"
         state["vol_opened_at"] = 0.0
         state["vol_position_size"] = 0.0

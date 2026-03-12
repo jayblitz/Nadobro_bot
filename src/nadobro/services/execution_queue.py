@@ -24,11 +24,17 @@ def register_handlers(
     _alert_handler = alert_handler
 
 
+_last_cleanup_ts: float = 0.0
+_CLEANUP_INTERVAL = 60.0
+
 def _dedupe_ok(dedupe_key: str) -> bool:
+    global _last_cleanup_ts
     now = time.time()
-    stale = [k for k, ts in _dedupe_seen.items() if now - ts > _DEDUP_TTL_SECONDS]
-    for k in stale:
-        _dedupe_seen.pop(k, None)
+    if now - _last_cleanup_ts > _CLEANUP_INTERVAL:
+        stale = [k for k, ts in _dedupe_seen.items() if now - ts > _DEDUP_TTL_SECONDS]
+        for k in stale:
+            _dedupe_seen.pop(k, None)
+        _last_cleanup_ts = now
     if dedupe_key in _dedupe_seen:
         return False
     _dedupe_seen[dedupe_key] = now

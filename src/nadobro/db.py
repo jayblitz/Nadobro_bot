@@ -208,6 +208,7 @@ def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 );
                 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (user_id, is_active);
+                CREATE INDEX IF NOT EXISTS idx_users_last_active ON users (last_active);
                 CREATE TABLE IF NOT EXISTS admin_logs (
                     id SERIAL PRIMARY KEY,
                     admin_id BIGINT NOT NULL,

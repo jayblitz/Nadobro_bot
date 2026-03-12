@@ -117,9 +117,17 @@ def get_pending_howl(telegram_id: int, network: str) -> dict | None:
         return None
     try:
         data = json.loads(raw) if isinstance(raw, str) else raw
-        if data.get("status") in ("pending", "partially_applied"):
-            return data
-        return None
+        if data.get("status") not in ("pending", "partially_applied"):
+            return None
+        ts_str = data.get("timestamp")
+        if ts_str:
+            created = datetime.fromisoformat(ts_str)
+            age_hours = (datetime.utcnow() - created).total_seconds() / 3600.0
+            if age_hours > 48:
+                data["status"] = "expired"
+                set_bot_state(_pending_key(telegram_id, network), data)
+                return None
+        return data
     except Exception:
         return None
 

@@ -562,8 +562,12 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 strategy, telegram_id, network, state,
                 client, 0.0, 0, "MULTI", [], session_passphrase,
             )
-        if not state.get("running", True):
+        tk_check = _task_key(telegram_id, network)
+        if tk_check not in _tasks or not state.get("running", True):
+            state["running"] = False
             _save_state(telegram_id, network, state)
+            if tk_check not in _tasks:
+                return True, None
             await _notify(telegram_id, f"🧠 Bro Mode completed on {network}.")
             return True, None
         state["last_run_ts"] = time.time()
@@ -656,9 +660,12 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             client, mid, product_id, product, open_orders, session_passphrase,
         )
 
-    if not state.get("running", True):
+    tk_post = _task_key(telegram_id, network)
+    if tk_post not in _tasks or not state.get("running", True):
+        state["running"] = False
         _save_state(telegram_id, network, state)
-        await _notify(telegram_id, f"✅ {strategy.upper()} completed on {product}-PERP ({network}).")
+        if tk_post in _tasks:
+            await _notify(telegram_id, f"✅ {strategy.upper()} completed on {product}-PERP ({network}).")
         return True, None
 
     state["last_run_ts"] = time.time()

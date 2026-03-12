@@ -164,6 +164,8 @@ def _parse_decision(raw: str, min_confidence: float) -> dict:
         decision["reasoning"] = f"Invalid action '{action}' — defaulting to hold"
 
     confidence = float(decision.get("confidence", 0))
+    if confidence > 1.0:
+        confidence = confidence / 100.0
     decision["confidence"] = max(0.0, min(1.0, confidence))
 
     if action in ("open_long", "open_short") and confidence < min_confidence:

@@ -324,11 +324,11 @@ def run_cycle(
             "reference_price": reference_price,
         }
 
-    existing_prices = set()
+    existing_prices = []
     for o in open_orders:
         p = float(o.get("price", 0))
         if p > 0:
-            existing_prices.add(round(p, 8))
+            existing_prices.append(p)
 
     grid_orders = _compute_grid_prices(
         reference_price,
@@ -387,8 +387,8 @@ def run_cycle(
         if orders_placed >= available_slots:
             break
         order_price = order_spec["price"]
-        rounded_price = round(order_price, 8)
-        if rounded_price in existing_prices:
+        price_tol = order_price * 1e-6
+        if any(abs(order_price - ep) < price_tol for ep in existing_prices):
             continue
         if pause_flatten_only:
             if net_units > 0 and order_spec["is_long"]:
@@ -416,7 +416,7 @@ def run_cycle(
 
         if result.get("success"):
             orders_placed += 1
-            existing_prices.add(rounded_price)
+            existing_prices.append(order_price)
             digest = result.get("digest")
             if digest and digest != "unknown":
                 order_birth_ts[str(digest)] = time.time()

@@ -909,13 +909,6 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str,
     elif tool_name == "get_global_market_data":
         return _execute_global_market_data()
 
-    elif tool_name == "search_web":
-        query = args.get("query", question)
-        sections = _search_knowledge_sections(query, top_k=5)
-        if sections:
-            return f"[KNOWLEDGE BASE RESULTS]\n{sections}", _pick_sources_for_question(query, context_text=sections)
-        return "[KNOWLEDGE BASE] No matching sections found.", [OFFICIAL_SOURCES["docs"]]
-
     return f"[ERROR] Unknown tool: {tool_name}", []
 
 
@@ -996,7 +989,7 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
 def _filter_official_sources(sources: list[str]) -> list[str]:
     allowed = set(OFFICIAL_SOURCES.values()) | {"https://coinmarketcap.com"}
     filtered = [s for s in sources if s in allowed]
-    return filtered[:1]
+    return filtered[:3]
 
 
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
@@ -1103,6 +1096,8 @@ def _should_skip_router(question: str) -> bool:
     if _is_price_question(q) or _is_sentiment_question(q) or _is_x_twitter_question(q):
         return False
     if _is_nado_specific_question(q):
+        return True
+    if _is_ink_question(q):
         return True
     return False
 

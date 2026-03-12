@@ -60,6 +60,11 @@ def get_account_snapshot(telegram_id: int) -> Optional[dict]:
                         product_name = pos.get("product_name", "") or pos.get("product", "")
                         notional = float(pos.get("notional_usd", 0) or 0) or size * entry
                         pnl = float(pos.get("unrealized_pnl", 0) or pos.get("pnl", 0) or 0)
+                        leverage = float(pos.get("leverage", 0) or pos.get("effective_leverage", 0) or 0)
+                        if leverage <= 0 and entry > 0 and notional > 0:
+                            margin_used = float(pos.get("margin", 0) or pos.get("initial_margin", 0) or 0)
+                            leverage = notional / margin_used if margin_used > 0 else 5
+                        leverage = max(1, leverage)
                         positions.append({
                             "product_id": pos.get("product_id"),
                             "product": product_name,
@@ -68,6 +73,7 @@ def get_account_snapshot(telegram_id: int) -> Optional[dict]:
                             "notional_usd": notional,
                             "entry_price": entry,
                             "unrealized_pnl": pnl,
+                            "leverage": leverage,
                         })
         except Exception as e:
             logger.warning("Failed to fetch positions for budget guard: %s", e)
@@ -79,7 +85,9 @@ def get_account_snapshot(telegram_id: int) -> Optional[dict]:
             "positions": positions,
             "position_count": len(positions),
             "total_exposure_usd": total_exposure,
-            "available_margin": max(0, usdt_balance - total_exposure * 0.1),
+            "available_margin": max(0, usdt_balance - sum(
+                p["notional_usd"] / max(1, float(p.get("leverage", 5))) for p in positions
+            )),
         }
     except Exception as e:
         logger.error("Account snapshot failed for user %s: %s", telegram_id, e)
@@ -170,10 +178,11 @@ def should_emergency_flatten(
     max_loss_pct = float(bro_settings.get("max_loss_pct", 15))
 
     total_unrealized_pnl = sum(
-        p.get("unrealized_pnl", 0) for p in snapshot.get("positions", [])
+        float(p.get("unrealized_pnl", 0) or 0) for p in snapshot.get("positions", [])
     )
 
-    loss_pct = abs(total_unrealized_pnl) / budget * 100 if budget > 0 and total_unrealized_pnl < 0 else 0
+    denominator = max(budget, snapshot["usdt_balance"]) if snapshot["usdt_balance"] > 0 else budget
+    loss_pct = abs(total_unrealized_pnl) / denominator * 100 if denominator > 0 and total_unrealized_pnl < 0 else 0
 
     if loss_pct >= max_loss_pct:
         return True, (

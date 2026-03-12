@@ -196,6 +196,19 @@ def _handle_open(
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'"}
 
+    from src.nadobro.services.budget_guard import get_account_snapshot
+    snapshot = get_account_snapshot(telegram_id)
+    if snapshot:
+        current_positions = snapshot.get("position_count", 0)
+        if current_positions >= max_positions:
+            return {"success": True, "action": "blocked",
+                    "detail": f"Max positions ({max_positions}) reached, holding"}
+
+        existing_products = {p.get("product", "").upper() for p in snapshot.get("positions", [])}
+        if product in existing_products:
+            return {"success": True, "action": "blocked",
+                    "detail": f"Already have a position in {product}, holding"}
+
     notional_usd = remaining * size_pct
     if notional_usd < 10:
         return {"success": True, "action": "hold", "detail": "Position too small (< $10)"}
