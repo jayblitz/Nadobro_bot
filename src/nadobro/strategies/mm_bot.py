@@ -155,6 +155,8 @@ def _cancel_stale_orders(
         if order_price <= 0:
             continue
         digest = order.get("digest")
+        if digest and digest not in order_birth_ts:
+            continue  # Manual order - do not cancel
         drift = abs(order_price - mid) / mid
         age_seconds = None
         if digest and digest in order_birth_ts:

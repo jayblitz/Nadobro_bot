@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from src.nadobro.models.database import (
     TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
     get_last_trade_for_rate_limit, insert_trade, update_trade, get_trades_by_user,
-    find_open_trade,
+    find_open_trade, get_pending_limit_trades,
 )
 from src.nadobro.config import (
     get_product_id,
@@ -193,6 +193,50 @@ def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[
         except Exception as e:
             errors.append(f"{get_product_name(product_id)}: cancel exception ({e})")
     return cancelled, errors
+
+
+def reconcile_pending_limit_trades(telegram_id: int, client) -> None:
+    """
+    Sync DB pending limit trades with exchange state. Orders no longer on exchange
+    are checked for fills via archive; if filled update to filled, else to cancelled.
+    """
+    if not client or not getattr(client, "subaccount_hex", None):
+        return
+    pending = get_pending_limit_trades(telegram_id)
+    if not pending:
+        return
+    product_ids = {int(t["product_id"]) for t in pending}
+    for product_id in product_ids:
+        try:
+            open_orders = client.get_open_orders(product_id) or []
+        except Exception as e:
+            logger.warning("reconcile_pending_limit_trades: get_open_orders failed product_id=%s: %s", product_id, e)
+            continue
+        open_digests = {str(o.get("digest", "")).strip().lower() for o in open_orders if o.get("digest")}
+        for t in pending:
+            if int(t.get("product_id", -1)) != product_id:
+                continue
+            digest = str(t.get("order_digest") or "").strip().lower()
+            if not digest or digest in open_digests:
+                continue
+            report = _fetch_close_execution_report(client, product_id, digest)
+            filled_size = float(report.get("filled_size") or 0.0)
+            fill_price = float(report.get("fill_price") or 0.0)
+            trade_id = t.get("id")
+            if not trade_id:
+                continue
+            if filled_size > 0:
+                exec_price = fill_price if fill_price > 0 else float(t.get("price") or 0)
+                update_trade(trade_id, {
+                    "status": TradeStatus.FILLED.value,
+                    "price": exec_price,
+                    "filled_at": datetime.utcnow().isoformat(),
+                })
+                logger.info("Reconciled trade #%d: filled (size=%.4f)", trade_id, filled_size)
+                update_trade_stats(telegram_id, filled_size * exec_price)
+            else:
+                update_trade(trade_id, {"status": TradeStatus.CANCELLED.value})
+                logger.info("Reconciled trade #%d: cancelled (expired or cancelled on exchange)", trade_id)
 
 
 def check_rate_limit(telegram_id: int) -> tuple[bool, str]:

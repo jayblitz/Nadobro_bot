@@ -1083,7 +1083,7 @@ class NadoClient:
             ot = ot_map.get(order_type, OrderType.DEFAULT)
 
             amount = size if is_buy else -size
-            expiration_secs = 10 if order_type == "ioc" else 3600
+            expiration_secs = 10 if order_type == "ioc" else 604800
 
             amount_x18 = self._to_x18_int(amount)
             if size_increment_x18 and size_increment_x18 > 0:

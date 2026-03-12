@@ -145,6 +145,14 @@ def get_trades_by_user(telegram_id: int, limit: int = 50) -> list:
     )
 
 
+def get_pending_limit_trades(telegram_id: int) -> list:
+    """Pending limit trades with order_digest, for reconciliation with exchange state."""
+    return query_all(
+        "SELECT * FROM trades WHERE user_id = %s AND status = 'pending' AND order_type = 'limit' AND order_digest IS NOT NULL",
+        (telegram_id,),
+    )
+
+
 _ALERT_INSERT_ALLOWED_COLS = frozenset({
     "user_id", "product_id", "product_name", "condition",
     "target_value", "is_active", "network", "created_at",

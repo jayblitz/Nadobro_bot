@@ -25,7 +25,7 @@ from src.nadobro.handlers.keyboards import (
     persistent_menu_kb,
     points_scope_kb,
 )
-from src.nadobro.services.trade_service import get_trade_analytics
+from src.nadobro.services.trade_service import get_trade_analytics, reconcile_pending_limit_trades
 from src.nadobro.services.equity_snapshots import record_snapshot, get_1d_7d_changes
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
@@ -206,6 +206,7 @@ def _view_positions_text(telegram_id: int):
     client = get_user_readonly_client(telegram_id)
     if not client:
         return "⚠️ Wallet not initialized\\. Use /start first\\.", home_card_kb()
+    reconcile_pending_limit_trades(telegram_id, client)
     positions = client.get_all_positions()
     prices = None
     try:
@@ -219,6 +220,7 @@ def _view_portfolio_text(telegram_id: int):
     client = get_user_readonly_client(telegram_id)
     if not client:
         return "⚠️ Wallet not initialized\\. Use /start first\\.", home_card_kb()
+    reconcile_pending_limit_trades(telegram_id, client)
     positions = client.get_all_positions() or []
     prices = None
     balance = None
