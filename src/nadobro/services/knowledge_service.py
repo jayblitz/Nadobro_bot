@@ -481,7 +481,7 @@ TOOLS:
 1. search_knowledge_base — Nado product knowledge (features, fees, margin, points, NFTs, NLP, dev docs, getting started). PRIMARY source for all Nado-specific questions.
 2. get_live_price — LIVE trading price from Nado DEX orderbook (bid/ask/spread). For: "what's BTC price?", "ETH price on Nado". Assets: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX.
 3. get_market_sentiment — Crypto market sentiment + Fear & Greed Index + crypto news from Twitter. For: "is the market bullish?", "sentiment?", "fear and greed".
-4. search_x_twitter — Latest tweets from @nadoHQ and @inkonchain. ONLY for Nado social media/announcements.
+4. search_x_twitter — Latest tweets from crypto Twitter. For Nado-specific queries, searches @nadoHQ and @inkonchain. For broader crypto news/opinions, searches wider crypto Twitter.
 {cmc_tools_section}
 ROUTING RULES:
 - "What's BTC price?" / "price of ETH" → get_live_price (Nado DEX price)
@@ -489,6 +489,7 @@ ROUTING RULES:
 - "Is the market bullish?" / "fear and greed" → get_market_sentiment
 - "What did Nado tweet?" / "any Nado news?" → search_x_twitter
 - "Have the points been distributed?" / "points this week?" / "weekly epoch?" → search_x_twitter (search for points distribution announcements)
+- "What's the latest crypto news?" / "any alpha?" / "what's CT saying?" → search_x_twitter (broader crypto Twitter search)
 - Casual greetings (gm, hi, hello, thanks, bye) → do NOT call any tools
 - General chat, jokes, opinions, non-crypto questions → do NOT call any tools (the main AI will handle these)
 - When in doubt about Nado specifically → search_knowledge_base
@@ -661,7 +662,7 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
             ],
             max_tokens=600,
             temperature=0.1,
-            extra_body={"search_parameters": X_NADO_SEARCH_PARAMS},
+            extra_body={"search_parameters": _pick_x_search_params(search_query)},
         )
         content = response.choices[0].message.content
         if content and content.strip():
@@ -977,7 +978,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
 
     messages = [{"role": "system", "content": system}]
     if history:
-        messages.extend(history[-8:])
+        messages.extend(history[-CHAT_HISTORY_MAX_MESSAGES:])
     messages.append({"role": "user", "content": question})
 
     kwargs = dict(
@@ -988,7 +989,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
         stream=True,
     )
     if x_search and provider == "xai":
-        kwargs["extra_body"] = {"search_parameters": X_NADO_SEARCH_PARAMS}
+        kwargs["extra_body"] = {"search_parameters": _pick_x_search_params(question)}
 
     stream = client.chat.completions.create(**kwargs)
     for chunk in stream:
@@ -1018,6 +1019,20 @@ def _is_x_twitter_question(question: str) -> bool:
     if _is_points_distribution_question(question):
         return True
     return False
+
+
+def _is_nado_x_question(question: str) -> bool:
+    q = _normalize_question(question)
+    nado_signals = ["nado", "nadohq", "inkonchain", "ink l2", "nado dex"]
+    if _is_points_distribution_question(question):
+        return True
+    return any(sig in q for sig in nado_signals)
+
+
+def _pick_x_search_params(question: str) -> dict:
+    if _is_nado_x_question(question):
+        return X_NADO_SEARCH_PARAMS
+    return X_CRYPTO_SEARCH_PARAMS
 
 
 def _is_price_question(question: str) -> bool:
@@ -1258,7 +1273,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                 client = _get_xai_client() if p == "xai" else _get_openai_client()
                 messages = [{"role": "system", "content": system}]
                 if history_msgs:
-                    messages.extend(history_msgs[-8:])
+                    messages.extend(history_msgs[-CHAT_HISTORY_MAX_MESSAGES:])
                 messages.append({"role": "user", "content": question})
                 resp = client.chat.completions.create(
                     model=_model_for(p), messages=messages, max_tokens=350, temperature=0.6,
@@ -1345,7 +1360,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                     max_tokens = 800 if (_wants_detailed_answer(question) or use_x_prompt) else 550
                     messages = [{"role": "system", "content": system}]
                     if history_msgs:
-                        messages.extend(history_msgs[-8:])
+                        messages.extend(history_msgs[-CHAT_HISTORY_MAX_MESSAGES:])
                     messages.append({"role": "user", "content": question})
                     kwargs = dict(
                         model=XAI_X_SEARCH_MODEL if (use_x_prompt and p == "xai") else _model_for(p),
@@ -1354,7 +1369,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                         temperature=0.5,
                     )
                     if use_x_prompt and p == "xai":
-                        kwargs["extra_body"] = {"search_parameters": X_NADO_SEARCH_PARAMS}
+                        kwargs["extra_body"] = {"search_parameters": _pick_x_search_params(question)}
                     resp = client.chat.completions.create(**kwargs)
                     content = resp.choices[0].message.content
                     if not content or not content.strip():
