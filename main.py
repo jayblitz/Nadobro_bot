@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import logging
 import asyncio
@@ -6,11 +7,25 @@ import signal
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
+
+class _TokenRedactFilter(logging.Filter):
+    _BOT_TOKEN_RE = re.compile(r"/bot(\d+:[A-Za-z0-9_-]+)/")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if hasattr(record, "msg") and isinstance(record.msg, str):
+            record.msg = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", record.msg)
+        return True
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
+
+logging.getLogger("httpx").addFilter(_TokenRedactFilter())
+logging.getLogger("telegram").addFilter(_TokenRedactFilter())
+
 logger = logging.getLogger("nadobro")
 
 # Load local .env during development before reading config vars.

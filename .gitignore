@@ -37,6 +37,7 @@ coverage.xml
 cover/
 *.log
 .env
+.env.*
 .venv
 env/
 venv/
@@ -49,3 +50,9 @@ dmypy.json
 .pytype/
 *.db
 *.sqlite3
+
+attached_assets/
+*.pem
+*.key
+secrets.json
+.secrets/
