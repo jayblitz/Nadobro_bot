@@ -187,6 +187,11 @@ async def run_bot():
 
     transport_mode, webhook_url, webhook_path = _resolve_transport_settings()
     webhook_secret = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+    if transport_mode == "webhook" and not webhook_secret:
+        logger.warning(
+            "TELEGRAM_WEBHOOK_SECRET is not set. Webhook mode without a secret "
+            "allows spoofed updates. Set TELEGRAM_WEBHOOK_SECRET for production."
+        )
     if transport_mode == "webhook" and webhook_url:
         parsed = urlparse(webhook_url)
         if parsed.path.rstrip("/") != webhook_path.rstrip("/"):

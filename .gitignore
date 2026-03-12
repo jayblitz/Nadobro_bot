@@ -52,6 +52,7 @@ dmypy.json
 *.sqlite3
 
 attached_assets/
+.local/
 *.pem
 *.key
 secrets.json
