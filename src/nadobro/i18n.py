@@ -2963,6 +2963,34 @@ _TEXTS = {
         "ru": "🔄 *Отозвать ключ 1CT (Nado)*\n\n1. Откройте Nado → Настройки\n2. Торговля в 1 клик → Расширенный 1CT\n3. Отключите переключатель и сохраните\n\nВаш основной кошелёк и средства в безопасности. Вы можете привязать снова через Кошелёк.",
         "ko": "🔄 *1CT 키 해제 (Nado)*\n\n1. Nado → 설정 열기\n2. 원클릭 거래 → 고급 1CT\n3. 토글 비활성화 및 저장\n\n메인 지갑과 자금은 안전합니다. 언제든 지갑을 통해 다시 연결할 수 있습니다.",
     },
+    "Unknown product '{product}'.": {
+        "zh": "未知产品 '{product}'。",
+        "fr": "Produit inconnu '{product}'.",
+        "ar": "منتج غير معروف '{product}'.",
+        "ru": "Неизвестный продукт '{product}'.",
+        "ko": "알 수 없는 상품 '{product}'.",
+    },
+    "Unknown condition '{condition}'. Use: above, below": {
+        "zh": "未知条件 '{condition}'。请使用：above、below",
+        "fr": "Condition inconnue '{condition}'. Utilisez : above, below",
+        "ar": "شرط غير معروف '{condition}'. استخدم: above أو below",
+        "ru": "Неизвестное условие '{condition}'. Используйте: above, below",
+        "ko": "알 수 없는 조건 '{condition}'. above 또는 below를 사용하세요",
+    },
+    "Alert #{alert_id} deleted.": {
+        "zh": "警报 #{alert_id} 已删除。",
+        "fr": "Alerte #{alert_id} supprimée.",
+        "ar": "تم حذف التنبيه #{alert_id}.",
+        "ru": "Оповещение #{alert_id} удалено.",
+        "ko": "알림 #{alert_id} 삭제됨.",
+    },
+    "{network} wallet unlinked. You can link again via Wallet button.": {
+        "zh": "{network} 钱包已解绑。可通过钱包按钮重新连接。",
+        "fr": "Portefeuille {network} dissocié. Vous pouvez relier via le bouton Wallet.",
+        "ar": "تم إلغاء ربط محفظة {network}. يمكنك الربط مجدداً عبر زر المحفظة.",
+        "ru": "Кошелёк {network} отвязан. Вы можете привязать снова через кнопку Кошелёк.",
+        "ko": "{network} 지갑 연결이 해제되었습니다. 지갑 버튼으로 다시 연결할 수 있습니다.",
+    },
 }
 
 

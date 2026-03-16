@@ -128,7 +128,8 @@ def setup_bot():
         user = update.effective_user
         if user:
             from src.nadobro.i18n import _ACTIVE_LANG, get_user_language, normalize_lang
-            _ACTIVE_LANG.set(normalize_lang(get_user_language(user.id)))
+            lang = normalize_lang(get_user_language(user.id))
+            _ACTIVE_LANG.set(lang)
 
     app = (
         Application.builder()

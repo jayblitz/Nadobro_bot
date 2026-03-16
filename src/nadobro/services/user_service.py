@@ -246,7 +246,7 @@ def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple
     invalidate_user_cache(telegram_id)
     clear_client_cache()
     _readonly_cache.clear()
-    return True, _loc(f"{network} wallet unlinked. You can link again via Wallet button.")
+    return True, _loc("{network} wallet unlinked. You can link again via Wallet button.").format(network=network)
 
 
 def update_user_language(telegram_id: int, lang: str):

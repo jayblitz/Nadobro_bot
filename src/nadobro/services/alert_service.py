@@ -15,7 +15,7 @@ def _loc(text):
 def create_alert(telegram_id: int, product: str, condition: str, target_value: float) -> dict:
     product_id = get_product_id(product)
     if product_id is None:
-        return {"success": False, "error": _loc(f"Unknown product '{product}'.")}
+        return {"success": False, "error": _loc("Unknown product '{product}'.").format(product=product)}
 
     user = get_user(telegram_id)
     if not user:
@@ -24,7 +24,7 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
     cond_map = {"above": AlertCondition.ABOVE.value, "below": AlertCondition.BELOW.value}
     alert_cond = cond_map.get(condition)
     if not alert_cond:
-        return {"success": False, "error": _loc(f"Unknown condition '{condition}'. Use: above, below")}
+        return {"success": False, "error": _loc("Unknown condition '{condition}'. Use: above, below").format(condition=condition)}
 
     alert_id = insert_alert({
         "user_id": telegram_id,
@@ -66,7 +66,7 @@ def delete_alert(telegram_id: int, alert_id: int) -> dict:
     if not alert:
         return {"success": False, "error": _loc("Alert not found.")}
     update_alert(alert_id, is_active=False)
-    return {"success": True, "message": _loc(f"Alert #{alert_id} deleted.")}
+    return {"success": True, "message": _loc("Alert #{alert_id} deleted.").format(alert_id=alert_id)}
 
 
 def get_triggered_alerts(prices: dict) -> list:
