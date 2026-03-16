@@ -651,6 +651,9 @@ def strategy_hub_kb():
             InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro"),
         ],
         [
+            InlineKeyboardButton("🔁 Copy Trading", callback_data="copy:hub"),
+        ],
+        [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
         ],
     ])
@@ -840,5 +843,112 @@ def back_kb(target="main"):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(label, callback_data=f"nav:{target}")],
     ])
+
+
+def copy_hub_kb(traders: list, is_admin_user: bool = False):
+    rows = []
+    for t in traders:
+        label = t.get("label", t["wallet"][:10])
+        curated = " ⭐" if t.get("is_curated") else ""
+        rows.append([InlineKeyboardButton(
+            f"{label}{curated}",
+            callback_data=f"copy:trader:{t['id']}",
+        )])
+    rows.append([InlineKeyboardButton("📋 My Copies", callback_data="copy:dashboard")])
+    rows.append([InlineKeyboardButton("➕ Add Custom Wallet", callback_data="copy:add_custom")])
+    if is_admin_user:
+        rows.append([InlineKeyboardButton("⚙️ Manage Traders", callback_data="copy:admin:menu")])
+    rows.append([InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub")])
+    return InlineKeyboardMarkup(rows)
+
+
+def copy_trader_preview_kb(trader_id: int):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶ Start Copying", callback_data=f"copy:start:{trader_id}")],
+        [InlineKeyboardButton("◀ Back", callback_data="copy:hub")],
+    ])
+
+
+def copy_budget_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("$50", callback_data="copy:budget:50"),
+            InlineKeyboardButton("$100", callback_data="copy:budget:100"),
+            InlineKeyboardButton("$250", callback_data="copy:budget:250"),
+        ],
+        [
+            InlineKeyboardButton("$500", callback_data="copy:budget:500"),
+            InlineKeyboardButton("$1000", callback_data="copy:budget:1000"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
+    ])
+
+
+def copy_risk_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("0.5x", callback_data="copy:risk:0.5"),
+            InlineKeyboardButton("1x", callback_data="copy:risk:1"),
+            InlineKeyboardButton("2x", callback_data="copy:risk:2"),
+        ],
+        [
+            InlineKeyboardButton("3x", callback_data="copy:risk:3"),
+            InlineKeyboardButton("5x", callback_data="copy:risk:5"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
+    ])
+
+
+def copy_leverage_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("5x", callback_data="copy:lev:5"),
+            InlineKeyboardButton("10x", callback_data="copy:lev:10"),
+            InlineKeyboardButton("20x", callback_data="copy:lev:20"),
+        ],
+        [
+            InlineKeyboardButton("30x", callback_data="copy:lev:30"),
+            InlineKeyboardButton("40x", callback_data="copy:lev:40"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
+    ])
+
+
+def copy_confirm_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Confirm & Start", callback_data="copy:confirm")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
+    ])
+
+
+def copy_dashboard_kb(mirrors: list):
+    rows = []
+    for m in mirrors:
+        label = m.get("trader_label", "???")[:20]
+        rows.append([
+            InlineKeyboardButton(
+                f"🛑 Stop {label}",
+                callback_data=f"copy:stop:{m['mirror_id']}",
+            ),
+        ])
+    if not mirrors:
+        rows.append([InlineKeyboardButton("ℹ️ No active copies", callback_data="copy:hub")])
+    rows.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="copy:dashboard"),
+        InlineKeyboardButton("◀ Back", callback_data="copy:hub"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def copy_admin_menu_kb(traders: list):
+    rows = []
+    for t in traders:
+        label = t.get("label", t["wallet"][:10])
+        rows.append([
+            InlineKeyboardButton(f"❌ Remove {label}", callback_data=f"copy:admin:remove:{t['id']}"),
+        ])
+    rows.append([InlineKeyboardButton("➕ Add Trader", callback_data="copy:admin:add")])
+    rows.append([InlineKeyboardButton("◀ Back", callback_data="copy:hub")])
+    return InlineKeyboardMarkup(rows)
 
 

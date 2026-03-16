@@ -275,6 +275,35 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         )
         return bool(result.get("success")), str(result.get("error", ""))
 
+    if action_type == "start_copy":
+        trader_id = action_data.get("trader_id")
+        budget_usd = float(action_data.get("budget_usd", 100))
+        risk_factor = float(action_data.get("risk_factor", 1.0))
+        max_leverage = float(action_data.get("max_leverage", 10))
+        from src.nadobro.services.copy_service import start_copy
+        from src.nadobro.services.bot_runtime import set_runtime_passphrase
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        set_runtime_passphrase(telegram_id, network, passphrase)
+        ok, msg = await run_blocking(start_copy, telegram_id, trader_id, budget_usd, risk_factor, max_leverage)
+        if ok:
+            from src.nadobro.services.hl_websocket import get_ws_manager
+            ws = get_ws_manager()
+            if ws and ws.is_running:
+                try:
+                    await ws._sync_subscriptions()
+                except Exception:
+                    pass
+            reply = f"🔁 {escape_md(msg)}"
+        else:
+            reply = f"⚠️ {escape_md(msg)}"
+        await _reply_loc(message,
+            reply,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return bool(ok), "" if ok else str(msg)
+
     if action_type == "start_strategy":
         strategy = action_data.get("strategy")
         product = action_data.get("product")
@@ -435,6 +464,12 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
         return
 
     if await _handle_pending_alert(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_copy_wallet(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_admin_copy_wallet(update, context, telegram_id, text):
         return
 
     if await _handle_pending_strategy_input(update, context, telegram_id, text):
@@ -1661,6 +1696,71 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
         return True
 
     return False
+
+
+async def _handle_pending_copy_wallet(update, context, telegram_id, text):
+    if not context.user_data.get("pending_copy_wallet"):
+        return False
+    context.user_data.pop("pending_copy_wallet", None)
+
+    import re
+    wallet = text.strip()
+    if not re.match(r'^0x[0-9a-fA-F]{40}$', wallet):
+        await _reply_loc(update.message,
+            "⚠️ Invalid wallet address\\. Must be 42 characters starting with `0x`\\.\n\nPlease try again from the Copy Trading menu\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return True
+
+    from src.nadobro.services.copy_service import add_trader
+    ok, msg, trader_id = add_trader(wallet, label=wallet[:10], is_curated=False)
+    if ok and trader_id:
+        await _reply_loc(update.message,
+            f"✅ {escape_md(msg)}\n\nGo to Copy Trading to start copying this trader\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+    else:
+        await _reply_loc(update.message,
+            f"⚠️ {escape_md(msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+    return True
+
+
+async def _handle_pending_admin_copy_wallet(update, context, telegram_id, text):
+    if not context.user_data.get("pending_admin_copy_wallet"):
+        return False
+    context.user_data.pop("pending_admin_copy_wallet", None)
+
+    from src.nadobro.services.admin_service import is_admin as check_admin, add_copy_trader
+    if not check_admin(telegram_id):
+        await _reply_loc(update.message, "⚠️ Admin access required\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
+        return True
+
+    import re
+    parts = text.strip().split(None, 1)
+    wallet = parts[0]
+    label = parts[1] if len(parts) > 1 else wallet[:10]
+
+    if not re.match(r'^0x[0-9a-fA-F]{40}$', wallet):
+        await _reply_loc(update.message,
+            "⚠️ Invalid wallet address\\. Must be 42 characters starting with `0x`\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return True
+
+    ok, msg = add_copy_trader(telegram_id, wallet, label=label, is_curated=True)
+    prefix = "✅" if ok else "⚠️"
+    await _reply_loc(update.message,
+        f"{prefix} {escape_md(msg)}",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=persistent_menu_kb(),
+    )
+    return True
 
 
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:

@@ -22,6 +22,8 @@ from src.nadobro.handlers.keyboards import (
     markets_kb, live_price_asset_kb, live_price_controls_kb,
     mode_kb,     home_card_kb, portfolio_kb,
     onboarding_accept_tos_kb,
+    copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
+    copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback
 from src.nadobro.handlers.home_card import build_home_card_text
@@ -34,7 +36,7 @@ from src.nadobro.services.trade_service import (
     close_all_positions, get_trade_history, get_trade_analytics,
 )
 from src.nadobro.services.alert_service import create_alert, get_user_alerts, delete_alert
-from src.nadobro.services.admin_service import is_trading_paused
+from src.nadobro.services.admin_service import is_trading_paused, is_admin
 from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.onboarding_service import (
@@ -128,6 +130,8 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
             await _handle_settings(query, data, telegram_id, context)
         elif data.startswith("strategy:"):
             await _handle_strategy(query, data, context, telegram_id)
+        elif data.startswith("copy:"):
+            await _handle_copy(query, data, context, telegram_id)
         elif data.startswith("bro:"):
             await _handle_bro(query, data, telegram_id, context)
         elif data.startswith("howl:"):
@@ -1863,3 +1867,197 @@ async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int,
         pass
     finally:
         LIVE_PRICE_TASKS.pop(task_key, None)
+
+
+async def _handle_copy(query, data, context, telegram_id):
+    from src.nadobro.services.copy_service import (
+        get_available_traders, get_user_copies, start_copy, stop_copy,
+    )
+    from src.nadobro.services.admin_service import (
+        add_copy_trader, remove_copy_trader, list_copy_traders,
+    )
+    from src.nadobro.services.hl_client import get_hl_client
+
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+
+    if action == "hub":
+        traders = await run_blocking(get_available_traders)
+        admin_flag = is_admin(telegram_id)
+        if traders:
+            lines = ["🔁 *Copy Trading*\n", "Select a trader to copy, or manage your active copies\\."]
+        else:
+            lines = ["🔁 *Copy Trading*\n", "No traders available yet\\. Add a custom wallet or ask an admin to add traders\\."]
+        await _edit_loc(query,
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_hub_kb(traders, is_admin_user=admin_flag),
+        )
+
+    elif action == "trader" and len(parts) >= 3:
+        trader_id = int(parts[2])
+        traders = await run_blocking(get_available_traders)
+        trader = next((t for t in traders if t["id"] == trader_id), None)
+        if not trader:
+            await _edit_loc(query, "⚠️ Trader not found\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+
+        hl_client = get_hl_client()
+        equity = await hl_client.get_account_equity(trader["wallet"])
+        equity_str = f"${equity:,.0f}" if equity else "N/A"
+        curated = " ⭐ Curated" if trader.get("is_curated") else ""
+
+        text = (
+            f"🔁 *Trader Preview*{escape_md(curated)}\n\n"
+            f"Label: *{escape_md(trader['label'])}*\n"
+            f"Wallet: `{escape_md(trader['wallet'][:10])}...`\n"
+            f"Equity: *{escape_md(equity_str)}*\n\n"
+            f"Tap Start Copying to set your budget and risk parameters\\."
+        )
+        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=copy_trader_preview_kb(trader_id))
+
+    elif action == "start" and len(parts) >= 3:
+        trader_id = int(parts[2])
+        context.user_data["copy_setup"] = {"trader_id": trader_id, "step": "budget"}
+        await _edit_loc(query,
+            "💰 *Set Copy Budget*\n\nHow much USD to allocate for copy trading this trader?",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_budget_kb(),
+        )
+
+    elif action == "budget" and len(parts) >= 3:
+        setup = context.user_data.get("copy_setup")
+        if not setup:
+            await _edit_loc(query, "⚠️ No setup in progress\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+        setup["budget_usd"] = float(parts[2])
+        setup["step"] = "risk"
+        await _edit_loc(query,
+            f"⚖️ *Set Risk Factor*\n\nBudget: *${setup['budget_usd']:.0f}*\n\nRisk factor scales your position size relative to the trader\\. 1x \\= match proportionally\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_risk_kb(),
+        )
+
+    elif action == "risk" and len(parts) >= 3:
+        setup = context.user_data.get("copy_setup")
+        if not setup:
+            await _edit_loc(query, "⚠️ No setup in progress\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+        setup["risk_factor"] = float(parts[2])
+        setup["step"] = "leverage"
+        await _edit_loc(query,
+            f"📐 *Set Max Leverage*\n\nBudget: *${setup['budget_usd']:.0f}* \\| Risk: *{setup['risk_factor']}x*\n\nSet the maximum leverage cap for copied trades\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_leverage_kb(),
+        )
+
+    elif action == "lev" and len(parts) >= 3:
+        setup = context.user_data.get("copy_setup")
+        if not setup:
+            await _edit_loc(query, "⚠️ No setup in progress\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+        setup["max_leverage"] = float(parts[2])
+        setup["step"] = "confirm"
+
+        traders = await run_blocking(get_available_traders)
+        trader = next((t for t in traders if t["id"] == setup["trader_id"]), None)
+        trader_label = trader["label"] if trader else "Unknown"
+
+        text = (
+            f"✅ *Confirm Copy Setup*\n\n"
+            f"Trader: *{escape_md(trader_label)}*\n"
+            f"Budget: *${setup['budget_usd']:.0f}*\n"
+            f"Risk Factor: *{setup['risk_factor']}x*\n"
+            f"Max Leverage: *{setup['max_leverage']:.0f}x*\n\n"
+            f"Ready to start?"
+        )
+        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=copy_confirm_kb())
+
+    elif action == "confirm":
+        setup = context.user_data.pop("copy_setup", None)
+        if not setup:
+            await _edit_loc(query, "⚠️ No setup to confirm\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+
+        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+        await authorize_or_prompt_passphrase(
+            query, context, telegram_id,
+            {
+                "type": "start_copy",
+                "trader_id": setup["trader_id"],
+                "budget_usd": setup["budget_usd"],
+                "risk_factor": setup["risk_factor"],
+                "max_leverage": setup["max_leverage"],
+            },
+        )
+
+    elif action == "stop" and len(parts) >= 3:
+        mirror_id = int(parts[2])
+        ok, msg = await run_blocking(stop_copy, telegram_id, mirror_id)
+        prefix = "✅" if ok else "⚠️"
+        await _edit_loc(query,
+            f"{prefix} {escape_md(msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb(),
+        )
+
+    elif action == "dashboard":
+        mirrors = await run_blocking(get_user_copies, telegram_id)
+        if mirrors:
+            lines = ["📋 *My Copy Trades*\n"]
+            for m in mirrors:
+                lines.append(
+                    f"• *{escape_md(m['trader_label'])}*\n"
+                    f"  Budget: ${m['budget_usd']:.0f} \\| Risk: {m['risk_factor']}x \\| Lev: {m['max_leverage']:.0f}x\n"
+                    f"  Filled: {m['recent_filled']} \\| Failed: {m['recent_failed']}"
+                )
+        else:
+            lines = ["📋 *My Copy Trades*\n", "You have no active copy mirrors\\."]
+        await _edit_loc(query,
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_dashboard_kb(mirrors),
+        )
+
+    elif action == "add_custom":
+        context.user_data["pending_copy_wallet"] = True
+        await _edit_loc(query,
+            "➕ *Add Custom Wallet*\n\nSend the Ethereum wallet address \\(0x\\.\\.\\.\\) of the trader you want to copy\\.\n\nThe address must be 42 characters starting with `0x`\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
+            ]),
+        )
+
+    elif action == "admin" and len(parts) >= 3:
+        if not is_admin(telegram_id):
+            await _edit_loc(query, "⚠️ Admin access required\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+
+        sub = parts[2]
+        if sub == "menu":
+            traders = await run_blocking(list_copy_traders)
+            await _edit_loc(query,
+                "⚙️ *Manage Copy Traders*\n\nAdd or remove traders from the copy trading pool\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=copy_admin_menu_kb(traders),
+            )
+        elif sub == "add":
+            context.user_data["pending_admin_copy_wallet"] = True
+            await _edit_loc(query,
+                "➕ *Add Trader*\n\nSend wallet address and optional label separated by a space\\.\n\nExample: `0xABC123\\.\\.\\. TopTrader`",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Cancel", callback_data="copy:admin:menu")],
+                ]),
+            )
+        elif sub == "remove" and len(parts) >= 4:
+            trader_id = int(parts[3])
+            ok, msg = await run_blocking(remove_copy_trader, telegram_id, trader_id)
+            prefix = "✅" if ok else "⚠️"
+            traders = await run_blocking(list_copy_traders)
+            await _edit_loc(query,
+                f"{prefix} {escape_md(msg)}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=copy_admin_menu_kb(traders),
+            )
