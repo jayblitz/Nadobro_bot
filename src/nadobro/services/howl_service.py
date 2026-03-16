@@ -22,12 +22,13 @@ def _pending_key(telegram_id: int, network: str) -> str:
     return f"{HOWL_PENDING_PREFIX}{telegram_id}:{network}"
 
 
-def get_recent_bro_trades(telegram_id: int, hours: int = 24) -> list[dict]:
+def get_recent_bro_trades(telegram_id: int, hours: int = 24, network: str = "mainnet") -> list[dict]:
+    table = f"trades_{network}" if network in ("testnet", "mainnet") else "trades_mainnet"
     cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
     rows = query_all(
-        "SELECT product_name, side, pnl, size, price, created_at, status "
-        "FROM trades WHERE user_id = %s AND created_at > %s "
-        "ORDER BY created_at DESC LIMIT 50",
+        f"SELECT product_name, side, pnl, size, price, created_at, status "
+        f"FROM {table} WHERE user_id = %s AND created_at > %s "
+        f"ORDER BY created_at DESC LIMIT 50",
         (telegram_id, cutoff),
     )
     return rows or []
@@ -69,7 +70,7 @@ def run_howl_analysis(telegram_id: int, network: str, bot_state: dict) -> dict |
     _, bro_settings = get_strategy_settings(telegram_id, "bro")
     bro_state = bot_state.get("bro_state", {})
 
-    trades = get_recent_bro_trades(telegram_id)
+    trades = get_recent_bro_trades(telegram_id, network=network)
     metrics = compute_performance_metrics(trades, bro_state)
 
     result = analyze_for_howl(
