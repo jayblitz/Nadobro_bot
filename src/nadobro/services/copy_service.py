@@ -419,17 +419,20 @@ async def _execute_mirror_trade(
             passphrase=passphrase,
         )
 
+        wallet_addr_close = mirror.get("wallet_address", "")
+        wallet_snip_close = wallet_addr_close[:6] + "..." + wallet_addr_close[-4:] if len(wallet_addr_close) >= 10 else wallet_addr_close
+        trader_label_close = mirror.get("label") or wallet_snip_close
+
         if result.get("success"):
             from src.nadobro.db import execute as db_execute
             db_execute(
                 "UPDATE copy_trades SET status = 'filled', nado_price = %s, filled_at = %s WHERE id = %s",
                 (result.get("price", 0), datetime.utcnow().isoformat(), copy_trade_id),
             )
-            trader_label = mirror.get("label") or mirror.get("wallet_address", "")[:10]
             await _notify_user(
                 user_id,
                 f"📋 Copy Close Filled\n"
-                f"Trader: {trader_label}\n"
+                f"Trader: {trader_label_close} ({wallet_snip_close})\n"
                 f"Closed {product_name} position",
             )
         else:
@@ -467,17 +470,20 @@ async def _execute_mirror_trade(
         passphrase=passphrase,
     )
 
+    wallet_addr = mirror.get("wallet_address", "")
+    wallet_snip = wallet_addr[:6] + "..." + wallet_addr[-4:] if len(wallet_addr) >= 10 else wallet_addr
+    trader_label = mirror.get("label") or wallet_snip
+
     if result.get("success"):
         from src.nadobro.db import execute as db_execute
         db_execute(
             "UPDATE copy_trades SET status = 'filled', nado_price = %s, nado_trade_id = %s, filled_at = %s WHERE id = %s",
             (result.get("price", 0), result.get("trade_id"), datetime.utcnow().isoformat(), copy_trade_id),
         )
-        trader_label = mirror.get("label") or mirror.get("wallet_address", "")[:10]
         await _notify_user(
             user_id,
             f"📋 Copy Trade Filled\n"
-            f"Trader: {trader_label}\n"
+            f"Trader: {trader_label} ({wallet_snip})\n"
             f"{'🟢 BUY' if is_buy else '🔴 SELL'} {nado_size:.6f} {product_name}\n"
             f"HL: ${hl_price:,.2f} → Nado: ${result.get('price', 0):,.2f}",
         )
@@ -495,7 +501,7 @@ async def _execute_mirror_trade(
         await _notify_user(
             user_id,
             f"⚠️ Copy Trade Failed\n"
-            f"Trader: {mirror.get('label') or mirror.get('wallet_address', '')[:10]}\n"
+            f"Trader: {trader_label} ({wallet_snip})\n"
             f"{coin} {'BUY' if is_buy else 'SELL'}: {error[:200]}",
         )
         logger.warning(

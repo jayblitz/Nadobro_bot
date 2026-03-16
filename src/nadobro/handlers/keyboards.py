@@ -922,39 +922,41 @@ def copy_confirm_kb():
     ])
 
 
-def copy_dashboard_kb(mirrors: list):
+def copy_dashboard_kb(mirrors: list, lang: str = "en"):
+    from src.nadobro.i18n import localize_label
     rows = []
     for m in mirrors:
         label = m.get("trader_label", "???")[:16]
         is_paused = m.get("paused", False)
         if is_paused:
             rows.append([
-                InlineKeyboardButton(f"▶ Resume {label}", callback_data=f"copy:resume:{m['mirror_id']}"),
-                InlineKeyboardButton(f"🛑 Stop {label}", callback_data=f"copy:stop:{m['mirror_id']}"),
+                InlineKeyboardButton(f"{localize_label('▶ Resume', lang)} {label}", callback_data=f"copy:resume:{m['mirror_id']}"),
+                InlineKeyboardButton(f"{localize_label('🛑 Stop', lang)} {label}", callback_data=f"copy:stop:{m['mirror_id']}"),
             ])
         else:
             rows.append([
-                InlineKeyboardButton(f"⏸ Pause {label}", callback_data=f"copy:pause:{m['mirror_id']}"),
-                InlineKeyboardButton(f"🛑 Stop {label}", callback_data=f"copy:stop:{m['mirror_id']}"),
+                InlineKeyboardButton(f"{localize_label('⏸ Pause', lang)} {label}", callback_data=f"copy:pause:{m['mirror_id']}"),
+                InlineKeyboardButton(f"{localize_label('🛑 Stop', lang)} {label}", callback_data=f"copy:stop:{m['mirror_id']}"),
             ])
     if not mirrors:
-        rows.append([InlineKeyboardButton("ℹ️ No active copies", callback_data="copy:hub")])
+        rows.append([InlineKeyboardButton(localize_label("ℹ️ No active copies", lang), callback_data="copy:hub")])
     rows.append([
-        InlineKeyboardButton("🔄 Refresh", callback_data="copy:dashboard"),
-        InlineKeyboardButton("◀ Back", callback_data="copy:hub"),
+        InlineKeyboardButton(localize_label("🔄 Refresh", lang), callback_data="copy:dashboard"),
+        InlineKeyboardButton(localize_label("◀ Back", lang), callback_data="copy:hub"),
     ])
     return InlineKeyboardMarkup(rows)
 
 
-def copy_admin_menu_kb(traders: list):
+def copy_admin_menu_kb(traders: list, lang: str = "en"):
+    from src.nadobro.i18n import localize_label
     rows = []
     for t in traders:
         label = t.get("label", t["wallet"][:10])
         rows.append([
-            InlineKeyboardButton(f"❌ Remove {label}", callback_data=f"copy:admin:remove:{t['id']}"),
+            InlineKeyboardButton(f"{localize_label('❌ Remove', lang)} {label}", callback_data=f"copy:admin:remove:{t['id']}"),
         ])
-    rows.append([InlineKeyboardButton("➕ Add Trader", callback_data="copy:admin:add")])
-    rows.append([InlineKeyboardButton("◀ Back", callback_data="copy:hub")])
+    rows.append([InlineKeyboardButton(localize_label("➕ Add Trader", lang), callback_data="copy:admin:add")])
+    rows.append([InlineKeyboardButton(localize_label("◀ Back", lang), callback_data="copy:hub")])
     return InlineKeyboardMarkup(rows)
 
 

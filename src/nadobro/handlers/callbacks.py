@@ -1890,7 +1890,13 @@ async def _handle_copy(query, data, context, telegram_id):
             for t in traders:
                 curated = " ⭐" if t.get("is_curated") else ""
                 wallet_snip = t["wallet"][:6] + "\\.\\.\\." + t["wallet"][-4:]
-                lines.append(f"• *{escape_md(t['label'])}*{curated} — `{wallet_snip}`")
+                stats = await run_blocking(get_trader_stats, t["id"])
+                vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "\\-"
+                wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "\\-"
+                lines.append(
+                    f"• *{escape_md(t['label'])}*{curated} — `{wallet_snip}`\n"
+                    f"  Vol: {escape_md(vol_str)} \\| WR: {escape_md(wr_str)} \\| Trades: {stats['total_trades']}"
+                )
             lines.append("\nSelect a trader to view details and start copying\\.")
         else:
             lines = ["🔁 *Copy Trading*\n", "No traders available yet\\. Add a custom wallet or ask an admin to add traders\\."]
@@ -2017,7 +2023,7 @@ async def _handle_copy(query, data, context, telegram_id):
         await _edit_loc(query,
             f"{prefix} {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=copy_dashboard_kb(mirrors),
+            reply_markup=copy_dashboard_kb(mirrors, lang=get_active_language()),
         )
 
     elif action == "resume" and len(parts) >= 3:
@@ -2028,7 +2034,7 @@ async def _handle_copy(query, data, context, telegram_id):
         await _edit_loc(query,
             f"{prefix} {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=copy_dashboard_kb(mirrors),
+            reply_markup=copy_dashboard_kb(mirrors, lang=get_active_language()),
         )
 
     elif action == "stop" and len(parts) >= 3:
@@ -2039,7 +2045,7 @@ async def _handle_copy(query, data, context, telegram_id):
         await _edit_loc(query,
             f"{prefix} {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=copy_dashboard_kb(mirrors),
+            reply_markup=copy_dashboard_kb(mirrors, lang=get_active_language()),
         )
 
     elif action == "dashboard":
@@ -2062,7 +2068,7 @@ async def _handle_copy(query, data, context, telegram_id):
         await _edit_loc(query,
             "\n".join(lines),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=copy_dashboard_kb(mirrors),
+            reply_markup=copy_dashboard_kb(mirrors, lang=get_active_language()),
         )
 
     elif action == "add_custom":
@@ -2086,7 +2092,7 @@ async def _handle_copy(query, data, context, telegram_id):
             await _edit_loc(query,
                 "⚙️ *Manage Copy Traders*\n\nAdd or remove traders from the copy trading pool\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=copy_admin_menu_kb(traders),
+                reply_markup=copy_admin_menu_kb(traders, lang=get_active_language()),
             )
         elif sub == "add":
             context.user_data["pending_admin_copy_wallet"] = True
@@ -2105,5 +2111,5 @@ async def _handle_copy(query, data, context, telegram_id):
             await _edit_loc(query,
                 f"{prefix} {escape_md(msg)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=copy_admin_menu_kb(traders),
+                reply_markup=copy_admin_menu_kb(traders, lang=get_active_language()),
             )
