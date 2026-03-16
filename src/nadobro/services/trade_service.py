@@ -40,8 +40,8 @@ def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[
     return cancelled, errors
 
 
-def check_rate_limit(telegram_id: int) -> tuple[bool, str]:
-    last_trade = get_last_trade_for_rate_limit(telegram_id)
+def check_rate_limit(telegram_id: int, network: str = "mainnet") -> tuple[bool, str]:
+    last_trade = get_last_trade_for_rate_limit(telegram_id, network=network)
     if last_trade and last_trade.get("created_at"):
         elapsed = None
         try:
@@ -123,7 +123,9 @@ def validate_trade(
         return False, f"Minimum trade size is ${MIN_TRADE_SIZE_USD}."
 
     if enforce_rate_limit:
-        allowed, msg = check_rate_limit(telegram_id)
+        user_obj = get_user(telegram_id)
+        net = user_obj.network_mode.value if user_obj else "mainnet"
+        allowed, msg = check_rate_limit(telegram_id, network=net)
         if not allowed:
             return False, msg
 
@@ -158,6 +160,7 @@ def execute_market_order(
     if not client:
         return {"success": False, "error": "Invalid passphrase or wallet not initialized. Please try again."}
 
+    network = user.network_mode.value
     trade_id = insert_trade({
         "user_id": telegram_id,
         "product_id": product_id,
@@ -167,9 +170,8 @@ def execute_market_order(
         "size": size,
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
-        "network": user.network_mode.value,
         "created_at": datetime.utcnow().isoformat(),
-    })
+    }, network=network)
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
 
@@ -181,12 +183,12 @@ def execute_market_order(
             "order_digest": result.get("digest"),
             "price": result.get("price") or client.get_market_price(product_id)["mid"],
             "filled_at": datetime.utcnow().isoformat(),
-        })
+        }, network=network)
     else:
         update_trade(trade_id, {
             "status": TradeStatus.FAILED.value,
             "error_message": result.get("error", "Unknown error"),
-        })
+        }, network=network)
 
     if result["success"]:
         mp = client.get_market_price(product_id)
@@ -252,6 +254,7 @@ def execute_limit_order(
     if not client:
         return {"success": False, "error": "Invalid passphrase or wallet not initialized. Please try again."}
 
+    network = user.network_mode.value
     trade_id = insert_trade({
         "user_id": telegram_id,
         "product_id": product_id,
@@ -262,18 +265,17 @@ def execute_limit_order(
         "price": price,
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
-        "network": user.network_mode.value,
         "created_at": datetime.utcnow().isoformat(),
-    })
+    }, network=network)
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
 
     result = client.place_limit_order(product_id, size, price, is_buy=is_long)
 
     if result["success"]:
-        update_trade(trade_id, {"status": TradeStatus.FILLED.value, "order_digest": result.get("digest"), "filled_at": datetime.utcnow().isoformat()})
+        update_trade(trade_id, {"status": TradeStatus.FILLED.value, "order_digest": result.get("digest"), "filled_at": datetime.utcnow().isoformat()}, network=network)
     else:
-        update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")})
+        update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")}, network=network)
 
     if result["success"]:
         update_trade_stats(telegram_id, size * price)
@@ -445,7 +447,7 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
                     "close_price": close_price,
                     "closed_at": datetime.utcnow().isoformat(),
                     "pnl": round(pnl, 4),
-                })
+                }, network=network)
                 logger.info(
                     "Trade #%d fully closed: %s %s size=%.4f open=%.2f close=%.2f pnl=%.4f",
                     open_trade["id"], open_side, get_product_name(product_id),
@@ -455,7 +457,7 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
                 update_trade(open_trade["id"], {
                     "pnl": round(pnl, 4),
                     "close_price": close_price,
-                })
+                }, network=network)
                 logger.info(
                     "Trade #%d partially closed: %s %s closed=%.4f/%.4f open=%.2f close=%.2f pnl=%.4f",
                     open_trade["id"], open_side, get_product_name(product_id),
@@ -472,12 +474,11 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
                 "price": close_price,
                 "leverage": 1.0,
                 "status": TradeStatus.CLOSED.value,
-                "network": network,
                 "close_price": close_price,
                 "closed_at": datetime.utcnow().isoformat(),
                 "created_at": datetime.utcnow().isoformat(),
                 "filled_at": datetime.utcnow().isoformat(),
-            })
+            }, network=network)
             logger.info(
                 "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f",
                 side, get_product_name(product_id), close_size, close_price,
@@ -669,7 +670,9 @@ def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
 
 
 def get_trade_history(telegram_id: int, limit: int = 20) -> list:
-    trades = get_trades_by_user(telegram_id, limit=limit)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    trades = get_trades_by_user(telegram_id, limit=limit, network=network)
     result = []
     for t in trades:
         entry = {
@@ -682,7 +685,7 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
             "status": t.get("status"),
             "pnl": t.get("pnl"),
             "close_price": t.get("close_price"),
-            "network": t.get("network"),
+            "network": network,
             "created_at": t.get("created_at", "")[:19] if t.get("created_at") else "",
             "closed_at": t.get("closed_at", "")[:19] if t.get("closed_at") else "",
         }
@@ -691,7 +694,9 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
 
 
 def get_trade_analytics(telegram_id: int) -> dict:
-    trades = get_trades_by_user(telegram_id, limit=500)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    trades = get_trades_by_user(telegram_id, limit=500, network=network)
     if not trades:
         return {"total_trades": 0}
     total = len(trades)

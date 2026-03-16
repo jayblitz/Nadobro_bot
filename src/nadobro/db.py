@@ -228,6 +228,80 @@ def init_db():
                 except Exception:
                     conn.rollback()
 
+        _NETWORK_TRADES_DDL = """
+            CREATE TABLE IF NOT EXISTS trades_{net} (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                product_id INT NOT NULL,
+                product_name TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                side TEXT NOT NULL,
+                size DOUBLE PRECISION NOT NULL,
+                price DOUBLE PRECISION,
+                leverage DOUBLE PRECISION DEFAULT 1.0,
+                status TEXT DEFAULT 'pending',
+                order_digest TEXT,
+                pnl DOUBLE PRECISION,
+                fees DOUBLE PRECISION DEFAULT 0,
+                error_message TEXT,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                filled_at TIMESTAMPTZ,
+                close_price DOUBLE PRECISION,
+                closed_at TIMESTAMPTZ
+            );
+            CREATE INDEX IF NOT EXISTS idx_trades_{net}_user_product ON trades_{net} (user_id, product_id);
+            CREATE INDEX IF NOT EXISTS idx_trades_{net}_created ON trades_{net} (created_at);
+        """
+        _NETWORK_ALERTS_DDL = """
+            CREATE TABLE IF NOT EXISTS alerts_{net} (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                product_id INT NOT NULL,
+                product_name TEXT NOT NULL,
+                condition TEXT NOT NULL,
+                target_value DOUBLE PRECISION NOT NULL,
+                is_active BOOLEAN DEFAULT true,
+                triggered_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_alerts_{net}_active ON alerts_{net} (user_id, is_active);
+        """
+        with conn.cursor() as cur:
+            for net in ("testnet", "mainnet"):
+                cur.execute(_NETWORK_TRADES_DDL.format(net=net))
+                cur.execute(_NETWORK_ALERTS_DDL.format(net=net))
+            conn.commit()
+            logger.info("Network-specific tables (trades_testnet/mainnet, alerts_testnet/mainnet) verified/created")
+
+        with conn.cursor() as cur:
+            for net in ("testnet", "mainnet"):
+                cur.execute(f"SELECT COUNT(*) FROM trades_{net}")
+                count = cur.fetchone()[0]
+                if count == 0:
+                    cur.execute(f"""
+                        INSERT INTO trades_{net}
+                            (user_id, product_id, product_name, order_type, side, size, price,
+                             leverage, status, order_digest, pnl, fees, error_message,
+                             created_at, filled_at, close_price, closed_at)
+                        SELECT user_id, product_id, product_name, order_type, side, size, price,
+                               leverage, status, order_digest, pnl, fees, error_message,
+                               created_at, filled_at, close_price, closed_at
+                        FROM trades WHERE network = %s
+                    """, (net,))
+                    migrated_trades = cur.rowcount
+                    cur.execute(f"""
+                        INSERT INTO alerts_{net}
+                            (user_id, product_id, product_name, condition, target_value,
+                             is_active, triggered_at, created_at)
+                        SELECT user_id, product_id, product_name, condition, target_value,
+                               is_active, triggered_at, created_at
+                        FROM alerts WHERE network = %s
+                    """, (net,))
+                    migrated_alerts = cur.rowcount
+                    if migrated_trades or migrated_alerts:
+                        logger.info("Migrated %d trades, %d alerts to %s tables", migrated_trades, migrated_alerts, net)
+            conn.commit()
+
         logger.info("Database tables verified/created")
     except Exception:
         conn.rollback()

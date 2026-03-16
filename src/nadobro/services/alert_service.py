@@ -26,14 +26,14 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
     if not alert_cond:
         return {"success": False, "error": _loc("Unknown condition '{condition}'. Use: above, below").format(condition=condition)}
 
+    network = user.network_mode.value
     alert_id = insert_alert({
         "user_id": telegram_id,
         "product_id": product_id,
         "product_name": get_product_name(product_id),
         "condition": alert_cond,
         "target_value": target_value,
-        "network": user.network_mode.value,
-    })
+    }, network=network)
     if not alert_id:
         return {"success": False, "error": _loc("Failed to create alert.")}
 
@@ -47,14 +47,16 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
 
 
 def get_user_alerts(telegram_id: int) -> list:
-    alerts = get_alerts_by_user(telegram_id, active_only=True)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    alerts = get_alerts_by_user(telegram_id, active_only=True, network=network)
     return [
         {
             "id": a.get("id"),
             "product": a.get("product_name"),
             "condition": a.get("condition"),
             "target": a.get("target_value"),
-            "network": a.get("network"),
+            "network": network,
             "created_at": (a.get("created_at") or "")[:19] if a.get("created_at") else "",
         }
         for a in alerts
@@ -62,10 +64,12 @@ def get_user_alerts(telegram_id: int) -> list:
 
 
 def delete_alert(telegram_id: int, alert_id: int) -> dict:
-    alert = get_alert_by_id_and_user(alert_id, telegram_id)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    alert = get_alert_by_id_and_user(alert_id, telegram_id, network=network)
     if not alert:
         return {"success": False, "error": _loc("Alert not found.")}
-    update_alert(alert_id, is_active=False)
+    update_alert(alert_id, is_active=False, network=network)
     return {"success": True, "message": _loc("Alert #{alert_id} deleted.").format(alert_id=alert_id)}
 
 
@@ -87,7 +91,8 @@ def get_triggered_alerts(prices: dict) -> list:
         elif cond == AlertCondition.BELOW.value and current_price <= target:
             should_trigger = True
         if should_trigger:
-            update_alert_triggered(alert["id"])
+            alert_network = alert.get("network", "mainnet")
+            update_alert_triggered(alert["id"], network=alert_network)
             triggered.append({
                 "user_id": alert.get("user_id"),
                 "product": alert.get("product_name"),

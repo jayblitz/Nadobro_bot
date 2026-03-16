@@ -42,6 +42,21 @@ class AlertCondition(enum.Enum):
     PNL_BELOW = "pnl_below"
 
 
+_VALID_NETWORKS = frozenset({"testnet", "mainnet"})
+
+
+def _trades_table(network: str) -> str:
+    if network not in _VALID_NETWORKS:
+        raise ValueError(f"Invalid network: {network}")
+    return f"trades_{network}"
+
+
+def _alerts_table(network: str) -> str:
+    if network not in _VALID_NETWORKS:
+        raise ValueError(f"Invalid network: {network}")
+    return f"alerts_{network}"
+
+
 def init_db():
     from src.nadobro.db import init_db as _init
     _init()
@@ -80,18 +95,21 @@ def get_bot_state_raw(key: str) -> Optional[str]:
 _TRADE_INSERT_ALLOWED_COLS = frozenset({
     "user_id", "product_id", "product_name", "order_type", "side",
     "size", "price", "leverage", "status", "order_digest", "pnl",
-    "fees", "network", "error_message", "created_at", "filled_at",
+    "fees", "error_message", "created_at", "filled_at",
     "close_price", "closed_at",
 })
 
 
-def insert_trade(data: dict) -> Optional[int]:
-    disallowed = set(data.keys()) - _TRADE_INSERT_ALLOWED_COLS
+def insert_trade(data: dict, network: str = "mainnet") -> Optional[int]:
+    filtered = {k: v for k, v in data.items() if k != "network"}
+    disallowed = set(filtered.keys()) - _TRADE_INSERT_ALLOWED_COLS
     if disallowed:
         raise ValueError(f"insert_trade: disallowed column(s): {disallowed}")
-    cols = list(data.keys())
-    vals = [data[c] for c in cols]
-    query = pgsql.SQL("INSERT INTO trades ({}) VALUES ({}) RETURNING id").format(
+    table = _trades_table(network)
+    cols = list(filtered.keys())
+    vals = [filtered[c] for c in cols]
+    query = pgsql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING id").format(
+        pgsql.Identifier(table),
         pgsql.SQL(", ").join(pgsql.Identifier(c) for c in cols),
         pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols)),
     )
@@ -105,57 +123,61 @@ _TRADE_UPDATE_ALLOWED_COLS = frozenset({
 })
 
 
-def update_trade(trade_id: int, data: dict):
+def update_trade(trade_id: int, data: dict, network: str = "mainnet"):
     disallowed = set(data.keys()) - _TRADE_UPDATE_ALLOWED_COLS
     if disallowed:
         raise ValueError(f"update_trade: disallowed column(s): {disallowed}")
+    table = _trades_table(network)
     set_clause = pgsql.SQL(", ").join(
         pgsql.SQL("{} = %s").format(pgsql.Identifier(k)) for k in data.keys()
     )
-    query = pgsql.SQL("UPDATE trades SET {} WHERE id = %s").format(set_clause)
+    query = pgsql.SQL("UPDATE {} SET {} WHERE id = %s").format(
+        pgsql.Identifier(table), set_clause
+    )
     vals = list(data.values()) + [trade_id]
     execute(query, vals)
 
 
-def get_last_trade_for_rate_limit(telegram_id: int) -> Optional[dict]:
+def get_last_trade_for_rate_limit(telegram_id: int, network: str = "mainnet") -> Optional[dict]:
+    table = _trades_table(network)
     return query_one(
-        "SELECT created_at FROM trades WHERE user_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
+        f"SELECT created_at FROM {table} WHERE user_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
         (telegram_id,),
     )
 
 
-def find_open_trade(telegram_id: int, product_id: int, network: str = None) -> Optional[dict]:
-    if network:
-        return query_one(
-            "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND network = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
-            (telegram_id, product_id, network),
-        )
+def find_open_trade(telegram_id: int, product_id: int, network: str = "mainnet") -> Optional[dict]:
+    table = _trades_table(network)
     return query_one(
-        "SELECT * FROM trades WHERE user_id = %s AND product_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
+        f"SELECT * FROM {table} WHERE user_id = %s AND product_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
         (telegram_id, product_id),
     )
 
 
-def get_trades_by_user(telegram_id: int, limit: int = 50) -> list:
+def get_trades_by_user(telegram_id: int, limit: int = 50, network: str = "mainnet") -> list:
+    table = _trades_table(network)
     return query_all(
-        "SELECT * FROM trades WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+        f"SELECT * FROM {table} WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
         (telegram_id, limit),
     )
 
 
 _ALERT_INSERT_ALLOWED_COLS = frozenset({
     "user_id", "product_id", "product_name", "condition",
-    "target_value", "is_active", "network", "created_at",
+    "target_value", "is_active", "created_at",
 })
 
 
-def insert_alert(data: dict) -> Optional[int]:
-    disallowed = set(data.keys()) - _ALERT_INSERT_ALLOWED_COLS
+def insert_alert(data: dict, network: str = "mainnet") -> Optional[int]:
+    filtered = {k: v for k, v in data.items() if k != "network"}
+    disallowed = set(filtered.keys()) - _ALERT_INSERT_ALLOWED_COLS
     if disallowed:
         raise ValueError(f"insert_alert: disallowed column(s): {disallowed}")
-    cols = list(data.keys())
-    vals = [data[c] for c in cols]
-    query = pgsql.SQL("INSERT INTO alerts ({}) VALUES ({}) RETURNING id").format(
+    table = _alerts_table(network)
+    cols = list(filtered.keys())
+    vals = [filtered[c] for c in cols]
+    query = pgsql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING id").format(
+        pgsql.Identifier(table),
         pgsql.SQL(", ").join(pgsql.Identifier(c) for c in cols),
         pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols)),
     )
@@ -163,39 +185,48 @@ def insert_alert(data: dict) -> Optional[int]:
     return row["id"] if row else None
 
 
-def get_alerts_by_user(telegram_id: int, active_only: bool = True) -> list:
+def get_alerts_by_user(telegram_id: int, active_only: bool = True, network: str = "mainnet") -> list:
+    table = _alerts_table(network)
     if active_only:
         return query_all(
-            "SELECT * FROM alerts WHERE user_id = %s AND is_active = true ORDER BY created_at DESC",
+            f"SELECT * FROM {table} WHERE user_id = %s AND is_active = true ORDER BY created_at DESC",
             (telegram_id,),
         )
     return query_all(
-        "SELECT * FROM alerts WHERE user_id = %s ORDER BY created_at DESC",
+        f"SELECT * FROM {table} WHERE user_id = %s ORDER BY created_at DESC",
         (telegram_id,),
     )
 
 
-def update_alert(alert_id: int, is_active: bool):
+def update_alert(alert_id: int, is_active: bool, network: str = "mainnet"):
+    table = _alerts_table(network)
     execute(
-        "UPDATE alerts SET is_active = %s WHERE id = %s",
+        f"UPDATE {table} SET is_active = %s WHERE id = %s",
         (is_active, alert_id),
     )
 
 
-def get_alert_by_id_and_user(alert_id: int, telegram_id: int) -> Optional[dict]:
+def get_alert_by_id_and_user(alert_id: int, telegram_id: int, network: str = "mainnet") -> Optional[dict]:
+    table = _alerts_table(network)
     return query_one(
-        "SELECT * FROM alerts WHERE id = %s AND user_id = %s",
+        f"SELECT * FROM {table} WHERE id = %s AND user_id = %s",
         (alert_id, telegram_id),
     )
 
 
-def get_all_active_alerts() -> list:
-    return query_all("SELECT * FROM alerts WHERE is_active = true")
+def get_all_active_alerts(network: str = None) -> list:
+    if network:
+        table = _alerts_table(network)
+        return query_all(f"SELECT * FROM {table} WHERE is_active = true")
+    testnet_alerts = query_all("SELECT *, 'testnet' AS network FROM alerts_testnet WHERE is_active = true")
+    mainnet_alerts = query_all("SELECT *, 'mainnet' AS network FROM alerts_mainnet WHERE is_active = true")
+    return testnet_alerts + mainnet_alerts
 
 
-def update_alert_triggered(alert_id: int):
+def update_alert_triggered(alert_id: int, network: str = "mainnet"):
+    table = _alerts_table(network)
     execute(
-        "UPDATE alerts SET is_active = false, triggered_at = %s WHERE id = %s",
+        f"UPDATE {table} SET is_active = false, triggered_at = %s WHERE id = %s",
         (datetime.utcnow().isoformat(), alert_id),
     )
 
@@ -207,28 +238,58 @@ def insert_admin_log(data: dict):
     )
 
 
-def get_trades_count() -> int:
-    return query_count("SELECT COUNT(*) FROM trades")
+def get_trades_count(network: str = None) -> int:
+    if network:
+        return query_count(f"SELECT COUNT(*) FROM {_trades_table(network)}")
+    t = query_count("SELECT COUNT(*) FROM trades_testnet")
+    m = query_count("SELECT COUNT(*) FROM trades_mainnet")
+    return t + m
 
 
-def get_trades_count_filled() -> int:
-    return query_count("SELECT COUNT(*) FROM trades WHERE status = 'filled'")
+def get_trades_count_filled(network: str = None) -> int:
+    if network:
+        return query_count(f"SELECT COUNT(*) FROM {_trades_table(network)} WHERE status = 'filled'")
+    t = query_count("SELECT COUNT(*) FROM trades_testnet WHERE status = 'filled'")
+    m = query_count("SELECT COUNT(*) FROM trades_mainnet WHERE status = 'filled'")
+    return t + m
 
 
-def get_trades_count_failed() -> int:
-    return query_count("SELECT COUNT(*) FROM trades WHERE status = 'failed'")
+def get_trades_count_failed(network: str = None) -> int:
+    if network:
+        return query_count(f"SELECT COUNT(*) FROM {_trades_table(network)} WHERE status = 'failed'")
+    t = query_count("SELECT COUNT(*) FROM trades_testnet WHERE status = 'failed'")
+    m = query_count("SELECT COUNT(*) FROM trades_mainnet WHERE status = 'failed'")
+    return t + m
 
 
-def get_total_volume_filled() -> float:
-    row = query_one("SELECT COALESCE(SUM(size * price), 0) AS total FROM trades WHERE status = 'filled'")
-    return float(row["total"]) if row else 0.0
+def get_total_volume_filled(network: str = None) -> float:
+    if network:
+        table = _trades_table(network)
+        row = query_one(f"SELECT COALESCE(SUM(size * price), 0) AS total FROM {table} WHERE status = 'filled'")
+        return float(row["total"]) if row else 0.0
+    t = query_one("SELECT COALESCE(SUM(size * price), 0) AS total FROM trades_testnet WHERE status = 'filled'")
+    m = query_one("SELECT COALESCE(SUM(size * price), 0) AS total FROM trades_mainnet WHERE status = 'filled'")
+    return float(t["total"] if t else 0) + float(m["total"] if m else 0)
 
 
-def get_recent_trades(limit: int = 20) -> list:
-    return query_all(
-        "SELECT * FROM trades ORDER BY created_at DESC LIMIT %s",
+def get_recent_trades(limit: int = 20, network: str = None) -> list:
+    if network:
+        table = _trades_table(network)
+        return query_all(
+            f"SELECT *, '{network}' AS network FROM {table} ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+        )
+    t = query_all(
+        "SELECT *, 'testnet' AS network FROM trades_testnet ORDER BY created_at DESC LIMIT %s",
         (limit,),
     )
+    m = query_all(
+        "SELECT *, 'mainnet' AS network FROM trades_mainnet ORDER BY created_at DESC LIMIT %s",
+        (limit,),
+    )
+    combined = t + m
+    combined.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return combined[:limit]
 
 
 def get_recent_admin_logs(limit: int = 20) -> list:
