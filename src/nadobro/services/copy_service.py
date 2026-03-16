@@ -52,14 +52,15 @@ def set_copy_bot_app(app):
     _bot_app = app
 
 
-async def _notify_user(telegram_id: int, text: str):
+async def _notify_user(telegram_id: int, template: str, **kwargs):
     if not _bot_app:
         return
     try:
         from src.nadobro.i18n import get_user_language, localize_text
         lang = get_user_language(telegram_id)
-        localized = localize_text(text, lang)
-        await _bot_app.bot.send_message(chat_id=telegram_id, text=localized)
+        localized = localize_text(template, lang)
+        text = localized.format(**kwargs) if kwargs else localized
+        await _bot_app.bot.send_message(chat_id=telegram_id, text=text)
     except Exception as e:
         logger.warning("Copy notify failed for %s: %s", telegram_id, e)
 
@@ -239,7 +240,12 @@ def get_trader_stats(trader_id: int) -> dict:
             COUNT(*) as total,
             COUNT(*) FILTER (WHERE status = 'filled') as filled,
             COUNT(*) FILTER (WHERE status = 'failed') as failed,
-            COALESCE(SUM(nado_size * nado_price) FILTER (WHERE status = 'filled'), 0) as volume
+            COALESCE(SUM(nado_size * nado_price) FILTER (WHERE status = 'filled'), 0) as volume,
+            COALESCE(SUM(
+                CASE WHEN side = 'long' THEN nado_size * (nado_price - hl_price)
+                     WHEN side = 'short' THEN nado_size * (hl_price - nado_price)
+                     ELSE 0 END
+            ) FILTER (WHERE status = 'filled'), 0) as pnl
            FROM copy_trades ct
            JOIN copy_mirrors cm ON ct.mirror_id = cm.id
            WHERE cm.trader_id = %s""",
@@ -249,12 +255,14 @@ def get_trader_stats(trader_id: int) -> dict:
     filled = int(row["filled"]) if row else 0
     failed = int(row["failed"]) if row else 0
     volume = float(row["volume"]) if row else 0.0
+    pnl = float(row["pnl"]) if row else 0.0
     win_rate = (filled / total * 100) if total > 0 else 0.0
     return {
         "total_trades": total,
         "filled": filled,
         "failed": failed,
         "volume_usd": volume,
+        "pnl_usd": pnl,
         "win_rate": win_rate,
     }
 
@@ -274,9 +282,8 @@ async def process_hl_fill(wallet_address: str, fill: dict):
         for m in mirrors:
             await _notify_user(
                 m["user_id"],
-                f"ℹ️ Copy Trade Skipped\n"
-                f"Trader opened {coin} — not available on Nado DEX.\n"
-                f"Supported: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
+                "ℹ️ Copy Trade Skipped\nTrader opened {coin} — not available on Nado DEX.\nSupported: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
+                coin=coin,
             )
         return
 
@@ -431,9 +438,8 @@ async def _execute_mirror_trade(
             )
             await _notify_user(
                 user_id,
-                f"📋 Copy Close Filled\n"
-                f"Trader: {trader_label_close} ({wallet_snip_close})\n"
-                f"Closed {product_name} position",
+                "📋 Copy Close Filled\nTrader: {trader} ({wallet})\nClosed {product} position",
+                trader=trader_label_close, wallet=wallet_snip_close, product=product_name,
             )
         else:
             error = result.get("error", "Unknown error")
@@ -480,12 +486,13 @@ async def _execute_mirror_trade(
             "UPDATE copy_trades SET status = 'filled', nado_price = %s, nado_trade_id = %s, filled_at = %s WHERE id = %s",
             (result.get("price", 0), result.get("trade_id"), datetime.utcnow().isoformat(), copy_trade_id),
         )
+        side_emoji = "🟢 BUY" if is_buy else "🔴 SELL"
         await _notify_user(
             user_id,
-            f"📋 Copy Trade Filled\n"
-            f"Trader: {trader_label} ({wallet_snip})\n"
-            f"{'🟢 BUY' if is_buy else '🔴 SELL'} {nado_size:.6f} {product_name}\n"
-            f"HL: ${hl_price:,.2f} → Nado: ${result.get('price', 0):,.2f}",
+            "📋 Copy Trade Filled\nTrader: {trader} ({wallet})\n{side} {size} {product}\nHL: ${hl_price} → Nado: ${nado_price}",
+            trader=trader_label, wallet=wallet_snip,
+            side=side_emoji, size=f"{nado_size:.6f}", product=product_name,
+            hl_price=f"{hl_price:,.2f}", nado_price=f"{result.get('price', 0):,.2f}",
         )
         logger.info(
             "Copy trade filled: user=%s mirror=%s %s %.6f %s",
@@ -500,9 +507,9 @@ async def _execute_mirror_trade(
         )
         await _notify_user(
             user_id,
-            f"⚠️ Copy Trade Failed\n"
-            f"Trader: {trader_label} ({wallet_snip})\n"
-            f"{coin} {'BUY' if is_buy else 'SELL'}: {error[:200]}",
+            "⚠️ Copy Trade Failed\nTrader: {trader} ({wallet})\n{coin} {side}: {error}",
+            trader=trader_label, wallet=wallet_snip,
+            coin=coin, side="BUY" if is_buy else "SELL", error=error[:200],
         )
         logger.warning(
             "Copy trade failed: user=%s mirror=%s error=%s",

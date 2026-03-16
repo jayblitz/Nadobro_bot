@@ -1893,9 +1893,11 @@ async def _handle_copy(query, data, context, telegram_id):
                 stats = await run_blocking(get_trader_stats, t["id"])
                 vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "\\-"
                 wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "\\-"
+                pnl = stats["pnl_usd"]
+                pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 lines.append(
                     f"• *{escape_md(t['label'])}*{curated} — `{wallet_snip}`\n"
-                    f"  Vol: {escape_md(vol_str)} \\| WR: {escape_md(wr_str)} \\| Trades: {stats['total_trades']}"
+                    f"  PnL: *{escape_md(pnl_str)}* \\| Vol: {escape_md(vol_str)} \\| WR: {escape_md(wr_str)} \\| Trades: {stats['total_trades']}"
                 )
             lines.append("\nSelect a trader to view details and start copying\\.")
         else:
