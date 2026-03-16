@@ -54,6 +54,41 @@ def get_recent_admin_logs(limit: int = 20) -> list:
     ]
 
 
+def add_copy_trader(admin_id: int, wallet: str, label: str = "", is_curated: bool = False) -> tuple[bool, str]:
+    from src.nadobro.services.copy_service import add_trader
+    ok, msg, trader_id = add_trader(wallet, label=label, is_curated=is_curated)
+    if ok:
+        log_admin_action(admin_id, "add_copy_trader", f"wallet={wallet[:16]}... label={label} curated={is_curated}")
+    return ok, msg
+
+
+def remove_copy_trader(admin_id: int, trader_id: int) -> tuple[bool, str]:
+    from src.nadobro.services.copy_service import remove_trader
+    ok, msg = remove_trader(trader_id)
+    if ok:
+        log_admin_action(admin_id, "remove_copy_trader", f"trader_id={trader_id}")
+    return ok, msg
+
+
+def get_copy_trading_stats() -> dict:
+    from src.nadobro.models.database import get_active_copy_traders, get_all_active_mirrors
+    from src.nadobro.db import query_count
+    from src.nadobro.services.hl_websocket import get_ws_manager
+    traders = get_active_copy_traders()
+    mirrors = get_all_active_mirrors()
+    total_copy_trades = query_count("SELECT COUNT(*) FROM copy_trades")
+    filled_copy_trades = query_count("SELECT COUNT(*) FROM copy_trades WHERE status = 'filled'")
+    ws_mgr = get_ws_manager()
+    return {
+        "active_traders": len(traders),
+        "active_mirrors": len(mirrors),
+        "total_copy_trades": total_copy_trades,
+        "filled_copy_trades": filled_copy_trades,
+        "ws_connected": ws_mgr.is_running,
+        "ws_subscriptions": ws_mgr.subscribed_count,
+    }
+
+
 def get_recent_trades_all(limit: int = 20) -> list:
     trades = get_recent_trades(limit)
     return [

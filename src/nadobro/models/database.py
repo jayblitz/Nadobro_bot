@@ -299,6 +299,157 @@ def get_recent_admin_logs(limit: int = 20) -> list:
     )
 
 
+def upsert_copy_trader(wallet_address: str, label: str = "", is_curated: bool = False) -> Optional[int]:
+    wallet = wallet_address.strip()
+    row = execute_returning(
+        """INSERT INTO copy_traders (wallet_address, label, is_curated, active)
+           VALUES (%s, %s, %s, true)
+           ON CONFLICT (wallet_address) DO UPDATE
+               SET label = EXCLUDED.label, is_curated = EXCLUDED.is_curated, active = true
+           RETURNING id""",
+        (wallet, label, is_curated),
+    )
+    return row["id"] if row else None
+
+
+def get_copy_trader(trader_id: int) -> Optional[dict]:
+    return query_one("SELECT * FROM copy_traders WHERE id = %s", (trader_id,))
+
+
+def get_copy_trader_by_wallet(wallet: str) -> Optional[dict]:
+    return query_one("SELECT * FROM copy_traders WHERE wallet_address = %s", (wallet.strip(),))
+
+
+def get_active_copy_traders() -> list:
+    return query_all("SELECT * FROM copy_traders WHERE active = true ORDER BY id")
+
+
+def get_curated_copy_traders() -> list:
+    return query_all("SELECT * FROM copy_traders WHERE active = true AND is_curated = true ORDER BY id")
+
+
+def deactivate_copy_trader(trader_id: int):
+    execute("UPDATE copy_traders SET active = false WHERE id = %s", (trader_id,))
+
+
+def create_copy_mirror(user_id: int, trader_id: int, budget_usd: float = 100.0,
+                        risk_factor: float = 1.0, max_leverage: float = 10.0) -> Optional[int]:
+    row = execute_returning(
+        """INSERT INTO copy_mirrors (user_id, trader_id, budget_usd, risk_factor, max_leverage, active)
+           VALUES (%s, %s, %s, %s, %s, true)
+           ON CONFLICT (user_id, trader_id) DO UPDATE
+               SET budget_usd = EXCLUDED.budget_usd,
+                   risk_factor = EXCLUDED.risk_factor,
+                   max_leverage = EXCLUDED.max_leverage,
+                   active = true,
+                   stopped_at = NULL
+           RETURNING id""",
+        (user_id, trader_id, budget_usd, risk_factor, max_leverage),
+    )
+    return row["id"] if row else None
+
+
+def get_copy_mirror(mirror_id: int) -> Optional[dict]:
+    return query_one("SELECT * FROM copy_mirrors WHERE id = %s", (mirror_id,))
+
+
+def get_user_active_mirrors(user_id: int) -> list:
+    return query_all(
+        """SELECT m.*, t.wallet_address, t.label
+           FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
+           WHERE m.user_id = %s AND m.active = true
+           ORDER BY m.created_at""",
+        (user_id,),
+    )
+
+
+def get_mirrors_for_trader(trader_id: int) -> list:
+    return query_all(
+        "SELECT * FROM copy_mirrors WHERE trader_id = %s AND active = true",
+        (trader_id,),
+    )
+
+
+def get_all_active_mirrors() -> list:
+    return query_all(
+        """SELECT m.*, t.wallet_address, t.label
+           FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
+           WHERE m.active = true AND t.active = true"""
+    )
+
+
+def stop_copy_mirror(mirror_id: int):
+    execute(
+        "UPDATE copy_mirrors SET active = false, stopped_at = %s WHERE id = %s",
+        (datetime.utcnow().isoformat(), mirror_id),
+    )
+
+
+def update_mirror_last_synced(mirror_id: int, fill_tid: int):
+    execute(
+        "UPDATE copy_mirrors SET last_synced_fill_tid = %s WHERE id = %s",
+        (fill_tid, mirror_id),
+    )
+
+
+def count_user_active_mirrors(user_id: int) -> int:
+    return query_count(
+        "SELECT COUNT(*) FROM copy_mirrors WHERE user_id = %s AND active = true",
+        (user_id,),
+    )
+
+
+def insert_copy_trade(data: dict) -> Optional[int]:
+    cols = [
+        "user_id", "mirror_id", "hl_fill_tid", "hl_coin",
+        "nado_product_id", "side", "hl_size", "hl_price",
+        "nado_size", "nado_price", "nado_trade_id", "status",
+        "error_message", "created_at", "filled_at",
+    ]
+    filtered = {k: v for k, v in data.items() if k in cols and v is not None}
+    if "created_at" not in filtered:
+        filtered["created_at"] = datetime.utcnow().isoformat()
+    col_names = list(filtered.keys())
+    vals = [filtered[c] for c in col_names]
+    placeholders = ", ".join(["%s"] * len(col_names))
+    col_str = ", ".join(col_names)
+    row = execute_returning(
+        f"INSERT INTO copy_trades ({col_str}) VALUES ({placeholders}) RETURNING id",
+        vals,
+    )
+    return row["id"] if row else None
+
+
+def get_copy_trades_by_user(user_id: int, limit: int = 50) -> list:
+    return query_all(
+        "SELECT * FROM copy_trades WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+        (user_id, limit),
+    )
+
+
+def get_copy_trades_by_mirror(mirror_id: int, limit: int = 50) -> list:
+    return query_all(
+        "SELECT * FROM copy_trades WHERE mirror_id = %s ORDER BY created_at DESC LIMIT %s",
+        (mirror_id, limit),
+    )
+
+
+def copy_trade_exists(hl_fill_tid: int, user_id: int) -> bool:
+    return query_count(
+        "SELECT COUNT(*) FROM copy_trades WHERE hl_fill_tid = %s AND user_id = %s",
+        (hl_fill_tid, user_id),
+    ) > 0
+
+
+def get_active_trader_wallets() -> list[str]:
+    rows = query_all(
+        """SELECT DISTINCT t.wallet_address
+           FROM copy_traders t JOIN copy_mirrors m ON t.id = m.trader_id
+           WHERE t.active = true AND m.active = true"""
+    )
+    return [r["wallet_address"] for r in rows]
+
+
 class UserRow:
     def __init__(self, data: dict):
         self._data = data or {}

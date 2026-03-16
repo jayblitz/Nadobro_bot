@@ -173,8 +173,11 @@ async def run_bot():
     )
     from src.nadobro.services.scheduler import handle_alert_job
     from src.nadobro.services.execution_queue import register_handlers, start_workers, stop_workers
+    from src.nadobro.services.copy_service import set_copy_bot_app
+    from src.nadobro.services.hl_websocket import start_copy_ws, stop_copy_ws
     set_bot_app(bot_app)
     set_runtime_app(bot_app)
+    set_copy_bot_app(bot_app)
     register_handlers(handle_strategy_job, handle_alert_job)
     start_workers(
         strategy_workers=int(os.environ.get("NADO_STRATEGY_WORKERS", "2")),
@@ -191,9 +194,13 @@ async def run_bot():
         logger.warning(f"Alert price-check client failed to initialize: {e}")
 
     start_scheduler()
-    # In production we want strategy loops to resume after restarts/deploys by default.
     auto_restore = os.environ.get("NADO_AUTO_RESTORE_STRATEGIES", "true").strip().lower() in ("1", "true", "yes", "on")
     restore_running_bots(enabled=auto_restore)
+
+    copy_enabled = os.environ.get("NADO_COPY_TRADING", "true").strip().lower() in ("1", "true", "yes", "on")
+    if copy_enabled:
+        start_copy_ws()
+        logger.info("Copy trading WebSocket manager started")
 
     transport_mode, webhook_url, webhook_path = _resolve_transport_settings()
     webhook_secret = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
@@ -292,6 +299,7 @@ async def run_bot():
         logger.info("Shutting down...")
         from src.nadobro.services.scheduler import stop_scheduler
         stop_scheduler()
+        stop_copy_ws()
         stop_runtime()
         stop_workers()
         await bot_app.updater.stop()

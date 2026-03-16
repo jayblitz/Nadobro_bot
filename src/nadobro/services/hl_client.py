@@ -1,0 +1,100 @@
+import logging
+import httpx
+
+logger = logging.getLogger(__name__)
+
+HL_INFO_URL = "https://api.hyperliquid.xyz/info"
+HL_REQUEST_TIMEOUT = 15.0
+
+
+class HLClient:
+
+    def __init__(self):
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=HL_REQUEST_TIMEOUT)
+        return self._client
+
+    async def close(self):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
+    async def _post(self, payload: dict) -> dict | list | None:
+        client = await self._get_client()
+        try:
+            resp = await client.post(HL_INFO_URL, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error("HL API HTTP error %s: %s", e.response.status_code, e.response.text[:300])
+            return None
+        except Exception as e:
+            logger.error("HL API request failed: %s", e)
+            return None
+
+    async def get_clearinghouse_state(self, wallet: str) -> dict | None:
+        return await self._post({
+            "type": "clearinghouseState",
+            "user": wallet,
+        })
+
+    async def get_user_fills(self, wallet: str) -> list | None:
+        result = await self._post({
+            "type": "userFills",
+            "user": wallet,
+        })
+        return result if isinstance(result, list) else None
+
+    async def get_user_fills_by_time(self, wallet: str, start_time_ms: int) -> list | None:
+        result = await self._post({
+            "type": "userFillsByTime",
+            "user": wallet,
+            "startTime": start_time_ms,
+        })
+        return result if isinstance(result, list) else None
+
+    async def get_all_mids(self) -> dict | None:
+        return await self._post({"type": "allMids"})
+
+    async def get_account_equity(self, wallet: str) -> float | None:
+        state = await self.get_clearinghouse_state(wallet)
+        if not state:
+            return None
+        try:
+            margin_summary = state.get("marginSummary", {})
+            equity = float(margin_summary.get("accountValue", 0))
+            return equity if equity > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    async def get_open_positions(self, wallet: str) -> list:
+        state = await self.get_clearinghouse_state(wallet)
+        if not state:
+            return []
+        positions = []
+        for pos in state.get("assetPositions", []):
+            p = pos.get("position", pos)
+            size = float(p.get("szi", 0))
+            if abs(size) > 0:
+                positions.append({
+                    "coin": p.get("coin", ""),
+                    "size": size,
+                    "entry_price": float(p.get("entryPx", 0)),
+                    "unrealized_pnl": float(p.get("unrealizedPnl", 0)),
+                    "leverage_type": p.get("leverage", {}).get("type", "cross"),
+                    "leverage_value": float(p.get("leverage", {}).get("value", 1)),
+                })
+        return positions
+
+
+_shared_client: HLClient | None = None
+
+
+def get_hl_client() -> HLClient:
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = HLClient()
+    return _shared_client

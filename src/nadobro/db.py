@@ -307,6 +307,60 @@ def init_db():
                     logger.info("Migrated %d trades, %d alerts to %s tables", migrated_trades, migrated_alerts, net)
             conn.commit()
 
+        _COPY_TRADING_DDL = """
+            CREATE TABLE IF NOT EXISTS copy_traders (
+                id SERIAL PRIMARY KEY,
+                wallet_address TEXT UNIQUE NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                is_curated BOOLEAN DEFAULT false,
+                active BOOLEAN DEFAULT true,
+                created_at TIMESTAMPTZ DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_copy_traders_active ON copy_traders (active);
+
+            CREATE TABLE IF NOT EXISTS copy_mirrors (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                trader_id INT NOT NULL REFERENCES copy_traders(id),
+                budget_usd DOUBLE PRECISION NOT NULL DEFAULT 100.0,
+                risk_factor DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                max_leverage DOUBLE PRECISION NOT NULL DEFAULT 10.0,
+                active BOOLEAN DEFAULT true,
+                last_synced_fill_tid BIGINT DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                stopped_at TIMESTAMPTZ,
+                UNIQUE(user_id, trader_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_copy_mirrors_user ON copy_mirrors (user_id, active);
+            CREATE INDEX IF NOT EXISTS idx_copy_mirrors_trader ON copy_mirrors (trader_id, active);
+
+            CREATE TABLE IF NOT EXISTS copy_trades (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                mirror_id INT NOT NULL REFERENCES copy_mirrors(id),
+                hl_fill_tid BIGINT,
+                hl_coin TEXT NOT NULL,
+                nado_product_id INT NOT NULL,
+                side TEXT NOT NULL,
+                hl_size DOUBLE PRECISION NOT NULL,
+                hl_price DOUBLE PRECISION NOT NULL,
+                nado_size DOUBLE PRECISION,
+                nado_price DOUBLE PRECISION,
+                nado_trade_id INT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error_message TEXT,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                filled_at TIMESTAMPTZ
+            );
+            CREATE INDEX IF NOT EXISTS idx_copy_trades_mirror ON copy_trades (mirror_id);
+            CREATE INDEX IF NOT EXISTS idx_copy_trades_user ON copy_trades (user_id, created_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_copy_trades_dedup ON copy_trades (user_id, mirror_id, hl_fill_tid) WHERE hl_fill_tid IS NOT NULL;
+        """
+        with conn.cursor() as cur:
+            cur.execute(_COPY_TRADING_DDL)
+            conn.commit()
+            logger.info("Copy trading tables verified/created")
+
         logger.info("Database tables verified/created")
     except Exception:
         conn.rollback()
