@@ -83,7 +83,8 @@ src/nadobro/
 ### Data Layer
 - **Replit PostgreSQL** via `DATABASE_URL` environment variable. Connection pooling via `psycopg2.pool.ThreadedConnectionPool` in `src/nadobro/db.py`.
 - Raw SQL queries (no ORM). Helper functions: `query_one`, `query_all`, `execute`, `execute_returning`, `query_count`.
-- Tables: `users`, `trades`, `alerts`, `bot_state`, `admin_logs` — auto-created by `init_db()` on startup.
+- Tables: `users`, `trades_testnet`, `trades_mainnet`, `alerts_testnet`, `alerts_mainnet`, `bot_state`, `admin_logs` — auto-created by `init_db()` on startup.
+- **Network-separated tables**: Trades and alerts use separate tables per network (`trades_testnet`/`trades_mainnet`, `alerts_testnet`/`alerts_mainnet`) to prevent cross-network data leakage. Legacy unified `trades`/`alerts` tables are retained as backup; all new reads/writes go to network-specific tables. Migration from legacy tables runs automatically on first startup.
 - The `bot_state` table acts as a flexible key-value store for settings, onboarding state, strategy state, etc.
 - A short in-memory LRU-style cache (`_user_cache`, `_price_cache`) with TTLs reduces DB round-trips for hot data.
 
