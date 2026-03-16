@@ -889,9 +889,10 @@ def copy_risk_kb():
         [
             InlineKeyboardButton("0.5x", callback_data="copy:risk:0.5"),
             InlineKeyboardButton("1x", callback_data="copy:risk:1"),
-            InlineKeyboardButton("2x", callback_data="copy:risk:2"),
+            InlineKeyboardButton("1.5x", callback_data="copy:risk:1.5"),
         ],
         [
+            InlineKeyboardButton("2x", callback_data="copy:risk:2"),
             InlineKeyboardButton("3x", callback_data="copy:risk:3"),
             InlineKeyboardButton("5x", callback_data="copy:risk:5"),
         ],

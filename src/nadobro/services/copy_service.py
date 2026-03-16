@@ -56,7 +56,10 @@ async def _notify_user(telegram_id: int, text: str):
     if not _bot_app:
         return
     try:
-        await _bot_app.bot.send_message(chat_id=telegram_id, text=text)
+        from src.nadobro.i18n import get_user_language, localize_text
+        lang = get_user_language(telegram_id)
+        localized = localize_text(text, lang)
+        await _bot_app.bot.send_message(chat_id=telegram_id, text=localized)
     except Exception as e:
         logger.warning("Copy notify failed for %s: %s", telegram_id, e)
 
@@ -227,6 +230,33 @@ def get_available_traders() -> list[dict]:
         }
         for t in traders
     ]
+
+
+def get_trader_stats(trader_id: int) -> dict:
+    from src.nadobro.db import query_one
+    row = query_one(
+        """SELECT
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE status = 'filled') as filled,
+            COUNT(*) FILTER (WHERE status = 'failed') as failed,
+            COALESCE(SUM(nado_size * nado_price) FILTER (WHERE status = 'filled'), 0) as volume
+           FROM copy_trades ct
+           JOIN copy_mirrors cm ON ct.mirror_id = cm.id
+           WHERE cm.trader_id = %s""",
+        (trader_id,),
+    )
+    total = int(row["total"]) if row else 0
+    filled = int(row["filled"]) if row else 0
+    failed = int(row["failed"]) if row else 0
+    volume = float(row["volume"]) if row else 0.0
+    win_rate = (filled / total * 100) if total > 0 else 0.0
+    return {
+        "total_trades": total,
+        "filled": filled,
+        "failed": failed,
+        "volume_usd": volume,
+        "win_rate": win_rate,
+    }
 
 
 async def process_hl_fill(wallet_address: str, fill: dict):

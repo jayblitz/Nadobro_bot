@@ -1872,7 +1872,7 @@ async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int,
 async def _handle_copy(query, data, context, telegram_id):
     from src.nadobro.services.copy_service import (
         get_available_traders, get_user_copies, start_copy, stop_copy,
-        pause_copy, resume_copy,
+        pause_copy, resume_copy, get_trader_stats,
     )
     from src.nadobro.services.admin_service import (
         add_copy_trader, remove_copy_trader, list_copy_traders,
@@ -1916,6 +1916,10 @@ async def _handle_copy(query, data, context, telegram_id):
         positions = await hl_client.get_open_positions(trader["wallet"])
         open_count = len(positions) if positions else 0
 
+        stats = await run_blocking(get_trader_stats, trader_id)
+        vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "N/A"
+        wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "N/A"
+
         wallet_snip = trader["wallet"][:6] + "..." + trader["wallet"][-4:]
 
         text = (
@@ -1923,7 +1927,9 @@ async def _handle_copy(query, data, context, telegram_id):
             f"Label: *{escape_md(trader['label'])}*\n"
             f"Wallet: `{escape_md(wallet_snip)}`\n"
             f"Equity: *{escape_md(equity_str)}*\n"
-            f"Open Positions: *{open_count}*\n\n"
+            f"Open Positions: *{open_count}*\n"
+            f"Volume: *{escape_md(vol_str)}*\n"
+            f"Win Rate: *{escape_md(wr_str)}* \\({stats['filled']} filled / {stats['total_trades']} total\\)\n\n"
             f"Tap Start Copying to set your budget and risk parameters\\."
         )
         await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=copy_trader_preview_kb(trader_id))
