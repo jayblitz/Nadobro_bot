@@ -456,6 +456,13 @@ _LABELS = {
         "ru": "🔄 Отозвать",
         "ko": "🔄 해제",
     },
+    "✅ Yes, Reset My Key": {
+        "zh": "✅ 是的，重置我的密钥",
+        "fr": "✅ Oui, réinitialiser ma clé",
+        "ar": "✅ نعم، أعد تعيين مفتاحي",
+        "ru": "✅ Да, сбросить мой ключ",
+        "ko": "✅ 네, 키 초기화",
+    },
     "✅ Arm Strategy": {
         "zh": "✅ 启动策略",
         "fr": "✅ Armer la stratégie",
@@ -2990,6 +2997,20 @@ _TEXTS = {
         "ar": "تم إلغاء ربط محفظة {network}. يمكنك الربط مجدداً عبر زر المحفظة.",
         "ru": "Кошелёк {network} отвязан. Вы можете привязать снова через кнопку Кошелёк.",
         "ko": "{network} 지갑 연결이 해제되었습니다. 지갑 버튼으로 다시 연결할 수 있습니다.",
+    },
+    "🔄 *Revoke 1CT Key (Nado)*\n\n1. Open Nado → Settings\n2. 1-Click Trading → Advanced 1CT\n3. Disable the toggle and save\n\nYour main wallet and funds stay safe. You can link again anytime via Wallet.\n\n⚠️ Tap below to also reset the bot's stored key so you can re-link a new one.": {
+        "zh": "🔄 *撤销 1CT 密钥 (Nado)*\n\n1. 打开 Nado → 设置\n2. 一键交易 → 高级 1CT\n3. 关闭开关并保存\n\n您的主钱包和资金安全无虞。可随时通过钱包重新连接。\n\n⚠️ 点击下方按钮重置机器人存储的密钥，以便重新连接新密钥。",
+        "fr": "🔄 *Révoquer la clé 1CT (Nado)*\n\n1. Ouvrez Nado → Paramètres\n2. Trading 1-Clic → 1CT Avancé\n3. Désactivez le toggle et sauvegardez\n\nVotre portefeuille principal et vos fonds restent en sécurité. Vous pouvez relier à tout moment via Wallet.\n\n⚠️ Appuyez ci-dessous pour réinitialiser la clé du bot et en lier une nouvelle.",
+        "ar": "🔄 *إلغاء مفتاح 1CT (Nado)*\n\n1. افتح Nado → الإعدادات\n2. التداول بنقرة واحدة → 1CT المتقدم\n3. عطّل المفتاح واحفظ\n\nمحفظتك الرئيسية وأموالك آمنة. يمكنك الربط مجدداً في أي وقت عبر المحفظة.\n\n⚠️ اضغط أدناه لإعادة تعيين مفتاح البوت المخزّن حتى تتمكن من ربط مفتاح جديد.",
+        "ru": "🔄 *Отозвать ключ 1CT (Nado)*\n\n1. Откройте Nado → Настройки\n2. Торговля в 1 клик → Расширенный 1CT\n3. Отключите переключатель и сохраните\n\nВаш основной кошелёк и средства в безопасности. Вы можете привязать снова через Кошелёк.\n\n⚠️ Нажмите ниже, чтобы сбросить сохранённый ключ бота и привязать новый.",
+        "ko": "🔄 *1CT 키 해제 (Nado)*\n\n1. Nado → 설정 열기\n2. 원클릭 거래 → 고급 1CT\n3. 토글 비활성화 및 저장\n\n메인 지갑과 자금은 안전합니다. 언제든 지갑을 통해 다시 연결할 수 있습니다.\n\n⚠️ 아래를 눌러 봇에 저장된 키를 초기화하고 새 키를 연결하세요.",
+    },
+    "✅ Key reset! Your stored signer has been cleared. Tap 👛 Wallet to link a new 1CT key.": {
+        "zh": "✅ 密钥已重置！存储的签名者已清除。点击 👛 钱包连接新的 1CT 密钥。",
+        "fr": "✅ Clé réinitialisée ! Votre signataire stocké a été effacé. Appuyez sur 👛 Wallet pour lier une nouvelle clé 1CT.",
+        "ar": "✅ تمت إعادة تعيين المفتاح! تم مسح المُوقّع المخزن. اضغط على 👛 المحفظة لربط مفتاح 1CT جديد.",
+        "ru": "✅ Ключ сброшен! Сохранённый подписант удалён. Нажмите 👛 Кошелёк, чтобы привязать новый ключ 1CT.",
+        "ko": "✅ 키가 초기화되었습니다! 저장된 서명자가 삭제되었습니다. 👛 월렛을 눌러 새 1CT 키를 연결하세요.",
     },
 }
 

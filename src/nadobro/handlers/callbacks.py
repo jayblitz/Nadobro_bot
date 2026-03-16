@@ -14,7 +14,7 @@ from src.nadobro.handlers.formatters import (
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
-    trade_confirm_kb, positions_kb, wallet_kb, wallet_kb_not_linked, alerts_kb,
+    trade_confirm_kb, positions_kb, wallet_kb, wallet_kb_not_linked, wallet_revoke_confirm_kb, alerts_kb,
     alert_product_kb, alert_delete_kb, settings_kb, settings_leverage_kb,
     settings_slippage_kb, settings_language_kb, close_product_kb, confirm_close_all_kb, back_kb,
     risk_profile_kb, strategy_hub_kb, strategy_action_kb,
@@ -667,9 +667,23 @@ async def _handle_wallet(query, data, telegram_id, context):
             "1. Open Nado → Settings\n"
             "2. 1-Click Trading → Advanced 1CT\n"
             "3. Disable the toggle and save\n\n"
-            "Your main wallet and funds stay safe. You can link again anytime via Wallet."
+            "Your main wallet and funds stay safe. You can link again anytime via Wallet.\n\n"
+            "⚠️ Tap below to also reset the bot's stored key so you can re-link a new one."
         )
-        await _edit_loc(query, revoke_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb())
+        await _edit_loc(query, revoke_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_revoke_confirm_kb())
+    elif action == "revoke_confirm":
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "testnet"
+        ok, msg = remove_user_private_key(telegram_id, network)
+        if ok:
+            from src.nadobro.handlers.messages import clear_session_passphrase
+            clear_session_passphrase(context, telegram_id=telegram_id)
+        success_msg = "✅ Key reset! Your stored signer has been cleared. Tap 👛 Wallet to link a new 1CT key."
+        fail_msg = "❌ {msg}"
+        if ok:
+            await _edit_loc(query, success_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
+        else:
+            await _edit_loc(query, fail_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb(), msg=escape_md(msg))
     elif action == "remove_active":
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "testnet"

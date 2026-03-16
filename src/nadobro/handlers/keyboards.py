@@ -482,6 +482,14 @@ def wallet_kb():
     ])
 
 
+def wallet_revoke_confirm_kb():
+    """Confirm revoke: reset the bot's stored signer and clear data."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Yes, Reset My Key", callback_data="wallet:revoke_confirm")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="wallet:view")],
+    ])
+
+
 def wallet_kb_not_linked():
     """When wallet is not linked — only Back (user replies DONE in chat)."""
     return InlineKeyboardMarkup([
