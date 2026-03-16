@@ -1716,10 +1716,12 @@ async def _handle_pending_copy_wallet(update, context, telegram_id, text):
     from src.nadobro.services.copy_service import add_trader
     ok, msg, trader_id = add_trader(wallet, label=wallet[:10], is_curated=False)
     if ok and trader_id:
+        from src.nadobro.handlers.keyboards import copy_trader_preview_kb
+        wallet_snip = wallet[:6] + "..." + wallet[-4:]
         await _reply_loc(update.message,
-            f"✅ {escape_md(msg)}\n\nGo to Copy Trading to start copying this trader\\.",
+            f"✅ {escape_md(msg)}\n\nWallet: `{escape_md(wallet_snip)}`\n\nTap Start Copying to configure your copy settings\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
+            reply_markup=copy_trader_preview_kb(trader_id),
         )
     else:
         await _reply_loc(update.message,

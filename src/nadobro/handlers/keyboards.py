@@ -924,13 +924,18 @@ def copy_confirm_kb():
 def copy_dashboard_kb(mirrors: list):
     rows = []
     for m in mirrors:
-        label = m.get("trader_label", "???")[:20]
-        rows.append([
-            InlineKeyboardButton(
-                f"🛑 Stop {label}",
-                callback_data=f"copy:stop:{m['mirror_id']}",
-            ),
-        ])
+        label = m.get("trader_label", "???")[:16]
+        is_paused = m.get("paused", False)
+        if is_paused:
+            rows.append([
+                InlineKeyboardButton(f"▶ Resume {label}", callback_data=f"copy:resume:{m['mirror_id']}"),
+                InlineKeyboardButton(f"🛑 Stop {label}", callback_data=f"copy:stop:{m['mirror_id']}"),
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton(f"⏸ Pause {label}", callback_data=f"copy:pause:{m['mirror_id']}"),
+                InlineKeyboardButton(f"🛑 Stop {label}", callback_data=f"copy:stop:{m['mirror_id']}"),
+            ])
     if not mirrors:
         rows.append([InlineKeyboardButton("ℹ️ No active copies", callback_data="copy:hub")])
     rows.append([

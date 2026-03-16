@@ -385,6 +385,20 @@ def stop_copy_mirror(mirror_id: int):
     )
 
 
+def pause_copy_mirror(mirror_id: int):
+    execute(
+        "UPDATE copy_mirrors SET paused = true WHERE id = %s AND active = true",
+        (mirror_id,),
+    )
+
+
+def resume_copy_mirror(mirror_id: int):
+    execute(
+        "UPDATE copy_mirrors SET paused = false WHERE id = %s AND active = true",
+        (mirror_id,),
+    )
+
+
 def update_mirror_last_synced(mirror_id: int, fill_tid: int):
     execute(
         "UPDATE copy_mirrors SET last_synced_fill_tid = %s WHERE id = %s",

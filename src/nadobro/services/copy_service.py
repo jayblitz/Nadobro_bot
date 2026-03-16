@@ -14,6 +14,8 @@ from src.nadobro.models.database import (
     get_user_active_mirrors,
     get_mirrors_for_trader,
     stop_copy_mirror,
+    pause_copy_mirror,
+    resume_copy_mirror,
     update_mirror_last_synced,
     count_user_active_mirrors,
     insert_copy_trade,
@@ -138,6 +140,34 @@ def stop_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
     return True, "Copy trading stopped for this trader."
 
 
+def pause_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
+    mirror = get_copy_mirror(mirror_id)
+    if not mirror:
+        return False, "Mirror not found."
+    if mirror["user_id"] != telegram_id:
+        return False, "Not your mirror."
+    if not mirror.get("active"):
+        return False, "Mirror is stopped."
+    if mirror.get("paused"):
+        return False, "Mirror is already paused."
+    pause_copy_mirror(mirror_id)
+    return True, "Copy trading paused. New trades will not be mirrored until resumed."
+
+
+def resume_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
+    mirror = get_copy_mirror(mirror_id)
+    if not mirror:
+        return False, "Mirror not found."
+    if mirror["user_id"] != telegram_id:
+        return False, "Not your mirror."
+    if not mirror.get("active"):
+        return False, "Mirror is stopped."
+    if not mirror.get("paused"):
+        return False, "Mirror is not paused."
+    resume_copy_mirror(mirror_id)
+    return True, "Copy trading resumed."
+
+
 def stop_all_copies(telegram_id: int) -> tuple[bool, str]:
     mirrors = get_user_active_mirrors(telegram_id)
     if not mirrors:
@@ -151,9 +181,20 @@ def get_user_copies(telegram_id: int) -> list[dict]:
     mirrors = get_user_active_mirrors(telegram_id)
     result = []
     for m in mirrors:
-        trades = get_copy_trades_by_mirror(m["id"], limit=10)
+        trades = get_copy_trades_by_mirror(m["id"], limit=100)
         filled = sum(1 for t in trades if t.get("status") == "filled")
         failed = sum(1 for t in trades if t.get("status") == "failed")
+        total_trades = len(trades)
+        pnl = 0.0
+        for t in trades:
+            if t.get("status") == "filled" and t.get("nado_price") and t.get("hl_price"):
+                nado_sz = float(t.get("nado_size") or 0)
+                nado_px = float(t.get("nado_price") or 0)
+                hl_px = float(t.get("hl_price") or 0)
+                if t.get("side") == "long":
+                    pnl += nado_sz * (nado_px - hl_px)
+                else:
+                    pnl += nado_sz * (hl_px - nado_px)
         result.append({
             "mirror_id": m["id"],
             "trader_label": m.get("label") or m["wallet_address"][:10],
@@ -163,6 +204,9 @@ def get_user_copies(telegram_id: int) -> list[dict]:
             "max_leverage": m["max_leverage"],
             "recent_filled": filled,
             "recent_failed": failed,
+            "total_trades": total_trades,
+            "pnl": pnl,
+            "paused": bool(m.get("paused")),
             "created_at": m.get("created_at"),
         })
     return result
@@ -226,6 +270,10 @@ async def process_hl_fill(wallet_address: str, fill: dict):
 
     for mirror in mirrors:
         user_id = mirror["user_id"]
+
+        if mirror.get("paused"):
+            logger.debug("Mirror %s paused, skipping fill for user %s", mirror["id"], user_id)
+            continue
 
         if fill_tid and copy_trade_exists(fill_tid, user_id, mirror["id"]):
             continue

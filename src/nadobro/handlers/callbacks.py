@@ -1872,6 +1872,7 @@ async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int,
 async def _handle_copy(query, data, context, telegram_id):
     from src.nadobro.services.copy_service import (
         get_available_traders, get_user_copies, start_copy, stop_copy,
+        pause_copy, resume_copy,
     )
     from src.nadobro.services.admin_service import (
         add_copy_trader, remove_copy_trader, list_copy_traders,
@@ -1885,7 +1886,12 @@ async def _handle_copy(query, data, context, telegram_id):
         traders = await run_blocking(get_available_traders)
         admin_flag = is_admin(telegram_id)
         if traders:
-            lines = ["🔁 *Copy Trading*\n", "Select a trader to copy, or manage your active copies\\."]
+            lines = ["🔁 *Copy Trading*\n"]
+            for t in traders:
+                curated = " ⭐" if t.get("is_curated") else ""
+                wallet_snip = t["wallet"][:6] + "\\.\\.\\." + t["wallet"][-4:]
+                lines.append(f"• *{escape_md(t['label'])}*{curated} — `{wallet_snip}`")
+            lines.append("\nSelect a trader to view details and start copying\\.")
         else:
             lines = ["🔁 *Copy Trading*\n", "No traders available yet\\. Add a custom wallet or ask an admin to add traders\\."]
         await _edit_loc(query,
@@ -1907,11 +1913,17 @@ async def _handle_copy(query, data, context, telegram_id):
         equity_str = f"${equity:,.0f}" if equity else "N/A"
         curated = " ⭐ Curated" if trader.get("is_curated") else ""
 
+        positions = await hl_client.get_open_positions(trader["wallet"])
+        open_count = len(positions) if positions else 0
+
+        wallet_snip = trader["wallet"][:6] + "..." + trader["wallet"][-4:]
+
         text = (
             f"🔁 *Trader Preview*{escape_md(curated)}\n\n"
             f"Label: *{escape_md(trader['label'])}*\n"
-            f"Wallet: `{escape_md(trader['wallet'][:10])}...`\n"
-            f"Equity: *{escape_md(equity_str)}*\n\n"
+            f"Wallet: `{escape_md(wallet_snip)}`\n"
+            f"Equity: *{escape_md(equity_str)}*\n"
+            f"Open Positions: *{open_count}*\n\n"
             f"Tap Start Copying to set your budget and risk parameters\\."
         )
         await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=copy_trader_preview_kb(trader_id))
@@ -1991,14 +2003,37 @@ async def _handle_copy(query, data, context, telegram_id):
             },
         )
 
+    elif action == "pause" and len(parts) >= 3:
+        mirror_id = int(parts[2])
+        ok, msg = await run_blocking(pause_copy, telegram_id, mirror_id)
+        prefix = "⏸" if ok else "⚠️"
+        mirrors = await run_blocking(get_user_copies, telegram_id)
+        await _edit_loc(query,
+            f"{prefix} {escape_md(msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_dashboard_kb(mirrors),
+        )
+
+    elif action == "resume" and len(parts) >= 3:
+        mirror_id = int(parts[2])
+        ok, msg = await run_blocking(resume_copy, telegram_id, mirror_id)
+        prefix = "▶" if ok else "⚠️"
+        mirrors = await run_blocking(get_user_copies, telegram_id)
+        await _edit_loc(query,
+            f"{prefix} {escape_md(msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_dashboard_kb(mirrors),
+        )
+
     elif action == "stop" and len(parts) >= 3:
         mirror_id = int(parts[2])
         ok, msg = await run_blocking(stop_copy, telegram_id, mirror_id)
         prefix = "✅" if ok else "⚠️"
+        mirrors = await run_blocking(get_user_copies, telegram_id)
         await _edit_loc(query,
             f"{prefix} {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
+            reply_markup=copy_dashboard_kb(mirrors),
         )
 
     elif action == "dashboard":
@@ -2006,10 +2041,15 @@ async def _handle_copy(query, data, context, telegram_id):
         if mirrors:
             lines = ["📋 *My Copy Trades*\n"]
             for m in mirrors:
+                status_icon = "⏸ PAUSED" if m.get("paused") else "🟢 ACTIVE"
+                pnl = m.get("pnl", 0)
+                pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+                pnl_str = escape_md(pnl_str)
                 lines.append(
-                    f"• *{escape_md(m['trader_label'])}*\n"
+                    f"• *{escape_md(m['trader_label'])}* — {status_icon}\n"
                     f"  Budget: ${m['budget_usd']:.0f} \\| Risk: {m['risk_factor']}x \\| Lev: {m['max_leverage']:.0f}x\n"
-                    f"  Filled: {m['recent_filled']} \\| Failed: {m['recent_failed']}"
+                    f"  Trades: {m.get('total_trades', 0)} \\| Filled: {m['recent_filled']} \\| Failed: {m['recent_failed']}\n"
+                    f"  PnL: *{pnl_str}*"
                 )
         else:
             lines = ["📋 *My Copy Trades*\n", "You have no active copy mirrors\\."]

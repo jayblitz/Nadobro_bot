@@ -729,10 +729,80 @@ _LABELS = {
         "ru": "➕ Добавить трейдера",
         "ko": "➕ 트레이더 추가",
     },
+    "⏸ Pause": {
+        "zh": "⏸ 暂停",
+        "fr": "⏸ Pause",
+        "ar": "⏸ إيقاف مؤقت",
+        "ru": "⏸ Пауза",
+        "ko": "⏸ 일시중지",
+    },
+    "▶ Resume": {
+        "zh": "▶ 恢复",
+        "fr": "▶ Reprendre",
+        "ar": "▶ استئناف",
+        "ru": "▶ Возобновить",
+        "ko": "▶ 재개",
+    },
+    "ℹ️ No active copies": {
+        "zh": "ℹ️ 没有活跃跟单",
+        "fr": "ℹ️ Aucune copie active",
+        "ar": "ℹ️ لا توجد نسخ نشطة",
+        "ru": "ℹ️ Нет активных копий",
+        "ko": "ℹ️ 활성 카피 없음",
+    },
 }
 
 
 _TEXTS = {
+    "🔁 *Copy Trading*\n": {
+        "zh": "🔁 *跟单交易*\n",
+        "fr": "🔁 *Copy Trading*\n",
+        "ar": "🔁 *نسخ التداول*\n",
+        "ru": "🔁 *Копи-трейдинг*\n",
+        "ko": "🔁 *카피 트레이딩*\n",
+    },
+    "Select a trader to copy, or manage your active copies\\.": {
+        "zh": "选择一个交易员进行跟单，或管理您的活跃跟单\\。",
+        "fr": "Sélectionnez un trader à copier ou gérez vos copies actives\\.",
+        "ar": "اختر متداولاً للنسخ أو أدِر نسخك النشطة\\.",
+        "ru": "Выберите трейдера для копирования или управляйте активными копиями\\.",
+        "ko": "카피할 트레이더를 선택하거나 활성 카피를 관리하세요\\.",
+    },
+    "💰 *Set Copy Budget*\n\nHow much USD to allocate for copy trading this trader?": {
+        "zh": "💰 *设置跟单预算*\n\n分配多少美元用于跟单该交易员？",
+        "fr": "💰 *Définir le budget*\n\nCombien d'USD allouer au copy trading de ce trader ?",
+        "ar": "💰 *تعيين ميزانية النسخ*\n\nكم دولاراً تريد تخصيصه لنسخ هذا المتداول؟",
+        "ru": "💰 *Бюджет копирования*\n\nСколько USD выделить для копирования этого трейдера?",
+        "ko": "💰 *카피 예산 설정*\n\n이 트레이더를 카피할 USD 예산을 설정하세요.",
+    },
+    "📋 *My Copy Trades*\n": {
+        "zh": "📋 *我的跟单交易*\n",
+        "fr": "📋 *Mes copies*\n",
+        "ar": "📋 *صفقات النسخ الخاصة بي*\n",
+        "ru": "📋 *Мои копи-сделки*\n",
+        "ko": "📋 *내 카피 트레이드*\n",
+    },
+    "You have no active copy mirrors\\.": {
+        "zh": "您没有活跃的跟单镜像\\。",
+        "fr": "Aucune copie active\\.",
+        "ar": "لا توجد نسخ نشطة\\.",
+        "ru": "Нет активных копий\\.",
+        "ko": "활성 카피 미러가 없습니다\\.",
+    },
+    "⚙️ *Manage Copy Traders*\n\nAdd or remove traders from the copy trading pool\\.": {
+        "zh": "⚙️ *管理跟单交易员*\n\n在跟单池中添加或删除交易员\\。",
+        "fr": "⚙️ *Gérer les traders*\n\nAjoutez ou retirez des traders du pool de copy trading\\.",
+        "ar": "⚙️ *إدارة المتداولين*\n\nأضف أو أزل متداولين من مجموعة نسخ التداول\\.",
+        "ru": "⚙️ *Управление трейдерами*\n\nДобавляйте или удаляйте трейдеров из пула копирования\\.",
+        "ko": "⚙️ *트레이더 관리*\n\n카피 트레이딩 풀에서 트레이더를 추가하거나 제거하세요\\.",
+    },
+    "Tap Start Copying to set your budget and risk parameters\\.": {
+        "zh": "点击开始跟单以设置预算和风险参数\\。",
+        "fr": "Appuyez sur Commencer à copier pour définir votre budget et vos paramètres de risque\\.",
+        "ar": "اضغط على بدء النسخ لتعيين ميزانيتك ومعايير المخاطر\\.",
+        "ru": "Нажмите Начать копирование, чтобы задать бюджет и параметры риска\\.",
+        "ko": "카피 시작을 눌러 예산 및 리스크 파라미터를 설정하세요\\.",
+    },
     "⚙️ *Control Panel*": {
         "zh": "⚙️ *控制面板*",
         "fr": "⚙️ *Panneau de contrôle*",

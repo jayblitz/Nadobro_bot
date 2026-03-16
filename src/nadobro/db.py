@@ -326,6 +326,7 @@ def init_db():
                 risk_factor DOUBLE PRECISION NOT NULL DEFAULT 1.0,
                 max_leverage DOUBLE PRECISION NOT NULL DEFAULT 10.0,
                 active BOOLEAN DEFAULT true,
+                paused BOOLEAN DEFAULT false,
                 last_synced_fill_tid BIGINT DEFAULT 0,
                 created_at TIMESTAMPTZ DEFAULT now(),
                 stopped_at TIMESTAMPTZ,
@@ -333,6 +334,7 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_copy_mirrors_user ON copy_mirrors (user_id, active);
             CREATE INDEX IF NOT EXISTS idx_copy_mirrors_trader ON copy_mirrors (trader_id, active);
+            ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS paused BOOLEAN DEFAULT false;
 
             CREATE TABLE IF NOT EXISTS copy_trades (
                 id SERIAL PRIMARY KEY,
