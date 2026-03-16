@@ -276,8 +276,12 @@ def init_db():
         with conn.cursor() as cur:
             for net in ("testnet", "mainnet"):
                 cur.execute(f"SELECT COUNT(*) FROM trades_{net}")
-                count = cur.fetchone()[0]
-                if count == 0:
+                trades_count = cur.fetchone()[0]
+                cur.execute(f"SELECT COUNT(*) FROM alerts_{net}")
+                alerts_count = cur.fetchone()[0]
+                migrated_trades = 0
+                migrated_alerts = 0
+                if trades_count == 0:
                     cur.execute(f"""
                         INSERT INTO trades_{net}
                             (user_id, product_id, product_name, order_type, side, size, price,
@@ -289,6 +293,7 @@ def init_db():
                         FROM trades WHERE network = %s
                     """, (net,))
                     migrated_trades = cur.rowcount
+                if alerts_count == 0:
                     cur.execute(f"""
                         INSERT INTO alerts_{net}
                             (user_id, product_id, product_name, condition, target_value,
@@ -298,8 +303,8 @@ def init_db():
                         FROM alerts WHERE network = %s
                     """, (net,))
                     migrated_alerts = cur.rowcount
-                    if migrated_trades or migrated_alerts:
-                        logger.info("Migrated %d trades, %d alerts to %s tables", migrated_trades, migrated_alerts, net)
+                if migrated_trades or migrated_alerts:
+                    logger.info("Migrated %d trades, %d alerts to %s tables", migrated_trades, migrated_alerts, net)
             conn.commit()
 
         logger.info("Database tables verified/created")

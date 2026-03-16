@@ -181,7 +181,7 @@ def execute_market_order(
         update_trade(trade_id, {
             "status": TradeStatus.FILLED.value,
             "order_digest": result.get("digest"),
-            "price": result.get("price") or client.get_market_price(product_id)["mid"],
+            "price": _get_post_fill_price(client, product_id) or result.get("price", 0),
             "filled_at": datetime.utcnow().isoformat(),
         }, network=network)
     else:
@@ -415,6 +415,15 @@ def _normalize_net_positions(positions: list) -> dict[int, dict]:
     return net_by_product
 
 
+def _get_post_fill_price(client, product_id: int) -> float | None:
+    try:
+        price_data = client.get_market_price(product_id)
+        mid = float(price_data.get("mid", 0) or 0)
+        return mid if mid > 0 else None
+    except Exception:
+        return None
+
+
 def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, pos_size: float, side: str, client, fill_price: float = None):
     try:
         user = get_user(telegram_id)
@@ -539,7 +548,7 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
         r = client.place_market_order(product_id, this_close_size, is_buy=is_buy, slippage_pct=1.0)
         if not r.get("success"):
             return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
-        fill_price = float(r.get("price") or 0) if r.get("price") else None
+        fill_price = _get_post_fill_price(client, product_id)
         _record_close_in_db(telegram_id, product_id, this_close_size, pos_size, close_side, client, fill_price=fill_price)
         remaining_size -= this_close_size
 
@@ -623,7 +632,7 @@ def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
                 product_name = p.get("product_name", get_product_name(pid))
                 products_closed.add(product_name)
                 close_side = "short" if signed_amount > 0 else "long"
-                fill_price = float(r.get("price") or 0) if r.get("price") else None
+                fill_price = _get_post_fill_price(client, pid)
                 _record_close_in_db(telegram_id, pid, pos_size, pos_size, close_side, client, fill_price=fill_price)
             else:
                 errors.append(f"{p.get('product_name', get_product_name(pid))}: {r.get('error', 'unknown')}")
