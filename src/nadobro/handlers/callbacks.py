@@ -1886,7 +1886,12 @@ async def _handle_copy(query, data, context, telegram_id):
         traders = await run_blocking(get_available_traders)
         admin_flag = is_admin(telegram_id)
         if traders:
-            lines = ["🔁 *Copy Trading*\n"]
+            lang = get_active_language()
+            l_pnl = localize_text("PnL", lang)
+            l_vol = localize_text("Vol", lang)
+            l_wr = localize_text("WR", lang)
+            l_trades = localize_text("Trades", lang)
+            lines = [localize_text("🔁 *Copy Trading*\n", lang)]
             for t in traders:
                 curated = " ⭐" if t.get("is_curated") else ""
                 wallet_snip = t["wallet"][:6] + "\\.\\.\\." + t["wallet"][-4:]
@@ -1897,9 +1902,9 @@ async def _handle_copy(query, data, context, telegram_id):
                 pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 lines.append(
                     f"• *{escape_md(t['label'])}*{curated} — `{wallet_snip}`\n"
-                    f"  PnL: *{escape_md(pnl_str)}* \\| Vol: {escape_md(vol_str)} \\| WR: {escape_md(wr_str)} \\| Trades: {stats['total_trades']}"
+                    f"  {l_pnl}: *{escape_md(pnl_str)}* \\| {l_vol}: {escape_md(vol_str)} \\| {l_wr}: {escape_md(wr_str)} \\| {l_trades}: {stats['total_trades']}"
                 )
-            lines.append("\nSelect a trader to view details and start copying\\.")
+            lines.append("\n" + localize_text("Select a trader to view details and start copying\\.", lang))
         else:
             lines = ["🔁 *Copy Trading*\n", "No traders available yet\\. Add a custom wallet or ask an admin to add traders\\."]
         await _edit_loc(query,
@@ -2055,21 +2060,30 @@ async def _handle_copy(query, data, context, telegram_id):
 
     elif action == "dashboard":
         mirrors = await run_blocking(get_user_copies, telegram_id)
+        lang = get_active_language()
         if mirrors:
-            lines = ["📋 *My Copy Trades*\n"]
+            l_budget = localize_text("Budget", lang)
+            l_risk = localize_text("Risk", lang)
+            l_lev = localize_text("Lev", lang)
+            l_trades = localize_text("Trades", lang)
+            l_filled = localize_text("Filled", lang)
+            l_failed = localize_text("Failed", lang)
+            l_pnl = localize_text("PnL", lang)
+            lines = [localize_text("📋 *My Copy Trades*\n", lang)]
             for m in mirrors:
-                status_icon = "⏸ PAUSED" if m.get("paused") else "🟢 ACTIVE"
+                status_label = localize_text("PAUSED", lang) if m.get("paused") else localize_text("ACTIVE", lang)
+                status_icon = f"⏸ {status_label}" if m.get("paused") else f"🟢 {status_label}"
                 pnl = m.get("pnl", 0)
                 pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 pnl_str = escape_md(pnl_str)
                 lines.append(
                     f"• *{escape_md(m['trader_label'])}* — {status_icon}\n"
-                    f"  Budget: ${m['budget_usd']:.0f} \\| Risk: {m['risk_factor']}x \\| Lev: {m['max_leverage']:.0f}x\n"
-                    f"  Trades: {m.get('total_trades', 0)} \\| Filled: {m['recent_filled']} \\| Failed: {m['recent_failed']}\n"
-                    f"  PnL: *{pnl_str}*"
+                    f"  {l_budget}: ${m['budget_usd']:.0f} \\| {l_risk}: {m['risk_factor']}x \\| {l_lev}: {m['max_leverage']:.0f}x\n"
+                    f"  {l_trades}: {m.get('total_trades', 0)} \\| {l_filled}: {m['recent_filled']} \\| {l_failed}: {m['recent_failed']}\n"
+                    f"  {l_pnl}: *{pnl_str}*"
                 )
         else:
-            lines = ["📋 *My Copy Trades*\n", "You have no active copy mirrors\\."]
+            lines = [localize_text("📋 *My Copy Trades*\n", lang), localize_text("You have no active copy mirrors\\.", lang)]
         await _edit_loc(query,
             "\n".join(lines),
             parse_mode=ParseMode.MARKDOWN_V2,
