@@ -423,6 +423,16 @@ def _get_post_fill_price(client, product_id: int) -> float | None:
     except Exception:
         return None
 
+# NOTE: The Nado SDK place_order response only returns a digest (order hash),
+# not the exchange-confirmed fill price. There is no fills/trade-history endpoint
+# in the current SDK to retrieve actual execution prices post-trade. Using the
+# real-time market mid immediately after a successful IOC order is the best
+# available approximation — IOC orders fill instantly at market, so mid at that
+# moment closely tracks the actual fill level. This is strictly better than the
+# old approach of using the slippage-inflated submission price.
+# If the SDK adds a fills endpoint in the future, _get_post_fill_price should
+# be updated to query actual execution data by digest.
+
 
 def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, pos_size: float, side: str, client, fill_price: float = None):
     try:
