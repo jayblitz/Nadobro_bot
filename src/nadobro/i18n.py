@@ -2949,6 +2949,20 @@ _TEXTS = {
         "ru": "🤖 *Торговая консоль*\n\nВыберите направление:",
         "ko": "🤖 *트레이드 콘솔*\n\n방향을 선택하세요:",
     },
+    "⚠️ Setup incomplete\\. Resume onboarding at *{step}*\\.": {
+        "zh": "⚠️ 设置未完成。请在 *{step}* 继续。",
+        "fr": "⚠️ Configuration incomplète\\. Reprenez à *{step}*\\.",
+        "ar": "⚠️ الإعداد غير مكتمل\\. تابع عند *{step}*\\.",
+        "ru": "⚠️ Настройка не завершена\\. Продолжите на *{step}*\\.",
+        "ko": "⚠️ 설정이 완료되지 않았습니다\\. *{step}*에서 계속하세요\\.",
+    },
+    "🔄 *Revoke 1CT Key (Nado)*\n\n1. Open Nado → Settings\n2. 1-Click Trading → Advanced 1CT\n3. Disable the toggle and save\n\nYour main wallet and funds stay safe. You can link again anytime via Wallet.": {
+        "zh": "🔄 *撤销 1CT 密钥 (Nado)*\n\n1. 打开 Nado → 设置\n2. 一键交易 → 高级 1CT\n3. 关闭开关并保存\n\n您的主钱包和资金安全无虞。可随时通过钱包重新连接。",
+        "fr": "🔄 *Révoquer la clé 1CT (Nado)*\n\n1. Ouvrez Nado → Paramètres\n2. Trading 1-Clic → 1CT Avancé\n3. Désactivez le toggle et sauvegardez\n\nVotre portefeuille principal et vos fonds restent en sécurité. Vous pouvez relier à tout moment via Wallet.",
+        "ar": "🔄 *إلغاء مفتاح 1CT (Nado)*\n\n1. افتح Nado → الإعدادات\n2. التداول بنقرة واحدة → 1CT المتقدم\n3. عطّل المفتاح واحفظ\n\nمحفظتك الرئيسية وأموالك آمنة. يمكنك الربط مجدداً في أي وقت عبر المحفظة.",
+        "ru": "🔄 *Отозвать ключ 1CT (Nado)*\n\n1. Откройте Nado → Настройки\n2. Торговля в 1 клик → Расширенный 1CT\n3. Отключите переключатель и сохраните\n\nВаш основной кошелёк и средства в безопасности. Вы можете привязать снова через Кошелёк.",
+        "ko": "🔄 *1CT 키 해제 (Nado)*\n\n1. Nado → 설정 열기\n2. 원클릭 거래 → 고급 1CT\n3. 토글 비활성화 및 저장\n\n메인 지갑과 자금은 안전합니다. 언제든 지갑을 통해 다시 연결할 수 있습니다.",
+    },
 }
 
 

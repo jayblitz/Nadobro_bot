@@ -160,7 +160,7 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
     step = get_resume_step(telegram_id)
     if step != "complete":
         await update.message.reply_text(
-            localize_text(f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(step.upper())}*\\.", lang),
+            localize_text("⚠️ Setup incomplete\\. Resume onboarding at *{step}*\\.", lang).format(step=escape_md(step.upper())),
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
