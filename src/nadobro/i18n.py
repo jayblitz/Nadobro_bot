@@ -750,20 +750,6 @@ _LABELS = {
         "ru": "ℹ️ Нет активных копий",
         "ko": "ℹ️ 활성 카피 없음",
     },
-    "🛑 Stop": {
-        "zh": "🛑 停止",
-        "fr": "🛑 Arrêter",
-        "ar": "🛑 إيقاف",
-        "ru": "🛑 Стоп",
-        "ko": "🛑 중지",
-    },
-    "🔄 Refresh": {
-        "zh": "🔄 刷新",
-        "fr": "🔄 Actualiser",
-        "ar": "🔄 تحديث",
-        "ru": "🔄 Обновить",
-        "ko": "🔄 새로고침",
-    },
     "❌ Remove": {
         "zh": "❌ 移除",
         "fr": "❌ Supprimer",
@@ -777,27 +763,6 @@ _LABELS = {
         "ar": "✅ تأكيد",
         "ru": "✅ Подтвердить",
         "ko": "✅ 확인",
-    },
-    "▶ Start Copying": {
-        "zh": "▶ 开始跟单",
-        "fr": "▶ Commencer à copier",
-        "ar": "▶ بدء النسخ",
-        "ru": "▶ Начать копирование",
-        "ko": "▶ 카피 시작",
-    },
-    "📋 My Copies": {
-        "zh": "📋 我的跟单",
-        "fr": "📋 Mes copies",
-        "ar": "📋 نسخي",
-        "ru": "📋 Мои копии",
-        "ko": "📋 내 카피",
-    },
-    "➕ Add Custom Wallet": {
-        "zh": "➕ 添加自定义钱包",
-        "fr": "➕ Ajouter un wallet",
-        "ar": "➕ إضافة محفظة مخصصة",
-        "ru": "➕ Добавить кошелёк",
-        "ko": "➕ 커스텀 월렛 추가",
     },
 }
 
@@ -845,12 +810,12 @@ _TEXTS = {
         "ru": "⚙️ *Управление трейдерами*\n\nДобавляйте или удаляйте трейдеров из пула копирования\\.",
         "ko": "⚙️ *트레이더 관리*\n\n카피 트레이딩 풀에서 트레이더를 추가하거나 제거하세요\\.",
     },
-    "Tap Start Copying to set your budget and risk parameters\\.": {
-        "zh": "点击开始跟单以设置预算和风险参数\\。",
-        "fr": "Appuyez sur Commencer à copier pour définir votre budget et vos paramètres de risque\\.",
-        "ar": "اضغط على بدء النسخ لتعيين ميزانيتك ومعايير المخاطر\\.",
-        "ru": "Нажмите Начать копирование, чтобы задать бюджет и параметры риска\\.",
-        "ko": "카피 시작을 눌러 예산 및 리스크 파라미터를 설정하세요\\.",
+    "🔁 *Trader Preview*{curated}\n\nLabel: *{label}*\nWallet: `{wallet}`\nEquity: *{equity}*\nOpen Positions: *{positions}*\nPnL: *{pnl}*\nVolume: *{volume}*\nWin Rate: *{winrate}* \\({filled} filled / {total} total\\)\n\nTap Start Copying to set your budget and risk parameters\\.": {
+        "zh": "🔁 *交易员预览*{curated}\n\n标签: *{label}*\n钱包: `{wallet}`\n权益: *{equity}*\n未平仓: *{positions}*\n盈亏: *{pnl}*\n交易量: *{volume}*\n胜率: *{winrate}* \\({filled} 成交 / {total} 总计\\)\n\n点击开始跟单以设置预算和风险参数\\。",
+        "fr": "🔁 *Aperçu du trader*{curated}\n\nLabel: *{label}*\nWallet: `{wallet}`\nÉquité: *{equity}*\nPositions ouvertes: *{positions}*\nPnL: *{pnl}*\nVolume: *{volume}*\nTaux de réussite: *{winrate}* \\({filled} exécutés / {total} total\\)\n\nAppuyez sur Commencer à copier pour définir vos paramètres\\.",
+        "ar": "🔁 *معاينة المتداول*{curated}\n\nالتسمية: *{label}*\nالمحفظة: `{wallet}`\nالحقوق: *{equity}*\nالمراكز المفتوحة: *{positions}*\nالربح/الخسارة: *{pnl}*\nالحجم: *{volume}*\nمعدل النجاح: *{winrate}* \\({filled} منفذة / {total} إجمالي\\)\n\nاضغط على بدء النسخ لتعيين معاييرك\\.",
+        "ru": "🔁 *Обзор трейдера*{curated}\n\nМетка: *{label}*\nКошелёк: `{wallet}`\nЭквити: *{equity}*\nОткрытые позиции: *{positions}*\nPnL: *{pnl}*\nОбъём: *{volume}*\nВинрейт: *{winrate}* \\({filled} исп\\. / {total} всего\\)\n\nНажмите Начать копирование для настройки параметров\\.",
+        "ko": "🔁 *트레이더 미리보기*{curated}\n\n라벨: *{label}*\n월렛: `{wallet}`\n에쿼티: *{equity}*\n오픈 포지션: *{positions}*\nPnL: *{pnl}*\n거래량: *{volume}*\n승률: *{winrate}* \\({filled} 체결 / {total} 전체\\)\n\n카피 시작을 눌러 예산 및 리스크 파라미터를 설정하세요\\.",
     },
     "📋 Copy Trade Filled\nTrader: {trader} ({wallet})\n{side} {size} {product}\nHL: ${hl_price} → Nado: ${nado_price}": {
         "zh": "📋 跟单交易已成交\n交易员: {trader} ({wallet})\n{side} {size} {product}\nHL: ${hl_price} → Nado: ${nado_price}",
@@ -894,26 +859,26 @@ _TEXTS = {
         "ru": "Выберите трейдера для просмотра и начала копирования\\.",
         "ko": "트레이더를 선택하여 세부 정보를 확인하고 카피를 시작하세요\\.",
     },
-    "⚖️ *Set Risk Factor*\n\nRisk factor scales your copy trade sizes relative to the trader\\.": {
-        "zh": "⚖️ *设置风险系数*\n\n风险系数按比例缩放您的跟单交易规模\\。",
-        "fr": "⚖️ *Facteur de risque*\n\nLe facteur de risque ajuste vos tailles de copie par rapport au trader\\.",
-        "ar": "⚖️ *عامل المخاطرة*\n\nيضبط عامل المخاطرة حجم صفقات النسخ بالنسبة للمتداول\\.",
-        "ru": "⚖️ *Коэффициент риска*\n\nКоэффициент масштабирует размеры ваших копи-сделок относительно трейдера\\.",
-        "ko": "⚖️ *리스크 계수 설정*\n\n리스크 계수는 트레이더 대비 카피 거래 규모를 조절합니다\\.",
+    "⚖️ *Set Risk Factor*\n\nBudget: *${budget}*\n\nRisk factor scales your position size relative to the trader\\. 1x \\= match proportionally\\.": {
+        "zh": "⚖️ *设置风险系数*\n\n预算: *${budget}*\n\n风险系数按比例缩放您的跟单仓位\\。1x \\= 按比例匹配\\。",
+        "fr": "⚖️ *Facteur de risque*\n\nBudget: *${budget}*\n\nLe facteur de risque ajuste vos tailles par rapport au trader\\. 1x \\= proportionnel\\.",
+        "ar": "⚖️ *عامل المخاطرة*\n\nالميزانية: *${budget}*\n\nيضبط عامل المخاطرة حجم صفقاتك مقارنة بالمتداول\\. 1x \\= نسبي\\.",
+        "ru": "⚖️ *Коэффициент риска*\n\nБюджет: *${budget}*\n\nКоэффициент масштабирует размеры позиций\\. 1x \\= пропорционально\\.",
+        "ko": "⚖️ *리스크 계수 설정*\n\n예산: *${budget}*\n\n리스크 계수는 트레이더 대비 포지션 규모를 조절합니다\\. 1x \\= 비례\\.",
     },
-    "📐 *Set Max Leverage*\n\nMaximum leverage for your copy trades\\.": {
-        "zh": "📐 *设置最大杠杆*\n\n跟单交易的最大杠杆\\。",
-        "fr": "📐 *Effet de levier max*\n\nLevier maximum pour vos copies\\.",
-        "ar": "📐 *الرافعة المالية القصوى*\n\nأقصى رافعة مالية لصفقات النسخ\\.",
-        "ru": "📐 *Макс\\. плечо*\n\nМаксимальное кредитное плечо для копи-сделок\\.",
-        "ko": "📐 *최대 레버리지 설정*\n\n카피 트레이드의 최대 레버리지\\.",
+    "📐 *Set Max Leverage*\n\nBudget: *${budget}* \\| Risk: *{risk}x*\n\nSet the maximum leverage cap for copied trades\\.": {
+        "zh": "📐 *设置最大杠杆*\n\n预算: *${budget}* \\| 风险: *{risk}x*\n\n设置跟单交易的最大杠杆上限\\。",
+        "fr": "📐 *Effet de levier max*\n\nBudget: *${budget}* \\| Risque: *{risk}x*\n\nDéfinissez le levier maximum pour les copies\\.",
+        "ar": "📐 *الرافعة المالية القصوى*\n\nالميزانية: *${budget}* \\| المخاطرة: *{risk}x*\n\nحدد الرافعة المالية القصوى للصفقات المنسوخة\\.",
+        "ru": "📐 *Макс\\. плечо*\n\nБюджет: *${budget}* \\| Риск: *{risk}x*\n\nУстановите лимит плеча для копи\\-сделок\\.",
+        "ko": "📐 *최대 레버리지 설정*\n\n예산: *${budget}* \\| 리스크: *{risk}x*\n\n카피 트레이드의 최대 레버리지를 설정하세요\\.",
     },
-    "✅ *Confirm Copy Setup*\n": {
-        "zh": "✅ *确认跟单设置*\n",
-        "fr": "✅ *Confirmer la configuration*\n",
-        "ar": "✅ *تأكيد إعداد النسخ*\n",
-        "ru": "✅ *Подтвердите настройку копирования*\n",
-        "ko": "✅ *카피 설정 확인*\n",
+    "✅ *Confirm Copy Setup*\n\nTrader: *{trader}*\nBudget: *${budget}*\nRisk Factor: *{risk}x*\nMax Leverage: *{leverage}x*\n\nReady to start?": {
+        "zh": "✅ *确认跟单设置*\n\n交易员: *{trader}*\n预算: *${budget}*\n风险系数: *{risk}x*\n最大杠杆: *{leverage}x*\n\n准备开始？",
+        "fr": "✅ *Confirmer la configuration*\n\nTrader: *{trader}*\nBudget: *${budget}*\nFacteur de risque: *{risk}x*\nLevier max: *{leverage}x*\n\nPrêt à commencer ?",
+        "ar": "✅ *تأكيد إعداد النسخ*\n\nالمتداول: *{trader}*\nالميزانية: *${budget}*\nعامل المخاطرة: *{risk}x*\nالرافعة القصوى: *{leverage}x*\n\nهل أنت جاهز؟",
+        "ru": "✅ *Подтвердите копирование*\n\nТрейдер: *{trader}*\nБюджет: *${budget}*\nКоэффициент риска: *{risk}x*\nМакс\\. плечо: *{leverage}x*\n\nНачать?",
+        "ko": "✅ *카피 설정 확인*\n\n트레이더: *{trader}*\n예산: *${budget}*\n리스크 계수: *{risk}x*\n최대 레버리지: *{leverage}x*\n\n시작할까요?",
     },
     "➕ *Add Custom Wallet*\n\nSend the Ethereum wallet address \\(0x\\.\\.\\.\\) of the trader you want to copy\\.\n\nThe address must be 42 characters starting with `0x`\\.": {
         "zh": "➕ *添加自定义钱包*\n\n发送您想跟单的交易员的以太坊钱包地址 \\(0x\\.\\.\\.\\)\\。\n\n地址必须是以 `0x` 开头的42个字符\\。",

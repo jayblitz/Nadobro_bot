@@ -1927,20 +1927,21 @@ async def _handle_copy(query, data, context, telegram_id):
         stats = await run_blocking(get_trader_stats, trader_id)
         vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "N/A"
         wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "N/A"
+        pnl_preview = stats["pnl_usd"]
+        pnl_preview_str = f"+${pnl_preview:,.2f}" if pnl_preview >= 0 else f"-${abs(pnl_preview):,.2f}"
 
         wallet_snip = trader["wallet"][:6] + "..." + trader["wallet"][-4:]
 
-        text = (
-            f"🔁 *Trader Preview*{escape_md(curated)}\n\n"
-            f"Label: *{escape_md(trader['label'])}*\n"
-            f"Wallet: `{escape_md(wallet_snip)}`\n"
-            f"Equity: *{escape_md(equity_str)}*\n"
-            f"Open Positions: *{open_count}*\n"
-            f"Volume: *{escape_md(vol_str)}*\n"
-            f"Win Rate: *{escape_md(wr_str)}* \\({stats['filled']} filled / {stats['total_trades']} total\\)\n\n"
-            f"Tap Start Copying to set your budget and risk parameters\\."
+        await _edit_loc(query,
+            "🔁 *Trader Preview*{curated}\n\nLabel: *{label}*\nWallet: `{wallet}`\nEquity: *{equity}*\nOpen Positions: *{positions}*\nPnL: *{pnl}*\nVolume: *{volume}*\nWin Rate: *{winrate}* \\({filled} filled / {total} total\\)\n\nTap Start Copying to set your budget and risk parameters\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_trader_preview_kb(trader_id),
+            curated=escape_md(curated), label=escape_md(trader['label']),
+            wallet=escape_md(wallet_snip), equity=escape_md(equity_str),
+            positions=open_count, pnl=escape_md(pnl_preview_str),
+            volume=escape_md(vol_str), winrate=escape_md(wr_str),
+            filled=stats['filled'], total=stats['total_trades'],
         )
-        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=copy_trader_preview_kb(trader_id))
 
     elif action == "start" and len(parts) >= 3:
         trader_id = int(parts[2])
@@ -1959,9 +1960,10 @@ async def _handle_copy(query, data, context, telegram_id):
         setup["budget_usd"] = float(parts[2])
         setup["step"] = "risk"
         await _edit_loc(query,
-            f"⚖️ *Set Risk Factor*\n\nBudget: *${setup['budget_usd']:.0f}*\n\nRisk factor scales your position size relative to the trader\\. 1x \\= match proportionally\\.",
+            "⚖️ *Set Risk Factor*\n\nBudget: *${budget}*\n\nRisk factor scales your position size relative to the trader\\. 1x \\= match proportionally\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=copy_risk_kb(),
+            budget=f"{setup['budget_usd']:.0f}",
         )
 
     elif action == "risk" and len(parts) >= 3:
@@ -1972,9 +1974,10 @@ async def _handle_copy(query, data, context, telegram_id):
         setup["risk_factor"] = float(parts[2])
         setup["step"] = "leverage"
         await _edit_loc(query,
-            f"📐 *Set Max Leverage*\n\nBudget: *${setup['budget_usd']:.0f}* \\| Risk: *{setup['risk_factor']}x*\n\nSet the maximum leverage cap for copied trades\\.",
+            "📐 *Set Max Leverage*\n\nBudget: *${budget}* \\| Risk: *{risk}x*\n\nSet the maximum leverage cap for copied trades\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=copy_leverage_kb(),
+            budget=f"{setup['budget_usd']:.0f}", risk=setup['risk_factor'],
         )
 
     elif action == "lev" and len(parts) >= 3:
@@ -1989,15 +1992,15 @@ async def _handle_copy(query, data, context, telegram_id):
         trader = next((t for t in traders if t["id"] == setup["trader_id"]), None)
         trader_label = trader["label"] if trader else "Unknown"
 
-        text = (
-            f"✅ *Confirm Copy Setup*\n\n"
-            f"Trader: *{escape_md(trader_label)}*\n"
-            f"Budget: *${setup['budget_usd']:.0f}*\n"
-            f"Risk Factor: *{setup['risk_factor']}x*\n"
-            f"Max Leverage: *{setup['max_leverage']:.0f}x*\n\n"
-            f"Ready to start?"
+        await _edit_loc(query,
+            "✅ *Confirm Copy Setup*\n\nTrader: *{trader}*\nBudget: *${budget}*\nRisk Factor: *{risk}x*\nMax Leverage: *{leverage}x*\n\nReady to start?",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_confirm_kb(),
+            trader=escape_md(trader_label),
+            budget=f"{setup['budget_usd']:.0f}",
+            risk=setup['risk_factor'],
+            leverage=f"{setup['max_leverage']:.0f}",
         )
-        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=copy_confirm_kb())
 
     elif action == "confirm":
         setup = context.user_data.pop("copy_setup", None)
