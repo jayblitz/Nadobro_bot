@@ -59,8 +59,12 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
     if fmt:
         try:
             localized = localized.format(**fmt)
-        except (KeyError, ValueError):
-            pass
+        except (KeyError, ValueError) as e:
+            import logging as _logging
+            _logging.getLogger("nadobro").warning(
+                "_edit_loc template error key=%r lang=%r err=%r", text[:60], lang, e
+            )
+            localized = text.format(**fmt)
     kwargs = {}
     if parse_mode is not None:
         kwargs["parse_mode"] = parse_mode

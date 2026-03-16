@@ -293,35 +293,35 @@ def fmt_wallet_info(wallet_info):
 
     if signer_linked:
         lines.append("")
-        lines.append("🔐 *1CT Address:*")
+        lines.append(f"🔐 *{_loc('1CT Address')}:*")
         lines.append(f"`{escape_md(wallet_info['linked_signer_address'])}`")
 
     verification = wallet_info.get("signer_verification")
     if verification:
         lines.append("")
         if verification.get("error"):
-            lines.append(f"⚠️ *Signer Check:* {escape_md('Could not verify — ' + str(verification['error'])[:60])}")
+            lines.append(f"⚠️ *{_loc('Signer Check')}:* {escape_md(_loc('Could not verify') + ' — ' + str(verification['error'])[:60])}")
         elif verification.get("verified"):
-            lines.append("✅ *Signer Check:* 1CT key is linked on Nado")
+            lines.append(f"✅ *{_loc('Signer Check')}:* {_loc('1CT key is linked on Nado')}")
         elif verification.get("current_signer"):
             current = verification["current_signer"]
             expected = verification.get("expected_signer", "")
-            lines.append("❌ *Signer Check:* MISMATCH")
-            lines.append(f"  Exchange has: `{escape_md(current[:10])}\\.\\.\\.$`")
-            lines.append(f"  Bot expects: `{escape_md(expected[:10])}\\.\\.\\.$`")
-            lines.append(escape_md("→ Disable 1-Click Trading on Nado, then re-link using Advanced 1CT with the bot's key."))
+            lines.append(f"❌ *{_loc('Signer Check')}:* {_loc('MISMATCH')}")
+            lines.append(f"  {_loc('Exchange has')}: `{escape_md(current[:10])}\\.\\.\\.$`")
+            lines.append(f"  {_loc('Bot expects')}: `{escape_md(expected[:10])}\\.\\.\\.$`")
+            lines.append(escape_md(_loc("→ Disable 1-Click Trading on Nado, then re-link using Advanced 1CT with the bot's key.")))
         else:
-            lines.append("❌ *Signer Check:* No signer linked on exchange")
-            lines.append(escape_md("→ Go to Nado Settings → 1-Click Trading → Advanced 1CT → paste bot's key → enable and save."))
+            lines.append(f"❌ *{_loc('Signer Check')}:* {_loc('No signer linked on exchange')}")
+            lines.append(escape_md(_loc("→ Go to Nado Settings → 1-Click Trading → Advanced 1CT → paste bot's key → enable and save.")))
     elif signer_linked:
         lines.append("")
-        lines.append(f"🔗 *1CT Signer:* {escape_md('LINKED (not verified)')}")
+        lines.append(f"🔗 *{_loc('1CT Signer')}:* {escape_md(_loc('LINKED (not verified)'))}")
     else:
         lines.append("")
-        lines.append(f"🔗 *1CT Signer:* {escape_md('NOT LINKED')}")
+        lines.append(f"🔗 *{_loc('1CT Signer')}:* {escape_md(_loc('NOT LINKED'))}")
 
     lines.append("")
-    lines.append("Use the 👛 Wallet button to link or revoke your 1CT key\\.")
+    lines.append(_loc("Use the 👛 Wallet button to link or revoke your 1CT key\\."))
 
     return "\n".join(lines)
 
@@ -441,8 +441,8 @@ def fmt_settings(user_data):
         _loc("⚙️ *Control Panel*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
-        f"⚡ *Default Leverage:* {escape_md(f'{leverage}x')}",
-        f"📊 *Slippage:* {escape_md(f'{slippage}%')}",
+        f"⚡ *{_loc('Default Leverage')}:* {escape_md(f'{leverage}x')}",
+        f"📊 *{_loc('Slippage')}:* {escape_md(f'{slippage}%')}",
     ]
 
     return "\n".join(lines)
@@ -605,19 +605,19 @@ def fmt_status_overview(status: dict, onboarding: dict):
             cancellation_ratio = status.get("cancellation_ratio")
             lines.append("")
             lines.append(
-                f"Fill Rate: *{escape_md(f'{float(maker_fill_ratio) * 100:.1f}%')}* \\| "
-                f"Cancel Rate: *{escape_md(f'{float(cancellation_ratio or 0) * 100:.1f}%')}*"
+                f"{_loc('Fill Rate')}: *{escape_md(f'{float(maker_fill_ratio) * 100:.1f}%')}* \\| "
+                f"{_loc('Cancel Rate')}: *{escape_md(f'{float(cancellation_ratio or 0) * 100:.1f}%')}*"
             )
         avg_quote_distance_bp = status.get("avg_quote_distance_bp")
         if avg_quote_distance_bp is not None:
             quote_refresh_rate = status.get("quote_refresh_rate")
             lines.append(
-                f"Quote Dist: *{escape_md(f'{float(avg_quote_distance_bp):.2f} bp')}* \\| "
-                f"Refresh: *{escape_md(f'{float(quote_refresh_rate or 0):.2f}/s')}*"
+                f"{_loc('Quote Dist')}: *{escape_md(f'{float(avg_quote_distance_bp):.2f} bp')}* \\| "
+                f"{_loc('Refresh')}: *{escape_md(f'{float(quote_refresh_rate or 0):.2f}/s')}*"
             )
         inventory_skew_usd = status.get("inventory_skew_usd")
         if inventory_skew_usd is not None:
-            lines.append(f"Inventory Skew: *{escape_md(f'${float(inventory_skew_usd):,.2f}')}*")
+            lines.append(f"{_loc('Inventory Skew')}: *{escape_md(f'${float(inventory_skew_usd):,.2f}')}*")
 
     return "\n".join(lines)
 
@@ -630,9 +630,9 @@ def fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
     sl_pct = float(conf.get("sl_pct", 0.5))
     return (
         f"✅ *{escape_md(strategy.upper())} updated* \\({escape_md(network.upper())}\\)\n\n"
-        f"Notional: {escape_md(f'${notional:,.2f}')}\n"
-        f"Spread: {escape_md(f'{spread_bp:.1f} bp')}\n"
-        f"Interval: {escape_md(f'{interval_seconds}s')}\n"
+        f"{_loc('Notional')}: {escape_md(f'${notional:,.2f}')}\n"
+        f"{_loc('Spread')}: {escape_md(f'{spread_bp:.1f} bp')}\n"
+        f"{_loc('Interval')}: {escape_md(f'{interval_seconds}s')}\n"
         f"{_loc('TP')}: {escape_md(f'{tp_pct:.2f}%')}\n"
         f"{_loc('SL')}: {escape_md(f'{sl_pct:.2f}%')}"
     )
