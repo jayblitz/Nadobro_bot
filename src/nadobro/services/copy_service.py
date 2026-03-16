@@ -227,7 +227,7 @@ async def process_hl_fill(wallet_address: str, fill: dict):
     for mirror in mirrors:
         user_id = mirror["user_id"]
 
-        if fill_tid and copy_trade_exists(fill_tid, user_id):
+        if fill_tid and copy_trade_exists(fill_tid, user_id, mirror["id"]):
             continue
 
         try:

@@ -434,10 +434,10 @@ def get_copy_trades_by_mirror(mirror_id: int, limit: int = 50) -> list:
     )
 
 
-def copy_trade_exists(hl_fill_tid: int, user_id: int) -> bool:
+def copy_trade_exists(hl_fill_tid: int, user_id: int, mirror_id: int) -> bool:
     return query_count(
-        "SELECT COUNT(*) FROM copy_trades WHERE hl_fill_tid = %s AND user_id = %s",
-        (hl_fill_tid, user_id),
+        "SELECT COUNT(*) FROM copy_trades WHERE hl_fill_tid = %s AND user_id = %s AND mirror_id = %s",
+        (hl_fill_tid, user_id, mirror_id),
     ) > 0
 
 
