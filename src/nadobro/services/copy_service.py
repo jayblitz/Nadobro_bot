@@ -168,6 +168,10 @@ def get_user_copies(telegram_id: int) -> list[dict]:
     return result
 
 
+def get_user_mirrors(telegram_id: int) -> list[dict]:
+    return get_user_copies(telegram_id)
+
+
 def get_available_traders() -> list[dict]:
     traders = get_active_copy_traders()
     return [
@@ -193,6 +197,13 @@ async def process_hl_fill(wallet_address: str, fill: dict):
     coin = fill.get("coin", "")
     if not is_supported_coin(coin):
         logger.debug("Unsupported coin %s from HL fill, skipping", coin)
+        for m in mirrors:
+            await _notify_user(
+                m["user_id"],
+                f"ℹ️ Copy Trade Skipped\n"
+                f"Trader opened {coin} — not available on Nado DEX.\n"
+                f"Supported: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
+            )
         return
 
     nado_product_id = hl_coin_to_nado_product_id(coin)
@@ -282,6 +293,11 @@ async def _execute_mirror_trade(
     nado_size = hl_size * size_ratio * risk_factor
 
     nado_notional = nado_size * hl_price
+    if nado_notional > budget_usd:
+        nado_size = budget_usd / hl_price
+        nado_notional = budget_usd
+        logger.debug("Capped copy size to budget $%.0f for user %s", budget_usd, user_id)
+
     if nado_notional < MIN_COPY_SIZE_USD:
         logger.debug(
             "Copy trade too small ($%.2f) for user %s, skipping",

@@ -1,16 +1,20 @@
 import logging
+import time
 import httpx
 
 logger = logging.getLogger(__name__)
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 HL_REQUEST_TIMEOUT = 15.0
+CACHE_TTL_SECONDS = 5.0
 
 
 class HLClient:
 
     def __init__(self):
         self._client: httpx.AsyncClient | None = None
+        self._cache: dict[str, tuple[float, any]] = {}
+        self._cache_ttl = CACHE_TTL_SECONDS
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -22,12 +26,31 @@ class HLClient:
             await self._client.aclose()
             self._client = None
 
-    async def _post(self, payload: dict) -> dict | list | None:
+    def _cache_get(self, key: str):
+        entry = self._cache.get(key)
+        if entry and (time.time() - entry[0]) < self._cache_ttl:
+            return entry[1]
+        return None
+
+    def _cache_set(self, key: str, value):
+        self._cache[key] = (time.time(), value)
+        if len(self._cache) > 200:
+            oldest = min(self._cache, key=lambda k: self._cache[k][0])
+            self._cache.pop(oldest, None)
+
+    async def _post(self, payload: dict, cache_key: str | None = None) -> dict | list | None:
+        if cache_key:
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
         client = await self._get_client()
         try:
             resp = await client.post(HL_INFO_URL, json=payload)
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            if cache_key and result is not None:
+                self._cache_set(cache_key, result)
+            return result
         except httpx.HTTPStatusError as e:
             logger.error("HL API HTTP error %s: %s", e.response.status_code, e.response.text[:300])
             return None
@@ -39,7 +62,7 @@ class HLClient:
         return await self._post({
             "type": "clearinghouseState",
             "user": wallet,
-        })
+        }, cache_key=f"chs:{wallet}")
 
     async def get_user_fills(self, wallet: str) -> list | None:
         result = await self._post({
@@ -57,7 +80,7 @@ class HLClient:
         return result if isinstance(result, list) else None
 
     async def get_all_mids(self) -> dict | None:
-        return await self._post({"type": "allMids"})
+        return await self._post({"type": "allMids"}, cache_key="allMids")
 
     async def get_account_equity(self, wallet: str) -> float | None:
         state = await self.get_clearinghouse_state(wallet)

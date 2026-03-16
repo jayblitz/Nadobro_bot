@@ -1,29 +1,20 @@
 import logging
+from src.nadobro.config import PRODUCTS
 
 logger = logging.getLogger(__name__)
 
 HL_TO_NADO = {
-    "BTC": 2,
-    "ETH": 4,
-    "SOL": 8,
-    "XRP": 10,
-    "BNB": 14,
-    "LINK": 16,
-    "AVAX": 18,
-    "DOGE": 22,
+    name: info["id"]
+    for name, info in PRODUCTS.items()
+    if info.get("type") == "perp"
 }
 
 NADO_TO_HL = {v: k for k, v in HL_TO_NADO.items()}
 
 NADO_PRODUCT_NAMES = {
-    2: "BTC-PERP",
-    4: "ETH-PERP",
-    8: "SOL-PERP",
-    10: "XRP-PERP",
-    14: "BNB-PERP",
-    16: "LINK-PERP",
-    18: "AVAX-PERP",
-    22: "DOGE-PERP",
+    info["id"]: info.get("symbol", name)
+    for name, info in PRODUCTS.items()
+    if info.get("type") == "perp"
 }
 
 

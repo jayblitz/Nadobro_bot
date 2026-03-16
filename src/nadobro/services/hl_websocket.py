@@ -10,7 +10,7 @@ from src.nadobro.models.database import get_active_trader_wallets, get_mirrors_f
 logger = logging.getLogger(__name__)
 
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"
-RECONNECT_BASE_DELAY = 2.0
+RECONNECT_BASE_DELAY = 1.0
 RECONNECT_MAX_DELAY = 60.0
 HEARTBEAT_INTERVAL = 30.0
 WALLET_REFRESH_INTERVAL = 60.0
