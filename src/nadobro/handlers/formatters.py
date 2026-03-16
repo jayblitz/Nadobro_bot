@@ -114,8 +114,8 @@ def fmt_positions(positions, prices=None):
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
                 mark_str = f"${fmt_price(current, base)}"
                 lines.append(
-                    f"  └ Mark: {escape_md(mark_str)} \\| "
-                    f"PnL: {pnl_emoji} {escape_md(pnl_str)}"
+                    f"  └ {_loc('Mark')}: {escape_md(mark_str)} \\| "
+                    f"{_loc('PnL')}: {pnl_emoji} {escape_md(pnl_str)}"
                 )
 
     lines.append("")
@@ -180,8 +180,8 @@ def fmt_prices(prices):
             f"*{escape_md(name)}\\-PERP:* {escape_md(f'${fmt_price(mid, name)}')}"
         )
         lines.append(
-            f"  Bid: {escape_md(f'${fmt_price(bid, name)}')} \\| "
-            f"Ask: {escape_md(f'${fmt_price(ask, name)}')}"
+            f"  {_loc('Bid')}: {escape_md(f'${fmt_price(bid, name)}')} \\| "
+            f"{_loc('Ask')}: {escape_md(f'${fmt_price(ask, name)}')}"
         )
 
     return "\n".join(lines)
@@ -633,6 +633,6 @@ def fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
         f"Notional: {escape_md(f'${notional:,.2f}')}\n"
         f"Spread: {escape_md(f'{spread_bp:.1f} bp')}\n"
         f"Interval: {escape_md(f'{interval_seconds}s')}\n"
-        f"TP: {escape_md(f'{tp_pct:.2f}%')}\n"
-        f"SL: {escape_md(f'{sl_pct:.2f}%')}"
+        f"{_loc('TP')}: {escape_md(f'{tp_pct:.2f}%')}\n"
+        f"{_loc('SL')}: {escape_md(f'{sl_pct:.2f}%')}"
     )

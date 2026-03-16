@@ -86,21 +86,21 @@ def _trade_step_summary(session: dict) -> str:
 
     lines = []
     if direction:
-        lines.append(f"Side: *{escape_md(direction.upper())}*")
+        lines.append(f"{_loc('Side')}: *{escape_md(direction.upper())}*")
     if order_type:
-        lines.append(f"Order: *{escape_md(order_type.upper())}*")
+        lines.append(f"{_loc('Order')}: *{escape_md(order_type.upper())}*")
     if product:
-        lines.append(f"Product: *{escape_md(product)}\\-PERP*")
+        lines.append(f"{_loc('Product')}: *{escape_md(product)}\\-PERP*")
     if leverage:
-        lines.append(f"Leverage: *{escape_md(str(leverage))}x*")
+        lines.append(f"{_loc('Leverage')}: *{escape_md(str(leverage))}x*")
     if size:
-        lines.append(f"Size: *{escape_md(str(size))}*")
+        lines.append(f"{_loc('Size')}: *{escape_md(str(size))}*")
     if limit_price:
-        lines.append(f"Limit: *{escape_md(str(limit_price))}*")
+        lines.append(f"{_loc('Limit')}: *{escape_md(str(limit_price))}*")
     if tp:
-        lines.append(f"TP: *{escape_md(str(tp))}*")
+        lines.append(f"{_loc('TP')}: *{escape_md(str(tp))}*")
     if sl:
-        lines.append(f"SL: *{escape_md(str(sl))}*")
+        lines.append(f"{_loc('SL')}: *{escape_md(str(sl))}*")
     return "\n".join(lines)
 
 
@@ -152,8 +152,8 @@ def _build_trade_card_text(session: dict) -> str:
     if state == "tpsl_edit":
         tp_val = session.get("tp")
         sl_val = session.get("sl")
-        tp_str = f"TP: {escape_md(str(tp_val))}" if tp_val else f"TP: {_loc('not set')}"
-        sl_str = f"SL: {escape_md(str(sl_val))}" if sl_val else f"SL: {_loc('not set')}"
+        tp_str = f"{_loc('TP')}: {escape_md(str(tp_val))}" if tp_val else f"{_loc('TP')}: {_loc('not set')}"
+        sl_str = f"{_loc('SL')}: {escape_md(str(sl_val))}" if sl_val else f"{_loc('SL')}: {_loc('not set')}"
         return (
             f"{header}\n\n"
             f"{summary}\n\n"

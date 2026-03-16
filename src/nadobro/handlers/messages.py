@@ -40,14 +40,20 @@ from src.nadobro.handlers.trade_card import (
 from src.nadobro.handlers.home_card import open_home_card_view_from_message
 
 
-async def _reply_loc(message, text, parse_mode=None, reply_markup=None):
+async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
     lang = get_active_language()
+    localized = localize_text(text, lang)
+    if fmt:
+        try:
+            localized = localized.format(**fmt)
+        except (KeyError, ValueError):
+            pass
     kwargs = {}
     if parse_mode is not None:
         kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
         kwargs["reply_markup"] = localize_markup(reply_markup, lang)
-    return await message.reply_text(localize_text(text, lang), **kwargs)
+    return await message.reply_text(localized, **kwargs)
 
 
 from src.nadobro.handlers.intent_handlers import (

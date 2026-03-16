@@ -53,14 +53,20 @@ logger = logging.getLogger(__name__)
 LIVE_PRICE_TASKS = {}
 
 
-async def _edit_loc(query, text, parse_mode=None, reply_markup=None):
+async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
     lang = get_active_language()
+    localized = localize_text(text, lang)
+    if fmt:
+        try:
+            localized = localized.format(**fmt)
+        except (KeyError, ValueError):
+            pass
     kwargs = {}
     if parse_mode is not None:
         kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
         kwargs["reply_markup"] = localize_markup(reply_markup, lang)
-    return await query.edit_message_text(localize_text(text, lang), **kwargs)
+    return await query.edit_message_text(localized, **kwargs)
 
 
 async def handle_callback(update: Update, context: CallbackContext):
@@ -127,9 +133,10 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
             current_network = user.network_mode.value if user else "testnet"
             network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
             await _edit_loc(query,
-                f"🌐 *Execution Mode Control*\n\nCurrent Mode: *{escape_md(network_label)}*\n\nSwitch mode below:",
+                "🌐 *Execution Mode Control*\n\nCurrent Mode: *{label}*\n\nSwitch mode below:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=mode_kb(current_network),
+                label=escape_md(network_label),
             )
         elif data.startswith("mode:"):
             await _handle_mode(query, data, telegram_id, context)
@@ -211,9 +218,10 @@ async def _handle_mode(query, data, telegram_id, context=None):
         network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
         try:
             await _edit_loc(query,
-                f"🌐 *Execution Mode Control*\n\nAlready on *{escape_md(network_label)}*\\.",
+                "🌐 *Execution Mode Control*\n\nAlready on *{label}*\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=mode_kb(current_network),
+                label=escape_md(network_label),
             )
         except BadRequest as e:
             if "Message is not modified" not in str(e):
@@ -227,15 +235,18 @@ async def _handle_mode(query, data, telegram_id, context=None):
             clear_session_passphrase(context, telegram_id=telegram_id)
         network_label = "🧪 TESTNET" if target_network == "testnet" else "🌐 MAINNET"
         await _edit_loc(query,
-            f"✅ *Switched to {escape_md(network_label)}*\n\n{escape_md(result_msg)}",
+            "✅ *Switched to {label}*\n\n{msg}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=mode_kb(target_network),
+            label=escape_md(network_label),
+            msg=escape_md(result_msg),
         )
     else:
         await _edit_loc(query,
-            f"❌ {escape_md(result_msg)}",
+            "❌ {msg}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=mode_kb(current_network),
+            msg=escape_md(result_msg),
         )
 
 
@@ -306,26 +317,31 @@ async def _handle_trade(query, data, telegram_id, context):
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if action in ("long", "short", "limit_long", "limit_short") and not wallet_ready:
         await _edit_loc(query,
-            f"⚠️ {escape_md(wallet_msg)}",
+            "⚠️ {msg}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
+            msg=escape_md(wallet_msg),
         )
         return
 
     if action in ("long", "short"):
         action_label = "🟢 BUY / LONG" if action == "long" else "🔴 SELL / SHORT"
         await _edit_loc(query,
-            f"*{escape_md(action_label)}*\n\nSelect a product:",
+            "*{label}*\n\n{select_product}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_product_kb(action),
+            label=escape_md(action_label),
+            select_product=localize_text("Select a product:", get_active_language()),
         )
     elif action in ("limit_long", "limit_short"):
         context.user_data["pending_trade"] = {"action": action, "step": "product_select"}
         action_label = "LIMIT LONG" if action == "limit_long" else "LIMIT SHORT"
         await _edit_loc(query, 
-            f"*{escape_md(action_label)}*\n\nSelect a product:",
+            "*{label}*\n\n{select_product}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_product_kb(action),
+            label=escape_md(action_label),
+            select_product=localize_text("Select a product:", get_active_language()),
         )
     elif action == "close":
         await _edit_loc(query, 
@@ -355,20 +371,26 @@ async def _handle_product(query, data, telegram_id, context):
             "product": product,
             "step": "limit_input",
         }
+        _lang = get_active_language()
         await _edit_loc(query, 
-            f"*{escape_md(action.replace('_', ' ').upper())} {escape_md(product)}*\n\n"
-            f"Enter size and price:\n"
-            f"Example: `0\\.01 95000`",
+            "*{label} {product}*\n\n{enter_size_price}\n{example}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
+            label=escape_md(action.replace('_', ' ').upper()),
+            product=escape_md(product),
+            enter_size_price=localize_text("Enter size and price:", _lang),
+            example=localize_text("Example: `0\\.01 95000`", _lang),
         )
         return
 
     action_label = "LONG" if action == "long" else "SHORT"
     await _edit_loc(query, 
-        f"*{escape_md(action_label)} {escape_md(product)}\\-PERP*\n\nSelect trade size:",
+        "*{label} {product}\\-PERP*\n\n{select_size}",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=trade_size_kb(product, action),
+        label=escape_md(action_label),
+        product=escape_md(product),
+        select_size=localize_text("Select trade size:", get_active_language()),
     )
 
 
@@ -387,20 +409,27 @@ async def _handle_size(query, data, telegram_id, context):
             "product": product,
             "step": "custom_size",
         }
+        _lang = get_active_language()
         await _edit_loc(query, 
-            f"*{escape_md(action.upper())} {escape_md(product)}\\-PERP*\n\n"
-            f"Type the trade size \\(e\\.g\\. `0\\.01`\\):",
+            "*{label} {product}\\-PERP*\n\n{prompt}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
+            label=escape_md(action.upper()),
+            product=escape_md(product),
+            prompt=localize_text("Type the trade size \\(e\\.g\\. `0\\.01`\\):", _lang),
         )
         return
 
     size = float(size_str)
     action_label = "LONG" if action == "long" else "SHORT"
     await _edit_loc(query, 
-        f"*{escape_md(action_label)} {escape_md(str(size))} {escape_md(product)}\\-PERP*\n\nSelect leverage:",
+        "*{label} {size} {product}\\-PERP*\n\n{select_leverage}",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=trade_leverage_kb(product, action, size),
+        label=escape_md(action_label),
+        size=escape_md(str(size)),
+        product=escape_md(product),
+        select_leverage=localize_text("Select leverage:", get_active_language()),
     )
 
 
@@ -416,9 +445,11 @@ async def _handle_leverage(query, data, telegram_id, context):
     max_leverage = get_product_max_leverage(product)
     if leverage > max_leverage:
         await _edit_loc(query, 
-            f"⚠️ Max leverage for *{escape_md(product)}* is *{escape_md(str(max_leverage))}x*\\.",
+            "⚠️ Max leverage for *{product}* is *{max_lev}x*\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_leverage_kb(product, action, size),
+            product=escape_md(product),
+            max_lev=escape_md(str(max_leverage)),
         )
         return
 
@@ -643,9 +674,11 @@ async def _handle_wallet(query, data, telegram_id, context):
             clear_session_passphrase(context, telegram_id=telegram_id)
         prefix = "✅" if ok else "❌"
         await _edit_loc(query, 
-            f"{prefix} {escape_md(msg)}",
+            "{prefix} {msg}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=wallet_kb(),
+            prefix=prefix,
+            msg=escape_md(msg),
         )
     elif action == "network" and len(parts) >= 3:
         net = parts[2]
@@ -660,15 +693,18 @@ async def _handle_wallet(query, data, telegram_id, context):
             info = get_user_wallet_info(telegram_id)
             msg = fmt_wallet_info(info)
             await _edit_loc(query, 
-                f"{escape_md(result_msg)}\n\n{msg}",
+                "{switch_msg}\n\n{wallet_info}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=wallet_kb(),
+                switch_msg=escape_md(result_msg),
+                wallet_info=msg,
             )
         else:
             await _edit_loc(query, 
-                f"❌ {escape_md(result_msg)}",
+                "❌ {msg}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=wallet_kb(),
+                msg=escape_md(result_msg),
             )
 
 
@@ -788,13 +824,15 @@ async def _handle_alert(query, data, telegram_id, context):
     elif action == "product" and len(parts) >= 3:
         product = parts[2]
         context.user_data["pending_alert"] = {"product": product}
+        _lang = get_active_language()
         await _edit_loc(query, 
-            f"🔔 *Alert for {escape_md(product)}\\-PERP*\n\n"
-            f"Enter condition and price:\n"
-            f"Example: `above 100000`\n"
-            f"Example: `below 90000`",
+            "🔔 *Alert for {product}\\-PERP*\n\n{enter_condition}\n{ex_above}\n{ex_below}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
+            product=escape_md(product),
+            enter_condition=localize_text("Enter condition and price:", _lang),
+            ex_above=localize_text("Example: `above 100000`", _lang),
+            ex_below=localize_text("Example: `below 90000`", _lang),
         )
 
     elif action == "view":
@@ -866,9 +904,11 @@ async def _handle_settings(query, data, telegram_id, context):
         msg = fmt_settings(user_settings)
         slip = user_settings.get("slippage", 1)
         await _edit_loc(query, 
-            f"✅ Default leverage set to {escape_md(f'{lev}x')}\n\n{msg}",
+            "✅ Default leverage set to {lev}x\n\n{settings}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(lev, slip),
+            lev=escape_md(str(lev)),
+            settings=msg,
         )
 
     elif action == "slippage_menu":
@@ -895,8 +935,9 @@ async def _handle_settings(query, data, telegram_id, context):
         user = get_user(telegram_id)
         current = (getattr(user, "language", None) or lang).lower()
         await _edit_loc(query,
-            f"✅ Language updated to *{escape_md(lang.upper())}*\\.",
+            "✅ Language updated to *{lang}*\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
+            lang=escape_md(lang.upper()),
             reply_markup=settings_language_kb(current),
         )
 
@@ -908,9 +949,11 @@ async def _handle_settings(query, data, telegram_id, context):
         msg = fmt_settings(user_settings)
         lev = user_settings.get("default_leverage", 1)
         await _edit_loc(query, 
-            f"✅ Slippage set to {escape_md(f'{slip}%')}\n\n{msg}",
+            "✅ Slippage set to {slip}%\n\n{settings}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(lev, slip),
+            slip=escape_md(str(slip)),
+            settings=msg,
         )
     elif action == "risk" and len(parts) >= 3:
         profile = parts[2]
@@ -935,9 +978,11 @@ async def _handle_settings(query, data, telegram_id, context):
         context.user_data["settings"] = saved
         msg = fmt_settings(chosen)
         await _edit_loc(query, 
-            f"✅ Risk profile set to *{escape_md(profile.upper())}*\n\n{msg}",
+            "✅ Risk profile set to *{profile}*\n\n{settings}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(chosen["default_leverage"], chosen["slippage"]),
+            profile=escape_md(profile.upper()),
+            settings=msg,
         )
 
 
@@ -1311,7 +1356,8 @@ async def _handle_howl(query, data, telegram_id, context):
                 reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
             )
         else:
-            await _edit_loc(query, f"{'✅' if ok else '⚠️'} {escape_md(msg)}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+            prefix = "✅" if ok else "⚠️"
+            await _edit_loc(query, "{prefix} {msg}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"), prefix=prefix, msg=escape_md(msg))
 
     elif action == "reject" and len(parts) >= 3:
         index = int(parts[2])
@@ -1329,7 +1375,8 @@ async def _handle_howl(query, data, telegram_id, context):
                 reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
             )
         else:
-            await _edit_loc(query, f"{'❌' if ok else '⚠️'} {escape_md(msg)}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+            prefix = "❌" if ok else "⚠️"
+            await _edit_loc(query, "{prefix} {msg}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"), prefix=prefix, msg=escape_md(msg))
 
     elif action == "approve_all":
         from src.nadobro.services.howl_service import approve_howl_suggestion, get_pending_howl
