@@ -361,6 +361,7 @@ async def _handle_trade(query, data, telegram_id, context):
         )
 
 
+
 async def _handle_product(query, data, telegram_id, context):
     parts = data.split(":")
     if len(parts) < 3:

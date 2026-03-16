@@ -131,13 +131,13 @@ def fmt_balance(balance_data, wallet_addr=None):
     ]
 
     if not balance_data or not balance_data.get("exists"):
-        lines.append("⚠️ No subaccount found\\.")
+        lines.append(_loc("⚠️ No subaccount found\\."))
         lines.append("")
         if wallet_addr:
-            lines.append(f"Deposit ≥ \\$5 USDT0 to:")
+            lines.append(_loc("Deposit ≥ \\$5 USDT0 to:"))
             lines.append(f"`{escape_md(wallet_addr)}`")
             lines.append("")
-            lines.append(f"🚰 Faucet: {escape_md('https://testnet.nado.xyz/portfolio/faucet')}")
+            lines.append(f"🚰 {_loc('Faucet')}: {escape_md('https://testnet.nado.xyz/portfolio/faucet')}")
         return "\n".join(lines)
 
     balances = balance_data.get("balances", {}) or {}
@@ -155,7 +155,7 @@ def fmt_balance(balance_data, wallet_addr=None):
 
     if wallet_addr:
         lines.append("")
-        lines.append(f"📋 Address: `{escape_md(wallet_addr)}`")
+        lines.append(f"📋 {_loc('Address')}: `{escape_md(wallet_addr)}`")
 
     return "\n".join(lines)
 
@@ -199,7 +199,7 @@ def fmt_funding(funding_data):
 
     for name, rate in funding_data.items():
         lines.append(
-            f"*{escape_md(name)}\\-PERP:* {escape_md(f'{rate:.6f}')} \\(index\\)"
+            f"*{escape_md(name)}\\-PERP:* {escape_md(f'{rate:.6f}')} \\({_loc('index')}\\)"
         )
 
     return "\n".join(lines)
@@ -241,29 +241,29 @@ def fmt_trade_result(result):
             _loc("✅ *Trade Executed\\!*"),
             escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             "",
-            f"📌 *Side:* {escape_md(result.get('side', '?'))}",
-            f"🪙 *Product:* {escape_md(result.get('product', '?'))}",
-            f"📏 *Size:* {escape_md(str(result.get('size', '?')))}",
-            f"💲 *Price:* {escape_md(price_str)}",
+            f"📌 *{_loc('Side')}:* {escape_md(result.get('side', '?'))}",
+            f"🪙 *{_loc('Product')}:* {escape_md(result.get('product', '?'))}",
+            f"📏 *{_loc('Size')}:* {escape_md(str(result.get('size', '?')))}",
+            f"💲 *{_loc('Price')}:* {escape_md(price_str)}",
             "",
             f"🌐 *{_loc('Network:')}* {escape_md(result.get('network', '?'))}",
         ]
         if result.get("tp_requested"):
             if result.get("tp_set"):
-                lines.append(f"📈 *Take Profit:* {escape_md(str(result.get('tp_price')))}")
+                lines.append(f"📈 *{_loc('Take Profit')}:* {escape_md(str(result.get('tp_price')))}")
             else:
-                lines.append(f"⚠️ *Take Profit:* {escape_md(str(result.get('tp_error', 'Failed to place TP order.')))}")
+                lines.append(f"⚠️ *{_loc('Take Profit')}:* {escape_md(str(result.get('tp_error', _loc('Failed to place TP order.'))))}")
         if result.get("sl_requested"):
             if result.get("sl_armed"):
-                lines.append(f"🛡 *Stop Loss:* {escape_md(str(result.get('sl_price')))}")
+                lines.append(f"🛡 *{_loc('Stop Loss')}:* {escape_md(str(result.get('sl_price')))}")
             else:
-                lines.append(f"⚠️ *Stop Loss:* {escape_md(str(result.get('sl_error', 'Failed to arm SL rule.')))}")
+                lines.append(f"⚠️ *{_loc('Stop Loss')}:* {escape_md(str(result.get('sl_error', _loc('Failed to arm SL rule.'))))}")
         order_type = result.get("type", "MARKET")
         if order_type != "MARKET":
-            lines.insert(3, f"📋 *Type:* {escape_md(order_type)}")
+            lines.insert(3, f"📋 *{_loc('Type')}:* {escape_md(order_type)}")
         return "\n".join(lines)
     else:
-        error = result.get("error", "Unknown error")
+        error = result.get("error", _loc("Unknown error"))
         return f"❌ *{_loc('Trade Failed')}*\n\n{escape_md(error)}"
 
 
@@ -418,18 +418,18 @@ def fmt_portfolio(stats, positions, prices=None):
             except Exception:
                 current = 0.0
 
-        pnl_text = "N/A"
+        pnl_text = _loc("N/A")
         if current:
             pnl = _calc_position_pnl(p, current)
             if pnl is not None:
                 pnl_text = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
 
         lines.append(
-            f"• {escape_md(side)} {escape_md(f'{amount:.4f}')} {escape_md(pname)} \\| PnL: {escape_md(pnl_text)}"
+            f"• {escape_md(side)} {escape_md(f'{amount:.4f}')} {escape_md(pname)} \\| {_loc('PnL')}: {escape_md(pnl_text)}"
         )
 
     if len(positions) > 5:
-        lines.append(f"• \\...and {escape_md(str(len(positions) - 5))} more")
+        lines.append(f"• \\.\\.\\. {_loc('and')} {escape_md(str(len(positions) - 5))} {_loc('more')}")
     return "\n".join(lines)
 
 
@@ -497,13 +497,13 @@ def fmt_help():
 
 def _fmt_action_label(action: str) -> str:
     labels = {
-        "hold": "Holding",
-        "open_long": "Opened Long",
-        "open_short": "Opened Short",
-        "close": "Closed Position",
-        "emergency_flatten": "Emergency Flatten",
-        "blocked": "Blocked",
-        "cycle": "Cycle Complete",
+        "hold": _loc("Holding"),
+        "open_long": _loc("Opened Long"),
+        "open_short": _loc("Opened Short"),
+        "close": _loc("Closed Position"),
+        "emergency_flatten": _loc("Emergency Flatten"),
+        "blocked": _loc("Blocked"),
+        "cycle": _loc("Cycle Complete"),
     }
     return labels.get(action, action.replace("_", " ").title() if action else "—")
 
@@ -584,11 +584,11 @@ def fmt_status_overview(status: dict, onboarding: dict):
             lines.append(f"{_loc('Last:')} {escape_md(action_text)}")
 
         if status.get("is_paused"):
-            lines.append(f"⚠️ *PAUSED*: {escape_md(str(status.get('pause_reason') or 'Unknown'))}")
+            lines.append(f"⚠️ *{_loc('PAUSED')}*: {escape_md(str(status.get('pause_reason') or _loc('Unknown')))}")
 
         error_streak = status.get("error_streak", 0)
         if error_streak >= 3:
-            lines.append(f"⚠️ {escape_md(str(error_streak))} consecutive errors")
+            lines.append(f"⚠️ {escape_md(str(error_streak))} {_loc('consecutive errors')}")
 
         bro_state = status.get("bro_state") or {}
         if strategy == "BRO" and bro_state:
@@ -629,7 +629,7 @@ def fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
     return (
-        f"✅ *{escape_md(strategy.upper())} updated* \\({escape_md(network.upper())}\\)\n\n"
+        f"✅ *{escape_md(strategy.upper())} {_loc('updated')}* \\({escape_md(network.upper())}\\)\n\n"
         f"{_loc('Notional')}: {escape_md(f'${notional:,.2f}')}\n"
         f"{_loc('Spread')}: {escape_md(f'{spread_bp:.1f} bp')}\n"
         f"{_loc('Interval')}: {escape_md(f'{interval_seconds}s')}\n"
