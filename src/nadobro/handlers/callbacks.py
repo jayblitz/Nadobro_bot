@@ -5,6 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
+from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language, _ACTIVE_LANG
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions,
     fmt_prices, fmt_funding, fmt_trade_preview, fmt_trade_result,
@@ -52,12 +53,27 @@ logger = logging.getLogger(__name__)
 LIVE_PRICE_TASKS = {}
 
 
+async def _edit_loc(query, text, parse_mode=None, reply_markup=None):
+    lang = get_active_language()
+    kwargs = {}
+    if parse_mode is not None:
+        kwargs["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        kwargs["reply_markup"] = localize_markup(reply_markup, lang)
+    return await query.edit_message_text(localize_text(text, lang), **kwargs)
+
+
 async def handle_callback(update: Update, context: CallbackContext):
     started = time.perf_counter()
     query = update.callback_query
     data = query.data
     telegram_id = query.from_user.id
 
+    with language_context(get_user_language(telegram_id)):
+      return await _handle_callback_inner(update, context, query, data, telegram_id, started)
+
+
+async def _handle_callback_inner(update, context, query, data, telegram_id, started):
     try:
         try:
             await query.answer()
@@ -110,17 +126,15 @@ async def handle_callback(update: Update, context: CallbackContext):
             user = get_user(telegram_id)
             current_network = user.network_mode.value if user else "testnet"
             network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
-            await query.edit_message_text(
-                f"🌐 *Execution Mode Control*\n\n"
-                f"Current Mode: *{escape_md(network_label)}*\n\n"
-                f"Switch mode below:",
+            await _edit_loc(query,
+                f"🌐 *Execution Mode Control*\n\nCurrent Mode: *{escape_md(network_label)}*\n\nSwitch mode below:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=mode_kb(current_network),
             )
         elif data.startswith("mode:"):
             await _handle_mode(query, data, telegram_id, context)
         else:
-            await query.edit_message_text(
+            await _edit_loc(query,
                 "Unknown action\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=back_kb(),
@@ -128,8 +142,8 @@ async def handle_callback(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Callback error for '{data}': {e}", exc_info=True)
         try:
-            await query.edit_message_text(
-                f"⚠️ An error occurred\\. Please try again\\.",
+            await _edit_loc(query,
+                "⚠️ An error occurred\\. Please try again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=back_kb(),
             )
@@ -161,10 +175,7 @@ _ONB_DASHBOARD_MSG = """🚀 You're all set! Pick a module below to get started.
 async def _handle_onb_new(query, data, telegram_id, context):
     if data == "onb:accept_tos":
         set_new_onboarding_tos_accepted(telegram_id)
-        await query.edit_message_text(
-            _ONB_DASHBOARD_MSG,
-            reply_markup=home_card_kb(),
-        )
+        await _edit_loc(query, _ONB_DASHBOARD_MSG, reply_markup=home_card_kb())
         return
     if data.startswith("onb:lang:"):
         parts = data.split(":")
@@ -172,18 +183,16 @@ async def _handle_onb_new(query, data, telegram_id, context):
             return
         lang = parts[2]
         set_new_onboarding_language(telegram_id, lang)
-        from src.nadobro.services.user_service import update_user_language
         update_user_language(telegram_id, lang)
-        await query.edit_message_text(
-            _ONB_WELCOME_CARD,
+        _ACTIVE_LANG.set(lang)
+        await _edit_loc(query, _ONB_WELCOME_CARD,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=onboarding_accept_tos_kb(),
         )
 
 
 async def _show_dashboard(query, telegram_id):
-    await query.edit_message_text(
-        build_home_card_text(telegram_id),
+    await _edit_loc(query, build_home_card_text(telegram_id),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=home_card_kb(),
     )
@@ -201,9 +210,8 @@ async def _handle_mode(query, data, telegram_id, context=None):
     if target_network == current_network:
         network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
         try:
-            await query.edit_message_text(
-                f"🌐 *Execution Mode Control*\n\n"
-                f"Already on *{escape_md(network_label)}*\\.",
+            await _edit_loc(query,
+                f"🌐 *Execution Mode Control*\n\nAlready on *{escape_md(network_label)}*\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=mode_kb(current_network),
             )
@@ -218,13 +226,13 @@ async def _handle_mode(query, data, telegram_id, context=None):
             from src.nadobro.handlers.messages import clear_session_passphrase
             clear_session_passphrase(context, telegram_id=telegram_id)
         network_label = "🧪 TESTNET" if target_network == "testnet" else "🌐 MAINNET"
-        await query.edit_message_text(
+        await _edit_loc(query,
             f"✅ *Switched to {escape_md(network_label)}*\n\n{escape_md(result_msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=mode_kb(target_network),
         )
     else:
-        await query.edit_message_text(
+        await _edit_loc(query,
             f"❌ {escape_md(result_msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=mode_kb(current_network),
@@ -245,8 +253,7 @@ async def _handle_nav(query, data, telegram_id, context=None):
         await _show_dashboard(query, telegram_id)
     elif target == "help":
         try:
-            await query.edit_message_text(
-                fmt_help(),
+            await _edit_loc(query, fmt_help(),
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=back_kb(),
             )
@@ -257,15 +264,15 @@ async def _handle_nav(query, data, telegram_id, context=None):
     elif target == "quick_start":
         await _handle_onboarding(query, "onboarding:resume", telegram_id, context)
     elif target == "strategy_hub":
-        await query.edit_message_text(
+        await _edit_loc(query,
             "🤖 *Nadobro Strategy Lab*\n\n"
-            "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
+            "Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )
     elif target == "ask_nado" and context is not None:
         context.user_data["pending_question"] = True
-        await query.edit_message_text(
+        await _edit_loc(query,
             "🧠 *Ask NadoBro AI Console*\n\n"
             "Ask me anything about Nado \\(docs, dev docs, API, website, X updates, troubleshooting\\)\\!\n\n"
             "Examples:\n"
@@ -287,7 +294,7 @@ async def _handle_trade(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     if not is_new_onboarding_complete(telegram_id):
-        await query.edit_message_text(
+        await _edit_loc(query,
             "⚠️ Complete setup first (language + accept terms).",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=InlineKeyboardMarkup([
@@ -298,7 +305,7 @@ async def _handle_trade(query, data, telegram_id, context):
         return
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if action in ("long", "short", "limit_long", "limit_short") and not wallet_ready:
-        await query.edit_message_text(
+        await _edit_loc(query,
             f"⚠️ {escape_md(wallet_msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
@@ -307,7 +314,7 @@ async def _handle_trade(query, data, telegram_id, context):
 
     if action in ("long", "short"):
         action_label = "🟢 BUY / LONG" if action == "long" else "🔴 SELL / SHORT"
-        await query.edit_message_text(
+        await _edit_loc(query,
             f"*{escape_md(action_label)}*\n\nSelect a product:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_product_kb(action),
@@ -315,19 +322,19 @@ async def _handle_trade(query, data, telegram_id, context):
     elif action in ("limit_long", "limit_short"):
         context.user_data["pending_trade"] = {"action": action, "step": "product_select"}
         action_label = "LIMIT LONG" if action == "limit_long" else "LIMIT SHORT"
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"*{escape_md(action_label)}*\n\nSelect a product:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_product_kb(action),
         )
     elif action == "close":
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "*Close Position*\n\nSelect the product to close:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=close_product_kb(),
         )
     elif action == "close_all":
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
@@ -348,7 +355,7 @@ async def _handle_product(query, data, telegram_id, context):
             "product": product,
             "step": "limit_input",
         }
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"*{escape_md(action.replace('_', ' ').upper())} {escape_md(product)}*\n\n"
             f"Enter size and price:\n"
             f"Example: `0\\.01 95000`",
@@ -358,7 +365,7 @@ async def _handle_product(query, data, telegram_id, context):
         return
 
     action_label = "LONG" if action == "long" else "SHORT"
-    await query.edit_message_text(
+    await _edit_loc(query, 
         f"*{escape_md(action_label)} {escape_md(product)}\\-PERP*\n\nSelect trade size:",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=trade_size_kb(product, action),
@@ -380,7 +387,7 @@ async def _handle_size(query, data, telegram_id, context):
             "product": product,
             "step": "custom_size",
         }
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"*{escape_md(action.upper())} {escape_md(product)}\\-PERP*\n\n"
             f"Type the trade size \\(e\\.g\\. `0\\.01`\\):",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -390,7 +397,7 @@ async def _handle_size(query, data, telegram_id, context):
 
     size = float(size_str)
     action_label = "LONG" if action == "long" else "SHORT"
-    await query.edit_message_text(
+    await _edit_loc(query, 
         f"*{escape_md(action_label)} {escape_md(str(size))} {escape_md(product)}\\-PERP*\n\nSelect leverage:",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=trade_leverage_kb(product, action, size),
@@ -408,7 +415,7 @@ async def _handle_leverage(query, data, telegram_id, context):
     leverage = int(parts[4])
     max_leverage = get_product_max_leverage(product)
     if leverage > max_leverage:
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"⚠️ Max leverage for *{escape_md(product)}* is *{escape_md(str(max_leverage))}x*\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_leverage_kb(product, action, size),
@@ -439,7 +446,7 @@ async def _handle_leverage(query, data, telegram_id, context):
     }
 
     preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
-    await query.edit_message_text(
+    await _edit_loc(query, 
         preview,
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=trade_confirm_kb(),
@@ -449,7 +456,7 @@ async def _handle_leverage(query, data, telegram_id, context):
 async def _handle_exec_trade(query, data, telegram_id, context):
     pending = context.user_data.get("pending_trade")
     if not pending:
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "⚠️ No pending trade found\\. Please start again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
@@ -465,7 +472,7 @@ async def _handle_exec_trade(query, data, telegram_id, context):
     context.user_data.pop("pending_trade", None)
 
     if is_trading_paused():
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "⏸ Trading is temporarily paused by admin\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
@@ -473,7 +480,7 @@ async def _handle_exec_trade(query, data, telegram_id, context):
         return
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"⚠️ {escape_md(wallet_msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
@@ -501,7 +508,7 @@ async def _handle_positions(query, data, telegram_id, context):
     if action == "view":
         client = get_user_readonly_client(telegram_id)
         if not client:
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 "⚠️ Wallet not initialized\\. Use /start first\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=back_kb(),
@@ -516,7 +523,7 @@ async def _handle_positions(query, data, telegram_id, context):
         except Exception:
             pass
         msg = fmt_positions(positions, prices)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=positions_kb(positions or []),
@@ -528,7 +535,7 @@ async def _handle_positions(query, data, telegram_id, context):
         await authorize_or_prompt_passphrase(query, context, telegram_id, {"type": "close_position", "product": product})
 
     elif action == "close_all":
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "⚠️ *Close All Orders*\n\nAre you sure?",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
@@ -542,7 +549,7 @@ async def _handle_positions(query, data, telegram_id, context):
 async def _handle_portfolio(query, data, telegram_id):
     client = get_user_readonly_client(telegram_id)
     if not client:
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "⚠️ Wallet not initialized\\. Use /start first\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
@@ -559,7 +566,7 @@ async def _handle_portfolio(query, data, telegram_id):
     stats = await run_blocking(get_trade_analytics, telegram_id)
     msg = fmt_portfolio(stats, positions, prices)
     try:
-        await query.edit_message_text(
+        await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=portfolio_kb(has_positions=bool(positions)),
@@ -595,10 +602,10 @@ async def _handle_wallet(query, data, telegram_id, context):
                 "Once saved, reply here with your *main wallet address* (0x...).\n\n"
                 "_This key is for trading only — it cannot withdraw your funds._"
             )
-            await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
+            await _edit_loc(query, msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
             return
         msg = fmt_wallet_info(info)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=wallet_kb(),
@@ -606,7 +613,7 @@ async def _handle_wallet(query, data, telegram_id, context):
     elif action == "balance":
         client = get_user_readonly_client(telegram_id)
         if not client:
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 "💰 Link your wallet first to check balance.",
                 reply_markup=wallet_kb(),
             )
@@ -617,7 +624,7 @@ async def _handle_wallet(query, data, telegram_id, context):
             msg = f"💰 Balance: ${float(usdt or 0):,.2f} USDT0"
         except Exception:
             msg = "Could not fetch balance. Try again."
-        await query.edit_message_text(msg, reply_markup=wallet_kb())
+        await _edit_loc(query, msg, reply_markup=wallet_kb())
     elif action == "revoke_steps":
         revoke_msg = (
             "🔄 *Revoke 1CT Key (Nado)*\n\n"
@@ -626,7 +633,7 @@ async def _handle_wallet(query, data, telegram_id, context):
             "3. Disable the toggle and save\n\n"
             "Your main wallet and funds stay safe. You can link again anytime via Wallet."
         )
-        await query.edit_message_text(revoke_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb())
+        await _edit_loc(query, revoke_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb())
     elif action == "remove_active":
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "testnet"
@@ -635,7 +642,7 @@ async def _handle_wallet(query, data, telegram_id, context):
             from src.nadobro.handlers.messages import clear_session_passphrase
             clear_session_passphrase(context, telegram_id=telegram_id)
         prefix = "✅" if ok else "❌"
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"{prefix} {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=wallet_kb(),
@@ -652,13 +659,13 @@ async def _handle_wallet(query, data, telegram_id, context):
             clear_session_passphrase(context, telegram_id=telegram_id)
             info = get_user_wallet_info(telegram_id)
             msg = fmt_wallet_info(info)
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 f"{escape_md(result_msg)}\n\n{msg}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=wallet_kb(),
             )
         else:
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 f"❌ {escape_md(result_msg)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=wallet_kb(),
@@ -672,7 +679,7 @@ async def _handle_market(query, data, telegram_id):
 
     client = get_user_readonly_client(telegram_id)
     if not client:
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "⚠️ Wallet not initialized\\. Use /start first\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
@@ -681,7 +688,7 @@ async def _handle_market(query, data, telegram_id):
 
     if action == "menu":
         await _stop_live_task(task_key)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "📡 *Market Radar*\n\nPick a market view:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=markets_kb(),
@@ -692,7 +699,7 @@ async def _handle_market(query, data, telegram_id):
         with timed_metric("cb.market.prices"):
             prices = await run_blocking(client.get_all_market_prices)
         msg = fmt_prices(prices)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=markets_kb(),
@@ -710,21 +717,21 @@ async def _handle_market(query, data, telegram_id):
                     funding[name] = fr.get("funding_rate", 0)
 
         msg = fmt_funding(funding)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=markets_kb(),
         )
     elif action == "live_menu":
         await _stop_live_task(task_key)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "🔴 *Live Last Price*\n\nSelect an asset:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=live_price_asset_kb(),
         )
     elif action == "live_stop":
         await _stop_live_task(task_key)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "🛑 Live price updates stopped\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=markets_kb(),
@@ -732,7 +739,7 @@ async def _handle_market(query, data, telegram_id):
     elif action == "live" and len(parts) >= 3:
         product = parts[2].upper()
         if product not in PRODUCTS or PRODUCTS[product]["type"] != "perp":
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 "⚠️ Unsupported product\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=live_price_asset_kb(),
@@ -743,7 +750,7 @@ async def _handle_market(query, data, telegram_id):
         pid = get_product_id(product)
         mp = await run_blocking(client.get_market_price, pid) if pid is not None else {"mid": 0}
         initial = _fmt_live_last_price(product, mp.get("mid", 0))
-        message = await query.edit_message_text(
+        message = await _edit_loc(query, 
             initial,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=live_price_controls_kb(product),
@@ -765,14 +772,14 @@ async def _handle_alert(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else ""
 
     if action == "menu":
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "🔔 *Alert Engine*\n\nManage your trigger alerts\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=alerts_kb(),
         )
 
     elif action == "set":
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "🔔 *Set Alert*\n\nSelect a product:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=alert_product_kb(),
@@ -781,7 +788,7 @@ async def _handle_alert(query, data, telegram_id, context):
     elif action == "product" and len(parts) >= 3:
         product = parts[2]
         context.user_data["pending_alert"] = {"product": product}
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"🔔 *Alert for {escape_md(product)}\\-PERP*\n\n"
             f"Enter condition and price:\n"
             f"Example: `above 100000`\n"
@@ -794,7 +801,7 @@ async def _handle_alert(query, data, telegram_id, context):
         alerts = get_user_alerts(telegram_id)
         msg = fmt_alerts(alerts)
         kb = alert_delete_kb(alerts) if alerts else back_kb()
-        await query.edit_message_text(
+        await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=kb,
@@ -814,7 +821,7 @@ async def _handle_alert(query, data, telegram_id, context):
         final_msg = f"{msg}\n\n{alerts_msg}"
 
         kb = alert_delete_kb(alerts) if alerts else back_kb()
-        await query.edit_message_text(
+        await _edit_loc(query, 
             final_msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=kb,
@@ -831,20 +838,20 @@ async def _handle_settings(query, data, telegram_id, context):
         msg = fmt_settings(user_settings)
         lev = user_settings.get("default_leverage", 1)
         slip = user_settings.get("slippage", 1)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(lev, slip),
         )
 
     elif action == "leverage_menu":
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "⚡ *Leverage Control*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_leverage_kb(),
         )
     elif action == "risk_menu":
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "🛡 *Choose Risk Profile*\n\n"
             "This presets leverage and slippage so trades are faster and more consistent\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -858,14 +865,14 @@ async def _handle_settings(query, data, telegram_id, context):
         )
         msg = fmt_settings(user_settings)
         slip = user_settings.get("slippage", 1)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"✅ Default leverage set to {escape_md(f'{lev}x')}\n\n{msg}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(lev, slip),
         )
 
     elif action == "slippage_menu":
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "📊 *Slippage Control*",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_slippage_kb(),
@@ -873,7 +880,7 @@ async def _handle_settings(query, data, telegram_id, context):
     elif action == "language_menu":
         user = get_user(telegram_id)
         lang = (getattr(user, "language", None) or "en").lower()
-        await query.edit_message_text(
+        await _edit_loc(query, 
             "🌐 *Select Language*\n\nChoose your preferred language for onboarding and UI copy\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_language_kb(lang),
@@ -884,9 +891,10 @@ async def _handle_settings(query, data, telegram_id, context):
         if lang not in supported:
             return
         update_user_language(telegram_id, lang)
+        _ACTIVE_LANG.set(lang)
         user = get_user(telegram_id)
         current = (getattr(user, "language", None) or lang).lower()
-        await query.edit_message_text(
+        await _edit_loc(query,
             f"✅ Language updated to *{escape_md(lang.upper())}*\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_language_kb(current),
@@ -899,7 +907,7 @@ async def _handle_settings(query, data, telegram_id, context):
         )
         msg = fmt_settings(user_settings)
         lev = user_settings.get("default_leverage", 1)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"✅ Slippage set to {escape_md(f'{slip}%')}\n\n{msg}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(lev, slip),
@@ -926,7 +934,7 @@ async def _handle_settings(query, data, telegram_id, context):
         )
         context.user_data["settings"] = saved
         msg = fmt_settings(chosen)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"✅ Risk profile set to *{escape_md(profile.upper())}*\n\n{msg}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(chosen["default_leverage"], chosen["slippage"]),
@@ -946,7 +954,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             from src.nadobro.handlers.keyboards import bro_action_kb
             with timed_metric("cb.strategy.preview.bro"):
                 preview_text = await run_blocking(_build_bro_preview_text, telegram_id)
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 preview_text,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=bro_action_kb(),
@@ -955,7 +963,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         selected_product = context.user_data.get(f"strategy_pair:{strategy_id}", "BTC")
         with timed_metric("cb.strategy.preview"):
             preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_action_kb(strategy_id, selected_product),
@@ -970,7 +978,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
         with timed_metric("cb.strategy.preview"):
             preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
-        await query.edit_message_text(
+        await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_action_kb(strategy_id, selected_product),
@@ -980,7 +988,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         network, settings = get_user_settings(telegram_id)
         conf = settings.get("strategies", {}).get(strategy_id, {})
-        await query.edit_message_text(
+        await _edit_loc(query, 
             _fmt_strategy_config_text(strategy_id, conf, network),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=_strategy_config_kb(strategy_id),
@@ -1007,7 +1015,7 @@ async def _handle_strategy(query, data, context, telegram_id):
 
         network, settings = update_user_settings(telegram_id, _mutate)
         conf = settings.get("strategies", {}).get(strategy_id, {})
-        await query.edit_message_text(
+        await _edit_loc(query, 
             _fmt_strategy_config_text(strategy_id, conf, network),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=_strategy_config_kb(strategy_id),
@@ -1033,7 +1041,7 @@ async def _handle_strategy(query, data, context, telegram_id):
 
         network, settings = update_user_settings(telegram_id, _mutate)
         conf = settings.get("strategies", {}).get(strategy_id, {})
-        await query.edit_message_text(
+        await _edit_loc(query, 
             _fmt_strategy_config_text(strategy_id, conf, network),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=_strategy_config_kb(strategy_id),
@@ -1074,7 +1082,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "max_spread_bp": "Enter maximum spread in bps \\(example: `20`\\)",
             "vol_sensitivity": "Enter volatility sensitivity \\(example: `0\\.02`\\)",
         }
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"✏️ *Custom {escape_md(field)}*\n\n"
             f"{help_text.get(field, 'Enter value')}\n\n"
             "Your next message will be used as this value\\.",
@@ -1083,7 +1091,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         )
     elif action == "activate":
         context.user_data["active_setup"] = strategy_id
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"✅ Active setup is now *{escape_md(strategy_id.upper())}*\\.\n\n"
             "Next: open Buy/Long or Sell/Short and execute with preview\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -1094,7 +1102,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id not in supported:
             return
         if not is_new_onboarding_complete(telegram_id):
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 "⚠️ Complete setup first (language + accept terms).",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
@@ -1105,7 +1113,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 f"⚠️ {escape_md(wallet_msg)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=back_kb(),
@@ -1132,14 +1140,14 @@ async def _handle_strategy(query, data, context, telegram_id):
             text += "\n\n*Perf Snapshot*"
             for line in perf_lines:
                 text += f"\n• {escape_md(line)}"
-        await query.edit_message_text(
+        await _edit_loc(query, 
             text,
             parse_mode=ParseMode.MARKDOWN_V2,
         )
     elif action == "stop":
         ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
         prefix = "🛑" if ok else "⚠️"
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"{prefix} {escape_md(msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
@@ -1172,7 +1180,7 @@ async def _handle_bro(query, data, telegram_id, context):
             f"Max Loss: *{escape_md(f'{b_maxl:.0f}%')}*\n\n"
             "Tap a parameter to change, or pick a risk preset below\\."
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_config_kb())
+        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_config_kb())
 
     elif action == "risk" and len(parts) >= 3:
         profile = parts[2]
@@ -1190,7 +1198,7 @@ async def _handle_bro(query, data, telegram_id, context):
             bro.update(chosen)
         update_user_settings(telegram_id, _mutate)
         from src.nadobro.handlers.keyboards import bro_config_kb
-        await query.edit_message_text(
+        await _edit_loc(query, 
             f"✅ Bro Mode risk set to *{escape_md(profile.upper())}*\n\n"
             f"Leverage cap: {chosen['leverage_cap']}x \\| Confidence: {chosen['min_confidence']:.0%}\n"
             f"TP/SL: {chosen['tp_pct']:.1f}%/{chosen['sl_pct']:.1f}%\n"
@@ -1206,7 +1214,7 @@ async def _handle_bro(query, data, telegram_id, context):
             return
         if field == "tp_sl":
             context.user_data["pending_bro_input"] = {"field": "tp_sl"}
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 "✏️ *Set TP/SL*\n\nEnter as `TP,SL` \\(example: `2.0,1.5`\\)",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=back_kb("strategy:preview:bro"),
@@ -1220,7 +1228,7 @@ async def _handle_bro(query, data, telegram_id, context):
                 "max_positions": "Enter max simultaneous positions \\(example: `3`\\)",
                 "risk_level": "Enter: `conservative`, `balanced`, or `aggressive`",
             }
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 f"✏️ *Set {escape_md(field)}*\n\n{hints.get(field, 'Enter value')}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=back_kb("strategy:preview:bro"),
@@ -1255,7 +1263,7 @@ async def _handle_bro(query, data, telegram_id, context):
         if last_error:
             text += f"\nLast error: _{escape_md(str(last_error)[:150])}_"
         from src.nadobro.handlers.keyboards import bro_action_kb
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_action_kb())
+        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_action_kb())
 
     elif action == "howl":
         from src.nadobro.services.howl_service import get_pending_howl, format_howl_message
@@ -1267,14 +1275,14 @@ async def _handle_bro(query, data, telegram_id, context):
             text = format_howl_message(pending)
             suggestions = pending.get("suggestions", [])
             pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 escape_md(text),
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
             )
         else:
             from src.nadobro.handlers.keyboards import bro_action_kb
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 "🐺 *HOWL*\n\nNo pending optimization suggestions\\.\nHOWL runs nightly and will notify you when it has suggestions\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=bro_action_kb(),
@@ -1297,13 +1305,13 @@ async def _handle_howl(query, data, telegram_id, context):
             suggestions = pending.get("suggestions", [])
             pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
             from src.nadobro.handlers.keyboards import howl_approval_kb
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 escape_md(f"{'✅' if ok else '⚠️'} {msg}\n\n{text}"),
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
             )
         else:
-            await query.edit_message_text(f"{'✅' if ok else '⚠️'} {escape_md(msg)}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+            await _edit_loc(query, f"{'✅' if ok else '⚠️'} {escape_md(msg)}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
 
     elif action == "reject" and len(parts) >= 3:
         index = int(parts[2])
@@ -1315,13 +1323,13 @@ async def _handle_howl(query, data, telegram_id, context):
             suggestions = pending.get("suggestions", [])
             pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
             from src.nadobro.handlers.keyboards import howl_approval_kb
-            await query.edit_message_text(
+            await _edit_loc(query, 
                 escape_md(f"{'❌' if ok else '⚠️'} {msg}\n\n{text}"),
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
             )
         else:
-            await query.edit_message_text(f"{'❌' if ok else '⚠️'} {escape_md(msg)}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+            await _edit_loc(query, f"{'❌' if ok else '⚠️'} {escape_md(msg)}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
 
     elif action == "approve_all":
         from src.nadobro.services.howl_service import approve_howl_suggestion, get_pending_howl
@@ -1333,14 +1341,14 @@ async def _handle_howl(query, data, telegram_id, context):
                     ok, msg = approve_howl_suggestion(telegram_id, network, i)
                     results.append(f"{'✅' if ok else '⚠️'} {msg}")
             text = "\n".join(results) if results else "No pending suggestions"
-            await query.edit_message_text(escape_md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+            await _edit_loc(query, escape_md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
         else:
-            await query.edit_message_text("No pending HOWL suggestions\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+            await _edit_loc(query, "No pending HOWL suggestions\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
 
     elif action == "dismiss":
         from src.nadobro.services.howl_service import dismiss_all_howl
         dismiss_all_howl(telegram_id, network)
-        await query.edit_message_text("🐺 HOWL suggestions dismissed\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+        await _edit_loc(query, "🐺 HOWL suggestions dismissed\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
 
 
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
@@ -1704,13 +1712,13 @@ async def _handle_onboarding(query, data, telegram_id, context):
         return
     state = get_new_onboarding_state(telegram_id)
     if not state.get("language"):
-        await query.edit_message_text(
+        await _edit_loc(query, 
             _ONB_WELCOME_LANG_MSG,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=onboarding_language_kb(),
         )
     else:
-        await query.edit_message_text(
+        await _edit_loc(query, 
             _ONB_WELCOME_CARD,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=onboarding_accept_tos_kb(),
@@ -1743,10 +1751,12 @@ async def _stop_live_task(task_key):
 
 
 def _fmt_live_last_price(product: str, last_price: float) -> str:
+    from src.nadobro.i18n import localize_text as _lt
+    lang = get_active_language()
     last_str = "$" + fmt_price(last_price, product) if last_price else "N/A"
     ts = time.strftime("%H:%M:%S UTC", time.gmtime())
     return (
-        "🔴 *Live Last Price*\n\n"
+        f"{_lt('🔴 *Live Last Price*', lang)}\n\n"
         f"Asset: *{escape_md(product)}\\-PERP*\n"
         f"Last: *{escape_md(last_str)}*\n"
         f"Updated: {escape_md(ts)}"
@@ -1766,13 +1776,14 @@ async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int,
 
             mp = await run_blocking(client.get_market_price, pid)
             text = _fmt_live_last_price(product, mp.get("mid", 0))
+            lang = get_active_language()
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=text,
+                    text=localize_text(text, lang),
                     parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=live_price_controls_kb(product),
+                    reply_markup=localize_markup(live_price_controls_kb(product), lang),
                 )
             except BadRequest as e:
                 if "Message is not modified" not in str(e):
@@ -1781,6 +1792,7 @@ async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int,
                 logger.warning("Live price loop error for %s, stopping", product, exc_info=True)
                 break
             await asyncio.sleep(2)
+
     except asyncio.CancelledError:
         pass
     finally:

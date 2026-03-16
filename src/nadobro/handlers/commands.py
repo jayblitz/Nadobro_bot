@@ -3,6 +3,7 @@ import os
 from telegram import Update
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
+from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language
 from src.nadobro.services.user_service import get_or_create_user, get_user
 
 INTRO_VIDEO_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "intro_video.mov")
@@ -25,8 +26,6 @@ from src.nadobro.handlers.home_card import (
     open_help_card_from_command,
     open_status_card_from_command,
 )
-from src.nadobro.services.perf import summary_lines
-
 logger = logging.getLogger(__name__)
 
 
@@ -72,82 +71,88 @@ async def cmd_start(update: Update, context: CallbackContext):
                 reply_markup=onboarding_language_kb(),
             )
             return
-        await update.message.reply_text(
-            WELCOME_CARD_MSG,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=onboarding_accept_tos_kb(),
-        )
+        with language_context(get_user_language(telegram_id)):
+            lang = get_active_language()
+            await update.message.reply_text(
+                localize_text(WELCOME_CARD_MSG, lang),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=localize_markup(onboarding_accept_tos_kb(), lang),
+            )
         return
 
-    # Onboarding complete → show dashboard (8 buttons)
-    if DUAL_MODE_CARD_FLOW:
-        await _send_dashboard_card(update, context, telegram_id)
-        return
-    await update.message.reply_text(
-        DASHBOARD_MSG,
-        reply_markup=persistent_menu_kb(),
-    )
+    with language_context(get_user_language(telegram_id)):
+        lang = get_active_language()
+        if DUAL_MODE_CARD_FLOW:
+            await _send_dashboard_card(update, context, telegram_id)
+            return
+        await update.message.reply_text(
+            localize_text(DASHBOARD_MSG, lang),
+            reply_markup=localize_markup(persistent_menu_kb(), lang),
+        )
 
 
 async def _send_dashboard_card(update: Update, context: CallbackContext, telegram_id: int):
-    """Send dashboard text + home card inline keyboard (8 buttons)."""
-    await update.message.reply_text(DASHBOARD_MSG, reply_markup=home_card_kb())
+    lang = get_active_language()
+    await update.message.reply_text(localize_text(DASHBOARD_MSG, lang), reply_markup=localize_markup(home_card_kb(), lang))
 
 
 async def cmd_help(update: Update, context: CallbackContext):
-    if DUAL_MODE_CARD_FLOW:
-        await open_help_card_from_command(update, context)
-        return
-    await update.message.reply_text(
-        fmt_help(),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=persistent_menu_kb(),
-    )
+    telegram_id = update.effective_user.id
+    with language_context(get_user_language(telegram_id)):
+        if DUAL_MODE_CARD_FLOW:
+            await open_help_card_from_command(update, context)
+            return
+        lang = get_active_language()
+        await update.message.reply_text(
+            localize_text(fmt_help(), lang),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=localize_markup(persistent_menu_kb(), lang),
+        )
 
 
 async def cmd_status(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    status = get_user_bot_status(telegram_id)
-    onboarding = evaluate_readiness(telegram_id)
-    text = fmt_status_overview(status, onboarding)
-    if status.get("last_error"):
-        text += f"\nLast error: {escape_md(str(status.get('last_error')))}"
-    perf_lines = summary_lines(top_n=5)
-    if perf_lines:
-        text += "\n\n*Perf Snapshot*"
-        for line in perf_lines:
-            text += f"\n• {escape_md(line)}"
+    with language_context(get_user_language(telegram_id)):
+        status = get_user_bot_status(telegram_id)
+        onboarding = evaluate_readiness(telegram_id)
+        text = fmt_status_overview(status, onboarding)
 
-    if DUAL_MODE_CARD_FLOW:
-        await open_status_card_from_command(update, context, text)
-        return
+        if DUAL_MODE_CARD_FLOW:
+            await open_status_card_from_command(update, context, text)
+            return
 
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=persistent_menu_kb(),
-    )
+        lang = get_active_language()
+        await update.message.reply_text(
+            localize_text(text, lang),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=localize_markup(persistent_menu_kb(), lang),
+        )
 
 
 async def cmd_stop_all(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
-    prefix = "🛑" if ok else "⚠️"
-    await update.message.reply_text(
-        f"{prefix} {msg}\n\nTo close open positions, use the Positions menu.",
-        reply_markup=persistent_menu_kb(),
-    )
+    with language_context(get_user_language(telegram_id)):
+        lang = get_active_language()
+        ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
+        prefix = "🛑" if ok else "⚠️"
+        close_msg = localize_text("To close open positions, use the Positions menu.", lang)
+        await update.message.reply_text(
+            f"{prefix} {msg}\n\n{close_msg}",
+            reply_markup=localize_markup(persistent_menu_kb(), lang),
+        )
 
 
 async def cmd_revoke(update: Update, context: CallbackContext):
-    """Show Nado revoke steps for 1CT key."""
-    msg = (
-        "🔄 *Revoke 1CT Key (Nado)*\n\n"
-        "1. Open Nado → Settings\n"
-        "2. 1-Click Trading → Advanced 1CT\n"
-        "3. Disable the toggle and save\n\n"
-        "Your main wallet and funds stay safe. You can link again anytime via Wallet."
-    )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=persistent_menu_kb())
+    telegram_id = update.effective_user.id
+    with language_context(get_user_language(telegram_id)):
+        lang = get_active_language()
+        msg = localize_text(
+            "🔄 *Revoke 1CT Key (Nado)*\n\n"
+            "1. Open Nado → Settings\n"
+            "2. 1-Click Trading → Advanced 1CT\n"
+            "3. Disable the toggle and save\n\n"
+            "Your main wallet and funds stay safe. You can link again anytime via Wallet.", lang
+        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=localize_markup(persistent_menu_kb(), lang))
 
 

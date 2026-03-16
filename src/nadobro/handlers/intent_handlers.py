@@ -4,6 +4,7 @@ import logging
 from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
 
+from src.nadobro.i18n import localize_text, get_active_language
 from src.nadobro.handlers.formatters import escape_md, fmt_trade_preview, fmt_trade_result
 from src.nadobro.handlers.intent_parser import parse_trade_intent
 from src.nadobro.services.admin_service import is_trading_paused
@@ -111,25 +112,26 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
     if not pending:
         return False
 
+    lang = get_active_language()
     normalized = text.strip().lower()
     if normalized in ("cancel", "no", "n", "abort"):
         context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
         await update.message.reply_text(
-            "❌ Trade cancelled\\.",
+            localize_text("❌ Trade cancelled\\.", lang),
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
 
     if normalized not in ("confirm", "yes", "y", "execute", "place"):
         await update.message.reply_text(
-            "Type `confirm` to execute this trade or `cancel` to discard it\\.",
+            localize_text("Type `confirm` to execute this trade or `cancel` to discard it\\.", lang),
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
 
     context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
     if is_trading_paused():
-        await update.message.reply_text("⏸ Trading is temporarily paused by admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(localize_text("⏸ Trading is temporarily paused by admin\\.", lang), parse_mode=ParseMode.MARKDOWN_V2)
         return True
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
@@ -154,10 +156,11 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
         intent.get("missing"),
     )
 
+    lang = get_active_language()
     step = get_resume_step(telegram_id)
     if step != "complete":
         await update.message.reply_text(
-            f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(step.upper())}*\\.",
+            localize_text(f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(step.upper())}*\\.", lang),
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
@@ -173,7 +176,7 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
     if intent.get("missing"):
         missing = ", ".join(intent["missing"])
         await update.message.reply_text(
-            "I can place this trade from text, but I need a bit more info\\.\n\n"
+            localize_text("I can place this trade from text, but I need a bit more info\\.", lang) + "\n\n"
             f"Missing: *{escape_md(missing)}*\n\n"
             "Example: `buy 0\\.01 BTC 5x market` or `sell 0\\.2 ETH limit 3200`",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -186,15 +189,16 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
 
     if _auto_execute_requested(text):
         if is_trading_paused():
-            await update.message.reply_text("⏸ Trading is temporarily paused by admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text(localize_text("⏸ Trading is temporarily paused by admin\\.", lang), parse_mode=ParseMode.MARKDOWN_V2)
             return True
         from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
         await authorize_or_prompt_passphrase(update, context, telegram_id, {"type": "execute_trade", "payload": payload})
         return True
 
     context.user_data[PENDING_TEXT_TRADE_KEY] = payload
+    confirm_prompt = localize_text("Type `confirm` to execute or `cancel` to discard\\.", lang)
     await update.message.reply_text(
-        f"{preview}\n\nType `confirm` to execute or `cancel` to discard\\.",
+        f"{preview}\n\n{confirm_prompt}",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
     return True

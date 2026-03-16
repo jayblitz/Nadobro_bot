@@ -3,6 +3,7 @@ import logging
 from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
 
+from src.nadobro.i18n import localize_text, localize_markup, get_active_language
 from src.nadobro.handlers.formatters import escape_md, fmt_positions, fmt_settings, fmt_wallet_info, fmt_portfolio, fmt_help
 from src.nadobro.handlers.keyboards import (
     home_card_kb,
@@ -71,14 +72,18 @@ def _remember_home_card(context: CallbackContext, chat_id: int, message_id: int)
 
 async def _edit_or_send_card(update, context: CallbackContext, text: str, reply_markup):
     chat_id = update.effective_chat.id
+    lang = get_active_language()
+    text = localize_text(text, lang)
+    reply_markup = localize_markup(reply_markup, lang)
 
     if not context.user_data.get(KEYBOARD_REMOVED_KEY):
         try:
-            # Ensure message-mode has an always-available Home shortcut.
+            shortcut_text = localize_text("Home shortcut enabled.", lang)
+            shortcut_kb = localize_markup(persistent_menu_kb(), lang)
             shortcut_msg = await context.bot.send_message(
                 chat_id=chat_id,
-                text="Home shortcut enabled.",
-                reply_markup=persistent_menu_kb(),
+                text=shortcut_text,
+                reply_markup=shortcut_kb,
             )
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=shortcut_msg.message_id)
@@ -86,7 +91,6 @@ async def _edit_or_send_card(update, context: CallbackContext, text: str, reply_
                 pass
             context.user_data[KEYBOARD_REMOVED_KEY] = True
         except Exception:
-            # Non-blocking: card rendering should continue even if keyboard remove fails.
             pass
 
     home = context.user_data.get(HOME_CARD_KEY) or {}
@@ -118,20 +122,18 @@ def _view_mode_text(telegram_id: int):
     user = get_user(telegram_id)
     current_network = user.network_mode.value if user else "testnet"
     network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
-    text = (
-        f"🌐 *Execution Mode Control*\n\n"
-        f"Current Mode: *{escape_md(network_label)}*\n\n"
-        f"Switch mode below:"
-    )
+    lang = get_active_language()
+    header = localize_text("🌐 *Execution Mode Control*\n\nCurrent Mode:", lang)
+    switch_label = localize_text("Switch mode below:", lang)
+    text = f"{header} *{escape_md(network_label)}*\n\n{switch_label}"
     return text, mode_kb(current_network)
 
 
 def _view_strategy_text():
-    return (
-        "🤖 *Nadobro Strategy Lab*\n\n"
-        "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
-        strategy_hub_kb(),
-    )
+    lang = get_active_language()
+    header = localize_text("🤖 *Nadobro Strategy Lab*", lang)
+    body = localize_text("Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.", lang)
+    return f"{header}\n\n{body}", strategy_hub_kb()
 
 
 def _view_wallet_text(telegram_id: int):
@@ -142,7 +144,7 @@ def _view_wallet_text(telegram_id: int):
 def _view_positions_text(telegram_id: int):
     client = get_user_readonly_client(telegram_id)
     if not client:
-        return "⚠️ Wallet not initialized\\. Use /start first\\.", home_card_kb()
+        return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
     positions = client.get_all_positions()
     prices = None
     try:
@@ -155,7 +157,7 @@ def _view_positions_text(telegram_id: int):
 def _view_portfolio_text(telegram_id: int):
     client = get_user_readonly_client(telegram_id)
     if not client:
-        return "⚠️ Wallet not initialized\\. Use /start first\\.", home_card_kb()
+        return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
     positions = client.get_all_positions() or []
     prices = None
     try:
@@ -168,11 +170,11 @@ def _view_portfolio_text(telegram_id: int):
 
 
 def _view_markets_text():
-    return "📡 *Market Radar*\n\nPick a market view:", markets_kb()
+    return localize_text("📡 *Market Radar*\n\nPick a market view:", get_active_language()), markets_kb()
 
 
 def _view_alerts_text():
-    return "🔔 *Alert Engine*\n\nManage your trigger alerts\\.", alerts_kb()
+    return localize_text("🔔 *Alert Engine*\n\nManage your trigger alerts\\.", get_active_language()), alerts_kb()
 
 
 def _view_settings_text(telegram_id: int):

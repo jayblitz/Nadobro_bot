@@ -2,8 +2,13 @@ import logging
 import re
 from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
+from src.nadobro.i18n import get_active_language, localize_text
 
 logger = logging.getLogger(__name__)
+
+
+def _loc(text):
+    return localize_text(text, get_active_language())
 
 
 def escape_md(text):
@@ -77,10 +82,10 @@ def fmt_price(price, product="BTC"):
 
 def fmt_positions(positions, prices=None):
     if not positions:
-        return "📋 *Open Orders*\n\nNo open orders found\\."
+        return _loc("📋 *Open Orders*") + "\n\n" + _loc("No open orders found\\.")
 
     lines = [
-        "📋 *Open Orders*",
+        _loc("📋 *Open Orders*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -114,13 +119,13 @@ def fmt_positions(positions, prices=None):
                 )
 
     lines.append("")
-    lines.append(f"Total: {escape_md(str(len(positions)))} order\\(s\\)")
+    lines.append(f"{_loc('Total')}: {escape_md(str(len(positions)))} {_loc('order(s)')}")
     return "\n".join(lines)
 
 
 def fmt_balance(balance_data, wallet_addr=None):
     lines = [
-        "💰 *Wallet Vault Balance*",
+        _loc("💰 *Wallet Vault Balance*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -157,10 +162,10 @@ def fmt_balance(balance_data, wallet_addr=None):
 
 def fmt_prices(prices):
     if not prices:
-        return "📡 *Market Radar*\n\nCould not fetch prices\\."
+        return _loc("📡 *Market Radar*") + "\n\n" + _loc("Could not fetch prices\\.")
 
     lines = [
-        "📡 *Market Radar*",
+        _loc("📡 *Market Radar*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -184,10 +189,10 @@ def fmt_prices(prices):
 
 def fmt_funding(funding_data):
     if not funding_data:
-        return "📊 *Funding Scanner*\n\nCould not fetch funding data\\."
+        return _loc("📊 *Funding Scanner*") + "\n\n" + _loc("Could not fetch funding data\\.")
 
     lines = [
-        "📊 *Funding Scanner*",
+        _loc("📊 *Funding Scanner*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -208,21 +213,21 @@ def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None)
         est_margin = (size * price) / leverage if leverage > 1 else size * price
 
     lines = [
-        f"{emoji} *Trade Preview*",
+        f"{emoji} *{_loc('Trade Preview')}*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
-        f"📌 *Action:* {escape_md(action_upper)}",
-        f"🪙 *Product:* {escape_md(product)}\\-PERP",
-        f"📏 *Size:* {escape_md(str(size))}",
-        f"💲 *Price:* {escape_md(f'~${fmt_price(price, product)}')}",
-        f"⚡ *Leverage:* {escape_md(f'{leverage}x')}",
+        f"📌 *{_loc('Action')}:* {escape_md(action_upper)}",
+        f"🪙 *{_loc('Product')}:* {escape_md(product)}\\-PERP",
+        f"📏 *{_loc('Size')}:* {escape_md(str(size))}",
+        f"💲 *{_loc('Price')}:* {escape_md(f'~${fmt_price(price, product)}')}",
+        f"⚡ *{_loc('Leverage')}:* {escape_md(f'{leverage}x')}",
     ]
 
     if est_margin is not None:
-        lines.append(f"💰 *Est\\. Margin:* {escape_md(f'${est_margin:,.2f}')}")
+        lines.append(f"💰 *{_loc('Est. Margin')}:* {escape_md(f'${est_margin:,.2f}')}")
 
     lines.append("")
-    lines.append("Confirm to execute this trade\\.")
+    lines.append(_loc("Confirm to execute this trade\\."))
 
     return "\n".join(lines)
 
@@ -233,7 +238,7 @@ def fmt_trade_result(result):
         r_product = result.get("product", "BTC")
         price_str = "$" + fmt_price(r_price, r_product)
         lines = [
-            "✅ *Trade Executed\\!*",
+            _loc("✅ *Trade Executed\\!*"),
             escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             "",
             f"📌 *Side:* {escape_md(result.get('side', '?'))}",
@@ -241,7 +246,7 @@ def fmt_trade_result(result):
             f"📏 *Size:* {escape_md(str(result.get('size', '?')))}",
             f"💲 *Price:* {escape_md(price_str)}",
             "",
-            f"🌐 *Network:* {escape_md(result.get('network', '?'))}",
+            f"🌐 *{_loc('Network:')}* {escape_md(result.get('network', '?'))}",
         ]
         if result.get("tp_requested"):
             if result.get("tp_set"):
@@ -259,32 +264,32 @@ def fmt_trade_result(result):
         return "\n".join(lines)
     else:
         error = result.get("error", "Unknown error")
-        return f"❌ *Trade Failed*\n\n{escape_md(error)}"
+        return f"❌ *{_loc('Trade Failed')}*\n\n{escape_md(error)}"
 
 
 def fmt_wallet_info(wallet_info):
     if not wallet_info:
-        return "💼 *Wallet Vault*\n\nWallet not found\\. Use /start first\\."
+        return _loc("💼 *Wallet Vault*") + "\n\n" + _loc("Wallet not found\\. Use /start first\\.")
 
     net = wallet_info.get("network", "testnet")
     net_emoji = "🧪" if net == "testnet" else "🌐"
     signer_linked = bool(wallet_info.get("linked_signer_address"))
 
     lines = [
-        "💼 *Wallet Vault*",
+        _loc("💼 *Wallet Vault*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
-        f"📊 *Network:* {net_emoji} {escape_md(net.upper())}",
+        f"📊 *{_loc('Network:')}* {net_emoji} {escape_md(net.upper())}",
     ]
 
     addr = wallet_info.get("active_address")
     if addr:
         lines.append("")
-        lines.append("📋 *Main Wallet:*")
+        lines.append(f"📋 *{_loc('Main Wallet:')}*")
         lines.append(f"`{escape_md(addr)}`")
     else:
         lines.append("")
-        lines.append("📋 *Main Wallet:* Not set")
+        lines.append(f"📋 *{_loc('Main Wallet:')}* {_loc('Not set')}")
 
     if signer_linked:
         lines.append("")
@@ -323,10 +328,10 @@ def fmt_wallet_info(wallet_info):
 
 def fmt_alerts(alerts):
     if not alerts:
-        return "🔔 *Alert Engine*\n\nNo active alerts\\. Use Set Alert to create one\\."
+        return _loc("🔔 *Alert Engine*") + "\n\n" + _loc("No active alerts\\. Use Set Alert to create one\\.")
 
     lines = [
-        "🔔 *Alert Engine*",
+        _loc("🔔 *Alert Engine*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -373,12 +378,12 @@ def fmt_portfolio(stats, positions, prices=None):
     upnl_str = f"+${unrealized_pnl:,.2f}" if unrealized_pnl >= 0 else f"-${abs(unrealized_pnl):,.2f}"
 
     lines = [
-        "📁 *Portfolio Deck*",
+        _loc("📁 *Portfolio Deck*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
-        f"📌 *Open Positions:* {escape_md(str(len(positions or [])))}",
-        f"💎 *Position Value:* {escape_md(f'${position_value:,.2f}')}",
-        f"{upnl_emoji} *Unrealized PnL:* {escape_md(upnl_str)}",
+        f"📌 *{_loc('Open Positions:')}* {escape_md(str(len(positions or [])))}",
+        f"💎 *{_loc('Position Value:')}* {escape_md(f'${position_value:,.2f}')}",
+        f"{upnl_emoji} *{_loc('Unrealized PnL:')}* {escape_md(upnl_str)}",
     ]
 
     if total_trades > 0:
@@ -389,18 +394,18 @@ def fmt_portfolio(stats, positions, prices=None):
         rpnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
         lines.extend([
             "",
-            "*Bot Trading Stats*",
-            f"💰 *Volume:* {escape_md(f'${total_volume:,.2f}')}",
-            f"{rpnl_emoji} *Realized PnL:* {escape_md(rpnl_str)}",
-            f"🏆 *Win Rate:* {escape_md(f'{win_rate:.1f}%')} \\| Trades: {escape_md(str(total_trades))}",
+            f"*{_loc('Bot Trading Stats')}*",
+            f"💰 *{_loc('Volume:')}* {escape_md(f'${total_volume:,.2f}')}",
+            f"{rpnl_emoji} *{_loc('Realized PnL:')}* {escape_md(rpnl_str)}",
+            f"🏆 *{_loc('Win Rate:')}* {escape_md(f'{win_rate:.1f}%')} \\| {_loc('Trades:')} {escape_md(str(total_trades))}",
         ])
 
     if not positions:
         lines.append("")
-        lines.append("No open positions right now\\.")
+        lines.append(_loc("No open positions right now\\."))
         return "\n".join(lines)
 
-    lines.extend(["", "*Top Open Positions*"])
+    lines.extend(["", f"*{_loc('Top Open Positions')}*"])
     for p in (positions or [])[:5]:
         side = p.get("side", "LONG")
         amount = abs(float(p.get("amount", 0) or 0))
@@ -433,7 +438,7 @@ def fmt_settings(user_data):
     slippage = user_data.get("slippage", 1)
 
     lines = [
-        "⚙️ *Control Panel*",
+        _loc("⚙️ *Control Panel*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"⚡ *Default Leverage:* {escape_md(f'{leverage}x')}",
@@ -444,7 +449,7 @@ def fmt_settings(user_data):
 
 
 def fmt_help():
-    return (
+    _HELP_TEXT = (
         "📖 *Trading Bot Guide*\n"
         + escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n"
         "\n"
@@ -487,54 +492,133 @@ def fmt_help():
         "\n"
         "Need support? Ask in chat with full error context and command used\\."
     )
+    return _loc(_HELP_TEXT)
+
+
+def _fmt_action_label(action: str) -> str:
+    labels = {
+        "hold": "Holding",
+        "open_long": "Opened Long",
+        "open_short": "Opened Short",
+        "close": "Closed Position",
+        "emergency_flatten": "Emergency Flatten",
+        "blocked": "Blocked",
+        "cycle": "Cycle Complete",
+    }
+    return labels.get(action, action.replace("_", " ").title() if action else "—")
+
+
+def _fmt_uptime(started_at: str) -> str:
+    if not started_at:
+        return "—"
+    try:
+        from datetime import datetime, timezone
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - start
+        hours, remainder = divmod(int(delta.total_seconds()), 3600)
+        minutes, _ = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+    except Exception:
+        return "—"
 
 
 def fmt_status_overview(status: dict, onboarding: dict):
     running = status.get("running")
-    step = onboarding.get("missing_step") or "complete"
     complete = onboarding.get("onboarding_complete")
     mode = onboarding.get("network", "testnet").upper()
-    key_ready = "YES" if onboarding.get("has_key") else "NO"
-    funded = "YES" if onboarding.get("funded") else "NO"
+    key_ready = onboarding.get("has_key")
+    funded = onboarding.get("funded")
 
     lines = [
-        "📡 *Nadobro Status*",
+        _loc("📡 *Nadobro Status*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
-        f"Mode: *{escape_md(mode)}*",
-        f"Onboarding: *{escape_md('COMPLETE' if complete else 'IN PROGRESS')}*",
-        f"Next Step: *{escape_md(step.upper())}*",
-        f"Key: *{escape_md(key_ready)}* \\| Funding: *{escape_md(funded)}*",
-        "",
+        f"{_loc('Network:')} *{escape_md(mode)}*",
     ]
+
+    if not complete:
+        step = onboarding.get("missing_step") or "unknown"
+        lines.append(f"{_loc('Setup:')} *{_loc('IN PROGRESS')}* — {escape_md(step.replace('_', ' ').title())}")
+        if not key_ready:
+            lines.append(f"{_loc('Key:')} *{_loc('NOT SET')}* — {_loc('use /onboard to continue')}")
+        elif not funded:
+            lines.append(f"{_loc('Funding:')} *{_loc('NEEDED')}* — {_loc('deposit to your wallet')}")
+    lines.append("")
+
     if not running:
-        lines.append("Strategy Runtime: *IDLE*")
+        lines.append(f"{_loc('Strategy:')} *{_loc('NOT RUNNING')}*")
+        last_action = status.get("last_action")
+        if last_action:
+            lines.append(f"{_loc('Last Action:')} {escape_md(_fmt_action_label(last_action))}")
+        if status.get("last_error"):
+            lines.append(f"{_loc('Stopped:')} {escape_md(str(status.get('last_error'))[:100])}")
     else:
-        lines.extend([
-            f"Strategy Runtime: *{escape_md((status.get('strategy') or '').upper())}*",
-            f"Pair: *{escape_md(str(status.get('product', 'BTC')))}\\-PERP*",
-            f"Cycles: *{escape_md(str(status.get('runs', 0)))}*",
-            f"Interval: *{escape_md(str(status.get('interval_seconds', 0)))}s*",
-        ])
+        strategy = (status.get("strategy") or "").upper()
+        product = str(status.get("product", "BTC"))
+        runs = status.get("runs", 0)
+        interval = status.get("interval_seconds", 0)
+        uptime = _fmt_uptime(status.get("started_at"))
+        next_in = status.get("next_cycle_in", 0)
+
+        lines.append(f"{_loc('Strategy:')} *{escape_md(strategy)}* — {_loc('RUNNING')}")
+        if product != "MULTI":
+            lines.append(f"{_loc('Pair:')} *{escape_md(product)}\\-PERP*")
+        else:
+            lines.append(f"{_loc('Mode:')} *Multi\\-Asset*")
+        lines.append(f"{_loc('Uptime:')} *{escape_md(uptime)}* \\| {_loc('Cycles:')} *{escape_md(str(runs))}*")
+        if next_in > 0:
+            lines.append(f"{_loc('Next Scan:')} *{escape_md(str(next_in))}s*")
+        else:
+            lines.append(f"{_loc('Interval:')} *{escape_md(str(interval))}s*")
+
+        last_action = status.get("last_action")
+        if last_action:
+            detail = status.get("last_action_detail") or ""
+            action_text = _fmt_action_label(last_action)
+            if detail:
+                action_text += f" — {detail[:80]}"
+            lines.append(f"{_loc('Last:')} {escape_md(action_text)}")
+
         if status.get("is_paused"):
-            lines.append(f"Pause: *{escape_md(str(status.get('pause_reason') or 'PAUSED'))}*")
+            lines.append(f"⚠️ *PAUSED*: {escape_md(str(status.get('pause_reason') or 'Unknown'))}")
+
+        error_streak = status.get("error_streak", 0)
+        if error_streak >= 3:
+            lines.append(f"⚠️ {escape_md(str(error_streak))} consecutive errors")
+
+        bro_state = status.get("bro_state") or {}
+        if strategy == "BRO" and bro_state:
+            trade_count = bro_state.get("trade_count", 0)
+            total_pnl = bro_state.get("total_pnl", 0.0)
+            active = len(bro_state.get("active_positions", []))
+            lines.append("")
+            lines.append(f"{_loc('Trades:')} *{escape_md(str(trade_count))}* \\| {_loc('Open Positions:')} *{escape_md(str(active))}*")
+            pnl_sign = "+" if total_pnl >= 0 else ""
+            lines.append(f"{_loc('Session PnL:')} *{escape_md(f'{pnl_sign}${total_pnl:,.2f}')}*")
+
         maker_fill_ratio = status.get("maker_fill_ratio")
-        cancellation_ratio = status.get("cancellation_ratio")
-        avg_quote_distance_bp = status.get("avg_quote_distance_bp")
-        quote_refresh_rate = status.get("quote_refresh_rate")
-        inventory_skew_usd = status.get("inventory_skew_usd")
         if maker_fill_ratio is not None:
+            cancellation_ratio = status.get("cancellation_ratio")
+            lines.append("")
             lines.append(
-                f"Maker Fill Ratio: *{escape_md(f'{float(maker_fill_ratio) * 100:.1f}%')}* \\| "
-                f"Cancel Ratio: *{escape_md(f'{float(cancellation_ratio or 0) * 100:.1f}%')}*"
+                f"Fill Rate: *{escape_md(f'{float(maker_fill_ratio) * 100:.1f}%')}* \\| "
+                f"Cancel Rate: *{escape_md(f'{float(cancellation_ratio or 0) * 100:.1f}%')}*"
             )
+        avg_quote_distance_bp = status.get("avg_quote_distance_bp")
         if avg_quote_distance_bp is not None:
+            quote_refresh_rate = status.get("quote_refresh_rate")
             lines.append(
                 f"Quote Dist: *{escape_md(f'{float(avg_quote_distance_bp):.2f} bp')}* \\| "
-                f"Refresh Rate: *{escape_md(f'{float(quote_refresh_rate or 0):.2f}/s')}*"
+                f"Refresh: *{escape_md(f'{float(quote_refresh_rate or 0):.2f}/s')}*"
             )
+        inventory_skew_usd = status.get("inventory_skew_usd")
         if inventory_skew_usd is not None:
             lines.append(f"Inventory Skew: *{escape_md(f'${float(inventory_skew_usd):,.2f}')}*")
+
     return "\n".join(lines)
 
 

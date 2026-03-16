@@ -117,11 +117,18 @@ def _resolve_transport_settings():
 
 
 def setup_bot():
-    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, filters
+    from telegram import Update
 
     from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_revoke
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
+
+    async def _language_middleware(update: Update, context):
+        user = update.effective_user
+        if user:
+            from src.nadobro.i18n import _ACTIVE_LANG, get_user_language, normalize_lang
+            _ACTIVE_LANG.set(normalize_lang(get_user_language(user.id)))
 
     app = (
         Application.builder()
@@ -129,6 +136,8 @@ def setup_bot():
         .concurrent_updates(True)
         .build()
     )
+
+    app.add_handler(TypeHandler(Update, _language_middleware), group=-1)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -139,7 +148,7 @@ def setup_bot():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot handlers registered (pure bot mode)")
+    logger.info("Bot handlers registered (pure bot mode, language middleware active)")
     return app
 
 

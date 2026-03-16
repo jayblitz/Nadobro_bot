@@ -123,11 +123,17 @@ def _save_state(telegram_id: int, network: str, state: dict):
     set_bot_state(_state_key(telegram_id, network), state)
 
 
-async def _notify(telegram_id: int, text: str):
+async def _notify(telegram_id: int, text: str, **fmt_kwargs):
     if not _bot_app:
         return
     try:
-        await _bot_app.bot.send_message(chat_id=telegram_id, text=text)
+        from src.nadobro.i18n import language_context, get_user_language, localize_text, get_active_language
+        with language_context(get_user_language(telegram_id)):
+            lang = get_active_language()
+            translated = localize_text(text, lang)
+            if fmt_kwargs:
+                translated = translated.format(**fmt_kwargs)
+            await _bot_app.bot.send_message(chat_id=telegram_id, text=translated)
     except Exception as e:
         logger.warning("Notify failed for %s: %s", telegram_id, e)
 
@@ -317,6 +323,9 @@ def get_user_bot_status(telegram_id: int) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
     state = _load_state(telegram_id, network)
+    last_run = float(state.get("last_run_ts") or 0)
+    interval = int(state.get("interval_seconds") or 60)
+    next_cycle_in = max(0, int(interval - (time.time() - last_run))) if last_run > 0 else 0
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -326,12 +335,18 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "spread_bp": state.get("spread_bp"),
         "tp_pct": state.get("tp_pct"),
         "sl_pct": state.get("sl_pct"),
-        "interval_seconds": state.get("interval_seconds"),
+        "interval_seconds": interval,
         "started_at": state.get("started_at"),
         "runs": state.get("runs", 0),
         "last_error": state.get("last_error"),
+        "last_action": state.get("last_action"),
+        "last_action_detail": state.get("last_action_detail"),
+        "last_run_ts": last_run,
+        "next_cycle_in": next_cycle_in,
+        "error_streak": int(state.get("error_streak") or 0),
         "pause_reason": state.get("mm_pause_reason") or "",
         "is_paused": bool(state.get("mm_paused")),
+        "bro_state": state.get("bro_state"),
         "maker_fill_ratio": (state.get("mm_last_metrics") or {}).get("maker_fill_ratio"),
         "cancellation_ratio": (state.get("mm_last_metrics") or {}).get("cancellation_ratio"),
         "avg_quote_distance_bp": (state.get("mm_last_metrics") or {}).get("avg_quote_distance_bp"),
@@ -403,7 +418,7 @@ def _ensure_task(telegram_id: int, network: str):
 
 async def _bot_loop(telegram_id: int, network: str):
     logger.info("Starting strategy loop for user %s on %s", telegram_id, network)
-    await _notify(telegram_id, f"Strategy loop started on {network}.")
+    await _notify(telegram_id, "Strategy loop started on {network}.", network=network)
     try:
         while True:
             state = _load_state(telegram_id, network)
@@ -463,11 +478,11 @@ async def _mark_cycle_error(telegram_id: int, network: str, error_msg: str):
         product = str(state.get("product") or "?")
         await _notify(
             telegram_id,
-            (
-                f"⚠️ {strategy} health alert on {product}-PERP ({network}): "
-                f"{streak} consecutive cycle errors.\n"
-                f"Latest: {str(error_msg)[:220]}"
-            ),
+            "⚠️ {strategy} health alert on {product}-PERP ({network}): "
+            "{streak} consecutive cycle errors.\n"
+            "Latest: {error}",
+            strategy=strategy, product=product, network=network,
+            streak=streak, error=str(error_msg)[:220],
         )
 
 
@@ -513,7 +528,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 await _notify(
                     telegram_id,
                     "Delta Neutral stop triggered, but auto-close cleanup failed. "
-                    f"Please close manually and check open orders. Error: {close_res.get('error', 'unknown')}",
+                    "Please close manually and check open orders. Error: {error}",
+                    error=close_res.get('error', 'unknown'),
                 )
         return True, None
     user = await run_blocking(get_user, telegram_id)
@@ -527,7 +543,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         await _notify(
             telegram_id,
-            f"Stopped {state.get('strategy', '').upper()} loop on {network}: active mode changed to {user.network_mode.value}.",
+            "Stopped {strategy} loop on {network}: active mode changed to {new_mode}.",
+            strategy=state.get('strategy', '').upper(), network=network, new_mode=user.network_mode.value,
         )
         return True, None
 
@@ -539,8 +556,9 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         await _notify(
             telegram_id,
-            f"⚠️ {str(state.get('strategy', '')).upper()} stopped on {network}: strategy session expired. "
-            f"Restart strategy and enter passphrase again.",
+            "⚠️ {strategy} stopped on {network}: strategy session expired. "
+            "Restart strategy and enter passphrase again.",
+            strategy=str(state.get('strategy', '')).upper(), network=network,
         )
         return True, None
 
@@ -568,49 +586,56 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             _save_state(telegram_id, network, state)
             if tk_check not in _tasks:
                 return True, None
-            await _notify(telegram_id, f"🧠 Bro Mode completed on {network}.")
+            await _notify(telegram_id, "🧠 Bro Mode completed on {network}.", network=network)
             return True, None
         prev_runs = int(state.get("runs") or 0)
         state["last_run_ts"] = time.time()
-        state["runs"] = prev_runs + 1
-        state["last_error"] = result.get("error")
-        _save_state(telegram_id, network, state)
-
         bro_action = result.get("action", "")
         bro_detail = result.get("detail", "")
         bro_confidence = result.get("confidence", 0)
+        state["runs"] = prev_runs + 1
+        state["last_error"] = result.get("error")
+        state["last_action"] = bro_action
+        state["last_action_detail"] = bro_detail[:200] if bro_detail else ""
+        _save_state(telegram_id, network, state)
         if prev_runs == 0 or bro_action in ("open_long", "open_short", "close", "emergency_flatten", "blocked"):
             if bro_action == "hold":
                 await _notify(
                     telegram_id,
-                    f"🧠 Bro Mode cycle #{state['runs']} ({network}): "
-                    f"HOLD — {bro_detail[:150]}\n"
-                    f"Confidence: {bro_confidence:.0%} | Next scan in {int(state.get('interval_seconds', 300))}s",
+                    "🧠 Bro Mode cycle #{cycle} ({network}): "
+                    "HOLD — {detail}\n"
+                    "Confidence: {confidence} | Next scan in {interval}s",
+                    cycle=state['runs'], network=network, detail=bro_detail[:150],
+                    confidence=f"{bro_confidence:.0%}", interval=int(state.get('interval_seconds', 300)),
                 )
             elif bro_action in ("open_long", "open_short"):
                 side_label = "LONG 📈" if bro_action == "open_long" else "SHORT 📉"
                 await _notify(
                     telegram_id,
-                    f"🧠 Bro Mode cycle #{state['runs']} ({network}): "
-                    f"{side_label} — {bro_detail[:150]}",
+                    "🧠 Bro Mode cycle #{cycle} ({network}): "
+                    "{side} — {detail}",
+                    cycle=state['runs'], network=network, side=side_label, detail=bro_detail[:150],
                 )
             elif bro_action == "blocked":
                 await _notify(
                     telegram_id,
-                    f"🧠 Bro Mode cycle #{state['runs']} ({network}): "
-                    f"Blocked — {bro_detail[:150]}",
+                    "🧠 Bro Mode cycle #{cycle} ({network}): "
+                    "Blocked — {detail}",
+                    cycle=state['runs'], network=network, detail=bro_detail[:150],
                 )
             elif bro_action:
                 await _notify(
                     telegram_id,
-                    f"🧠 Bro Mode cycle #{state['runs']} ({network}): "
-                    f"{bro_action.upper()} — {bro_detail[:150]}",
+                    "🧠 Bro Mode cycle #{cycle} ({network}): "
+                    "{action} — {detail}",
+                    cycle=state['runs'], network=network, action=bro_action.upper(), detail=bro_detail[:150],
                 )
         elif bro_action == "hold" and state["runs"] % 6 == 0:
             await _notify(
                 telegram_id,
-                f"🧠 Bro Mode update ({network}): Still scanning, {state['runs']} cycles run. "
-                f"Last: HOLD — {bro_detail[:100]}",
+                "🧠 Bro Mode update ({network}): Still scanning, {cycles} cycles run. "
+                "Last: HOLD — {detail}",
+                network=network, cycles=state['runs'], detail=bro_detail[:100],
             )
         logger.info(
             "Bro Mode cycle #%d for user %s: action=%s confidence=%.2f detail=%s",
@@ -652,7 +677,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         if close_res.get("success"):
             await _notify(
                 telegram_id,
-                f"🛑 {strategy.upper()} stopped on {product}-PERP ({network}) - SL hit ({move_pct:.2f}%).",
+                "🛑 {strategy} stopped on {product}-PERP ({network}) - SL hit ({pct}%).",
+                strategy=strategy.upper(), product=product, network=network, pct=f"{move_pct:.2f}",
             )
         else:
             logger.warning(
@@ -663,9 +689,10 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             )
             await _notify(
                 telegram_id,
-                f"⚠️ SL triggered for {strategy.upper()} on {product}-PERP ({network}), "
+                "⚠️ SL triggered for {strategy} on {product}-PERP ({network}), "
                 "but full cleanup failed. Please close remaining exposure on Nado. "
-                f"Error: {close_res.get('error', 'unknown')}",
+                "Error: {error}",
+                strategy=strategy.upper(), product=product, network=network, error=close_res.get('error', 'unknown'),
             )
         return True, None
     if tp_pct > 0 and move_pct >= tp_pct:
@@ -676,7 +703,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         if close_res.get("success"):
             await _notify(
                 telegram_id,
-                f"✅ {strategy.upper()} target reached on {product}-PERP ({network}) - TP hit ({move_pct:.2f}%).",
+                "✅ {strategy} target reached on {product}-PERP ({network}) - TP hit ({pct}%).",
+                strategy=strategy.upper(), product=product, network=network, pct=f"{move_pct:.2f}",
             )
         else:
             logger.warning(
@@ -687,9 +715,10 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             )
             await _notify(
                 telegram_id,
-                f"⚠️ TP triggered for {strategy.upper()} on {product}-PERP ({network}), "
+                "⚠️ TP triggered for {strategy} on {product}-PERP ({network}), "
                 "but full cleanup failed. Please close remaining exposure on Nado. "
-                f"Error: {close_res.get('error', 'unknown')}",
+                "Error: {error}",
+                strategy=strategy.upper(), product=product, network=network, error=close_res.get('error', 'unknown'),
             )
         return True, None
 
@@ -708,12 +737,14 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["running"] = False
         _save_state(telegram_id, network, state)
         if tk_post in _tasks:
-            await _notify(telegram_id, f"✅ {strategy.upper()} completed on {product}-PERP ({network}).")
+            await _notify(telegram_id, "✅ {strategy} completed on {product}-PERP ({network}).", strategy=strategy.upper(), product=product, network=network)
         return True, None
 
     state["last_run_ts"] = time.time()
     state["runs"] = int(state.get("runs") or 0) + 1
     state["last_error"] = result.get("error")
+    state["last_action"] = result.get("action", "cycle")
+    state["last_action_detail"] = str(result.get("detail", ""))[:200]
     _save_state(telegram_id, network, state)
     drift_seconds = max(0.0, state["last_run_ts"] - last_run - interval) if last_run > 0 else 0.0
     if drift_seconds > 0:

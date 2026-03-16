@@ -9,7 +9,14 @@ from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 
 from src.nadobro.config import DUAL_MODE_CARD_FLOW, get_product_id, get_product_max_leverage
+from src.nadobro.i18n import localize_text, localize_markup, get_active_language
 from src.nadobro.handlers.formatters import escape_md, fmt_trade_preview, fmt_trade_result
+
+
+def _loc(text: str) -> str:
+    return localize_text(text, get_active_language())
+
+
 from src.nadobro.handlers.keyboards import (
     home_card_kb,
     trade_card_direction_kb,
@@ -101,55 +108,58 @@ def _build_trade_card_text(session: dict) -> str:
     state = session.get("state", "direction")
     summary = _trade_step_summary(session)
     error = session.get("error")
-    error_block = f"\n\n⚠️ {escape_md(error)}" if error else ""
+    error_block = f"\n\n⚠️ {escape_md(_loc(error) if error else '')}" if error else ""
+    header = _loc("📊 *Trade Card*")
 
     if state == "direction":
-        return "📊 *Trade Card*\n\nSelect direction:" + error_block
+        return f"{header}\n\n{_loc('Select direction:')}" + error_block
     if state == "order_type":
-        return f"📊 *Trade Card*\n\n{summary}\n\nSelect order type:{error_block}"
+        return f"{header}\n\n{summary}\n\n{_loc('Select order type:')}{error_block}"
     if state == "product":
-        return f"📊 *Trade Card*\n\n{summary}\n\nSelect product:{error_block}"
+        return f"{header}\n\n{summary}\n\n{_loc('Select product:')}{error_block}"
     if state == "leverage":
-        return f"📊 *Trade Card*\n\n{summary}\n\nSelect leverage:{error_block}"
+        return f"{header}\n\n{summary}\n\n{_loc('Select leverage:')}{error_block}"
     if state == "size":
-        return f"📊 *Trade Card*\n\n{summary}\n\nSelect size:{error_block}"
+        return f"{header}\n\n{summary}\n\n{_loc('Select size:')}{error_block}"
     if state == "size_custom_input":
         return (
-            f"📊 *Trade Card*\n\n{summary}\n\n"
-            "Type your custom size in chat \\(e\\.g\\. `0\\.01`\\)\\."
+            f"{header}\n\n{summary}\n\n"
+            f"{_loc('Type your custom size in chat')} \\(e\\.g\\. `0\\.01`\\)\\."
             f"{error_block}"
         )
     if state == "limit_price":
         return (
-            f"📊 *Trade Card*\n\n{summary}\n\n"
-            "Type your limit price in chat \\(e\\.g\\. `95000`\\)\\."
+            f"{header}\n\n{summary}\n\n"
+            f"{_loc('Type your limit price in chat')} \\(e\\.g\\. `95000`\\)\\."
             f"{error_block}"
         )
     if state == "tpsl":
-        return f"📊 *Trade Card*\n\n{summary}\n\nSet TP/SL or skip:{error_block}"
+        return f"{header}\n\n{summary}\n\n{_loc('Set TP/SL or skip:')}{error_block}"
     if state == "tp_input":
+        tp_prompt = _loc("Type take profit price in chat\\.")
         return (
-            f"📊 *Trade Card*\n\n{summary}\n\n"
-            "Type take profit price in chat\\."
+            f"{header}\n\n{summary}\n\n"
+            f"{tp_prompt}"
             f"{error_block}"
         )
     if state == "sl_input":
+        sl_prompt = _loc("Type stop loss price in chat\\.")
         return (
-            f"📊 *Trade Card*\n\n{summary}\n\n"
-            "Type stop loss price in chat\\."
+            f"{header}\n\n{summary}\n\n"
+            f"{sl_prompt}"
             f"{error_block}"
         )
     if state == "tpsl_edit":
         tp_val = session.get("tp")
         sl_val = session.get("sl")
-        tp_str = f"TP: {escape_md(str(tp_val))}" if tp_val else "TP: not set"
-        sl_str = f"SL: {escape_md(str(sl_val))}" if sl_val else "SL: not set"
+        tp_str = f"TP: {escape_md(str(tp_val))}" if tp_val else f"TP: {_loc('not set')}"
+        sl_str = f"SL: {escape_md(str(sl_val))}" if sl_val else f"SL: {_loc('not set')}"
         return (
-            "📊 *Trade Card*\n\n"
+            f"{header}\n\n"
             f"{summary}\n\n"
-            f"📐 *TP/SL Settings*\n{tp_str} \\| {sl_str}{error_block}"
+            f"📐 *{_loc('TP/SL Settings')}*\n{tp_str} \\| {sl_str}{error_block}"
         )
-    return f"📊 *Trade Card*\n\n{summary}{error_block}"
+    return f"{header}\n\n{summary}{error_block}"
 
 
 def _card_keyboard(session: dict):
@@ -246,8 +256,9 @@ async def _edit_or_send_trade_card(
     chat_id: int,
     message_id: Optional[int] = None,
 ):
-    text = _build_trade_card_text(session)
-    kb = _card_keyboard(session)
+    lang = get_active_language()
+    text = localize_text(_build_trade_card_text(session), lang)
+    kb = localize_markup(_card_keyboard(session), lang)
     if message_id:
         try:
             await context.bot.edit_message_text(
@@ -271,11 +282,12 @@ async def _edit_or_send_trade_card(
 
 
 async def _edit_message_safely(query, text: str, reply_markup=None):
+    lang = get_active_language()
     try:
         await query.edit_message_text(
-            text,
+            localize_text(text, lang),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup,
+            reply_markup=localize_markup(reply_markup, lang) if reply_markup else reply_markup,
         )
     except BadRequest as e:
         if "Message is not modified" in str(e):
@@ -509,13 +521,14 @@ async def handle_trade_card_text_input(update: Update, context: CallbackContext,
     except (TypeError, ValueError):
         session["error"] = "Invalid number. Try again."
         _set_trade_card_session(context, session)
+        lang = get_active_language()
         try:
             await context.bot.edit_message_text(
                 chat_id=session["origin_chat_id"],
                 message_id=session["origin_message_id"],
-                text=_build_trade_card_text(session),
+                text=localize_text(_build_trade_card_text(session), lang),
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=_card_keyboard(session),
+                reply_markup=localize_markup(_card_keyboard(session), lang),
             )
         except Exception:
             pass
@@ -536,13 +549,14 @@ async def handle_trade_card_text_input(update: Update, context: CallbackContext,
         session["state"] = "tpsl_edit"
 
     _set_trade_card_session(context, session)
+    lang = get_active_language()
     try:
         await context.bot.edit_message_text(
             chat_id=session["origin_chat_id"],
             message_id=session["origin_message_id"],
-            text=_build_trade_card_text(session),
+            text=localize_text(_build_trade_card_text(session), lang),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=_card_keyboard(session),
+            reply_markup=localize_markup(_card_keyboard(session), lang),
         )
     except Exception:
         logger.exception("Failed to edit trade card after text input")

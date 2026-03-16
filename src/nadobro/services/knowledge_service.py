@@ -9,6 +9,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from openai import OpenAI
+from src.nadobro.i18n import get_active_language, LANGUAGE_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -512,7 +513,7 @@ CASUAL_SYSTEM_PROMPT = """You are Nadobro — a witty, sharp, and brutally hones
 
 Today's date: {current_date}
 User's name: {user_name}
-
+{language_instruction}
 PERSONALITY — THIS IS WHO YOU ARE:
 - You're funny, quick-witted, and a little sarcastic. You have OPINIONS about crypto and you're not afraid to share them.
 - You drop crypto slang naturally — WAGMI, LFG, NGMI, degen, ape, rekt, ser, fren, based, copium, hopium, diamond hands, paper hands, anon, chad move
@@ -534,7 +535,7 @@ SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro — a witty, sharp, and opinionat
 
 Today's date: {current_date}
 User's name: {user_name}
-
+{language_instruction}
 PERSONALITY — THIS IS WHO YOU ARE:
 - You're funny, clever, and real. Not a corporate support bot. You have actual opinions about crypto.
 - You're the smartest degen in the room — technically sharp but you talk like a human, not a textbook.
@@ -560,7 +561,7 @@ CONTEXT (use for Nado-specific facts, supplement with your own knowledge for eve
 X_TWITTER_NADO_PROMPT = """You are Nadobro — a witty, opinionated crypto AI with real-time access to X (Twitter). Think Grok but for Nado DEX.
 
 Today's date: {current_date}
-
+{language_instruction}
 Official X accounts:
 - @nadoHQ (https://x.com/nadoHQ) — Nado DEX official
 - @inkonchain (https://x.com/inkonchain) — Ink L2 blockchain (Nado's chain)
@@ -600,7 +601,7 @@ Relevant Nado Knowledge:
 X_TWITTER_BROAD_PROMPT = """You are Nadobro — a witty, opinionated crypto AI with real-time access to crypto Twitter (X). Think Grok vibes.
 
 Today's date: {current_date}
-
+{language_instruction}
 PERSONALITY:
 - Be conversational, have opinions, react to what you find like a real crypto native.
 - Use crypto slang naturally (CT, ser, anon, alpha, ngmi, wagmi, etc.)
@@ -1119,10 +1120,15 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
     now = datetime.utcnow()
     current_date = now.strftime("%Y-%m-%d")
 
+    lang = get_active_language()
+    lang_name = LANGUAGE_LABELS.get(lang, "English")
+    lang_instruction = f"IMPORTANT: The user's preferred language is {lang} ({lang_name}). Always respond in {lang_name}." if lang != "en" else ""
+
     if _is_casual_message(question):
         system = CASUAL_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
+            language_instruction=lang_instruction,
         )
         primary = _pick_primary_provider(question)
         try:
@@ -1162,14 +1168,16 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         except Exception as e:
             logger.warning(f"Casual response failed: {e}")
 
-        fallback_msg = f"Yo {display_name}! What's good? Ready to talk crypto, drop alpha, or just vibe. What do you need?"
+        from src.nadobro.i18n import localize_text as _lt
+        fallback_msg = _lt(f"Yo {display_name}! What's good? Ready to talk crypto, drop alpha, or just vibe. What do you need?", lang)
         yield fallback_msg
         if telegram_id:
             _add_to_chat_history(telegram_id, "assistant", fallback_msg)
         return
 
     if _is_x_twitter_question(question) and not xai_client:
-        yield "X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!"
+        from src.nadobro.i18n import localize_text as _lt
+        yield _lt("X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!", lang)
         return
 
     _load_knowledge_base()
@@ -1185,12 +1193,14 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
                 knowledge_base=_search_knowledge_sections(question, top_k=2),
                 current_date=current_date,
                 current_year=str(now.year),
+                language_instruction=lang_instruction,
             )
             used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
         else:
             system = X_TWITTER_BROAD_PROMPT.format(
                 current_date=current_date,
                 current_year=str(now.year),
+                language_instruction=lang_instruction,
             )
             used_sources = ["https://x.com"]
         gathered_context = "[X/TWITTER RESULTS]"
@@ -1216,6 +1226,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
             current_date=current_date,
             user_name=display_name,
             context=gathered_context[:12000],
+            language_instruction=lang_instruction,
         )
 
     used_sources = _filter_official_sources(used_sources)
@@ -1281,7 +1292,8 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
             logger.warning("Stream answer failed on provider=%s: %s", provider, provider_error)
             continue
 
-    yield "I couldn't generate an answer. Please try again."
+    from src.nadobro.i18n import localize_text as _lt
+    yield _lt("I couldn't generate an answer. Please try again.", lang)
 
 
 async def answer_nado_question(question: str, telegram_id: int = None, user_name: str = None) -> str:
@@ -1303,8 +1315,12 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
     now = datetime.utcnow()
     current_date = now.strftime("%Y-%m-%d")
 
+    lang = get_active_language()
+    lang_name = LANGUAGE_LABELS.get(lang, "English")
+    lang_instruction = f"IMPORTANT: The user's preferred language is {lang} ({lang_name}). Always respond in {lang_name}." if lang != "en" else ""
+
     if _is_casual_message(question):
-        system = CASUAL_SYSTEM_PROMPT.format(current_date=current_date, user_name=display_name)
+        system = CASUAL_SYSTEM_PROMPT.format(current_date=current_date, user_name=display_name, language_instruction=lang_instruction)
         primary = _pick_primary_provider(question)
         try:
             import asyncio
@@ -1327,13 +1343,15 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             return answer
         except Exception as e:
             logger.warning(f"Casual answer failed: {e}")
-            fallback = f"Yo {display_name}! What's good? I'm ready to talk crypto, drop alpha, or just vibe. What do you need?"
+            from src.nadobro.i18n import localize_text as _lt
+            fallback = _lt(f"Yo {display_name}! What's good? I'm ready to talk crypto, drop alpha, or just vibe. What do you need?", lang)
             if telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", fallback)
             return fallback
 
     if _is_x_twitter_question(question) and not xai_client:
-        return "X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!"
+        from src.nadobro.i18n import localize_text as _lt
+        return _lt("X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!", lang)
 
     _load_knowledge_base()
 
@@ -1348,12 +1366,14 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                 knowledge_base=_search_knowledge_sections(question, top_k=2),
                 current_date=current_date,
                 current_year=str(now.year),
+                language_instruction=lang_instruction,
             )
             used_sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
         else:
             system = X_TWITTER_BROAD_PROMPT.format(
                 current_date=current_date,
                 current_year=str(now.year),
+                language_instruction=lang_instruction,
             )
             used_sources = ["https://x.com"]
         gathered_context = "[X/TWITTER RESULTS]"
@@ -1379,6 +1399,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             current_date=current_date,
             user_name=display_name,
             context=gathered_context[:12000],
+            language_instruction=lang_instruction,
         )
 
     used_sources = _filter_official_sources(used_sources)
@@ -1436,7 +1457,8 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         if not answer:
             if last_error:
                 raise last_error
-            return "I couldn't generate an answer. Please try again."
+            from src.nadobro.i18n import localize_text as _lt
+            return _lt("I couldn't generate an answer. Please try again.", lang)
 
         logger.info("Support answer generated via provider=%s in %.1fs", used_provider, time.time() - started_at)
         if not skip_sources and "Sources:" not in answer:

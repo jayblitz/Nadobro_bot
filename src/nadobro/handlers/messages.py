@@ -5,6 +5,7 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
+from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language, resolve_reply_button_text
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_readonly_client, get_user_wallet_info, get_user,
     ensure_active_wallet_ready, save_linked_signer, get_user_nado_client,
@@ -37,6 +38,18 @@ from src.nadobro.handlers.trade_card import (
     is_trade_card_mode_enabled,
 )
 from src.nadobro.handlers.home_card import open_home_card_view_from_message
+
+
+async def _reply_loc(message, text, parse_mode=None, reply_markup=None):
+    lang = get_active_language()
+    kwargs = {}
+    if parse_mode is not None:
+        kwargs["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        kwargs["reply_markup"] = localize_markup(reply_markup, lang)
+    return await message.reply_text(localize_text(text, lang), **kwargs)
+
+
 from src.nadobro.handlers.intent_handlers import (
     handle_pending_text_trade_confirmation,
     handle_trade_intent_message,
@@ -136,7 +149,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         payload = action_data.get("payload", {})
         from src.nadobro.handlers.intent_handlers import _execute_trade_payload
         result = await run_blocking(_execute_trade_payload, telegram_id, payload, passphrase=passphrase)
-        await message.reply_text(
+        await _reply_loc(message, 
             fmt_trade_result(result),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -167,7 +180,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
                 is_long=is_long, leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase,
                 tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
-        await message.reply_text(
+        await _reply_loc(message, 
             fmt_trade_result(result),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -195,7 +208,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
                 execute_market_order, telegram_id, product, size,
                 is_long=is_long, leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase
             )
-        await message.reply_text(
+        await _reply_loc(message, 
             fmt_trade_result(result),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -209,7 +222,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             msg = f"✅ Closed {escape_md(str(result.get('cancelled', 0)))} {escape_md(result.get('product', product))} position size\\."
         else:
             msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
-        await message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
+        await _reply_loc(message, msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
         return bool(result.get("success")), str(result.get("error", ""))
 
     if action_type == "close_all":
@@ -219,7 +232,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             msg = f"✅ Closed total size {escape_md(str(result.get('cancelled', 0)))} across {escape_md(products)}\\."
         else:
             msg = f"❌ Close failed: {escape_md(result.get('error', 'unknown error'))}"
-        await message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
+        await _reply_loc(message, msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
         return bool(result.get("success")), str(result.get("error", ""))
 
     if action_type == "trade_card":
@@ -245,7 +258,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
                 tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         result_msg = fmt_trade_result(result)
-        await message.reply_text(
+        await _reply_loc(message, 
             f"{result_msg}\n\nUse the menu for your next action\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -270,14 +283,14 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             reply = f"🚀 {escape_md(msg)}\n\nUse /status to monitor live loop health\\."
         else:
             reply = f"❌ {escape_md(msg)}"
-        await message.reply_text(
+        await _reply_loc(message, 
             reply,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
         )
         return bool(ok), "" if ok else str(msg)
 
-    await message.reply_text(
+    await _reply_loc(message, 
         "⚠️ Unknown action\\. Please try again\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=persistent_menu_kb(),
@@ -288,16 +301,16 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
 async def _prompt_passphrase(update_or_query, context, action_data: dict):
     context.user_data[PENDING_PASSPHRASE_ACTION] = action_data
     msg_text = "🔐 Enter your passphrase to authorize this command:"
+    lang = get_active_language()
+    kb = localize_markup(InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
+    ]), lang)
     if hasattr(update_or_query, 'message') and update_or_query.message:
-        await update_or_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
-        ]))
+        await _reply_loc(update_or_query.message, msg_text, reply_markup=kb)
     elif hasattr(update_or_query, 'edit_message_text'):
         await update_or_query.edit_message_text(
-            msg_text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
-            ]),
+            localize_text(msg_text, lang),
+            reply_markup=kb,
         )
 
 
@@ -364,74 +377,83 @@ async def handle_message(update: Update, context: CallbackContext):
 
         get_or_create_user(telegram_id, username)
 
-        if text in REPLY_BUTTON_MAP:
-            callback_data = REPLY_BUTTON_MAP[text]
-            if _is_contextual_button(callback_data, context):
-                try:
-                    await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
-                except Exception as e:
-                    logger.error(f"Button dispatch error for '{text}': {e}", exc_info=True)
-                    try:
-                        await update.message.reply_text(
-                            "⚠️ Something went wrong\\. Please try again\\.",
-                            parse_mode=ParseMode.MARKDOWN_V2,
-                            reply_markup=persistent_menu_kb(),
-                        )
-                    except Exception:
-                        pass
-                return
-
-        if await _handle_passphrase_input(update, context, telegram_id, text):
-            return
-
-        if await handle_trade_card_text_input(update, context, telegram_id, text):
-            return
-
-        if await handle_pending_text_trade_confirmation(update, context, telegram_id, text):
-            return
-
-        if await _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
-            return
-
-        if await _handle_wallet_flow(update, context, telegram_id, text):
-            return
-
-        if await _handle_trade_flow_free_text(update, context, telegram_id, text):
-            return
-
-        if await _handle_pending_trade(update, context, telegram_id, text):
-            return
-
-        if await _handle_pending_alert(update, context, telegram_id, text):
-            return
-
-        if await _handle_pending_strategy_input(update, context, telegram_id, text):
-            return
-
-        if await _handle_pending_bro_input(update, context, telegram_id, text):
-            return
-
-        if await handle_trade_intent_message(update, context, telegram_id, text):
-            return
-
-        if await _handle_interaction_intent_message(update, context, telegram_id, text):
-            return
-
-        await _handle_nado_question(update, context, text)
+        with language_context(get_user_language(telegram_id)):
+            return await _handle_message_inner(update, context, telegram_id, username, text, started)
     finally:
         log_slow("message.total", threshold_ms=1000.0, started_at=started)
 
 
+async def _handle_message_inner(update, context, telegram_id, username, text, started):
+    resolved_text = resolve_reply_button_text(text)
+    if resolved_text in REPLY_BUTTON_MAP:
+        callback_data = REPLY_BUTTON_MAP[resolved_text]
+        if _is_contextual_button(callback_data, context):
+            try:
+                await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
+            except Exception as e:
+                logger.error(f"Button dispatch error for '{text}': {e}", exc_info=True)
+                lang = get_active_language()
+                try:
+                    await _reply_loc(update.message, 
+                        localize_text("⚠️ Something went wrong\\. Please try again\\.", lang),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=localize_markup(persistent_menu_kb(), lang),
+                    )
+                except Exception:
+                    pass
+            return
+
+    if await _handle_passphrase_input(update, context, telegram_id, text):
+        return
+
+    if await handle_trade_card_text_input(update, context, telegram_id, text):
+        return
+
+    if await handle_pending_text_trade_confirmation(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
+        return
+
+    if await _handle_wallet_flow(update, context, telegram_id, text):
+        return
+
+    if await _handle_trade_flow_free_text(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_trade(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_alert(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_strategy_input(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_bro_input(update, context, telegram_id, text):
+        return
+
+    if await handle_trade_intent_message(update, context, telegram_id, text):
+        return
+
+    if await _handle_interaction_intent_message(update, context, telegram_id, text):
+        return
+
+    await _handle_nado_question(update, context, text)
+
+
 async def _dispatch_reply_button(update, context, telegram_id, callback_data, text):
+    lang = get_active_language()
+
     if callback_data == "nav:main":
         clear_session_passphrase(context)
         if is_trade_card_mode_enabled():
             await open_home_card_view_from_message(update, context, telegram_id, "nav:main")
             return
-        await update.message.reply_text(
-            "Use /start to open the dashboard\\.",
+        await _reply_loc(update.message, 
+            localize_text("Use /start to open the dashboard\\.", lang),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=persistent_menu_kb(),
+            reply_markup=localize_markup(persistent_menu_kb(), lang),
         )
         return
 
@@ -453,10 +475,10 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         if is_trade_card_mode_enabled():
             await open_trade_card_from_message(update, context, telegram_id)
             return
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "🤖 *Trade Console*\n\nSelect direction:",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=trade_direction_kb(),
+            reply_markup=localize_markup(trade_direction_kb(), lang),
         )
         _clear_trade_flow(context)
         _set_trade_flow(context, {"state": "direction"})
@@ -467,10 +489,10 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             if callback_data in ("trade_flow:home", "trade_flow:cancel"):
                 _clear_trade_flow(context)
                 clear_session_passphrase(context, telegram_id=telegram_id)
-                await update.message.reply_text(
-                    "↩️ Returned to home\\.",
+                await _reply_loc(update.message, 
+                    localize_text("↩️ Returned to home\\.", lang),
                     parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=persistent_menu_kb(),
+                    reply_markup=localize_markup(persistent_menu_kb(), lang),
                 )
                 return
             await open_trade_card_from_message(update, context, telegram_id)
@@ -482,21 +504,22 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         user = get_user(telegram_id)
         current_network = user.network_mode.value if user else "testnet"
         network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
-        await update.message.reply_text(
-            f"🌐 *Execution Mode Control*\n\n"
-            f"Current Mode: *{escape_md(network_label)}*\n\n"
-            f"Switch mode below:",
+        header = localize_text("🌐 *Execution Mode Control*\n\nCurrent Mode:", lang)
+        switch_label = localize_text("Switch mode below:", lang)
+        await _reply_loc(update.message, 
+            f"{header} *{escape_md(network_label)}*\n\n{switch_label}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=mode_kb(current_network),
+            reply_markup=localize_markup(mode_kb(current_network), lang),
         )
         return
 
     if callback_data == "nav:strategy_hub":
-        await update.message.reply_text(
-            "🤖 *Nadobro Strategy Lab*\n\n"
-            "Pick a strategy to open its cockpit dashboard, tune risk, and launch with pre\\-trade analytics\\.",
+        header = localize_text("🤖 *Nadobro Strategy Lab*", lang)
+        body = localize_text("Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.", lang)
+        await _reply_loc(update.message, 
+            f"{header}\n\n{body}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=strategy_hub_kb(),
+            reply_markup=localize_markup(strategy_hub_kb(), lang),
         )
         return
 
@@ -505,10 +528,10 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         with timed_metric("msg.wallet.view"):
             info = await run_blocking(get_user_wallet_info, telegram_id)
         msg = fmt_wallet_info(info)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=wallet_kb(),
+            reply_markup=localize_markup(wallet_kb(), lang),
         )
         return
 
@@ -516,8 +539,8 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         await update.message.chat.send_action(ChatAction.TYPING)
         client = get_user_readonly_client(telegram_id)
         if not client:
-            await update.message.reply_text(
-                "⚠️ Wallet not initialized\\. Use /start first\\.",
+            await _reply_loc(update.message, 
+                localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", lang),
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
             return
@@ -529,10 +552,10 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         except Exception:
             pass
         msg = fmt_positions(positions, prices)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=positions_kb(positions or []),
+            reply_markup=localize_markup(positions_kb(positions or []), lang),
         )
         return
 
@@ -540,8 +563,8 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         await update.message.chat.send_action(ChatAction.TYPING)
         client = get_user_readonly_client(telegram_id)
         if not client:
-            await update.message.reply_text(
-                "⚠️ Wallet not initialized\\. Use /start first\\.",
+            await _reply_loc(update.message, 
+                localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", lang),
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
             return
@@ -554,26 +577,26 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             pass
         stats = await run_blocking(get_trade_analytics, telegram_id)
         msg = fmt_portfolio(stats, positions, prices)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=portfolio_kb(has_positions=bool(positions)),
+            reply_markup=localize_markup(portfolio_kb(has_positions=bool(positions)), lang),
         )
         return
 
     if callback_data == "mkt:menu":
-        await update.message.reply_text(
-            "📡 *Market Radar*\n\nPick a market view:",
+        await _reply_loc(update.message, 
+            localize_text("📡 *Market Radar*\n\nPick a market view:", lang),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=markets_kb(),
+            reply_markup=localize_markup(markets_kb(), lang),
         )
         return
 
     if callback_data == "alert:menu":
-        await update.message.reply_text(
-            "🔔 *Alert Engine*\n\nManage your trigger alerts\\.",
+        await _reply_loc(update.message, 
+            localize_text("🔔 *Alert Engine*\n\nManage your trigger alerts\\.", lang),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=alerts_kb(),
+            reply_markup=localize_markup(alerts_kb(), lang),
         )
         return
 
@@ -582,15 +605,15 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         msg = fmt_settings(user_settings)
         lev = user_settings.get("default_leverage", 1)
         slip = user_settings.get("slippage", 1)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_kb(lev, slip),
+            reply_markup=localize_markup(settings_kb(lev, slip), lang),
         )
         return
 
-    await update.message.reply_text(
-        f"Use the keyboard buttons or type a question for AI chat\\.",
+    await _reply_loc(update.message, 
+        localize_text("Use the menu for your next action\\.", lang),
         parse_mode=ParseMode.MARKDOWN_V2,
     )
 
@@ -605,7 +628,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
     if action == "home" or action == "cancel":
         _clear_trade_flow(context)
         clear_session_passphrase(context, telegram_id=telegram_id)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -616,7 +639,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         if not flow:
             _clear_trade_flow(context)
             clear_session_passphrase(context, telegram_id=telegram_id)
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "↩️ Returned to home\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=persistent_menu_kb(),
@@ -629,7 +652,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
     if action == "direction":
         step = get_resume_step(telegram_id)
         if step != "complete":
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"⚠️ Setup incomplete\\. Resume onboarding at *{escape_md(step.upper())}*\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=persistent_menu_kb(),
@@ -638,7 +661,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             return
         wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"⚠️ {escape_md(wallet_msg)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=persistent_menu_kb(),
@@ -649,7 +672,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         direction = value
         direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
         _set_trade_flow(context, {"state": "order_type", "direction": direction})
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"{direction_label} → Select order type:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_order_type_kb(),
@@ -663,7 +686,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         flow["state"] = "product"
         _set_trade_flow(context, flow)
         order_label = "📈 MARKET" if value == "market" else "📉 LIMIT"
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"{order_label} → Select product:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_product_reply_kb(),
@@ -676,7 +699,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         flow["product"] = value
         flow["state"] = "leverage"
         _set_trade_flow(context, flow)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"🪙 {escape_md(value)}\\-PERP → Select leverage:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_leverage_reply_kb(value),
@@ -694,7 +717,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         product = flow.get("product", "BTC")
         max_leverage = get_product_max_leverage(product)
         if leverage > max_leverage:
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"⚠️ Max leverage for {escape_md(product)} is {escape_md(str(max_leverage))}x\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=trade_leverage_reply_kb(product),
@@ -703,7 +726,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         flow["leverage"] = leverage
         flow["state"] = "size"
         _set_trade_flow(context, flow)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"⚡ {escape_md(str(leverage))}x → Select size for {escape_md(product)}:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_size_reply_kb(product),
@@ -715,7 +738,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             return
         if value == "custom":
             context.user_data["trade_flow_custom_size"] = True
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "✏️ Enter custom size \\(e\\.g\\. `0\\.01`\\):",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -730,14 +753,14 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             flow["state"] = "limit_price"
             _set_trade_flow(context, flow)
             context.user_data["trade_flow_limit_price_input"] = True
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"📏 Size: {escape_md(str(size))} → Enter limit price:",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
         else:
             flow["state"] = "tpsl"
             _set_trade_flow(context, flow)
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"📏 Size: {escape_md(str(size))} → Set TP/SL or skip:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=trade_tpsl_kb(),
@@ -757,7 +780,7 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             sl_val = flow.get("sl")
             tp_str = f"TP: {escape_md(str(tp_val))}" if tp_val else "TP: not set"
             sl_str = f"SL: {escape_md(str(sl_val))}" if sl_val else "SL: not set"
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"📐 *TP/SL Settings*\n{tp_str} \\| {sl_str}\n\nTap Set TP or Set SL to enter values:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=trade_tpsl_edit_kb(),
@@ -765,14 +788,14 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             return
         if value == "set_tp":
             context.user_data["trade_flow_tp_input"] = True
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "Enter take profit price:",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
             return
         if value == "set_sl":
             context.user_data["trade_flow_sl_input"] = True
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "Enter stop loss price:",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -793,7 +816,7 @@ async def _go_back(update, context, flow, state, telegram_id):
     if state in ("direction", "order_type"):
         _clear_trade_flow(context)
         clear_session_passphrase(context, telegram_id=telegram_id)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -821,13 +844,13 @@ async def _go_back(update, context, flow, state, telegram_id):
 
         if prev_state == "size":
             product = flow.get("product", "BTC")
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"Select size for {escape_md(product)}:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=trade_size_reply_kb(product),
             )
         elif kb_fn and prompt:
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 prompt,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=kb_fn(),
@@ -835,14 +858,14 @@ async def _go_back(update, context, flow, state, telegram_id):
         else:
             if prev_state == "size":
                 product = flow.get("product", "BTC")
-                await update.message.reply_text(
+                await _reply_loc(update.message, 
                     f"Select size for {escape_md(product)}:",
                     parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=trade_size_reply_kb(product),
                 )
             elif prev_state == "leverage":
                 product = flow.get("product", "BTC")
-                await update.message.reply_text(
+                await _reply_loc(update.message, 
                     prompt,
                     parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=trade_leverage_reply_kb(product),
@@ -850,7 +873,7 @@ async def _go_back(update, context, flow, state, telegram_id):
     else:
         _clear_trade_flow(context)
         clear_session_passphrase(context, telegram_id=telegram_id)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -900,7 +923,7 @@ async def _move_to_confirm(update, context, telegram_id, flow):
         if sl_val:
             preview += f"\n📉 *Stop Loss:* {escape_md(str(sl_val))}"
 
-    await update.message.reply_text(
+    await _reply_loc(update.message, 
         preview,
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=trade_confirm_reply_kb(),
@@ -918,7 +941,7 @@ async def _execute_trade_flow(update, context, telegram_id, flow):
     _clear_trade_flow(context)
 
     if is_trading_paused():
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "⏸ Trading is temporarily paused by admin\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -927,7 +950,7 @@ async def _execute_trade_flow(update, context, telegram_id, flow):
 
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"⚠️ {escape_md(wallet_msg)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -959,7 +982,7 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
         try:
             size = float(text.strip())
         except ValueError:
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "⚠️ Invalid size\\. Enter a number \\(e\\.g\\. `0\\.01`\\)\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -970,14 +993,14 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
             flow["state"] = "limit_price"
             _set_trade_flow(context, flow)
             context.user_data["trade_flow_limit_price_input"] = True
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"📏 Size: {escape_md(str(size))} → Enter limit price:",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
         else:
             flow["state"] = "tpsl"
             _set_trade_flow(context, flow)
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"📏 Size: {escape_md(str(size))} → Set TP/SL or skip:",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=trade_tpsl_kb(),
@@ -992,7 +1015,7 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
         try:
             price = float(text.strip())
         except ValueError:
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "⚠️ Invalid price\\. Enter a number \\(e\\.g\\. `95000`\\)\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -1001,7 +1024,7 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
         flow["limit_price"] = price
         flow["state"] = "tpsl"
         _set_trade_flow(context, flow)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"💲 Limit price: {escape_md(str(price))} → Set TP/SL or skip:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_tpsl_kb(),
@@ -1016,7 +1039,7 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
         try:
             tp = float(text.strip())
         except ValueError:
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "⚠️ Invalid price\\. Enter a number\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -1027,7 +1050,7 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
         tp_str = f"TP: {escape_md(str(tp))}"
         sl_val = flow.get("sl")
         sl_str = f"SL: {escape_md(str(sl_val))}" if sl_val else "SL: not set"
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"✅ TP set\\!\n{tp_str} \\| {sl_str}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_tpsl_edit_kb(),
@@ -1042,7 +1065,7 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
         try:
             sl = float(text.strip())
         except ValueError:
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "⚠️ Invalid price\\. Enter a number\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -1053,7 +1076,7 @@ async def _handle_trade_flow_free_text(update, context, telegram_id, text):
         tp_val = flow.get("tp")
         tp_str = f"TP: {escape_md(str(tp_val))}" if tp_val else "TP: not set"
         sl_str = f"SL: {escape_md(str(sl))}"
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"✅ SL set\\!\n{tp_str} \\| {sl_str}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_tpsl_edit_kb(),
@@ -1081,7 +1104,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
                 leverage = int(float(lev_str))
                 explicit_leverage = True
         except (ValueError, IndexError):
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "⚠️ Invalid size\\. Enter a number \\(e\\.g\\. `0\\.01`\\)\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -1092,7 +1115,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         max_leverage = get_product_max_leverage(product)
         if leverage > max_leverage:
             if explicit_leverage:
-                await update.message.reply_text(
+                await _reply_loc(update.message, 
                     f"⚠️ Max leverage for {escape_md(product)} is {escape_md(str(max_leverage))}x\\.",
                     parse_mode=ParseMode.MARKDOWN_V2,
                 )
@@ -1123,7 +1146,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         }
 
         preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             preview,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_confirm_kb(),
@@ -1136,7 +1159,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             size = float(parts[0])
             price = float(parts[1])
         except (ValueError, IndexError):
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "⚠️ Enter size and price \\(e\\.g\\. `0\\.01 95000`\\)\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -1165,7 +1188,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
             price,
             leverage,
         )
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             preview,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=trade_confirm_kb(),
@@ -1205,7 +1228,7 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
 
     if flow == "awaiting_main_address":
         if not _is_valid_main_address(text):
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "❌ That doesn't look right. Send your main wallet address — starts with 0x followed by 40 hex characters.",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -1215,7 +1238,7 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
             main_addr = main_addr[:2] + main_addr[2:].lower()
         context.user_data["wallet_main_address"] = main_addr
         context.user_data["wallet_flow"] = "awaiting_passphrase"
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "🔐 Almost done! Choose a *strong passphrase* to encrypt your 1CT key.\n\n"
             "Requirements: min 12 characters, mix of uppercase, lowercase, number, and symbol.\n\n"
             "You'll need this passphrase each time you start a trading session.",
@@ -1226,14 +1249,14 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
     if flow == "awaiting_passphrase":
         ok, msg = _is_strong_passphrase(text)
         if not ok:
-            await update.message.reply_text(f"❌ {msg}", parse_mode=ParseMode.MARKDOWN)
+            await _reply_loc(update.message, f"❌ {msg}", parse_mode=ParseMode.MARKDOWN)
             return True
         pk_hex = context.user_data.get("wallet_linked_signer_pk")
         main_addr = context.user_data.get("wallet_main_address")
         linked_addr = context.user_data.get("wallet_linked_signer_address")
         if not pk_hex or not main_addr or not linked_addr:
             context.user_data.pop("wallet_flow", None)
-            await update.message.reply_text("⚠️ Session expired. Tap the Wallet button to start again.")
+            await _reply_loc(update.message, "⚠️ Session expired. Tap the Wallet button to start again.")
             return True
         passphrase = text.strip()
         pk_bytes = pk_hex.encode("utf-8")
@@ -1245,7 +1268,7 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
             await update.message.delete()
         except Exception:
             pass
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "✅ Wallet linked! Your 1CT key is encrypted and stored.\n\n"
             "You can now trade directly from this bot. Revoke anytime with /revoke.",
             reply_markup=persistent_menu_kb(),
@@ -1276,14 +1299,14 @@ async def _handle_pending_alert(update, context, telegram_id, text):
         condition = parts[0]
         target = float(parts[1])
     except (ValueError, IndexError):
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "⚠️ Invalid format\\. Use: `above 100000` or `below 90000`",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
 
     if condition not in ("above", "below"):
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "⚠️ Invalid condition\\. Use: above, below",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
@@ -1291,7 +1314,7 @@ async def _handle_pending_alert(update, context, telegram_id, text):
 
     result = create_alert(telegram_id, product, condition, target)
     if result["success"]:
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"✅ Alert set\\!\n"
             f"{escape_md(result['product'])} {escape_md(condition)} "
             f"{escape_md(f'${target:,.2f}')}",
@@ -1299,7 +1322,7 @@ async def _handle_pending_alert(update, context, telegram_id, text):
             reply_markup=persistent_menu_kb(),
         )
     else:
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"❌ {escape_md(result['error'])}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -1326,7 +1349,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     try:
         value = float(text.strip())
     except (TypeError, ValueError):
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "⚠️ Invalid value\\. Please enter a number\\. Example: `1\\.2`",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
@@ -1346,7 +1369,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     }
     lo, hi = limits[field]
     if value < lo or value > hi:
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"⚠️ Value out of range\\. Allowed: {escape_md(str(lo))} to {escape_md(str(hi))}",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
@@ -1363,7 +1386,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     network, settings = update_user_settings(telegram_id, _mutate)
     conf = settings.get("strategies", {}).get(strategy, {})
     context.user_data.pop("pending_strategy_input", None)
-    await update.message.reply_text(
+    await _reply_loc(update.message, 
         fmt_strategy_update(strategy, network, conf),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup([
@@ -1388,20 +1411,20 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
             tp = float(parts[0].strip())
             sl = float(parts[1].strip())
         except (ValueError, IndexError):
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "⚠️ Invalid format\\. Use `TP,SL` \\(example: `2.0,1.5`\\)",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
             return True
         if tp < 0.3 or tp > 20 or sl < 0.3 or sl > 10:
-            await update.message.reply_text("⚠️ TP: 0\\.3\\-20%, SL: 0\\.3\\-10%", parse_mode=ParseMode.MARKDOWN_V2)
+            await _reply_loc(update.message, "⚠️ TP: 0\\.3\\-20%, SL: 0\\.3\\-10%", parse_mode=ParseMode.MARKDOWN_V2)
             return True
         def _mutate(s):
             bro = s.setdefault("strategies", {}).setdefault("bro", {})
             bro["tp_pct"] = tp
             bro["sl_pct"] = sl
         update_user_settings(telegram_id, _mutate)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"✅ Bro Mode TP/SL set to {tp:.1f}%/{sl:.1f}%",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
@@ -1412,12 +1435,12 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
     elif field == "risk_level":
         val = text.strip().lower()
         if val not in ("conservative", "balanced", "aggressive"):
-            await update.message.reply_text("⚠️ Choose: conservative, balanced, or aggressive")
+            await _reply_loc(update.message, "⚠️ Choose: conservative, balanced, or aggressive")
             return True
         def _mutate(s):
             s.setdefault("strategies", {}).setdefault("bro", {})["risk_level"] = val
         update_user_settings(telegram_id, _mutate)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"✅ Bro Mode risk set to {val.upper()}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
@@ -1429,7 +1452,7 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
         try:
             value = float(text.strip())
         except ValueError:
-            await update.message.reply_text("⚠️ Please enter a number\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await _reply_loc(update.message, "⚠️ Please enter a number\\.", parse_mode=ParseMode.MARKDOWN_V2)
             return True
         limits = {
             "budget_usd": (10, 100000),
@@ -1439,14 +1462,14 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
         }
         lo, hi = limits.get(field, (0, 99999))
         if value < lo or value > hi:
-            await update.message.reply_text(f"⚠️ Range: {lo} to {hi}")
+            await _reply_loc(update.message, f"⚠️ Range: {lo} to {hi}")
             return True
         int_fields = {"leverage_cap", "max_positions"}
         def _mutate(s):
             bro = s.setdefault("strategies", {}).setdefault("bro", {})
             bro[field] = int(value) if field in int_fields else value
         update_user_settings(telegram_id, _mutate)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             f"✅ Bro Mode {field} set to {value}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
@@ -1495,7 +1518,7 @@ async def _handle_nado_question(update, context, question):
             await context.bot.send_message_draft(
                 chat_id=chat_id,
                 draft_id=draft_id,
-                text="🧠 Ask NadoBro\n\nThinking...",
+                text=localize_text("🧠 Ask NadoBro\n\nThinking..."),
             )
             last_draft_ts = time.time()
         except Exception:
@@ -1517,7 +1540,7 @@ async def _handle_nado_question(update, context, question):
                     draft_ok = False
 
         if full_text.strip():
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 f"🧠 *Ask NadoBro*\n\n{escape_md(full_text)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
@@ -1525,7 +1548,7 @@ async def _handle_nado_question(update, context, question):
                 ]),
             )
         else:
-            await update.message.reply_text(
+            await _reply_loc(update.message, 
                 "⚠️ I couldn't generate an answer\\. Please try again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
@@ -1536,7 +1559,7 @@ async def _handle_nado_question(update, context, question):
         logger.error(f"Nado Q&A error: {e}", exc_info=True)
         if full_text.strip():
             try:
-                await update.message.reply_text(
+                await _reply_loc(update.message, 
                     f"🧠 *Ask NadoBro*\n\n{escape_md(full_text)}",
                     parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=InlineKeyboardMarkup([
@@ -1546,7 +1569,7 @@ async def _handle_nado_question(update, context, question):
                 return
             except Exception:
                 pass
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "⚠️ Something went wrong answering your question\\. Please try again\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=InlineKeyboardMarkup([
@@ -1569,7 +1592,7 @@ async def _handle_pending_text_close_all_confirmation(update, context, telegram_
     normalized = (text or "").strip().lower()
     if normalized in ("cancel", "no", "n", "abort"):
         context.user_data.pop(PENDING_TEXT_CLOSE_ALL_KEY, None)
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "❌ Close-all request cancelled\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -1577,7 +1600,7 @@ async def _handle_pending_text_close_all_confirmation(update, context, telegram_
         return True
 
     if normalized not in ("confirm", "yes", "y", "execute", "close all"):
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "Type `confirm` to close all positions or `cancel` to discard\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
@@ -1603,7 +1626,7 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
         return True
 
     if action == "close_menu":
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "*Close Position*\n\nSelect the product to close:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=close_product_kb(),
@@ -1612,7 +1635,7 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
 
     if action == "close_all":
         context.user_data[PENDING_TEXT_CLOSE_ALL_KEY] = True
-        await update.message.reply_text(
+        await _reply_loc(update.message, 
             "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?\n\n"
             "Type `confirm` to execute or `cancel` to discard\\.",
             parse_mode=ParseMode.MARKDOWN_V2,

@@ -9,6 +9,11 @@ from src.nadobro.services.bot_runtime import get_runtime_passphrase
 
 logger = logging.getLogger(__name__)
 
+
+def _loc(text: str, lang: str = "en") -> str:
+    from src.nadobro.i18n import localize_text
+    return localize_text(text, lang)
+
 _SL_KEY_PREFIX = "stop_loss:"
 _ERROR_NOTIFY_COOLDOWN_SECONDS = 300
 
@@ -98,6 +103,9 @@ def process_stop_losses(prices: dict) -> list[dict]:
         if not _should_trigger_stop_loss(side, mark, target):
             continue
 
+        from src.nadobro.i18n import get_user_language
+        user_lang = get_user_language(user_id)
+
         passphrase = get_runtime_passphrase(user_id, network)
         if not passphrase:
             last_notified = float(rule.get("last_error_notified_at") or 0)
@@ -109,8 +117,9 @@ def process_stop_losses(prices: dict) -> list[dict]:
                     {
                         "user_id": user_id,
                         "text": (
-                            f"⚠️ Stop-loss hit on {product}-PERP at ${mark:,.2f}, "
-                            "but your session passphrase expired. Re-authorize and close manually."
+                            f"{_loc('⚠️ Stop-loss hit on', user_lang)} {product}-PERP "
+                            f"${mark:,.2f}, "
+                            f"{_loc('but your session passphrase expired. Re-authorize and close manually.', user_lang)}"
                         ),
                     }
                 )
@@ -128,15 +137,14 @@ def process_stop_losses(prices: dict) -> list[dict]:
                 {
                     "user_id": user_id,
                     "text": (
-                        f"🛑 Stop-loss executed for {product}-PERP.\n"
-                        f"Trigger: ${target:,.2f} | Mark: ${mark:,.2f}"
+                        f"{_loc('🛑 Stop-loss executed for', user_lang)} {product}-PERP.\n"
+                        f"{_loc('Trigger', user_lang)}: ${target:,.2f} | {_loc('Mark', user_lang)}: ${mark:,.2f}"
                     ),
                 }
             )
         else:
             err = str(close_result.get("error", "unknown error"))
             if "No open positions" in err:
-                # Position already closed (e.g. TP filled manually/systematically).
                 rule["active"] = False
                 rule["triggered_at"] = _now_iso()
                 rule["last_error"] = None
@@ -151,8 +159,9 @@ def process_stop_losses(prices: dict) -> list[dict]:
                     {
                         "user_id": user_id,
                         "text": (
-                            f"⚠️ Stop-loss trigger failed for {product}-PERP at ${mark:,.2f}.\n"
-                            f"Reason: {err}"
+                            f"{_loc('⚠️ Stop-loss trigger failed for', user_lang)} {product}-PERP "
+                            f"${mark:,.2f}.\n"
+                            f"{_loc('Reason', user_lang)}: {err}"
                         ),
                     }
                 )

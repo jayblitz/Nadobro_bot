@@ -50,11 +50,14 @@ async def handle_alert_job(payload: dict):
         triggered = await run_blocking(get_triggered_alerts, prices)
         for alert in triggered:
             try:
-                msg = (
-                    f"Alert Triggered!\n"
-                    f"{alert['product']} is {alert['condition']} ${alert['target']:,.2f}\n"
-                    f"Current price: ${alert['current_price']:,.2f}"
-                )
+                from src.nadobro.i18n import language_context, get_user_language, localize_text, get_active_language
+                with language_context(get_user_language(alert["user_id"])):
+                    lang = get_active_language()
+                    msg = (
+                        f"{localize_text('Alert Triggered!', lang)}\n"
+                        f"{alert['product']} {localize_text('is', lang)} {alert['condition']} ${alert['target']:,.2f}\n"
+                        f"{localize_text('Current price:', lang)} ${alert['current_price']:,.2f}"
+                    )
                 await _bot_app.bot.send_message(chat_id=alert["user_id"], text=msg)
                 logger.info(f"Alert sent to user {alert['user_id']}: {alert['product']} {alert['condition']}")
             except Exception as e:
@@ -62,7 +65,10 @@ async def handle_alert_job(payload: dict):
         sl_notifications = await run_blocking(process_stop_losses, prices)
         for note in sl_notifications:
             try:
-                await _bot_app.bot.send_message(chat_id=note["user_id"], text=note["text"])
+                from src.nadobro.i18n import language_context, get_user_language, localize_text, get_active_language
+                with language_context(get_user_language(note["user_id"])):
+                    lang = get_active_language()
+                    await _bot_app.bot.send_message(chat_id=note["user_id"], text=localize_text(note["text"], lang))
             except Exception as e:
                 logger.error("Failed to send stop-loss notification to %s: %s", note.get("user_id"), e)
     except Exception as e:
@@ -120,13 +126,16 @@ async def tick_howl():
                 if howl_data and howl_data.get("suggestions"):
                     msg = format_howl_message(howl_data)
                     from src.nadobro.handlers.keyboards import howl_approval_kb
+                    from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language
                     suggestions_count = len(howl_data.get("suggestions", []))
                     try:
-                        await _bot_app.bot.send_message(
-                            chat_id=telegram_id,
-                            text=msg,
-                            reply_markup=howl_approval_kb(suggestions_count),
-                        )
+                        with language_context(get_user_language(telegram_id)):
+                            lang = get_active_language()
+                            await _bot_app.bot.send_message(
+                                chat_id=telegram_id,
+                                text=localize_text(msg, lang),
+                                reply_markup=localize_markup(howl_approval_kb(suggestions_count), lang),
+                            )
                     except Exception as e:
                         logger.error("Failed to send HOWL to user %s: %s", telegram_id, e)
             except Exception as e:

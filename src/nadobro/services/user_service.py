@@ -6,8 +6,14 @@ from typing import Optional
 from src.nadobro.models.database import UserRow, NetworkMode
 from src.nadobro.db import query_one, query_all, execute, query_count
 from src.nadobro.services.nado_client import get_nado_client, NadoClient, clear_client_cache
+from src.nadobro.i18n import get_active_language, localize_text
 
 logger = logging.getLogger(__name__)
+
+
+def _loc(text):
+    return localize_text(text, get_active_language())
+
 
 _user_cache = {}
 _USER_CACHE_TTL = 10
@@ -73,7 +79,7 @@ def get_user(telegram_id: int) -> Optional[UserRow]:
 def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     user = get_user(telegram_id)
     if not user:
-        return False, "User not found. Use /start first."
+        return False, _loc("User not found. Use /start first.")
 
     execute("UPDATE users SET network_mode = %s WHERE telegram_id = %s", (network, telegram_id))
     clear_client_cache()
@@ -82,11 +88,11 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
 
     addr = user.main_address
     if addr:
-        msg = f"Switched to {network} mode.\nActive wallet: `{addr}`"
+        msg = f"{_loc('Switched to')} {network} {_loc('mode.')}\n{_loc('Active wallet:')} `{addr}`"
     else:
         msg = (
-            f"Switched to {network} mode.\n"
-            "Link your wallet via the Wallet button to trade."
+            f"{_loc('Switched to')} {network} {_loc('mode.')}\n"
+            f"{_loc('Link your wallet via the Wallet button to trade.')}"
         )
     return True, msg
 
@@ -194,11 +200,11 @@ def has_mode_private_key(telegram_id: int, network: str) -> bool:
 def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
     user = get_user(telegram_id)
     if not user:
-        return False, "User not found. Use /start first."
+        return False, _loc("User not found. Use /start first.")
     if not has_mode_private_key(telegram_id, user.network_mode.value):
         return (
             False,
-            "Wallet not linked. Use the Wallet button to connect your wallet (Linked Signer).",
+            _loc("Wallet not linked. Use the Wallet button to connect your wallet (Linked Signer)."),
         )
     return True, ""
 
@@ -240,7 +246,7 @@ def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple
     invalidate_user_cache(telegram_id)
     clear_client_cache()
     _readonly_cache.clear()
-    return True, f"{network} wallet unlinked. You can link again via Wallet button."
+    return True, _loc(f"{network} wallet unlinked. You can link again via Wallet button.")
 
 
 def update_user_language(telegram_id: int, lang: str):

@@ -3,23 +3,28 @@ from datetime import datetime
 from src.nadobro.models.database import AlertCondition, insert_alert, get_alerts_by_user, get_alert_by_id_and_user, update_alert, get_all_active_alerts, update_alert_triggered
 from src.nadobro.config import get_product_id, get_product_name
 from src.nadobro.services.user_service import get_user
+from src.nadobro.i18n import get_active_language, localize_text
 
 logger = logging.getLogger(__name__)
+
+
+def _loc(text):
+    return localize_text(text, get_active_language())
 
 
 def create_alert(telegram_id: int, product: str, condition: str, target_value: float) -> dict:
     product_id = get_product_id(product)
     if product_id is None:
-        return {"success": False, "error": f"Unknown product '{product}'."}
+        return {"success": False, "error": _loc(f"Unknown product '{product}'.")}
 
     user = get_user(telegram_id)
     if not user:
-        return {"success": False, "error": "User not found."}
+        return {"success": False, "error": _loc("User not found.")}
 
     cond_map = {"above": AlertCondition.ABOVE.value, "below": AlertCondition.BELOW.value}
     alert_cond = cond_map.get(condition)
     if not alert_cond:
-        return {"success": False, "error": f"Unknown condition '{condition}'. Use: above, below"}
+        return {"success": False, "error": _loc(f"Unknown condition '{condition}'. Use: above, below")}
 
     alert_id = insert_alert({
         "user_id": telegram_id,
@@ -30,7 +35,7 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
         "network": user.network_mode.value,
     })
     if not alert_id:
-        return {"success": False, "error": "Failed to create alert."}
+        return {"success": False, "error": _loc("Failed to create alert.")}
 
     return {
         "success": True,
@@ -59,9 +64,9 @@ def get_user_alerts(telegram_id: int) -> list:
 def delete_alert(telegram_id: int, alert_id: int) -> dict:
     alert = get_alert_by_id_and_user(alert_id, telegram_id)
     if not alert:
-        return {"success": False, "error": "Alert not found."}
+        return {"success": False, "error": _loc("Alert not found.")}
     update_alert(alert_id, is_active=False)
-    return {"success": True, "message": f"Alert #{alert_id} deleted."}
+    return {"success": True, "message": _loc(f"Alert #{alert_id} deleted.")}
 
 
 def get_triggered_alerts(prices: dict) -> list:
