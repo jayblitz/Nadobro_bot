@@ -30,6 +30,60 @@ RISK_PROFILES = {
     },
 }
 
+BRO_PROFILES = {
+    "chill": {
+        "risk_level": "conservative",
+        "leverage_cap": 2,
+        "max_positions": 1,
+        "min_confidence": 0.80,
+        "tp_pct": 1.5,
+        "sl_pct": 0.8,
+        "max_loss_pct": 8,
+        "max_daily_loss_usd": None,
+        "block_high_vol": True,
+        "block_extreme_funding": True,
+        "description": "low risk, few trades, tight stops — only high-conviction setups",
+    },
+    "normal": {
+        "risk_level": "balanced",
+        "leverage_cap": 5,
+        "max_positions": 3,
+        "min_confidence": 0.65,
+        "tp_pct": 2.0,
+        "sl_pct": 1.5,
+        "max_loss_pct": 15,
+        "max_daily_loss_usd": None,
+        "block_high_vol": False,
+        "block_extreme_funding": False,
+        "description": "moderate risk, balanced approach — trade good setups",
+    },
+    "degen": {
+        "risk_level": "aggressive",
+        "leverage_cap": 8,
+        "max_positions": 5,
+        "min_confidence": 0.55,
+        "tp_pct": 3.0,
+        "sl_pct": 2.0,
+        "max_loss_pct": 25,
+        "max_daily_loss_usd": 500,
+        "block_high_vol": False,
+        "block_extreme_funding": False,
+        "description": "high risk, frequent trades, wider stops — for experienced traders",
+    },
+}
+
+
+def get_bro_profile(profile_name: str) -> dict:
+    return BRO_PROFILES.get(profile_name, BRO_PROFILES["normal"]).copy()
+
+
+def get_bro_profile_limits(profile_name: str) -> dict:
+    profile = get_bro_profile(profile_name)
+    base_limits = get_risk_limits(profile["risk_level"])
+    base_limits["max_leverage"] = min(base_limits["max_leverage"], profile["leverage_cap"])
+    base_limits["max_positions"] = min(base_limits["max_positions"], profile["max_positions"])
+    return base_limits
+
 
 def get_risk_limits(risk_profile: str) -> dict:
     return RISK_PROFILES.get(risk_profile, RISK_PROFILES["balanced"]).copy()
@@ -94,6 +148,16 @@ def get_account_snapshot(telegram_id: int) -> Optional[dict]:
         return None
 
 
+def get_copy_exposure(telegram_id: int) -> float:
+    try:
+        from src.nadobro.services.copy_service import get_user_copies
+        mirrors = get_user_copies(telegram_id)
+        return sum(float(m.get("budget_usd", 0)) for m in mirrors)
+    except Exception as e:
+        logger.debug("Could not fetch copy exposure: %s", e)
+        return 0.0
+
+
 def check_can_open_position(
     telegram_id: int,
     proposed_notional_usd: float,
@@ -117,6 +181,8 @@ def check_can_open_position(
     current_exposure = snapshot["total_exposure_usd"]
     current_positions = snapshot["position_count"]
 
+    copy_exposure = get_copy_exposure(telegram_id)
+
     effective_budget = min(budget, usdt_balance * limits["max_budget_pct"])
 
     if current_positions >= limits["max_positions"]:
@@ -131,12 +197,13 @@ def check_can_open_position(
             f"${max_single:.0f} ({risk_profile})"
         )
 
-    new_total_exposure = current_exposure + proposed_notional_usd
-    if new_total_exposure > effective_budget:
-        remaining = max(0, effective_budget - current_exposure)
+    total_risk = current_exposure + copy_exposure + proposed_notional_usd
+    if total_risk > effective_budget:
+        remaining = max(0, effective_budget - current_exposure - copy_exposure)
         return False, (
-            f"Would exceed budget. Current exposure: ${current_exposure:.0f}, "
-            f"budget: ${effective_budget:.0f}, remaining: ${remaining:.0f}"
+            f"Would exceed budget. Exposure: ${current_exposure:.0f} + "
+            f"copy: ${copy_exposure:.0f}, budget: ${effective_budget:.0f}, "
+            f"remaining: ${remaining:.0f}"
         )
 
     required_margin = proposed_notional_usd / proposed_leverage
@@ -189,6 +256,10 @@ def should_emergency_flatten(
             f"Unrealized loss {loss_pct:.1f}% exceeds max {max_loss_pct}% of budget"
         )
 
+    max_daily_loss = bro_settings.get("max_daily_loss_usd")
+    if max_daily_loss and total_unrealized_pnl < 0 and abs(total_unrealized_pnl) >= max_daily_loss:
+        return True, f"Daily loss ${abs(total_unrealized_pnl):.0f} exceeds cap ${max_daily_loss:.0f}"
+
     balance = snapshot["usdt_balance"]
     if balance < budget * 0.05:
         return True, f"Account balance ${balance:.0f} critically low"
@@ -205,16 +276,19 @@ def get_budget_status(telegram_id: int, bro_settings: dict) -> dict:
     risk_profile = bro_settings.get("risk_level", "balanced")
     limits = get_risk_limits(risk_profile)
 
+    copy_exposure = get_copy_exposure(telegram_id)
+
     effective_budget = min(budget, snapshot["usdt_balance"] * limits["max_budget_pct"])
-    remaining = max(0, effective_budget - snapshot["total_exposure_usd"])
+    remaining = max(0, effective_budget - snapshot["total_exposure_usd"] - copy_exposure)
 
     return {
         "account_balance": snapshot["usdt_balance"],
         "budget_usd": budget,
         "effective_budget": effective_budget,
         "current_exposure": snapshot["total_exposure_usd"],
+        "copy_exposure": copy_exposure,
         "remaining_budget": remaining,
-        "utilization_pct": (snapshot["total_exposure_usd"] / effective_budget * 100) if effective_budget > 0 else 0,
+        "utilization_pct": ((snapshot["total_exposure_usd"] + copy_exposure) / effective_budget * 100) if effective_budget > 0 else 0,
         "position_count": snapshot["position_count"],
         "max_positions": limits["max_positions"],
         "risk_profile": risk_profile,

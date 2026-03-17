@@ -283,6 +283,40 @@ def get_full_technicals(product: str) -> dict:
     return result
 
 
+def classify_regime(product: str) -> Optional[str]:
+    mids = get_mids(product)
+    if len(mids) < EMA_SLOW + 5:
+        return None
+
+    ema_21_vals = _ema(mids, EMA_MID)
+    ema_50_vals = _ema(mids, EMA_SLOW)
+
+    slope_21 = (ema_21_vals[-1] - ema_21_vals[-5]) / max(1e-8, ema_21_vals[-5]) * 100 if len(ema_21_vals) >= 5 else 0
+    slope_50 = (ema_50_vals[-1] - ema_50_vals[-5]) / max(1e-8, ema_50_vals[-5]) * 100 if len(ema_50_vals) >= 5 else 0
+
+    bb = compute_bollinger(product)
+    vol = compute_volatility(product)
+
+    bb_width = bb["bandwidth"] if bb else 0
+    current_vol = vol if vol is not None else 0
+
+    high_vol_threshold = 0.5
+    trend_slope_threshold = 0.15
+
+    if current_vol > high_vol_threshold and bb_width > 4.0:
+        change_5m = compute_price_change(product, 5)
+        if change_5m is not None and abs(change_5m) > 1.5:
+            return "news_spike"
+        return "high_vol_chop"
+
+    if slope_21 > trend_slope_threshold and slope_50 > 0:
+        return "trending_up"
+    if slope_21 < -trend_slope_threshold and slope_50 < 0:
+        return "trending_down"
+
+    return "range"
+
+
 def get_all_technicals() -> dict[str, dict]:
     results = {}
     for product, info in PRODUCTS.items():

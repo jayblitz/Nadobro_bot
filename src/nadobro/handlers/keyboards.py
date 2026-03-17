@@ -748,6 +748,10 @@ def bro_action_kb():
             InlineKeyboardButton("📊 Status", callback_data="bro:status"),
         ],
         [
+            InlineKeyboardButton("🧠 Why?", callback_data="bro:explain"),
+            InlineKeyboardButton("📋 Game Plan", callback_data="bro:gameplan"),
+        ],
+        [
             InlineKeyboardButton("🐺 HOWL Report", callback_data="bro:howl"),
         ],
         [
@@ -763,6 +767,11 @@ def bro_action_kb():
 
 def bro_config_kb():
     return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("😎 Chill Bro", callback_data="bro:profile:chill"),
+            InlineKeyboardButton("🤙 Normal Bro", callback_data="bro:profile:normal"),
+            InlineKeyboardButton("🔥 Degen Bro", callback_data="bro:profile:degen"),
+        ],
         [
             InlineKeyboardButton("💰 Budget", callback_data="bro:set:budget_usd"),
             InlineKeyboardButton("⚡ Risk Level", callback_data="bro:set:risk_level"),

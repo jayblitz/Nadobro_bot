@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from src.nadobro.config import PRODUCTS
-from src.nadobro.services.price_tracker import get_full_technicals, get_all_technicals
+from src.nadobro.services.price_tracker import get_full_technicals, get_all_technicals, classify_regime
 from src.nadobro.services.async_utils import run_blocking
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,10 @@ def build_market_snapshot(
         if tech.get("avg_spread_bp") is not None:
             asset["spread_bp"] = tech["avg_spread_bp"]
 
+        regime = classify_regime(product)
+        if regime:
+            asset["regime"] = regime
+
         if funding is not None:
             asset["funding_rate"] = funding
 
@@ -241,6 +245,10 @@ def format_snapshot_for_llm(snapshot: dict, max_chars: int = 6000) -> str:
         signal = asset.get("signal_1h")
         if signal:
             parts.append(f"Signal(1h): {signal}")
+
+        regime = asset.get("regime")
+        if regime:
+            parts.append(f"Regime: {regime.upper().replace('_', ' ')}")
 
         fr = asset.get("funding_rate")
         if fr is not None:

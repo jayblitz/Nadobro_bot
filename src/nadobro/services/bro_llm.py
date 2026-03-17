@@ -35,13 +35,27 @@ You analyze market data and make trading decisions. You are methodical, data-dri
 
 AVAILABLE ASSETS: {products}
 RISK PROFILE: {risk_level}
+BRO PERSONA: {bro_profile} — {bro_profile_desc}
 BUDGET: ${budget:.0f} | CURRENT EXPOSURE: ${exposure:.0f} | REMAINING: ${remaining:.0f}
+COPY EXPOSURE: ${copy_exposure:.0f} (allocated to copy trading — don't double-count)
 MAX LEVERAGE: {max_leverage}x | MAX POSITIONS: {max_positions}
 OPEN POSITIONS: {positions_text}
 
+REGIME AWARENESS:
+{regime_text}
+Adapt your strategy to each asset's current regime:
+- TRENDING UP/DOWN: allow trend-following entries, trailing stops, consider pyramiding
+- RANGE: prefer mean-reversion, tighter TP/SL, consider skipping if confidence is marginal
+- HIGH VOL CHOP: reduce size or skip — whipsaws destroy capital
+- NEWS SPIKE: reduce size significantly or wait for stability
+
+ANTI-FLIP-FLOP RULE:
+{cooldown_text}
+If you recently closed a position in an asset, require significantly stronger signals before re-entering the same direction. Avoid reversing within 2-3 cycles unless thesis has fundamentally changed.
+
 DECISION RULES:
 1. Only trade when you have HIGH CONFIDENCE (>={min_confidence:.0f}%) based on multiple confirming signals
-2. Look for confluence: RSI + EMA alignment + MACD + momentum + sentiment should mostly agree
+2. Look for confluence: RSI + EMA alignment + MACD + momentum + sentiment + regime should mostly agree
 3. Never chase — if price moved significantly already, wait for pullback
 4. Respect the risk profile: {risk_level} means {risk_description}
 5. Always set TP and SL levels. TP should be realistic (1-3%), SL tight (0.5-1.5%)
@@ -61,7 +75,9 @@ RESPOND WITH VALID JSON ONLY (no markdown, no code blocks):
   "sl_pct": stop loss percentage from entry,
   "reasoning": "1-2 sentence explanation",
   "signals": ["list", "of", "key", "signals"],
-  "close_product": "only if action is close — which product to close"
+  "close_product": "only if action is close — which product to close",
+  "expected_pnl_pct": estimated PnL if trade works out (0-10),
+  "risk_score": 0.0 to 1.0 (0=very safe, 1=very risky based on vol/funding/correlation)
 }}
 
 For "hold" action, only provide: {{"action": "hold", "reasoning": "why", "confidence": 0.0}}
@@ -88,6 +104,27 @@ def _format_positions(positions: list[dict]) -> str:
     return " | ".join(parts)
 
 
+def _format_regime_text(snapshot_text: str) -> str:
+    lines = []
+    for line in snapshot_text.split("\n"):
+        if "Regime:" in line:
+            lines.append(line.strip())
+    return "\n".join(lines) if lines else "No regime data available yet."
+
+
+def _format_cooldown_text(recent_closes: list[dict]) -> str:
+    if not recent_closes:
+        return "No recent closes — free to trade any direction."
+    parts = []
+    for rc in recent_closes[-5:]:
+        product = rc.get("product", "?")
+        side = rc.get("side", "?")
+        ago = rc.get("cycles_ago", 0)
+        conf = rc.get("exit_confidence", 0)
+        parts.append(f"Closed {product} {side} {ago} cycles ago (exit conf={conf:.0%})")
+    return "\n".join(parts)
+
+
 def make_decision(
     market_snapshot_text: str,
     products: list[str],
@@ -99,22 +136,33 @@ def make_decision(
     max_positions: int,
     positions: list[dict],
     min_confidence: float,
+    bro_profile: str = "normal",
+    copy_exposure: float = 0.0,
+    recent_closes: list[dict] | None = None,
 ) -> dict:
     client = _get_client()
     if not client:
         return {"action": "hold", "reasoning": "LLM client not available", "confidence": 0.0}
 
+    from src.nadobro.services.budget_guard import get_bro_profile
+    profile_data = get_bro_profile(bro_profile)
+
     system = SYSTEM_PROMPT.format(
         products=", ".join(products),
         risk_level=risk_level,
+        bro_profile=bro_profile.upper(),
+        bro_profile_desc=profile_data.get("description", "balanced approach"),
         budget=budget,
         exposure=exposure,
         remaining=remaining,
+        copy_exposure=copy_exposure,
         max_leverage=max_leverage,
         max_positions=max_positions,
         positions_text=_format_positions(positions),
         min_confidence=min_confidence * 100,
         risk_description=RISK_DESCRIPTIONS.get(risk_level, RISK_DESCRIPTIONS["balanced"]),
+        regime_text=_format_regime_text(market_snapshot_text),
+        cooldown_text=_format_cooldown_text(recent_closes or []),
     )
 
     try:
@@ -124,7 +172,7 @@ def make_decision(
                 {"role": "system", "content": system},
                 {"role": "user", "content": market_snapshot_text},
             ],
-            max_tokens=500,
+            max_tokens=600,
             temperature=0.3,
         )
 
@@ -181,7 +229,101 @@ def _parse_decision(raw: str, min_confidence: float) -> dict:
         decision["tp_pct"] = max(0.3, min(10.0, float(decision.get("tp_pct", 2.0))))
         decision["sl_pct"] = max(0.3, min(5.0, float(decision.get("sl_pct", 1.0))))
 
+        expected_pnl = float(decision.get("expected_pnl_pct", 0))
+        risk_score = float(decision.get("risk_score", 0.5))
+        decision["expected_pnl_pct"] = max(0, min(10, expected_pnl))
+        decision["risk_score"] = max(0, min(1, risk_score))
+
+        if risk_score > 0:
+            decision["composite_score"] = expected_pnl / (1 + risk_score)
+        else:
+            decision["composite_score"] = expected_pnl
+
     return decision
+
+
+def explain_position(
+    product: str,
+    side: str,
+    entry_price: float,
+    current_price: float,
+    pnl: float,
+    entry_reasoning: str,
+    entry_signals: list[str],
+) -> Optional[str]:
+    client = _get_client()
+    if not client:
+        return None
+
+    prompt = (
+        f"Explain why Bro Mode is holding this position in plain language (2-3 sentences):\n\n"
+        f"Position: {product} {side.upper()} from ${entry_price:,.2f} (now ${current_price:,.2f}, PnL=${pnl:+.2f})\n"
+        f"Entry reasoning: {entry_reasoning}\n"
+        f"Entry signals: {', '.join(entry_signals)}\n\n"
+        f"Explain the thesis, current status, and what would trigger an exit."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=BRO_SCAN_MODEL,
+            messages=[
+                {"role": "system", "content": "You are Bro, an autonomous trading agent. Explain positions clearly and concisely."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=200,
+            temperature=0.2,
+        )
+        return response.choices[0].message.content or ""
+    except Exception as e:
+        logger.error("Position explanation failed: %s", e)
+        return None
+
+
+def generate_game_plan(
+    products: list[str],
+    budget: float,
+    remaining: float,
+    positions: list[dict],
+    bro_profile: str,
+    recent_decisions: list[dict],
+) -> Optional[str]:
+    client = _get_client()
+    if not client:
+        return None
+
+    from src.nadobro.services.budget_guard import get_bro_profile
+    profile_data = get_bro_profile(bro_profile)
+
+    positions_text = _format_positions(positions)
+    recent_text = ""
+    for d in recent_decisions[-10:]:
+        recent_text += f"  {d.get('action','?')} {d.get('product','?')} conf={d.get('confidence',0):.0%} — {d.get('reasoning','')[:80]}\n"
+
+    prompt = (
+        f"Generate Bro's 24-hour game plan (3-5 bullet points):\n\n"
+        f"Profile: {bro_profile.upper()} — {profile_data.get('description', '')}\n"
+        f"Assets: {', '.join(products)}\n"
+        f"Budget: ${budget:.0f} | Remaining: ${remaining:.0f}\n"
+        f"Open positions: {positions_text}\n"
+        f"Recent decisions:\n{recent_text or '  None yet'}\n\n"
+        f"Include: target risk range ($), key assets to watch, conditions for emergency flatten, "
+        f"and what would trigger new entries. Be concise and actionable."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=BRO_SCAN_MODEL,
+            messages=[
+                {"role": "system", "content": "You are Bro, an autonomous trading agent. Provide a clear, concise trading plan."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=400,
+            temperature=0.3,
+        )
+        return response.choices[0].message.content or ""
+    except Exception as e:
+        logger.error("Game plan generation failed: %s", e)
+        return None
 
 
 def analyze_for_howl(
@@ -213,6 +355,7 @@ Suggest specific parameter changes with clear rationale. Focus on:
 4. Product selection (which assets to focus on)
 5. Leverage adjustments
 6. Cycle timing
+7. Bro profile adjustment (chill/normal/degen)
 
 RESPOND WITH VALID JSON:
 {{

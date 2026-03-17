@@ -72,7 +72,12 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
         kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
         kwargs["reply_markup"] = localize_markup(reply_markup, lang)
-    return await query.edit_message_text(localized, **kwargs)
+    try:
+        return await query.edit_message_text(localized, **kwargs)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
+        raise
 
 
 async def handle_callback(update: Update, context: CallbackContext):
@@ -1237,8 +1242,11 @@ async def _handle_bro(query, data, telegram_id, context):
         b_sl = float(conf.get("sl_pct", 1.5))
         b_maxp = int(conf.get("max_positions", 3))
         b_maxl = float(conf.get("max_loss_pct", 15))
+        b_profile = conf.get("bro_profile", "normal").upper()
+        profile_emoji = {"CHILL": "😎", "NORMAL": "🤙", "DEGEN": "🔥"}.get(b_profile, "🤙")
         text = (
             f"⚙️ *Bro Mode Configuration*\n\n"
+            f"Profile: {profile_emoji} *{escape_md(b_profile)}*\n"
             f"Budget: *{escape_md(f'${b_budget:,.0f}')}*\n"
             f"Risk Level: *{escape_md(b_risk)}*\n"
             f"Min Confidence: *{escape_md(f'{b_conf_val:.0%}')}*\n"
@@ -1246,7 +1254,7 @@ async def _handle_bro(query, data, telegram_id, context):
             f"TP/SL: *{escape_md(f'{b_tp:.1f}%/{b_sl:.1f}%')}*\n"
             f"Max Positions: *{escape_md(str(b_maxp))}*\n"
             f"Max Loss: *{escape_md(f'{b_maxl:.0f}%')}*\n\n"
-            "Tap a parameter to change, or pick a risk preset below\\."
+            "Pick a Bro profile, or tap a parameter to fine\\-tune\\."
         )
         await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_config_kb())
 
@@ -1317,19 +1325,148 @@ async def _handle_bro(query, data, telegram_id, context):
 
         budget_status = await run_blocking(get_budget_status, telegram_id, bro_settings)
         exposure = budget_status.get("current_exposure", 0)
+        copy_exp = budget_status.get("copy_exposure", 0)
         remaining = budget_status.get("remaining_budget", 0)
         positions = budget_status.get("position_count", 0)
         util = budget_status.get("utilization_pct", 0)
 
+        b_profile = bro_conf.get("bro_profile", "normal").upper()
+        profile_emoji = {"CHILL": "😎", "NORMAL": "🤙", "DEGEN": "🔥"}.get(b_profile, "🤙")
+
         text = (
             f"📊 *Bro Mode Status*\n\n"
-            f"Status: {escape_md(status_text)}\n"
+            f"Status: {escape_md(status_text)} \\| Profile: {profile_emoji} {escape_md(b_profile)}\n"
             f"Cycles: *{escape_md(str(runs))}*\n"
-            f"Exposure: *{escape_md(f'${exposure:,.0f}')}* \\| Remaining: *{escape_md(f'${remaining:,.0f}')}*\n"
-            f"Positions: *{escape_md(str(positions))}* \\| Utilization: *{escape_md(f'{util:.0f}%')}*\n"
+            f"Exposure: *{escape_md(f'${exposure:,.0f}')}* \\| Copy: *{escape_md(f'${copy_exp:,.0f}')}*\n"
+            f"Remaining: *{escape_md(f'${remaining:,.0f}')}* \\| Utilization: *{escape_md(f'{util:.0f}%')}*\n"
+            f"Positions: *{escape_md(str(positions))}*\n"
         )
         if last_error:
             text += f"\nLast error: _{escape_md(str(last_error)[:150])}_"
+        from src.nadobro.handlers.keyboards import bro_action_kb
+        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_action_kb())
+
+    elif action == "profile" and len(parts) >= 3:
+        profile = parts[2]
+        if profile not in ("chill", "normal", "degen"):
+            return
+        from src.nadobro.services.budget_guard import get_bro_profile, BRO_PROFILES
+        profile_data = get_bro_profile(profile)
+        emoji_map = {"chill": "😎", "normal": "🤙", "degen": "🔥"}
+
+        def _mutate(s):
+            strategies = s.setdefault("strategies", {})
+            bro = strategies.setdefault("bro", {})
+            bro["bro_profile"] = profile
+            bro["risk_level"] = profile_data["risk_level"]
+            bro["leverage_cap"] = profile_data["leverage_cap"]
+            bro["max_positions"] = profile_data["max_positions"]
+            bro["min_confidence"] = profile_data["min_confidence"]
+            bro["tp_pct"] = profile_data["tp_pct"]
+            bro["sl_pct"] = profile_data["sl_pct"]
+            bro["max_loss_pct"] = profile_data["max_loss_pct"]
+
+        update_user_settings(telegram_id, _mutate)
+        from src.nadobro.handlers.keyboards import bro_config_kb
+        await _edit_loc(query,
+            f"{emoji_map.get(profile, '🤙')} *Bro Profile: {escape_md(profile.upper())}*\n\n"
+            f"_{escape_md(profile_data['description'])}_\n\n"
+            f"Leverage: {profile_data['leverage_cap']}x \\| Confidence: {profile_data['min_confidence']:.0%}\n"
+            f"TP/SL: {profile_data['tp_pct']:.1f}%/{profile_data['sl_pct']:.1f}%\n"
+            f"Max positions: {profile_data['max_positions']} \\| Max loss: {profile_data['max_loss_pct']}%",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=bro_config_kb(),
+        )
+
+    elif action == "explain":
+        from src.nadobro.services.budget_guard import get_budget_status
+        from src.nadobro.services.settings_service import get_strategy_settings
+        from src.nadobro.services.bro_llm import explain_position
+        _, bro_conf = get_strategy_settings(telegram_id, "bro")
+        bro_settings = {"budget_usd": bro_conf.get("budget_usd", 500), "risk_level": bro_conf.get("risk_level", "balanced"), "max_loss_pct": bro_conf.get("max_loss_pct", 15)}
+        budget_status = await run_blocking(get_budget_status, telegram_id, bro_settings)
+        positions = budget_status.get("positions", [])
+        if not positions:
+            from src.nadobro.handlers.keyboards import bro_action_kb
+            await _edit_loc(query,
+                "🧠 *Why?*\n\nNo open positions to explain\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=bro_action_kb(),
+            )
+            return
+
+        bot_status = get_user_bot_status(telegram_id)
+        bro_state = bot_status.get("bro_state", {}) if bot_status else {}
+        trades_log = bro_state.get("trades_log", [])
+
+        explanations = []
+        for pos in positions:
+            product = pos.get("product", "?")
+            side = pos.get("side", "?")
+            entry = pos.get("entry_price", 0)
+            pnl = pos.get("unrealized_pnl", 0)
+            notional = pos.get("notional_usd", 0)
+
+            matching_trade = None
+            for t in reversed(trades_log):
+                if t.get("product", "").upper() == product.upper() and t.get("side") == side:
+                    matching_trade = t
+                    break
+
+            reasoning = matching_trade.get("reasoning", "No entry data") if matching_trade else "Opened before current session"
+            signals = matching_trade.get("signals", []) if matching_trade else []
+
+            from src.nadobro.services.user_service import get_user_readonly_client as _get_ro
+            ro = _get_ro(telegram_id)
+            current_price = entry
+            if ro:
+                try:
+                    pid = get_product_id(product)
+                    if pid is not None:
+                        mp = ro.get_market_price(pid)
+                        current_price = float(mp.get("mid", entry))
+                except Exception:
+                    pass
+
+            explanation = await run_blocking(
+                explain_position,
+                product, side, entry, current_price, pnl, reasoning, signals,
+            )
+            if explanation:
+                explanations.append(f"*{escape_md(product)} {escape_md(side.upper())}* \\(${escape_md(f'{notional:.0f}')} PnL=${escape_md(f'{pnl:+.2f}')}\\)\n{escape_md(explanation)}")
+            else:
+                explanations.append(f"*{escape_md(product)} {escape_md(side.upper())}* \\(${escape_md(f'{notional:.0f}')} PnL=${escape_md(f'{pnl:+.2f}')}\\)\n_{escape_md(reasoning[:150])}_")
+
+        text = "🧠 *Why These Positions?*\n\n" + "\n\n".join(explanations)
+        from src.nadobro.handlers.keyboards import bro_action_kb
+        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_action_kb())
+
+    elif action == "gameplan":
+        from src.nadobro.services.budget_guard import get_budget_status
+        from src.nadobro.services.settings_service import get_strategy_settings
+        from src.nadobro.services.bro_llm import generate_game_plan
+        _, bro_conf = get_strategy_settings(telegram_id, "bro")
+        bro_settings = {"budget_usd": bro_conf.get("budget_usd", 500), "risk_level": bro_conf.get("risk_level", "balanced"), "max_loss_pct": bro_conf.get("max_loss_pct", 15)}
+        budget_status = await run_blocking(get_budget_status, telegram_id, bro_settings)
+        positions = budget_status.get("positions", [])
+        remaining = budget_status.get("remaining_budget", 0)
+        budget = bro_conf.get("budget_usd", 500)
+        bro_profile = bro_conf.get("bro_profile", "normal")
+
+        bot_status = get_user_bot_status(telegram_id)
+        bro_state = bot_status.get("bro_state", {}) if bot_status else {}
+        decisions_log = bro_state.get("decisions_log", [])
+
+        plan = await run_blocking(
+            generate_game_plan,
+            bro_conf.get("products", ["BTC", "ETH", "SOL"]),
+            budget, remaining, positions, bro_profile, decisions_log,
+        )
+
+        if plan:
+            text = f"📋 *Bro's 24h Game Plan*\n\n{escape_md(plan)}"
+        else:
+            text = "📋 *Game Plan*\n\nCouldn't generate a plan right now\\. Try again later\\."
         from src.nadobro.handlers.keyboards import bro_action_kb
         await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_action_kb())
 

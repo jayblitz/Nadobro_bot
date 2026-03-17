@@ -11,6 +11,9 @@ from src.nadobro.services.budget_guard import (
     get_budget_status,
     get_risk_limits,
     compute_position_size,
+    get_bro_profile,
+    get_bro_profile_limits,
+    get_copy_exposure,
 )
 from src.nadobro.services.market_scanner import build_market_snapshot, format_snapshot_for_llm
 from src.nadobro.services.bro_llm import make_decision
@@ -20,6 +23,9 @@ logger = logging.getLogger(__name__)
 BRO_CYCLE_SECONDS = 300
 LLM_FAIL_PAUSE_AFTER = 3
 LLM_FAIL_PAUSE_CYCLES = 6
+
+COOLDOWN_CYCLES = 3
+COOLDOWN_CONFIDENCE_BUMP = 0.15
 
 
 def run_cycle(
@@ -55,11 +61,19 @@ def run_cycle(
     use_sentiment = bool(state.get("use_sentiment", True))
     leverage_cap = int(state.get("leverage_cap", 5))
     max_loss_pct = float(state.get("max_loss_pct", 15))
+    bro_profile = state.get("bro_profile", "normal")
+
+    profile_data = get_bro_profile(bro_profile)
+    risk_level = profile_data.get("risk_level", risk_level)
+    min_confidence = max(min_confidence, profile_data.get("min_confidence", 0))
+    leverage_cap = min(leverage_cap, profile_data.get("leverage_cap", leverage_cap))
+    max_loss_pct = profile_data.get("max_loss_pct", max_loss_pct)
 
     bro_settings = {
         "budget_usd": budget,
         "risk_level": risk_level,
         "max_loss_pct": max_loss_pct,
+        "max_daily_loss_usd": profile_data.get("max_daily_loss_usd"),
     }
 
     flatten, flatten_reason = should_emergency_flatten(telegram_id, bro_settings)
@@ -76,9 +90,9 @@ def run_cycle(
     if budget_status.get("error"):
         return {"success": False, "error": f"Budget check failed: {budget_status['error']}"}
 
-    limits = get_risk_limits(risk_level)
-    max_positions = min(int(state.get("max_positions", 3)), limits["max_positions"])
-    max_leverage = min(leverage_cap, limits["max_leverage"])
+    profile_limits = get_bro_profile_limits(bro_profile)
+    max_positions = min(int(state.get("max_positions", 3)), profile_limits["max_positions"])
+    max_leverage = min(leverage_cap, profile_limits["max_leverage"])
 
     try:
         snapshot = build_market_snapshot(
@@ -93,9 +107,25 @@ def run_cycle(
 
     snapshot_text = format_snapshot_for_llm(snapshot)
 
+    if profile_data.get("block_high_vol"):
+        for asset in snapshot.get("assets", []):
+            regime = asset.get("regime")
+            if regime in ("high_vol_chop", "news_spike"):
+                logger.info("Chill Bro: skipping cycle — %s in %s regime", asset.get("product"), regime)
+                return {"success": True, "action": "hold", "detail": f"Chill mode: {asset.get('product')} in {regime} — staying safe"}
+
+    if profile_data.get("block_extreme_funding"):
+        for asset in snapshot.get("assets", []):
+            fr = asset.get("funding_rate")
+            if fr is not None and abs(fr) > 0.001:
+                logger.info("Chill Bro: extreme funding on %s (%.6f), holding", asset.get("product"), fr)
+
     positions = budget_status.get("positions", [])
     exposure = budget_status.get("current_exposure", 0)
     remaining = budget_status.get("remaining_budget", 0)
+    copy_exposure = budget_status.get("copy_exposure", 0)
+
+    recent_closes = bro_state.get("recent_closes", [])
 
     try:
         decision = make_decision(
@@ -109,6 +139,9 @@ def run_cycle(
             max_positions=max_positions,
             positions=positions,
             min_confidence=min_confidence,
+            bro_profile=bro_profile,
+            copy_exposure=copy_exposure,
+            recent_closes=recent_closes,
         )
         bro_state["llm_fail_streak"] = 0
     except Exception as e:
@@ -125,6 +158,9 @@ def run_cycle(
         "confidence": decision.get("confidence", 0),
         "reasoning": decision.get("reasoning", ""),
         "product": decision.get("product", ""),
+        "composite_score": decision.get("composite_score", 0),
+        "risk_score": decision.get("risk_score", 0),
+        "expected_pnl_pct": decision.get("expected_pnl_pct", 0),
         "ts": time.time(),
     }
 
@@ -134,6 +170,7 @@ def run_cycle(
         "confidence": decision.get("confidence", 0),
         "product": decision.get("product", ""),
         "reasoning": decision.get("reasoning", "")[:150],
+        "composite_score": decision.get("composite_score", 0),
         "ts": time.time(),
     })
     bro_state["decisions_log"] = decisions_log[-50:]
@@ -150,6 +187,10 @@ def run_cycle(
     bro_state["consecutive_holds"] = 0
 
     if action in ("open_long", "open_short"):
+        cooldown_block = _check_cooldown(bro_state, decision)
+        if cooldown_block:
+            return cooldown_block
+
         return _handle_open(
             telegram_id, network, state, decision,
             budget, remaining, max_leverage, max_positions,
@@ -164,6 +205,35 @@ def run_cycle(
     return {"success": True, "action": action, "detail": decision.get("reasoning", "")}
 
 
+def _check_cooldown(bro_state: dict, decision: dict) -> dict | None:
+    recent_closes = bro_state.get("recent_closes", [])
+    if not recent_closes:
+        return None
+
+    product = decision.get("product", "").upper()
+    action = decision.get("action", "")
+    new_side = "long" if action == "open_long" else "short"
+    confidence = decision.get("confidence", 0)
+
+    now = time.time()
+    for rc in recent_closes:
+        if rc.get("product", "").upper() != product:
+            continue
+        if rc.get("side", "") != new_side:
+            continue
+        cycles_ago = (now - rc.get("ts", 0)) / BRO_CYCLE_SECONDS
+        if cycles_ago < COOLDOWN_CYCLES:
+            required = rc.get("exit_confidence", 0.5) + COOLDOWN_CONFIDENCE_BUMP
+            if confidence < required:
+                return {
+                    "success": True,
+                    "action": "hold",
+                    "detail": f"Cooldown: recently closed {product} {new_side} ({cycles_ago:.0f} cycles ago). "
+                              f"Need conf>{required:.0%}, got {confidence:.0%}",
+                }
+    return None
+
+
 def _init_bro_state() -> dict:
     return {
         "llm_fail_streak": 0,
@@ -174,6 +244,7 @@ def _init_bro_state() -> dict:
         "total_pnl": 0.0,
         "decisions_log": [],
         "trades_log": [],
+        "recent_closes": [],
         "last_decision": None,
         "started_at": datetime.utcnow().isoformat(),
     }
@@ -265,6 +336,9 @@ def _handle_open(
             "tp_pct": tp_pct,
             "sl_pct": sl_pct,
             "confidence": confidence,
+            "composite_score": decision.get("composite_score", 0),
+            "risk_score": decision.get("risk_score", 0),
+            "expected_pnl_pct": decision.get("expected_pnl_pct", 0),
             "reasoning": decision.get("reasoning", "")[:200],
             "signals": decision.get("signals", []),
             "ts": time.time(),
@@ -275,9 +349,10 @@ def _handle_open(
         bro_state["trades_log"] = trades_log[-100:]
 
         logger.info(
-            "Bro Mode OPENED %s %s: $%.0f @ $%,.2f (%dx) conf=%.0f%% — %s",
+            "Bro Mode OPENED %s %s: $%.0f @ $%,.2f (%dx) conf=%.0f%% score=%.2f — %s",
             product, "LONG" if is_long else "SHORT",
             notional_usd, mid, leverage, confidence * 100,
+            decision.get("composite_score", 0),
             decision.get("reasoning", "")[:100],
         )
 
@@ -291,6 +366,7 @@ def _handle_open(
             "entry_price": mid,
             "leverage": leverage,
             "confidence": confidence,
+            "composite_score": decision.get("composite_score", 0),
             "reasoning": decision.get("reasoning", ""),
             "tp_price": tp_price,
             "sl_price": sl_price,
@@ -334,6 +410,16 @@ def _handle_close(
         pnl = pos.get("unrealized_pnl", 0)
         bro_state["total_pnl"] = float(bro_state.get("total_pnl", 0)) + pnl
 
+        recent_closes = bro_state.get("recent_closes", [])
+        recent_closes.append({
+            "product": close_product,
+            "side": "long" if is_long else "short",
+            "exit_confidence": decision.get("confidence", 0.5),
+            "pnl": pnl,
+            "ts": time.time(),
+        })
+        bro_state["recent_closes"] = recent_closes[-20:]
+
         logger.info(
             "Bro Mode CLOSED %s %s: PnL=$%.2f — %s",
             close_product, pos.get("side", "?").upper(),
@@ -357,6 +443,14 @@ def _emergency_close_all(telegram_id, network, state, passphrase, products):
         result = close_all_positions(telegram_id, passphrase=passphrase)
         if result.get("success"):
             logger.info("Bro Mode emergency flatten successful for user %s", telegram_id)
+            closed = result.get("closed", [])
+            failed = result.get("failed", [])
+            if failed:
+                logger.warning(
+                    "Bro Mode emergency flatten partial failure for user %s: %d closed, %d failed — %s",
+                    telegram_id, len(closed), len(failed),
+                    "; ".join(str(f)[:80] for f in failed[:3]),
+                )
         else:
             logger.error("Bro Mode emergency flatten failed for user %s: %s", telegram_id, result.get("error"))
     except Exception as e:
@@ -382,4 +476,6 @@ def get_bro_status(state: dict) -> dict:
         "risk_level": state.get("risk_level", "balanced"),
         "budget_usd": state.get("budget_usd", 500),
         "products": state.get("products", ["BTC", "ETH", "SOL"]),
+        "bro_profile": state.get("bro_profile", "normal"),
+        "composite_score": last_decision.get("composite_score", 0),
     }
