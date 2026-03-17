@@ -134,11 +134,18 @@ src/nadobro/
 - **Architecture**: Grok-3 structured JSON decision engine (`services/bro_llm.py`), market scanner (`services/market_scanner.py`), budget guard (`services/budget_guard.py`), price tracker (`services/price_tracker.py`)
 - **Strategy cycle** (`strategies/bro_mode.py`): 5-min cycle scans all assets, builds market snapshots (technicals + funding + CMC + X sentiment), sends to Grok-3 for structured decisions (open/close/hold/emergency_flatten), manages full position lifecycle
 - **Product**: Uses "MULTI" as product (not single-asset); `start_user_bot` has dedicated bro early-return that skips product_id validation
-- **Budget Guard**: 3 risk profiles (conservative/balanced/aggressive), exposure tracking, emergency flatten, min margin buffer
+- **Bro Profiles** (chill/normal/degen): Persona presets in `budget_guard.BRO_PROFILES`. Chill: 2x lev, 1 pos, 80% confidence, blocks high-vol/extreme funding. Normal: 5x/3/65% defaults. Degen: 8x/5/55%, $500 daily loss cap. Selected via `bro:profile:*` callbacks, persisted in `strategies.bro.bro_profile` settings. Profile limits enforced by `get_bro_profile_limits()` in bro_mode cycle.
+- **Multi-objective Scoring**: LLM returns `expected_pnl_pct`, `risk_score`; composite score = `expected_pnl / (1 + risk_score)`. Trades selected by composite score, not just confidence. Stored in trades_log for audit.
+- **Regime Detection**: `price_tracker.classify_regime()` classifies each asset as trending_up/trending_down/range/high_vol_chop/news_spike from EMA slopes + Bollinger bandwidth + funding spikes. Fed into LLM prompt and Chill profile blocking rules.
+- **Anti-flip-flop Cooldowns**: `_check_cooldown()` in bro_mode tracks `recent_closes` per product. If re-entering same direction within 3 cycles, requires confidence bump of +15%.
+- **Explainability UX**: "Why?" button (`bro:explain`) calls `bro_llm.explain_position()` for each open position with trade context. "Game Plan" button (`bro:gameplan`) calls `bro_llm.generate_game_plan()` for 24h strategy summary.
+- **Copy+Bro Budget Synergy**: `budget_guard.get_copy_exposure()` queries active copy mirrors; included in `check_can_open_position()` and `get_budget_status()` so Bro budget accounts for copy trading exposure.
+- **Budget Guard**: 3 risk profiles (conservative/balanced/aggressive), exposure tracking, emergency flatten (handles partial close failures gracefully), min margin buffer, `max_daily_loss_usd` cap
 - **Price Tracker**: Rolling price history, RSI-14, EMA-9/21/50, MACD, Bollinger Bands, 1hr/4hr signals, 60s tick
 - **HOWL** (nightly optimization): `services/howl_service.py` runs at 02:00 UTC via scheduler, sends suggestions to Telegram with approve/reject/dismiss keyboard
-- **Settings**: `strategies.bro` in user settings — budget_usd, risk_level, min_confidence, leverage_cap, max_positions, tp_pct, sl_pct, max_loss_pct, cycle_seconds, products
-- **UI**: Bro Mode card in strategy hub, config keyboard, risk preset picker, HOWL approval flow, pending bro input handler in messages.py
+- **Settings**: `strategies.bro` in user settings — budget_usd, risk_level, min_confidence, leverage_cap, max_positions, tp_pct, sl_pct, max_loss_pct, cycle_seconds, products, bro_profile
+- **UI**: Bro Mode card in strategy hub, config keyboard (with profile presets), risk preset picker, Why?/Game Plan explainability, HOWL approval flow, pending bro input handler in messages.py
+- **Robustness**: `_edit_loc` handles MessageNotModified silently, nav clears pending passphrase, emergency flatten logs partial failures, rate limiter excludes failed trades, WebSocket deduplicates subscriptions on reconnect
 
 ### Configuration
 All configuration lives in `src/nadobro/config.py` and is read from environment variables. Key flags:
