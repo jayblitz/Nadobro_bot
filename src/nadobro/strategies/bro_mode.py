@@ -119,6 +119,7 @@ def run_cycle(
             fr = asset.get("funding_rate")
             if fr is not None and abs(fr) > 0.001:
                 logger.info("Chill Bro: extreme funding on %s (%.6f), holding", asset.get("product"), fr)
+                return {"success": True, "action": "hold", "detail": f"Chill mode: extreme funding on {asset.get('product')} ({fr:.6f}) — staying safe"}
 
     positions = budget_status.get("positions", [])
     exposure = budget_status.get("current_exposure", 0)
