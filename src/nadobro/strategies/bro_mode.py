@@ -33,7 +33,6 @@ def run_cycle(
     network: str,
     state: dict,
     client=None,
-    passphrase: str = None,
     **kwargs,
 ) -> dict:
     if not client:
@@ -79,7 +78,7 @@ def run_cycle(
     flatten, flatten_reason = should_emergency_flatten(telegram_id, bro_settings)
     if flatten:
         logger.warning("Bro Mode emergency flatten for user %s: %s", telegram_id, flatten_reason)
-        _emergency_close_all(telegram_id, network, state, passphrase, products)
+        _emergency_close_all(telegram_id, network, state, products)
         state["running"] = False
         state["last_error"] = f"Emergency flatten: {flatten_reason}"
         bro_state["stopped_reason"] = flatten_reason
@@ -195,12 +194,12 @@ def run_cycle(
         return _handle_open(
             telegram_id, network, state, decision,
             budget, remaining, max_leverage, max_positions,
-            bro_settings, passphrase,
+            bro_settings,
         )
 
     if action == "close":
         return _handle_close(
-            telegram_id, network, state, decision, passphrase, positions,
+            telegram_id, network, state, decision, positions,
         )
 
     return {"success": True, "action": action, "detail": decision.get("reasoning", "")}
@@ -254,7 +253,7 @@ def _init_bro_state() -> dict:
 def _handle_open(
     telegram_id, network, state, decision,
     budget, remaining, max_leverage, max_positions,
-    bro_settings, passphrase,
+    bro_settings,
 ) -> dict:
     product = decision.get("product", "BTC").upper()
     is_long = decision["action"] == "open_long"
@@ -318,7 +317,6 @@ def _handle_open(
         leverage=leverage,
         slippage_pct=1.0,
         enforce_rate_limit=False,
-        passphrase=passphrase,
         tp_price=tp_price,
         sl_price=sl_price,
     )
@@ -377,7 +375,7 @@ def _handle_open(
 
 
 def _handle_close(
-    telegram_id, network, state, decision, passphrase, positions,
+    telegram_id, network, state, decision, positions,
 ) -> dict:
     close_product = decision.get("close_product", decision.get("product", "")).upper()
     if not close_product:
@@ -403,7 +401,6 @@ def _handle_close(
         leverage=1.0,
         slippage_pct=1.5,
         enforce_rate_limit=False,
-        passphrase=passphrase,
     )
 
     if result.get("success"):
@@ -438,10 +435,10 @@ def _handle_close(
     return {"success": False, "error": f"Close failed: {result.get('error', 'unknown')}"}
 
 
-def _emergency_close_all(telegram_id, network, state, passphrase, products):
+def _emergency_close_all(telegram_id, network, state, products):
     from src.nadobro.services.trade_service import close_all_positions
     try:
-        result = close_all_positions(telegram_id, passphrase=passphrase)
+        result = close_all_positions(telegram_id)
         if result.get("success"):
             logger.info("Bro Mode emergency flatten successful for user %s", telegram_id)
             closed = result.get("closed", [])

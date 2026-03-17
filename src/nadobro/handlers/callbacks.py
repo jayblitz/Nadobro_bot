@@ -243,9 +243,6 @@ async def _handle_mode(query, data, telegram_id, context=None):
 
     success, result_msg = switch_network(telegram_id, target_network)
     if success:
-        if context is not None:
-            from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context, telegram_id=telegram_id)
         network_label = "🧪 TESTNET" if target_network == "testnet" else "🌐 MAINNET"
         await _edit_loc(query,
             "✅ *Switched to {label}*\n\n{msg}",
@@ -267,13 +264,9 @@ async def _handle_nav(query, data, telegram_id, context=None):
     target = data.split(":")[1] if ":" in data else "main"
 
     if context is not None:
-        context.user_data.pop("pending_passphrase_action", None)
         context.user_data.pop("pending_trade", None)
 
     if target in ("main", "refresh"):
-        if context is not None:
-            from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context, telegram_id=telegram_id)
         await _show_dashboard(query, telegram_id)
     elif target == "help":
         try:
@@ -532,8 +525,8 @@ async def _handle_exec_trade(query, data, telegram_id, context):
         )
         return
 
-    from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
-    await authorize_or_prompt_passphrase(query, context, telegram_id, {
+    from src.nadobro.handlers.messages import execute_action_directly
+    await execute_action_directly(query, context, telegram_id, {
         "type": "exec_trade_callback",
         "pending": {
             "action": action,
@@ -576,8 +569,8 @@ async def _handle_positions(query, data, telegram_id, context):
 
     elif action == "close" and len(parts) >= 3:
         product = parts[2]
-        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
-        await authorize_or_prompt_passphrase(query, context, telegram_id, {"type": "close_position", "product": product})
+        from src.nadobro.handlers.messages import execute_action_directly
+        await execute_action_directly(query, context, telegram_id, {"type": "close_position", "product": product})
 
     elif action == "close_all":
         await _edit_loc(query, 
@@ -587,8 +580,8 @@ async def _handle_positions(query, data, telegram_id, context):
         )
 
     elif action == "confirm_close_all":
-        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
-        await authorize_or_prompt_passphrase(query, context, telegram_id, {"type": "close_all"})
+        from src.nadobro.handlers.messages import execute_action_directly
+        await execute_action_directly(query, context, telegram_id, {"type": "close_all"})
 
 
 async def _handle_portfolio(query, data, telegram_id):
@@ -684,9 +677,6 @@ async def _handle_wallet(query, data, telegram_id, context):
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "testnet"
         ok, msg = remove_user_private_key(telegram_id, network)
-        if ok:
-            from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context, telegram_id=telegram_id)
         success_msg = "✅ Key reset! Your stored signer has been cleared. Tap 👛 Wallet to link a new 1CT key."
         fail_msg = "❌ {msg}"
         if ok:
@@ -697,9 +687,6 @@ async def _handle_wallet(query, data, telegram_id, context):
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "testnet"
         ok, msg = remove_user_private_key(telegram_id, network)
-        if ok:
-            from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context, telegram_id=telegram_id)
         prefix = "✅" if ok else "❌"
         await _edit_loc(query, 
             "{prefix} {msg}",
@@ -716,8 +703,6 @@ async def _handle_wallet(query, data, telegram_id, context):
         success, result_msg = switch_network(telegram_id, net)
 
         if success:
-            from src.nadobro.handlers.messages import clear_session_passphrase
-            clear_session_passphrase(context, telegram_id=telegram_id)
             info = get_user_wallet_info(telegram_id)
             msg = fmt_wallet_info(info)
             await _edit_loc(query, 
@@ -1193,9 +1178,9 @@ async def _handle_strategy(query, data, context, telegram_id):
             )
             return
         settings = _get_user_settings(telegram_id, context)
-        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
+        from src.nadobro.handlers.messages import execute_action_directly
         strategy_leverage = 1 if strategy_id in ("vol", "mm") else settings.get("default_leverage", 3)
-        await authorize_or_prompt_passphrase(query, context, telegram_id, {
+        await execute_action_directly(query, context, telegram_id, {
             "type": "start_strategy",
             "strategy": strategy_id,
             "product": product,
@@ -2150,8 +2135,8 @@ async def _handle_copy(query, data, context, telegram_id):
             await _edit_loc(query, "⚠️ No setup to confirm\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
             return
 
-        from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
-        await authorize_or_prompt_passphrase(
+        from src.nadobro.handlers.messages import execute_action_directly
+        await execute_action_directly(
             query, context, telegram_id,
             {
                 "type": "start_copy",

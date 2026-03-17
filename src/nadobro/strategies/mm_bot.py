@@ -178,7 +178,7 @@ def run_cycle(
     client=None,
     mid: float = 0.0,
     open_orders: list = None,
-    passphrase: str = None,
+    **kwargs,
 ) -> dict:
     product = state.get("product", "BTC")
     strategy = state.get("strategy", "mm")
@@ -188,7 +188,7 @@ def run_cycle(
 
     if client is None:
         from src.nadobro.services.user_service import get_user_nado_client
-        client = get_user_nado_client(telegram_id, passphrase=passphrase)
+        client = get_user_nado_client(telegram_id)
     if not client:
         return {"success": False, "error": "Wallet client unavailable", "orders_placed": 0}
 
@@ -411,7 +411,6 @@ def run_cycle(
             is_long=order_spec["is_long"],
             leverage=leverage,
             enforce_rate_limit=False,
-            passphrase=passphrase,
         )
 
         if result.get("success"):

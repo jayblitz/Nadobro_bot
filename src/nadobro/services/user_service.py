@@ -97,20 +97,21 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     return True, msg
 
 
-def get_user_nado_client(telegram_id: int, passphrase: Optional[str] = None) -> Optional[NadoClient]:
+def get_user_nado_client(telegram_id: int, **kwargs) -> Optional[NadoClient]:
     user = get_user(telegram_id)
     if not user or not user.linked_signer_address or not user.main_address:
         return None
     enc_pk = user.encrypted_linked_signer_pk
-    salt = user.salt
-    if not enc_pk or not salt or not passphrase:
+    if not enc_pk:
+        return None
+    if user.salt:
+        logger.warning("User %s still has legacy passphrase-encrypted key; migration required", telegram_id)
         return None
     try:
         import base64
-        from src.nadobro.services.crypto import decrypt_with_passphrase
+        from src.nadobro.services.crypto import decrypt_with_server_key
         ciphertext = base64.b64decode(enc_pk) if isinstance(enc_pk, str) else enc_pk
-        salt_b = base64.b64decode(salt) if isinstance(salt, str) else salt
-        pk_bytes = decrypt_with_passphrase(ciphertext, salt_b, passphrase)
+        pk_bytes = decrypt_with_server_key(ciphertext)
         pk = pk_bytes.decode("utf-8") if isinstance(pk_bytes, bytes) else pk_bytes
         network = user.network_mode.value
         return get_nado_client(pk, network, main_address=user.main_address)
@@ -172,22 +173,46 @@ def save_linked_signer(
     main_address: str,
     linked_signer_address: str,
     encrypted_pk: bytes,
-    salt: bytes,
+    salt: bytes = None,
 ) -> None:
     import base64
     execute(
-        "UPDATE users SET main_address = %s, linked_signer_address = %s, encrypted_linked_signer_pk = %s, salt = %s WHERE telegram_id = %s",
+        "UPDATE users SET main_address = %s, linked_signer_address = %s, encrypted_linked_signer_pk = %s, salt = NULL WHERE telegram_id = %s",
         (
             main_address,
             linked_signer_address,
             base64.b64encode(encrypted_pk).decode("ascii"),
-            base64.b64encode(salt).decode("ascii"),
             telegram_id,
         ),
     )
     invalidate_user_cache(telegram_id)
     clear_client_cache()
     _readonly_cache.clear()
+
+
+def migrate_user_key(telegram_id: int, old_passphrase: str) -> tuple[bool, str]:
+    import base64
+    from src.nadobro.services.crypto import decrypt_with_passphrase, encrypt_with_server_key
+    user = get_user(telegram_id)
+    if not user:
+        return False, "User not found."
+    if not user.salt or not user.encrypted_linked_signer_pk:
+        return False, "No legacy key to migrate."
+    try:
+        ciphertext = base64.b64decode(user.encrypted_linked_signer_pk) if isinstance(user.encrypted_linked_signer_pk, str) else user.encrypted_linked_signer_pk
+        salt_b = base64.b64decode(user.salt) if isinstance(user.salt, str) else user.salt
+        pk_bytes = decrypt_with_passphrase(ciphertext, salt_b, old_passphrase)
+    except Exception:
+        return False, "Invalid passphrase. Please try again."
+    new_ciphertext = encrypt_with_server_key(pk_bytes)
+    execute(
+        "UPDATE users SET encrypted_linked_signer_pk = %s, salt = NULL WHERE telegram_id = %s",
+        (base64.b64encode(new_ciphertext).decode("ascii"), telegram_id),
+    )
+    invalidate_user_cache(telegram_id)
+    clear_client_cache()
+    _readonly_cache.clear()
+    return True, "Key migrated successfully. You no longer need a passphrase."
 
 
 def has_mode_private_key(telegram_id: int, network: str) -> bool:

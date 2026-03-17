@@ -140,9 +140,9 @@ def execute_market_order(
     leverage: float = 1.0,
     slippage_pct: float = 1.0,
     enforce_rate_limit: bool = True,
-    passphrase: str = None,
     tp_price: float = None,
     sl_price: float = None,
+    **kwargs,
 ) -> dict:
     valid, msg = validate_trade(
         telegram_id,
@@ -155,10 +155,10 @@ def execute_market_order(
         return {"success": False, "error": msg}
 
     product_id = get_product_id(product)
-    client = get_user_nado_client(telegram_id, passphrase=passphrase)
+    client = get_user_nado_client(telegram_id)
     user = get_user(telegram_id)
     if not client:
-        return {"success": False, "error": "Invalid passphrase or wallet not initialized. Please try again."}
+        return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
     network = user.network_mode.value
     trade_id = insert_trade({
@@ -234,9 +234,9 @@ def execute_limit_order(
     is_long: bool,
     leverage: float = 1.0,
     enforce_rate_limit: bool = True,
-    passphrase: str = None,
     tp_price: float = None,
     sl_price: float = None,
+    **kwargs,
 ) -> dict:
     valid, msg = validate_trade(
         telegram_id,
@@ -249,10 +249,10 @@ def execute_limit_order(
         return {"success": False, "error": msg}
 
     product_id = get_product_id(product)
-    client = get_user_nado_client(telegram_id, passphrase=passphrase)
+    client = get_user_nado_client(telegram_id)
     user = get_user(telegram_id)
     if not client:
-        return {"success": False, "error": "Invalid passphrase or wallet not initialized. Please try again."}
+        return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
     network = user.network_mode.value
     trade_id = insert_trade({
@@ -506,14 +506,14 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
         logger.warning("Failed to record close in DB: %s", e)
 
 
-def close_position(telegram_id: int, product: str, size: float = None, passphrase: str = None) -> dict:
+def close_position(telegram_id: int, product: str, size: float = None, **kwargs) -> dict:
     product_id = get_product_id(product)
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'."}
 
-    client = get_user_nado_client(telegram_id, passphrase=passphrase)
+    client = get_user_nado_client(telegram_id)
     if not client:
-        return {"success": False, "error": "Invalid passphrase or wallet not initialized."}
+        return {"success": False, "error": "Wallet not initialized or key migration required."}
     cancelled_orders, order_errors = _cancel_open_orders_for_product(client, product_id)
 
     net_positions = _normalize_net_positions(client.get_all_positions() or [])
@@ -590,10 +590,10 @@ def close_position(telegram_id: int, product: str, size: float = None, passphras
     return payload
 
 
-def close_all_positions(telegram_id: int, passphrase: str = None) -> dict:
-    client = get_user_nado_client(telegram_id, passphrase=passphrase)
+def close_all_positions(telegram_id: int, **kwargs) -> dict:
+    client = get_user_nado_client(telegram_id)
     if not client:
-        return {"success": False, "error": "Invalid passphrase or wallet not initialized."}
+        return {"success": False, "error": "Wallet not initialized or key migration required."}
 
     cancelled_orders = 0
     order_errors = []

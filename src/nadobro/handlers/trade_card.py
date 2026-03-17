@@ -370,8 +370,8 @@ async def _execute_card_trade(query, context: CallbackContext, telegram_id: int,
         return
 
     _clear_trade_card_session(context)
-    from src.nadobro.handlers.messages import authorize_or_prompt_passphrase
-    await authorize_or_prompt_passphrase(query, context, telegram_id, {
+    from src.nadobro.handlers.messages import execute_action_directly
+    await execute_action_directly(query, context, telegram_id, {
         "type": "trade_card",
         "flow": {
             "order_type": order_type,

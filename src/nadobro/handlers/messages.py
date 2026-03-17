@@ -17,7 +17,7 @@ from src.nadobro.services.knowledge_service import answer_nado_question, stream_
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.bot_runtime import start_user_bot
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
-from src.nadobro.services.crypto import encrypt_with_passphrase
+from src.nadobro.services.crypto import encrypt_with_server_key
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id, get_product_max_leverage
 from src.nadobro.handlers.formatters import (
@@ -72,8 +72,6 @@ logger = logging.getLogger(__name__)
 
 TRADE_FLOW_STEPS = ["direction", "order_type", "product", "leverage", "size", "limit_price", "tpsl", "confirm"]
 PENDING_TEXT_CLOSE_ALL_KEY = "pending_text_close_all"
-PENDING_PASSPHRASE_ACTION = "pending_passphrase_action"
-SESSION_PASSPHRASE_KEY = "session_passphrase"
 
 
 _STATE_REQUIRED_ACTIONS = {
@@ -116,49 +114,13 @@ def _is_contextual_button(callback_data: str, context) -> bool:
     return True
 
 
-def clear_session_passphrase(context: CallbackContext, telegram_id: int | None = None):
-    context.user_data.pop(SESSION_PASSPHRASE_KEY, None)
-    if telegram_id is not None:
-        user = get_user(telegram_id)
-        network = user.network_mode.value if user else "mainnet"
-        from src.nadobro.services.bot_runtime import clear_manual_passphrase
-        clear_manual_passphrase(telegram_id, network)
-
-
-def _cache_session_passphrase(context: CallbackContext, telegram_id: int, passphrase: str):
-    if not passphrase:
-        return
-    user = get_user(telegram_id)
-    network = user.network_mode.value if user else "mainnet"
-    from src.nadobro.services.bot_runtime import set_manual_passphrase
-    set_manual_passphrase(telegram_id, network, passphrase)
-    context.user_data[SESSION_PASSPHRASE_KEY] = {
-        "value": passphrase,
-        "network": network,
-        "set_at": time.time(),
-    }
-
-
-def _get_session_passphrase(context: CallbackContext, telegram_id: int) -> str | None:
-    payload = context.user_data.get(SESSION_PASSPHRASE_KEY)
-    if not isinstance(payload, dict):
-        return None
-    user = get_user(telegram_id)
-    network = user.network_mode.value if user else "mainnet"
-    if payload.get("network") != network:
-        clear_session_passphrase(context, telegram_id=telegram_id)
-        return None
-    value = payload.get("value")
-    return value if isinstance(value, str) and value else None
-
-
-async def _execute_authorized_action(message, context, telegram_id: int, action_data: dict, passphrase: str) -> tuple[bool, str]:
+async def _execute_authorized_action(message, context, telegram_id: int, action_data: dict) -> tuple[bool, str]:
     action_type = action_data.get("type")
 
     if action_type == "execute_trade":
         payload = action_data.get("payload", {})
         from src.nadobro.handlers.intent_handlers import _execute_trade_payload
-        result = await run_blocking(_execute_trade_payload, telegram_id, payload, passphrase=passphrase)
+        result = await run_blocking(_execute_trade_payload, telegram_id, payload)
         await _reply_loc(message, 
             fmt_trade_result(result),
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -180,14 +142,14 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             is_long = direction == "long"
             result = await run_blocking(
                 execute_limit_order, telegram_id, product, size, price,
-                is_long=is_long, leverage=leverage, passphrase=passphrase,
+                is_long=is_long, leverage=leverage,
                 tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         else:
             is_long = direction == "long"
             result = await run_blocking(
                 execute_market_order, telegram_id, product, size,
-                is_long=is_long, leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase,
+                is_long=is_long, leverage=leverage, slippage_pct=slippage_pct,
                 tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         await _reply_loc(message, 
@@ -210,13 +172,13 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             is_long = action == "limit_long"
             result = await run_blocking(
                 execute_limit_order, telegram_id, product, size, price,
-                is_long=is_long, leverage=leverage, passphrase=passphrase
+                is_long=is_long, leverage=leverage,
             )
         else:
             is_long = action == "long"
             result = await run_blocking(
                 execute_market_order, telegram_id, product, size,
-                is_long=is_long, leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase
+                is_long=is_long, leverage=leverage, slippage_pct=slippage_pct,
             )
         await _reply_loc(message, 
             fmt_trade_result(result),
@@ -227,7 +189,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
 
     if action_type == "close_position":
         product = action_data.get("product")
-        result = await run_blocking(close_position, telegram_id, product, passphrase=passphrase)
+        result = await run_blocking(close_position, telegram_id, product)
         if result.get("success"):
             msg = f"✅ Closed {escape_md(str(result.get('cancelled', 0)))} {escape_md(result.get('product', product))} position size\\."
         else:
@@ -236,7 +198,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         return bool(result.get("success")), str(result.get("error", ""))
 
     if action_type == "close_all":
-        result = await run_blocking(close_all_positions, telegram_id, passphrase=passphrase)
+        result = await run_blocking(close_all_positions, telegram_id)
         if result.get("success"):
             products = ", ".join(result.get("products", []))
             msg = f"✅ Closed total size {escape_md(str(result.get('cancelled', 0)))} across {escape_md(products)}\\."
@@ -258,13 +220,13 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             price = float(flow.get("limit_price", flow.get("price", 0)) or 0)
             result = await run_blocking(
                 execute_limit_order, telegram_id, product, size, price,
-                is_long=(direction == "long"), leverage=leverage, passphrase=passphrase,
+                is_long=(direction == "long"), leverage=leverage,
                 tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         else:
             result = await run_blocking(
                 execute_market_order, telegram_id, product, size,
-                is_long=(direction == "long"), leverage=leverage, slippage_pct=slippage_pct, passphrase=passphrase,
+                is_long=(direction == "long"), leverage=leverage, slippage_pct=slippage_pct,
                 tp_price=flow.get("tp"), sl_price=flow.get("sl"),
             )
         result_msg = fmt_trade_result(result)
@@ -281,10 +243,6 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         risk_factor = float(action_data.get("risk_factor", 1.0))
         max_leverage = float(action_data.get("max_leverage", 10))
         from src.nadobro.services.copy_service import start_copy
-        from src.nadobro.services.bot_runtime import set_runtime_passphrase
-        user = get_user(telegram_id)
-        network = user.network_mode.value if user else "mainnet"
-        set_runtime_passphrase(telegram_id, network, passphrase)
         ok, msg = await run_blocking(start_copy, telegram_id, trader_id, budget_usd, risk_factor, max_leverage)
         if ok:
             from src.nadobro.services.hl_websocket import get_ws_manager
@@ -316,7 +274,6 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             product=product,
             leverage=leverage,
             slippage_pct=slippage_pct,
-            passphrase=passphrase,
         )
         if ok:
             reply = f"🚀 {escape_md(msg)}\n\nUse /status to monitor live loop health\\."
@@ -337,55 +294,10 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
     return False, "unknown action"
 
 
-async def _prompt_passphrase(update_or_query, context, action_data: dict):
-    context.user_data[PENDING_PASSPHRASE_ACTION] = action_data
-    msg_text = "🔐 Enter your passphrase to authorize this command:"
-    lang = get_active_language()
-    kb = localize_markup(InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Cancel", callback_data="nav:main")],
-    ]), lang)
-    if hasattr(update_or_query, 'message') and update_or_query.message:
-        await _reply_loc(update_or_query.message, msg_text, reply_markup=kb)
-    elif hasattr(update_or_query, 'edit_message_text'):
-        await update_or_query.edit_message_text(
-            localize_text(msg_text, lang),
-            reply_markup=kb,
-        )
-
-
-async def authorize_or_prompt_passphrase(update_or_query, context, telegram_id: int, action_data: dict):
-    cached = _get_session_passphrase(context, telegram_id)
-    if cached:
-        valid = await run_blocking(lambda: bool(get_user_nado_client(telegram_id, passphrase=cached)))
-        if valid:
-            target_message = getattr(update_or_query, "message", None)
-            if target_message:
-                ok, _ = await _execute_authorized_action(target_message, context, telegram_id, action_data, cached)
-                if ok:
-                    _cache_session_passphrase(context, telegram_id, cached)
-                return
-        clear_session_passphrase(context, telegram_id=telegram_id)
-    await _prompt_passphrase(update_or_query, context, action_data)
-
-
-async def _handle_passphrase_input(update, context, telegram_id, text):
-    action_data = context.user_data.get(PENDING_PASSPHRASE_ACTION)
-    if not action_data:
-        return False
-
-    passphrase = text.strip()
-    context.user_data.pop(PENDING_PASSPHRASE_ACTION, None)
-
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-    ok, _ = await _execute_authorized_action(update.message, context, telegram_id, action_data, passphrase)
-    if ok:
-        _cache_session_passphrase(context, telegram_id, passphrase)
-
-    return True
+async def execute_action_directly(update_or_query, context, telegram_id: int, action_data: dict):
+    target_message = getattr(update_or_query, "message", None)
+    if target_message:
+        await _execute_authorized_action(target_message, context, telegram_id, action_data)
 
 
 def _get_trade_flow(context):
@@ -442,9 +354,6 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
                     pass
             return
 
-    if await _handle_passphrase_input(update, context, telegram_id, text):
-        return
-
     if await handle_trade_card_text_input(update, context, telegram_id, text):
         return
 
@@ -491,7 +400,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     lang = get_active_language()
 
     if callback_data == "nav:main":
-        clear_session_passphrase(context)
         if is_trade_card_mode_enabled():
             await open_home_card_view_from_message(update, context, telegram_id, "nav:main")
             return
@@ -533,7 +441,6 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         if is_trade_card_mode_enabled():
             if callback_data in ("trade_flow:home", "trade_flow:cancel"):
                 _clear_trade_flow(context)
-                clear_session_passphrase(context, telegram_id=telegram_id)
                 await _reply_loc(update.message, 
                     localize_text("↩️ Returned to home\\.", lang),
                     parse_mode=ParseMode.MARKDOWN_V2,
@@ -672,7 +579,6 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
 
     if action == "home" or action == "cancel":
         _clear_trade_flow(context)
-        clear_session_passphrase(context, telegram_id=telegram_id)
         await _reply_loc(update.message, 
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -683,7 +589,6 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
     if action == "back":
         if not flow:
             _clear_trade_flow(context)
-            clear_session_passphrase(context, telegram_id=telegram_id)
             await _reply_loc(update.message, 
                 "↩️ Returned to home\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
@@ -860,7 +765,6 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
 async def _go_back(update, context, flow, state, telegram_id):
     if state in ("direction", "order_type"):
         _clear_trade_flow(context)
-        clear_session_passphrase(context, telegram_id=telegram_id)
         await _reply_loc(update.message, 
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -917,7 +821,6 @@ async def _go_back(update, context, flow, state, telegram_id):
                 )
     else:
         _clear_trade_flow(context)
-        clear_session_passphrase(context, telegram_id=telegram_id)
         await _reply_loc(update.message, 
             "↩️ Returned to home\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -1002,7 +905,7 @@ async def _execute_trade_flow(update, context, telegram_id, flow):
         )
         return
 
-    await authorize_or_prompt_passphrase(update, context, telegram_id, {
+    await execute_action_directly(update, context, telegram_id, {
         "type": "execute_trade_flow",
         "flow": {
             "direction": direction,
@@ -1251,21 +1154,6 @@ def _is_valid_main_address(text: str) -> bool:
     return len(t) == 40 and bool(re.fullmatch(r"[0-9a-fA-F]{40}", t))
 
 
-def _is_strong_passphrase(text: str) -> tuple[bool, str]:
-    t = (text or "").strip()
-    if len(t) < 12:
-        return False, "Use at least 12 characters."
-    if not re.search(r"[A-Z]", t):
-        return False, "Include at least one uppercase letter."
-    if not re.search(r"[a-z]", t):
-        return False, "Include at least one lowercase letter."
-    if not re.search(r"\d", t):
-        return False, "Include at least one number."
-    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>/?]", t):
-        return False, "Include at least one symbol."
-    return True, ""
-
-
 async def _handle_wallet_flow(update, context, telegram_id, text):
     flow = context.user_data.get("wallet_flow")
     if not flow:
@@ -1282,37 +1170,17 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
         if main_addr.startswith("0x"):
             main_addr = main_addr[:2] + main_addr[2:].lower()
         context.user_data["wallet_main_address"] = main_addr
-        context.user_data["wallet_flow"] = "awaiting_passphrase"
-        await _reply_loc(update.message, 
-            "🔐 Almost done! Choose a *strong passphrase* to encrypt your 1CT key.\n\n"
-            "Requirements: min 12 characters, mix of uppercase, lowercase, number, and symbol.\n\n"
-            "You'll need this passphrase each time you start a trading session.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return True
-
-    if flow == "awaiting_passphrase":
-        ok, msg = _is_strong_passphrase(text)
-        if not ok:
-            await _reply_loc(update.message, f"❌ {msg}", parse_mode=ParseMode.MARKDOWN)
-            return True
         pk_hex = context.user_data.get("wallet_linked_signer_pk")
-        main_addr = context.user_data.get("wallet_main_address")
         linked_addr = context.user_data.get("wallet_linked_signer_address")
-        if not pk_hex or not main_addr or not linked_addr:
+        if not pk_hex or not linked_addr:
             context.user_data.pop("wallet_flow", None)
             await _reply_loc(update.message, "⚠️ Session expired. Tap the Wallet button to start again.")
             return True
-        passphrase = text.strip()
         pk_bytes = pk_hex.encode("utf-8")
-        ciphertext, salt = encrypt_with_passphrase(pk_bytes, passphrase)
-        save_linked_signer(telegram_id, main_addr, linked_addr, ciphertext, salt)
+        ciphertext = encrypt_with_server_key(pk_bytes)
+        save_linked_signer(telegram_id, main_addr, linked_addr, ciphertext)
         for key in ("wallet_flow", "wallet_linked_signer_pk", "wallet_main_address", "wallet_linked_signer_address"):
             context.user_data.pop(key, None)
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
         await _reply_loc(update.message, 
             "✅ Wallet linked! Your 1CT key is encrypted and stored.\n\n"
             "You can now trade directly from this bot. Revoke anytime with /revoke.",
@@ -1653,7 +1521,7 @@ async def _handle_pending_text_close_all_confirmation(update, context, telegram_
         return True
 
     context.user_data.pop(PENDING_TEXT_CLOSE_ALL_KEY, None)
-    await authorize_or_prompt_passphrase(update, context, telegram_id, {"type": "close_all"})
+    await execute_action_directly(update, context, telegram_id, {"type": "close_all"})
     return True
 
 
@@ -1692,7 +1560,7 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
         product = intent.get("product")
         if not product:
             return False
-        await authorize_or_prompt_passphrase(update, context, telegram_id, {"type": "close_position", "product": product})
+        await execute_action_directly(update, context, telegram_id, {"type": "close_position", "product": product})
         return True
 
     return False

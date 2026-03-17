@@ -35,7 +35,7 @@ def get_fee_pnl_preview(telegram_id: int, product: str, target_volume_usd: float
     }
 
 
-def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = None) -> dict:
+def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     """
     One round:
       - open with LIMIT at mid
@@ -105,7 +105,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
             return {"success": True, "done": False, "action": "waiting"}
 
         # Interval exhausted -> close immediately and clean any stale open orders.
-        signer_client = get_user_nado_client(telegram_id, passphrase=passphrase) if passphrase else None
+        signer_client = get_user_nado_client(telegram_id)
         if signer_client:
             try:
                 for order in (client.get_open_orders(product_id) or []):
@@ -134,7 +134,6 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
                     leverage=leverage,
                     slippage_pct=slippage_pct,
                     enforce_rate_limit=False,
-                    passphrase=passphrase,
                 )
                 if not close_result.get("success"):
                     return {
@@ -192,7 +191,6 @@ def run_cycle(telegram_id: int, network: str, state: dict, passphrase: str = Non
         is_long=is_long,
         leverage=leverage,
         enforce_rate_limit=False,
-        passphrase=passphrase,
     )
 
     if open_result.get("success"):

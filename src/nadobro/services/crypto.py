@@ -91,28 +91,20 @@ def private_key_fingerprint(private_key: str) -> str:
     return digest[-8:]
 
 
-# --- Passphrase-based encryption for linked signer (PBKDF2 600k + Fernet) ---
+def encrypt_with_server_key(data: bytes) -> bytes:
+    f = _get_fernet()
+    return f.encrypt(data)
+
+
+def decrypt_with_server_key(ciphertext: bytes) -> bytes:
+    f = _get_fernet()
+    return f.decrypt(ciphertext)
+
+
 PBKDF2_ITERATIONS = 600_000
 
 
-def encrypt_with_passphrase(data: bytes, passphrase: str) -> tuple[bytes, bytes]:
-    """Encrypt data with passphrase. Returns (ciphertext, salt)."""
-    salt = secrets.token_bytes(16)
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=PBKDF2_ITERATIONS,
-        backend=default_backend(),
-    )
-    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
-    f = Fernet(key)
-    ciphertext = f.encrypt(data)
-    return ciphertext, salt
-
-
 def decrypt_with_passphrase(ciphertext: bytes, salt: bytes, passphrase: str) -> bytes:
-    """Decrypt data with passphrase and salt."""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,

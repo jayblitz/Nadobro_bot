@@ -25,9 +25,6 @@ STRATEGY_ERROR_ALERT_STREAK = 3
 _bot_app = None
 _runtime_loop: asyncio.AbstractEventLoop | None = None
 _tasks: dict[str, asyncio.Task] = {}
-_session_passphrases: dict[str, str] = {}
-_manual_session_passphrases: dict[str, dict] = {}
-_MANUAL_SESSION_TTL_SECONDS = 1800
 
 
 def set_bot_app(app):
@@ -46,42 +43,6 @@ def _task_key(telegram_id: int, network: str) -> str:
 
 def _state_key(telegram_id: int, network: str) -> str:
     return f"{STATE_PREFIX}{telegram_id}:{network}"
-
-
-def set_runtime_passphrase(telegram_id: int, network: str, passphrase: str):
-    if not passphrase:
-        return
-    _session_passphrases[_task_key(telegram_id, network)] = passphrase
-
-
-def set_manual_passphrase(telegram_id: int, network: str, passphrase: str):
-    if not passphrase:
-        return
-    _manual_session_passphrases[_task_key(telegram_id, network)] = {
-        "passphrase": passphrase,
-        "set_at": time.time(),
-    }
-
-
-def clear_manual_passphrase(telegram_id: int, network: str):
-    _manual_session_passphrases.pop(_task_key(telegram_id, network), None)
-
-
-def get_runtime_passphrase(telegram_id: int, network: str) -> str | None:
-    tk = _task_key(telegram_id, network)
-    strategy_passphrase = _session_passphrases.get(tk)
-    if strategy_passphrase:
-        return strategy_passphrase
-
-    payload = _manual_session_passphrases.get(tk)
-    if not payload:
-        return None
-    passphrase = payload.get("passphrase")
-    set_at = float(payload.get("set_at") or 0)
-    if not passphrase or (time.time() - set_at > _MANUAL_SESSION_TTL_SECONDS):
-        _manual_session_passphrases.pop(tk, None)
-        return None
-    return passphrase
 
 
 def _default_state() -> dict:
@@ -172,7 +133,7 @@ def start_user_bot(
     product: str,
     leverage: float = 3.0,
     slippage_pct: float = 1.0,
-    passphrase: str | None = None,
+    **kwargs,
 ) -> tuple[bool, str]:
     strategy = (strategy or "").lower()
     if strategy not in SUPPORTED_STRATEGIES:
@@ -207,8 +168,6 @@ def start_user_bot(
             }
         )
         _save_state(telegram_id, network, state)
-        if passphrase:
-            set_runtime_passphrase(telegram_id, network, passphrase)
         _ensure_task(telegram_id, network)
         return True, "Bro Mode activated 🧠"
 
@@ -242,8 +201,6 @@ def start_user_bot(
         }
     )
     _save_state(telegram_id, network, state)
-    if passphrase:
-        set_runtime_passphrase(telegram_id, network, passphrase)
     _ensure_task(telegram_id, network)
     return (
         True,
@@ -268,11 +225,9 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
         task.cancel()
 
     if cancel_orders:
-        close_res = close_all_positions(telegram_id, passphrase=_session_passphrases.get(tk))
+        close_res = close_all_positions(telegram_id)
         if not close_res.get("success"):
-            _session_passphrases.pop(tk, None)
             return False, f"Strategy loop stopped, but cleanup failed: {close_res.get('error', 'unknown')}"
-    _session_passphrases.pop(tk, None)
 
     return True, "Strategy bot stopped. Open orders cancellation requested."
 
@@ -301,14 +256,9 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             if task:
                 task.cancel()
             if cancel_orders:
-                passphrase = _session_passphrases.get(tk)
-                if passphrase:
-                    close_res = close_all_positions(telegram_id, passphrase=passphrase)
-                    if not close_res.get("success"):
-                        close_errors.append(f"{network}: {close_res.get('error', 'close_all_positions failed')}")
-                else:
-                    close_errors.append(f"{network}: no active strategy session passphrase; skipped close-all")
-            _session_passphrases.pop(tk, None)
+                close_res = close_all_positions(telegram_id)
+                if not close_res.get("success"):
+                    close_errors.append(f"{network}: {close_res.get('error', 'close_all_positions failed')}")
             stopped += 1
         except Exception:
             continue
@@ -360,8 +310,6 @@ def stop_runtime():
     for task_id, task in list(_tasks.items()):
         task.cancel()
         _tasks.pop(task_id, None)
-    _session_passphrases.clear()
-    _manual_session_passphrases.clear()
 
 
 def restore_running_bots(enabled: bool = False):
@@ -487,28 +435,27 @@ async def _mark_cycle_error(telegram_id: int, network: str, error_msg: str):
 
 
 def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dict,
-                       client, mid: float, product_id: int, product: str, open_orders: list,
-                       passphrase: str) -> dict:
+                       client, mid: float, product_id: int, product: str, open_orders: list) -> dict:
     from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
 
     if strategy in ("mm", "grid"):
         return mm_bot.run_cycle(
             telegram_id, network, state,
-            client=client, mid=mid, open_orders=open_orders, passphrase=passphrase,
+            client=client, mid=mid, open_orders=open_orders,
         )
     elif strategy == "dn":
         return delta_neutral.run_cycle(
             telegram_id, network, state,
             client=client, mid=mid, product_id=product_id,
-            product=product, open_orders=open_orders, passphrase=passphrase,
+            product=product, open_orders=open_orders,
         )
     elif strategy == "vol":
-        return volume_bot.run_cycle(telegram_id, network, state, passphrase=passphrase)
+        return volume_bot.run_cycle(telegram_id, network, state)
     elif strategy == "bro":
         from src.nadobro.strategies import bro_mode
         return bro_mode.run_cycle(
             telegram_id, network, state,
-            client=client, passphrase=passphrase,
+            client=client,
         )
     else:
         return {"success": False, "error": f"Unknown strategy '{strategy}'"}
@@ -521,7 +468,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             state["last_error"] = "Auto-closed on maintenance pause."
             _save_state(telegram_id, network, state)
             tk = _task_key(telegram_id, network)
-            close_res = await run_blocking(close_all_positions, telegram_id, _session_passphrases.get(tk))
+            close_res = await run_blocking(close_all_positions, telegram_id)
             if close_res.get("success"):
                 await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
             else:
@@ -548,20 +495,6 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         )
         return True, None
 
-    tk = _task_key(telegram_id, network)
-    session_passphrase = _session_passphrases.get(tk)
-    if not session_passphrase:
-        state["running"] = False
-        state["last_error"] = "Strategy session expired. Restart strategy and enter passphrase again."
-        _save_state(telegram_id, network, state)
-        await _notify(
-            telegram_id,
-            "⚠️ {strategy} stopped on {network}: strategy session expired. "
-            "Restart strategy and enter passphrase again.",
-            strategy=str(state.get('strategy', '')).upper(), network=network,
-        )
-        return True, None
-
     last_run = float(state.get("last_run_ts") or 0.0)
     interval = int(state.get("interval_seconds") or 60)
     if time.time() - last_run < interval:
@@ -578,7 +511,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             result = await run_blocking(
                 _dispatch_strategy,
                 strategy, telegram_id, network, state,
-                client, 0.0, 0, "MULTI", [], session_passphrase,
+                client, 0.0, 0, "MULTI", [],
             )
         tk_check = _task_key(telegram_id, network)
         if tk_check not in _tasks or not state.get("running", True):
@@ -673,7 +606,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["running"] = False
         state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
         _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, session_passphrase)
+        close_res = await run_blocking(close_all_positions, telegram_id)
         if close_res.get("success"):
             await _notify(
                 telegram_id,
@@ -699,7 +632,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["running"] = False
         state["last_error"] = None
         _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, session_passphrase)
+        close_res = await run_blocking(close_all_positions, telegram_id)
         if close_res.get("success"):
             await _notify(
                 telegram_id,
@@ -729,7 +662,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         result = await run_blocking(
             _dispatch_strategy,
             strategy, telegram_id, network, state,
-            client, mid, product_id, product, open_orders, session_passphrase,
+            client, mid, product_id, product, open_orders,
         )
 
     tk_post = _task_key(telegram_id, network)

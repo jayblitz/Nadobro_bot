@@ -5,7 +5,6 @@ import uuid
 
 from src.nadobro.db import query_all
 from src.nadobro.models.database import set_bot_state
-from src.nadobro.services.bot_runtime import get_runtime_passphrase
 
 logger = logging.getLogger(__name__)
 
@@ -106,28 +105,9 @@ def process_stop_losses(prices: dict) -> list[dict]:
         from src.nadobro.i18n import get_user_language
         user_lang = get_user_language(user_id)
 
-        passphrase = get_runtime_passphrase(user_id, network)
-        if not passphrase:
-            last_notified = float(rule.get("last_error_notified_at") or 0)
-            if now_ts - last_notified >= _ERROR_NOTIFY_COOLDOWN_SECONDS:
-                rule["last_error_notified_at"] = now_ts
-                rule["last_error"] = "Strategy/auth session expired before SL could execute."
-                set_bot_state(key, rule)
-                notifications.append(
-                    {
-                        "user_id": user_id,
-                        "text": (
-                            f"{_loc('⚠️ Stop-loss hit on', user_lang)} {product}-PERP "
-                            f"${mark:,.2f}, "
-                            f"{_loc('but your session passphrase expired. Re-authorize and close manually.', user_lang)}"
-                        ),
-                    }
-                )
-            continue
-
         from src.nadobro.services.trade_service import close_position
 
-        close_result = close_position(user_id, product, passphrase=passphrase)
+        close_result = close_position(user_id, product)
         if close_result.get("success"):
             rule["active"] = False
             rule["triggered_at"] = _now_iso()

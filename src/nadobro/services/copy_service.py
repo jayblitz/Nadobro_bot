@@ -32,7 +32,6 @@ from src.nadobro.services.copy_asset_map import (
 from src.nadobro.services.hl_client import get_hl_client
 from src.nadobro.services.user_service import get_user, get_user_nado_client
 from src.nadobro.services.trade_service import execute_market_order
-from src.nadobro.services.bot_runtime import get_runtime_passphrase
 from src.nadobro.config import get_product_max_leverage
 
 logger = logging.getLogger(__name__)
@@ -401,8 +400,6 @@ async def _execute_mirror_trade(
         return
     network = user.network_mode.value
 
-    passphrase = get_runtime_passphrase(user_id, network)
-
     if is_close:
         from src.nadobro.services.trade_service import close_position
 
@@ -423,7 +420,6 @@ async def _execute_mirror_trade(
         result = close_position(
             telegram_id=user_id,
             product=product_key,
-            passphrase=passphrase,
         )
 
         wallet_addr_close = mirror.get("wallet_address", "")
@@ -473,7 +469,6 @@ async def _execute_mirror_trade(
         leverage=leverage,
         slippage_pct=1.5,
         enforce_rate_limit=False,
-        passphrase=passphrase,
     )
 
     wallet_addr = mirror.get("wallet_address", "")
