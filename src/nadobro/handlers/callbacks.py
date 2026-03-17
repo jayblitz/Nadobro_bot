@@ -2147,6 +2147,20 @@ async def _handle_copy(query, data, context, telegram_id):
             await _edit_loc(query, "⚠️ No setup to confirm\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
             return
 
+        wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+        if not wallet_ready:
+            if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
+                from src.nadobro.handlers.messages import _prompt_legacy_migration
+                context.user_data["copy_setup"] = setup
+                await _prompt_legacy_migration(query, context)
+            else:
+                await _edit_loc(query,
+                    f"⚠️ {escape_md(wallet_msg)}",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=back_kb(),
+                )
+            return
+
         from src.nadobro.handlers.messages import execute_action_directly
         await execute_action_directly(
             query, context, telegram_id,
