@@ -133,7 +133,11 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
         return True
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(f"⚠️ {escape_md(wallet_msg)}", parse_mode=ParseMode.MARKDOWN_V2)
+        if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
+            from src.nadobro.handlers.messages import _prompt_legacy_migration
+            await _prompt_legacy_migration(update, context)
+        else:
+            await update.message.reply_text(f"⚠️ {escape_md(wallet_msg)}", parse_mode=ParseMode.MARKDOWN_V2)
         return True
 
     from src.nadobro.handlers.messages import execute_action_directly
@@ -165,10 +169,14 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
 
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(
-            f"⚠️ {escape_md(wallet_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+        if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
+            from src.nadobro.handlers.messages import _prompt_legacy_migration
+            await _prompt_legacy_migration(update, context)
+        else:
+            await update.message.reply_text(
+                f"⚠️ {escape_md(wallet_msg)}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
         return True
 
     if intent.get("missing"):

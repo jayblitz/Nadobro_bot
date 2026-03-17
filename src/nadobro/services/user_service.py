@@ -231,6 +231,8 @@ def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
             False,
             _loc("Wallet not linked. Use the Wallet button to connect your wallet (Linked Signer)."),
         )
+    if user.salt:
+        return False, "LEGACY_KEY_MIGRATION_REQUIRED"
     return True, ""
 
 

@@ -311,7 +311,7 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 - Supports natural language trading: "buy 0.01 BTC 5x market"
 - Features: live market data, wallet management, trade execution, price alerts, automated strategies
 - Strategies available: Market Making, Delta Neutral, Volume Bot
-- Uses 1-Click Trading model — generates a linked signer encrypted with your passphrase
+- Uses 1-Click Trading model — generates a linked signer encrypted with server key
 - Supports both testnet and mainnet
 - Portfolio view shows live positions, PnL, and trading stats
 

@@ -1292,7 +1292,7 @@ _TEXTS = {
         "ar": "🔐 أدخل عبارة المرور لتفويض هذا الأمر:",
         "ru": "🔐 Введите пароль-фразу для авторизации команды:",
         "ko": "🔐 이 명령을 승인하려면 패스프레이즈를 입력하세요:",
-    },
+    },  # LEGACY: kept for i18n key compatibility; no longer used in code
     "Yo what’s good, future Nado whale?! 👋💰\n\nWelcome to Nadobro — the best Telegram bot for trading Perps on Nado.\n\nWe’re giving you pro tools in the palm of your hand:\n• MM Bot (Grid + RGRID that prints)\n• Delta Neutral Bot (spot + 1-5x short = easy funding)\n• Volume Bot (farm leaderboards on autopilot)\n• AI chat: just type your trade ideas in English\n\nFirst, pick your language vibe:": {
         "zh": "Yo，未来的 Nado 巨鲸你好！👋💰\n\n欢迎来到 Nadobro —— 在 Nado 上交易永续合约的顶级 Telegram 机器人。\n\n我们把专业工具放进你的掌心：\n• MM Bot（Grid + RGRID，持续输出）\n• Delta Neutral Bot（现货 + 1-5x 空单，轻松吃资金费）\n• Volume Bot（自动冲榜）\n• AI 聊天：直接输入你的交易想法\n\n先选择你的语言：",
         "fr": "Salut, futur whale Nado ! 👋💰\n\nBienvenue sur Nadobro — le meilleur bot Telegram pour trader les Perps sur Nado.\n\nOn te met des outils pro dans la main :\n• MM Bot (Grid + RGRID qui envoie)\n• Delta Neutral Bot (spot + short 1-5x = funding simplifié)\n• Volume Bot (farm des leaderboards en automatique)\n• Chat IA : tape simplement tes idées de trade\n\nD'abord, choisis ta langue :",
@@ -1698,7 +1698,7 @@ _TEXTS = {
         "ar": "لكن عبارة المرور الخاصة بجلستك انتهت. أعد التفويض وأغلق يدويًا.",
         "ru": "но ваша сессионная парольная фраза истекла. Авторизуйтесь заново и закройте вручную.",
         "ko": "그러나 세션 패스프레이즈가 만료되었습니다. 다시 인증한 후 수동으로 종료하세요.",
-    },
+    },  # LEGACY: kept for i18n key compatibility; no longer used in code
     "⚠️ Stop-loss trigger failed for": {
         "zh": "⚠️ 止损触发失败:",
         "fr": "⚠️ Déclenchement du stop-loss échoué pour",

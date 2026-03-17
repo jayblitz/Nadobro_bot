@@ -365,7 +365,11 @@ async def _execute_card_trade(query, context: CallbackContext, telegram_id: int,
         return
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await _edit_message_safely(query, f"⚠️ {escape_md(wallet_msg)}", home_card_kb())
+        if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
+            from src.nadobro.handlers.messages import _prompt_legacy_migration
+            await _prompt_legacy_migration(query, context)
+        else:
+            await _edit_message_safely(query, f"⚠️ {escape_md(wallet_msg)}", home_card_kb())
         _clear_trade_card_session(context)
         return
 
@@ -440,6 +444,10 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
             return True
         wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
+            if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
+                from src.nadobro.handlers.messages import _prompt_legacy_migration
+                await _prompt_legacy_migration(query, context)
+                return True
             session["error"] = wallet_msg
             _set_trade_card_session(context, session)
             await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
