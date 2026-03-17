@@ -2253,7 +2253,7 @@ async def _handle_copy(query, data, context, telegram_id):
         elif sub == "add":
             context.user_data["pending_admin_copy_wallet"] = True
             await _edit_loc(query,
-                "➕ *Add Trader*\n\nSend wallet address and optional label separated by a space\\.\n\nExample: `0xABC123\\.\\.\\. TopTrader`",
+                "➕ *Add Trader*\n\nSend the Ethereum wallet address \\(0x\\.\\.\\.\\) and an optional label separated by a space\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("❌ Cancel", callback_data="copy:admin:menu")],
