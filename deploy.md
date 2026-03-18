@@ -114,22 +114,17 @@ fly scale count 1   # Ensure 1 machine is running
 **Changing regions:**
 - Edit `primary_region` in `fly.toml` and redeploy
 
-## Scale Path (Polling -> Webhook)
+## Scale Path (Webhook)
 
-Current runtime uses Telegram polling, which should run as a single ingress instance.
+Current production runtime uses Telegram webhook mode.
 
 ### Phase A (now)
-- Keep one ingress machine always on (`auto_stop_machines=off`, `min_machines_running=1`)
+- Keep one ingress machine always on (`min_machines_running=1`).
 - Scale internal workers using:
   - `NADO_STRATEGY_WORKERS` (default `2`)
   - `NADO_ALERT_WORKERS` (default `1`)
 
-### Phase B (recommended for high concurrency)
-1. Set webhook secrets (`TELEGRAM_TRANSPORT`, `TELEGRAM_WEBHOOK_URL`, `TELEGRAM_WEBHOOK_PATH`, `TELEGRAM_WEBHOOK_SECRET`).
-2. Keep bot ingress stateless and enqueue all heavy work.
-3. Run dedicated strategy/alert workers separately.
-4. Use idempotency keys on jobs to avoid duplicate execution.
-
-### Phase C
-- Horizontally scale webhook ingress replicas behind Fly load balancing.
-- Keep strategy workers independently scaled from ingress.
+### Phase B (higher concurrency)
+1. Keep ingress stateless and enqueue heavy work.
+2. Use idempotency keys on jobs to avoid duplicate execution.
+3. Scale ingress and worker capacity independently.

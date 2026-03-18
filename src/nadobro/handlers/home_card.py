@@ -4,14 +4,22 @@ from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
 
 from src.nadobro.i18n import localize_text, localize_markup, get_active_language
-from src.nadobro.handlers.formatters import escape_md, fmt_positions, fmt_settings, fmt_wallet_info, fmt_portfolio, fmt_help
+from src.nadobro.handlers.formatters import (
+    escape_md,
+    fmt_positions,
+    fmt_settings,
+    fmt_wallet_info,
+    fmt_portfolio,
+    fmt_help,
+    fmt_points_dashboard,
+)
 from src.nadobro.handlers.keyboards import (
     home_card_kb,
     mode_kb,
     strategy_hub_kb,
     wallet_kb,
     positions_kb,
-    markets_kb,
+    points_scope_kb,
     alerts_kb,
     settings_kb,
     portfolio_kb,
@@ -20,6 +28,7 @@ from src.nadobro.handlers.keyboards import (
 from src.nadobro.services.trade_service import get_trade_analytics
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
+from src.nadobro.services.points_service import get_points_dashboard
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric
 
@@ -169,8 +178,9 @@ def _view_portfolio_text(telegram_id: int):
     return msg, portfolio_kb(has_positions=bool(positions))
 
 
-def _view_markets_text():
-    return localize_text("📡 *Market Radar*\n\nPick a market view:", get_active_language()), markets_kb()
+def _view_points_text(telegram_id: int):
+    payload = get_points_dashboard(telegram_id, scope="week")
+    return fmt_points_dashboard(payload), points_scope_kb("week")
 
 
 def _view_alerts_text():
@@ -186,6 +196,8 @@ def _view_settings_text(telegram_id: int):
 
 
 async def resolve_home_view(callback_data: str, telegram_id: int):
+    if callback_data in ("market:view", "nav:market_radar", "market:radar", "home:market_radar"):
+        callback_data = "points:view"
     if callback_data == "home:mode":
         return _view_mode_text(telegram_id)
     if callback_data == "nav:strategy_hub":
@@ -196,8 +208,8 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
         return _view_portfolio_text(telegram_id)
     if callback_data == "pos:view":
         return _view_positions_text(telegram_id)
-    if callback_data == "mkt:menu":
-        return _view_markets_text()
+    if callback_data == "points:view":
+        return _view_points_text(telegram_id)
     if callback_data == "alert:menu":
         return _view_alerts_text()
     if callback_data == "settings:view":

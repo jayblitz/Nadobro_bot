@@ -273,13 +273,19 @@ def execute_limit_order(
     result = client.place_limit_order(product_id, size, price, is_buy=is_long)
 
     if result["success"]:
-        update_trade(trade_id, {"status": TradeStatus.FILLED.value, "order_digest": result.get("digest"), "filled_at": datetime.utcnow().isoformat()}, network=network)
+        update_trade(
+            trade_id,
+            {
+                "status": TradeStatus.PENDING.value,
+                "order_digest": result.get("digest"),
+            },
+            network=network,
+        )
     else:
         update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")}, network=network)
 
     if result["success"]:
-        update_trade_stats(telegram_id, size * price)
-        payload = {
+        return {
             "success": True,
             "side": "LONG" if is_long else "SHORT",
             "size": size,
@@ -288,27 +294,9 @@ def execute_limit_order(
             "digest": result.get("digest"),
             "network": user.network_mode.value,
             "type": "LIMIT",
+            "status": TradeStatus.PENDING.value,
+            "message": "Limit order accepted and recorded as pending until execution.",
         }
-        tp_result = _place_take_profit_order(
-            client=client,
-            product_id=product_id,
-            size=size,
-            is_long=is_long,
-            tp_price=tp_price,
-        )
-        if tp_result:
-            payload.update(tp_result)
-        sl_result = _arm_stop_loss_rule(
-            telegram_id=telegram_id,
-            network=user.network_mode.value,
-            product=get_product_name(product_id),
-            is_long=is_long,
-            stop_price=sl_price,
-            size=size,
-        )
-        if sl_result:
-            payload.update(sl_result)
-        return payload
 
     return result
 
@@ -434,10 +422,19 @@ def _get_post_fill_price(client, product_id: int) -> float | None:
 # be updated to query actual execution data by digest.
 
 
-def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, pos_size: float, side: str, client, fill_price: float = None):
+def _record_close_in_db(
+    telegram_id: int,
+    product_id: int,
+    close_size: float,
+    pos_size: float,
+    side: str,
+    client,
+    fill_price: float = None,
+    network: str | None = None,
+):
     try:
         user = get_user(telegram_id)
-        network = user.network_mode.value if user else "mainnet"
+        selected_network = str(network or (user.network_mode.value if user else "mainnet"))
 
         close_price = fill_price or 0.0
         if not close_price:
@@ -447,7 +444,7 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
             except Exception:
                 pass
 
-        open_trade = find_open_trade(telegram_id, product_id, network=network)
+        open_trade = find_open_trade(telegram_id, product_id, network=selected_network)
         is_full_close = close_size >= pos_size
 
         if open_trade:
@@ -466,7 +463,7 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
                     "close_price": close_price,
                     "closed_at": datetime.utcnow().isoformat(),
                     "pnl": round(pnl, 4),
-                }, network=network)
+                }, network=selected_network)
                 logger.info(
                     "Trade #%d fully closed: %s %s size=%.4f open=%.2f close=%.2f pnl=%.4f",
                     open_trade["id"], open_side, get_product_name(product_id),
@@ -476,7 +473,7 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
                 update_trade(open_trade["id"], {
                     "pnl": round(pnl, 4),
                     "close_price": close_price,
-                }, network=network)
+                }, network=selected_network)
                 logger.info(
                     "Trade #%d partially closed: %s %s closed=%.4f/%.4f open=%.2f close=%.2f pnl=%.4f",
                     open_trade["id"], open_side, get_product_name(product_id),
@@ -497,7 +494,7 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
                 "closed_at": datetime.utcnow().isoformat(),
                 "created_at": datetime.utcnow().isoformat(),
                 "filled_at": datetime.utcnow().isoformat(),
-            }, network=network)
+            }, network=selected_network)
             logger.info(
                 "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f",
                 side, get_product_name(product_id), close_size, close_price,
@@ -506,12 +503,19 @@ def _record_close_in_db(telegram_id: int, product_id: int, close_size: float, po
         logger.warning("Failed to record close in DB: %s", e)
 
 
-def close_position(telegram_id: int, product: str, size: float = None, **kwargs) -> dict:
+def close_position(
+    telegram_id: int,
+    product: str,
+    size: float = None,
+    network: str | None = None,
+    **kwargs,
+) -> dict:
     product_id = get_product_id(product)
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'."}
 
-    client = get_user_nado_client(telegram_id)
+    selected_network = str(network or "")
+    client = get_user_nado_client(telegram_id, network=selected_network or None)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
     cancelled_orders, order_errors = _cancel_open_orders_for_product(client, product_id)
@@ -559,7 +563,16 @@ def close_position(telegram_id: int, product: str, size: float = None, **kwargs)
         if not r.get("success"):
             return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
         fill_price = _get_post_fill_price(client, product_id)
-        _record_close_in_db(telegram_id, product_id, this_close_size, pos_size, close_side, client, fill_price=fill_price)
+        _record_close_in_db(
+            telegram_id,
+            product_id,
+            this_close_size,
+            pos_size,
+            close_side,
+            client,
+            fill_price=fill_price,
+            network=selected_network or None,
+        )
         remaining_size -= this_close_size
 
     post_positions = _normalize_net_positions(client.get_all_positions() or [])
@@ -590,8 +603,9 @@ def close_position(telegram_id: int, product: str, size: float = None, **kwargs)
     return payload
 
 
-def close_all_positions(telegram_id: int, **kwargs) -> dict:
-    client = get_user_nado_client(telegram_id)
+def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) -> dict:
+    selected_network = str(network or "")
+    client = get_user_nado_client(telegram_id, network=selected_network or None)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
 
@@ -624,7 +638,11 @@ def close_all_positions(telegram_id: int, **kwargs) -> dict:
                 "cancelled_orders": cancelled_orders,
                 "order_errors": order_errors,
             }
-        return {"success": False, "error": "No open positions found."}
+        return {
+            "success": True,
+            "cancelled": 0.0,
+            "products": [],
+        }
 
     cancelled = 0.0
     errors = []
@@ -643,7 +661,16 @@ def close_all_positions(telegram_id: int, **kwargs) -> dict:
                 products_closed.add(product_name)
                 close_side = "short" if signed_amount > 0 else "long"
                 fill_price = _get_post_fill_price(client, pid)
-                _record_close_in_db(telegram_id, pid, pos_size, pos_size, close_side, client, fill_price=fill_price)
+                _record_close_in_db(
+                    telegram_id,
+                    pid,
+                    pos_size,
+                    pos_size,
+                    close_side,
+                    client,
+                    fill_price=fill_price,
+                    network=selected_network or None,
+                )
             else:
                 errors.append(f"{p.get('product_name', get_product_name(pid))}: {r.get('error', 'unknown')}")
         except Exception as e:

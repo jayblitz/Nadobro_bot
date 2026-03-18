@@ -19,7 +19,7 @@ HOME_BTN_TRADE = "🤖 Trade Console"
 HOME_BTN_PORTFOLIO = "📁 Portfolio Deck"
 HOME_BTN_HOME = "🏠 Home"
 HOME_BTN_WALLET = "💼 Wallet Vault"
-HOME_BTN_MARKETS = "📡 Market Radar"
+HOME_BTN_POINTS = "🏆 Nado Points"
 HOME_BTN_STRATEGIES = "🧠 Strategy Lab"
 HOME_BTN_ALERTS = "🔔 Alert Engine"
 HOME_BTN_SETTINGS = "⚙️ Control Panel"
@@ -31,7 +31,7 @@ REPLY_BUTTON_MAP = {
     HOME_BTN_TRADE: "nav:trade",
     HOME_BTN_PORTFOLIO: "portfolio:view",
     HOME_BTN_WALLET: "wallet:view",
-    HOME_BTN_MARKETS: "mkt:menu",
+    HOME_BTN_POINTS: "points:view",
     HOME_BTN_STRATEGIES: "nav:strategy_hub",
     HOME_BTN_ALERTS: "alert:menu",
     HOME_BTN_SETTINGS: "settings:view",
@@ -68,7 +68,9 @@ REPLY_BUTTON_MAP.update({
     "Home": "nav:main",
     "Positions": "pos:view",
     "Wallet": "wallet:view",
-    "Markets": "mkt:menu",
+    "Points": "points:view",
+    "📡 Market Radar": "points:view",
+    "Market Radar": "points:view",
     "Strategies": "nav:strategy_hub",
     "Alerts": "alert:menu",
     "Settings": "settings:view",
@@ -120,7 +122,7 @@ def persistent_menu_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(HOME_BTN_TRADE), KeyboardButton(HOME_BTN_PORTFOLIO)],
-            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_MARKETS)],
+            [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_POINTS)],
             [KeyboardButton(HOME_BTN_STRATEGIES), KeyboardButton(HOME_BTN_ALERTS)],
             [KeyboardButton(HOME_BTN_SETTINGS), KeyboardButton(HOME_BTN_MODE)],
         ],
@@ -137,7 +139,7 @@ def home_card_kb():
         ],
         [
             InlineKeyboardButton("💼 Wallet Vault", callback_data="wallet:view"),
-            InlineKeyboardButton("📡 Market Radar", callback_data="mkt:menu"),
+            InlineKeyboardButton("🏆 Nado Points", callback_data="points:view"),
         ],
         [
             InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
@@ -659,46 +661,16 @@ def strategy_hub_kb():
     ])
 
 
-def markets_kb():
+def points_scope_kb(scope: str = "week"):
+    scope_norm = (scope or "week").lower()
+    week_label = "✅ Last 7 Days" if scope_norm == "week" else "Last 7 Days"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💹 Price Grid", callback_data="mkt:prices"),
-            InlineKeyboardButton("📊 Funding", callback_data="mkt:funding"),
-        ],
-        [
-            InlineKeyboardButton("🔴 Live Last Price", callback_data="mkt:live_menu"),
+            InlineKeyboardButton(week_label, callback_data="points:scope:week"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="points:refresh"),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
-        ],
-    ])
-
-
-def live_price_asset_kb():
-    rows = []
-    row = []
-    for name in PERP_PRODUCTS:
-        row.append(InlineKeyboardButton(name, callback_data=f"mkt:live:{name}"))
-        if len(row) == 4:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([
-        InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
-        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def live_price_controls_kb(product: str):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🛑 Stop Live", callback_data="mkt:live_stop"),
-            InlineKeyboardButton("Switch Asset", callback_data="mkt:live_menu"),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="mkt:menu"),
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
@@ -849,8 +821,9 @@ def mode_kb(current_network="testnet"):
 
 def back_kb(target="main"):
     label = "🏠 Home" if target == "main" else "◀ Back"
+    callback_data = target if ":" in str(target) else f"nav:{target}"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(label, callback_data=f"nav:{target}")],
+        [InlineKeyboardButton(label, callback_data=callback_data)],
     ])
 
 

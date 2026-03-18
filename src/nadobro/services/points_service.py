@@ -5,7 +5,6 @@ import secrets
 import time
 from typing import Optional
 
-from src.nadobro.config import LOWIQPTS_BRIDGE_CHAT_ID
 from src.nadobro.services.user_service import get_user
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,7 @@ _NO_POINTS_HINT_RE = re.compile(
 
 
 def _bridge_chat_id() -> Optional[int]:
-    raw = (LOWIQPTS_BRIDGE_CHAT_ID or "").strip() or os.environ.get("LOWIQPTS_BRIDGE_CHAT_ID", "").strip()
+    raw = os.environ.get("LOWIQPTS_BRIDGE_CHAT_ID", "").strip()
     if not raw:
         return None
     try:

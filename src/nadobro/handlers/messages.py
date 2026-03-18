@@ -29,7 +29,7 @@ from src.nadobro.handlers.keyboards import (
     trade_direction_kb, trade_order_type_kb, trade_product_reply_kb,
     trade_leverage_reply_kb, trade_size_reply_kb, trade_tpsl_kb,
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
-    mode_kb, strategy_hub_kb, wallet_kb, positions_kb, markets_kb,
+    mode_kb, strategy_hub_kb, wallet_kb, positions_kb, points_scope_kb,
     alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb,
 )
 from src.nadobro.handlers.trade_card import (
@@ -38,6 +38,9 @@ from src.nadobro.handlers.trade_card import (
     is_trade_card_mode_enabled,
 )
 from src.nadobro.handlers.home_card import open_home_card_view_from_message
+from src.nadobro.handlers.state_reset import clear_pending_user_state
+from src.nadobro.handlers.formatters import fmt_points_dashboard
+from src.nadobro.services.points_service import get_points_dashboard, request_points_refresh
 
 
 async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
@@ -412,8 +415,11 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
 
 async def _dispatch_reply_button(update, context, telegram_id, callback_data, text):
     lang = get_active_language()
+    if callback_data in ("market:view", "nav:market_radar", "market:radar", "home:market_radar"):
+        callback_data = "points:view"
 
     if callback_data == "nav:main":
+        clear_pending_user_state(context)
         if is_trade_card_mode_enabled():
             await open_home_card_view_from_message(update, context, telegram_id, "nav:main")
             return
@@ -428,17 +434,19 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         "pos:view",
         "portfolio:view",
         "wallet:view",
-        "mkt:menu",
+        "points:view",
         "nav:strategy_hub",
         "alert:menu",
         "settings:view",
         "nav:mode",
     ):
+        clear_pending_user_state(context)
         target = "home:mode" if callback_data == "nav:mode" else callback_data
         await open_home_card_view_from_message(update, context, telegram_id, target)
         return
 
     if callback_data == "nav:trade":
+        clear_pending_user_state(context)
         if is_trade_card_mode_enabled():
             await open_trade_card_from_message(update, context, telegram_id)
             return
@@ -550,12 +558,32 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         )
         return
 
-    if callback_data == "mkt:menu":
-        await _reply_loc(update.message, 
-            localize_text("📡 *Market Radar*\n\nPick a market view:", lang),
+    if callback_data == "points:view":
+        payload = get_points_dashboard(telegram_id, scope="week")
+        await _reply_loc(
+            update.message,
+            fmt_points_dashboard(payload),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(markets_kb(), lang),
+            reply_markup=localize_markup(points_scope_kb("week"), lang),
         )
+        return
+
+    if callback_data == "points:refresh":
+        result = await request_points_refresh(context, telegram_id, update.effective_chat.id)
+        if result.get("ok"):
+            await _reply_loc(
+                update.message,
+                "⏳ Refresh requested\\. I will post your points update as soon as the bridge replies\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=localize_markup(points_scope_kb("week"), lang),
+            )
+        else:
+            await _reply_loc(
+                update.message,
+                escape_md(result.get("error", "Could not refresh points right now.")),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=localize_markup(points_scope_kb("week"), lang),
+            )
         return
 
     if callback_data == "alert:menu":
@@ -822,14 +850,7 @@ async def _go_back(update, context, flow, state, telegram_id):
                 reply_markup=kb_fn(),
             )
         else:
-            if prev_state == "size":
-                product = flow.get("product", "BTC")
-                await _reply_loc(update.message, 
-                    f"Select size for {escape_md(product)}:",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=trade_size_reply_kb(product),
-                )
-            elif prev_state == "leverage":
+            if prev_state == "leverage":
                 product = flow.get("product", "BTC")
                 await _reply_loc(update.message, 
                     prompt,

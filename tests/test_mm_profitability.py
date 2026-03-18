@@ -1,74 +1,9 @@
-import sys
-import types
 import unittest
 from unittest.mock import patch
 
+from _stubs import install_test_stubs
 
-# Lightweight psycopg2 stubs for import-only test environments.
-if "psycopg2" not in sys.modules:
-    psycopg2_mod = types.ModuleType("psycopg2")
-    psycopg2_pool = types.ModuleType("psycopg2.pool")
-    psycopg2_extras = types.ModuleType("psycopg2.extras")
-    psycopg2_sql = types.ModuleType("psycopg2.sql")
-
-    class _ThreadedConnectionPool:
-        def __init__(self, *args, **kwargs):
-            pass
-
-    class _RealDictCursor:
-        pass
-
-    class _SqlFragment:
-        def __init__(self, value=""):
-            self.value = value
-
-        def format(self, *args, **kwargs):
-            return self
-
-        def join(self, _iterable):
-            return self
-
-        def __mul__(self, _):
-            return self
-
-    def _sql_factory(value=""):
-        return _SqlFragment(value)
-
-    def _identifier_factory(_value=""):
-        return _SqlFragment("")
-
-    def _placeholder_factory():
-        return _SqlFragment("%s")
-
-    psycopg2_pool.ThreadedConnectionPool = _ThreadedConnectionPool
-    psycopg2_extras.RealDictCursor = _RealDictCursor
-    psycopg2_sql.SQL = _sql_factory
-    psycopg2_sql.Identifier = _identifier_factory
-    psycopg2_sql.Placeholder = _placeholder_factory
-
-    psycopg2_mod.pool = psycopg2_pool
-    psycopg2_mod.extras = psycopg2_extras
-    psycopg2_mod.sql = psycopg2_sql
-
-    sys.modules["psycopg2"] = psycopg2_mod
-    sys.modules["psycopg2.pool"] = psycopg2_pool
-    sys.modules["psycopg2.extras"] = psycopg2_extras
-    sys.modules["psycopg2.sql"] = psycopg2_sql
-
-# Lightweight requests stub for import-only environments.
-if "requests" not in sys.modules:
-    requests_mod = types.ModuleType("requests")
-
-    class _DummyResponse:
-        def json(self):
-            return {}
-
-    class _DummySession:
-        def get(self, *args, **kwargs):
-            return _DummyResponse()
-
-    requests_mod.Session = _DummySession
-    sys.modules["requests"] = requests_mod
+install_test_stubs()
 
 from src.nadobro.strategies import mm_bot
 
@@ -111,6 +46,7 @@ class MmProfitabilityTests(unittest.TestCase):
             "max_spread_bp": 30.0,
             "notional_usd": 100.0,
             "cycle_notional_usd": 100.0,
+            "min_order_notional_usd": 20.0,
             "mm_mid_history": [100, 110, 90, 112, 88],
         }
         client = _FakeClient(mid=105.0)
@@ -138,6 +74,7 @@ class MmProfitabilityTests(unittest.TestCase):
             "levels": 2,
             "notional_usd": 100.0,
             "cycle_notional_usd": 100.0,
+            "min_order_notional_usd": 20.0,
             "inventory_soft_limit_usd": 20.0,
         }
         # Long inventory ($50) breaches hard limit (~$36+), so only sell quotes should be placed.
@@ -168,6 +105,7 @@ class MmProfitabilityTests(unittest.TestCase):
             "levels": 2,
             "notional_usd": 100.0,
             "cycle_notional_usd": 100.0,
+            "min_order_notional_usd": 20.0,
             "session_notional_cap_usd": 120.0,
             "mm_session_notional_done_usd": 80.0,
         }
@@ -192,6 +130,7 @@ class MmProfitabilityTests(unittest.TestCase):
             "levels": 2,
             "notional_usd": 100.0,
             "cycle_notional_usd": 100.0,
+            "min_order_notional_usd": 20.0,
             "session_notional_cap_usd": 200.0,
             "mm_session_notional_done_usd": 200.0,
         }

@@ -8,9 +8,9 @@ from telegram.constants import ParseMode, ChatAction
 from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language, _ACTIVE_LANG
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions,
-    fmt_prices, fmt_funding, fmt_trade_preview, fmt_trade_result,
+    fmt_trade_preview, fmt_trade_result,
     fmt_wallet_info, fmt_alerts, fmt_portfolio,
-    fmt_settings, fmt_help, fmt_price, fmt_status_overview,
+    fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
@@ -19,7 +19,7 @@ from src.nadobro.handlers.keyboards import (
     settings_slippage_kb, settings_language_kb, close_product_kb, confirm_close_all_kb, back_kb,
     risk_profile_kb, strategy_hub_kb, strategy_action_kb,
     onboarding_language_kb,
-    markets_kb, live_price_asset_kb, live_price_controls_kb,
+    points_scope_kb,
     mode_kb,     home_card_kb, portfolio_kb,
     onboarding_accept_tos_kb,
     copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
@@ -27,6 +27,7 @@ from src.nadobro.handlers.keyboards import (
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback
 from src.nadobro.handlers.home_card import build_home_card_text
+from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_readonly_client, get_user_wallet_info,
     switch_network, get_user, remove_user_private_key, ensure_active_wallet_ready, update_user_language,
@@ -39,6 +40,7 @@ from src.nadobro.services.alert_service import create_alert, get_user_alerts, de
 from src.nadobro.services.admin_service import is_trading_paused, is_admin
 from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
+from src.nadobro.services.points_service import get_points_dashboard, request_points_refresh
 from src.nadobro.services.onboarding_service import (
     get_resume_step,
     evaluate_readiness,
@@ -52,7 +54,6 @@ from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
 
 logger = logging.getLogger(__name__)
-LIVE_PRICE_TASKS = {}
 
 
 async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
@@ -84,6 +85,8 @@ async def handle_callback(update: Update, context: CallbackContext):
     started = time.perf_counter()
     query = update.callback_query
     data = query.data
+    if data in ("market:view", "nav:market_radar", "market:radar", "home:market_radar"):
+        data = "points:view"
     telegram_id = query.from_user.id
 
     with language_context(get_user_language(telegram_id)):
@@ -127,8 +130,8 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
             await _handle_portfolio(query, data, telegram_id)
         elif data.startswith("wallet:"):
             await _handle_wallet(query, data, telegram_id, context)
-        elif data.startswith("mkt:"):
-            await _handle_market(query, data, telegram_id)
+        elif data.startswith("points:"):
+            await _handle_points(query, data, telegram_id, context)
         elif data.startswith("alert:"):
             await _handle_alert(query, data, telegram_id, context)
         elif data.startswith("settings:"):
@@ -261,10 +264,9 @@ async def _handle_mode(query, data, telegram_id, context=None):
 
 
 async def _handle_nav(query, data, telegram_id, context=None):
-    target = data.split(":")[1] if ":" in data else "main"
+    target = data.split(":", 1)[1] if ":" in data else "main"
 
-    if context is not None:
-        context.user_data.pop("pending_trade", None)
+    clear_pending_user_state(context)
 
     if target in ("main", "refresh"):
         await _show_dashboard(query, telegram_id)
@@ -305,6 +307,20 @@ async def _handle_nav(query, data, telegram_id, context=None):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
         )
+    elif target.startswith("strategy:"):
+        await _handle_strategy(query, target, context, telegram_id)
+    elif target.startswith("copy:"):
+        await _handle_copy(query, target, context, telegram_id)
+    elif target.startswith("bro:"):
+        await _handle_bro(query, target, telegram_id, context)
+    elif target.startswith("settings:"):
+        await _handle_settings(query, target, telegram_id, context)
+    elif target.startswith("alert:"):
+        await _handle_alert(query, target, telegram_id, context)
+    elif target.startswith("wallet:"):
+        await _handle_wallet(query, target, telegram_id, context)
+    elif target.startswith("portfolio:"):
+        await _handle_portfolio(query, target, telegram_id)
 
 
 async def _handle_trade(query, data, telegram_id, context):
@@ -729,99 +745,48 @@ async def _handle_wallet(query, data, telegram_id, context):
             )
 
 
-async def _handle_market(query, data, telegram_id):
+async def _handle_points(query, data, telegram_id, context):
     parts = data.split(":")
-    action = parts[1] if len(parts) > 1 else ""
-    task_key = _live_task_key(query, telegram_id)
+    action = parts[1] if len(parts) > 1 else "view"
+    scope = parts[2] if len(parts) > 2 else "week"
 
-    client = get_user_readonly_client(telegram_id)
-    if not client:
-        await _edit_loc(query, 
-            "⚠️ Wallet not initialized\\. Use /start first\\.",
+    if action == "view":
+        payload = get_points_dashboard(telegram_id, scope="week")
+        await _edit_loc(
+            query,
+            fmt_points_dashboard(payload),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
+            reply_markup=points_scope_kb("week"),
         )
         return
 
-    if action == "menu":
-        await _stop_live_task(task_key)
-        await _edit_loc(query, 
-            "📡 *Market Radar*\n\nPick a market view:",
+    if action == "scope":
+        payload = get_points_dashboard(telegram_id, scope=scope)
+        await _edit_loc(
+            query,
+            fmt_points_dashboard(payload),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=markets_kb(),
+            reply_markup=points_scope_kb(scope),
         )
+        return
 
-    elif action == "prices":
-        await _stop_live_task(task_key)
-        with timed_metric("cb.market.prices"):
-            prices = await run_blocking(client.get_all_market_prices)
-        msg = fmt_prices(prices)
-        await _edit_loc(query, 
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=markets_kb(),
-        )
-
-    elif action == "funding":
-        await _stop_live_task(task_key)
-        funding = {}
-        with timed_metric("cb.market.funding"):
-            all_rates = await run_blocking(client.get_all_funding_rates)
-        for name, info in PRODUCTS.items():
-            if info["type"] == "perp":
-                fr = all_rates.get(info["id"])
-                if fr:
-                    funding[name] = fr.get("funding_rate", 0)
-
-        msg = fmt_funding(funding)
-        await _edit_loc(query, 
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=markets_kb(),
-        )
-    elif action == "live_menu":
-        await _stop_live_task(task_key)
-        await _edit_loc(query, 
-            "🔴 *Live Last Price*\n\nSelect an asset:",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=live_price_asset_kb(),
-        )
-    elif action == "live_stop":
-        await _stop_live_task(task_key)
-        await _edit_loc(query, 
-            "🛑 Live price updates stopped\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=markets_kb(),
-        )
-    elif action == "live" and len(parts) >= 3:
-        product = parts[2].upper()
-        if product not in PRODUCTS or PRODUCTS[product]["type"] != "perp":
-            await _edit_loc(query, 
-                "⚠️ Unsupported product\\.",
+    if action == "refresh":
+        result = await request_points_refresh(context, telegram_id, query.message.chat.id)
+        if result.get("ok"):
+            await _edit_loc(
+                query,
+                "⏳ Refresh requested\\. I will post your points update when the bridge replies\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=live_price_asset_kb(),
+                reply_markup=points_scope_kb("week"),
             )
             return
-
-        await _stop_live_task(task_key)
-        pid = get_product_id(product)
-        mp = await run_blocking(client.get_market_price, pid) if pid is not None else {"mid": 0}
-        initial = _fmt_live_last_price(product, mp.get("mid", 0))
-        message = await _edit_loc(query, 
-            initial,
+        await _edit_loc(
+            query,
+            escape_md(result.get("error", "Could not refresh points right now.")),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=live_price_controls_kb(product),
+            reply_markup=points_scope_kb("week"),
         )
-        LIVE_PRICE_TASKS[task_key] = asyncio.create_task(
-            _live_price_loop(
-                query.bot,
-                telegram_id=telegram_id,
-                chat_id=message.chat_id,
-                message_id=message.message_id,
-                product=product,
-                task_key=task_key,
-            )
-        )
+        return
 
 
 async def _handle_alert(query, data, telegram_id, context):
@@ -1935,72 +1900,6 @@ async def _delete_message_later(query, chat_id: int, message_id: int, delay_seco
         await query.bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
-
-
-def _live_task_key(query, telegram_id: int):
-    chat_id = query.message.chat_id if query and query.message else telegram_id
-    return chat_id, telegram_id
-
-
-async def _stop_live_task(task_key):
-    task = LIVE_PRICE_TASKS.pop(task_key, None)
-    if task and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
-
-def _fmt_live_last_price(product: str, last_price: float) -> str:
-    from src.nadobro.i18n import localize_text as _lt
-    lang = get_active_language()
-    last_str = "$" + fmt_price(last_price, product) if last_price else "N/A"
-    ts = time.strftime("%H:%M:%S UTC", time.gmtime())
-    return (
-        f"{_lt('🔴 *Live Last Price*', lang)}\n\n"
-        f"Asset: *{escape_md(product)}\\-PERP*\n"
-        f"Last: *{escape_md(last_str)}*\n"
-        f"Updated: {escape_md(ts)}"
-    )
-
-
-async def _live_price_loop(bot, telegram_id: int, chat_id: int, message_id: int, product: str, task_key):
-    try:
-        while True:
-            client = get_user_readonly_client(telegram_id)
-            if not client:
-                break
-
-            pid = get_product_id(product)
-            if pid is None:
-                break
-
-            mp = await run_blocking(client.get_market_price, pid)
-            text = _fmt_live_last_price(product, mp.get("mid", 0))
-            lang = get_active_language()
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=localize_text(text, lang),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=localize_markup(live_price_controls_kb(product), lang),
-                )
-            except BadRequest as e:
-                if "Message is not modified" not in str(e):
-                    break
-            except Exception:
-                logger.warning("Live price loop error for %s, stopping", product, exc_info=True)
-                break
-            await asyncio.sleep(2)
-
-    except asyncio.CancelledError:
-        pass
-    finally:
-        LIVE_PRICE_TASKS.pop(task_key, None)
 
 
 async def _handle_copy(query, data, context, telegram_id):

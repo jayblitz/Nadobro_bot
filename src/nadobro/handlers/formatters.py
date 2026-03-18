@@ -160,51 +160,6 @@ def fmt_balance(balance_data, wallet_addr=None):
     return "\n".join(lines)
 
 
-def fmt_prices(prices):
-    if not prices:
-        return _loc("📡 *Market Radar*") + "\n\n" + _loc("Could not fetch prices\\.")
-
-    lines = [
-        _loc("📡 *Market Radar*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        "",
-    ]
-
-    for name, p in prices.items():
-        mid = p.get("mid", 0)
-        bid = p.get("bid", 0)
-        ask = p.get("ask", 0)
-        spread = ask - bid if ask and bid else 0
-
-        lines.append(
-            f"*{escape_md(name)}\\-PERP:* {escape_md(f'${fmt_price(mid, name)}')}"
-        )
-        lines.append(
-            f"  {_loc('Bid')}: {escape_md(f'${fmt_price(bid, name)}')} \\| "
-            f"{_loc('Ask')}: {escape_md(f'${fmt_price(ask, name)}')}"
-        )
-
-    return "\n".join(lines)
-
-
-def fmt_funding(funding_data):
-    if not funding_data:
-        return _loc("📊 *Funding Scanner*") + "\n\n" + _loc("Could not fetch funding data\\.")
-
-    lines = [
-        _loc("📊 *Funding Scanner*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        "",
-    ]
-
-    for name, rate in funding_data.items():
-        lines.append(
-            f"*{escape_md(name)}\\-PERP:* {escape_md(f'{rate:.6f}')} \\({_loc('index')}\\)"
-        )
-
-    return "\n".join(lines)
-
-
 def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None):
     action_upper = action.upper()
     emoji = "🟢" if "LONG" in action_upper else "🔴"
@@ -346,6 +301,47 @@ def fmt_alerts(alerts):
 
     return "\n".join(lines)
 
+
+
+def fmt_points_dashboard(payload: dict) -> str:
+    if not payload or not payload.get("ok"):
+        err = (payload or {}).get("error") or "Points data unavailable."
+        return f"🏆 *Nado Points*\n\n{escape_md(err)}"
+
+    no_activity = bool(payload.get("no_activity"))
+    points = float(payload.get("points") or 0.0)
+    volume_usd = float(payload.get("volume_usd") or 0.0)
+    cpp = float(payload.get("cost_per_point") or 0.0)
+    total_costs = float(payload.get("total_costs") or 0.0)
+    ppm = float(payload.get("ppm") or 0.0)
+    window = payload.get("window_label") or "Last 7 Days"
+
+    lines = [
+        "🏆 *Your Nado Points Dashboard*",
+        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        f"📅 *Window:* {escape_md(window)}",
+        "",
+    ]
+    if no_activity:
+        lines.extend(
+            [
+                "No points activity found for this period\\.",
+                "",
+                "Tip: increase real trading activity and check again after the next weekly epoch\\.",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            f"⭐ *Points:* {escape_md(f'{points:,.2f}')}",
+            f"💰 *Volume:* {escape_md(f'${volume_usd:,.2f}')}",
+            f"🧾 *Cost / Point:* {escape_md(f'${cpp:,.4f}')}",
+            f"💸 *Est. Costs:* {escape_md(f'${total_costs:,.2f}')}",
+            f"📊 *Points / $1M:* {escape_md(f'{ppm:,.2f}')}",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _compute_exchange_stats(positions, prices):
