@@ -40,7 +40,11 @@ from src.nadobro.handlers.trade_card import (
 from src.nadobro.handlers.home_card import open_home_card_view_from_message
 from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.handlers.formatters import fmt_points_dashboard
-from src.nadobro.services.points_service import get_points_dashboard, request_points_refresh
+from src.nadobro.services.points_service import (
+    get_points_dashboard,
+    request_points_refresh,
+    relay_user_reply_to_lowiqpts,
+)
 
 
 async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
@@ -404,6 +408,24 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     if await _handle_pending_bro_input(update, context, telegram_id, text):
         return
 
+    relay_result = await relay_user_reply_to_lowiqpts(context, update.effective_chat.id, text)
+    if relay_result.get("handled"):
+        if relay_result.get("cancelled"):
+            await _reply_loc(
+                update.message,
+                "✅ Points request closed\\. Tap *🏆 Nado Points* and *Refresh* to start again\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=points_scope_kb("week"),
+            )
+        elif not relay_result.get("ok", False):
+            await _reply_loc(
+                update.message,
+                escape_md(relay_result.get("error", "Could not relay your reply right now.")),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=points_scope_kb("week"),
+            )
+        return
+
     if await handle_trade_intent_message(update, context, telegram_id, text):
         return
 
@@ -573,7 +595,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         if result.get("ok"):
             await _reply_loc(
                 update.message,
-                "⏳ Refresh requested\\. I will post your points update as soon as the bridge replies\\.",
+                "⏳ Refresh requested\\. I will post your points update as soon as LOWIQPTS replies\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=localize_markup(points_scope_kb("week"), lang),
             )

@@ -123,7 +123,6 @@ def setup_bot():
     from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_revoke
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
-    from src.nadobro.handlers.points_bridge import lowiqpts_bridge_reply_handler
 
     async def _language_middleware(update: Update, context):
         user = update.effective_user
@@ -140,7 +139,6 @@ def setup_bot():
     )
 
     app.add_handler(TypeHandler(Update, _language_middleware), group=-1)
-    app.add_handler(MessageHandler(filters.ALL, lowiqpts_bridge_reply_handler), group=-2)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))

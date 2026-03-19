@@ -775,7 +775,7 @@ async def _handle_points(query, data, telegram_id, context):
         if result.get("ok"):
             await _edit_loc(
                 query,
-                "⏳ Refresh requested\\. I will post your points update when the bridge replies\\.",
+                "⏳ Refresh requested\\. I will post your points update when LOWIQPTS replies\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=points_scope_kb("week"),
             )
