@@ -28,6 +28,14 @@ Before deploying, you need to create a session file by logging in once locally:
 cd relay
 pip install telethon
 
+export TELEGRAM_API_ID="your_api_id_number"
+export TELEGRAM_API_HASH="your_api_hash_string"
+python3 scripts/first_login.py
+```
+
+**Or** a one-liner (replace placeholders):
+
+```bash
 python -c "
 from telethon.sync import TelegramClient
 client = TelegramClient('relay_session', YOUR_API_ID, 'YOUR_API_HASH')
@@ -37,7 +45,7 @@ client.disconnect()
 "
 ```
 
-This will prompt for your phone number and a verification code (and 2FA password if enabled). It creates a `relay_session.session` file — this is your persistent login.
+This will prompt for your phone number and a verification code (and 2FA password if enabled). It creates a `relay_session.session` file in the `relay/` folder by default — this is your persistent login. For Fly.io, copy or mount this file to the path in `SESSION_PATH` (default `/data/relay.session`).
 
 ### 3. Verify DM Works
 

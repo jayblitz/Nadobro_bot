@@ -40,7 +40,11 @@ from src.nadobro.services.alert_service import create_alert, get_user_alerts, de
 from src.nadobro.services.admin_service import is_trading_paused, is_admin
 from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
-from src.nadobro.services.points_service import get_points_dashboard, request_points_refresh
+from src.nadobro.services.points_service import (
+    get_points_dashboard,
+    relay_user_reply_to_lowiqpts,
+    request_points_refresh,
+)
 from src.nadobro.services.onboarding_service import (
     get_resume_step,
     evaluate_readiness,
@@ -767,6 +771,24 @@ async def _handle_points(query, data, telegram_id, context):
             fmt_points_dashboard(payload),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=points_scope_kb(scope),
+        )
+        return
+
+    if action == "cancel":
+        relay_result = await relay_user_reply_to_lowiqpts(context, query.message.chat.id, "/cancel")
+        if relay_result.get("cancelled"):
+            await _edit_loc(
+                query,
+                "✅ Points request closed\\. Tap *🔄 Refresh* to start again\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=points_scope_kb("week"),
+            )
+            return
+        await _edit_loc(
+            query,
+            escape_md(relay_result.get("error", "No active LOWIQPTS request to close.")),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=points_scope_kb("week"),
         )
         return
 

@@ -57,3 +57,9 @@ attached_assets/
 *.key
 secrets.json
 .secrets/
+
+# Telethon MTProto session (full account access — never commit)
+relay/*.session
+relay/*.session-journal
+relay/.relay_auth_token_generated
+relay/.fly-bootstrap.env

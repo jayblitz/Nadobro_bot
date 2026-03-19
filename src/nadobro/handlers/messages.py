@@ -413,7 +413,7 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
         if relay_result.get("cancelled"):
             await _reply_loc(
                 update.message,
-                "✅ Points request closed\\. Tap *🏆 Nado Points* and *Refresh* to start again\\.",
+                "✅ Points request closed\\. Tap *🔄 Refresh* to start again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=points_scope_kb("week"),
             )

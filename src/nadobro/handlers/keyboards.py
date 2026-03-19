@@ -670,7 +670,9 @@ def points_scope_kb(scope: str = "week"):
             InlineKeyboardButton("🔄 Refresh", callback_data="points:refresh"),
         ],
         [
-            InlineKeyboardButton("◀ Back", callback_data="nav:main"),
+            InlineKeyboardButton("❌ Cancel Request", callback_data="points:cancel"),
+        ],
+        [
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
