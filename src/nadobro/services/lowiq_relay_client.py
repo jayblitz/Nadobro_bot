@@ -93,6 +93,18 @@ async def send_user_reply(*, session_id: str, text: str) -> dict:
     )
 
 
+async def send_user_reply_option(*, session_id: str, option_text: str, source_message_id: int) -> dict:
+    return await _request(
+        "POST",
+        "/sessions/reply_option",
+        json={
+            "session_id": str(session_id),
+            "option_text": str(option_text),
+            "source_message_id": int(source_message_id),
+        },
+    )
+
+
 async def poll_events(*, cursor: Optional[str]) -> dict:
     params: dict[str, Any] = {"limit": _DEFAULT_POLL_LIMIT}
     if cursor:

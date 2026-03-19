@@ -85,6 +85,15 @@ async def send_message(entity, text: str):
     return await _client.send_message(entity, text)
 
 
+async def click_message_button(entity, message_id: int, button_text: str):
+    if _client is None:
+        raise RuntimeError("Telegram client not started")
+    msg = await _client.get_messages(entity, ids=int(message_id))
+    if msg is None:
+        raise RuntimeError("source_message_not_found")
+    return await msg.click(text=str(button_text))
+
+
 async def _handle_incoming(event: events.NewMessage.Event) -> None:
     if _on_message_callback is None:
         return
@@ -111,6 +120,12 @@ async def _handle_incoming(event: events.NewMessage.Event) -> None:
     chat_id = event.chat_id
     logger.debug("Incoming from @%s (chat=%s): %s", _lowiqpts_username(), chat_id, text[:80])
     try:
-        await _on_message_callback(chat_id=chat_id, sender_id=sender.id, text=text, options=options)
+        await _on_message_callback(
+            chat_id=chat_id,
+            sender_id=sender.id,
+            text=text,
+            options=options,
+            source_message_id=int(event.message.id),
+        )
     except Exception:
         logger.warning("Error in message callback", exc_info=True)

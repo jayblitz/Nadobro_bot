@@ -14,6 +14,7 @@ from relay.session_manager import (
     cleanup_idle_sessions,
     close_session,
     create_session,
+    reply_option_to_session,
     reply_to_session,
 )
 from relay.telegram_client import set_message_callback, start_client, stop_client
@@ -38,12 +39,19 @@ async def _periodic_cleanup() -> None:
             logger.warning("Cleanup tick failed", exc_info=True)
 
 
-async def _on_lowiqpts_message(*, chat_id: int, sender_id: int, text: str, options: Optional[list[str]] = None) -> None:
+async def _on_lowiqpts_message(
+    *,
+    chat_id: int,
+    sender_id: int,
+    text: str,
+    options: Optional[list[str]] = None,
+    source_message_id: Optional[int] = None,
+) -> None:
     session_id = await find_session_for_incoming(sender_id)
     if not session_id:
         logger.debug("No active session for sender_id=%s, dropping message", sender_id)
         return
-    await store_event(session_id, text, options=options)
+    await store_event(session_id, text, options=options, source_message_id=source_message_id)
 
 
 @asynccontextmanager
@@ -102,6 +110,12 @@ class CloseRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class ReplyOptionRequest(BaseModel):
+    session_id: str
+    option_text: str
+    source_message_id: int
+
+
 @app.get("/health")
 async def health():
     return {"ok": True, "service": "lowiqpts-relay"}
@@ -155,6 +169,21 @@ async def close_session_endpoint(
     _auth: None = Depends(verify_auth),
 ):
     result = await close_session(body.session_id, body.reason)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error", "session_error"))
+    return result
+
+
+@app.post("/sessions/reply_option")
+async def reply_option_endpoint(
+    body: ReplyOptionRequest,
+    _auth: None = Depends(verify_auth),
+):
+    result = await reply_option_to_session(
+        body.session_id,
+        body.option_text,
+        body.source_message_id,
+    )
     if not result.get("ok"):
         raise HTTPException(status_code=404, detail=result.get("error", "session_error"))
     return result

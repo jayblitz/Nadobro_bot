@@ -14,6 +14,7 @@ from src.nadobro.services.lowiq_relay_client import (
     close_session as relay_close_session,
     poll_events as relay_poll_events,
     relay_is_configured,
+    send_user_reply_option as relay_send_user_reply_option,
     send_user_reply as relay_send_user_reply,
     start_session as relay_start_session,
 )
@@ -211,6 +212,21 @@ def _extract_event_options(event: dict) -> list[str]:
         if label:
             out.append(label)
     return out
+
+
+def _extract_event_source_message_id(event: dict) -> Optional[int]:
+    if not isinstance(event, dict):
+        return None
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    raw = event.get("source_message_id")
+    if raw is None:
+        raw = payload.get("source_message_id")
+    try:
+        if raw is None:
+            return None
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_events_response(payload: dict) -> tuple[list[dict], Optional[str]]:
@@ -426,10 +442,13 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     chat_id = int(req.get("chat_id"))
     telegram_id = int(req.get("telegram_id"))
     options = _extract_event_options(event)
+    source_message_id = _extract_event_source_message_id(event)
     if options:
         req["relay_options"] = options
+        req["relay_options_source_message_id"] = source_message_id
     else:
         req.pop("relay_options", None)
+        req.pop("relay_options_source_message_id", None)
     await bot_app.bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -486,7 +505,24 @@ async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: in
     choice = str(options[idx]).strip()
     if not choice:
         return {"ok": False, "error": "Invalid option."}
-    relay_result = await relay_user_reply_to_lowiqpts(context, chat_id, choice)
+    source_message_id = req.get("relay_options_source_message_id")
+    session_id = str(req.get("relay_session_id", "")).strip()
+    if not session_id:
+        return {"ok": False, "error": "LOWIQPTS relay session is missing."}
+    if source_message_id is None:
+        # Fallback for older events without source message metadata.
+        relay_result = await relay_user_reply_to_lowiqpts(context, chat_id, choice)
+        relay_result["choice"] = choice
+        return relay_result
+    relay_result = await relay_send_user_reply_option(
+        session_id=session_id,
+        option_text=choice,
+        source_message_id=int(source_message_id),
+    )
+    if not relay_result.get("ok"):
+        return {"ok": False, "error": "Could not click LOWIQPTS option right now."}
+    _touch_pending_request(req)
+    _schedule_timeout(context.application, str(req.get("req_id", "")))
     relay_result["choice"] = choice
     return relay_result
 

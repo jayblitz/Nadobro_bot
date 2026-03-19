@@ -7,7 +7,12 @@ from relay.db import get_pool
 logger = logging.getLogger("relay.events")
 
 
-async def store_event(session_id: str, text: str, options: Optional[list[str]] = None) -> Optional[int]:
+async def store_event(
+    session_id: str,
+    text: str,
+    options: Optional[list[str]] = None,
+    source_message_id: Optional[int] = None,
+) -> Optional[int]:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -27,11 +32,11 @@ async def store_event(session_id: str, text: str, options: Optional[list[str]] =
 
         cursor_id = await conn.fetchval(
             """
-            INSERT INTO relay_events (session_id, text, options_json)
-            VALUES ($1, $2, $3)
+            INSERT INTO relay_events (session_id, text, options_json, source_message_id)
+            VALUES ($1, $2, $3, $4)
             RETURNING cursor_id
             """,
-            session_id, text, options_json,
+            session_id, text, options_json, int(source_message_id) if source_message_id else None,
         )
 
         await conn.execute(
@@ -55,7 +60,7 @@ async def poll_events(cursor: Optional[str] = None, limit: int = 25) -> dict:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT e.cursor_id, e.session_id, e.text, e.options_json, e.created_at
+            SELECT e.cursor_id, e.session_id, e.text, e.options_json, e.source_message_id, e.created_at
             FROM relay_events e
             JOIN relay_sessions s ON s.id = e.session_id
             WHERE e.cursor_id > $1
@@ -86,6 +91,8 @@ async def poll_events(cursor: Optional[str] = None, limit: int = 25) -> dict:
         }
         if options:
             event_item["options"] = options
+        if row.get("source_message_id"):
+            event_item["source_message_id"] = int(row["source_message_id"])
         events.append(event_item)
         next_cursor = str(row["cursor_id"])
 

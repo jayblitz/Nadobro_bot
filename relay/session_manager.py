@@ -3,7 +3,7 @@ import secrets
 from typing import Optional
 
 from relay.db import get_pool
-from relay.telegram_client import get_lowiqpts_entity, send_message
+from relay.telegram_client import click_message_button, get_lowiqpts_entity, send_message
 
 logger = logging.getLogger("relay.sessions")
 
@@ -98,6 +98,31 @@ async def close_session(session_id: str, reason: Optional[str] = None) -> dict:
         return {"ok": False, "error": "session_not_found_or_already_closed"}
 
     logger.info("Session %s closed (reason=%s)", session_id, reason or "none")
+    return {"ok": True}
+
+
+async def reply_option_to_session(session_id: str, option_text: str, source_message_id: int) -> dict:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, status FROM relay_sessions WHERE id = $1",
+            session_id,
+        )
+    if not row:
+        return {"ok": False, "error": "session_not_found"}
+    if row["status"] != "active":
+        return {"ok": False, "error": "session_closed"}
+
+    entity = await get_lowiqpts_entity()
+    await click_message_button(entity, int(source_message_id), str(option_text))
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE relay_sessions SET updated_at = now() WHERE id = $1",
+            session_id,
+        )
+
+    logger.info("Option clicked in session %s: %s", session_id, option_text[:40])
     return {"ok": True}
 
 
