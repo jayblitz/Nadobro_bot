@@ -47,7 +47,16 @@ async def create_session(
             session_id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id,
         )
 
-    await send_message(entity, f"/nado {wallet}")
+    try:
+        await send_message(entity, f"/nado {wallet}")
+    except Exception as e:
+        logger.error("Telegram send failed for session %s, cleaning up: %s", session_id, e)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE relay_sessions SET status = 'failed', updated_at = now() WHERE id = $1",
+                session_id,
+            )
+        raise
 
     logger.info("Session %s created for wallet=%s req=%s", session_id, wallet[:10], request_id)
     return {"ok": True, "session_id": session_id}

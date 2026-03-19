@@ -93,8 +93,10 @@ fly ssh console
 # mkdir -p /data
 # then paste/upload your .session file to /data/relay.session
 
-# Option B: Include session string in DATABASE_URL and rebuild on boot
-# (advanced — see Telethon StringSession docs)
+# Option B: Use Telethon StringSession (advanced)
+# Generate a string session locally, set it as TELETHON_STRING_SESSION env var,
+# and modify telegram_client.py to use StringSession instead of file-based session.
+# See Telethon docs: https://docs.telethon.dev/en/stable/concepts/sessions.html
 ```
 
 ### Deploy
