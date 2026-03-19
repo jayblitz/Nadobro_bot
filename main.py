@@ -186,10 +186,20 @@ async def run_bot():
 
     try:
         from src.nadobro.services.nado_client import NadoClient
-        alert_client = NadoClient("0x0000000000000000000000000000000000000000000000000000000000000001", "testnet")
-        alert_client.initialize()
+        alert_network = (os.environ.get("NADO_ALERT_CHECK_NETWORK") or "testnet").strip().lower()
+        alert_pk = (os.environ.get("NADO_ALERT_CHECK_PRIVATE_KEY") or "").strip()
+        alert_address = (
+            os.environ.get("NADO_ALERT_CHECK_ADDRESS")
+            or "0x0000000000000000000000000000000000000000"
+        ).strip()
+        if alert_pk:
+            alert_client = NadoClient(alert_pk, alert_network)
+            alert_client.initialize()
+        else:
+            # Read-only client is sufficient for alert price checks.
+            alert_client = NadoClient.from_address(alert_address, alert_network)
         set_check_client(alert_client)
-        logger.info("Alert price-check client initialized")
+        logger.info("Alert price-check client initialized (network=%s)", alert_network)
     except Exception as e:
         logger.warning(f"Alert price-check client failed to initialize: {e}")
 

@@ -4,12 +4,13 @@ version = "0.2.0"
 description = "Nadobro — Telegram trading bot for Perps on Nado (Ink L2 CLOB DEX)"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "apscheduler>=3.11.2",
+    "apscheduler==3.11.2",
     "cryptography==46.0.5",
     "eth-account>=0.8.0,<0.9.0",
-    "nado-protocol>=0.3.3",
-    "openai>=2.17.0",
-    "python-dotenv>=1.2.1",
-    "python-telegram-bot[webhooks]>=22.6",
-    "psycopg2-binary>=2.9.9",
+    "nado-protocol==0.3.3",
+    "openai==2.17.0",
+    "psycopg2-binary==2.9.11",
+    "python-dotenv==1.2.1",
+    "python-telegram-bot[webhooks]==22.6",
+    "requests==2.32.5",
 ]

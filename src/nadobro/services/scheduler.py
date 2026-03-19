@@ -8,6 +8,7 @@ from src.nadobro.services.nado_client import NadoClient
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric
 from src.nadobro.services.execution_queue import enqueue_alert
+from src.nadobro.services.lowiq_relay_client import relay_poll_interval_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +145,29 @@ async def tick_howl():
         logger.error("HOWL ticker failed: %s", e)
 
 
+async def poll_lowiqpts_relay():
+    global _bot_app
+    if not _bot_app:
+        return
+    try:
+        from src.nadobro.services.points_service import poll_lowiqpts_relay_events
+        await poll_lowiqpts_relay_events(_bot_app)
+    except Exception as e:
+        logger.error("LOWIQPTS relay poll failed: %s", e)
+
+
 def start_scheduler():
+    relay_poll_seconds = relay_poll_interval_seconds()
     scheduler.add_job(check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS, id="check_alerts", replace_existing=True)
     scheduler.add_job(tick_price_tracker, "interval", seconds=60, id="price_tracker", replace_existing=True)
     scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True)
+    scheduler.add_job(poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds, id="lowiqpts_relay_poll", replace_existing=True)
     scheduler.start()
-    logger.info("Scheduler started - alerts %ss, price tracker 60s, HOWL nightly 02:00 UTC", _ALERT_SCAN_SECONDS)
+    logger.info(
+        "Scheduler started - alerts %ss, price tracker 60s, HOWL nightly 02:00 UTC, LOWIQ relay %ss",
+        _ALERT_SCAN_SECONDS,
+        relay_poll_seconds,
+    )
 
 
 def stop_scheduler():

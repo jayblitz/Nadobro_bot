@@ -225,7 +225,7 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
         task.cancel()
 
     if cancel_orders:
-        close_res = close_all_positions(telegram_id)
+        close_res = close_all_positions(telegram_id, network=network)
         if not close_res.get("success"):
             return False, f"Strategy loop stopped, but cleanup failed: {close_res.get('error', 'unknown')}"
 
@@ -256,7 +256,7 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             if task:
                 task.cancel()
             if cancel_orders:
-                close_res = close_all_positions(telegram_id)
+                close_res = close_all_positions(telegram_id, network=network)
                 if not close_res.get("success"):
                     close_errors.append(f"{network}: {close_res.get('error', 'close_all_positions failed')}")
             stopped += 1
@@ -468,7 +468,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             state["last_error"] = "Auto-closed on maintenance pause."
             _save_state(telegram_id, network, state)
             tk = _task_key(telegram_id, network)
-            close_res = await run_blocking(close_all_positions, telegram_id)
+            close_res = await run_blocking(close_all_positions, telegram_id, network)
             if close_res.get("success"):
                 await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
             else:
@@ -606,7 +606,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["running"] = False
         state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
         _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id)
+        close_res = await run_blocking(close_all_positions, telegram_id, network)
         if close_res.get("success"):
             await _notify(
                 telegram_id,
@@ -632,7 +632,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["running"] = False
         state["last_error"] = None
         _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id)
+        close_res = await run_blocking(close_all_positions, telegram_id, network)
         if close_res.get("success"):
             await _notify(
                 telegram_id,

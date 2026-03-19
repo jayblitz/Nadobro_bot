@@ -540,13 +540,6 @@ _LABELS = {
         "ru": "🔴 Последняя цена",
         "ko": "🔴 실시간 최신 가격",
     },
-    "📡 Market Radar": {
-        "zh": "📡 市场雷达",
-        "fr": "📡 Radar de marché",
-        "ar": "📡 رادار السوق",
-        "ru": "📡 Рыночный радар",
-        "ko": "📡 마켓 레이더",
-    },
     "💹 Price Grid": {
         "zh": "💹 价格网格",
         "fr": "💹 Grille de prix",
@@ -1481,13 +1474,6 @@ _TEXTS = {
         "ar": "اكتب `confirm` للتنفيذ أو `cancel` للإلغاء\\.",
         "ru": "Введите `confirm` для выполнения или `cancel` для отмены\\.",
         "ko": "실행하려면 `confirm`, 취소하려면 `cancel`을 입력하세요\\.",
-    },
-    "📡 *Market Radar*\n\nPick a market view:": {
-        "zh": "📡 *市场雷达*\n\n选择一个市场视图:",
-        "fr": "📡 *Radar de marché*\n\nChoisissez une vue du marché :",
-        "ar": "📡 *رادار السوق*\n\nاختر عرض السوق:",
-        "ru": "📡 *Рыночный радар*\n\nВыберите обзор рынка:",
-        "ko": "📡 *마켓 레이더*\n\n시장 뷰를 선택하세요:",
     },
     "⏸ Trading is temporarily paused by admin\\.": {
         "zh": "⏸ 交易已被管理员暂停\\。",
@@ -3095,13 +3081,6 @@ _TEXTS = {
         "ar": "📋 *الأوامر المفتوحة*",
         "ru": "📋 *Открытые ордера*",
         "ko": "📋 *미체결 주문*",
-    },
-    "📡 *Market Radar*": {
-        "zh": "📡 *市场雷达*",
-        "fr": "📡 *Radar du marché*",
-        "ar": "📡 *رادار السوق*",
-        "ru": "📡 *Рыночный радар*",
-        "ko": "📡 *마켓 레이더*",
     },
     "🔔 *Alert Engine*": {
         "zh": "🔔 *警报引擎*",

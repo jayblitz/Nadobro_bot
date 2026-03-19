@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Reset Nadobro database: truncates users, trades, alerts, bot_state, admin_logs.
+Reset Nadobro database: truncates users, network trades/alerts, bot_state, admin_logs,
+and copy-trading tables.
 
 Run from project root with .env set (or SUPABASE_DATABASE_URL):
   python scripts/reset_db.py
@@ -23,12 +24,28 @@ load_dotenv()
 from src.nadobro.db import execute
 
 TRUNCATE_SQL = """
-TRUNCATE users, trades, alerts, bot_state, admin_logs RESTART IDENTITY CASCADE;
+TRUNCATE
+  users,
+  trades,
+  trades_testnet,
+  trades_mainnet,
+  alerts,
+  alerts_testnet,
+  alerts_mainnet,
+  bot_state,
+  admin_logs,
+  copy_trades,
+  copy_mirrors,
+  copy_traders
+RESTART IDENTITY CASCADE;
 """
 
 
 def main():
-    confirm = input("Reset database? This will DELETE all users, trades, alerts, and state. Type 'yes' to confirm: ")
+    confirm = input(
+        "Reset database? This will DELETE users, trades/alerts (all networks), bot state, and copy-trading data. "
+        "Type 'yes' to confirm: "
+    )
     if confirm.strip().lower() != "yes":
         print("Aborted.")
         sys.exit(0)

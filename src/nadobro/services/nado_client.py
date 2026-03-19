@@ -214,6 +214,59 @@ class NadoClient:
                 return orders
             except Exception as e:
                 logger.error(f"SDK get_open_orders failed: {e}")
+        try:
+            # Read-only/runtime clients rely on REST, so keep parity with SDK path.
+            data = self._query_rest(
+                "subaccount_open_orders",
+                {"subaccount": self.subaccount_hex, "product_id": product_id},
+            ) or {}
+            if data.get("status") != "success":
+                data = self._query_rest(
+                    "open_orders",
+                    {"subaccount": self.subaccount_hex, "product_id": product_id},
+                ) or {}
+            if data.get("status") == "success":
+                payload = data.get("data", {}) or {}
+                rows = payload.get("orders")
+                if rows is None and isinstance(payload, list):
+                    rows = payload
+                if rows is None:
+                    rows = data.get("orders")
+                orders = []
+                for o in rows or []:
+                    if not isinstance(o, dict):
+                        continue
+                    digest = o.get("digest") or o.get("order_digest") or o.get("id")
+                    amount_raw = (
+                        o.get("amount")
+                        or o.get("size")
+                        or o.get("amount_x18")
+                        or o.get("size_x18")
+                        or 0
+                    )
+                    price_raw = o.get("price") or o.get("price_x18") or 0
+                    amount = self._from_x18_dynamic(amount_raw)
+                    price = self._from_x18_dynamic(price_raw)
+                    if not digest:
+                        continue
+                    orders.append(
+                        {
+                            "digest": str(digest),
+                            "amount": abs(float(amount)),
+                            "price": float(price),
+                            "side": self._normalize_side(
+                                raw_side=o.get("side"),
+                                raw_is_long=o.get("is_long"),
+                                raw_direction=o.get("direction"),
+                                signed_amount=float(amount),
+                            ),
+                            "product_id": product_id,
+                            "product_name": get_product_name(product_id),
+                        }
+                    )
+                return orders
+        except Exception as e:
+            logger.error("REST get_open_orders failed: %s", e)
         return []
 
     @staticmethod
@@ -871,12 +924,10 @@ class NadoClient:
                 return {"success": False, "error": self._friendly_error(result_str)}
 
             return {
-                "success": True,
-                "digest": "unknown",
-                "product_id": product_id,
-                "size": size,
-                "price": price,
-                "side": "LONG" if is_buy else "SHORT",
+                "success": False,
+                "error": self._friendly_error(
+                    "Exchange did not confirm order acceptance (missing digest/status)."
+                ),
             }
         except Exception as e:
             err_str = str(e)

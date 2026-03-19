@@ -97,7 +97,7 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     return True, msg
 
 
-def get_user_nado_client(telegram_id: int, **kwargs) -> Optional[NadoClient]:
+def get_user_nado_client(telegram_id: int, network: str | None = None, **kwargs) -> Optional[NadoClient]:
     user = get_user(telegram_id)
     if not user or not user.linked_signer_address or not user.main_address:
         return None
@@ -113,8 +113,8 @@ def get_user_nado_client(telegram_id: int, **kwargs) -> Optional[NadoClient]:
         ciphertext = base64.b64decode(enc_pk) if isinstance(enc_pk, str) else enc_pk
         pk_bytes = decrypt_with_server_key(ciphertext)
         pk = pk_bytes.decode("utf-8") if isinstance(pk_bytes, bytes) else pk_bytes
-        network = user.network_mode.value
-        return get_nado_client(pk, network, main_address=user.main_address)
+        selected_network = str(network or user.network_mode.value)
+        return get_nado_client(pk, selected_network, main_address=user.main_address)
     except Exception as e:
         logger.warning("Failed to get Nado client for user %s: %s", telegram_id, e)
         return None
@@ -124,16 +124,16 @@ _readonly_cache: dict[str, NadoClient] = {}
 _READONLY_CACHE_TTL = 60
 
 
-def get_user_readonly_client(telegram_id: int) -> Optional[NadoClient]:
+def get_user_readonly_client(telegram_id: int, network: str | None = None) -> Optional[NadoClient]:
     user = get_user(telegram_id)
     if not user or not user.main_address:
         return None
-    network = user.network_mode.value
-    cache_key = f"ro:{user.main_address}:{network}"
+    selected_network = str(network or user.network_mode.value)
+    cache_key = f"ro:{user.main_address}:{selected_network}"
     cached = _readonly_cache.get(cache_key)
     if cached:
         return cached
-    client = NadoClient.from_address(user.main_address, network)
+    client = NadoClient.from_address(user.main_address, selected_network)
     _readonly_cache[cache_key] = client
     return client
 

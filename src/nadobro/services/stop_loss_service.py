@@ -107,7 +107,7 @@ def process_stop_losses(prices: dict) -> list[dict]:
 
         from src.nadobro.services.trade_service import close_position
 
-        close_result = close_position(user_id, product)
+        close_result = close_position(user_id, product, network=network)
         if close_result.get("success"):
             rule["active"] = False
             rule["triggered_at"] = _now_iso()
