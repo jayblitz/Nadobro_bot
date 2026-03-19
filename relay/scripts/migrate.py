@@ -57,6 +57,10 @@ async def main():
         CREATE INDEX IF NOT EXISTS idx_relay_sessions_request_id
         ON relay_sessions (request_id);
     """)
+    await conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_sessions_single_active
+        ON relay_sessions (status) WHERE status = 'active';
+    """)
 
     await conn.close()
     print("Done! Relay tables created successfully.")
