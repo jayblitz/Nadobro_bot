@@ -38,12 +38,12 @@ async def _periodic_cleanup() -> None:
             logger.warning("Cleanup tick failed", exc_info=True)
 
 
-async def _on_lowiqpts_message(*, chat_id: int, sender_id: int, text: str) -> None:
+async def _on_lowiqpts_message(*, chat_id: int, sender_id: int, text: str, options: Optional[list[str]] = None) -> None:
     session_id = await find_session_for_incoming(sender_id)
     if not session_id:
         logger.debug("No active session for sender_id=%s, dropping message", sender_id)
         return
-    await store_event(session_id, text)
+    await store_event(session_id, text, options=options)
 
 
 @asynccontextmanager

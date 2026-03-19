@@ -97,9 +97,20 @@ async def _handle_incoming(event: events.NewMessage.Event) -> None:
     if sender.id != lowiq.id:
         return
     text = event.message.message or ""
+    options: list[str] = []
+    try:
+        rows = event.message.buttons or []
+        for row in rows:
+            for btn in row:
+                label = str(getattr(btn, "text", "") or "").strip()
+                if label:
+                    options.append(label)
+    except Exception:
+        options = []
+
     chat_id = event.chat_id
     logger.debug("Incoming from @%s (chat=%s): %s", _lowiqpts_username(), chat_id, text[:80])
     try:
-        await _on_message_callback(chat_id=chat_id, sender_id=sender.id, text=text)
+        await _on_message_callback(chat_id=chat_id, sender_id=sender.id, text=text, options=options)
     except Exception:
         logger.warning("Error in message callback", exc_info=True)

@@ -42,6 +42,7 @@ from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.points_service import (
     get_points_dashboard,
+    relay_option_reply_to_lowiqpts,
     relay_user_reply_to_lowiqpts,
     request_points_refresh,
 )
@@ -789,6 +790,23 @@ async def _handle_points(query, data, telegram_id, context):
             escape_md(relay_result.get("error", "No active LOWIQPTS request to close.")),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=points_scope_kb("week"),
+        )
+        return
+
+    if action == "replyopt":
+        option_index = parts[2] if len(parts) > 2 else "-1"
+        relay_result = await relay_option_reply_to_lowiqpts(context, query.message.chat.id, option_index)
+        if relay_result.get("ok"):
+            choice = str(relay_result.get("choice", "")).strip()
+            if choice:
+                await context.bot.send_message(
+                    chat_id=query.message.chat.id,
+                    text=f"↪️ Sent to LOWIQPTS: {choice}",
+                )
+            return
+        await context.bot.send_message(
+            chat_id=query.message.chat.id,
+            text=str(relay_result.get("error", "Could not send selection."))[:180],
         )
         return
 

@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import Optional
 
 from relay.db import get_pool
@@ -6,7 +7,7 @@ from relay.db import get_pool
 logger = logging.getLogger("relay.events")
 
 
-async def store_event(session_id: str, text: str) -> Optional[int]:
+async def store_event(session_id: str, text: str, options: Optional[list[str]] = None) -> Optional[int]:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -17,13 +18,20 @@ async def store_event(session_id: str, text: str) -> Optional[int]:
             logger.debug("Dropping event for inactive/unknown session %s", session_id)
             return None
 
+        options_json = None
+        if options:
+            try:
+                options_json = json.dumps([str(x) for x in options if str(x).strip()])
+            except Exception:
+                options_json = None
+
         cursor_id = await conn.fetchval(
             """
-            INSERT INTO relay_events (session_id, text)
-            VALUES ($1, $2)
+            INSERT INTO relay_events (session_id, text, options_json)
+            VALUES ($1, $2, $3)
             RETURNING cursor_id
             """,
-            session_id, text,
+            session_id, text, options_json,
         )
 
         await conn.execute(
@@ -47,7 +55,7 @@ async def poll_events(cursor: Optional[str] = None, limit: int = 25) -> dict:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT e.cursor_id, e.session_id, e.text, e.created_at
+            SELECT e.cursor_id, e.session_id, e.text, e.options_json, e.created_at
             FROM relay_events e
             JOIN relay_sessions s ON s.id = e.session_id
             WHERE e.cursor_id > $1
@@ -60,12 +68,25 @@ async def poll_events(cursor: Optional[str] = None, limit: int = 25) -> dict:
     events = []
     next_cursor = None
     for row in rows:
-        events.append({
+        options = None
+        raw_options = row.get("options_json")
+        if raw_options:
+            try:
+                parsed = json.loads(raw_options)
+                if isinstance(parsed, list):
+                    options = [str(x) for x in parsed if str(x).strip()]
+            except Exception:
+                options = None
+
+        event_item = {
             "id": row["cursor_id"],
             "session_id": row["session_id"],
             "text": row["text"],
             "created_at": row["created_at"].isoformat(),
-        })
+        }
+        if options:
+            event_item["options"] = options
+        events.append(event_item)
         next_cursor = str(row["cursor_id"])
 
     return {

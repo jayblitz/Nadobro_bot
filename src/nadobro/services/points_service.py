@@ -8,7 +8,7 @@ from typing import Optional
 from telegram.constants import ParseMode
 
 from src.nadobro.handlers.formatters import fmt_points_dashboard
-from src.nadobro.handlers.keyboards import points_scope_kb
+from src.nadobro.handlers.keyboards import points_followup_options_kb, points_scope_kb
 from src.nadobro.handlers.points_mascot import mascot_caption_for_cost, mascot_path_for_cost
 from src.nadobro.services.lowiq_relay_client import (
     close_session as relay_close_session,
@@ -194,6 +194,23 @@ def _extract_event_session_id(event: dict) -> str:
         if value:
             return str(value)
     return ""
+
+
+def _extract_event_options(event: dict) -> list[str]:
+    if not isinstance(event, dict):
+        return []
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    raw = event.get("options")
+    if raw is None:
+        raw = payload.get("options")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        label = str(item or "").strip()
+        if label:
+            out.append(label)
+    return out
 
 
 def _extract_events_response(payload: dict) -> tuple[list[dict], Optional[str]]:
@@ -408,7 +425,16 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
 
     chat_id = int(req.get("chat_id"))
     telegram_id = int(req.get("telegram_id"))
-    await bot_app.bot.send_message(chat_id=chat_id, text=text)
+    options = _extract_event_options(event)
+    if options:
+        req["relay_options"] = options
+    else:
+        req.pop("relay_options", None)
+    await bot_app.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=points_followup_options_kb(options) if options else None,
+    )
     parsed = parse_lowiq_points_reply(text)
     if not parsed:
         _schedule_timeout(bot_app, str(req.get("req_id", "")))
@@ -442,6 +468,27 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
                 )
         except Exception:
             logger.warning("Failed to send points mascot image", exc_info=True)
+
+
+async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: int) -> dict:
+    req = get_active_pending_request(context.application.bot_data, chat_id)
+    if not req:
+        return {"ok": False, "error": "No active LOWIQPTS request."}
+    options = req.get("relay_options")
+    if not isinstance(options, list) or not options:
+        return {"ok": False, "error": "No selectable options available right now."}
+    try:
+        idx = int(option_index)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Invalid option."}
+    if idx < 0 or idx >= len(options):
+        return {"ok": False, "error": "That option is no longer available."}
+    choice = str(options[idx]).strip()
+    if not choice:
+        return {"ok": False, "error": "Invalid option."}
+    relay_result = await relay_user_reply_to_lowiqpts(context, chat_id, choice)
+    relay_result["choice"] = choice
+    return relay_result
 
 
 async def poll_lowiqpts_relay_events(bot_app) -> None:

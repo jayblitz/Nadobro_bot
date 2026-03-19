@@ -678,6 +678,20 @@ def points_scope_kb(scope: str = "week"):
     ])
 
 
+def points_followup_options_kb(options: list[str]):
+    rows = []
+    clean = [str(opt).strip() for opt in (options or []) if str(opt).strip()]
+    for i in range(0, len(clean), 2):
+        row = []
+        for j, label in enumerate(clean[i:i + 2]):
+            row.append(InlineKeyboardButton(label[:32], callback_data=f"points:replyopt:{i + j}"))
+        if row:
+            rows.append(row)
+    rows.append([InlineKeyboardButton("❌ Cancel Request", callback_data="points:cancel")])
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
+
+
 def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
     return InlineKeyboardMarkup([
         [

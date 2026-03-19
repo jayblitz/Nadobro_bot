@@ -58,8 +58,13 @@ async def _ensure_tables() -> None:
                 cursor_id   BIGSERIAL PRIMARY KEY,
                 session_id  TEXT NOT NULL REFERENCES relay_sessions(id) ON DELETE CASCADE,
                 text        TEXT NOT NULL,
+                options_json TEXT,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+        """)
+        await conn.execute("""
+            ALTER TABLE relay_events
+            ADD COLUMN IF NOT EXISTS options_json TEXT;
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_relay_events_session
