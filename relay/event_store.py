@@ -17,11 +17,11 @@ async def store_event(session_id: str, text: str) -> Optional[int]:
             logger.debug("Dropping event for inactive/unknown session %s", session_id)
             return None
 
-        event_id = await conn.fetchval(
+        cursor_id = await conn.fetchval(
             """
             INSERT INTO relay_events (session_id, text)
             VALUES ($1, $2)
-            RETURNING id
+            RETURNING cursor_id
             """,
             session_id, text,
         )
@@ -31,42 +31,42 @@ async def store_event(session_id: str, text: str) -> Optional[int]:
             session_id,
         )
 
-    logger.debug("Stored event %s for session %s", event_id, session_id)
-    return event_id
+    logger.debug("Stored event cursor_id=%s for session %s", cursor_id, session_id)
+    return cursor_id
 
 
 async def poll_events(cursor: Optional[str] = None, limit: int = 25) -> dict:
     pool = get_pool()
-    cursor_id = 0
+    after_cursor = 0
     if cursor:
         try:
-            cursor_id = int(cursor)
+            after_cursor = int(cursor)
         except (TypeError, ValueError):
-            cursor_id = 0
+            after_cursor = 0
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT e.id, e.session_id, e.text, e.created_at
+            SELECT e.cursor_id, e.session_id, e.text, e.created_at
             FROM relay_events e
             JOIN relay_sessions s ON s.id = e.session_id
-            WHERE e.id > $1
-            ORDER BY e.id ASC
+            WHERE e.cursor_id > $1
+            ORDER BY e.cursor_id ASC
             LIMIT $2
             """,
-            cursor_id, limit,
+            after_cursor, limit,
         )
 
     events = []
     next_cursor = None
     for row in rows:
         events.append({
-            "id": row["id"],
+            "id": row["cursor_id"],
             "session_id": row["session_id"],
             "text": row["text"],
             "created_at": row["created_at"].isoformat(),
         })
-        next_cursor = str(row["id"])
+        next_cursor = str(row["cursor_id"])
 
     return {
         "ok": True,

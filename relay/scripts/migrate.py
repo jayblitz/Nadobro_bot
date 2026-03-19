@@ -37,7 +37,7 @@ async def main():
     print("Creating relay_events table...")
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS relay_events (
-            id          BIGSERIAL PRIMARY KEY,
+            cursor_id   BIGSERIAL PRIMARY KEY,
             session_id  TEXT NOT NULL REFERENCES relay_sessions(id) ON DELETE CASCADE,
             text        TEXT NOT NULL,
             created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -47,7 +47,7 @@ async def main():
     print("Creating indexes...")
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_relay_events_session
-        ON relay_events (session_id, id);
+        ON relay_events (session_id, cursor_id);
     """)
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_relay_sessions_status

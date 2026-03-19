@@ -1,14 +1,11 @@
 import logging
 import secrets
-import time
 from typing import Optional
 
 from relay.db import get_pool
 from relay.telegram_client import get_lowiqpts_entity, send_message
 
 logger = logging.getLogger("relay.sessions")
-
-_IDLE_TIMEOUT_SECONDS = 300
 
 
 def _generate_session_id() -> str:
@@ -34,18 +31,10 @@ async def create_session(
             "SELECT count(*) FROM relay_sessions WHERE status = 'active'"
         )
         if active_count and active_count > 0:
-            await conn.execute(
-                """
-                UPDATE relay_sessions
-                SET status = 'preempted', updated_at = now()
-                WHERE status = 'active'
-                """
-            )
-            logger.info("Preempted %d active session(s) for new request", active_count)
+            return {"ok": False, "error": "busy", "detail": "Another session is active. Close it first or wait for idle expiry."}
 
     session_id = _generate_session_id()
     entity = await get_lowiqpts_entity()
-    await send_message(entity, f"/nado {wallet}")
     lowiqpts_chat_id = entity.id
 
     async with pool.acquire() as conn:
@@ -57,6 +46,8 @@ async def create_session(
             """,
             session_id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id,
         )
+
+    await send_message(entity, f"/nado {wallet}")
 
     logger.info("Session %s created for wallet=%s req=%s", session_id, wallet[:10], request_id)
     return {"ok": True, "session_id": session_id}

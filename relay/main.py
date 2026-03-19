@@ -119,7 +119,11 @@ async def start_session_endpoint(
             wallet=body.wallet,
             request_id=body.request_id,
         )
+        if not result.get("ok") and result.get("error") == "busy":
+            raise HTTPException(status_code=409, detail=result.get("detail", "Another session is active"))
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("start_session failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to start session")
