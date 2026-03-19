@@ -73,4 +73,8 @@ async def _ensure_tables() -> None:
             CREATE INDEX IF NOT EXISTS idx_relay_sessions_request_id
             ON relay_sessions (request_id);
         """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_sessions_single_active
+            ON relay_sessions (status) WHERE status = 'active';
+        """)
     logger.info("Relay tables verified/created")
