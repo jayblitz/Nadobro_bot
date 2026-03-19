@@ -83,6 +83,11 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
     except BadRequest as e:
         if "Message is not modified" in str(e):
             return
+        if "Can't parse entities" in str(e) and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
+            # Fallback for occasional MarkdownV2 edge cases in dynamic text.
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.pop("parse_mode", None)
+            return await query.edit_message_text((localized or "").replace("\\", ""), **fallback_kwargs)
         raise
 
 
