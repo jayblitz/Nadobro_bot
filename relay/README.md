@@ -123,9 +123,10 @@ LOWIQPTS_RELAY_POLL_SECONDS=2
 
 ## Local Development
 
+Run from the **repo root** (not from inside `relay/`):
+
 ```bash
-cd relay
-pip install -r requirements.txt
+pip install -r relay/requirements.txt
 
 export TELEGRAM_API_ID="..."
 export TELEGRAM_API_HASH="..."
