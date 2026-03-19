@@ -189,6 +189,19 @@ All configuration lives in `src/nadobro/config.py` and is read from environment 
 - Secrets injected as environment variables via Replit Secrets panel and `fly secrets set`
 - Dockerfile uses requirements.txt; `python-telegram-bot[webhooks]==22.6` required for webhook mode
 
+### LOWIQPTS Relay Service
+A separate FastAPI + Telethon microservice in `relay/` that proxies DM conversations between Nadobro and the @lowiqpts Telegram bot for points lookups. Deployed independently on Fly.io.
+
+- **relay/main.py** — FastAPI app with 5 endpoints (health, start session, reply, poll events, close session)
+- **relay/telegram_client.py** — Telethon wrapper for MTProto Telegram API
+- **relay/session_manager.py** — Session lifecycle (create, reply, close, idle cleanup)
+- **relay/event_store.py** — Cursor-based event buffer in PostgreSQL
+- **relay/db.py** — asyncpg connection pool + schema auto-creation
+- **relay/fly.toml** / **relay/Dockerfile** — Fly.io deployment config
+- **Auth**: Bearer token (`RELAY_AUTH_TOKEN` on relay, `LOWIQPTS_RELAY_AUTH_TOKEN` on Nadobro)
+- **DB**: Supabase PostgreSQL (tables: `relay_sessions`, `relay_events`)
+- **Nadobro integration**: `src/nadobro/services/lowiq_relay_client.py` is the HTTP client; `points_service.py` polls events via scheduler
+
 ### Project Structure (root)
 ```
 main.py          — entry point
@@ -198,5 +211,6 @@ replit.md        — this file
 .replit           — Replit workspace config
 .gitignore       — Git ignore rules
 src/nadobro/     — all source code
+relay/           — LOWIQPTS relay microservice (FastAPI + Telethon)
 attached_assets/ — reference images/docs from user
 ```
