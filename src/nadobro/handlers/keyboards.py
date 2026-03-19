@@ -693,6 +693,12 @@ def points_followup_options_kb(options: list[str]):
 
 
 def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
+    pair_buttons = [
+        InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
+        InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
+    ]
+    if strategy_id != "dn":
+        pair_buttons.append(InlineKeyboardButton("SOL", callback_data=f"strategy:pair:{strategy_id}:SOL"))
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Arm Strategy", callback_data=f"strategy:activate:{strategy_id}"),
@@ -702,9 +708,7 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
             InlineKeyboardButton("🧩 Edit Parameters", callback_data=f"strategy:config:{strategy_id}"),
         ],
         [
-            InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
-            InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
-            InlineKeyboardButton("SOL", callback_data=f"strategy:pair:{strategy_id}:SOL"),
+            *pair_buttons,
         ],
         [
             InlineKeyboardButton(

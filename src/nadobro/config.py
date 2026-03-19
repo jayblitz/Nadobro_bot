@@ -26,6 +26,13 @@ PRODUCTS = {
     "AVAX": {"id": 18, "type": "perp", "symbol": "AVAX-PERP"},
 }
 
+# Spot product ids currently supported for DN hedge legs.
+SPOT_PRODUCT_IDS = {
+    "USDT0": 0,
+    "BTC": 1,
+    "ETH": 3,
+}
+
 PRODUCT_ALIASES = {}
 for name, info in PRODUCTS.items():
     PRODUCT_ALIASES[name.lower()] = info["id"]
@@ -41,6 +48,10 @@ def get_product_name(product_id: int) -> str:
         if info["id"] == product_id:
             return info.get("symbol", name)
     return f"ID:{product_id}"
+
+
+def get_spot_product_id(name: str) -> Optional[int]:
+    return SPOT_PRODUCT_IDS.get((name or "").upper().strip())
 
 RATE_LIMIT_SECONDS = 5
 MAX_LEVERAGE = 40

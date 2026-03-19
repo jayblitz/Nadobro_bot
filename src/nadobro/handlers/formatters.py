@@ -466,6 +466,7 @@ def fmt_help():
         "\n"
         "🧠 *Strategy Lab*\n"
         "Configure and run automated strategies: MM Bot, Grid Reactor, Mirror DN, and Volume Engine\\.\n"
+        "Mirror DN now runs a real hedge on Nado: buy spot \\(BTC/ETH\\) and short the matching perp \\(1x\\-5x\\) to farm funding\\.\n"
         "Each dashboard includes a \"How it works\" explainer and pre\\-trade analytics\\.\n"
         "\n"
         "📁 *Portfolio Deck*\n"

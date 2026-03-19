@@ -1049,7 +1049,8 @@ async def _handle_strategy(query, data, context, telegram_id):
         selected_product = parts[3].upper()
         if strategy_id not in supported:
             return
-        if selected_product not in ("BTC", "ETH", "SOL"):
+        allowed_pairs = ("BTC", "ETH") if strategy_id == "dn" else ("BTC", "ETH", "SOL")
+        if selected_product not in allowed_pairs:
             return
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
         with timed_metric("cb.strategy.preview"):
@@ -1202,6 +1203,8 @@ async def _handle_strategy(query, data, context, telegram_id):
         settings = _get_user_settings(telegram_id, context)
         from src.nadobro.handlers.messages import execute_action_directly
         strategy_leverage = 1 if strategy_id in ("vol", "mm") else settings.get("default_leverage", 3)
+        if strategy_id == "dn":
+            strategy_leverage = max(1, min(float(strategy_leverage), 5))
         await execute_action_directly(query, context, telegram_id, {
             "type": "start_strategy",
             "strategy": strategy_id,
@@ -1616,7 +1619,11 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         )
     elif strategy == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
-        extra = f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+        extra = (
+            "Hedge model: *Spot long + matching perp short* \\(BTC/ETH only\\)\n"
+            "Leverage cap: *1x to 5x* \\(used on perp leg\\)\n"
+            f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+        )
     return base + extra + "Use presets or set custom values below\\."
 
 
@@ -1813,6 +1820,8 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
     leverage = 1.0 if strategy_id in ("vol", "mm") else float(settings.get("default_leverage", 3))
+    if strategy_id == "dn":
+        leverage = max(1.0, min(leverage, 5.0))
     slippage = float(settings.get("slippage", 1))
 
     available_margin = 0.0
@@ -1861,7 +1870,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     how_it_works = {
         "mm": "Quotes around mid price, captures spread, auto\\-reposts each cycle\\.",
         "grid": "Staggered levels above/below mid — buys low, sells high as price moves\\.",
-        "dn": "Offsetting long/short to earn spread \\+ funding with reduced risk\\.",
+        "dn": "Buys Nado Spot and shorts same perp to farm funding with reduced directional exposure\\.",
         "vol": "Balanced two\\-sided flow with risk caps for consistent volume\\.",
     }
     selected_explainer = how_it_works.get(strategy_id, "Automates trade cycles with configured risk controls\\.")
@@ -1896,7 +1905,11 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         )
     elif strategy_id == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
-        extra_cfg = f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
+        extra_cfg = (
+            f"\nHedge Leg: *{escape_md(product)}\\-SPOT long + {escape_md(product)}\\-PERP short*"
+            f"\nFunding Leverage: *{escape_md(f'{leverage:.0f}x')}* \\(1x to 5x\\)"
+            f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
+        )
     return (
         f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
         f"Status: {status_dot} *READY*\n"

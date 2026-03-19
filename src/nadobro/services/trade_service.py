@@ -7,6 +7,7 @@ from src.nadobro.models.database import (
 )
 from src.nadobro.config import (
     get_product_id,
+    get_spot_product_id,
     get_product_name,
     get_product_max_leverage,
     RATE_LIMIT_SECONDS,
@@ -223,6 +224,115 @@ def execute_market_order(
             payload.update(sl_result)
         return payload
 
+    return result
+
+
+def execute_spot_market_order(
+    telegram_id: int,
+    asset: str,
+    size: float,
+    is_buy: bool,
+    enforce_rate_limit: bool = False,
+    slippage_pct: float = 1.0,
+) -> dict:
+    asset = (asset or "").upper().strip()
+    spot_product_id = get_spot_product_id(asset)
+    if spot_product_id is None:
+        return {"success": False, "error": f"{asset} spot is not supported for this strategy."}
+    if size <= 0:
+        return {"success": False, "error": "Spot size must be positive."}
+
+    wallet_ok, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    if not wallet_ok:
+        return {"success": False, "error": wallet_msg}
+
+    readonly = get_user_readonly_client(telegram_id)
+    if not readonly:
+        return {"success": False, "error": "Could not initialize client. Please try again."}
+
+    spot_price = readonly.get_market_price(spot_product_id)
+    mid = float(spot_price.get("mid") or 0.0)
+    if mid <= 0:
+        return {"success": False, "error": f"Could not fetch {asset} spot price."}
+    notional = size * mid
+    if notional < MIN_TRADE_SIZE_USD:
+        return {"success": False, "error": f"Minimum trade size is ${MIN_TRADE_SIZE_USD}."}
+
+    balance = readonly.get_balance() or {}
+    balances = balance.get("balances", {}) or {}
+    usdt_balance = float(balances.get(0, balances.get("0", 0)) or 0.0)
+    spot_balance = float(balances.get(spot_product_id, balances.get(str(spot_product_id), 0)) or 0.0)
+    if is_buy and notional > usdt_balance * 0.98:
+        return {
+            "success": False,
+            "error": (
+                f"Insufficient USDT0 for {asset} spot buy.\n"
+                f"Required: ~${notional:,.2f}\n"
+                f"Available: ${usdt_balance:,.2f}"
+            ),
+        }
+    if (not is_buy) and size > spot_balance * 0.999:
+        return {
+            "success": False,
+            "error": (
+                f"Insufficient {asset} spot balance to sell.\n"
+                f"Required: {size:,.6f}\n"
+                f"Available: {spot_balance:,.6f}"
+            ),
+        }
+
+    if enforce_rate_limit:
+        user_obj = get_user(telegram_id)
+        net = user_obj.network_mode.value if user_obj else "mainnet"
+        allowed, msg = check_rate_limit(telegram_id, network=net)
+        if not allowed:
+            return {"success": False, "error": msg}
+
+    client = get_user_nado_client(telegram_id)
+    user = get_user(telegram_id)
+    if not client:
+        return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
+    network = user.network_mode.value
+
+    trade_id = insert_trade({
+        "user_id": telegram_id,
+        "product_id": spot_product_id,
+        "product_name": f"{asset}-SPOT",
+        "order_type": OrderTypeEnum.MARKET.value,
+        "side": OrderSide.LONG.value if is_buy else OrderSide.SHORT.value,
+        "size": size,
+        "leverage": 1.0,
+        "status": TradeStatus.PENDING.value,
+        "created_at": datetime.utcnow().isoformat(),
+    }, network=network)
+    if not trade_id:
+        return {"success": False, "error": "Failed to record spot trade."}
+
+    result = client.place_market_order(spot_product_id, size, is_buy=is_buy, slippage_pct=slippage_pct)
+    if result.get("success"):
+        post_px = _get_post_fill_price(client, spot_product_id) or mid
+        update_trade(trade_id, {
+            "status": TradeStatus.FILLED.value,
+            "order_digest": result.get("digest"),
+            "price": post_px,
+            "filled_at": datetime.utcnow().isoformat(),
+        }, network=network)
+        update_trade_stats(telegram_id, abs(size * post_px))
+        return {
+            "success": True,
+            "side": "BUY" if is_buy else "SELL",
+            "asset": asset,
+            "size": size,
+            "price": post_px,
+            "product_id": spot_product_id,
+            "digest": result.get("digest"),
+            "network": network,
+        }
+
+    update_trade(trade_id, {
+        "status": TradeStatus.FAILED.value,
+        "error_message": result.get("error", "Unknown error"),
+    }, network=network)
     return result
 
 

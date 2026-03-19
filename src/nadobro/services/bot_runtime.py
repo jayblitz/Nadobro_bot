@@ -4,7 +4,7 @@ import logging
 import time
 from datetime import datetime
 
-from src.nadobro.config import get_product_id, get_product_max_leverage
+from src.nadobro.config import get_product_id, get_product_max_leverage, get_spot_product_id
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
@@ -174,7 +174,11 @@ def start_user_bot(
     product_id = get_product_id(product)
     if product_id is None:
         return False, f"Unknown product '{product}'."
+    if strategy == "dn" and get_spot_product_id(product) is None:
+        return False, f"Delta Neutral currently supports assets with Nado Spot markets (BTC, ETH)."
     max_leverage = get_product_max_leverage(product)
+    if strategy == "dn":
+        max_leverage = min(max_leverage, 5)
     if float(leverage or 0) > max_leverage:
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
     if float(leverage or 0) < 1:
@@ -202,6 +206,12 @@ def start_user_bot(
     )
     _save_state(telegram_id, network, state)
     _ensure_task(telegram_id, network)
+    if strategy == "dn":
+        return (
+            True,
+            f"DN bot started with {product.upper()} spot long + {product.upper()}-PERP short ({network}) "
+            f"| TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}% | Leverage {state.get('leverage')}x",
+        )
     return (
         True,
         f"{strategy.upper()} bot started on {product.upper()}-PERP ({network}) "
