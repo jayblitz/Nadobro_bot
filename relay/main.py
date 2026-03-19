@@ -80,7 +80,7 @@ async def verify_auth(
 ) -> None:
     token = _expected_token()
     if not token:
-        return
+        raise HTTPException(status_code=503, detail="RELAY_AUTH_TOKEN not configured")
     if credentials is None or credentials.credentials != token:
         raise HTTPException(status_code=401, detail="Unauthorized")
 

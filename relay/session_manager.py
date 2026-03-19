@@ -21,12 +21,33 @@ async def create_session(
     wallet: str,
     request_id: str,
 ) -> dict:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            "SELECT id FROM relay_sessions WHERE request_id = $1 AND status = 'active'",
+            request_id,
+        )
+        if existing:
+            return {"ok": True, "session_id": existing}
+
+        active_count = await conn.fetchval(
+            "SELECT count(*) FROM relay_sessions WHERE status = 'active'"
+        )
+        if active_count and active_count > 0:
+            await conn.execute(
+                """
+                UPDATE relay_sessions
+                SET status = 'preempted', updated_at = now()
+                WHERE status = 'active'
+                """
+            )
+            logger.info("Preempted %d active session(s) for new request", active_count)
+
     session_id = _generate_session_id()
     entity = await get_lowiqpts_entity()
     await send_message(entity, f"/nado {wallet}")
     lowiqpts_chat_id = entity.id
 
-    pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
