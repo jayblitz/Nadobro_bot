@@ -36,6 +36,21 @@ class DynamicProductCatalogTests(unittest.TestCase):
         labels = [btn.text for row in kb.keyboard for btn in row]
         self.assertIn("XAG", labels)
 
+    def test_catalog_uses_symbols_payload_for_dynamic_names(self):
+        fake_products = [
+            {"product_id": 88, "book_info": {}},
+        ]
+        fake_symbols = [
+            {"type": "perp", "product_id": 88, "symbol": "XAG-PERP"},
+            {"type": "spot", "product_id": 5, "symbol": "USDC"},
+        ]
+        with patch("src.nadobro.services.product_catalog._fetch_all_products", return_value=fake_products), patch(
+            "src.nadobro.services.product_catalog._fetch_symbol_rows", return_value=fake_symbols
+        ):
+            catalog = product_catalog.get_catalog(network="mainnet", refresh=True)
+        self.assertIn("XAG", catalog["perps"])
+        self.assertEqual(product_catalog.get_product_id("XAG", network="mainnet"), 88)
+
 
 if __name__ == "__main__":
     unittest.main()

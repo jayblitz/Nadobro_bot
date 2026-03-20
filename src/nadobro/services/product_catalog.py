@@ -93,9 +93,38 @@ def _fetch_all_products(network: str, client=None) -> list[dict]:
     return []
 
 
+def _fetch_symbol_rows(network: str, client=None) -> list[dict]:
+    if client is not None:
+        try:
+            data = client._query_rest("symbols") or {}  # noqa: SLF001
+            if data.get("status") == "success":
+                symbols = ((data.get("data") or {}).get("symbols") or {})
+                if isinstance(symbols, dict):
+                    return [row for row in symbols.values() if isinstance(row, dict)]
+        except Exception as e:
+            logger.warning("catalog: client symbols failed on %s: %s", network, e)
+    try:
+        url = f"{_rest_url(network)}/query"
+        resp = _rest_session.get(
+            url,
+            params={"type": "symbols"},
+            headers={"Accept-Encoding": "gzip"},
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
+        data = resp.json() if resp is not None else {}
+        if data.get("status") == "success":
+            symbols = ((data.get("data") or {}).get("symbols") or {})
+            if isinstance(symbols, dict):
+                return [row for row in symbols.values() if isinstance(row, dict)]
+    except Exception as e:
+        logger.warning("catalog: rest symbols failed on %s: %s", network, e)
+    return []
+
+
 def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
-    raw = _fetch_all_products(network, client=client)
-    if not raw:
+    raw_products = _fetch_all_products(network, client=client)
+    raw_symbols = _fetch_symbol_rows(network, client=client)
+    if not raw_products and not raw_symbols:
         return None
 
     catalog = _build_static_catalog()
@@ -103,11 +132,31 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
     by_id = dict(catalog["by_id"])
     aliases = dict(catalog["aliases"])
 
-    for row in raw:
+    rows_by_id: dict[int, dict] = {}
+    for row in raw_products:
         try:
             pid = int(row.get("product_id"))
         except (TypeError, ValueError):
             continue
+        rows_by_id[pid] = row
+
+    merged_rows: list[dict] = []
+    if raw_symbols:
+        # `symbols` includes canonical symbol strings and trading metadata.
+        for symbol_row in raw_symbols:
+            if str(symbol_row.get("type", "")).lower() != "perp":
+                continue
+            merged_rows.append(symbol_row)
+    else:
+        # Fallback: still support legacy payloads where all_products carried symbols.
+        merged_rows = raw_products
+
+    for row in merged_rows:
+        try:
+            pid = int(row.get("product_id"))
+        except (TypeError, ValueError):
+            continue
+        product_row = rows_by_id.get(pid, {})
         book_info = row.get("book_info") or {}
         raw_symbol = (
             row.get("symbol")
@@ -121,10 +170,14 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
         if base.startswith("P") and pid in by_id:
             base = by_id[pid]
             norm_symbol = perps[base]["symbol"]
+        product_book = product_row.get("book_info") or {}
         max_lev = (
             row.get("max_leverage")
             or row.get("max_leverage_x")
             or book_info.get("max_leverage")
+            or product_row.get("max_leverage")
+            or product_row.get("max_leverage_x")
+            or product_book.get("max_leverage")
             or PRODUCT_MAX_LEVERAGE.get(base, _DYNAMIC_DEFAULT_MAX_LEVERAGE)
         )
         try:
