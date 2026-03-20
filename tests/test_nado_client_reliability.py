@@ -47,6 +47,18 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertEqual(data.get("status"), "success")
         self.assertEqual(data.get("data", {}).get("ok"), True)
 
+    def test_query_rest_uses_post_for_multi_product_queries(self):
+        client = NadoClient(private_key="0xabc", network="mainnet")
+        response = _FakeResponse(payload={"status": "success", "data": {"market_prices": []}})
+        with patch("src.nadobro.services.nado_client._rest_session.get") as mock_get, patch(
+            "src.nadobro.services.nado_client._rest_session.post", return_value=response
+        ) as mock_post:
+            data = client._query_rest("market_prices", {"product_ids": [1, 2]})
+
+        self.assertEqual(data.get("status"), "success")
+        mock_get.assert_not_called()
+        mock_post.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

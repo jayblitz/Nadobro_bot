@@ -135,6 +135,9 @@ def install_test_stubs() -> None:
             def get(self, *args, **kwargs):
                 return _DummyResponse()
 
+            def post(self, *args, **kwargs):
+                return _DummyResponse()
+
         class _HTTPAdapter:
             def __init__(self, *args, **kwargs):
                 pass

@@ -154,10 +154,14 @@ class NadoClient:
             params.update(extra_params)
         url = f"{self._rest_url()}/query"
         headers = {"Accept-Encoding": "gzip"}
+        use_post = query_type in {"market_prices", "orders"} or isinstance((extra_params or {}).get("product_ids"), list)
         max_attempts = max(1, _REST_MAX_RETRIES + 1)
         for attempt in range(max_attempts):
             try:
-                resp = _rest_session.get(url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
+                if use_post:
+                    resp = _rest_session.post(url, json=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
+                else:
+                    resp = _rest_session.get(url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
                 data = self._parse_json_response(resp)
                 if data is not None:
                     return data
@@ -211,7 +215,15 @@ class NadoClient:
     def get_all_market_prices(self) -> dict:
         prices = {}
         try:
-            data = self._query_rest("market_prices") or {}
+            product_ids = []
+            for name in get_perp_products(network=self.network, client=self):
+                pid = get_product_id(name, network=self.network, client=self)
+                if pid is not None:
+                    product_ids.append(int(pid))
+            if product_ids:
+                data = self._query_rest("market_prices", {"product_ids": product_ids}) or {}
+            else:
+                data = {}
             if data.get("status") == "success":
                 payload = data.get("data", {}) or {}
                 rows = payload.get("market_prices")
@@ -317,14 +329,9 @@ class NadoClient:
         try:
             # Read-only/runtime clients rely on REST, so keep parity with SDK path.
             data = self._query_rest(
-                "subaccount_open_orders",
-                {"subaccount": self.subaccount_hex, "product_id": product_id},
+                "subaccount_orders",
+                {"sender": self.subaccount_hex, "product_id": product_id},
             ) or {}
-            if data.get("status") != "success":
-                data = self._query_rest(
-                    "open_orders",
-                    {"subaccount": self.subaccount_hex, "product_id": product_id},
-                ) or {}
             if data.get("status") == "success":
                 payload = data.get("data", {}) or {}
                 rows = payload.get("orders")
@@ -571,24 +578,30 @@ class NadoClient:
 
     def get_all_positions(self) -> list:
         # Prefer true perp positions from subaccount info.
+        subaccount_info_succeeded = False
         if self._initialized and self.client:
             try:
                 info = self.client.context.engine_client.get_subaccount_info(self.subaccount_hex)
+                subaccount_info_succeeded = True
                 sdk_positions = self._extract_positions_from_sdk_info(info)
-                if sdk_positions:
-                    return sdk_positions
+                return sdk_positions
             except Exception as e:
                 logger.warning(f"SDK get_all_positions via subaccount_info failed: {e}")
 
         try:
             data = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
             if data.get("status") == "success":
+                subaccount_info_succeeded = True
                 payload = data.get("data", {}) or {}
                 rest_positions = self._extract_positions_from_rest_payload(payload)
-                if rest_positions:
-                    return rest_positions
+                return rest_positions
         except Exception as e:
             logger.warning(f"REST get_all_positions via subaccount_info failed: {e}")
+
+        # If subaccount_info read succeeded and returned no perp positions, do not
+        # fan out into per-product order scans.
+        if subaccount_info_succeeded:
+            return []
 
         # Fallback to open orders for backward compatibility.
         fallback_key = (self.network, str(self.subaccount_hex or ""))
