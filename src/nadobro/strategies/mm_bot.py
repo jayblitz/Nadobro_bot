@@ -192,6 +192,30 @@ def run_cycle(
     if not client:
         return {"success": False, "error": "Wallet client unavailable", "orders_placed": 0}
 
+    # Circuit breaker: check cumulative drawdown
+    mm_initial_equity = float(state.get("mm_initial_equity") or 0)
+    mm_cumulative_pnl = float(state.get("mm_cumulative_pnl") or 0)
+    mm_max_drawdown_pct = float(state.get("mm_max_drawdown_pct") or 20.0)
+
+    if mm_initial_equity <= 0:
+        # First run - record initial equity
+        try:
+            balance = client.get_balance() or {}
+            mm_initial_equity = float(balance.get("equity", 0) or balance.get("available_balance", 0) or 0)
+            state["mm_initial_equity"] = mm_initial_equity
+        except Exception:
+            pass
+
+    if mm_initial_equity > 0 and mm_cumulative_pnl < 0:
+        drawdown_pct = abs(mm_cumulative_pnl) / mm_initial_equity * 100
+        if drawdown_pct >= mm_max_drawdown_pct:
+            return {
+                "success": False,
+                "action": "circuit_breaker",
+                "error": f"MM Bot stopped: drawdown {drawdown_pct:.1f}% exceeds {mm_max_drawdown_pct}% limit",
+                "cumulative_pnl": mm_cumulative_pnl,
+            }
+
     if mid <= 0:
         mp = client.get_market_price(product_id)
         mid = float(mp.get("mid") or 0.0)
@@ -463,7 +487,7 @@ def run_cycle(
         state["mm_pause_reason"] = ""
 
     success = not (orders_placed == 0 and errors and len(open_orders) == 0)
-    return {
+    result = {
         "success": success,
         "error": errors[0] if not success else None,
         "orders_placed": orders_placed,
@@ -483,3 +507,9 @@ def run_cycle(
         "pause_reason": state.get("mm_pause_reason") or None,
         "errors": errors if errors else None,
     }
+
+    # Update cumulative PnL tracking
+    cycle_pnl = float(result.get("pnl", 0) or 0)
+    state["mm_cumulative_pnl"] = mm_cumulative_pnl + cycle_pnl
+
+    return result

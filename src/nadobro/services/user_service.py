@@ -86,6 +86,14 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     _readonly_cache.clear()
     invalidate_user_cache(telegram_id)
 
+    # Stop all active strategies before network switch
+    try:
+        from src.nadobro.services.bot_runtime import stop_all_strategies_for_user
+        stop_all_strategies_for_user(telegram_id)
+        logger.info("Stopped all strategies for user %s due to network switch", telegram_id)
+    except Exception as e:
+        logger.warning("Failed to stop strategies on network switch for %s: %s", telegram_id, e)
+
     addr = user.main_address
     if addr:
         msg = f"{_loc('Switched to')} {network} {_loc('mode.')}\n{_loc('Active wallet:')} `{addr}`"
@@ -105,7 +113,7 @@ def get_user_nado_client(telegram_id: int, network: str | None = None, **kwargs)
     if not enc_pk:
         return None
     if user.salt:
-        logger.warning("User %s still has legacy passphrase-encrypted key; migration required", telegram_id)
+        logger.error("User %s has a legacy passphrase-encrypted key. They must unlink and re-link their wallet.", telegram_id)
         return None
     try:
         import base64
@@ -190,30 +198,6 @@ def save_linked_signer(
     _readonly_cache.clear()
 
 
-def migrate_user_key(telegram_id: int, old_passphrase: str) -> tuple[bool, str]:
-    import base64
-    from src.nadobro.services.crypto import decrypt_with_passphrase, encrypt_with_server_key
-    user = get_user(telegram_id)
-    if not user:
-        return False, "User not found."
-    if not user.salt or not user.encrypted_linked_signer_pk:
-        return False, "No legacy key to migrate."
-    try:
-        ciphertext = base64.b64decode(user.encrypted_linked_signer_pk) if isinstance(user.encrypted_linked_signer_pk, str) else user.encrypted_linked_signer_pk
-        salt_b = base64.b64decode(user.salt) if isinstance(user.salt, str) else user.salt
-        pk_bytes = decrypt_with_passphrase(ciphertext, salt_b, old_passphrase)
-    except Exception:
-        return False, "Invalid passphrase. Please try again."
-    new_ciphertext = encrypt_with_server_key(pk_bytes)
-    execute(
-        "UPDATE users SET encrypted_linked_signer_pk = %s, salt = NULL WHERE telegram_id = %s",
-        (base64.b64encode(new_ciphertext).decode("ascii"), telegram_id),
-    )
-    invalidate_user_cache(telegram_id)
-    clear_client_cache()
-    _readonly_cache.clear()
-    return True, "Key migrated successfully. You no longer need a passphrase."
-
 
 def has_mode_private_key(telegram_id: int, network: str) -> bool:
     user = get_user(telegram_id)
@@ -232,7 +216,7 @@ def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
             _loc("Wallet not linked. Use the Wallet button to connect your wallet (Linked Signer)."),
         )
     if user.salt:
-        return False, "LEGACY_KEY_MIGRATION_REQUIRED"
+        return False, "Your wallet key uses an old format. Please unlink and re-link your wallet."
     return True, ""
 
 

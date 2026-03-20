@@ -252,13 +252,6 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         from src.nadobro.services.copy_service import start_copy
         ok, msg = await run_blocking(start_copy, telegram_id, trader_id, budget_usd, risk_factor, max_leverage)
         if ok:
-            from src.nadobro.services.hl_websocket import get_ws_manager
-            ws = get_ws_manager()
-            if ws and ws.is_running:
-                try:
-                    await ws._sync_subscriptions()
-                except Exception:
-                    pass
             reply = f"🔁 {escape_md(msg)}"
         else:
             reply = f"⚠️ {escape_md(msg)}"
@@ -299,20 +292,6 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         reply_markup=persistent_menu_kb(),
     )
     return False, "unknown action"
-
-
-async def _prompt_legacy_migration(update_or_query, context):
-    context.user_data["wallet_flow"] = "awaiting_migration_passphrase"
-    msg_target = getattr(update_or_query, "message", None) or update_or_query
-    reply = getattr(msg_target, "reply_text", None) or getattr(msg_target, "edit_message_text", None)
-    if reply:
-        await reply(
-            "🔄 *Key Migration Required*\n\n"
-            "We've upgraded security\\! Your signer key needs a one\\-time migration\\.\n\n"
-            "Please enter your *old passphrase* to re\\-encrypt your key with the new system\\.\n"
-            "After this, you'll never need a passphrase again\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
 
 
 async def execute_action_directly(update_or_query, context, telegram_id: int, action_data: dict):
@@ -675,14 +654,11 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
             return
         wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
-            if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
-                await _prompt_legacy_migration(update, context)
-            else:
-                await _reply_loc(update.message, 
-                    f"⚠️ {escape_md(wallet_msg)}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=persistent_menu_kb(),
-                )
+            await _reply_loc(update.message, 
+                f"⚠️ {escape_md(wallet_msg)}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=persistent_menu_kb(),
+            )
             _clear_trade_flow(context)
             return
 
@@ -958,14 +934,11 @@ async def _execute_trade_flow(update, context, telegram_id, flow):
 
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
-            await _prompt_legacy_migration(update, context)
-        else:
-            await _reply_loc(update.message, 
-                f"⚠️ {escape_md(wallet_msg)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=persistent_menu_kb(),
-            )
+        await _reply_loc(update.message, 
+            f"⚠️ {escape_md(wallet_msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
         return
 
     await execute_action_directly(update, context, telegram_id, {
@@ -1221,27 +1194,6 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
     flow = context.user_data.get("wallet_flow")
     if not flow:
         return False
-
-    if flow == "awaiting_migration_passphrase":
-        from src.nadobro.services.user_service import migrate_user_key
-        old_passphrase = text.strip()
-        ok, msg = await run_blocking(migrate_user_key, telegram_id, old_passphrase)
-        if ok:
-            context.user_data.pop("wallet_flow", None)
-            try:
-                await update.message.delete()
-            except Exception:
-                pass
-            await _reply_loc(update.message,
-                "✅ Key migrated successfully! You no longer need a passphrase.\n\n"
-                "All trading features are now available.",
-                reply_markup=persistent_menu_kb(),
-            )
-        else:
-            await _reply_loc(update.message,
-                f"❌ {msg}\n\nPlease enter your old passphrase again, or tap /start to cancel.",
-            )
-        return True
 
     if flow == "awaiting_main_address":
         if not _is_valid_main_address(text):

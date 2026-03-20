@@ -40,6 +40,11 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     mid = kwargs.get("mid", 0.0)
     product_id = kwargs.get("product_id")
     product = kwargs.get("product", state.get("product", "BTC"))
+
+    # DN strategy only supports assets with spot pairs (BTC, ETH)
+    if product not in ("BTC", "ETH"):
+        return {"success": False, "error": f"{product} is not supported for Delta Neutral. Only BTC and ETH have spot pairs on Nado."}
+
     if not client or mid <= 0 or product_id is None:
         return {"success": False, "error": "Missing client, price, or product_id"}
 

@@ -1,3 +1,6 @@
+# DEPRECATED: This module is being replaced by Nado-native copy trading.
+# It will be removed in a future version.
+
 import asyncio
 import json
 import logging
@@ -8,6 +11,11 @@ import websockets
 from src.nadobro.models.database import get_active_trader_wallets, get_mirrors_for_trader, get_copy_trader_by_wallet, update_mirror_last_synced
 
 logger = logging.getLogger(__name__)
+
+
+# Stub for removed function - HL copy trading replaced by Nado-native
+async def _deprecated_process_hl_fill(wallet, fill):
+    logger.warning("HL copy trading is deprecated. Use Nado-native copy trading instead.")
 
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"
 RECONNECT_BASE_DELAY = 1.0
@@ -187,7 +195,7 @@ class HLWebSocketManager:
             return
 
     async def _dispatch_fills(self, wallet: str, fills: list):
-        from src.nadobro.services.copy_service import process_hl_fill
+        process_hl_fill = _deprecated_process_hl_fill
         for fill in fills:
             try:
                 await process_hl_fill(wallet, fill)
@@ -236,7 +244,7 @@ class HLWebSocketManager:
 
     async def _backfill_missed_fills(self):
         from src.nadobro.services.hl_client import get_hl_client
-        from src.nadobro.services.copy_service import process_hl_fill
+        process_hl_fill = _deprecated_process_hl_fill
         try:
             wallets = get_active_trader_wallets()
         except Exception as e:

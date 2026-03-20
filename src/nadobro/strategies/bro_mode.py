@@ -263,6 +263,13 @@ def _handle_open(
     tp_pct = float(decision.get("tp_pct", 2.0))
     sl_pct = float(decision.get("sl_pct", 1.0))
 
+    # Risk guardrails: clamp leverage to product-specific max
+    from src.nadobro.config import get_product_max_leverage
+    max_product_lev = get_product_max_leverage(product)
+    if leverage > max_product_lev:
+        leverage = max_product_lev
+        logger.info("Bro Mode: clamped leverage to %sx for %s", leverage, product)
+
     product_id = get_product_id(product)
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'"}
@@ -301,6 +308,17 @@ def _handle_open(
         return {"success": False, "error": f"Cannot fetch {product} price"}
 
     size = notional_usd / mid
+
+    # Don't risk more than 50% of available balance on a single trade
+    try:
+        balance = ro_client.get_balance() or {}
+        available = float(balance.get("available_balance", 0) or balance.get("equity", 0) or 0)
+        max_notional = available * 0.5
+        if mid > 0 and size * mid > max_notional and max_notional > 0:
+            size = max_notional / mid
+            logger.info("Bro Mode: clamped size to %.6f (50%% of balance)", size)
+    except Exception as e:
+        logger.warning("Bro Mode: balance check failed: %s", e)
 
     if is_long:
         tp_price = mid * (1 + tp_pct / 100)

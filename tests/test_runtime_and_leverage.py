@@ -47,7 +47,6 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             product="LINK",
             leverage=40,
             slippage_pct=1,
-            passphrase="pw",
         )
         self.assertFalse(ok)
         self.assertIn("Max leverage for LINK is 20x", msg)
@@ -63,7 +62,6 @@ class RuntimeAndLeverageTests(unittest.TestCase):
                 product="BTC",
                 leverage=40,
                 slippage_pct=1,
-                passphrase="pw",
             )
         self.assertTrue(ok)
         self.assertIn("MM bot started on BTC-PERP", msg)

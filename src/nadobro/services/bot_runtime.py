@@ -316,6 +316,44 @@ def get_user_bot_status(telegram_id: int) -> dict:
     }
 
 
+def stop_all_strategies_for_user(telegram_id: int) -> None:
+    """Stop all running strategies for a given user. Used on network switch."""
+    rows = query_all(
+        "SELECT key, value FROM bot_state WHERE key LIKE %s",
+        (f"{STATE_PREFIX}{telegram_id}:%",),
+    )
+    stopped = []
+    for row in rows:
+        try:
+            key = row.get("key", "")
+            user_network = key.replace(STATE_PREFIX, "")
+            user_id_str, network = user_network.split(":", 1)
+            if int(user_id_str) != int(telegram_id):
+                continue
+            state = json.loads(row.get("value") or "{}")
+            if not state.get("running"):
+                continue
+            strategy = state.get("strategy", "unknown")
+            state["running"] = False
+            state["last_error"] = "Stopped due to network switch"
+            set_bot_state(key, state)
+            tk = _task_key(telegram_id, network)
+            task = _tasks.pop(tk, None)
+            if task:
+                task.cancel()
+            stopped.append(f"{strategy}@{network}")
+        except Exception as e:
+            logger.warning("Error stopping strategy for user %s: %s", telegram_id, e)
+            continue
+    if stopped:
+        logger.info(
+            "stop_all_strategies_for_user: stopped %d strategy/strategies for user %s: %s",
+            len(stopped), telegram_id, ", ".join(stopped),
+        )
+    else:
+        logger.debug("stop_all_strategies_for_user: no running strategies found for user %s", telegram_id)
+
+
 def stop_runtime():
     for task_id, task in list(_tasks.items()):
         task.cancel()

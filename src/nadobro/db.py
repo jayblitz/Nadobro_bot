@@ -70,8 +70,12 @@ def get_db():
 def put_db(conn):
     try:
         get_pool().putconn(conn)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to return connection to pool: %s", e)
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def query_one(sql, params=None):
@@ -80,7 +84,9 @@ def query_one(sql, params=None):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
-            return dict(row) if row else None
+            result = dict(row) if row else None
+        conn.commit()
+        return result
     except Exception:
         conn.rollback()
         raise
@@ -94,7 +100,9 @@ def query_all(sql, params=None):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
-            return [dict(r) for r in rows]
+            result = [dict(r) for r in rows]
+        conn.commit()
+        return result
     except Exception:
         conn.rollback()
         raise
@@ -136,7 +144,9 @@ def query_count(sql, params=None):
         with conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
-            return row[0] if row else 0
+            result = row[0] if row else 0
+        conn.commit()
+        return result
     except Exception:
         conn.rollback()
         raise
@@ -222,7 +232,7 @@ def init_db():
         with conn.cursor() as cur:
             for col, col_type in [("close_price", "DOUBLE PRECISION"), ("closed_at", "TIMESTAMPTZ")]:
                 try:
-                    cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+                    cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")  # Safe: col and col_type are hardcoded constants above
                     conn.commit()
                     logger.info(f"Added column trades.{col}")
                 except Exception:
@@ -322,30 +332,65 @@ def init_db():
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 trader_id INT NOT NULL REFERENCES copy_traders(id),
-                budget_usd DOUBLE PRECISION NOT NULL DEFAULT 100.0,
-                risk_factor DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                network TEXT NOT NULL DEFAULT 'mainnet',
+                margin_per_trade DOUBLE PRECISION NOT NULL DEFAULT 50.0,
                 max_leverage DOUBLE PRECISION NOT NULL DEFAULT 10.0,
+                cumulative_stop_loss_pct DOUBLE PRECISION NOT NULL DEFAULT 50.0,
+                cumulative_take_profit_pct DOUBLE PRECISION NOT NULL DEFAULT 100.0,
+                total_allocated_usd DOUBLE PRECISION NOT NULL DEFAULT 500.0,
+                cumulative_pnl DOUBLE PRECISION NOT NULL DEFAULT 0.0,
                 active BOOLEAN DEFAULT true,
                 paused BOOLEAN DEFAULT false,
-                last_synced_fill_tid BIGINT DEFAULT 0,
+                auto_stopped_reason TEXT,
                 created_at TIMESTAMPTZ DEFAULT now(),
                 stopped_at TIMESTAMPTZ,
-                UNIQUE(user_id, trader_id)
+                UNIQUE(user_id, trader_id, network)
             );
             CREATE INDEX IF NOT EXISTS idx_copy_mirrors_user ON copy_mirrors (user_id, active);
             CREATE INDEX IF NOT EXISTS idx_copy_mirrors_trader ON copy_mirrors (trader_id, active);
-            ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS paused BOOLEAN DEFAULT false;
+
+            CREATE TABLE IF NOT EXISTS copy_positions (
+                id SERIAL PRIMARY KEY,
+                mirror_id INT NOT NULL REFERENCES copy_mirrors(id),
+                user_id BIGINT NOT NULL,
+                product_id INT NOT NULL,
+                product_name TEXT NOT NULL,
+                side TEXT NOT NULL,
+                entry_price DOUBLE PRECISION,
+                size DOUBLE PRECISION,
+                leverage DOUBLE PRECISION DEFAULT 1.0,
+                tp_price DOUBLE PRECISION,
+                sl_price DOUBLE PRECISION,
+                leader_entry_price DOUBLE PRECISION,
+                leader_size DOUBLE PRECISION,
+                status TEXT NOT NULL DEFAULT 'open',
+                pnl DOUBLE PRECISION DEFAULT 0.0,
+                opened_at TIMESTAMPTZ DEFAULT now(),
+                closed_at TIMESTAMPTZ,
+                close_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_copy_positions_mirror ON copy_positions (mirror_id, status);
+            CREATE INDEX IF NOT EXISTS idx_copy_positions_user ON copy_positions (user_id, status);
+
+            CREATE TABLE IF NOT EXISTS copy_snapshots (
+                id SERIAL PRIMARY KEY,
+                trader_id INT NOT NULL REFERENCES copy_traders(id),
+                network TEXT NOT NULL DEFAULT 'mainnet',
+                positions_json JSONB NOT NULL DEFAULT '[]',
+                captured_at TIMESTAMPTZ DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_copy_snapshots_trader ON copy_snapshots (trader_id, network);
 
             CREATE TABLE IF NOT EXISTS copy_trades (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 mirror_id INT NOT NULL REFERENCES copy_mirrors(id),
                 hl_fill_tid BIGINT,
-                hl_coin TEXT NOT NULL,
-                nado_product_id INT NOT NULL,
+                hl_coin TEXT NOT NULL DEFAULT '',
+                nado_product_id INT NOT NULL DEFAULT 0,
                 side TEXT NOT NULL,
-                hl_size DOUBLE PRECISION NOT NULL,
-                hl_price DOUBLE PRECISION NOT NULL,
+                hl_size DOUBLE PRECISION NOT NULL DEFAULT 0,
+                hl_price DOUBLE PRECISION NOT NULL DEFAULT 0,
                 nado_size DOUBLE PRECISION,
                 nado_price DOUBLE PRECISION,
                 nado_trade_id INT,
@@ -356,7 +401,6 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_copy_trades_mirror ON copy_trades (mirror_id);
             CREATE INDEX IF NOT EXISTS idx_copy_trades_user ON copy_trades (user_id, created_at);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_copy_trades_dedup ON copy_trades (user_id, mirror_id, hl_fill_tid) WHERE hl_fill_tid IS NOT NULL;
         """
         with conn.cursor() as cur:
             cur.execute(_COPY_TRADING_DDL)

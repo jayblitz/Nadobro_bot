@@ -738,7 +738,16 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
     return "[X SEARCH] No results found from @nadoHQ or @inkonchain.", []
 
 
-def _execute_live_price(product: str) -> tuple[str, list[str]]:
+def _get_user_network(telegram_id: int) -> str:
+    try:
+        from src.nadobro.services.user_service import get_user
+        user = get_user(telegram_id)
+        return user.network_mode.value if user else "mainnet"
+    except Exception:
+        return "mainnet"
+
+
+def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, list[str]]:
     from src.nadobro.config import PRODUCTS, get_product_id
     from src.nadobro.services.nado_client import NadoClient
 
@@ -748,7 +757,7 @@ def _execute_live_price(product: str) -> tuple[str, list[str]]:
     if product_id is None:
         if symbol == "ALL":
             try:
-                client = NadoClient.from_address("0x0000000000000000000000000000000000000000", "mainnet")
+                client = NadoClient.from_address("0x0000000000000000000000000000000000000000", network)
                 prices = client.get_all_market_prices()
                 lines = ["[LIVE PRICES FROM NADO DEX]"]
                 for name, p in sorted(prices.items()):
@@ -763,7 +772,7 @@ def _execute_live_price(product: str) -> tuple[str, list[str]]:
         return f"[LIVE PRICE] Unknown asset '{product}'. Supported: {', '.join(supported)}", []
 
     try:
-        client = NadoClient.from_address("0x0000000000000000000000000000000000000000", "mainnet")
+        client = NadoClient.from_address("0x0000000000000000000000000000000000000000", network)
         price_data = client.get_market_price(product_id)
         mid = price_data.get("mid", 0)
         bid = price_data.get("bid", 0)
@@ -880,7 +889,7 @@ def _execute_global_market_data() -> tuple[str, list[str]]:
         return f"[GLOBAL MARKET] Could not fetch global data right now: {e}", []
 
 
-def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str, list[str]]:
+def _execute_agent_tool(tool_name: str, args: dict, question: str, network: str = "mainnet") -> tuple[str, list[str]]:
     if tool_name == "search_knowledge_base":
         query = args.get("query", question)
         sections = _search_knowledge_sections(query, top_k=5)
@@ -890,7 +899,7 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str,
 
     elif tool_name == "get_live_price":
         product = args.get("product", "BTC")
-        return _execute_live_price(product)
+        return _execute_live_price(product, network=network)
 
     elif tool_name == "search_x_twitter":
         query = args.get("query", question)
@@ -913,7 +922,7 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str) -> tuple[str,
     return f"[ERROR] Unknown tool: {tool_name}", []
 
 
-def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
+def _run_agent_pipeline(question: str, provider: str, network: str = "mainnet") -> tuple[str, list[str]]:
     client = _get_xai_client() if provider == "xai" else _get_openai_client()
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
@@ -971,7 +980,7 @@ def _run_agent_pipeline(question: str, provider: str) -> tuple[str, list[str]]:
         except (json.JSONDecodeError, AttributeError):
             continue
 
-        ctx, sources = _execute_agent_tool(fn_name, fn_args, question)
+        ctx, sources = _execute_agent_tool(fn_name, fn_args, question, network=network)
         all_context_parts.append(ctx)
         all_sources.extend(sources)
 
@@ -1209,13 +1218,14 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         loop = asyncio.get_event_loop()
 
         primary = _pick_primary_provider(question)
+        user_network = _get_user_network(telegram_id) if telegram_id else "mainnet"
         if _should_skip_router(question):
             gathered_context = _search_knowledge_sections(question, top_k=5)
             used_sources = _pick_sources_for_question(question, context_text=gathered_context)
         else:
             try:
                 gathered_context, used_sources = await loop.run_in_executor(
-                    None, _run_agent_pipeline, question, primary
+                    None, _run_agent_pipeline, question, primary, user_network
                 )
             except Exception as e:
                 logger.warning(f"Agent pipeline failed: {e}")
@@ -1382,13 +1392,14 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         loop = asyncio.get_event_loop()
 
         primary = _pick_primary_provider(question)
+        user_network = _get_user_network(telegram_id) if telegram_id else "mainnet"
         if _should_skip_router(question):
             gathered_context = _search_knowledge_sections(question, top_k=5)
             used_sources = _pick_sources_for_question(question, context_text=gathered_context)
         else:
             try:
                 gathered_context, used_sources = await loop.run_in_executor(
-                    None, _run_agent_pipeline, question, primary
+                    None, _run_agent_pipeline, question, primary, user_network
                 )
             except Exception as e:
                 logger.warning(f"Agent pipeline failed: {e}")

@@ -1279,13 +1279,6 @@ _TEXTS = {
         "ru": "⚠️ Сессия истекла. Нажмите Wallet, чтобы начать заново.",
         "ko": "⚠️ 세션이 만료되었습니다. 월렛 버튼을 눌러 다시 시작하세요.",
     },
-    "🔐 Enter your passphrase to authorize this command:": {
-        "zh": "🔐 输入口令以授权此操作：",
-        "fr": "🔐 Entrez votre passphrase pour autoriser cette commande :",
-        "ar": "🔐 أدخل عبارة المرور لتفويض هذا الأمر:",
-        "ru": "🔐 Введите пароль-фразу для авторизации команды:",
-        "ko": "🔐 이 명령을 승인하려면 패스프레이즈를 입력하세요:",
-    },  # LEGACY: kept for i18n key compatibility; no longer used in code
     "Yo what’s good, future Nado whale?! 👋💰\n\nWelcome to Nadobro — the best Telegram bot for trading Perps on Nado.\n\nWe’re giving you pro tools in the palm of your hand:\n• MM Bot (Grid + RGRID that prints)\n• Delta Neutral Bot (spot + 1-5x short = easy funding)\n• Volume Bot (farm leaderboards on autopilot)\n• AI chat: just type your trade ideas in English\n\nFirst, pick your language vibe:": {
         "zh": "Yo，未来的 Nado 巨鲸你好！👋💰\n\n欢迎来到 Nadobro —— 在 Nado 上交易永续合约的顶级 Telegram 机器人。\n\n我们把专业工具放进你的掌心：\n• MM Bot（Grid + RGRID，持续输出）\n• Delta Neutral Bot（现货 + 1-5x 空单，轻松吃资金费）\n• Volume Bot（自动冲榜）\n• AI 聊天：直接输入你的交易想法\n\n先选择你的语言：",
         "fr": "Salut, futur whale Nado ! 👋💰\n\nBienvenue sur Nadobro — le meilleur bot Telegram pour trader les Perps sur Nado.\n\nOn te met des outils pro dans la main :\n• MM Bot (Grid + RGRID qui envoie)\n• Delta Neutral Bot (spot + short 1-5x = funding simplifié)\n• Volume Bot (farm des leaderboards en automatique)\n• Chat IA : tape simplement tes idées de trade\n\nD'abord, choisis ta langue :",
@@ -1678,13 +1671,6 @@ _TEXTS = {
         "ru": "⚠️ Стоп-лосс сработал на",
         "ko": "⚠️ 손절 도달:",
     },
-    "but your session passphrase expired. Re-authorize and close manually.": {
-        "zh": "但您的会话口令已过期。请重新授权并手动平仓。",
-        "fr": "mais votre passphrase de session a expiré. Réautorisez et fermez manuellement.",
-        "ar": "لكن عبارة المرور الخاصة بجلستك انتهت. أعد التفويض وأغلق يدويًا.",
-        "ru": "но ваша сессионная парольная фраза истекла. Авторизуйтесь заново и закройте вручную.",
-        "ko": "그러나 세션 패스프레이즈가 만료되었습니다. 다시 인증한 후 수동으로 종료하세요.",
-    },  # LEGACY: kept for i18n key compatibility; no longer used in code
     "⚠️ Stop-loss trigger failed for": {
         "zh": "⚠️ 止损触发失败:",
         "fr": "⚠️ Déclenchement du stop-loss échoué pour",
@@ -1740,13 +1726,6 @@ _TEXTS = {
         "ar": "لكن التنظيف التلقائي فشل. أغلق يدويًا وتحقق من الأوامر المفتوحة.",
         "ru": "но автоматическая очистка не удалась. Закройте вручную и проверьте открытые ордера.",
         "ko": "자동 종료 정리에 실패했습니다. 수동으로 닫고 미체결 주문을 확인하세요.",
-    },
-    "strategy session expired. Restart strategy and enter passphrase again.": {
-        "zh": "策略会话已过期。请重启策略并重新输入口令。",
-        "fr": "session de stratégie expirée. Relancez la stratégie et saisissez à nouveau le mot de passe.",
-        "ar": "انتهت جلسة الاستراتيجية. أعد تشغيل الاستراتيجية وأدخل عبارة المرور مجددًا.",
-        "ru": "сессия стратегии истекла. Перезапустите стратегию и введите парольную фразу снова.",
-        "ko": "전략 세션이 만료되었습니다. 전략을 다시 시작하고 패스프레이즈를 다시 입력하세요.",
     },
     "consecutive cycle errors.": {
         "zh": "连续周期错误。",
@@ -2454,13 +2433,6 @@ _TEXTS = {
         "ar": "تم إيقاف حلقة {strategy} على {network}: تم تغيير الوضع النشط إلى {new_mode}.",
         "ru": "Остановлен цикл {strategy} на {network}: активный режим изменен на {new_mode}.",
         "ko": "{network}에서 {strategy} 루프 중지됨: 활성 모드가 {new_mode}로 변경되었습니다.",
-    },
-    "⚠️ {strategy} stopped on {network}: strategy session expired. Restart strategy and enter passphrase again.": {
-        "zh": "⚠️ {strategy} 在 {network} 上已停止: 策略会话已过期。请重新启动策略并再次输入密码。",
-        "fr": "⚠️ {strategy} arrêtée sur {network} : session de stratégie expirée. Relancez la stratégie et entrez à nouveau la phrase secrète.",
-        "ar": "⚠️ {strategy} توقف على {network}: انتهت صلاحية جلسة الاستراتيجية. أعد تشغيل الاستراتيجية وأدخل عبارة المرور مرة أخرى.",
-        "ru": "⚠️ {strategy} остановлен на {network}: сессия стратегии истекла. Перезапустите стратегию и введите пароль снова.",
-        "ko": "⚠️ {strategy}이(가) {network}에서 중지됨: 전략 세션이 만료되었습니다. 전략을 다시 시작하고 비밀번호를 다시 입력하세요.",
     },
     "🧠 Bro Mode completed on {network}.": {
         "zh": "🧠 Bro Mode 已在 {network} 上完成。",

@@ -4,9 +4,6 @@ import base64
 import secrets
 import re
 from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.backends import default_backend
 from eth_account import Account
 
 Account.enable_unaudited_hdwallet_features()
@@ -28,19 +25,12 @@ def _get_fernet() -> Fernet:
         f = Fernet(key_bytes)
         _fernet_instance = f
         return f
-    except Exception:
-        pass
-
-    import logging
-    logging.getLogger(__name__).warning(
-        "ENCRYPTION_KEY is not a valid Fernet key — deriving one via SHA-256. "
-        "For better security, generate a proper key with: "
-        "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
-    )
-    derived = hashlib.sha256(key_bytes).digest()
-    fernet_key = base64.urlsafe_b64encode(derived)
-    _fernet_instance = Fernet(fernet_key)
-    return _fernet_instance
+    except Exception as e:
+        raise RuntimeError(
+            "ENCRYPTION_KEY is not a valid Fernet key. "
+            "Generate a proper key with: "
+            "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        ) from e
 
 
 def validate_encryption_key():
@@ -101,17 +91,4 @@ def decrypt_with_server_key(ciphertext: bytes) -> bytes:
     return f.decrypt(ciphertext)
 
 
-PBKDF2_ITERATIONS = 600_000
 
-
-def decrypt_with_passphrase(ciphertext: bytes, salt: bytes, passphrase: str) -> bytes:
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=PBKDF2_ITERATIONS,
-        backend=default_backend(),
-    )
-    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
-    f = Fernet(key)
-    return f.decrypt(ciphertext)

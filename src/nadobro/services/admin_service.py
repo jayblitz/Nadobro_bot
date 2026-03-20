@@ -82,19 +82,15 @@ def list_copy_traders() -> list[dict]:
 def get_copy_trading_stats() -> dict:
     from src.nadobro.models.database import get_active_copy_traders, get_all_active_mirrors
     from src.nadobro.db import query_count
-    from src.nadobro.services.hl_websocket import get_ws_manager
     traders = get_active_copy_traders()
     mirrors = get_all_active_mirrors()
     total_copy_trades = query_count("SELECT COUNT(*) FROM copy_trades")
     filled_copy_trades = query_count("SELECT COUNT(*) FROM copy_trades WHERE status = 'filled'")
-    ws_mgr = get_ws_manager()
     return {
         "active_traders": len(traders),
         "active_mirrors": len(mirrors),
         "total_copy_trades": total_copy_trades,
         "filled_copy_trades": filled_copy_trades,
-        "ws_connected": ws_mgr.is_running,
-        "ws_subscriptions": ws_mgr.subscribed_count,
     }
 
 

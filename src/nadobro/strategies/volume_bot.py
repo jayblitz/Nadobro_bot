@@ -53,6 +53,11 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
 
     Returns dict with cycle results.
     """
+    # Verify network matches to prevent cross-network trading
+    client = kwargs.get("client")
+    if client and hasattr(client, 'network') and client.network != network:
+        return {"success": False, "error": f"Network mismatch: expected {network}, got {client.network}"}
+
     product = state.get("product", "BTC")
     target_volume = float(state.get("target_volume_usd") or 0)
     volume_done = float(state.get("volume_done_usd") or 0)

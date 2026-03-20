@@ -1,7 +1,17 @@
+"""
+Nado-native Copy Trading Service.
+
+Monitors copied trader addresses on Nado DEX and mirrors their positions
+with user-defined parameters (margin, leverage, TP/SL, cumulative limits).
+"""
+import asyncio
+import json
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
+from src.nadobro.config import get_product_name, get_product_max_leverage, PRODUCTS
 from src.nadobro.models.database import (
     upsert_copy_trader,
     get_copy_trader,
@@ -9,41 +19,36 @@ from src.nadobro.models.database import (
     get_active_copy_traders,
     get_curated_copy_traders,
     deactivate_copy_trader,
-    create_copy_mirror,
     get_copy_mirror,
-    get_user_active_mirrors,
-    get_mirrors_for_trader,
     stop_copy_mirror,
     pause_copy_mirror,
     resume_copy_mirror,
-    update_mirror_last_synced,
     count_user_active_mirrors,
-    insert_copy_trade,
-    copy_trade_exists,
-    get_copy_trades_by_user,
-    get_copy_trades_by_mirror,
-    get_active_trader_wallets,
+    get_mirrors_for_trader,
+    create_copy_mirror_v2,
+    get_user_active_mirrors_v2,
+    get_all_active_mirrors_v2,
+    update_mirror_cumulative_pnl,
+    auto_stop_mirror,
+    insert_copy_position,
+    get_open_copy_positions,
+    get_open_copy_position_for_product,
+    close_copy_position,
+    save_copy_snapshot,
+    get_latest_copy_snapshot,
 )
-from src.nadobro.services.copy_asset_map import (
-    hl_coin_to_nado_product_id,
-    is_supported_coin,
-    get_nado_product_name,
-)
-from src.nadobro.services.hl_client import get_hl_client
 from src.nadobro.services.user_service import get_user, get_user_nado_client
 from src.nadobro.services.trade_service import execute_market_order
-from src.nadobro.config import get_product_max_leverage
+from src.nadobro.services.nado_client import NadoClient
 
 logger = logging.getLogger(__name__)
 
 MAX_MIRRORS_PER_USER = 5
-MIN_BUDGET_USD = 10.0
-MAX_BUDGET_USD = 10000.0
-MIN_RISK_FACTOR = 0.1
-MAX_RISK_FACTOR = 5.0
-MIN_COPY_SIZE_USD = 1.0
-
+MIN_MARGIN_PER_TRADE = 5.0
+MAX_MARGIN_PER_TRADE = 5000.0
+POLL_INTERVAL_SECONDS = 30
 _bot_app = None
+_poll_task: Optional[asyncio.Task] = None
 
 
 def set_copy_bot_app(app):
@@ -51,18 +56,16 @@ def set_copy_bot_app(app):
     _bot_app = app
 
 
-async def _notify_user(telegram_id: int, template: str, **kwargs):
+async def _notify_user(telegram_id: int, text: str):
     if not _bot_app:
         return
     try:
-        from src.nadobro.i18n import get_user_language, localize_text
-        lang = get_user_language(telegram_id)
-        localized = localize_text(template, lang)
-        text = localized.format(**kwargs) if kwargs else localized
         await _bot_app.bot.send_message(chat_id=telegram_id, text=text)
     except Exception as e:
         logger.warning("Copy notify failed for %s: %s", telegram_id, e)
 
+
+# ─── Public API ────────────────────────────────────────────────
 
 def add_trader(wallet_address: str, label: str = "", is_curated: bool = False) -> tuple[bool, str, int | None]:
     if not wallet_address or len(wallet_address) < 10:
@@ -91,9 +94,12 @@ def remove_trader(trader_id: int) -> tuple[bool, str]:
 def start_copy(
     telegram_id: int,
     trader_id: int,
-    budget_usd: float = 100.0,
-    risk_factor: float = 1.0,
+    network: str = "mainnet",
+    margin_per_trade: float = 50.0,
     max_leverage: float = 10.0,
+    cumulative_stop_loss_pct: float = 50.0,
+    cumulative_take_profit_pct: float = 100.0,
+    total_allocated_usd: float = 500.0,
 ) -> tuple[bool, str]:
     user = get_user(telegram_id)
     if not user:
@@ -105,29 +111,33 @@ def start_copy(
     if not trader or not trader.get("active"):
         return False, "Trader not found or inactive."
 
-    if budget_usd < MIN_BUDGET_USD or budget_usd > MAX_BUDGET_USD:
-        return False, f"Budget must be between ${MIN_BUDGET_USD} and ${MAX_BUDGET_USD}."
-    if risk_factor < MIN_RISK_FACTOR or risk_factor > MAX_RISK_FACTOR:
-        return False, f"Risk factor must be between {MIN_RISK_FACTOR}x and {MAX_RISK_FACTOR}x."
+    if margin_per_trade < MIN_MARGIN_PER_TRADE or margin_per_trade > MAX_MARGIN_PER_TRADE:
+        return False, f"Margin per trade must be between ${MIN_MARGIN_PER_TRADE} and ${MAX_MARGIN_PER_TRADE}."
 
     count = count_user_active_mirrors(telegram_id)
     if count >= MAX_MIRRORS_PER_USER:
         return False, f"Maximum {MAX_MIRRORS_PER_USER} simultaneous copy traders allowed."
 
-    mirror_id = create_copy_mirror(
+    mirror_id = create_copy_mirror_v2(
         user_id=telegram_id,
         trader_id=trader_id,
-        budget_usd=budget_usd,
-        risk_factor=risk_factor,
+        network=network,
+        margin_per_trade=margin_per_trade,
         max_leverage=max_leverage,
+        cumulative_stop_loss_pct=cumulative_stop_loss_pct,
+        cumulative_take_profit_pct=cumulative_take_profit_pct,
+        total_allocated_usd=total_allocated_usd,
     )
     if not mirror_id:
         return False, "Failed to create copy mirror."
 
     label = trader.get("label") or trader["wallet_address"][:10]
     return True, (
-        f"Now copying {label}\n"
-        f"Budget: ${budget_usd:.0f} | Risk: {risk_factor}x | Max Leverage: {max_leverage}x"
+        f"🔗 Now copying {label}\n"
+        f"💰 Margin/Trade: ${margin_per_trade:.0f}\n"
+        f"📊 Max Leverage: {max_leverage}x\n"
+        f"🛑 Stop Loss: {cumulative_stop_loss_pct}% of ${total_allocated_usd:.0f}\n"
+        f"🎯 Take Profit: {cumulative_take_profit_pct}% of ${total_allocated_usd:.0f}"
     )
 
 
@@ -172,7 +182,7 @@ def resume_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
 
 
 def stop_all_copies(telegram_id: int) -> tuple[bool, str]:
-    mirrors = get_user_active_mirrors(telegram_id)
+    mirrors = get_user_active_mirrors_v2(telegram_id)
     if not mirrors:
         return False, "No active copy mirrors."
     for m in mirrors:
@@ -180,36 +190,26 @@ def stop_all_copies(telegram_id: int) -> tuple[bool, str]:
     return True, f"Stopped {len(mirrors)} copy mirror(s)."
 
 
-def get_user_copies(telegram_id: int) -> list[dict]:
-    mirrors = get_user_active_mirrors(telegram_id)
+def get_user_copies(telegram_id: int, network: str = None) -> list[dict]:
+    mirrors = get_user_active_mirrors_v2(telegram_id, network=network)
     result = []
     for m in mirrors:
-        trades = get_copy_trades_by_mirror(m["id"], limit=100)
-        filled = sum(1 for t in trades if t.get("status") == "filled")
-        failed = sum(1 for t in trades if t.get("status") == "failed")
-        total_trades = len(trades)
-        pnl = 0.0
-        for t in trades:
-            if t.get("status") == "filled" and t.get("nado_price") and t.get("hl_price"):
-                nado_sz = float(t.get("nado_size") or 0)
-                nado_px = float(t.get("nado_price") or 0)
-                hl_px = float(t.get("hl_price") or 0)
-                if t.get("side") == "long":
-                    pnl += nado_sz * (nado_px - hl_px)
-                else:
-                    pnl += nado_sz * (hl_px - nado_px)
+        open_positions = get_open_copy_positions(m["id"])
+        wallet = m.get("wallet_address", "")
+        wallet_snip = f"{wallet[:6]}...{wallet[-4:]}" if len(wallet) >= 10 else wallet
         result.append({
             "mirror_id": m["id"],
-            "trader_label": m.get("label") or m["wallet_address"][:10],
-            "wallet": m["wallet_address"],
-            "budget_usd": m["budget_usd"],
-            "risk_factor": m["risk_factor"],
-            "max_leverage": m["max_leverage"],
-            "recent_filled": filled,
-            "recent_failed": failed,
-            "total_trades": total_trades,
-            "pnl": pnl,
+            "trader_label": m.get("label") or wallet_snip,
+            "wallet": wallet,
+            "margin_per_trade": m.get("margin_per_trade", 50.0),
+            "max_leverage": m.get("max_leverage", 10.0),
+            "cumulative_stop_loss_pct": m.get("cumulative_stop_loss_pct", 50.0),
+            "cumulative_take_profit_pct": m.get("cumulative_take_profit_pct", 100.0),
+            "total_allocated_usd": m.get("total_allocated_usd", 500.0),
+            "cumulative_pnl": float(m.get("cumulative_pnl", 0)),
+            "open_positions": len(open_positions),
             "paused": bool(m.get("paused")),
+            "network": m.get("network", "mainnet"),
             "created_at": m.get("created_at"),
         })
     return result
@@ -232,281 +232,349 @@ def get_available_traders() -> list[dict]:
     ]
 
 
-def get_trader_stats(trader_id: int) -> dict:
-    from src.nadobro.db import query_one
-    row = query_one(
-        """SELECT
-            COUNT(*) as total,
-            COUNT(*) FILTER (WHERE status = 'filled') as filled,
-            COUNT(*) FILTER (WHERE status = 'failed') as failed,
-            COALESCE(SUM(nado_size * nado_price) FILTER (WHERE status = 'filled'), 0) as volume,
-            COALESCE(SUM(
-                CASE WHEN side = 'long' THEN nado_size * (nado_price - hl_price)
-                     WHEN side = 'short' THEN nado_size * (hl_price - nado_price)
-                     ELSE 0 END
-            ) FILTER (WHERE status = 'filled'), 0) as pnl
-           FROM copy_trades ct
-           JOIN copy_mirrors cm ON ct.mirror_id = cm.id
-           WHERE cm.trader_id = %s""",
-        (trader_id,),
-    )
-    total = int(row["total"]) if row else 0
-    filled = int(row["filled"]) if row else 0
-    failed = int(row["failed"]) if row else 0
-    volume = float(row["volume"]) if row else 0.0
-    pnl = float(row["pnl"]) if row else 0.0
-    win_rate = (filled / total * 100) if total > 0 else 0.0
-    return {
-        "total_trades": total,
-        "filled": filled,
-        "failed": failed,
-        "volume_usd": volume,
-        "pnl_usd": pnl,
-        "win_rate": win_rate,
-    }
+# ─── Position Monitoring Loop ─────────────────────────────────
 
-
-async def process_hl_fill(wallet_address: str, fill: dict):
-    trader = get_copy_trader_by_wallet(wallet_address)
-    if not trader:
+async def start_copy_polling():
+    """Start the background polling loop for copy trading."""
+    global _poll_task
+    if _poll_task and not _poll_task.done():
         return
+    _poll_task = asyncio.create_task(_poll_loop())
+    logger.info("Copy trading polling loop started (interval=%ds)", POLL_INTERVAL_SECONDS)
 
-    mirrors = get_mirrors_for_trader(trader["id"])
+
+async def stop_copy_polling():
+    global _poll_task
+    if _poll_task:
+        _poll_task.cancel()
+        _poll_task = None
+        logger.info("Copy trading polling loop stopped")
+
+
+async def _poll_loop():
+    """Main polling loop: check all active mirrors and sync positions."""
+    while True:
+        try:
+            await _poll_all_mirrors()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Copy polling error: %s", e, exc_info=True)
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def _poll_all_mirrors():
+    """Poll all active mirrors and process position changes."""
+    mirrors = get_all_active_mirrors_v2()
     if not mirrors:
         return
 
-    coin = fill.get("coin", "")
-    if not is_supported_coin(coin):
-        logger.debug("Unsupported coin %s from HL fill, skipping", coin)
-        for m in mirrors:
+    # Group mirrors by trader+network for efficient polling
+    trader_groups: dict[str, list[dict]] = {}
+    for m in mirrors:
+        key = f"{m['trader_id']}:{m.get('network', 'mainnet')}"
+        trader_groups.setdefault(key, []).append(m)
+
+    for group_key, group_mirrors in trader_groups.items():
+        trader_id = group_mirrors[0]["trader_id"]
+        network = group_mirrors[0].get("network", "mainnet")
+        wallet = group_mirrors[0].get("wallet_address", "")
+
+        try:
+            leader_client = NadoClient.from_address(wallet, network)
+            leader_positions = leader_client.get_all_positions() or []
+            leader_orders_by_product = {}
+
+            # Build a map of leader's current positions
+            leader_pos_map = {}
+            for pos in leader_positions:
+                pid = int(pos.get("product_id", -1))
+                amount = float(pos.get("amount", 0) or 0)
+                if abs(amount) > 0:
+                    side = pos.get("side", "").upper()
+                    if not side:
+                        side = "LONG" if amount > 0 else "SHORT"
+                    leader_pos_map[pid] = {
+                        "product_id": pid,
+                        "side": side,
+                        "size": abs(amount),
+                        "entry_price": float(pos.get("entry_price", 0) or 0),
+                        "unrealized_pnl": float(pos.get("unrealized_pnl", 0) or 0),
+                    }
+                    # Fetch TP/SL orders for this product
+                    try:
+                        orders = leader_client.get_open_orders(pid) or []
+                        tp_price = None
+                        sl_price = None
+                        for o in orders:
+                            otype = (o.get("order_type") or o.get("type") or "").lower()
+                            if "take_profit" in otype or "tp" in otype:
+                                tp_price = float(o.get("price", 0) or 0)
+                            elif "stop_loss" in otype or "sl" in otype:
+                                sl_price = float(o.get("price", 0) or 0)
+                        leader_pos_map[pid]["tp_price"] = tp_price
+                        leader_pos_map[pid]["sl_price"] = sl_price
+                        leader_orders_by_product[pid] = orders
+                    except Exception as e:
+                        logger.debug("Failed to fetch orders for product %s: %s", pid, e)
+
+            # Save snapshot for debugging
+            try:
+                save_copy_snapshot(trader_id, network, json.dumps(list(leader_pos_map.values())))
+            except Exception:
+                pass
+
+            # Process each mirror
+            for mirror in group_mirrors:
+                try:
+                    await _sync_mirror_positions(mirror, leader_pos_map)
+                except Exception as e:
+                    logger.error(
+                        "Copy sync failed for mirror %s user %s: %s",
+                        mirror["id"], mirror["user_id"], e, exc_info=True,
+                    )
+
+        except Exception as e:
+            logger.error("Failed to poll trader %s on %s: %s", wallet[:10], network, e)
+
+
+async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
+    """Sync a single mirror's positions with the leader's current positions."""
+    mirror_id = mirror["id"]
+    user_id = mirror["user_id"]
+    network = mirror.get("network", "mainnet")
+    margin_per_trade = float(mirror.get("margin_per_trade", 50.0))
+    max_leverage = float(mirror.get("max_leverage", 10.0))
+    cumulative_stop_loss_pct = float(mirror.get("cumulative_stop_loss_pct", 50.0))
+    cumulative_take_profit_pct = float(mirror.get("cumulative_take_profit_pct", 100.0))
+    total_allocated = float(mirror.get("total_allocated_usd", 500.0))
+    cumulative_pnl = float(mirror.get("cumulative_pnl", 0.0))
+
+    # Check cumulative P&L limits
+    if total_allocated > 0:
+        pnl_pct = (cumulative_pnl / total_allocated) * 100
+        if cumulative_pnl < 0 and abs(pnl_pct) >= cumulative_stop_loss_pct:
+            auto_stop_mirror(mirror_id, f"Cumulative stop loss hit: {pnl_pct:.1f}%")
             await _notify_user(
-                m["user_id"],
-                "ℹ️ Copy Trade Skipped\nTrader opened {coin} — not available on Nado DEX.\nSupported: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
-                coin=coin,
+                user_id,
+                f"🛑 Copy Trading Auto-Stopped\n"
+                f"Cumulative loss hit {abs(pnl_pct):.1f}% (limit: {cumulative_stop_loss_pct}%)\n"
+                f"P&L: ${cumulative_pnl:,.2f} / ${total_allocated:,.0f} allocated"
             )
-        return
+            return
+        if cumulative_pnl > 0 and pnl_pct >= cumulative_take_profit_pct:
+            auto_stop_mirror(mirror_id, f"Cumulative take profit hit: {pnl_pct:.1f}%")
+            await _notify_user(
+                user_id,
+                f"🎯 Copy Trading Auto-Stopped — Target Hit!\n"
+                f"Cumulative profit hit {pnl_pct:.1f}% (target: {cumulative_take_profit_pct}%)\n"
+                f"P&L: +${cumulative_pnl:,.2f} / ${total_allocated:,.0f} allocated"
+            )
+            return
 
-    nado_product_id = hl_coin_to_nado_product_id(coin)
-    if nado_product_id is None:
-        return
+    # Get current copy positions for this mirror
+    open_copy_positions = get_open_copy_positions(mirror_id)
+    copy_pos_by_product = {}
+    for cp in open_copy_positions:
+        copy_pos_by_product[cp["product_id"]] = cp
 
-    fill_tid = int(fill.get("tid", 0))
-    hl_side = fill.get("side", "").upper()
-    hl_size = abs(float(fill.get("sz", 0)))
-    hl_price = float(fill.get("px", 0))
+    # 1. Close positions that leader has closed
+    for pid, cp in list(copy_pos_by_product.items()):
+        if pid not in leader_pos_map:
+            # Leader closed this position — close ours too
+            product_name = cp.get("product_name", get_product_name(pid))
+            product_key = product_name.replace("-PERP", "")
+            try:
+                # Close by opening opposite side
+                is_close_long = cp["side"].upper() != "LONG"
+                result = execute_market_order(
+                    telegram_id=user_id,
+                    product=product_key,
+                    size=float(cp.get("size", 0)),
+                    is_long=is_close_long,
+                    leverage=float(cp.get("leverage", 1.0)),
+                    slippage_pct=1.5,
+                    enforce_rate_limit=False,
+                )
+                pnl = float(result.get("pnl", 0) or 0)
+                close_copy_position(cp["id"], pnl=pnl, reason="leader_closed")
+                update_mirror_cumulative_pnl(mirror_id, pnl)
+                await _notify_user(
+                    user_id,
+                    f"📋 Copy Position Closed\n"
+                    f"{product_name}: Leader closed → Your position closed\n"
+                    f"P&L: ${pnl:+,.2f}"
+                )
+            except Exception as e:
+                logger.error("Failed to close copy position %s: %s", cp["id"], e)
 
-    if hl_size <= 0 or hl_price <= 0:
-        return
-
-    is_buy = hl_side == "B" or hl_side == "BUY"
-    is_close = fill.get("closedPnl") and float(fill.get("closedPnl", "0")) != 0
-
-    hl_client = get_hl_client()
-    leader_equity = await hl_client.get_account_equity(wallet_address)
-
-    for mirror in mirrors:
-        user_id = mirror["user_id"]
-
-        if mirror.get("paused"):
-            logger.debug("Mirror %s paused, skipping fill for user %s", mirror["id"], user_id)
+    # 2. Open new positions that leader has opened
+    for pid, leader_pos in leader_pos_map.items():
+        if pid in copy_pos_by_product:
+            # Already tracking this position — update TP/SL if changed
+            existing = copy_pos_by_product[pid]
+            _update_tp_sl_if_changed(existing, leader_pos, user_id, network)
             continue
 
-        if fill_tid and copy_trade_exists(fill_tid, user_id, mirror["id"]):
+        # New position from leader — open a copy
+        product_name = get_product_name(pid)
+        product_key = product_name.replace("-PERP", "")
+        is_long = leader_pos["side"] == "LONG"
+        leader_entry = leader_pos.get("entry_price", 0)
+
+        if leader_entry <= 0:
+            continue
+
+        # Calculate size based on user's margin_per_trade
+        product_max_lev = get_product_max_leverage(product_key)
+        leverage = min(max_leverage, product_max_lev)
+        copy_size = (margin_per_trade * leverage) / leader_entry
+
+        if copy_size <= 0:
             continue
 
         try:
-            await _execute_mirror_trade(
-                user_id=user_id,
-                mirror=mirror,
-                coin=coin,
-                nado_product_id=nado_product_id,
-                fill_tid=fill_tid,
-                is_buy=is_buy,
-                is_close=is_close,
-                hl_size=hl_size,
-                hl_price=hl_price,
-                leader_equity=leader_equity,
+            result = execute_market_order(
+                telegram_id=user_id,
+                product=product_key,
+                size=copy_size,
+                is_long=is_long,
+                leverage=leverage,
+                slippage_pct=1.5,
+                enforce_rate_limit=False,
+            )
+
+            if result.get("success"):
+                fill_price = float(result.get("price", leader_entry) or leader_entry)
+                # Record the copy position
+                insert_copy_position({
+                    "mirror_id": mirror_id,
+                    "user_id": user_id,
+                    "product_id": pid,
+                    "product_name": product_name,
+                    "side": "long" if is_long else "short",
+                    "entry_price": fill_price,
+                    "size": copy_size,
+                    "leverage": leverage,
+                    "tp_price": leader_pos.get("tp_price"),
+                    "sl_price": leader_pos.get("sl_price"),
+                    "leader_entry_price": leader_entry,
+                    "leader_size": leader_pos["size"],
+                })
+
+                # Place TP/SL orders if leader has them
+                _place_tp_sl_orders(user_id, product_key, pid, copy_size, is_long,
+                                    leverage, leader_pos.get("tp_price"), leader_pos.get("sl_price"))
+
+                side_emoji = "🟢 LONG" if is_long else "🔴 SHORT"
+                wallet = mirror.get("wallet_address", "")
+                wallet_snip = f"{wallet[:6]}...{wallet[-4:]}" if len(wallet) >= 10 else wallet
+                await _notify_user(
+                    user_id,
+                    f"📋 Copy Trade Opened\n"
+                    f"Trader: {mirror.get('label') or wallet_snip}\n"
+                    f"{side_emoji} {product_name}\n"
+                    f"Size: {copy_size:.6f} @ ${fill_price:,.2f}\n"
+                    f"Leverage: {leverage}x"
+                    + (f"\nTP: ${leader_pos['tp_price']:,.2f}" if leader_pos.get("tp_price") else "")
+                    + (f"\nSL: ${leader_pos['sl_price']:,.2f}" if leader_pos.get("sl_price") else "")
+                )
+            else:
+                error = result.get("error", "Unknown error")
+                logger.warning("Copy trade failed for user %s: %s", user_id, error)
+
+        except Exception as e:
+            logger.error("Copy trade exception for user %s product %s: %s", user_id, pid, e)
+
+
+def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
+                        size: float, is_long: bool, leverage: float,
+                        tp_price: Optional[float], sl_price: Optional[float]):
+    """Place TP and SL orders for a copy position."""
+    from src.nadobro.services.trade_service import execute_limit_order
+
+    if tp_price and tp_price > 0:
+        try:
+            execute_limit_order(
+                telegram_id=user_id,
+                product=product_key,
+                size=size,
+                is_long=not is_long,  # TP closes the position
+                leverage=leverage,
+                price=tp_price,
+                order_type="take_profit",
+                enforce_rate_limit=False,
             )
         except Exception as e:
-            logger.error(
-                "Copy trade failed for user %s mirror %s: %s",
-                user_id, mirror["id"], e, exc_info=True,
+            logger.warning("Failed to place TP for copy user %s: %s", user_id, e)
+
+    if sl_price and sl_price > 0:
+        try:
+            execute_limit_order(
+                telegram_id=user_id,
+                product=product_key,
+                size=size,
+                is_long=not is_long,  # SL closes the position
+                leverage=leverage,
+                price=sl_price,
+                order_type="stop_loss",
+                enforce_rate_limit=False,
             )
-            insert_copy_trade({
-                "user_id": user_id,
-                "mirror_id": mirror["id"],
-                "hl_fill_tid": fill_tid,
-                "hl_coin": coin,
-                "nado_product_id": nado_product_id,
-                "side": "long" if is_buy else "short",
-                "hl_size": hl_size,
-                "hl_price": hl_price,
-                "status": "failed",
-                "error_message": str(e)[:300],
-            })
-
-        if fill_tid:
-            update_mirror_last_synced(mirror["id"], fill_tid)
+        except Exception as e:
+            logger.warning("Failed to place SL for copy user %s: %s", user_id, e)
 
 
-async def _execute_mirror_trade(
-    user_id: int,
-    mirror: dict,
-    coin: str,
-    nado_product_id: int,
-    fill_tid: int,
-    is_buy: bool,
-    is_close: bool,
-    hl_size: float,
-    hl_price: float,
-    leader_equity: float | None,
-):
-    budget_usd = float(mirror.get("budget_usd", 100))
-    risk_factor = float(mirror.get("risk_factor", 1.0))
-    max_leverage = float(mirror.get("max_leverage", 10.0))
+def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, network: str):
+    """Check if leader's TP/SL changed and update the copy position's orders."""
+    new_tp = leader_pos.get("tp_price")
+    new_sl = leader_pos.get("sl_price")
+    old_tp = existing_cp.get("tp_price")
+    old_sl = existing_cp.get("sl_price")
 
-    if leader_equity and leader_equity > 0:
-        size_ratio = budget_usd / leader_equity
-    else:
-        logger.warning(
-            "Cannot fetch leader equity for %s, skipping copy for user %s",
-            mirror.get("wallet_address", "?")[:10], user_id,
-        )
+    # Only update if there's a meaningful change
+    tp_changed = (new_tp or 0) != (old_tp or 0) and new_tp
+    sl_changed = (new_sl or 0) != (old_sl or 0) and new_sl
+
+    if not tp_changed and not sl_changed:
         return
 
-    nado_size = hl_size * size_ratio * risk_factor
+    # Update the copy_positions record
+    from src.nadobro.db import execute as db_execute
+    updates = []
+    params = []
+    if tp_changed:
+        updates.append("tp_price = %s")
+        params.append(new_tp)
+    if sl_changed:
+        updates.append("sl_price = %s")
+        params.append(new_sl)
+    params.append(existing_cp["id"])
+    db_execute(f"UPDATE copy_positions SET {', '.join(updates)} WHERE id = %s", params)
 
-    nado_notional = nado_size * hl_price
-    if nado_notional > budget_usd:
-        nado_size = budget_usd / hl_price
-        nado_notional = budget_usd
-        logger.debug("Capped copy size to budget $%.0f for user %s", budget_usd, user_id)
+    # Cancel old orders and place new ones
+    product_name = existing_cp.get("product_name", "")
+    product_key = product_name.replace("-PERP", "")
+    pid = existing_cp["product_id"]
+    size = float(existing_cp.get("size", 0))
+    is_long = existing_cp["side"].upper() == "LONG"
+    leverage = float(existing_cp.get("leverage", 1.0))
 
-    if nado_notional < MIN_COPY_SIZE_USD:
-        logger.debug(
-            "Copy trade too small ($%.2f) for user %s, skipping",
-            nado_notional, user_id,
-        )
-        return
+    # Cancel existing TP/SL orders for this product
+    try:
+        client = get_user_nado_client(user_id, network)
+        if client:
+            orders = client.get_open_orders(pid) or []
+            for o in orders:
+                otype = (o.get("order_type") or o.get("type") or "").lower()
+                if "take_profit" in otype or "stop_loss" in otype or "tp" in otype or "sl" in otype:
+                    try:
+                        client.cancel_order(pid, o.get("order_digest") or o.get("id"))
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.debug("Failed to cancel old TP/SL: %s", e)
 
-    product_name = get_nado_product_name(nado_product_id)
-    product_key = coin.upper()
-
-    product_max_lev = get_product_max_leverage(product_key)
-    leverage = min(max_leverage, product_max_lev)
-
-    user = get_user(user_id)
-    if not user:
-        return
-    network = user.network_mode.value
-
-    if is_close:
-        from src.nadobro.services.trade_service import close_position
-
-        side_str = "long" if is_buy else "short"
-        copy_trade_id = insert_copy_trade({
-            "user_id": user_id,
-            "mirror_id": mirror["id"],
-            "hl_fill_tid": fill_tid,
-            "hl_coin": coin,
-            "nado_product_id": nado_product_id,
-            "side": side_str,
-            "hl_size": hl_size,
-            "hl_price": hl_price,
-            "nado_size": nado_size,
-            "status": "pending",
-        })
-
-        result = close_position(
-            telegram_id=user_id,
-            product=product_key,
-        )
-
-        wallet_addr_close = mirror.get("wallet_address", "")
-        wallet_snip_close = wallet_addr_close[:6] + "..." + wallet_addr_close[-4:] if len(wallet_addr_close) >= 10 else wallet_addr_close
-        trader_label_close = mirror.get("label") or wallet_snip_close
-
-        if result.get("success"):
-            from src.nadobro.db import execute as db_execute
-            db_execute(
-                "UPDATE copy_trades SET status = 'filled', nado_price = %s, filled_at = %s WHERE id = %s",
-                (result.get("price", 0), datetime.utcnow().isoformat(), copy_trade_id),
-            )
-            await _notify_user(
-                user_id,
-                "📋 Copy Close Filled\nTrader: {trader} ({wallet})\nClosed {product} position",
-                trader=trader_label_close, wallet=wallet_snip_close, product=product_name,
-            )
-        else:
-            error = result.get("error", "Unknown error")
-            from src.nadobro.db import execute as db_execute
-            db_execute(
-                "UPDATE copy_trades SET status = 'failed', error_message = %s WHERE id = %s",
-                (error[:300], copy_trade_id),
-            )
-        return
-
-    side_str = "long" if is_buy else "short"
-
-    copy_trade_id = insert_copy_trade({
-        "user_id": user_id,
-        "mirror_id": mirror["id"],
-        "hl_fill_tid": fill_tid,
-        "hl_coin": coin,
-        "nado_product_id": nado_product_id,
-        "side": side_str,
-        "hl_size": hl_size,
-        "hl_price": hl_price,
-        "nado_size": nado_size,
-        "status": "pending",
-    })
-
-    result = execute_market_order(
-        telegram_id=user_id,
-        product=product_key,
-        size=nado_size,
-        is_long=is_buy,
-        leverage=leverage,
-        slippage_pct=1.5,
-        enforce_rate_limit=False,
-    )
-
-    wallet_addr = mirror.get("wallet_address", "")
-    wallet_snip = wallet_addr[:6] + "..." + wallet_addr[-4:] if len(wallet_addr) >= 10 else wallet_addr
-    trader_label = mirror.get("label") or wallet_snip
-
-    if result.get("success"):
-        from src.nadobro.db import execute as db_execute
-        db_execute(
-            "UPDATE copy_trades SET status = 'filled', nado_price = %s, nado_trade_id = %s, filled_at = %s WHERE id = %s",
-            (result.get("price", 0), result.get("trade_id"), datetime.utcnow().isoformat(), copy_trade_id),
-        )
-        side_emoji = "🟢 BUY" if is_buy else "🔴 SELL"
-        await _notify_user(
-            user_id,
-            "📋 Copy Trade Filled\nTrader: {trader} ({wallet})\n{side} {size} {product}\nHL: ${hl_price} → Nado: ${nado_price}",
-            trader=trader_label, wallet=wallet_snip,
-            side=side_emoji, size=f"{nado_size:.6f}", product=product_name,
-            hl_price=f"{hl_price:,.2f}", nado_price=f"{result.get('price', 0):,.2f}",
-        )
-        logger.info(
-            "Copy trade filled: user=%s mirror=%s %s %.6f %s",
-            user_id, mirror["id"], side_str, nado_size, product_name,
-        )
-    else:
-        error = result.get("error", "Unknown error")
-        from src.nadobro.db import execute as db_execute
-        db_execute(
-            "UPDATE copy_trades SET status = 'failed', error_message = %s WHERE id = %s",
-            (error[:300], copy_trade_id),
-        )
-        await _notify_user(
-            user_id,
-            "⚠️ Copy Trade Failed\nTrader: {trader} ({wallet})\n{coin} {side}: {error}",
-            trader=trader_label, wallet=wallet_snip,
-            coin=coin, side="BUY" if is_buy else "SELL", error=error[:200],
-        )
-        logger.warning(
-            "Copy trade failed: user=%s mirror=%s error=%s",
-            user_id, mirror["id"], error[:200],
-        )
+    # Place updated TP/SL
+    _place_tp_sl_orders(user_id, product_key, pid, size, is_long, leverage,
+                        new_tp if tp_changed else old_tp,
+                        new_sl if sl_changed else old_sl)

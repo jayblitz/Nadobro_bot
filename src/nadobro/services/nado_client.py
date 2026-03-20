@@ -87,6 +87,7 @@ class NadoClient:
             query_addr = self.main_address or self.address
             self.subaccount_hex = self._compute_subaccount_hex(query_addr)
             self._initialized = True
+            self.private_key = None  # Clear raw key after SDK init
             logger.info(
                 "Nado client initialized: signer=%s, query=%s, network=%s",
                 self.address, query_addr, self.network,
@@ -1145,29 +1146,31 @@ class NadoClient:
 _client_cache: dict[str, NadoClient] = {}
 
 
-def _cache_key_for(private_key: str, network: str) -> str:
-    import hashlib
-    key_hash = hashlib.sha256(private_key.encode()).hexdigest()[:16]
-    return f"{key_hash}_{network}"
+def _cache_key_for(address: str, network: str) -> str:
+    return f"{address.lower()}_{network}"
 
 
 def get_nado_client(private_key: str, network: str = "testnet", main_address: str = None) -> NadoClient:
-    cache_key = _cache_key_for(private_key, network)
-    cached = _client_cache.get(cache_key)
-    if cached:
-        if main_address and cached.main_address != main_address:
-            cached.main_address = main_address
-            cached.subaccount_hex = cached._compute_subaccount_hex(main_address)
-        return cached
     client = NadoClient(private_key, network, main_address=main_address)
+    # Derive the signer address before initialization for cache key
+    signer_address = client.address
+    if signer_address:
+        cache_key = _cache_key_for(signer_address, network)
+        cached = _client_cache.get(cache_key)
+        if cached:
+            if main_address and cached.main_address != main_address:
+                cached.main_address = main_address
+                cached.subaccount_hex = cached._compute_subaccount_hex(main_address)
+            return cached
     client.initialize()
-    _client_cache[cache_key] = client
+    if signer_address:
+        _client_cache[cache_key] = client
     return client
 
 
-def clear_client_cache(private_key: str = None, network: str = None):
-    if private_key and network:
-        cache_key = _cache_key_for(private_key, network)
+def clear_client_cache(address: str = None, network: str = None):
+    if address and network:
+        cache_key = _cache_key_for(address, network)
         _client_cache.pop(cache_key, None)
     else:
         _client_cache.clear()

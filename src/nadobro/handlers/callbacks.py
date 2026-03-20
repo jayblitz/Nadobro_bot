@@ -348,16 +348,12 @@ async def _handle_trade(query, data, telegram_id, context):
         return
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if action in ("long", "short", "limit_long", "limit_short") and not wallet_ready:
-        if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
-            from src.nadobro.handlers.messages import _prompt_legacy_migration
-            await _prompt_legacy_migration(query, context)
-        else:
-            await _edit_loc(query,
-                "⚠️ {msg}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-                msg=escape_md(wallet_msg),
-            )
+        await _edit_loc(query,
+            "⚠️ {msg}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb(),
+            msg=escape_md(wallet_msg),
+        )
         return
 
     if action in ("long", "short"):
@@ -548,15 +544,11 @@ async def _handle_exec_trade(query, data, telegram_id, context):
         return
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
-            from src.nadobro.handlers.messages import _prompt_legacy_migration
-            await _prompt_legacy_migration(query, context)
-        else:
-            await _edit_loc(query, 
-                f"⚠️ {escape_md(wallet_msg)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-            )
+        await _edit_loc(query, 
+            f"⚠️ {escape_md(wallet_msg)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb(),
+        )
         return
 
     from src.nadobro.handlers.messages import execute_action_directly
@@ -1190,15 +1182,11 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
-            if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
-                from src.nadobro.handlers.messages import _prompt_legacy_migration
-                await _prompt_legacy_migration(query, context)
-            else:
-                await _edit_loc(query, 
-                    f"⚠️ {escape_md(wallet_msg)}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=back_kb(),
-                )
+            await _edit_loc(query, 
+                f"⚠️ {escape_md(wallet_msg)}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
             return
         settings = _get_user_settings(telegram_id, context)
         from src.nadobro.handlers.messages import execute_action_directly
@@ -2106,16 +2094,11 @@ async def _handle_copy(query, data, context, telegram_id):
 
         wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
         if not wallet_ready:
-            if wallet_msg == "LEGACY_KEY_MIGRATION_REQUIRED":
-                from src.nadobro.handlers.messages import _prompt_legacy_migration
-                context.user_data["copy_setup"] = setup
-                await _prompt_legacy_migration(query, context)
-            else:
-                await _edit_loc(query,
-                    f"⚠️ {escape_md(wallet_msg)}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=back_kb(),
-                )
+            await _edit_loc(query,
+                f"⚠️ {escape_md(wallet_msg)}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
             return
 
         from src.nadobro.handlers.messages import execute_action_directly

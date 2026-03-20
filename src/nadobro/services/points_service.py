@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -22,6 +23,24 @@ from src.nadobro.services.user_service import get_user
 
 logger = logging.getLogger(__name__)
 
+
+async def _relay_with_retry(func, *args, **kwargs):
+    """Execute a relay function with retry logic and exponential backoff."""
+    last_error = None
+    for attempt in range(POINTS_MAX_RETRIES):
+        try:
+            return await asyncio.wait_for(func(*args, **kwargs), timeout=POINTS_RELAY_TIMEOUT)
+        except asyncio.TimeoutError:
+            last_error = "Relay timeout"
+            logger.warning("Points relay timeout (attempt %d/%d)", attempt + 1, POINTS_MAX_RETRIES)
+        except Exception as e:
+            last_error = str(e)
+            logger.warning("Points relay error (attempt %d/%d): %s", attempt + 1, POINTS_MAX_RETRIES, e)
+        if attempt < POINTS_MAX_RETRIES - 1:
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+    raise RuntimeError(f"Points relay failed after {POINTS_MAX_RETRIES} attempts: {last_error}")
+
+
 _POINTS_CACHE: dict[int, dict] = {}
 _POINTS_CACHE_TTL_SECONDS = 3600
 _POINTS_WINDOW_LABEL = "Last 7 Days"
@@ -29,6 +48,9 @@ _POINTS_REPLY_TIMEOUT_SECONDS = max(
     5,
     int(os.environ.get("LOWIQPTS_REPLY_TIMEOUT_SECONDS", "25") or "25"),
 )
+
+POINTS_RELAY_TIMEOUT = int(os.environ.get("POINTS_RELAY_TIMEOUT", "30"))
+POINTS_MAX_RETRIES = int(os.environ.get("POINTS_MAX_RETRIES", "3"))
 
 _PENDING_QUEUE_KEY = "lowiqpts_pending_queue"
 _PENDING_BY_WALLET_KEY = "lowiqpts_pending_by_wallet"
@@ -377,7 +399,8 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
     _set_active_req_for_chat(bot_data, chat_id, req_id)
 
     try:
-        relay_resp = await relay_start_session(
+        relay_resp = await _relay_with_retry(
+            relay_start_session,
             telegram_user_id=int(telegram_id),
             chat_id=int(chat_id),
             wallet=wallet,
@@ -419,7 +442,7 @@ async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict
         session_id = str(req.get("relay_session_id", "")).strip()
         if not session_id:
             return {"ok": False, "handled": True, "error": "❌ LOWIQPTS relay session is missing."}
-        relay_resp = await relay_send_user_reply(session_id=session_id, text=cleaned)
+        relay_resp = await _relay_with_retry(relay_send_user_reply, session_id=session_id, text=cleaned)
         if not relay_resp.get("ok"):
             raise RuntimeError(relay_resp.get("error") or "relay_send_failed")
         _touch_pending_request(req)

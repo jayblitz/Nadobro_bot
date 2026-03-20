@@ -483,3 +483,138 @@ class UserRow:
         self.last_trade_at = self._data.get("last_trade_at")
         self.total_trades = int(self._data.get("total_trades") or 0)
         self.total_volume_usd = float(self._data.get("total_volume_usd") or 0)
+
+
+# --- New copy trading ORM functions (Nado-native v2) ---
+
+def create_copy_mirror_v2(user_id: int, trader_id: int, network: str,
+                          margin_per_trade: float = 50.0, max_leverage: float = 10.0,
+                          cumulative_stop_loss_pct: float = 50.0,
+                          cumulative_take_profit_pct: float = 100.0,
+                          total_allocated_usd: float = 500.0) -> Optional[int]:
+    row = execute_returning(
+        """INSERT INTO copy_mirrors 
+           (user_id, trader_id, network, margin_per_trade, max_leverage, 
+            cumulative_stop_loss_pct, cumulative_take_profit_pct, total_allocated_usd, active)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true)
+           ON CONFLICT (user_id, trader_id, network) DO UPDATE
+               SET margin_per_trade = EXCLUDED.margin_per_trade,
+                   max_leverage = EXCLUDED.max_leverage,
+                   cumulative_stop_loss_pct = EXCLUDED.cumulative_stop_loss_pct,
+                   cumulative_take_profit_pct = EXCLUDED.cumulative_take_profit_pct,
+                   total_allocated_usd = EXCLUDED.total_allocated_usd,
+                   active = true,
+                   paused = false,
+                   auto_stopped_reason = NULL,
+                   cumulative_pnl = 0.0,
+                   stopped_at = NULL
+           RETURNING id""",
+        (user_id, trader_id, network, margin_per_trade, max_leverage,
+         cumulative_stop_loss_pct, cumulative_take_profit_pct, total_allocated_usd),
+    )
+    return row["id"] if row else None
+
+
+def get_user_active_mirrors_v2(user_id: int, network: str = None) -> list:
+    if network:
+        return query_all(
+            """SELECT m.*, t.wallet_address, t.label
+               FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
+               WHERE m.user_id = %s AND m.active = true AND m.network = %s
+               ORDER BY m.created_at""",
+            (user_id, network),
+        )
+    return query_all(
+        """SELECT m.*, t.wallet_address, t.label
+           FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
+           WHERE m.user_id = %s AND m.active = true
+           ORDER BY m.created_at""",
+        (user_id,),
+    )
+
+
+def get_all_active_mirrors_v2(network: str = None) -> list:
+    if network:
+        return query_all(
+            """SELECT m.*, t.wallet_address, t.label
+               FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
+               WHERE m.active = true AND NOT m.paused AND t.active = true AND m.network = %s""",
+            (network,),
+        )
+    return query_all(
+        """SELECT m.*, t.wallet_address, t.label
+           FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
+           WHERE m.active = true AND NOT m.paused AND t.active = true"""
+    )
+
+
+def update_mirror_cumulative_pnl(mirror_id: int, pnl_delta: float):
+    execute(
+        "UPDATE copy_mirrors SET cumulative_pnl = cumulative_pnl + %s WHERE id = %s",
+        (pnl_delta, mirror_id),
+    )
+
+
+def auto_stop_mirror(mirror_id: int, reason: str):
+    execute(
+        "UPDATE copy_mirrors SET active = false, paused = false, auto_stopped_reason = %s, stopped_at = %s WHERE id = %s",
+        (reason, datetime.utcnow().isoformat(), mirror_id),
+    )
+
+
+def insert_copy_position(data: dict) -> Optional[int]:
+    cols = [
+        "mirror_id", "user_id", "product_id", "product_name", "side",
+        "entry_price", "size", "leverage", "tp_price", "sl_price",
+        "leader_entry_price", "leader_size", "status", "opened_at",
+    ]
+    filtered = {k: v for k, v in data.items() if k in cols and v is not None}
+    if "opened_at" not in filtered:
+        filtered["opened_at"] = datetime.utcnow().isoformat()
+    if "status" not in filtered:
+        filtered["status"] = "open"
+    col_names = list(filtered.keys())
+    vals = [filtered[c] for c in col_names]
+    placeholders = ", ".join(["%s"] * len(col_names))
+    col_str = ", ".join(col_names)
+    row = execute_returning(
+        f"INSERT INTO copy_positions ({col_str}) VALUES ({placeholders}) RETURNING id",
+        vals,
+    )
+    return row["id"] if row else None
+
+
+def get_open_copy_positions(mirror_id: int) -> list:
+    return query_all(
+        "SELECT * FROM copy_positions WHERE mirror_id = %s AND status = 'open' ORDER BY opened_at",
+        (mirror_id,),
+    )
+
+
+def get_open_copy_position_for_product(mirror_id: int, product_id: int) -> Optional[dict]:
+    return query_one(
+        "SELECT * FROM copy_positions WHERE mirror_id = %s AND product_id = %s AND status = 'open' ORDER BY opened_at DESC LIMIT 1",
+        (mirror_id, product_id),
+    )
+
+
+def close_copy_position(position_id: int, pnl: float = 0.0, reason: str = "leader_closed"):
+    execute(
+        "UPDATE copy_positions SET status = 'closed', pnl = %s, closed_at = %s, close_reason = %s WHERE id = %s",
+        (pnl, datetime.utcnow().isoformat(), reason, position_id),
+    )
+
+
+def save_copy_snapshot(trader_id: int, network: str, positions_json: str):
+    execute(
+        """INSERT INTO copy_snapshots (trader_id, network, positions_json)
+           VALUES (%s, %s, %s)""",
+        (trader_id, network, positions_json),
+    )
+
+
+def get_latest_copy_snapshot(trader_id: int, network: str) -> Optional[dict]:
+    return query_one(
+        "SELECT * FROM copy_snapshots WHERE trader_id = %s AND network = %s ORDER BY captured_at DESC LIMIT 1",
+        (trader_id, network),
+    )

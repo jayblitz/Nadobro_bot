@@ -72,7 +72,9 @@ PRODUCT_MAX_LEVERAGE = {
 
 def get_product_max_leverage(product: str) -> int:
     product_key = (product or "").upper().strip()
-    return int(PRODUCT_MAX_LEVERAGE.get(product_key, MAX_LEVERAGE))
+    if product_key not in PRODUCT_MAX_LEVERAGE:
+        return 1  # Safe default for unknown products
+    return int(PRODUCT_MAX_LEVERAGE[product_key])
 
 EST_FEE_RATE = 0.0003
 EST_FILL_EFFICIENCY = 0.45
