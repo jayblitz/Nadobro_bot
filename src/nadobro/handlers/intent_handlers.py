@@ -3,9 +3,10 @@ import logging
 
 from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
+from telegram.error import BadRequest
 
 from src.nadobro.i18n import localize_text, get_active_language
-from src.nadobro.handlers.formatters import escape_md, fmt_trade_preview, fmt_trade_result
+from src.nadobro.handlers.formatters import escape_md, build_trade_preview_text
 from src.nadobro.handlers.intent_parser import parse_trade_intent
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.onboarding_service import get_resume_step
@@ -16,6 +17,16 @@ from src.nadobro.config import get_product_id, get_product_max_leverage
 
 PENDING_TEXT_TRADE_KEY = "pending_text_trade"
 logger = logging.getLogger(__name__)
+
+
+async def _reply_md_safe(message, text: str) -> None:
+    try:
+        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
+    except BadRequest as e:
+        if "Can't parse entities" not in str(e):
+            raise
+        logger.warning("intent_handlers: markdown parse fallback triggered: %s", e)
+        await message.reply_text(str(text).replace("\\", ""))
 
 
 def _auto_execute_requested(text: str) -> bool:
@@ -71,12 +82,16 @@ def _preview_text(payload: dict) -> str:
     price = float(payload.get("price") or 0)
     est_margin = payload.get("est_margin")
     action = "limit_long" if (order_type == "limit" and direction == "long") else "limit_short" if order_type == "limit" else direction
-    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
-    if payload.get("tp"):
-        preview += f"\n\n📈 *Take Profit:* {escape_md(str(payload['tp']))}"
-    if payload.get("sl"):
-        preview += f"\n📉 *Stop Loss:* {escape_md(str(payload['sl']))}"
-    return preview
+    return build_trade_preview_text(
+        action=action,
+        product=product,
+        size=size,
+        price=price,
+        leverage=leverage,
+        est_margin=est_margin,
+        tp=payload.get("tp"),
+        sl=payload.get("sl"),
+    )
 
 
 def _execute_trade_payload(telegram_id: int, payload: dict, **kwargs) -> dict:
@@ -119,26 +134,23 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
     normalized = text.strip().lower()
     if normalized in ("cancel", "no", "n", "abort"):
         context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
-        await update.message.reply_text(
-            localize_text("❌ Trade cancelled\\.", lang),
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+        await _reply_md_safe(update.message, localize_text("❌ Trade cancelled\\.", lang))
         return True
 
     if normalized not in ("confirm", "yes", "y", "execute", "place"):
-        await update.message.reply_text(
+        await _reply_md_safe(
+            update.message,
             localize_text("Type `confirm` to execute this trade or `cancel` to discard it\\.", lang),
-            parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
 
     context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
     if is_trading_paused():
-        await update.message.reply_text(localize_text("⏸ Trading is temporarily paused by admin\\.", lang), parse_mode=ParseMode.MARKDOWN_V2)
+        await _reply_md_safe(update.message, localize_text("⏸ Trading is temporarily paused by admin\\.", lang))
         return True
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(f"⚠️ {escape_md(wallet_msg)}", parse_mode=ParseMode.MARKDOWN_V2)
+        await _reply_md_safe(update.message, f"⚠️ {escape_md(wallet_msg)}")
         return True
 
     from src.nadobro.handlers.messages import execute_action_directly
@@ -164,27 +176,24 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
     lang = get_active_language()
     step = get_resume_step(telegram_id)
     if step != "complete":
-        await update.message.reply_text(
+        await _reply_md_safe(
+            update.message,
             localize_text("⚠️ Setup incomplete\\. Resume onboarding at *{step}*\\.", lang).format(step=escape_md(step.upper())),
-            parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
 
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if not wallet_ready:
-        await update.message.reply_text(
-            f"⚠️ {escape_md(wallet_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+        await _reply_md_safe(update.message, f"⚠️ {escape_md(wallet_msg)}")
         return True
 
     if intent.get("missing"):
         missing = ", ".join(intent["missing"])
-        await update.message.reply_text(
+        await _reply_md_safe(
+            update.message,
             localize_text("I can place this trade from text, but I need a bit more info\\.", lang) + "\n\n"
             f"Missing: *{escape_md(missing)}*\n\n"
             "Example: `buy 0\\.01 BTC 5x market` or `sell 0\\.2 ETH limit 3200`",
-            parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
 
@@ -194,7 +203,7 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
 
     if _auto_execute_requested(text):
         if is_trading_paused():
-            await update.message.reply_text(localize_text("⏸ Trading is temporarily paused by admin\\.", lang), parse_mode=ParseMode.MARKDOWN_V2)
+            await _reply_md_safe(update.message, localize_text("⏸ Trading is temporarily paused by admin\\.", lang))
             return True
         from src.nadobro.handlers.messages import execute_action_directly
         await execute_action_directly(update, context, telegram_id, {"type": "execute_trade", "payload": payload})
@@ -202,8 +211,5 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
 
     context.user_data[PENDING_TEXT_TRADE_KEY] = payload
     confirm_prompt = localize_text("Type `confirm` to execute or `cancel` to discard\\.", lang)
-    await update.message.reply_text(
-        f"{preview}\n\n{confirm_prompt}",
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
+    await _reply_md_safe(update.message, f"{preview}\n\n{confirm_prompt}")
     return True

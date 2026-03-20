@@ -11,6 +11,10 @@ def _loc(text):
     return localize_text(text, get_active_language())
 
 
+def _loc_md(text):
+    return escape_md(_loc(text))
+
+
 def escape_md(text):
     if text is None:
         return ""
@@ -168,23 +172,41 @@ def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None)
         est_margin = (size * price) / leverage if leverage > 1 else size * price
 
     lines = [
-        f"{emoji} *{_loc('Trade Preview')}*",
+        f"{emoji} *{_loc_md('Trade Preview')}*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
-        f"📌 *{_loc('Action')}:* {escape_md(action_upper)}",
-        f"🪙 *{_loc('Product')}:* {escape_md(product)}\\-PERP",
-        f"📏 *{_loc('Size')}:* {escape_md(str(size))}",
-        f"💲 *{_loc('Price')}:* {escape_md(f'~${fmt_price(price, product)}')}",
-        f"⚡ *{_loc('Leverage')}:* {escape_md(f'{leverage}x')}",
+        f"📌 *{_loc_md('Action')}:* {escape_md(action_upper)}",
+        f"🪙 *{_loc_md('Product')}:* {escape_md(product)}\\-PERP",
+        f"📏 *{_loc_md('Size')}:* {escape_md(str(size))}",
+        f"💲 *{_loc_md('Price')}:* {escape_md(f'~${fmt_price(price, product)}')}",
+        f"⚡ *{_loc_md('Leverage')}:* {escape_md(f'{leverage}x')}",
     ]
 
     if est_margin is not None:
-        lines.append(f"💰 *{_loc('Est. Margin')}:* {escape_md(f'${est_margin:,.2f}')}")
+        lines.append(f"💰 *{_loc_md('Est. Margin')}:* {escape_md(f'${est_margin:,.2f}')}")
 
     lines.append("")
-    lines.append(_loc("Confirm to execute this trade\\."))
+    lines.append(escape_md(_loc("Confirm to execute this trade.")))
 
     return "\n".join(lines)
+
+
+def build_trade_preview_text(
+    action: str,
+    product: str,
+    size: float,
+    price: float,
+    leverage: int = 1,
+    est_margin=None,
+    tp=None,
+    sl=None,
+) -> str:
+    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
+    if tp:
+        preview += f"\n\n📈 *{_loc_md('Take Profit')}:* {escape_md(str(tp))}"
+    if sl:
+        preview += f"\n📉 *{_loc_md('Stop Loss')}:* {escape_md(str(sl))}"
+    return preview
 
 
 def fmt_trade_result(result):
@@ -196,26 +218,26 @@ def fmt_trade_result(result):
             _loc("✅ *Trade Executed\\!*"),
             escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             "",
-            f"📌 *{_loc('Side')}:* {escape_md(result.get('side', '?'))}",
-            f"🪙 *{_loc('Product')}:* {escape_md(result.get('product', '?'))}",
-            f"📏 *{_loc('Size')}:* {escape_md(str(result.get('size', '?')))}",
-            f"💲 *{_loc('Price')}:* {escape_md(price_str)}",
+            f"📌 *{_loc_md('Side')}:* {escape_md(result.get('side', '?'))}",
+            f"🪙 *{_loc_md('Product')}:* {escape_md(result.get('product', '?'))}",
+            f"📏 *{_loc_md('Size')}:* {escape_md(str(result.get('size', '?')))}",
+            f"💲 *{_loc_md('Price')}:* {escape_md(price_str)}",
             "",
-            f"🌐 *{_loc('Network:')}* {escape_md(result.get('network', '?'))}",
+            f"🌐 *{_loc_md('Network:')}* {escape_md(result.get('network', '?'))}",
         ]
         if result.get("tp_requested"):
             if result.get("tp_set"):
-                lines.append(f"📈 *{_loc('Take Profit')}:* {escape_md(str(result.get('tp_price')))}")
+                lines.append(f"📈 *{_loc_md('Take Profit')}:* {escape_md(str(result.get('tp_price')))}")
             else:
-                lines.append(f"⚠️ *{_loc('Take Profit')}:* {escape_md(str(result.get('tp_error', _loc('Failed to place TP order.'))))}")
+                lines.append(f"⚠️ *{_loc_md('Take Profit')}:* {escape_md(str(result.get('tp_error', _loc('Failed to place TP order.'))))}")
         if result.get("sl_requested"):
             if result.get("sl_armed"):
-                lines.append(f"🛡 *{_loc('Stop Loss')}:* {escape_md(str(result.get('sl_price')))}")
+                lines.append(f"🛡 *{_loc_md('Stop Loss')}:* {escape_md(str(result.get('sl_price')))}")
             else:
-                lines.append(f"⚠️ *{_loc('Stop Loss')}:* {escape_md(str(result.get('sl_error', _loc('Failed to arm SL rule.'))))}")
+                lines.append(f"⚠️ *{_loc_md('Stop Loss')}:* {escape_md(str(result.get('sl_error', _loc('Failed to arm SL rule.'))))}")
         order_type = result.get("type", "MARKET")
         if order_type != "MARKET":
-            lines.insert(3, f"📋 *{_loc('Type')}:* {escape_md(order_type)}")
+            lines.insert(3, f"📋 *{_loc_md('Type')}:* {escape_md(order_type)}")
         return "\n".join(lines)
     else:
         error = result.get("error", _loc("Unknown error"))

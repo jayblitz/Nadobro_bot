@@ -22,7 +22,7 @@ from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id, get_product_max_leverage, get_perp_products
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
-    fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio,
+    fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, build_trade_preview_text,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
@@ -916,15 +916,16 @@ async def _move_to_confirm(update, context, telegram_id, flow):
     flow["est_margin"] = est_margin
     _set_trade_flow(context, flow)
 
-    preview = fmt_trade_preview(action, product, size, price, leverage, est_margin)
-    tp_val = flow.get("tp")
-    sl_val = flow.get("sl")
-    if tp_val or sl_val:
-        preview += "\n"
-        if tp_val:
-            preview += f"\n📈 *Take Profit:* {escape_md(str(tp_val))}"
-        if sl_val:
-            preview += f"\n📉 *Stop Loss:* {escape_md(str(sl_val))}"
+    preview = build_trade_preview_text(
+        action=action,
+        product=product,
+        size=size,
+        price=price,
+        leverage=leverage,
+        est_margin=est_margin,
+        tp=flow.get("tp"),
+        sl=flow.get("sl"),
+    )
 
     await _reply_loc(update.message, 
         preview,
