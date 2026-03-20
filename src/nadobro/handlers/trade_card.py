@@ -35,7 +35,7 @@ from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.onboarding_service import get_resume_step
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
-from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client
+from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +215,9 @@ async def _load_preview_fields(session: dict, telegram_id: int) -> None:
         else:
             client = get_user_readonly_client(telegram_id)
             if client:
-                pid = get_product_id(product)
+                user = get_user(telegram_id)
+                network = user.network_mode.value if user else "mainnet"
+                pid = get_product_id(product, network=network, client=client)
                 if pid is not None:
                     mp = client.get_market_price(pid)
                     price = float(mp.get("mid", 0) or 0)
@@ -453,7 +455,9 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
         session["product"] = value
         session["state"] = "leverage"
     elif action == "lev":
-        max_leverage = get_product_max_leverage(session.get("product", "BTC"))
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        max_leverage = get_product_max_leverage(session.get("product", "BTC"), network=network)
         try:
             selected = int(value)
         except (TypeError, ValueError):

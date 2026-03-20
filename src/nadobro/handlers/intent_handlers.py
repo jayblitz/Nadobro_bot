@@ -11,7 +11,7 @@ from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.onboarding_service import get_resume_step
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
-from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client
+from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
 from src.nadobro.config import get_product_id, get_product_max_leverage
 
 PENDING_TEXT_TRADE_KEY = "pending_text_trade"
@@ -29,9 +29,14 @@ def _settings_for_user(telegram_id: int) -> dict:
 
 def _enrich_trade_payload(telegram_id: int, payload: dict, settings: dict) -> dict:
     result = dict(payload)
+    try:
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+    except Exception:
+        network = "mainnet"
     requested_leverage = int(payload.get("leverage") or settings.get("default_leverage", 3))
     product = str(result.get("product") or "BTC")
-    max_leverage = get_product_max_leverage(product)
+    max_leverage = get_product_max_leverage(product, network=network)
     result["leverage"] = max(1, min(requested_leverage, max_leverage))
     result["slippage_pct"] = float(settings.get("slippage", 1))
 
@@ -42,7 +47,7 @@ def _enrich_trade_payload(telegram_id: int, payload: dict, settings: dict) -> di
         else:
             client = get_user_readonly_client(telegram_id)
             if client:
-                pid = get_product_id(result.get("product", "BTC"))
+                pid = get_product_id(result.get("product", "BTC"), network=network, client=client)
                 if pid is not None:
                     mp = client.get_market_price(pid)
                     price = float(mp.get("mid", 0) or 0)
@@ -142,7 +147,9 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
 
 
 async def handle_trade_intent_message(update, context: CallbackContext, telegram_id: int, text: str) -> bool:
-    intent = parse_trade_intent(text)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    intent = parse_trade_intent(text, network=network)
     if not intent:
         return False
     logger.info(

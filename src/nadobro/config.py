@@ -40,10 +40,32 @@ for name, info in PRODUCTS.items():
         PRODUCT_ALIASES[info["symbol"].lower()] = info["id"]
         PRODUCT_ALIASES[info["symbol"].replace("-PERP", "").lower() + "-perp"] = info["id"]
 
-def get_product_id(name: str) -> Optional[int]:
-    return PRODUCT_ALIASES.get(name.lower().strip())
+def _default_catalog_network() -> str:
+    return os.environ.get("NADO_PRODUCT_CATALOG_DEFAULT_NETWORK", "mainnet").strip().lower() or "mainnet"
 
-def get_product_name(product_id: int) -> str:
+
+def get_product_id(name: str, network: str = None, client=None) -> Optional[int]:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import get_product_id as _catalog_product_id
+
+        pid = _catalog_product_id(name, network=network_name, client=client)
+        if pid is not None:
+            return pid
+    except Exception:
+        pass
+    return PRODUCT_ALIASES.get((name or "").lower().strip())
+
+def get_product_name(product_id: int, network: str = None, client=None) -> str:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import get_product_name as _catalog_product_name
+
+        resolved = _catalog_product_name(product_id, network=network_name, client=client)
+        if resolved and not resolved.startswith("ID:"):
+            return resolved
+    except Exception:
+        pass
     for name, info in PRODUCTS.items():
         if info["id"] == product_id:
             return info.get("symbol", name)
@@ -70,11 +92,30 @@ PRODUCT_MAX_LEVERAGE = {
 }
 
 
-def get_product_max_leverage(product: str) -> int:
-    product_key = (product or "").upper().strip()
-    if product_key not in PRODUCT_MAX_LEVERAGE:
-        return 1  # Safe default for unknown products
-    return int(PRODUCT_MAX_LEVERAGE[product_key])
+def get_product_max_leverage(product: str, network: str = None, client=None) -> int:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import get_product_max_leverage as _catalog_max_leverage
+
+        return int(_catalog_max_leverage(product, network=network_name, client=client))
+    except Exception:
+        product_key = (product or "").upper().strip()
+        if product_key not in PRODUCT_MAX_LEVERAGE:
+            return 1  # Safe default for unknown products
+        return int(PRODUCT_MAX_LEVERAGE[product_key])
+
+
+def get_perp_products(network: str = None, client=None) -> list[str]:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import list_perp_names
+
+        products = list_perp_names(network=network_name, client=client)
+        if products:
+            return products
+    except Exception:
+        pass
+    return [name for name, info in PRODUCTS.items() if info.get("type") == "perp"]
 
 EST_FEE_RATE = 0.0003
 EST_FILL_EFFICIENCY = 0.45

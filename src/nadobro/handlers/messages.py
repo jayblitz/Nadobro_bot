@@ -19,7 +19,7 @@ from src.nadobro.services.bot_runtime import start_user_bot
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
 from src.nadobro.services.crypto import encrypt_with_server_key
 from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.config import get_product_id, get_product_max_leverage
+from src.nadobro.config import get_product_id, get_product_max_leverage, get_perp_products
 from src.nadobro.handlers.formatters import (
     escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
     fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio,
@@ -336,6 +336,19 @@ async def handle_message(update: Update, context: CallbackContext):
 
 async def _handle_message_inner(update, context, telegram_id, username, text, started):
     resolved_text = resolve_reply_button_text(text)
+    flow = context.user_data.get("trade_flow") or {}
+    current_state = flow.get("state")
+    if current_state == "product":
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        dynamic_products = {p.upper() for p in get_perp_products(network=network)}
+        if resolved_text.upper() in dynamic_products and resolved_text not in REPLY_BUTTON_MAP:
+            callback_data = f"trade_flow:product:{resolved_text.upper()}"
+            try:
+                await _dispatch_reply_button(update, context, telegram_id, callback_data, text)
+            except Exception as e:
+                logger.error(f"Dynamic button dispatch error for '{text}': {e}", exc_info=True)
+            return
     if resolved_text in REPLY_BUTTON_MAP:
         callback_data = REPLY_BUTTON_MAP[resolved_text]
         if _is_contextual_button(callback_data, context):
@@ -679,10 +692,12 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         flow["state"] = "product"
         _set_trade_flow(context, flow)
         order_label = "📈 MARKET" if value == "market" else "📉 LIMIT"
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
         await _reply_loc(update.message, 
             f"{order_label} → Select product:",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=trade_product_reply_kb(),
+            reply_markup=trade_product_reply_kb(network=network),
         )
         return
 
@@ -708,7 +723,9 @@ async def _handle_trade_flow_button(update, context, telegram_id, callback_data)
         except ValueError:
             leverage = 1
         product = flow.get("product", "BTC")
-        max_leverage = get_product_max_leverage(product)
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        max_leverage = get_product_max_leverage(product, network=network)
         if leverage > max_leverage:
             await _reply_loc(update.message, 
                 f"⚠️ Max leverage for {escape_md(product)} is {escape_md(str(max_leverage))}x\\.",
@@ -883,7 +900,9 @@ async def _move_to_confirm(update, context, telegram_id, flow):
         else:
             client = get_user_readonly_client(telegram_id)
             if client:
-                pid = get_product_id(product)
+                user = get_user(telegram_id)
+                network = user.network_mode.value if user else "mainnet"
+                pid = get_product_id(product, network=network, client=client)
                 if pid is not None:
                     mp = client.get_market_price(pid)
                     price = mp.get("mid", 0)
@@ -1096,7 +1115,9 @@ async def _handle_pending_trade(update, context, telegram_id, text):
 
         action = pending["action"]
         product = pending["product"]
-        max_leverage = get_product_max_leverage(product)
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        max_leverage = get_product_max_leverage(product, network=network)
         if leverage > max_leverage:
             if explicit_leverage:
                 await _reply_loc(update.message, 
@@ -1110,7 +1131,7 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         try:
             client = get_user_readonly_client(telegram_id)
             if client:
-                pid = get_product_id(product)
+                pid = get_product_id(product, network=network, client=client)
                 if pid is not None:
                     mp = client.get_market_price(pid)
                     price = mp.get("mid", 0)
@@ -1152,7 +1173,9 @@ async def _handle_pending_trade(update, context, telegram_id, text):
         action = pending["action"]
         product = pending["product"]
         leverage = _get_user_settings(telegram_id, context).get("default_leverage", 3)
-        max_leverage = get_product_max_leverage(product)
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        max_leverage = get_product_max_leverage(product, network=network)
         if leverage > max_leverage:
             leverage = max_leverage
 
@@ -1562,7 +1585,9 @@ async def _handle_pending_text_close_all_confirmation(update, context, telegram_
 
 
 async def _handle_interaction_intent_message(update, context, telegram_id, text):
-    intent = parse_interaction_intent(text)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    intent = parse_interaction_intent(text, network=network)
     if not intent:
         return False
 

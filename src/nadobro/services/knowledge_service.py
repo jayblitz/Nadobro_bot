@@ -748,11 +748,11 @@ def _get_user_network(telegram_id: int) -> str:
 
 
 def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, list[str]]:
-    from src.nadobro.config import PRODUCTS, get_product_id
+    from src.nadobro.config import get_product_id, get_perp_products
     from src.nadobro.services.nado_client import NadoClient
 
     symbol = product.strip().upper().replace("-PERP", "")
-    product_id = get_product_id(symbol)
+    product_id = get_product_id(symbol, network=network)
 
     if product_id is None:
         if symbol == "ALL":
@@ -768,7 +768,7 @@ def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, li
                 logger.warning(f"All prices fetch failed: {e}")
                 return "[LIVE PRICE] Could not fetch prices right now.", []
 
-        supported = [n for n, i in PRODUCTS.items() if i["type"] == "perp"]
+        supported = get_perp_products(network=network)
         return f"[LIVE PRICE] Unknown asset '{product}'. Supported: {', '.join(supported)}", []
 
     try:

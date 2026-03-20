@@ -4,7 +4,7 @@ import logging
 import time
 from datetime import datetime
 
-from src.nadobro.config import get_product_id, get_product_max_leverage, get_spot_product_id
+from src.nadobro.config import get_product_id, get_product_max_leverage, get_spot_product_id, get_perp_products
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
@@ -100,6 +100,7 @@ async def _notify(telegram_id: int, text: str, **fmt_kwargs):
 
 
 def _strategy_defaults(strategy: str) -> dict:
+    default_bro_products = get_perp_products()[:6] or ["BTC", "ETH", "SOL"]
     presets = {
         "mm": {
             "notional_usd": 400.0,
@@ -116,7 +117,7 @@ def _strategy_defaults(strategy: str) -> dict:
             "budget_usd": 500.0, "risk_level": "balanced", "max_positions": 3,
             "interval_seconds": 300, "cycle_seconds": 300,
             "tp_pct": 2.0, "sl_pct": 1.5, "max_loss_pct": 15.0,
-            "leverage_cap": 5, "products": ["BTC", "ETH", "SOL"],
+            "leverage_cap": 5, "products": default_bro_products,
             "use_sentiment": True, "use_cmc": True, "min_confidence": 0.65,
             "howl_enabled": True, "howl_hour_utc": 2,
         },
@@ -138,10 +139,14 @@ def start_user_bot(
     strategy = (strategy or "").lower()
     if strategy not in SUPPORTED_STRATEGIES:
         return False, "Unknown strategy."
-
-    if strategy == "bro":
+    try:
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
+    except Exception:
+        user = None
+        network = "mainnet"
+
+    if strategy == "bro":
         _, strat_cfg = get_strategy_settings(telegram_id, strategy)
         state = _default_state()
         state.update(_strategy_defaults(strategy))
@@ -171,12 +176,12 @@ def start_user_bot(
         _ensure_task(telegram_id, network)
         return True, "Bro Mode activated 🧠"
 
-    product_id = get_product_id(product)
+    product_id = get_product_id(product, network=network)
     if product_id is None:
         return False, f"Unknown product '{product}'."
     if strategy == "dn" and get_spot_product_id(product) is None:
         return False, f"Delta Neutral currently supports assets with Nado Spot markets (BTC, ETH)."
-    max_leverage = get_product_max_leverage(product)
+    max_leverage = get_product_max_leverage(product, network=network)
     if strategy == "dn":
         max_leverage = min(max_leverage, 5)
     if float(leverage or 0) > max_leverage:
@@ -184,8 +189,6 @@ def start_user_bot(
     if float(leverage or 0) < 1:
         return False, "Leverage must be at least 1x."
 
-    user = get_user(telegram_id)
-    network = user.network_mode.value if user else "mainnet"
     _, strat_cfg = get_strategy_settings(telegram_id, strategy)
     state = _default_state()
     state.update(_strategy_defaults(strategy))
@@ -627,7 +630,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             return False, str(result.get("error", "unknown"))[:300]
         return True, None
 
-    product_id = get_product_id(product)
+    product_id = get_product_id(product, network=network)
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")
 

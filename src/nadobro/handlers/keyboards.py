@@ -1,7 +1,11 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW, get_product_max_leverage
+from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW, get_product_max_leverage, get_perp_products
 
 PERP_PRODUCTS = [name for name, info in PRODUCTS.items() if info["type"] == "perp"]
+
+
+def _perp_products(network: str = "mainnet", client=None):
+    return get_perp_products(network=network, client=client)
 
 SIZE_PRESETS = {
     "BTC": [0.001, 0.005, 0.01, 0.05, 0.1],
@@ -183,13 +187,20 @@ def trade_order_type_kb():
     )
 
 
-def trade_product_reply_kb():
+def trade_product_reply_kb(network: str = "mainnet"):
+    products = _perp_products(network=network)
+    rows = []
+    row = []
+    for name in products:
+        row.append(KeyboardButton(name))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([KeyboardButton("◀ Back"), KeyboardButton("◀ Home")])
     return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("BTC"), KeyboardButton("ETH"), KeyboardButton("SOL"), KeyboardButton("XRP")],
-            [KeyboardButton("BNB"), KeyboardButton("LINK"), KeyboardButton("DOGE"), KeyboardButton("AVAX")],
-            [KeyboardButton("◀ Back"), KeyboardButton("◀ Home")],
-        ],
+        rows,
         resize_keyboard=True,
     )
 
@@ -293,7 +304,7 @@ def trade_card_order_type_kb(session_id: str):
 def trade_card_product_kb(session_id: str):
     rows = []
     row = []
-    for name in PERP_PRODUCTS:
+    for name in _perp_products():
         row.append(InlineKeyboardButton(name, callback_data=trade_card_cb(session_id, "product", name)))
         if len(row) == 4:
             rows.append(row)
@@ -409,7 +420,7 @@ def trade_card_confirm_kb(session_id: str):
 def trade_product_kb(action):
     rows = []
     row = []
-    for name in PERP_PRODUCTS:
+    for name in _perp_products():
         row.append(InlineKeyboardButton(name, callback_data=f"product:{action}:{name}"))
         if len(row) == 4:
             rows.append(row)
@@ -514,7 +525,7 @@ def alerts_kb():
 def alert_product_kb():
     rows = []
     row = []
-    for name in PERP_PRODUCTS:
+    for name in _perp_products():
         row.append(InlineKeyboardButton(name, callback_data=f"alert:product:{name}"))
         if len(row) == 4:
             rows.append(row)
@@ -692,13 +703,15 @@ def points_followup_options_kb(options: list[str]):
     return InlineKeyboardMarkup(rows)
 
 
-def strategy_action_kb(strategy_id: str, selected_product: str = "BTC"):
+def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", available_products: list[str] | None = None):
+    if strategy_id == "dn":
+        products = ["BTC", "ETH"]
+    else:
+        products = [p.upper() for p in (available_products or _perp_products()[:3] or ["BTC", "ETH", "SOL"])]
     pair_buttons = [
-        InlineKeyboardButton("BTC", callback_data=f"strategy:pair:{strategy_id}:BTC"),
-        InlineKeyboardButton("ETH", callback_data=f"strategy:pair:{strategy_id}:ETH"),
+        InlineKeyboardButton(product, callback_data=f"strategy:pair:{strategy_id}:{product}")
+        for product in products[:3]
     ]
-    if strategy_id != "dn":
-        pair_buttons.append(InlineKeyboardButton("SOL", callback_data=f"strategy:pair:{strategy_id}:SOL"))
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Arm Strategy", callback_data=f"strategy:activate:{strategy_id}"),
@@ -807,7 +820,7 @@ def howl_approval_kb(suggestion_count: int):
 def close_product_kb():
     rows = []
     row = []
-    for name in PERP_PRODUCTS:
+    for name in _perp_products():
         row.append(InlineKeyboardButton(name, callback_data=f"pos:close:{name}"))
         if len(row) == 4:
             rows.append(row)

@@ -8,7 +8,7 @@ from typing import Optional
 from src.nadobro.config import (
     NADO_TESTNET_REST, NADO_MAINNET_REST,
     NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE,
-    PRODUCTS, get_product_name
+    get_product_name, get_perp_products, get_product_id
 )
 
 logger = logging.getLogger(__name__)
@@ -154,7 +154,11 @@ class NadoClient:
 
     def get_all_market_prices(self) -> dict:
         prices = {}
-        perp_products = [(name, info["id"]) for name, info in PRODUCTS.items() if info["type"] == "perp"]
+        perp_products = []
+        for name in get_perp_products(network=self.network, client=self):
+            pid = get_product_id(name, network=self.network, client=self)
+            if pid is not None:
+                perp_products.append((name, pid))
         with ThreadPoolExecutor(max_workers=max(1, _FANOUT_WORKERS)) as pool:
             futures = {pool.submit(self.get_market_price, pid): name for name, pid in perp_products}
             for fut in as_completed(futures):
@@ -491,10 +495,12 @@ class NadoClient:
 
         # Fallback to open orders for backward compatibility.
         positions = []
-        for name, info in PRODUCTS.items():
-            if info["type"] == "perp":
-                orders = self.get_open_orders(info["id"])
-                positions.extend(orders)
+        for name in get_perp_products(network=self.network, client=self):
+            pid = get_product_id(name, network=self.network, client=self)
+            if pid is None:
+                continue
+            orders = self.get_open_orders(pid)
+            positions.extend(orders)
         return positions
 
     def verify_linked_signer(self, expected_signer_address: str = None) -> dict:

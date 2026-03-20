@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from src.nadobro.config import get_product_name, get_product_max_leverage, PRODUCTS
+from src.nadobro.config import get_product_name, get_product_max_leverage
 from src.nadobro.models.database import (
     upsert_copy_trader,
     get_copy_trader,
@@ -426,7 +426,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             continue
 
         # Calculate size based on user's margin_per_trade
-        product_max_lev = get_product_max_leverage(product_key)
+        product_max_lev = get_product_max_leverage(product_key, network=network)
         leverage = min(max_leverage, product_max_lev)
         copy_size = (margin_per_trade * leverage) / leader_entry
 

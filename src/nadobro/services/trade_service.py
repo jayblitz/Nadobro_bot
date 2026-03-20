@@ -10,9 +10,9 @@ from src.nadobro.config import (
     get_spot_product_id,
     get_product_name,
     get_product_max_leverage,
+    get_perp_products,
     RATE_LIMIT_SECONDS,
     MIN_TRADE_SIZE_USD,
-    PRODUCTS,
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 
@@ -74,16 +74,18 @@ def validate_trade(
     leverage: float = 1.0,
     enforce_rate_limit: bool = True,
 ) -> tuple[bool, str]:
-    product_id = get_product_id(product)
+    user_obj = get_user(telegram_id)
+    network = user_obj.network_mode.value if user_obj else "mainnet"
+    client = get_user_readonly_client(telegram_id)
+    product_id = get_product_id(product, network=network, client=client)
     if product_id is None:
-        from src.nadobro.config import PRODUCTS as _P
-        available = ", ".join([n for n, i in _P.items() if i["type"] == "perp"])
+        available = ", ".join(get_perp_products(network=network, client=client))
         return False, f"Unknown product '{product}'. Available: {available}"
 
     if size <= 0:
         return False, "Trade size must be positive."
 
-    max_leverage = get_product_max_leverage(product)
+    max_leverage = get_product_max_leverage(product, network=network, client=client)
     if leverage > max_leverage:
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
 
@@ -94,7 +96,6 @@ def validate_trade(
     if not wallet_ok:
         return False, wallet_msg
 
-    client = get_user_readonly_client(telegram_id)
     if not client:
         return False, "Could not initialize client. Please try again."
 
@@ -124,9 +125,7 @@ def validate_trade(
         return False, f"Minimum trade size is ${MIN_TRADE_SIZE_USD}."
 
     if enforce_rate_limit:
-        user_obj = get_user(telegram_id)
-        net = user_obj.network_mode.value if user_obj else "mainnet"
-        allowed, msg = check_rate_limit(telegram_id, network=net)
+        allowed, msg = check_rate_limit(telegram_id, network=network)
         if not allowed:
             return False, msg
 
@@ -155,17 +154,17 @@ def execute_market_order(
     if not valid:
         return {"success": False, "error": msg}
 
-    product_id = get_product_id(product)
-    client = get_user_nado_client(telegram_id)
     user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    product_id = get_product_id(product, network=network)
+    client = get_user_nado_client(telegram_id)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
-    network = user.network_mode.value
     trade_id = insert_trade({
         "user_id": telegram_id,
         "product_id": product_id,
-        "product_name": get_product_name(product_id),
+        "product_name": get_product_name(product_id, network=network),
         "order_type": OrderTypeEnum.MARKET.value,
         "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
         "size": size,
@@ -198,7 +197,7 @@ def execute_market_order(
             "success": True,
             "side": "LONG" if is_long else "SHORT",
             "size": size,
-            "product": get_product_name(product_id),
+            "product": get_product_name(product_id, network=network),
             "price": mp["mid"],
             "digest": result.get("digest"),
             "network": user.network_mode.value,
@@ -214,8 +213,8 @@ def execute_market_order(
             payload.update(tp_result)
         sl_result = _arm_stop_loss_rule(
             telegram_id=telegram_id,
-            network=user.network_mode.value,
-            product=get_product_name(product_id),
+            network=network,
+            product=get_product_name(product_id, network=network),
             is_long=is_long,
             stop_price=sl_price,
             size=size,
@@ -358,17 +357,17 @@ def execute_limit_order(
     if not valid:
         return {"success": False, "error": msg}
 
-    product_id = get_product_id(product)
-    client = get_user_nado_client(telegram_id)
     user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    product_id = get_product_id(product, network=network)
+    client = get_user_nado_client(telegram_id)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
-    network = user.network_mode.value
     trade_id = insert_trade({
         "user_id": telegram_id,
         "product_id": product_id,
-        "product_name": get_product_name(product_id),
+        "product_name": get_product_name(product_id, network=network),
         "order_type": OrderTypeEnum.LIMIT.value,
         "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
         "size": size,
@@ -399,10 +398,10 @@ def execute_limit_order(
             "success": True,
             "side": "LONG" if is_long else "SHORT",
             "size": size,
-            "product": get_product_name(product_id),
+            "product": get_product_name(product_id, network=network),
             "price": price,
             "digest": result.get("digest"),
-            "network": user.network_mode.value,
+            "network": network,
             "type": "LIMIT",
             "status": TradeStatus.PENDING.value,
             "message": "Limit order accepted and recorded as pending until execution.",
@@ -620,11 +619,11 @@ def close_position(
     network: str | None = None,
     **kwargs,
 ) -> dict:
-    product_id = get_product_id(product)
+    selected_network = str(network or "")
+    product_id = get_product_id(product, network=selected_network or "mainnet")
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'."}
 
-    selected_network = str(network or "")
     client = get_user_nado_client(telegram_id, network=selected_network or None)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
@@ -637,7 +636,7 @@ def close_position(
             return {
                 "success": True,
                 "cancelled": 0.0,
-                "product": get_product_name(product_id),
+                "product": get_product_name(product_id, network=selected_network or "mainnet"),
                 "cancelled_orders": cancelled_orders,
                 "order_errors": order_errors if order_errors else None,
             }
@@ -704,7 +703,7 @@ def close_position(
     payload = {
         "success": True,
         "cancelled": close_size,
-        "product": get_product_name(product_id),
+        "product": get_product_name(product_id, network=selected_network or "mainnet"),
     }
     if cancelled_orders:
         payload["cancelled_orders"] = cancelled_orders
@@ -722,10 +721,10 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
     cancelled_orders = 0
     order_errors = []
     # Always cancel stale open orders first so strategy stop leaves no resting orders.
-    for _, info in PRODUCTS.items():
-        if info.get("type") != "perp":
+    for product_name in get_perp_products(network=selected_network or "mainnet", client=client):
+        pid = get_product_id(product_name, network=selected_network or "mainnet", client=client)
+        if pid is None:
             continue
-        pid = info.get("id")
         c_count, c_errors = _cancel_open_orders_for_product(client, pid)
         cancelled_orders += c_count
         if c_errors:
@@ -767,7 +766,7 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
             r = client.place_market_order(pid, pos_size, is_buy=is_buy, slippage_pct=1.0)
             if r["success"]:
                 cancelled += pos_size
-                product_name = p.get("product_name", get_product_name(pid))
+                product_name = p.get("product_name", get_product_name(pid, network=selected_network or "mainnet"))
                 products_closed.add(product_name)
                 close_side = "short" if signed_amount > 0 else "long"
                 fill_price = _get_post_fill_price(client, pid)
@@ -782,7 +781,10 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
                     network=selected_network or None,
                 )
             else:
-                errors.append(f"{p.get('product_name', get_product_name(pid))}: {r.get('error', 'unknown')}")
+                errors.append(
+                    f"{p.get('product_name', get_product_name(pid, network=selected_network or 'mainnet'))}: "
+                    f"{r.get('error', 'unknown')}"
+                )
         except Exception as e:
             errors.append(f"{p.get('product_name', 'unknown')}: {str(e)}")
 
@@ -807,14 +809,15 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
         result["success"] = False
         result["error"] = (
             "Close-all verification failed: open positions remain on "
-            + ", ".join(get_product_name(pid) for pid in post_positions.keys())
+            + ", ".join(get_product_name(pid, network=selected_network or "mainnet") for pid in post_positions.keys())
         )
     remaining_orders = 0
-    for _, info in PRODUCTS.items():
-        if info.get("type") != "perp":
+    for product_name in get_perp_products(network=selected_network or "mainnet", client=client):
+        pid = get_product_id(product_name, network=selected_network or "mainnet", client=client)
+        if pid is None:
             continue
         try:
-            remaining_orders += len(client.get_open_orders(info.get("id")) or [])
+            remaining_orders += len(client.get_open_orders(pid) or [])
         except Exception:
             continue
     if remaining_orders > 0:

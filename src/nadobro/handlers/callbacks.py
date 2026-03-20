@@ -54,7 +54,7 @@ from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
     get_new_onboarding_state,
 )
-from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS
+from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS, get_perp_products
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
 
@@ -475,7 +475,9 @@ async def _handle_leverage(query, data, telegram_id, context):
     product = parts[2]
     size = float(parts[3])
     leverage = int(parts[4])
-    max_leverage = get_product_max_leverage(product)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    max_leverage = get_product_max_leverage(product, network=network)
     if leverage > max_leverage:
         await _edit_loc(query, 
             "⚠️ Max leverage for *{product}* is *{max_lev}x*\\.",
@@ -490,7 +492,9 @@ async def _handle_leverage(query, data, telegram_id, context):
     try:
         client = get_user_readonly_client(telegram_id)
         if client:
-            pid = get_product_id(product)
+            user = get_user(telegram_id)
+            network = user.network_mode.value if user else "mainnet"
+            pid = get_product_id(product, network=network, client=client)
             if pid is not None:
                 mp = client.get_market_price(pid)
                 price = mp.get("mid", 0)
@@ -1028,20 +1032,25 @@ async def _handle_strategy(query, data, context, telegram_id):
                 reply_markup=bro_action_kb(),
             )
             return
-        selected_product = context.user_data.get(f"strategy_pair:{strategy_id}", "BTC")
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        available_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network)[:3] or ("BTC", "ETH", "SOL"))
+        selected_product = context.user_data.get(f"strategy_pair:{strategy_id}", available_pairs[0])
         with timed_metric("cb.strategy.preview"):
             preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
         await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=strategy_action_kb(strategy_id, selected_product),
+            reply_markup=strategy_action_kb(strategy_id, selected_product, list(available_pairs)),
         )
     elif action == "pair" and len(parts) >= 4:
         strategy_id = parts[2]
         selected_product = parts[3].upper()
         if strategy_id not in supported:
             return
-        allowed_pairs = ("BTC", "ETH") if strategy_id == "dn" else ("BTC", "ETH", "SOL")
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        allowed_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network)[:3] or ("BTC", "ETH", "SOL"))
         if selected_product not in allowed_pairs:
             return
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
@@ -1050,7 +1059,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=strategy_action_kb(strategy_id, selected_product),
+            reply_markup=strategy_action_kb(strategy_id, selected_product, list(allowed_pairs)),
         )
     elif action == "config":
         if strategy_id not in supported:
@@ -1419,7 +1428,9 @@ async def _handle_bro(query, data, telegram_id, context):
             current_price = entry
             if ro:
                 try:
-                    pid = get_product_id(product)
+                    user = get_user(telegram_id)
+                    network = user.network_mode.value if user else "mainnet"
+                    pid = get_product_id(product, network=network, client=ro)
                     if pid is not None:
                         mp = ro.get_market_price(pid)
                         current_price = float(mp.get("mid", entry))
@@ -1457,7 +1468,7 @@ async def _handle_bro(query, data, telegram_id, context):
 
         plan = await run_blocking(
             generate_game_plan,
-            bro_conf.get("products", ["BTC", "ETH", "SOL"]),
+            bro_conf.get("products", get_perp_products()[:6] or ["BTC", "ETH", "SOL"]),
             budget, remaining, positions, bro_profile, decisions_log,
         )
 
@@ -1746,7 +1757,7 @@ def _build_bro_preview_text(telegram_id: int) -> str:
     tp_pct = float(conf.get("tp_pct", 2.0))
     sl_pct = float(conf.get("sl_pct", 1.5))
     min_confidence = float(conf.get("min_confidence", 0.65))
-    products = conf.get("products", ["BTC", "ETH", "SOL"])
+    products = conf.get("products", get_perp_products()[:6] or ["BTC", "ETH", "SOL"])
     max_loss = float(conf.get("max_loss_pct", 15))
     cycle_seconds = int(conf.get("cycle_seconds", 300))
 
@@ -1826,7 +1837,9 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         except Exception:
             pass
         try:
-            pid = get_product_id(product)
+            user = get_user(telegram_id)
+            network = user.network_mode.value if user else "mainnet"
+            pid = get_product_id(product, network=network, client=client)
             if pid is not None:
                 mp = client.get_market_price(pid)
                 mid = float(mp.get("mid", 0) or 0)

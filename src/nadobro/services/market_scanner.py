@@ -3,7 +3,6 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from src.nadobro.config import PRODUCTS
 from src.nadobro.services.price_tracker import get_full_technicals, get_all_technicals, classify_regime
 from src.nadobro.services.async_utils import run_blocking
 
@@ -38,7 +37,8 @@ def _get_funding_rates(client, products: list[str]) -> dict[str, float]:
     for product in products:
         try:
             from src.nadobro.config import get_product_id
-            pid = get_product_id(product)
+
+            pid = get_product_id(product, network=getattr(client, "network", "mainnet"), client=client)
             if pid is not None:
                 rate = client.get_funding_rate(pid)
                 if rate is not None:

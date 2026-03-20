@@ -1,20 +1,14 @@
 import re
 from typing import Optional
 
-from src.nadobro.config import PRODUCTS
+from src.nadobro.config import get_perp_products
 
 TRADE_KEYWORDS = ("buy", "sell", "long", "short", "market", "limit")
 
 
-def _extract_product(text_lower: str) -> Optional[str]:
-    for symbol, info in PRODUCTS.items():
-        if info.get("type") != "perp":
-            continue
-        checks = (
-            symbol.lower(),
-            f"{symbol.lower()}-perp",
-            info.get("symbol", "").lower(),
-        )
+def _extract_product(text_lower: str, network: str = "mainnet", client=None) -> Optional[str]:
+    for symbol in get_perp_products(network=network, client=client):
+        checks = (symbol.lower(), f"{symbol.lower()}-perp")
         if any(token and re.search(rf"\b{re.escape(token)}\b", text_lower) for token in checks):
             return symbol
     return None
@@ -28,7 +22,7 @@ def _extract_direction(text_lower: str) -> Optional[str]:
     return None
 
 
-def parse_trade_intent(text: str) -> Optional[dict]:
+def parse_trade_intent(text: str, network: str = "mainnet", client=None) -> Optional[dict]:
     raw = text.strip()
     if not raw:
         return None
@@ -37,7 +31,7 @@ def parse_trade_intent(text: str) -> Optional[dict]:
         return None
 
     direction = _extract_direction(text_lower)
-    product = _extract_product(text_lower)
+    product = _extract_product(text_lower, network=network, client=client)
     order_type = "limit" if re.search(r"\blimit\b", text_lower) else "market"
 
     leverage = None
@@ -129,7 +123,7 @@ def _looks_like_question(text_lower: str) -> bool:
     )
 
 
-def parse_interaction_intent(text: str) -> Optional[dict]:
+def parse_interaction_intent(text: str, network: str = "mainnet", client=None) -> Optional[dict]:
     raw = (text or "").strip()
     if not raw:
         return None
@@ -156,7 +150,7 @@ def parse_interaction_intent(text: str) -> Optional[dict]:
         ):
             return {"kind": "interaction", "action": "close_all", "raw": raw}
 
-        product = _extract_product(text_lower)
+        product = _extract_product(text_lower, network=network, client=client)
         if product:
             return {
                 "kind": "interaction",

@@ -3,7 +3,7 @@ import time
 import json
 from datetime import datetime
 
-from src.nadobro.config import get_product_id, get_product_name, get_product_max_leverage
+from src.nadobro.config import get_product_id, get_product_name, get_product_max_leverage, get_perp_products
 from src.nadobro.services.trade_service import execute_market_order
 from src.nadobro.services.budget_guard import (
     check_can_open_position,
@@ -52,7 +52,7 @@ def run_cycle(
         bro_state["llm_fail_streak"] = 0
         bro_state["llm_pause_until"] = 0
 
-    products = state.get("products") or ["BTC", "ETH", "SOL"]
+    products = state.get("products") or get_perp_products(network=network)[:6] or ["BTC", "ETH", "SOL"]
     risk_level = state.get("risk_level", "balanced")
     budget = float(state.get("budget_usd", 500))
     min_confidence = float(state.get("min_confidence", 0.65))
@@ -265,12 +265,12 @@ def _handle_open(
 
     # Risk guardrails: clamp leverage to product-specific max
     from src.nadobro.config import get_product_max_leverage
-    max_product_lev = get_product_max_leverage(product)
+    max_product_lev = get_product_max_leverage(product, network=network)
     if leverage > max_product_lev:
         leverage = max_product_lev
         logger.info("Bro Mode: clamped leverage to %sx for %s", leverage, product)
 
-    product_id = get_product_id(product)
+    product_id = get_product_id(product, network=network)
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'"}
 
@@ -404,7 +404,7 @@ def _handle_close(
         return {"success": True, "action": "hold", "detail": f"No open position for {close_product}"}
 
     pos = matching[0]
-    product_id = get_product_id(close_product)
+    product_id = get_product_id(close_product, network=network)
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{close_product}'"}
 
@@ -491,7 +491,7 @@ def get_bro_status(state: dict) -> dict:
         "llm_fail_streak": bro_state.get("llm_fail_streak", 0),
         "risk_level": state.get("risk_level", "balanced"),
         "budget_usd": state.get("budget_usd", 500),
-        "products": state.get("products", ["BTC", "ETH", "SOL"]),
+        "products": state.get("products", get_perp_products()[:6] or ["BTC", "ETH", "SOL"]),
         "bro_profile": state.get("bro_profile", "normal"),
         "composite_score": last_decision.get("composite_score", 0),
     }

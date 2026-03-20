@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 from typing import Optional
 
-from src.nadobro.config import PRODUCTS
+from src.nadobro.config import get_perp_products
 
 logger = logging.getLogger(__name__)
 
@@ -319,9 +319,7 @@ def classify_regime(product: str) -> Optional[str]:
 
 def get_all_technicals() -> dict[str, dict]:
     results = {}
-    for product, info in PRODUCTS.items():
-        if info["type"] != "perp":
-            continue
+    for product in get_perp_products():
         tech = get_full_technicals(product)
         if tech.get("data_points", 0) > 0:
             results[product] = tech
