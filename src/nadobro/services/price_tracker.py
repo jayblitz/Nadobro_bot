@@ -44,9 +44,18 @@ def record_prices_from_client(client) -> dict[str, float]:
     recorded = {}
     try:
         all_prices = client.get_all_market_prices()
+        return record_prices_snapshot(all_prices)
+    except Exception as e:
+        logger.error("Failed to record prices: %s", e)
+    return recorded
+
+
+def record_prices_snapshot(all_prices: dict) -> dict[str, float]:
+    recorded: dict[str, float] = {}
+    try:
         if not all_prices:
             return recorded
-        for product, price_data in all_prices.items():
+        for product, price_data in (all_prices or {}).items():
             if isinstance(price_data, dict):
                 bid = float(price_data.get("bid", 0))
                 ask = float(price_data.get("ask", 0))

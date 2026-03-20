@@ -16,6 +16,8 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 _bot_app = None
 _check_client = None
 _ALERT_SCAN_SECONDS = int(os.environ.get("ALERT_SCAN_SECONDS", "5"))
+_MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SECONDS", "3.0"))
+_last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
 
 
 def set_bot_app(app):
@@ -45,7 +47,7 @@ async def handle_alert_job(payload: dict):
         return
     try:
         with timed_metric("scheduler.check_alerts.total"):
-            prices = await run_blocking(_check_client.get_all_market_prices)
+            prices = await _get_market_snapshot()
         if not prices:
             return
         triggered = await run_blocking(get_triggered_alerts, prices)
@@ -81,10 +83,24 @@ async def tick_price_tracker():
     if not _check_client:
         return
     try:
-        from src.nadobro.services.price_tracker import record_prices_from_client
-        await run_blocking(record_prices_from_client, _check_client)
+        from src.nadobro.services.price_tracker import record_prices_snapshot
+        prices = await _get_market_snapshot()
+        if prices:
+            await run_blocking(record_prices_snapshot, prices)
     except Exception as e:
         logger.error("Price tracker tick failed: %s", e)
+
+
+async def _get_market_snapshot(force_refresh: bool = False) -> dict:
+    global _last_market_snapshot
+    now = asyncio.get_running_loop().time()
+    if (not force_refresh) and _last_market_snapshot.get("prices") and (
+        now - float(_last_market_snapshot.get("ts") or 0.0) < _MARKET_SNAPSHOT_TTL_SECONDS
+    ):
+        return _last_market_snapshot.get("prices") or {}
+    prices = await run_blocking(_check_client.get_all_market_prices)
+    _last_market_snapshot = {"ts": now, "prices": prices or {}}
+    return _last_market_snapshot["prices"]
 
 
 async def tick_howl():

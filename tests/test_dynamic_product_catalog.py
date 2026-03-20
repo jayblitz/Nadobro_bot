@@ -41,7 +41,7 @@ class DynamicProductCatalogTests(unittest.TestCase):
             {"product_id": 88, "book_info": {}},
         ]
         fake_symbols = [
-            {"type": "perp", "product_id": 88, "symbol": "XAG-PERP"},
+            {"type": "perp", "product_id": 88, "symbol": "XAG-PERP", "isolated_only": True},
             {"type": "spot", "product_id": 5, "symbol": "USDC"},
         ]
         with patch("src.nadobro.services.product_catalog._fetch_all_products", return_value=fake_products), patch(
@@ -50,6 +50,8 @@ class DynamicProductCatalogTests(unittest.TestCase):
             catalog = product_catalog.get_catalog(network="mainnet", refresh=True)
         self.assertIn("XAG", catalog["perps"])
         self.assertEqual(product_catalog.get_product_id("XAG", network="mainnet"), 88)
+        self.assertTrue(catalog["perps"]["XAG"]["isolated_only"])
+        self.assertTrue(product_catalog.is_product_isolated_only("XAG", network="mainnet"))
 
 
 if __name__ == "__main__":

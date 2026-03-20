@@ -117,6 +117,16 @@ def get_perp_products(network: str = None, client=None) -> list[str]:
         pass
     return [name for name, info in PRODUCTS.items() if info.get("type") == "perp"]
 
+
+def is_product_isolated_only(product: str, network: str = None, client=None) -> bool:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import is_product_isolated_only as _catalog_isolated_only
+
+        return bool(_catalog_isolated_only(product, network=network_name, client=client))
+    except Exception:
+        return False
+
 EST_FEE_RATE = 0.0003
 EST_FILL_EFFICIENCY = 0.45
 DUAL_MODE_CARD_FLOW = os.environ.get("DUAL_MODE_CARD_FLOW", "true").strip().lower() in ("1", "true", "yes", "on")

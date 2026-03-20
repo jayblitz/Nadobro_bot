@@ -11,6 +11,7 @@ from src.nadobro.config import (
     get_product_name,
     get_product_max_leverage,
     get_perp_products,
+    is_product_isolated_only,
     RATE_LIMIT_SECONDS,
     MIN_TRADE_SIZE_USD,
 )
@@ -175,7 +176,24 @@ def execute_market_order(
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
 
-    result = client.place_market_order(product_id, size, is_buy=is_long, slippage_pct=slippage_pct)
+    isolated_only = is_product_isolated_only(product, network=network, client=client)
+    isolated_margin = None
+    if isolated_only:
+        try:
+            mp = client.get_market_price(product_id)
+            mid = float(mp.get("mid", 0) or 0)
+            if mid > 0 and float(leverage or 0) > 0:
+                isolated_margin = (float(size) * mid) / max(1.0, float(leverage))
+        except Exception:
+            isolated_margin = None
+    result = client.place_market_order(
+        product_id,
+        size,
+        is_buy=is_long,
+        slippage_pct=slippage_pct,
+        isolated_only=isolated_only,
+        isolated_margin=isolated_margin,
+    )
 
     if result["success"]:
         update_trade(trade_id, {
@@ -379,7 +397,18 @@ def execute_limit_order(
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
 
-    result = client.place_limit_order(product_id, size, price, is_buy=is_long)
+    isolated_only = is_product_isolated_only(product, network=network, client=client)
+    isolated_margin = None
+    if isolated_only and float(leverage or 0) > 0:
+        isolated_margin = (float(size) * float(price)) / max(1.0, float(leverage))
+    result = client.place_limit_order(
+        product_id,
+        size,
+        price,
+        is_buy=is_long,
+        isolated_only=isolated_only,
+        isolated_margin=isolated_margin,
+    )
 
     if result["success"]:
         update_trade(
@@ -668,7 +697,13 @@ def close_position(
             break
         is_buy = latest_signed < 0
         this_close_size = min(remaining_size, latest_abs)
-        r = client.place_market_order(product_id, this_close_size, is_buy=is_buy, slippage_pct=1.0)
+        r = client.place_market_order(
+            product_id,
+            this_close_size,
+            is_buy=is_buy,
+            slippage_pct=1.0,
+            reduce_only=True,
+        )
         if not r.get("success"):
             return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
         fill_price = _get_post_fill_price(client, product_id)
@@ -763,7 +798,13 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
             if pos_size <= 0:
                 continue
             is_buy = signed_amount < 0
-            r = client.place_market_order(pid, pos_size, is_buy=is_buy, slippage_pct=1.0)
+            r = client.place_market_order(
+                pid,
+                pos_size,
+                is_buy=is_buy,
+                slippage_pct=1.0,
+                reduce_only=True,
+            )
             if r["success"]:
                 cancelled += pos_size
                 product_name = p.get("product_name", get_product_name(pid, network=selected_network or "mainnet"))

@@ -1,7 +1,9 @@
 import logging
 import time
 import os
+import random
 import requests
+from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional
@@ -26,7 +28,25 @@ _price_increment_x18_cache = {}
 _min_size_x18_cache = {}
 _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
 _FANOUT_WORKERS = int(os.environ.get("NADO_FANOUT_WORKERS", "8"))
+_REST_MAX_RETRIES = int(os.environ.get("NADO_REST_MAX_RETRIES", "2"))
+_REST_RETRY_BASE_SECONDS = float(os.environ.get("NADO_REST_RETRY_BASE_SECONDS", "0.25"))
+_REST_RETRY_JITTER_SECONDS = float(os.environ.get("NADO_REST_RETRY_JITTER_SECONDS", "0.2"))
+_REST_POOL_CONNECTIONS = int(os.environ.get("NADO_HTTP_POOL_CONNECTIONS", "64"))
+_REST_POOL_MAXSIZE = int(os.environ.get("NADO_HTTP_POOL_MAXSIZE", "64"))
+_OPEN_ORDERS_CACHE_TTL = float(os.environ.get("NADO_OPEN_ORDERS_CACHE_TTL_SECONDS", "2.0"))
+_POSITIONS_FALLBACK_TTL = float(os.environ.get("NADO_POSITIONS_FALLBACK_TTL_SECONDS", "6.0"))
+_POSITIONS_FALLBACK_MAX_PRODUCTS = int(os.environ.get("NADO_POSITIONS_FALLBACK_MAX_PRODUCTS", "16"))
 _rest_session = requests.Session()
+_rest_session.mount(
+    "https://",
+    HTTPAdapter(pool_connections=max(8, _REST_POOL_CONNECTIONS), pool_maxsize=max(8, _REST_POOL_MAXSIZE)),
+)
+_rest_session.mount(
+    "http://",
+    HTTPAdapter(pool_connections=max(8, _REST_POOL_CONNECTIONS), pool_maxsize=max(8, _REST_POOL_MAXSIZE)),
+)
+_open_orders_cache: dict[tuple[str, str, int], dict] = {}
+_positions_fallback_cache: dict[tuple[str, str], dict] = {}
 
 
 class NadoClient:
@@ -108,18 +128,54 @@ class NadoClient:
     def _archive_url(self):
         return NADO_MAINNET_ARCHIVE if self.network == "mainnet" else NADO_TESTNET_ARCHIVE
 
-    def _query_rest(self, query_type: str, extra_params: dict | None = None) -> Optional[dict]:
+    @staticmethod
+    def _parse_json_response(resp) -> Optional[dict]:
+        if resp is None:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            snippet = ""
+            try:
+                snippet = (resp.text or "").strip().replace("\n", " ")[:180]
+            except Exception:
+                snippet = ""
+            logger.warning(
+                "REST returned non-JSON status=%s content_type=%s body=%r",
+                getattr(resp, "status_code", "?"),
+                (getattr(resp, "headers", {}) or {}).get("content-type"),
+                snippet,
+            )
+            return None
+
+    def _query_rest(self, query_type: str, extra_params: Optional[dict] = None) -> Optional[dict]:
         params = {"type": query_type}
         if extra_params:
             params.update(extra_params)
-        try:
-            url = f"{self._rest_url()}/query"
-            headers = {"Accept-Encoding": "gzip"}
-            resp = _rest_session.get(url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
-            return resp.json()
-        except Exception as e:
-            logger.error("REST query failed type=%s: %s", query_type, e)
-            return None
+        url = f"{self._rest_url()}/query"
+        headers = {"Accept-Encoding": "gzip"}
+        max_attempts = max(1, _REST_MAX_RETRIES + 1)
+        for attempt in range(max_attempts):
+            try:
+                resp = _rest_session.get(url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
+                data = self._parse_json_response(resp)
+                if data is not None:
+                    return data
+                if attempt < (max_attempts - 1):
+                    sleep_s = (_REST_RETRY_BASE_SECONDS * (2 ** attempt)) + random.uniform(0.0, _REST_RETRY_JITTER_SECONDS)
+                    time.sleep(sleep_s)
+                    continue
+                return None
+            except requests.RequestException as e:
+                if attempt >= (max_attempts - 1):
+                    logger.error("REST query failed type=%s attempts=%s: %s", query_type, max_attempts, e)
+                    return None
+                sleep_s = (_REST_RETRY_BASE_SECONDS * (2 ** attempt)) + random.uniform(0.0, _REST_RETRY_JITTER_SECONDS)
+                time.sleep(sleep_s)
+            except Exception as e:
+                logger.error("REST query failed type=%s unexpected: %s", query_type, e)
+                return None
+        return None
 
     def get_market_price(self, product_id: int) -> dict:
         cache_key = f"{self.network}:{product_id}"
@@ -154,6 +210,39 @@ class NadoClient:
 
     def get_all_market_prices(self) -> dict:
         prices = {}
+        try:
+            data = self._query_rest("market_prices") or {}
+            if data.get("status") == "success":
+                payload = data.get("data", {}) or {}
+                rows = payload.get("market_prices")
+                if rows is None and isinstance(payload, list):
+                    rows = payload
+                if rows is None and isinstance(payload, dict):
+                    rows = payload.get("prices") or payload.get("markets")
+                if isinstance(rows, dict):
+                    rows = list(rows.values())
+                for row in rows or []:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        pid = int(row.get("product_id"))
+                    except Exception:
+                        continue
+                    name = str(get_product_name(pid, network=self.network, client=self)).replace("-PERP", "")
+                    bid = self._from_x18_dynamic(row.get("bid_x18") or row.get("bid") or row.get("price_x18") or row.get("price"))
+                    ask = self._from_x18_dynamic(row.get("ask_x18") or row.get("ask") or row.get("price_x18") or row.get("price"))
+                    if bid <= 0 and ask > 0:
+                        bid = ask
+                    if ask <= 0 and bid > 0:
+                        ask = bid
+                    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0
+                    if mid > 0:
+                        prices[name] = {"bid": float(bid), "ask": float(ask), "mid": float(mid)}
+                if prices:
+                    return prices
+        except Exception as e:
+            logger.debug("market_prices bulk query unavailable, falling back to fanout: %s", e)
+
         perp_products = []
         for name in get_perp_products(network=self.network, client=self):
             pid = get_product_id(name, network=self.network, client=self)
@@ -199,7 +288,12 @@ class NadoClient:
 
         return {"exists": False, "balances": {}}
 
-    def get_open_orders(self, product_id: int) -> list:
+    def get_open_orders(self, product_id: int, refresh: bool = False) -> list:
+        cache_key = (self.network, str(self.subaccount_hex or ""), int(product_id))
+        if not refresh:
+            cached = _open_orders_cache.get(cache_key)
+            if cached and (time.time() - float(cached.get("ts", 0))) < _OPEN_ORDERS_CACHE_TTL:
+                return list(cached.get("data") or [])
         if self._initialized and self.client:
             try:
                 from nado_protocol.utils.math import from_x18
@@ -216,6 +310,7 @@ class NadoClient:
                         "product_id": product_id,
                         "product_name": get_product_name(product_id),
                     })
+                _open_orders_cache[cache_key] = {"data": orders, "ts": time.time()}
                 return orders
             except Exception as e:
                 logger.error(f"SDK get_open_orders failed: {e}")
@@ -269,9 +364,11 @@ class NadoClient:
                             "product_name": get_product_name(product_id),
                         }
                     )
+                _open_orders_cache[cache_key] = {"data": orders, "ts": time.time()}
                 return orders
         except Exception as e:
             logger.error("REST get_open_orders failed: %s", e)
+        _open_orders_cache[cache_key] = {"data": [], "ts": time.time()}
         return []
 
     @staticmethod
@@ -494,13 +591,28 @@ class NadoClient:
             logger.warning(f"REST get_all_positions via subaccount_info failed: {e}")
 
         # Fallback to open orders for backward compatibility.
+        fallback_key = (self.network, str(self.subaccount_hex or ""))
+        cached = _positions_fallback_cache.get(fallback_key)
+        if cached and (time.time() - float(cached.get("ts", 0))) < _POSITIONS_FALLBACK_TTL:
+            return list(cached.get("data") or [])
+
         positions = []
-        for name in get_perp_products(network=self.network, client=self):
+        products = list(get_perp_products(network=self.network, client=self) or [])
+        max_products = max(1, _POSITIONS_FALLBACK_MAX_PRODUCTS)
+        if len(products) > max_products:
+            logger.warning(
+                "get_all_positions fallback truncating product scan %s -> %s to reduce REST load",
+                len(products),
+                max_products,
+            )
+            products = products[:max_products]
+        for name in products:
             pid = get_product_id(name, network=self.network, client=self)
             if pid is None:
                 continue
             orders = self.get_open_orders(pid)
             positions.extend(orders)
+        _positions_fallback_cache[fallback_key] = {"data": positions, "ts": time.time()}
         return positions
 
     def verify_linked_signer(self, expected_signer_address: str = None) -> dict:
@@ -631,6 +743,11 @@ class NadoClient:
             return "Too many requests. Please wait a moment and try again."
         if "invalid order price" in err_lower and "price_increment_x18" in err_lower:
             return "Order price did not match exchange tick size. Price was auto-adjusted if possible; please retry."
+        if "2122" in err_lower or "isolated-only" in err_lower or "marketisolatedonlymode" in compact:
+            return (
+                "This market is isolated-only. The bot now sends isolated orders, "
+                "but this trade may still fail if isolated margin is too low."
+            )
         return error_str
 
     @staticmethod
@@ -733,6 +850,25 @@ class NadoClient:
         return int((Decimal(str(value)) * Decimal("1000000000000000000")).to_integral_value(rounding=ROUND_HALF_UP))
 
     @staticmethod
+    def _to_x6_int(value: float) -> int:
+        return int((Decimal(str(value)) * Decimal("1000000")).to_integral_value(rounding=ROUND_HALF_UP))
+
+    @staticmethod
+    def _build_order_appendix(order_type_int: int, isolated: bool = False, reduce_only: bool = False, margin_x6: int = 0) -> int:
+        # Bit layout:
+        # version[0..7], isolated[8], order_type[9..10], reduce_only[11], value[64..127]
+        version = 1
+        appendix = int(version & 0xFF)
+        if isolated:
+            appendix |= (1 << 8)
+        appendix |= ((int(order_type_int) & 0x03) << 9)
+        if reduce_only:
+            appendix |= (1 << 11)
+        if isolated and margin_x6 > 0:
+            appendix |= (int(margin_x6) << 64)
+        return appendix
+
+    @staticmethod
     def _align_x18_to_increment(value_x18: int, increment_x18: int) -> int:
         if increment_x18 <= 0:
             return value_x18
@@ -813,6 +949,9 @@ class NadoClient:
         price: float,
         order_type: str = "default",
         is_buy: bool = True,
+        isolated_only: bool = False,
+        isolated_margin: Optional[float] = None,
+        reduce_only: bool = False,
         _retry_count: int = 0,
     ) -> dict:
         if not self._initialized or not self.client:
@@ -841,18 +980,15 @@ class NadoClient:
                 price = self._align_price_to_increment(price, price_increment, is_buy, order_type)
 
             from nado_protocol.engine_client.types.execute import PlaceOrderParams, OrderParams
-            from nado_protocol.utils.math import to_x18
-            from nado_protocol.utils.order import build_appendix
-            from nado_protocol.utils.expiration import OrderType, get_expiration_timestamp
+            from nado_protocol.utils.expiration import get_expiration_timestamp
             from nado_protocol.utils.nonce import gen_order_nonce
 
-            ot_map = {
-                "default": OrderType.DEFAULT,
-                "ioc": OrderType.IOC,
-                "fok": OrderType.FOK,
-                "post_only": OrderType.POST_ONLY,
-            }
-            ot = ot_map.get(order_type, OrderType.DEFAULT)
+            appendix_order_type_int = {
+                "default": 0,
+                "ioc": 1,
+                "fok": 2,
+                "post_only": 3,
+            }.get(order_type, 0)
 
             amount = size if is_buy else -size
             expiration_secs = 10 if order_type == "ioc" else 3600
@@ -896,13 +1032,24 @@ class NadoClient:
                         amount_x18 = int(bumped_amount_x18)
                         size = abs(float(amount_x18) / 1e18)
 
+            isolated_margin_x6 = 0
+            if isolated_only:
+                if isolated_margin is None:
+                    isolated_margin = abs(float(size) * float(price))
+                isolated_margin_x6 = max(0, self._to_x6_int(float(isolated_margin)))
+
             order = OrderParams(
                 sender=self.subaccount_hex,
                 priceX18=price_x18,
                 amount=amount_x18,
                 expiration=get_expiration_timestamp(expiration_secs),
                 nonce=gen_order_nonce(),
-                appendix=build_appendix(ot),
+                appendix=self._build_order_appendix(
+                    appendix_order_type_int,
+                    isolated=bool(isolated_only),
+                    reduce_only=bool(reduce_only),
+                    margin_x6=isolated_margin_x6,
+                ),
             )
 
             params = PlaceOrderParams(product_id=product_id, order=order)
@@ -974,6 +1121,9 @@ class NadoClient:
                             price=retry_price,
                             order_type=order_type,
                             is_buy=is_buy,
+                            isolated_only=isolated_only,
+                            isolated_margin=isolated_margin,
+                            reduce_only=reduce_only,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -1005,6 +1155,9 @@ class NadoClient:
                                 price=price,
                                 order_type=order_type,
                                 is_buy=is_buy,
+                                isolated_only=isolated_only,
+                                isolated_margin=isolated_margin,
+                                reduce_only=reduce_only,
                                 _retry_count=_retry_count + 1,
                             )
                         except Exception as retry_e:
@@ -1030,6 +1183,9 @@ class NadoClient:
                             price=price,
                             order_type=order_type,
                             is_buy=is_buy,
+                            isolated_only=isolated_only,
+                            isolated_margin=isolated_margin,
+                            reduce_only=reduce_only,
                             _retry_count=_retry_count + 1,
                         )
                         if retry_result.get("success"):
@@ -1056,6 +1212,9 @@ class NadoClient:
                             price=aligned_price,
                             order_type=order_type,
                             is_buy=is_buy,
+                            isolated_only=isolated_only,
+                            isolated_margin=isolated_margin,
+                            reduce_only=reduce_only,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -1065,7 +1224,16 @@ class NadoClient:
             logger.error(f"place_order failed: {e}")
             return {"success": False, "error": self._friendly_error(err_str)}
 
-    def place_market_order(self, product_id: int, size: float, is_buy: bool = True, slippage_pct: float = 1.0) -> dict:
+    def place_market_order(
+        self,
+        product_id: int,
+        size: float,
+        is_buy: bool = True,
+        slippage_pct: float = 1.0,
+        isolated_only: bool = False,
+        isolated_margin: Optional[float] = None,
+        reduce_only: bool = False,
+    ) -> dict:
         mp = self.get_market_price(product_id)
         if mp["mid"] == 0:
             return {"success": False, "error": "Could not fetch market price"}
@@ -1076,10 +1244,37 @@ class NadoClient:
         slippage_pct = max(0.1, min(slippage_pct, 10.0))
         multiplier = 1.0 + (slippage_pct / 100.0)
         price = mp["ask"] * multiplier if is_buy else mp["bid"] / multiplier
-        return self.place_order(product_id, size, price, order_type="ioc", is_buy=is_buy)
+        return self.place_order(
+            product_id,
+            size,
+            price,
+            order_type="ioc",
+            is_buy=is_buy,
+            isolated_only=isolated_only,
+            isolated_margin=isolated_margin,
+            reduce_only=reduce_only,
+        )
 
-    def place_limit_order(self, product_id: int, size: float, price: float, is_buy: bool = True) -> dict:
-        return self.place_order(product_id, size, price, order_type="default", is_buy=is_buy)
+    def place_limit_order(
+        self,
+        product_id: int,
+        size: float,
+        price: float,
+        is_buy: bool = True,
+        isolated_only: bool = False,
+        isolated_margin: Optional[float] = None,
+        reduce_only: bool = False,
+    ) -> dict:
+        return self.place_order(
+            product_id,
+            size,
+            price,
+            order_type="default",
+            is_buy=is_buy,
+            isolated_only=isolated_only,
+            isolated_margin=isolated_margin,
+            reduce_only=reduce_only,
+        )
 
     def cancel_order(self, product_id: int, digest: str) -> dict:
         if not self._initialized or not self.client:

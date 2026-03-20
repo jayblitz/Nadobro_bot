@@ -22,6 +22,15 @@ _catalog_cache: dict[str, dict] = {}
 _rest_session = requests.Session()
 
 
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    return text in ("1", "true", "yes", "y", "on")
+
+
 def _rest_url(network: str) -> str:
     return NADO_MAINNET_REST if str(network).lower() == "mainnet" else NADO_TESTNET_REST
 
@@ -61,6 +70,7 @@ def _build_static_catalog() -> dict:
             "base": key,
             "dynamic": False,
             "max_leverage": int(PRODUCT_MAX_LEVERAGE.get(key, _DYNAMIC_DEFAULT_MAX_LEVERAGE)),
+            "isolated_only": False,
         }
         by_id[pid] = key
         aliases[key.lower()] = key
@@ -185,6 +195,12 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
         except (TypeError, ValueError):
             max_lev = _DYNAMIC_DEFAULT_MAX_LEVERAGE
         max_lev = max(1, max_lev)
+        isolated_only = _as_bool(
+            row.get("isolated_only")
+            or book_info.get("isolated_only")
+            or product_row.get("isolated_only")
+            or product_book.get("isolated_only")
+        )
 
         key = base.upper().strip()
         perps[key] = {
@@ -194,6 +210,7 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
             "base": key,
             "dynamic": True,
             "max_leverage": int(max_lev),
+            "isolated_only": isolated_only,
         }
         by_id[pid] = key
         aliases[key.lower()] = key
@@ -268,4 +285,36 @@ def get_product_max_leverage(
         return max(1, int(row.get("max_leverage", _DYNAMIC_DEFAULT_MAX_LEVERAGE)))
     except (TypeError, ValueError):
         return max(1, int(_DYNAMIC_DEFAULT_MAX_LEVERAGE))
+
+
+def get_product_metadata(product: str, network: str = "mainnet", client=None, refresh: bool = False) -> dict:
+    key = (product or "").upper().strip()
+    if not key:
+        return {}
+    catalog = get_catalog(network=network, client=client, refresh=refresh)
+    row = (catalog.get("perps") or {}).get(key)
+    if not row:
+        resolved = (catalog.get("aliases") or {}).get(key.lower())
+        row = (catalog.get("perps") or {}).get(resolved) if resolved else None
+    return dict(row or {})
+
+
+def is_product_isolated_only(product: str, network: str = "mainnet", client=None, refresh: bool = False) -> bool:
+    row = get_product_metadata(product=product, network=network, client=client, refresh=refresh)
+    return _as_bool(row.get("isolated_only"))
+
+
+def is_product_id_isolated_only(
+    product_id: int, network: str = "mainnet", client=None, refresh: bool = False
+) -> bool:
+    try:
+        pid = int(product_id)
+    except (TypeError, ValueError):
+        return False
+    catalog = get_catalog(network=network, client=client, refresh=refresh)
+    key = (catalog.get("by_id") or {}).get(pid)
+    if not key:
+        return False
+    row = (catalog.get("perps") or {}).get(key) or {}
+    return _as_bool(row.get("isolated_only"))
 

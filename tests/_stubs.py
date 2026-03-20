@@ -122,17 +122,28 @@ def install_test_stubs() -> None:
     # requests
     if "requests" not in sys.modules:
         requests_mod = types.ModuleType("requests")
+        requests_adapters = types.ModuleType("requests.adapters")
 
         class _DummyResponse:
             def json(self):
                 return {}
 
         class _DummySession:
+            def mount(self, *args, **kwargs):
+                return None
+
             def get(self, *args, **kwargs):
                 return _DummyResponse()
 
+        class _HTTPAdapter:
+            def __init__(self, *args, **kwargs):
+                pass
+
         requests_mod.Session = _DummySession
+        requests_mod.RequestException = Exception
+        requests_adapters.HTTPAdapter = _HTTPAdapter
         sys.modules["requests"] = requests_mod
+        sys.modules["requests.adapters"] = requests_adapters
 
     # eth_account
     if "eth_account" not in sys.modules:
