@@ -36,6 +36,7 @@ def _default_strategy_settings() -> dict:
         "dn": {
             "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6,
             "auto_close_on_maintenance": 1.0,
+            "funding_entry_mode": "enter_anyway",
         },
         "vol": {"notional_usd": 100.0, "spread_bp": 6.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
         "bro": {

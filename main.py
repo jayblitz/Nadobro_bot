@@ -171,6 +171,10 @@ async def run_bot():
         stop_runtime,
         handle_strategy_job,
     )
+    from src.nadobro.services.runtime_supervisor import (
+        start_runtime_supervisor,
+        stop_runtime_supervisor,
+    )
     from src.nadobro.services.scheduler import handle_alert_job
     from src.nadobro.services.execution_queue import register_handlers, start_workers, stop_workers
     from src.nadobro.services.copy_service import set_copy_bot_app
@@ -183,6 +187,7 @@ async def run_bot():
         strategy_workers=int(os.environ.get("NADO_STRATEGY_WORKERS", "2")),
         alert_workers=int(os.environ.get("NADO_ALERT_WORKERS", "1")),
     )
+    start_runtime_supervisor()
 
     try:
         from src.nadobro.services.nado_client import NadoClient
@@ -316,6 +321,7 @@ async def run_bot():
         stop_scheduler()
         await stop_copy_polling()
         stop_runtime()
+        stop_runtime_supervisor()
         stop_workers()
         await bot_app.updater.stop()
         await bot_app.stop()

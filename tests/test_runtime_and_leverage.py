@@ -11,8 +11,10 @@ install_test_stubs()
 from src.nadobro.handlers.intent_handlers import _enrich_trade_payload
 from src.nadobro.handlers.intent_parser import parse_interaction_intent
 from src.nadobro.services import bot_runtime
+from src.nadobro.services import runtime_supervisor
 from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
 from src.nadobro.services.trade_service import _place_take_profit_order
+from src.nadobro.strategies import delta_neutral
 
 
 class RuntimeAndLeverageTests(unittest.TestCase):
@@ -212,6 +214,112 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertFalse(_should_trigger_stop_loss("LONG", 69000.0, 68500.0))
         self.assertTrue(_should_trigger_stop_loss("SHORT", 69000.0, 68500.0))
         self.assertFalse(_should_trigger_stop_loss("SHORT", 68000.0, 68500.0))
+
+    def test_runtime_supervisor_group_mapping(self):
+        self.assertEqual(runtime_supervisor.strategy_worker_group("mm"), "mm_grid")
+        self.assertEqual(runtime_supervisor.strategy_worker_group("grid"), "mm_grid")
+        self.assertEqual(runtime_supervisor.strategy_worker_group("dn"), "dn")
+        self.assertEqual(runtime_supervisor.strategy_worker_group("vol"), "vol")
+        self.assertEqual(runtime_supervisor.strategy_worker_group("bro"), "bro")
+
+    def test_dn_wait_mode_stays_idle_on_unfavorable_funding(self):
+        class FakeClient:
+            def get_funding_rate(self, _product_id):
+                return {"funding_rate": -0.0002}
+
+            def get_all_positions(self):
+                return []
+
+            def get_balance(self):
+                return {"balances": {1001: 0.0}}
+
+        state = {
+            "product": "BTC",
+            "notional_usd": 100.0,
+            "leverage": 2.0,
+            "funding_entry_mode": "wait",
+            "slippage_pct": 1.0,
+        }
+        with patch("src.nadobro.config.get_spot_product_id", return_value=1001):
+            result = delta_neutral.run_cycle(
+                telegram_id=1,
+                network="testnet",
+                state=state,
+                client=FakeClient(),
+                mid=50000.0,
+                product_id=1,
+                product="BTC",
+                open_orders=[],
+            )
+        self.assertTrue(result.get("success"))
+        self.assertEqual(result.get("action"), "wait_unfavorable")
+
+    def test_dn_enter_anyway_opens_short_on_unfavorable_funding(self):
+        class FakeClient:
+            def get_funding_rate(self, _product_id):
+                return {"funding_rate": -0.0002}
+
+            def get_all_positions(self):
+                return []
+
+            def get_balance(self):
+                return {"balances": {1001: 0.0}}
+
+        state = {
+            "product": "BTC",
+            "notional_usd": 100.0,
+            "leverage": 2.0,
+            "funding_entry_mode": "enter_anyway",
+            "slippage_pct": 1.0,
+        }
+        with patch("src.nadobro.config.get_spot_product_id", return_value=1001), patch(
+            "src.nadobro.services.trade_service.execute_spot_market_order",
+            return_value={"success": True},
+        ), patch(
+            "src.nadobro.services.trade_service.execute_market_order",
+            return_value={"success": True},
+        ):
+            result = delta_neutral.run_cycle(
+                telegram_id=1,
+                network="testnet",
+                state=state,
+                client=FakeClient(),
+                mid=50000.0,
+                product_id=1,
+                product="BTC",
+                open_orders=[],
+            )
+        self.assertTrue(result.get("success"))
+        self.assertEqual(result.get("action"), "enter_short")
+
+    def test_start_user_bot_sets_worker_group_on_both_networks(self):
+        def _run_for_network(network_name: str):
+            saved = {}
+
+            def _save_state_stub(telegram_id, network, state):
+                saved["network"] = network
+                saved["state"] = dict(state)
+
+            fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network_name))
+            with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
+                bot_runtime, "get_strategy_settings", return_value=(network_name, {})
+            ), patch.object(bot_runtime, "_save_state", side_effect=_save_state_stub), patch.object(
+                bot_runtime, "_ensure_task"
+            ):
+                ok, _ = bot_runtime.start_user_bot(
+                    telegram_id=101,
+                    strategy="dn",
+                    product="BTC",
+                    leverage=3,
+                    slippage_pct=1,
+                )
+            self.assertTrue(ok)
+            self.assertEqual(saved.get("network"), network_name)
+            self.assertEqual(saved["state"].get("worker_group"), "dn")
+            self.assertEqual(saved["state"].get("funding_entry_mode"), "enter_anyway")
+
+        _run_for_network("mainnet")
+        _run_for_network("testnet")
 
 
 if __name__ == "__main__":

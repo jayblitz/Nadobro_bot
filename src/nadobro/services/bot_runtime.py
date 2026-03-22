@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -25,6 +26,7 @@ STRATEGY_ERROR_ALERT_STREAK = 3
 _bot_app = None
 _runtime_loop: asyncio.AbstractEventLoop | None = None
 _tasks: dict[str, asyncio.Task] = {}
+_process_worker_mode = False
 
 
 def set_bot_app(app):
@@ -63,6 +65,12 @@ def _default_state() -> dict:
         "last_error": None,
         "error_streak": 0,
         "runs": 0,
+        "worker_group": None,
+        "worker_last_heartbeat": 0.0,
+        "last_dispatch_ts": 0.0,
+        "last_cycle_ms": 0.0,
+        "last_cycle_result": "",
+        "worker_pid": None,
     }
 
 
@@ -111,7 +119,13 @@ def _strategy_defaults(strategy: str) -> dict:
             "close_offset_bp": 24.0,
         },
         "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0},
-        "dn": {"notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "auto_close_on_maintenance": 1.0},
+        "dn": {
+            "notional_usd": 50.0,
+            "spread_bp": 3.0,
+            "interval_seconds": 90,
+            "auto_close_on_maintenance": 1.0,
+            "funding_entry_mode": "enter_anyway",
+        },
         "vol": {"notional_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
         "bro": {
             "budget_usd": 500.0, "risk_level": "balanced", "max_positions": 3,
@@ -151,6 +165,8 @@ def start_user_bot(
         state = _default_state()
         state.update(_strategy_defaults(strategy))
         state.update(strat_cfg)
+        from src.nadobro.services.runtime_supervisor import strategy_worker_group
+
         state.update(
             {
                 "running": True,
@@ -172,6 +188,7 @@ def start_user_bot(
                 },
             }
         )
+        state["worker_group"] = strategy_worker_group("bro")
         _save_state(telegram_id, network, state)
         _ensure_task(telegram_id, network)
         return True, "Bro Mode activated 🧠"
@@ -207,6 +224,9 @@ def start_user_bot(
             "runs": 0,
         }
     )
+    from src.nadobro.services.runtime_supervisor import strategy_worker_group
+
+    state["worker_group"] = strategy_worker_group(strategy)
     _save_state(telegram_id, network, state)
     _ensure_task(telegram_id, network)
     if strategy == "dn":
@@ -220,6 +240,46 @@ def start_user_bot(
         f"{strategy.upper()} bot started on {product.upper()}-PERP ({network}) "
         f"| TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
     )
+
+
+def set_process_worker_mode(enabled: bool) -> None:
+    global _process_worker_mode
+    _process_worker_mode = bool(enabled)
+
+
+def run_cycle_job_sync(payload: dict) -> dict:
+    telegram_id = int(payload.get("telegram_id"))
+    network = str(payload.get("network"))
+    started = time.perf_counter()
+    set_process_worker_mode(True)
+    try:
+        state = _load_state(telegram_id, network)
+        if not state.get("running"):
+            return {
+                "ok": True,
+                "skipped": "not_running",
+                "worker_pid": os.getpid(),
+                "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                "completed_at": time.time(),
+            }
+        ok, error_msg = asyncio.run(_run_cycle(telegram_id, network, state))
+        return {
+            "ok": bool(ok),
+            "error": error_msg,
+            "worker_pid": os.getpid(),
+            "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+            "completed_at": time.time(),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "worker_pid": os.getpid(),
+            "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+            "completed_at": time.time(),
+        }
+    finally:
+        set_process_worker_mode(False)
 
 
 def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, str]:
@@ -289,6 +349,23 @@ def get_user_bot_status(telegram_id: int) -> dict:
     last_run = float(state.get("last_run_ts") or 0)
     interval = int(state.get("interval_seconds") or 60)
     next_cycle_in = max(0, int(interval - (time.time() - last_run))) if last_run > 0 else 0
+    other_running_networks: list[str] = []
+    try:
+        rows = query_all(
+            "SELECT key, value FROM bot_state WHERE key LIKE %s",
+            (f"{STATE_PREFIX}{telegram_id}:%",),
+        )
+        for row in rows:
+            key = str(row.get("key", ""))
+            key_part = key.replace(STATE_PREFIX, "")
+            _, row_network = key_part.split(":", 1)
+            if row_network == network:
+                continue
+            row_state = json.loads(row.get("value") or "{}")
+            if row_state.get("running"):
+                other_running_networks.append(row_network)
+    except Exception:
+        pass
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -316,6 +393,16 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "quote_refresh_rate": (state.get("mm_last_metrics") or {}).get("quote_refresh_rate"),
         "inventory_skew_usd": (state.get("mm_last_metrics") or {}).get("inventory_skew_usd"),
         "session_notional_done_usd": (state.get("mm_last_metrics") or {}).get("session_notional_done_usd"),
+        "worker_group": state.get("worker_group"),
+        "worker_last_heartbeat": float(state.get("worker_last_heartbeat") or 0.0),
+        "last_dispatch_ts": float(state.get("last_dispatch_ts") or 0.0),
+        "last_cycle_ms": float(state.get("last_cycle_ms") or 0.0),
+        "last_cycle_result": state.get("last_cycle_result") or "",
+        "worker_pid": state.get("worker_pid"),
+        "dn_last_funding_rate": state.get("dn_last_funding_rate"),
+        "dn_unfavorable_count": state.get("dn_unfavorable_count"),
+        "dn_mode": state.get("dn_mode") or state.get("funding_entry_mode"),
+        "other_running_networks": other_running_networks,
     }
 
 
@@ -448,7 +535,37 @@ async def handle_strategy_job(payload: dict):
         return
     cycle_started = time.perf_counter()
     try:
-        ok, error_msg = await _run_cycle(telegram_id, network, state)
+        from src.nadobro.services.runtime_supervisor import (
+            is_multiprocess_enabled,
+            strategy_worker_group,
+            submit_cycle_job,
+        )
+
+        if is_multiprocess_enabled():
+            strategy = str(state.get("strategy") or "")
+            worker_group = strategy_worker_group(strategy)
+            state["worker_group"] = worker_group
+            state["last_dispatch_ts"] = time.time()
+            _save_state(telegram_id, network, state)
+            delegated = await submit_cycle_job(
+                {
+                    "telegram_id": telegram_id,
+                    "network": network,
+                    "strategy": strategy,
+                    "worker_group": worker_group,
+                }
+            )
+            ok = bool(delegated.get("ok", True))
+            error_msg = delegated.get("error")
+            refreshed = _load_state(telegram_id, network)
+            refreshed["worker_group"] = worker_group
+            refreshed["worker_last_heartbeat"] = float(delegated.get("completed_at") or time.time())
+            refreshed["last_cycle_ms"] = float(delegated.get("elapsed_ms") or 0.0)
+            refreshed["last_cycle_result"] = "ok" if ok else "error"
+            refreshed["worker_pid"] = delegated.get("worker_pid")
+            _save_state(telegram_id, network, refreshed)
+        else:
+            ok, error_msg = await _run_cycle(telegram_id, network, state)
         if ok:
             refreshed = _load_state(telegram_id, network)
             if refreshed.get("error_streak") or refreshed.get("last_error"):
@@ -565,7 +682,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 client, 0.0, 0, "MULTI", [],
             )
         tk_check = _task_key(telegram_id, network)
-        if tk_check not in _tasks or not state.get("running", True):
+        if (not _process_worker_mode) and (tk_check not in _tasks or not state.get("running", True)):
             state["running"] = False
             _save_state(telegram_id, network, state)
             if tk_check not in _tasks:
@@ -717,7 +834,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         )
 
     tk_post = _task_key(telegram_id, network)
-    if tk_post not in _tasks or not state.get("running", True):
+    if (not _process_worker_mode) and (tk_post not in _tasks or not state.get("running", True)):
         state["running"] = False
         _save_state(telegram_id, network, state)
         if tk_post in _tasks:

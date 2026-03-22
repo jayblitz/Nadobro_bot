@@ -65,6 +65,10 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     fr_data = client.get_funding_rate(product_id) or {}
     funding_rate = float(fr_data.get("funding_rate", 0) or 0)
     state["dn_last_funding_rate"] = funding_rate
+    funding_entry_mode = str(state.get("funding_entry_mode") or "enter_anyway").strip().lower()
+    if funding_entry_mode not in ("wait", "enter_anyway"):
+        funding_entry_mode = "enter_anyway"
+    state["dn_mode"] = funding_entry_mode
 
     unfavorable_count = int(state.get("dn_unfavorable_count") or 0)
     total_funding = float(state.get("dn_total_funding_earned") or 0.0)
@@ -89,6 +93,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         "success": True,
         "action": "hold",
         "funding_rate": funding_rate,
+        "funding_entry_mode": funding_entry_mode,
         "position_size": current_size,
         "position_side": current_side,
         "spot_size": spot_size,
@@ -147,10 +152,20 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 )
             return result
 
-        result["action"] = "wait_unfavorable"
-        return result
+        if funding_entry_mode == "wait":
+            result["action"] = "wait_unfavorable"
+            result["detail"] = (
+                f"Funding unfavorable ({funding_rate:.6f}); waiting for favorable rate "
+                f"(cycle {unfavorable_count})."
+            )
+            return result
 
-    state["dn_unfavorable_count"] = 0
+        result["detail"] = (
+            f"Funding unfavorable ({funding_rate:.6f}); enter-anyway mode keeps hedge active."
+        )
+
+    if funding_favorable:
+        state["dn_unfavorable_count"] = 0
 
     # Keep spot leg aligned to target size.
     spot_size_diff = abs(spot_size - target_size)

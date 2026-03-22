@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
 from src.nadobro.i18n import get_active_language, localize_text
@@ -545,6 +546,22 @@ def _fmt_uptime(started_at: str) -> str:
         return "—"
 
 
+def _fmt_age_seconds(ts: float) -> str:
+    if not ts:
+        return "—"
+    try:
+        age = max(0, int(time.time() - float(ts)))
+        if age < 60:
+            return f"{age}s"
+        mins, secs = divmod(age, 60)
+        if mins < 60:
+            return f"{mins}m {secs}s"
+        hours, mins = divmod(mins, 60)
+        return f"{hours}h {mins}m"
+    except Exception:
+        return "—"
+
+
 def fmt_status_overview(status: dict, onboarding: dict):
     running = status.get("running")
     complete = onboarding.get("onboarding_complete")
@@ -567,6 +584,12 @@ def fmt_status_overview(status: dict, onboarding: dict):
         elif not funded:
             lines.append(f"{_loc('Funding:')} *{_loc('NEEDED')}* — {_loc('deposit to your wallet')}")
     lines.append("")
+    other_running = status.get("other_running_networks") or []
+    if other_running:
+        lines.append(
+            f"⚠️ {_loc('Other running network(s)')}: *{escape_md(', '.join(str(n).upper() for n in other_running))}*"
+        )
+        lines.append("")
 
     if not running:
         lines.append(f"{_loc('Strategy:')} *{_loc('NOT RUNNING')}*")
@@ -608,6 +631,33 @@ def fmt_status_overview(status: dict, onboarding: dict):
         error_streak = status.get("error_streak", 0)
         if error_streak >= 3:
             lines.append(f"⚠️ {escape_md(str(error_streak))} {_loc('consecutive errors')}")
+
+        worker_group = status.get("worker_group")
+        heartbeat = _fmt_age_seconds(float(status.get("worker_last_heartbeat") or 0.0))
+        dispatch_age = _fmt_age_seconds(float(status.get("last_dispatch_ts") or 0.0))
+        cycle_ms = float(status.get("last_cycle_ms") or 0.0)
+        cycle_result = status.get("last_cycle_result") or "n/a"
+        if worker_group:
+            lines.append("")
+            lines.append(
+                f"{_loc('Worker Group')}: *{escape_md(str(worker_group).upper())}* \\| "
+                f"{_loc('Heartbeat')}: *{escape_md(heartbeat)}*"
+            )
+            lines.append(
+                f"{_loc('Last Dispatch')}: *{escape_md(dispatch_age)}* \\| "
+                f"{_loc('Cycle')}: *{escape_md(cycle_result.upper())}* "
+                f"\\({escape_md(f'{cycle_ms:.1f}ms')}\\)"
+            )
+
+        if strategy == "DN":
+            dn_mode = status.get("dn_mode") or "enter_anyway"
+            dn_fr = float(status.get("dn_last_funding_rate") or 0.0)
+            dn_unf = int(status.get("dn_unfavorable_count") or 0)
+            lines.append(
+                f"{_loc('Funding Mode')}: *{escape_md(str(dn_mode).upper())}* \\| "
+                f"{_loc('Funding')}: *{escape_md(f'{dn_fr:.6f}')}*"
+            )
+            lines.append(f"{_loc('Unfavorable Cycles')}: *{escape_md(str(dn_unf))}*")
 
         bro_state = status.get("bro_state") or {}
         if strategy == "BRO" and bro_state:

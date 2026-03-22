@@ -1906,9 +1906,13 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         )
     elif strategy_id == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
+        funding_mode = str(conf.get("funding_entry_mode", "enter_anyway")).strip().lower()
+        mode_label = "ENTER ANYWAY" if funding_mode == "enter_anyway" else "WAIT FAVORABLE"
+        funding_bias = "FAVORABLE" if funding_rate > 0.000001 else "UNFAVORABLE"
         extra_cfg = (
             f"\nHedge Leg: *{escape_md(product)}\\-SPOT long + {escape_md(product)}\\-PERP short*"
             f"\nFunding Leverage: *{escape_md(f'{leverage:.0f}x')}* \\(1x to 5x\\)"
+            f"\nFunding Entry: *{escape_md(mode_label)}* \\| Funding Now: *{escape_md(funding_bias)}*"
             f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
         )
     return (
