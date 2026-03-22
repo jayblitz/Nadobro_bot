@@ -210,6 +210,31 @@ def build_trade_preview_text(
     return preview
 
 
+def humanize_exchange_error(error) -> str:
+    """Turn raw JSON / engine errors into user-friendly text (Telegram-safe)."""
+    if error is None:
+        return ""
+    s = str(error).strip()
+    low = s.lower()
+    if "2070" in s or "maximum open interest" in low:
+        return (
+            "This market has hit its maximum open interest on the exchange (error 2070). "
+            "You cannot open new positions until capacity frees up; you can still close or reduce positions."
+        )
+    try:
+        import json
+
+        j = json.loads(s)
+        if isinstance(j, dict):
+            code = j.get("error_code")
+            msg = str(j.get("error") or "")
+            if code == 2070 or "maximum open interest" in msg.lower():
+                return humanize_exchange_error(msg or s)
+    except Exception:
+        pass
+    return s
+
+
 def fmt_trade_result(result):
     if result.get("success"):
         r_price = result.get("price", 0)
@@ -241,8 +266,57 @@ def fmt_trade_result(result):
             lines.insert(3, f"📋 *{_loc_md('Type')}:* {escape_md(order_type)}")
         return "\n".join(lines)
     else:
-        error = result.get("error", _loc("Unknown error"))
+        error = humanize_exchange_error(result.get("error", _loc("Unknown error")))
         return f"❌ *{_loc('Trade Failed')}*\n\n{escape_md(error)}"
+
+
+def fmt_bracket_result(result: dict) -> str:
+    """Format TP/SL placement on an existing position (natural-language commands)."""
+    if result.get("success"):
+        lines = [
+            _loc("✅ *TP/SL updated*"),
+            escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+            "",
+            f"🪙 *{_loc_md('Product')}:* {escape_md(result.get('product', '?'))}",
+            f"🌐 *{_loc_md('Network:')}* {escape_md(result.get('network', '?'))}",
+        ]
+        if result.get("tp_requested"):
+            if result.get("tp_set"):
+                lines.append(f"📈 *{_loc_md('Take Profit')}:* {escape_md(str(result.get('tp_price')))}")
+            else:
+                lines.append(
+                    f"⚠️ *{_loc_md('Take Profit')}:* {escape_md(str(result.get('tp_error', _loc('Failed to place TP order.'))))}"
+                )
+        if result.get("sl_requested"):
+            if result.get("sl_armed"):
+                lines.append(f"🛡 *{_loc_md('Stop Loss')}:* {escape_md(str(result.get('sl_price')))}")
+            else:
+                lines.append(
+                    f"⚠️ *{_loc_md('Stop Loss')}:* {escape_md(str(result.get('sl_error', _loc('Failed to arm SL rule.'))))}"
+                )
+        return "\n".join(lines)
+    err = humanize_exchange_error(result.get("error", _loc("Unknown error")))
+    return f"❌ *{_loc('Trade Failed')}* — TP/SL\n\n{escape_md(err)}"
+
+
+def fmt_limit_close_result(result: dict) -> str:
+    """Reduce-only limit order used to close or scale out of a position."""
+    if result.get("success"):
+        price_str = "$" + fmt_price(float(result.get("limit_price", 0)), result.get("product", "BTC"))
+        lines = [
+            _loc("✅ *Limit close placed*"),
+            escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+            "",
+            f"🪙 *{_loc_md('Product')}:* {escape_md(result.get('product', '?'))}",
+            f"📏 *{_loc_md('Size')}:* {escape_md(str(result.get('size', '?')))}",
+            f"💲 *{_loc_md('Limit')}:* {escape_md(price_str)}",
+            f"📌 *{_loc_md('Side')}:* {escape_md(result.get('side', '?'))}",
+            "",
+            f"🌐 *{_loc_md('Network:')}* {escape_md(result.get('network', '?'))}",
+        ]
+        return "\n".join(lines)
+    err = humanize_exchange_error(result.get("error", _loc("Unknown error")))
+    return f"❌ *{_loc('Trade Failed')}* — limit close\n\n{escape_md(err)}"
 
 
 def fmt_wallet_info(wallet_info):

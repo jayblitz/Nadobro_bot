@@ -502,6 +502,202 @@ def _arm_stop_loss_rule(
     }
 
 
+def apply_tp_sl_to_open_position(
+    telegram_id: int,
+    product: str,
+    tp_price: float | None = None,
+    sl_price: float | None = None,
+) -> dict:
+    """
+    Place a reduce-only take-profit limit and/or arm the bot stop-loss rule for an existing PERP position.
+    Used by natural-language commands so replies reflect real execution, not LLM text.
+    """
+    tp_price = None if tp_price is None else float(tp_price)
+    sl_price = None if sl_price is None else float(sl_price)
+    if (tp_price is None or tp_price <= 0) and (sl_price is None or sl_price <= 0):
+        return {"success": False, "error": "Provide a valid TP and/or SL price greater than zero."}
+
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    product_id = get_product_id(product, network=network)
+    if product_id is None:
+        return {"success": False, "error": f"Unknown product '{product}'."}
+
+    client = get_user_nado_client(telegram_id)
+    if not client:
+        return {"success": False, "error": "Wallet not initialized or key migration required."}
+
+    from src.nadobro.services.settings_service import get_user_settings
+
+    _, settings = get_user_settings(telegram_id)
+    leverage = float(settings.get("default_leverage", 3) or 3)
+    leverage = max(1.0, leverage)
+
+    net_positions = _normalize_net_positions(client.get_all_positions() or [])
+    product_pos = net_positions.get(product_id)
+    if not product_pos:
+        return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
+
+    signed_amount = float(product_pos.get("signed_amount", 0) or 0)
+    pos_size = abs(signed_amount)
+    if pos_size <= 0:
+        return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
+
+    is_long = signed_amount > 0
+    product_name = get_product_name(product_id, network=network)
+
+    isolated_only = is_product_isolated_only(product, network=network, client=client)
+    isolated_margin = None
+    if isolated_only:
+        mp = client.get_market_price(product_id)
+        mid = float(mp.get("mid", 0) or 0)
+        if mid > 0:
+            isolated_margin = (float(pos_size) * mid) / leverage
+
+    out: dict = {
+        "product": product_name,
+        "network": network,
+        "position_size": pos_size,
+        "side": "LONG" if is_long else "SHORT",
+    }
+    any_ok = False
+
+    if tp_price is not None and tp_price > 0:
+        out["tp_requested"] = True
+        tp_res = client.place_limit_order(
+            product_id,
+            float(pos_size),
+            float(tp_price),
+            is_buy=(not is_long),
+            isolated_only=isolated_only,
+            isolated_margin=isolated_margin,
+            reduce_only=True,
+        )
+        if tp_res.get("success"):
+            any_ok = True
+            out["tp_set"] = True
+            out["tp_price"] = float(tp_price)
+            out["tp_digest"] = tp_res.get("digest")
+        else:
+            out["tp_set"] = False
+            out["tp_price"] = float(tp_price)
+            out["tp_error"] = tp_res.get("error", "Failed to place TP order.")
+
+    if sl_price is not None and sl_price > 0:
+        out["sl_requested"] = True
+        sl_part = _arm_stop_loss_rule(
+            telegram_id=telegram_id,
+            network=network,
+            product=product_name,
+            is_long=is_long,
+            stop_price=float(sl_price),
+            size=float(pos_size),
+        )
+        out.update(sl_part)
+        if sl_part.get("sl_armed"):
+            any_ok = True
+
+    if out.get("tp_requested") and out.get("sl_requested"):
+        out["success"] = bool(any_ok)
+    elif out.get("tp_requested"):
+        out["success"] = bool(out.get("tp_set"))
+    elif out.get("sl_requested"):
+        out["success"] = bool(out.get("sl_armed"))
+    else:
+        out["success"] = False
+
+    if not out.get("success"):
+        errs = []
+        if out.get("tp_error"):
+            errs.append(str(out["tp_error"]))
+        if out.get("sl_error"):
+            errs.append(str(out["sl_error"]))
+        out["error"] = errs[0] if errs else "TP/SL placement failed."
+
+    return out
+
+
+def limit_close_position(
+    telegram_id: int,
+    product: str,
+    limit_price: float,
+    size: float | None = None,
+) -> dict:
+    """
+    Place a reduce-only limit order to close (fully or partially) an existing PERP position.
+    """
+    try:
+        lp = float(limit_price)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "Invalid limit price."}
+    if lp <= 0:
+        return {"success": False, "error": "Limit price must be greater than zero."}
+
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    product_id = get_product_id(product, network=network)
+    if product_id is None:
+        return {"success": False, "error": f"Unknown product '{product}'."}
+
+    client = get_user_nado_client(telegram_id)
+    if not client:
+        return {"success": False, "error": "Wallet not initialized or key migration required."}
+
+    from src.nadobro.services.settings_service import get_user_settings
+
+    _, settings = get_user_settings(telegram_id)
+    leverage = float(settings.get("default_leverage", 3) or 3)
+    leverage = max(1.0, leverage)
+
+    net_positions = _normalize_net_positions(client.get_all_positions() or [])
+    product_pos = net_positions.get(product_id)
+    if not product_pos:
+        return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
+
+    signed_amount = float(product_pos.get("signed_amount", 0) or 0)
+    pos_size = abs(signed_amount)
+    if pos_size <= 0:
+        return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
+
+    is_long = signed_amount > 0
+    close_sz = float(size) if size is not None else pos_size
+    close_sz = min(close_sz, pos_size)
+    if close_sz <= 0:
+        return {"success": False, "error": "Invalid close size."}
+
+    product_name = get_product_name(product_id, network=network)
+    isolated_only = is_product_isolated_only(product, network=network, client=client)
+    isolated_margin = None
+    if isolated_only:
+        mp = client.get_market_price(product_id)
+        mid = float(mp.get("mid", 0) or 0)
+        if mid > 0:
+            isolated_margin = (float(close_sz) * mid) / leverage
+
+    r = client.place_limit_order(
+        product_id,
+        float(close_sz),
+        float(lp),
+        is_buy=(not is_long),
+        isolated_only=isolated_only,
+        isolated_margin=isolated_margin,
+        reduce_only=True,
+    )
+    if not r.get("success"):
+        return {"success": False, "error": r.get("error", "Limit close failed.")}
+
+    return {
+        "success": True,
+        "kind": "LIMIT_CLOSE",
+        "product": product_name,
+        "network": network,
+        "size": close_sz,
+        "limit_price": float(lp),
+        "digest": r.get("digest"),
+        "side": "LONG" if is_long else "SHORT",
+    }
+
+
 def _normalize_net_positions(positions: list) -> dict[int, dict]:
     """
     Build net position by product with de-dup protection.

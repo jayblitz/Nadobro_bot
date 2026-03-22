@@ -9,7 +9,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.handlers.intent_handlers import _enrich_trade_payload
-from src.nadobro.handlers.intent_parser import parse_interaction_intent
+from src.nadobro.handlers.intent_parser import parse_interaction_intent, parse_position_management_intent
 from src.nadobro.services import bot_runtime
 from src.nadobro.services import runtime_supervisor
 from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
@@ -190,6 +190,39 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIsNotNone(intent)
         self.assertEqual(intent.get("action"), "open_view")
         self.assertEqual(intent.get("target"), "points:view")
+
+    def test_parse_position_management_close_all(self):
+        intent = parse_position_management_intent("close all positions")
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.get("action"), "close_all")
+        intent2 = parse_position_management_intent("market close everything")
+        self.assertIsNotNone(intent2)
+        self.assertEqual(intent2.get("action"), "close_all")
+
+    def test_parse_position_management_market_close(self):
+        intent = parse_position_management_intent("close my BTC position")
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.get("action"), "close_market")
+        self.assertEqual(intent.get("product"), "BTC")
+        self.assertIsNone(intent.get("size"))
+
+    def test_parse_position_management_limit_close(self):
+        intent = parse_position_management_intent("close BTC at 69500")
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.get("action"), "limit_close")
+        self.assertEqual(intent.get("product"), "BTC")
+        self.assertEqual(intent.get("limit_price"), 69500.0)
+
+    def test_parse_position_management_tp_sl(self):
+        intent = parse_position_management_intent("set TP order for my BTC open position at 69500")
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.get("action"), "set_tp_sl")
+        self.assertEqual(intent.get("product"), "BTC")
+        self.assertEqual(intent.get("tp_price"), 69500.0)
+
+    def test_parse_position_management_defers_to_full_trade_intent(self):
+        intent = parse_position_management_intent("long 5 BTC with 20x leverage")
+        self.assertIsNone(intent)
 
     def test_place_take_profit_order_places_opposite_side_limit(self):
         calls = []

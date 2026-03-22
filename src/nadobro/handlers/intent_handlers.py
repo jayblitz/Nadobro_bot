@@ -2,16 +2,29 @@ import re
 import logging
 
 from telegram.constants import ParseMode
+from src.nadobro.handlers.keyboards import confirm_close_all_kb
 from telegram.ext import CallbackContext
 from telegram.error import BadRequest
 
 from src.nadobro.i18n import localize_text, get_active_language
-from src.nadobro.handlers.formatters import escape_md, build_trade_preview_text
-from src.nadobro.handlers.intent_parser import parse_trade_intent
+from src.nadobro.handlers.formatters import (
+    escape_md,
+    build_trade_preview_text,
+    fmt_bracket_result,
+    fmt_limit_close_result,
+    humanize_exchange_error,
+)
+from src.nadobro.handlers.intent_parser import parse_trade_intent, parse_position_management_intent
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.onboarding_service import get_resume_step
 from src.nadobro.services.settings_service import get_user_settings
-from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
+from src.nadobro.services.trade_service import (
+    apply_tp_sl_to_open_position,
+    close_position,
+    execute_market_order,
+    execute_limit_order,
+    limit_close_position,
+)
 from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
 from src.nadobro.config import get_product_id, get_product_max_leverage
 
@@ -213,3 +226,101 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
     confirm_prompt = localize_text("Type `confirm` to execute or `cancel` to discard\\.", lang)
     await _reply_md_safe(update.message, f"{preview}\n\n{confirm_prompt}")
     return True
+
+
+async def handle_position_management_intent(update, context: CallbackContext, telegram_id: int, text: str) -> bool:
+    """NL: TP/SL, market close, limit close, close all — must run before trade intents."""
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    client = get_user_readonly_client(telegram_id)
+    intent = parse_position_management_intent(text, network=network, client=client)
+    if not intent:
+        return False
+
+    logger.info(
+        "position_management_intent telegram_id=%s action=%s product=%s",
+        telegram_id,
+        intent.get("action"),
+        intent.get("product"),
+    )
+
+    lang = get_active_language()
+    step = get_resume_step(telegram_id)
+    if step != "complete":
+        await _reply_md_safe(
+            update.message,
+            localize_text("⚠️ Setup incomplete\\. Resume onboarding at *{step}*\\.", lang).format(step=escape_md(step.upper())),
+        )
+        return True
+
+    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    if not wallet_ready:
+        await _reply_md_safe(update.message, f"⚠️ {escape_md(wallet_msg)}")
+        return True
+
+    action = intent.get("action")
+
+    if action == "close_all":
+        if is_trading_paused():
+            await _reply_md_safe(update.message, localize_text("⏸ Trading is temporarily paused by admin\\.", lang))
+            return True
+        context.user_data["pending_text_close_all"] = True
+        try:
+            await update.message.reply_text(
+                "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?\n\n"
+                "Type `confirm` to execute or `cancel` to discard\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=confirm_close_all_kb(),
+            )
+        except BadRequest:
+            await update.message.reply_text(
+                "⚠️ Close All Positions — type confirm or cancel.",
+                reply_markup=confirm_close_all_kb(),
+            )
+        return True
+
+    if is_trading_paused():
+        await _reply_md_safe(update.message, localize_text("⏸ Trading is temporarily paused by admin\\.", lang))
+        return True
+
+    from src.nadobro.services.async_utils import run_blocking
+
+    if action == "set_tp_sl":
+        tp = intent.get("tp_price")
+        sl = intent.get("sl_price")
+        product = intent.get("product") or "BTC"
+        if tp is None and sl is None:
+            await _reply_md_safe(
+                update.message,
+                localize_text("I need a TP and/or SL price \\(e\\.g\\. *set TP on BTC at 69500*\\)\\.", lang),
+            )
+            return True
+        result = await run_blocking(apply_tp_sl_to_open_position, telegram_id, product, tp, sl)
+        await _reply_md_safe(update.message, fmt_bracket_result(result))
+        return True
+
+    if action == "limit_close":
+        product = intent.get("product")
+        price = intent.get("limit_price")
+        size = intent.get("size")
+        result = await run_blocking(limit_close_position, telegram_id, product, price, size)
+        await _reply_md_safe(update.message, fmt_limit_close_result(result))
+        return True
+
+    if action == "close_market":
+        product = intent.get("product")
+        size = intent.get("size")
+        result = await run_blocking(close_position, telegram_id, product, size)
+        if result.get("success"):
+            msg = (
+                f"✅ *Market close*\n\n"
+                f"Closed {escape_md(str(result.get('cancelled', 0)))} "
+                f"{escape_md(str(result.get('product', product)))}\\."
+            )
+        else:
+            err = humanize_exchange_error(result.get("error", "unknown"))
+            msg = f"❌ *Close failed*\n\n{escape_md(err)}"
+        await _reply_md_safe(update.message, msg)
+        return True
+
+    return False

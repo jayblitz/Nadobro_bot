@@ -184,3 +184,184 @@ def parse_interaction_intent(text: str, network: str = "mainnet", client=None) -
             return {"kind": "interaction", "action": "open_view", "target": "nav:trade", "raw": raw}
 
     return None
+
+
+def _looks_like_bracket_command(text_lower: str) -> bool:
+    """NL TP/SL: avoid hijacking generic questions like \"what is tp?\"."""
+    if re.search(r"\b(?:set|place|put|add|create)\b", text_lower):
+        return True
+    if re.search(r"\b(?:for|on)\s+(?:my|the|an)\b", text_lower):
+        return True
+    if re.search(r"\border\b", text_lower):
+        return True
+    if re.match(r"^\s*(?:tp|sl|take\s*profit|stop\s*loss)\s+\d", text_lower):
+        return True
+    if re.match(r"^\s*\w+\s+(?:tp|sl)\s+\d", text_lower):
+        return True
+    if re.search(r"\b(?:tp|take\s*-?profit|sl|stop\s*-?loss)\b", text_lower) and re.search(
+        r"(?:at|@)\s*\d", text_lower
+    ):
+        return True
+    return False
+
+
+def _extract_tp_sl_prices(text_lower: str) -> tuple[Optional[float], Optional[float]]:
+    tp = None
+    sl = None
+    if re.search(r"\b(?:tp|take\s*-?profit)\b", text_lower):
+        m = re.search(r"\b(?:tp|take\s*-?profit)\b.*?(?:at|@)\s*(\d+(?:\.\d+)?)\b", text_lower)
+        if m:
+            tp = float(m.group(1))
+        else:
+            m2 = re.search(
+                r"\b(?:tp|take\s*-?profit)\b\D{0,40}?(\d+(?:\.\d+)?)\b",
+                text_lower,
+            )
+            if m2:
+                tp = float(m2.group(1))
+    if re.search(r"\b(?:sl|stop\s*-?loss)\b", text_lower):
+        m = re.search(r"\b(?:sl|stop\s*-?loss)\b.*?(?:at|@)\s*(\d+(?:\.\d+)?)\b", text_lower)
+        if m:
+            sl = float(m.group(1))
+        else:
+            m2 = re.search(
+                r"\b(?:sl|stop\s*-?loss)\b\D{0,40}?(\d+(?:\.\d+)?)\b",
+                text_lower,
+            )
+            if m2:
+                sl = float(m2.group(1))
+    return tp, sl
+
+
+def _parse_close_all_nl(text_lower: str) -> bool:
+    if re.search(r"\b(close|exit|flatten|square|liquidate)\s+(all|everything)\b", text_lower):
+        return True
+    if re.search(r"\b(close|exit)\s+all\s+(positions|open\s+positions|my\s+positions)\b", text_lower):
+        return True
+    if re.search(r"\bmarket\s+close\s+(all|everything)\b", text_lower):
+        return True
+    if re.search(r"\b(close|exit)\s+everything\b", text_lower):
+        return True
+    if re.search(r"\b(all|everything)\s+(positions|open\s+positions)\b", text_lower) and re.search(
+        r"\b(close|exit|flatten)\b", text_lower
+    ):
+        return True
+    return False
+
+
+def _parse_limit_close_nl(text_lower: str, network: str, client) -> Optional[dict]:
+    has_close = bool(
+        re.search(r"\b(close|exit|flatten|reduce)\b", text_lower)
+        or re.search(r"\blimit\s+close\b", text_lower)
+    )
+    if not has_close:
+        return None
+    product = _extract_product(text_lower, network=network, client=client)
+    if not product:
+        return None
+    price = None
+    m = re.search(r"(?:at|@)\s*(\d+(?:\.\d+)?)\b", text_lower)
+    if m:
+        price = float(m.group(1))
+    else:
+        m2 = re.search(rf"\b{re.escape(product.lower())}\s+(\d+(?:\.\d+)?)\b", text_lower)
+        if m2:
+            price = float(m2.group(1))
+    if price is None or price <= 0:
+        return None
+    # Partial: "close 0.5 btc at 3000"
+    size = None
+    m3 = re.search(
+        rf"\b(?:close|exit|reduce)\s+(\d+(?:\.\d+)?)\s+{re.escape(product.lower())}\b",
+        text_lower,
+    )
+    if m3:
+        size = float(m3.group(1))
+    return {
+        "kind": "position",
+        "action": "limit_close",
+        "product": product,
+        "limit_price": price,
+        "size": size,
+    }
+
+
+def _parse_market_close_nl(text_lower: str, network: str, client) -> Optional[dict]:
+    has_close = bool(
+        re.search(r"\b(close|exit|flatten|square|reduce|liquidate)\b", text_lower)
+        or re.search(r"\bmarket\s+close\b", text_lower)
+    )
+    if not has_close:
+        return None
+    product = _extract_product(text_lower, network=network, client=client)
+    if not product:
+        return None
+    # Routed to limit close when an explicit exit price is present
+    if re.search(r"(?:at|@)\s*(\d+(?:\.\d+)?)\b", text_lower):
+        return None
+    size = None
+    m = re.search(
+        rf"\b(?:close|exit|reduce)\s+(\d+(?:\.\d+)?)\s+{re.escape(product.lower())}\b",
+        text_lower,
+    )
+    if m:
+        size = float(m.group(1))
+    return {
+        "kind": "position",
+        "action": "close_market",
+        "product": product,
+        "size": size,
+    }
+
+
+def parse_position_management_intent(text: str, network: str = "mainnet", client=None) -> Optional[dict]:
+    """
+    Natural-language position management: TP/SL, market close, limit close, close all.
+    Does not run when parse_trade_intent is a complete open-order intent.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    text_lower = raw.lower()
+
+    # Do not hijack Q&A (e.g. "how do I close all positions?")
+    if raw.endswith("?") and _looks_like_question(text_lower):
+        return None
+
+    trade = parse_trade_intent(text, network=network, client=client)
+    if trade and not trade.get("missing"):
+        return None
+
+    # TP / SL on open position
+    has_tp = bool(re.search(r"\b(?:tp|take\s*-?profit)\b", text_lower))
+    has_sl = bool(re.search(r"\b(?:sl|stop\s*-?loss)\b", text_lower))
+    if (has_tp or has_sl) and _looks_like_bracket_command(text_lower):
+        tp, sl = _extract_tp_sl_prices(text_lower)
+        if tp is None and sl is None:
+            return None
+        product = _extract_product(text_lower, network=network, client=client)
+        if not product:
+            product = "BTC"
+        return {
+            "kind": "position",
+            "action": "set_tp_sl",
+            "product": product,
+            "tp_price": tp,
+            "sl_price": sl,
+            "raw": raw,
+        }
+
+    if _parse_close_all_nl(text_lower):
+        return {"kind": "position", "action": "close_all", "raw": raw}
+
+    lim = _parse_limit_close_nl(text_lower, network, client)
+    if lim:
+        lim["raw"] = raw
+        return lim
+
+    mc = _parse_market_close_nl(text_lower, network, client)
+    if mc:
+        mc["raw"] = raw
+        return mc
+
+    return None

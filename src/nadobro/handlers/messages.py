@@ -69,6 +69,7 @@ async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
 
 from src.nadobro.handlers.intent_handlers import (
     handle_pending_text_trade_confirmation,
+    handle_position_management_intent,
     handle_trade_intent_message,
 )
 from src.nadobro.handlers.intent_parser import parse_interaction_intent
@@ -416,6 +417,9 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=points_scope_kb("week"),
             )
+        return
+
+    if await handle_position_management_intent(update, context, telegram_id, text):
         return
 
     if await handle_trade_intent_message(update, context, telegram_id, text):
