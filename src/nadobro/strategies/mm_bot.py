@@ -283,17 +283,23 @@ def run_cycle(
     reference_price = reference_price if reference_price > 0 else mid
 
     if threshold_bp > 0 and strategy == "mm":
-        reference = float(state.get("reference_price") or mid)
-        moved_bp = abs(mid - reference) / max(reference, 1e-9) * 10000.0
-        if moved_bp < threshold_bp:
-            return {
-                "success": True,
-                "orders_placed": 0,
-                "orders_cancelled": 0,
-                "reason": "below threshold",
-                "spread_bp": dynamic_spread_bp,
-                "reference_price": reference_price,
-            }
+        # Avoid a cold-start deadlock: while mid history is short, price vs session ref is ~0 bp,
+        # so we would never place quotes until the market drifts. Allow quotes until history warms up.
+        hist = state.get("mm_mid_history") or []
+        if len(hist) >= 4:
+            reference = float(state.get("reference_price") or mid)
+            moved_bp = abs(mid - reference) / max(reference, 1e-9) * 10000.0
+            if moved_bp < threshold_bp:
+                return {
+                    "success": True,
+                    "orders_placed": 0,
+                    "orders_cancelled": 0,
+                    "reason": "below threshold",
+                    "action": "wait",
+                    "detail": f"Price moved {moved_bp:.1f} bp vs ref (need {threshold_bp:.0f} bp)",
+                    "spread_bp": dynamic_spread_bp,
+                    "reference_price": reference_price,
+                }
 
     # Position-aware risk guardrails.
     positions = client.get_all_positions() or []

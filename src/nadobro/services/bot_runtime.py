@@ -372,6 +372,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "strategy": state.get("strategy"),
         "product": state.get("product"),
         "notional_usd": state.get("notional_usd"),
+        "cycle_notional_usd": state.get("cycle_notional_usd"),
         "spread_bp": state.get("spread_bp"),
         "tp_pct": state.get("tp_pct"),
         "sl_pct": state.get("sl_pct"),
@@ -630,6 +631,20 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
 
 
 async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
+    # Apply latest saved strategy parameters (margin, spreads, etc.) every cycle so edits
+    # in the UI take effect without restarting the loop.
+    try:
+        strategy_key = str(state.get("strategy") or "").lower()
+        if strategy_key:
+            from src.nadobro.services.settings_service import get_strategy_settings
+
+            _, cfg = get_strategy_settings(telegram_id, strategy_key)
+            if isinstance(cfg, dict):
+                for k, v in cfg.items():
+                    state[k] = v
+    except Exception:
+        logger.warning("Failed to merge strategy settings into runtime state for user %s", telegram_id, exc_info=True)
+
     if is_trading_paused():
         if str(state.get("strategy", "")).lower() == "dn" and float(state.get("auto_close_on_maintenance") or 0) >= 0.5:
             state["running"] = False

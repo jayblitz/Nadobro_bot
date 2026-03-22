@@ -24,7 +24,6 @@ from src.nadobro.config import DUAL_MODE_CARD_FLOW
 from src.nadobro.handlers.home_card import (
     open_home_card_from_command,
     open_help_card_from_command,
-    open_status_card_from_command,
 )
 logger = logging.getLogger(__name__)
 
@@ -117,16 +116,24 @@ async def cmd_status(update: Update, context: CallbackContext):
         onboarding = evaluate_readiness(telegram_id)
         text = fmt_status_overview(status, onboarding)
 
-        if DUAL_MODE_CARD_FLOW:
-            await open_status_card_from_command(update, context, text)
-            return
-
         lang = get_active_language()
-        await update.message.reply_text(
-            localize_text(text, lang),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(persistent_menu_kb(), lang),
-        )
+        localized = localize_text(text, lang)
+        reply_markup = localize_markup(home_card_kb() if DUAL_MODE_CARD_FLOW else persistent_menu_kb(), lang)
+        # Always send a visible reply so /status works even when the home card is off-screen
+        # or edit-in-place fails (webhook / concurrent updates).
+        try:
+            await update.message.reply_text(
+                localized,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            from src.nadobro.handlers.home_card import _plain_text_fallback
+
+            await update.message.reply_text(
+                _plain_text_fallback(localized),
+                reply_markup=reply_markup,
+            )
 
 
 async def cmd_stop_all(update: Update, context: CallbackContext):

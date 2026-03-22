@@ -1314,6 +1314,8 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     supported_fields = (
         "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
         "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
+        "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
+        "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
     )
     if strategy not in supported or field not in supported_fields:
         context.user_data.pop("pending_strategy_input", None)
@@ -1339,6 +1341,13 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "max_range_pct": (0.1, 40),
         "threshold_bp": (1, 500),
         "close_offset_bp": (1, 1000),
+        "cycle_notional_usd": (1, 1000000),
+        "session_notional_cap_usd": (0, 10000000),
+        "inventory_soft_limit_usd": (1, 1000000),
+        "quote_ttl_seconds": (5, 86400),
+        "min_spread_bp": (0.1, 200),
+        "max_spread_bp": (0.1, 500),
+        "vol_sensitivity": (0.0, 1.0),
     }
     lo, hi = limits[field]
     if value < lo or value > hi:
@@ -1351,10 +1360,17 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     def _mutate(s):
         strategies = s.setdefault("strategies", {})
         cfg = strategies.setdefault(strategy, {})
-        if field in {"interval_seconds", "levels"}:
+        int_fields = {
+            "interval_seconds", "levels", "quote_ttl_seconds",
+        }
+        if field in int_fields:
             cfg[field] = int(value)
         else:
             cfg[field] = value
+        if field == "notional_usd":
+            from src.nadobro.services.settings_service import sync_cycle_notional_with_margin
+
+            sync_cycle_notional_with_margin(strategies, strategy)
 
     network, settings = update_user_settings(telegram_id, _mutate)
     conf = settings.get("strategies", {}).get(strategy, {})

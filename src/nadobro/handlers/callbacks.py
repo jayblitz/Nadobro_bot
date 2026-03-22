@@ -1090,6 +1090,10 @@ async def _handle_strategy(query, data, context, telegram_id):
                 cfg[field] = int(value)
             else:
                 cfg[field] = value
+            if field == "notional_usd":
+                from src.nadobro.services.settings_service import sync_cycle_notional_with_margin
+
+                sync_cycle_notional_with_margin(strategies, strategy_id)
 
         network, settings = update_user_settings(telegram_id, _mutate)
         conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -1142,7 +1146,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "field": field,
         }
         help_text = {
-            "notional_usd": "Enter notional in USD \\(example: `150`\\)",
+            "notional_usd": "Enter margin in USD \\(example: `150`\\)",
             "spread_bp": "Enter spread in bps \\(example: `6`\\)",
             "interval_seconds": "Enter loop interval seconds \\(example: `45`\\)",
             "tp_pct": "Enter take profit % \\(example: `1\\.2`\\)",
@@ -1152,7 +1156,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "max_range_pct": "Enter max range % \\(example: `2\\.0`\\)",
             "threshold_bp": "Enter threshold in bps \\(example: `12`\\)",
             "close_offset_bp": "Enter close offset in bps \\(example: `25`\\)",
-            "cycle_notional_usd": "Enter cycle notional in USD \\(example: `75`\\)",
+            "cycle_notional_usd": "Enter per\\-cycle budget in USD \\(usually same as margin\\)",
             "session_notional_cap_usd": "Enter optional session cap in USD \\(example: `5000`, or `0` to disable\\)",
             "inventory_soft_limit_usd": "Enter inventory soft limit in USD \\(example: `45`\\)",
             "quote_ttl_seconds": "Enter quote TTL seconds \\(example: `90`\\)",
@@ -1579,11 +1583,10 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
     base = (
-        f"⚙️ *{escape_md(strategy.upper())} PARAMS \\| ROBOTIC MODE*\n\n"
+        f"⚙️ *{escape_md(strategy.upper())}*\n\n"
         f"Mode: *{escape_md(network.upper())}*\n"
-        f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
-        f"Interval: *{escape_md(f'{interval_seconds}s')}*\n"
-        f"TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*\n\n"
+        f"Margin: *{escape_md(f'${notional:,.2f}')}* · Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
+        f"Interval: *{escape_md(f'{interval_seconds}s')}* · TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*\n\n"
     )
     extra = ""
     if strategy == "grid":
@@ -1608,13 +1611,11 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         cap_str = f"${session_cap:,.0f}" if session_cap > 0 else "OFF"
         spread_band = f"{min_spread:.1f} - {max_spread:.1f} bp"
         extra = (
-            f"Threshold: *{escape_md(threshold)}* \\| "
-            f"Close Offset: *{escape_md(close_offset)}*\n"
-            f"Ref Mode: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias)}*\n"
-            f"Cycle Notional: *{escape_md(f'${cycle_notional:,.2f}')}* \\| Session Cap: *{escape_md(cap_str)}*\n"
-            f"Inv Soft Limit: *{escape_md(f'${inv_soft:,.2f}')}* \\| Quote TTL: *{escape_md(f'{quote_ttl}s')}*\n"
-            f"Spread Band: *{escape_md(spread_band)}* \\| "
-            f"Vol Sensitivity: *{escape_md(f'{vol_sensitivity:.3f}')}*\n\n"
+            f"Move to quote: *{escape_md(threshold)}* · Close offset: *{escape_md(close_offset)}*\n"
+            f"Ref: *{escape_md(ref_mode)}* · Bias: *{escape_md(bias)}*\n"
+            f"Per\\-cycle budget: *{escape_md(f'${cycle_notional:,.0f}')}* · Cap: *{escape_md(cap_str)}*\n"
+            f"Inventory limit: *{escape_md(f'${inv_soft:,.0f}')}* · Quote TTL: *{escape_md(f'{quote_ttl}s')}*\n"
+            f"Spread band: *{escape_md(spread_band)}* · Vol: *{escape_md(f'{vol_sensitivity:.3f}')}*\n\n"
         )
     elif strategy == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
@@ -1629,12 +1630,12 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
 def _strategy_config_kb(strategy: str):
     rows = [
         [
-            InlineKeyboardButton("Notional $50", callback_data=f"strategy:set:{strategy}:notional_usd:50"),
-            InlineKeyboardButton("Notional $100", callback_data=f"strategy:set:{strategy}:notional_usd:100"),
-            InlineKeyboardButton("Notional $250", callback_data=f"strategy:set:{strategy}:notional_usd:250"),
+            InlineKeyboardButton("Margin $50", callback_data=f"strategy:set:{strategy}:notional_usd:50"),
+            InlineKeyboardButton("Margin $100", callback_data=f"strategy:set:{strategy}:notional_usd:100"),
+            InlineKeyboardButton("Margin $250", callback_data=f"strategy:set:{strategy}:notional_usd:250"),
         ],
         [
-            InlineKeyboardButton("Custom Notional", callback_data=f"strategy:input:{strategy}:notional_usd"),
+            InlineKeyboardButton("Custom margin", callback_data=f"strategy:input:{strategy}:notional_usd"),
         ],
         [
             InlineKeyboardButton("Spread 2bp", callback_data=f"strategy:set:{strategy}:spread_bp:2"),
@@ -1884,25 +1885,16 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             f"Range: *{escape_md(min_range)} \\- {escape_md(max_range)}*"
         )
     elif strategy_id == "mm":
-        threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
-        close_offset = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
+        threshold = f"{float(conf.get('threshold_bp', 12.0)):.0f}bp"
         ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
-        bias = str(conf.get("directional_bias", "neutral")).upper()
-        inv_soft = float(conf.get("inventory_soft_limit_usd", notional * 0.6))
         min_spread = float(conf.get("min_spread_bp", 2.0))
         max_spread = float(conf.get("max_spread_bp", 20.0))
-        quote_ttl = int(conf.get("quote_ttl_seconds", max(60, interval_seconds * 2)))
         cap_str = f"${session_cap:,.0f}" if session_cap > 0 else "OFF"
-        spread_band = f"{min_spread:.1f} - {max_spread:.1f} bp"
+        spread_band = f"{min_spread:.0f}\\-{max_spread:.0f}bp"
         extra_cfg = (
-            f"\nThreshold: *{escape_md(threshold)}* \\| "
-            f"Close Offset: *{escape_md(close_offset)}*"
-            f"\nRef Mode: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias)}*"
-            f"\nSpread Band: *{escape_md(spread_band)}* \\| "
-            f"Quote TTL: *{escape_md(f'{quote_ttl}s')}*"
-            f"\nCycle Notional: *{escape_md(f'${cycle_notional:,.2f}')}* \\| "
-            f"Session Cap: *{escape_md(cap_str)}*"
-            f"\nInv Soft Limit: *{escape_md(f'${inv_soft:,.2f}')}*"
+            f"\nQuote when price moves *{escape_md(threshold)}*+ from ref · "
+            f"Ref *{escape_md(ref_mode)}* · Spread band *{escape_md(spread_band)}*"
+            f"\nPer\\-cycle budget *{escape_md(f'${cycle_notional:,.0f}')}* · Cap *{escape_md(cap_str)}*"
         )
     elif strategy_id == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
@@ -1920,10 +1912,11 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Status: {status_dot} *READY*\n"
         f"{escape_md(selected_explainer)}\n\n"
         f"📊 *Settings*\n"
-        f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}*\n"
-        f"Mode: *{escape_md(network.upper())}* \\| Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| Slippage: *{escape_md(f'{slippage:.2f}%')}*\n"
-        f"Notional: *{escape_md(f'${notional:,.2f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
-        f"TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*"
+        f"Pair *{escape_md(product)}\\-PERP* · Mid *{escape_md(mid_str)}* · Mode *{escape_md(network.upper())}*\n"
+        f"Margin *{escape_md(f'${notional:,.0f}')}* · Per cycle *{escape_md(f'${cycle_notional:,.0f}')}* · "
+        f"Spread *{escape_md(f'{spread_bp:.0f}bp')}* · Every *{escape_md(f'{interval_seconds}s')}*\n"
+        f"Leverage *{escape_md(f'{leverage:.0f}x')}* · Slippage *{escape_md(f'{slippage:.1f}%')}* · "
+        f"TP/SL *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}*"
         f"{extra_cfg}\n\n"
         f"📈 *Analytics*\n"
         f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *{escape_md(f'${required_margin:,.2f}')}* required\n"

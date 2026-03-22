@@ -102,6 +102,23 @@ def update_user_settings(telegram_id: int, mutator):
     return network, settings
 
 
+def sync_cycle_notional_with_margin(strategies: dict, strategy_id: str) -> None:
+    """When margin (notional_usd) changes, keep per-cycle budget aligned for MM/Grid."""
+    if strategy_id not in ("mm", "grid"):
+        return
+    cfg = strategies.get(strategy_id)
+    if not isinstance(cfg, dict):
+        return
+    if "notional_usd" not in cfg:
+        return
+    try:
+        n = float(cfg["notional_usd"])
+    except (TypeError, ValueError):
+        return
+    cfg["notional_usd"] = n
+    cfg["cycle_notional_usd"] = n
+
+
 def get_strategy_settings(telegram_id: int, strategy: str) -> tuple[str, dict]:
     network, settings = get_user_settings(telegram_id)
     strategies = settings.get("strategies", {})

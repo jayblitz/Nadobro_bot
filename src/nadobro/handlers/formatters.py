@@ -570,9 +570,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
     funded = onboarding.get("funded")
 
     lines = [
-        _loc("📡 *Nadobro Status*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        "",
+        _loc("📡 *Status*"),
         f"{_loc('Network:')} *{escape_md(mode)}*",
     ]
 
@@ -592,12 +590,12 @@ def fmt_status_overview(status: dict, onboarding: dict):
         lines.append("")
 
     if not running:
-        lines.append(f"{_loc('Strategy:')} *{_loc('NOT RUNNING')}*")
+        lines.append(f"{_loc('Strategy:')} *{_loc('OFF')}*")
         last_action = status.get("last_action")
         if last_action:
-            lines.append(f"{_loc('Last Action:')} {escape_md(_fmt_action_label(last_action))}")
+            lines.append(f"{_loc('Last:')} {escape_md(_fmt_action_label(last_action))}")
         if status.get("last_error"):
-            lines.append(f"{_loc('Stopped:')} {escape_md(str(status.get('last_error'))[:100])}")
+            lines.append(f"{_loc('Note:')} {escape_md(str(status.get('last_error'))[:120])}")
     else:
         strategy = (status.get("strategy") or "").upper()
         product = str(status.get("product", "BTC"))
@@ -606,23 +604,33 @@ def fmt_status_overview(status: dict, onboarding: dict):
         uptime = _fmt_uptime(status.get("started_at"))
         next_in = status.get("next_cycle_in", 0)
 
-        lines.append(f"{_loc('Strategy:')} *{escape_md(strategy)}* — {_loc('RUNNING')}")
+        lines.append(f"{_loc('Strategy:')} *{escape_md(strategy)}* · {_loc('ON')}")
         if product != "MULTI":
             lines.append(f"{_loc('Pair:')} *{escape_md(product)}\\-PERP*")
         else:
-            lines.append(f"{_loc('Mode:')} *Multi\\-Asset*")
-        lines.append(f"{_loc('Uptime:')} *{escape_md(uptime)}* \\| {_loc('Cycles:')} *{escape_md(str(runs))}*")
+            lines.append(f"{_loc('Mode:')} *Multi*")
+        margin = status.get("notional_usd")
+        if margin is not None and strategy in ("MM", "GRID", "DN", "VOL"):
+            cyc = status.get("cycle_notional_usd")
+            if cyc is not None and strategy == "MM":
+                lines.append(
+                    f"{_loc('Margin')}: *{escape_md(f'${float(margin):,.0f}')}* \\| "
+                    f"{_loc('Per cycle')}: *{escape_md(f'${float(cyc):,.0f}')}*"
+                )
+            else:
+                lines.append(f"{_loc('Margin')}: *{escape_md(f'${float(margin):,.0f}')}*")
+        lines.append(f"{_loc('Uptime')} *{escape_md(uptime)}* · {_loc('Cycles')} *{escape_md(str(runs))}*")
         if next_in > 0:
-            lines.append(f"{_loc('Next Scan:')} *{escape_md(str(next_in))}s*")
+            lines.append(f"{_loc('Next in')}: *{escape_md(str(next_in))}s*")
         else:
-            lines.append(f"{_loc('Interval:')} *{escape_md(str(interval))}s*")
+            lines.append(f"{_loc('Every')}: *{escape_md(str(interval))}s*")
 
         last_action = status.get("last_action")
         if last_action:
             detail = status.get("last_action_detail") or ""
             action_text = _fmt_action_label(last_action)
             if detail:
-                action_text += f" — {detail[:80]}"
+                action_text += f" — {detail[:100]}"
             lines.append(f"{_loc('Last:')} {escape_md(action_text)}")
 
         if status.get("is_paused"):
@@ -630,23 +638,16 @@ def fmt_status_overview(status: dict, onboarding: dict):
 
         error_streak = status.get("error_streak", 0)
         if error_streak >= 3:
-            lines.append(f"⚠️ {escape_md(str(error_streak))} {_loc('consecutive errors')}")
+            lines.append(f"⚠️ {escape_md(str(error_streak))} {_loc('errors in a row')}")
 
         worker_group = status.get("worker_group")
-        heartbeat = _fmt_age_seconds(float(status.get("worker_last_heartbeat") or 0.0))
-        dispatch_age = _fmt_age_seconds(float(status.get("last_dispatch_ts") or 0.0))
-        cycle_ms = float(status.get("last_cycle_ms") or 0.0)
-        cycle_result = status.get("last_cycle_result") or "n/a"
         if worker_group:
-            lines.append("")
+            heartbeat = _fmt_age_seconds(float(status.get("worker_last_heartbeat") or 0.0))
+            cycle_ms = float(status.get("last_cycle_ms") or 0.0)
             lines.append(
-                f"{_loc('Worker Group')}: *{escape_md(str(worker_group).upper())}* \\| "
-                f"{_loc('Heartbeat')}: *{escape_md(heartbeat)}*"
-            )
-            lines.append(
-                f"{_loc('Last Dispatch')}: *{escape_md(dispatch_age)}* \\| "
-                f"{_loc('Cycle')}: *{escape_md(cycle_result.upper())}* "
-                f"\\({escape_md(f'{cycle_ms:.1f}ms')}\\)"
+                f"{_loc('Worker')}: *{escape_md(str(worker_group).upper())}* · "
+                f"{_loc('hb')}: *{escape_md(heartbeat)}* · "
+                f"{escape_md(f'{cycle_ms:.0f}ms')}"
             )
 
         if strategy == "DN":
@@ -670,23 +671,13 @@ def fmt_status_overview(status: dict, onboarding: dict):
             lines.append(f"{_loc('Session PnL:')} *{escape_md(f'{pnl_sign}${total_pnl:,.2f}')}*")
 
         maker_fill_ratio = status.get("maker_fill_ratio")
-        if maker_fill_ratio is not None:
+        if strategy == "MM" and maker_fill_ratio is not None:
             cancellation_ratio = status.get("cancellation_ratio")
-            lines.append("")
             lines.append(
-                f"{_loc('Fill Rate')}: *{escape_md(f'{float(maker_fill_ratio) * 100:.1f}%')}* \\| "
-                f"{_loc('Cancel Rate')}: *{escape_md(f'{float(cancellation_ratio or 0) * 100:.1f}%')}*"
+                f"{_loc('Quotes')}: "
+                f"{escape_md(f'{float(maker_fill_ratio) * 100:.0f}%')} {_loc('fills')} · "
+                f"{escape_md(f'{float(cancellation_ratio or 0) * 100:.0f}%')} {_loc('cancels')}"
             )
-        avg_quote_distance_bp = status.get("avg_quote_distance_bp")
-        if avg_quote_distance_bp is not None:
-            quote_refresh_rate = status.get("quote_refresh_rate")
-            lines.append(
-                f"{_loc('Quote Dist')}: *{escape_md(f'{float(avg_quote_distance_bp):.2f} bp')}* \\| "
-                f"{_loc('Refresh')}: *{escape_md(f'{float(quote_refresh_rate or 0):.2f}/s')}*"
-            )
-        inventory_skew_usd = status.get("inventory_skew_usd")
-        if inventory_skew_usd is not None:
-            lines.append(f"{_loc('Inventory Skew')}: *{escape_md(f'${float(inventory_skew_usd):,.2f}')}*")
 
     return "\n".join(lines)
 
@@ -699,7 +690,7 @@ def fmt_strategy_update(strategy: str, network: str, conf: dict) -> str:
     sl_pct = float(conf.get("sl_pct", 0.5))
     return (
         f"✅ *{escape_md(strategy.upper())} {_loc('updated')}* \\({escape_md(network.upper())}\\)\n\n"
-        f"{_loc('Notional')}: {escape_md(f'${notional:,.2f}')}\n"
+        f"{_loc('Margin')}: {escape_md(f'${notional:,.2f}')}\n"
         f"{_loc('Spread')}: {escape_md(f'{spread_bp:.1f} bp')}\n"
         f"{_loc('Interval')}: {escape_md(f'{interval_seconds}s')}\n"
         f"{_loc('TP')}: {escape_md(f'{tp_pct:.2f}%')}\n"
