@@ -13,7 +13,7 @@ def _settings_key(telegram_id: int, network: str) -> str:
 
 def _default_strategy_settings() -> dict:
     return {
-        "mm": {
+        "grid": {
             "notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "tp_pct": 0.6, "sl_pct": 0.5,
             "levels": 2, "threshold_bp": 12.0, "close_offset_bp": 24.0,
             "reference_mode": "ema_fast",
@@ -29,9 +29,13 @@ def _default_strategy_settings() -> dict:
             "cycle_notional_usd": 75.0,
             "session_notional_cap_usd": 0.0,
         },
-        "grid": {
-            "notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "tp_pct": 1.2, "sl_pct": 0.8,
-            "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0,
+        "rgrid": {
+            "notional_usd": 100.0, "spread_bp": 10.0, "rgrid_spread_bp": 10.0, "interval_seconds": 60,
+            "tp_pct": 1.2, "sl_pct": 0.8, "rgrid_stop_loss_pct": 0.8, "rgrid_take_profit_pct": 1.2,
+            "levels": 4, "rgrid_discretion": 0.06,
+            "rgrid_reset_threshold_pct": 1.0, "rgrid_reset_timeout_seconds": 120,
+            # Legacy keys kept for one migration cycle.
+            "min_range_pct": 1.0, "max_range_pct": 1.0,
         },
         "dn": {
             "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6,
@@ -67,6 +71,53 @@ def _default_settings() -> dict:
     }
 
 
+def _looks_like_rgrid_config(cfg: dict) -> bool:
+    if not isinstance(cfg, dict):
+        return False
+    if any(k.startswith("rgrid_") for k in cfg.keys()):
+        return True
+    legacy_keys = {"grid_spread_bp", "grid_stop_loss_pct", "grid_take_profit_pct", "grid_reset_threshold_pct", "grid_discretion"}
+    return any(k in cfg for k in legacy_keys)
+
+
+def _looks_like_grid_config(cfg: dict) -> bool:
+    if not isinstance(cfg, dict):
+        return False
+    marker_keys = {"threshold_bp", "close_offset_bp", "reference_mode", "directional_bias", "min_spread_bp", "max_spread_bp"}
+    return any(k in cfg for k in marker_keys)
+
+
+def _normalize_strategy_id(strategy: str) -> str:
+    sid = str(strategy or "").lower().strip()
+    if sid == "mm":
+        return "grid"
+    if sid in ("reverse_grid", "reverse-grid"):
+        return "rgrid"
+    return sid
+
+
+def _migrate_loaded_strategies(loaded_strats: dict) -> dict:
+    migrated = dict(loaded_strats or {})
+    mm_cfg = migrated.get("mm") if isinstance(migrated.get("mm"), dict) else None
+    grid_cfg = migrated.get("grid") if isinstance(migrated.get("grid"), dict) else None
+    rgrid_cfg = migrated.get("rgrid") if isinstance(migrated.get("rgrid"), dict) else None
+
+    # Requested migration policy:
+    # - mm -> grid
+    # - legacy grid (reverse-grid payload) -> rgrid
+    if mm_cfg is not None:
+        migrated["grid"] = dict(mm_cfg)
+    if rgrid_cfg is None and grid_cfg is not None:
+        # Legacy "grid" strategy payloads were reverse-grid style.
+        if _looks_like_rgrid_config(grid_cfg) or not _looks_like_grid_config(grid_cfg):
+            migrated["rgrid"] = dict(grid_cfg)
+            if mm_cfg is None and "grid" in migrated:
+                migrated.pop("grid", None)
+
+    migrated.pop("mm", None)
+    return migrated
+
+
 def get_user_settings(telegram_id: int) -> tuple[str, dict]:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
@@ -79,7 +130,7 @@ def get_user_settings(telegram_id: int) -> tuple[str, dict]:
             if isinstance(loaded, dict):
                 settings.update(loaded)
                 default_strats = _default_strategy_settings()
-                loaded_strats = loaded.get("strategies", {})
+                loaded_strats = _migrate_loaded_strategies(loaded.get("strategies", {}))
                 if isinstance(loaded_strats, dict):
                     for sid, base in default_strats.items():
                         if sid in loaded_strats and isinstance(loaded_strats[sid], dict):
@@ -104,7 +155,8 @@ def update_user_settings(telegram_id: int, mutator):
 
 def sync_cycle_notional_with_margin(strategies: dict, strategy_id: str) -> None:
     """When margin (notional_usd) changes, keep per-cycle budget aligned for MM/Grid."""
-    if strategy_id not in ("mm", "grid"):
+    strategy_id = _normalize_strategy_id(strategy_id)
+    if strategy_id not in ("grid", "rgrid"):
         return
     cfg = strategies.get(strategy_id)
     if not isinstance(cfg, dict):
@@ -122,5 +174,6 @@ def sync_cycle_notional_with_margin(strategies: dict, strategy_id: str) -> None:
 def get_strategy_settings(telegram_id: int, strategy: str) -> tuple[str, dict]:
     network, settings = get_user_settings(telegram_id)
     strategies = settings.get("strategies", {})
+    strategy = _normalize_strategy_id(strategy)
     strat = strategies.get(strategy, _default_strategy_settings().get(strategy, {}))
     return network, strat

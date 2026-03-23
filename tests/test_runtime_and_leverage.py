@@ -45,7 +45,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
     def test_start_user_bot_rejects_product_leverage_over_cap(self):
         ok, msg = bot_runtime.start_user_bot(
             telegram_id=1,
-            strategy="mm",
+            strategy="grid",
             product="LINK",
             leverage=40,
             slippage_pct=1,
@@ -60,13 +60,13 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         ), patch.object(bot_runtime, "_save_state"), patch.object(bot_runtime, "_ensure_task"):
             ok, msg = bot_runtime.start_user_bot(
                 telegram_id=1,
-                strategy="mm",
+                strategy="grid",
                 product="BTC",
                 leverage=40,
                 slippage_pct=1,
             )
         self.assertTrue(ok)
-        self.assertIn("MM bot started on BTC-PERP", msg)
+        self.assertIn("GRID bot started on BTC-PERP", msg)
 
     def test_stop_all_user_bots_closes_each_running_network(self):
         telegram_id = 42
@@ -118,7 +118,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         network = "mainnet"
         state = {
             "running": True,
-            "strategy": "mm",
+            "strategy": "grid",
             "product": "BTC",
             "reference_price": 100.0,
             "sl_pct": 5.0,
@@ -150,6 +150,49 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             result = asyncio.run(bot_runtime._run_cycle(telegram_id, network, state))
 
         self.assertEqual(result, (True, None))
+
+    def test_run_cycle_grid_uses_strategy_pnl_stop_action(self):
+        telegram_id = 8
+        network = "mainnet"
+        state = {
+            "running": True,
+            "strategy": "rgrid",
+            "product": "BTC",
+            "reference_price": 100.0,
+            "sl_pct": 0.1,  # Should not be used as primary guard for GRID now.
+            "interval_seconds": 1,
+            "last_run_ts": 0.0,
+        }
+
+        class FakeClient:
+            def get_market_price(self, _product_id):
+                return {"mid": 90.0}
+
+            def get_open_orders(self, _product_id):
+                return []
+
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
+
+        async def _run_blocking_stub(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.object(bot_runtime, "is_trading_paused", return_value=False), patch.object(
+            bot_runtime, "run_blocking", side_effect=_run_blocking_stub
+        ), patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
+            bot_runtime, "get_user_readonly_client", return_value=FakeClient()
+        ), patch.object(
+            bot_runtime, "_dispatch_strategy", return_value={"success": True, "action": "grid_stop_loss_hit", "detail": "stop"}
+        ), patch.object(
+            bot_runtime, "_save_state"
+        ), patch.object(
+            bot_runtime, "close_all_positions", return_value={"success": True}
+        ) as close_mock, patch.object(
+            bot_runtime, "_notify"
+        ):
+            result = asyncio.run(bot_runtime._run_cycle(telegram_id, network, state))
+
+        self.assertEqual(result, (True, None))
+        self.assertTrue(close_mock.called)
 
     def test_ensure_task_uses_cached_loop_when_called_off_loop(self):
         calls = []
@@ -249,8 +292,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertFalse(_should_trigger_stop_loss("SHORT", 68000.0, 68500.0))
 
     def test_runtime_supervisor_group_mapping(self):
-        self.assertEqual(runtime_supervisor.strategy_worker_group("mm"), "mm_grid")
         self.assertEqual(runtime_supervisor.strategy_worker_group("grid"), "mm_grid")
+        self.assertEqual(runtime_supervisor.strategy_worker_group("rgrid"), "mm_grid")
         self.assertEqual(runtime_supervisor.strategy_worker_group("dn"), "dn")
         self.assertEqual(runtime_supervisor.strategy_worker_group("vol"), "vol")
         self.assertEqual(runtime_supervisor.strategy_worker_group("bro"), "bro")

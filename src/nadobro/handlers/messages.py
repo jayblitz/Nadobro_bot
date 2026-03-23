@@ -1324,12 +1324,14 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
 
     strategy = pending.get("strategy")
     field = pending.get("field")
-    supported = ("mm", "grid", "dn", "vol")
+    supported = ("grid", "rgrid", "dn", "vol")
     supported_fields = (
         "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
         "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
         "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
         "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
+        "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
+        "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
     )
     if strategy not in supported or field not in supported_fields:
         context.user_data.pop("pending_strategy_input", None)
@@ -1362,6 +1364,12 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "min_spread_bp": (0.1, 200),
         "max_spread_bp": (0.1, 500),
         "vol_sensitivity": (0.0, 1.0),
+        "rgrid_spread_bp": (0.1, 200),
+        "rgrid_stop_loss_pct": (0.05, 100),
+        "rgrid_take_profit_pct": (0.05, 200),
+        "rgrid_reset_threshold_pct": (0.05, 20),
+        "rgrid_reset_timeout_seconds": (15, 86400),
+        "rgrid_discretion": (0.01, 0.5),
     }
     lo, hi = limits[field]
     if value < lo or value > hi:
@@ -1375,7 +1383,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         strategies = s.setdefault("strategies", {})
         cfg = strategies.setdefault(strategy, {})
         int_fields = {
-            "interval_seconds", "levels", "quote_ttl_seconds",
+            "interval_seconds", "levels", "quote_ttl_seconds", "rgrid_reset_timeout_seconds",
         }
         if field in int_fields:
             cfg[field] = int(value)

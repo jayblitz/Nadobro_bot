@@ -127,8 +127,8 @@ src/nadobro/
 ### Trading Strategies (Background Bots)
 - `bot_runtime.py` manages per-user asyncio tasks that run strategy cycles on a timer.
 - Strategy state (running, parameters, last tick) is persisted in the `bot_state` table under a `strategy_bot:{user_id}:{network}` key.
-- `_dispatch_strategy()` routes: mm/grid → `strategies/mm_bot.py`, dn → `strategies/delta_neutral.py`, vol → `strategies/volume_bot.py`, bro → `strategies/bro_mode.py`
-- SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol", "bro")
+- `_dispatch_strategy()` routes: grid/rgrid → `strategies/mm_bot.py`, dn → `strategies/delta_neutral.py`, vol → `strategies/volume_bot.py`, bro → `strategies/bro_mode.py`
+- SUPPORTED_STRATEGIES = ("grid", "rgrid", "dn", "vol", "bro")
 
 ### Bro Mode — Autonomous LLM Quant Agent
 - **Architecture**: Grok-3 structured JSON decision engine (`services/bro_llm.py`), market scanner (`services/market_scanner.py`), budget guard (`services/budget_guard.py`), price tracker (`services/price_tracker.py`)

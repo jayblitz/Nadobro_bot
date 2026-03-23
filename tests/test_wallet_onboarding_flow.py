@@ -73,7 +73,7 @@ class WalletOnboardingFlowTests(unittest.TestCase):
                 "wallet_flow": "awaiting_main_address",
                 "pending_alert": {"product": "BTC"},
                 "pending_trade": {"step": "custom_size"},
-                "pending_strategy_input": {"strategy": "mm", "field": "spread_bp"},
+                "pending_strategy_input": {"strategy": "grid", "field": "spread_bp"},
                 "pending_bro_input": {"field": "tp_sl"},
                 "trade_flow": {"state": "size"},
                 "pending_copy_wallet": True,

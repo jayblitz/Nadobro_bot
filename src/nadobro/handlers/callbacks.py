@@ -1014,7 +1014,7 @@ async def _handle_settings(query, data, telegram_id, context):
 
 
 async def _handle_strategy(query, data, context, telegram_id):
-    supported = ("mm", "grid", "dn", "vol", "bro")
+    supported = ("grid", "rgrid", "dn", "vol", "bro")
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     strategy_id = parts[2] if len(parts) > 2 else ""
@@ -1080,7 +1080,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         value = float(raw_value)
         int_fields = {
             "interval_seconds", "levels", "max_open_orders",
-            "auto_close_on_maintenance", "is_long_bias",
+            "auto_close_on_maintenance", "is_long_bias", "rgrid_reset_timeout_seconds",
         }
 
         def _mutate(s):
@@ -1138,6 +1138,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
             "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
             "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
+            "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
+            "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
         )
         if field not in allowed_inputs:
             return
@@ -1163,6 +1165,12 @@ async def _handle_strategy(query, data, context, telegram_id):
             "min_spread_bp": "Enter minimum spread in bps \\(example: `2`\\)",
             "max_spread_bp": "Enter maximum spread in bps \\(example: `20`\\)",
             "vol_sensitivity": "Enter volatility sensitivity \\(example: `0\\.02`\\)",
+            "rgrid_spread_bp": "Enter RGRID spread in bps \\(example: `10`\\)",
+            "rgrid_stop_loss_pct": "Enter RGRID PnL stop loss % of margin \\(example: `0\\.8`\\)",
+            "rgrid_take_profit_pct": "Enter RGRID PnL take profit % of margin \\(example: `1\\.2`\\)",
+            "rgrid_reset_threshold_pct": "Enter RGRID reset threshold % \\(example: `1\\.0`\\)",
+            "rgrid_reset_timeout_seconds": "Enter RGRID reset timeout seconds \\(example: `120`\\)",
+            "rgrid_discretion": "Enter RGRID discretion \\(example: `0\\.06`\\)",
         }
         await _edit_loc(query, 
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -1203,7 +1211,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         settings = _get_user_settings(telegram_id, context)
         from src.nadobro.handlers.messages import execute_action_directly
-        strategy_leverage = 1 if strategy_id in ("vol", "mm") else settings.get("default_leverage", 3)
+        strategy_leverage = 1 if strategy_id in ("vol", "grid") else settings.get("default_leverage", 3)
         if strategy_id == "dn":
             strategy_leverage = max(1, min(float(strategy_leverage), 5))
         await execute_action_directly(query, context, telegram_id, {
@@ -1579,6 +1587,8 @@ def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
 def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
     notional = float(conf.get("notional_usd", 100.0))
     spread_bp = float(conf.get("spread_bp", 5.0))
+    if strategy == "rgrid":
+        spread_bp = float(conf.get("rgrid_spread_bp", conf.get("grid_spread_bp", spread_bp)))
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
@@ -1586,17 +1596,27 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         f"⚙️ *{escape_md(strategy.upper())}*\n\n"
         f"Mode: *{escape_md(network.upper())}*\n"
         f"Margin: *{escape_md(f'${notional:,.2f}')}* · Spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
-        f"Interval: *{escape_md(f'{interval_seconds}s')}* · TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*\n\n"
+        f"Interval: *{escape_md(f'{interval_seconds}s')}*"
     )
+    if strategy != "rgrid":
+        base += f" · TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}*"
+    base += "\n\n"
     extra = ""
-    if strategy == "grid":
-        min_range = f"{float(conf.get('min_range_pct', 1.0)):.2f}%"
-        max_range = f"{float(conf.get('max_range_pct', 1.0)):.2f}%"
+    if strategy == "rgrid":
+        grid_sl = float(conf.get("rgrid_stop_loss_pct", conf.get("grid_stop_loss_pct", sl_pct)))
+        grid_tp = float(conf.get("rgrid_take_profit_pct", conf.get("grid_take_profit_pct", tp_pct)))
+        grid_discretion = float(conf.get("rgrid_discretion", conf.get("grid_discretion", 0.06)))
+        reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 1.0)))
+        reset_timeout = int(conf.get("rgrid_reset_timeout_seconds", conf.get("grid_reset_timeout_seconds", 120)))
+        spread_hint = "Reverse breakout width"
         extra = (
-            f"Grid Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
-            f"Range: *{escape_md(min_range)} \\- {escape_md(max_range)}*\n\n"
+            f"Reverse Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
+            f"Spread mode: *{escape_md(spread_hint)}*\n"
+            f"PnL SL/TP: *{escape_md(f'{grid_sl:.2f}% / {grid_tp:.2f}%')}* \\| "
+            f"Reset: *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}*\n"
+            f"Discretion: *{escape_md(f'{grid_discretion:.2f}')}*\n\n"
         )
-    elif strategy == "mm":
+    elif strategy == "grid":
         threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
         close_offset = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
         ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
@@ -1668,7 +1688,7 @@ def _strategy_config_kb(strategy: str):
             InlineKeyboardButton("Custom SL", callback_data=f"strategy:input:{strategy}:sl_pct"),
         ],
     ]
-    if strategy == "grid":
+    if strategy == "rgrid":
         rows.extend([
             [
                 InlineKeyboardButton("Levels 3", callback_data=f"strategy:set:{strategy}:levels:3"),
@@ -1676,15 +1696,35 @@ def _strategy_config_kb(strategy: str):
                 InlineKeyboardButton("Levels 7", callback_data=f"strategy:set:{strategy}:levels:7"),
             ],
             [
-                InlineKeyboardButton("Range 1%/1%", callback_data=f"strategy:set:{strategy}:min_range_pct:1"),
-                InlineKeyboardButton("Range 1%/2%", callback_data=f"strategy:set:{strategy}:max_range_pct:2"),
+                InlineKeyboardButton("Spread 5bp", callback_data=f"strategy:set:{strategy}:rgrid_spread_bp:5"),
+                InlineKeyboardButton("Spread 10bp", callback_data=f"strategy:set:{strategy}:rgrid_spread_bp:10"),
+                InlineKeyboardButton("Spread 20bp", callback_data=f"strategy:set:{strategy}:rgrid_spread_bp:20"),
             ],
             [
                 InlineKeyboardButton("Custom Levels", callback_data=f"strategy:input:{strategy}:levels"),
-                InlineKeyboardButton("Custom Range", callback_data=f"strategy:input:{strategy}:max_range_pct"),
+                InlineKeyboardButton("Custom Spread", callback_data=f"strategy:input:{strategy}:rgrid_spread_bp"),
+            ],
+            [
+                InlineKeyboardButton("PnL SL 0.5%", callback_data=f"strategy:set:{strategy}:rgrid_stop_loss_pct:0.5"),
+                InlineKeyboardButton("PnL SL 1.0%", callback_data=f"strategy:set:{strategy}:rgrid_stop_loss_pct:1.0"),
+                InlineKeyboardButton("PnL TP 1.5%", callback_data=f"strategy:set:{strategy}:rgrid_take_profit_pct:1.5"),
+            ],
+            [
+                InlineKeyboardButton("Reset 0.8%", callback_data=f"strategy:set:{strategy}:rgrid_reset_threshold_pct:0.8"),
+                InlineKeyboardButton("Reset 1.5%", callback_data=f"strategy:set:{strategy}:rgrid_reset_threshold_pct:1.5"),
+                InlineKeyboardButton("Timeout 120s", callback_data=f"strategy:set:{strategy}:rgrid_reset_timeout_seconds:120"),
+            ],
+            [
+                InlineKeyboardButton("Custom PnL SL", callback_data=f"strategy:input:{strategy}:rgrid_stop_loss_pct"),
+                InlineKeyboardButton("Custom PnL TP", callback_data=f"strategy:input:{strategy}:rgrid_take_profit_pct"),
+                InlineKeyboardButton("Custom Reset", callback_data=f"strategy:input:{strategy}:rgrid_reset_threshold_pct"),
+            ],
+            [
+                InlineKeyboardButton("Discretion 0.06", callback_data=f"strategy:set:{strategy}:rgrid_discretion:0.06"),
+                InlineKeyboardButton("Custom Discretion", callback_data=f"strategy:input:{strategy}:rgrid_discretion"),
             ],
         ])
-    if strategy == "mm":
+    if strategy == "grid":
         rows.extend([
             [
                 InlineKeyboardButton("Threshold 8bp", callback_data=f"strategy:set:{strategy}:threshold_bp:8"),
@@ -1805,8 +1845,8 @@ def _build_bro_preview_text(telegram_id: int) -> str:
 
 def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: str) -> str:
     names = {
-        "mm": "MM Bot",
-        "grid": "Grid Reactor",
+        "grid": "GRID",
+        "rgrid": "Reverse GRID",
         "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",
     }
@@ -1816,10 +1856,12 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     cycle_notional = float(conf.get("cycle_notional_usd", notional))
     session_cap = float(conf.get("session_notional_cap_usd", 0) or 0)
     spread_bp = float(conf.get("spread_bp", 5.0))
+    if strategy_id == "rgrid":
+        spread_bp = float(conf.get("rgrid_spread_bp", conf.get("grid_spread_bp", spread_bp)))
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
-    leverage = 1.0 if strategy_id in ("vol", "mm") else float(settings.get("default_leverage", 3))
+    leverage = 1.0 if strategy_id in ("vol", "grid") else float(settings.get("default_leverage", 3))
     if strategy_id == "dn":
         leverage = max(1.0, min(leverage, 5.0))
     slippage = float(settings.get("slippage", 1))
@@ -1849,6 +1891,8 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         except Exception:
             pass
 
+    bot_status = get_user_bot_status(telegram_id) or {}
+
     required_margin = cycle_notional / leverage if leverage > 0 else cycle_notional
     cycles_per_day = 86400 / max(interval_seconds, 10)
     est_daily_volume = cycle_notional * 2.0 * cycles_per_day
@@ -1861,7 +1905,8 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     est_funding = 0.0
     if strategy_id == "dn":
         est_funding = abs(funding_rate) * notional * 3
-    max_loss = required_margin * (sl_pct / 100.0)
+    max_loss_pct = float(conf.get("rgrid_stop_loss_pct", conf.get("grid_stop_loss_pct", sl_pct))) if strategy_id == "rgrid" else sl_pct
+    max_loss = required_margin * (max_loss_pct / 100.0)
     est_net = est_spread_pnl + est_funding - est_fees
 
     margin_flag = "✅" if available_margin >= required_margin else "⚠️"
@@ -1870,21 +1915,42 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
     status_dot = "🟢" if est_net >= 0 else "🟠"
     how_it_works = {
-        "mm": "Quotes around mid price, captures spread, auto\\-reposts each cycle\\.",
-        "grid": "Staggered levels above/below mid — buys low, sells high as price moves\\.",
+        "grid": "Classic spread market maker around reference price.",
+        "rgrid": "Reverse GRID anchors to exposure VWAP average and places buy above / sell below anchor to capture trending continuation\\.",
         "dn": "Buys Nado Spot and shorts same perp to farm funding with reduced directional exposure\\.",
         "vol": "Balanced two\\-sided flow with risk caps for consistent volume\\.",
     }
     selected_explainer = how_it_works.get(strategy_id, "Automates trade cycles with configured risk controls\\.")
     extra_cfg = ""
-    if strategy_id == "grid":
-        min_range = f"{float(conf.get('min_range_pct', 1.0)):.2f}%"
-        max_range = f"{float(conf.get('max_range_pct', 1.0)):.2f}%"
-        extra_cfg = (
-            f"\nGrid Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
-            f"Range: *{escape_md(min_range)} \\- {escape_md(max_range)}*"
+    if strategy_id == "rgrid":
+        grid_tp = float(conf.get("rgrid_take_profit_pct", conf.get("grid_take_profit_pct", tp_pct)))
+        discretion = float(conf.get("rgrid_discretion", conf.get("grid_discretion", 0.06)))
+        reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 1.0)))
+        reset_timeout = int(conf.get("rgrid_reset_timeout_seconds", conf.get("grid_reset_timeout_seconds", 120)))
+        spread_mode = "Reverse breakout"
+        anchor = float(bot_status.get("rgrid_anchor_price") or 0.0)
+        drift_pct = float(bot_status.get("rgrid_drift_from_anchor_pct") or 0.0)
+        reset_active = bool(bot_status.get("rgrid_reset_active"))
+        cycle_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or 0.0)
+        pnl_sign = "+" if cycle_pnl >= 0 else ""
+        telem = (
+            f"Anchor {anchor:,.2f}" if anchor > 0 else "Anchor n/a"
+        ) + (
+            f" · Drift {drift_pct:.2f}%"
+        ) + (
+            f" · Reset {'ON' if reset_active else 'OFF'}"
+        ) + (
+            f" · Cycle PnL {pnl_sign}${cycle_pnl:,.2f}"
         )
-    elif strategy_id == "mm":
+        extra_cfg = (
+            f"\nReverse Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
+            f"Spread mode: *{escape_md(spread_mode)}*"
+            f"\nPnL SL/TP: *{escape_md(f'{max_loss_pct:.2f}% / {grid_tp:.2f}%')}* of margin \\| "
+            f"Reset: *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}*"
+            f"\nDiscretion: *{escape_md(f'{discretion:.2f}')}*"
+            f"\nTelemetry: *{escape_md(telem)}*"
+        )
+    elif strategy_id == "grid":
         threshold = f"{float(conf.get('threshold_bp', 12.0)):.0f}bp"
         ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
         min_spread = float(conf.get("min_spread_bp", 2.0))
@@ -1916,7 +1982,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"Margin *{escape_md(f'${notional:,.0f}')}* · Per cycle *{escape_md(f'${cycle_notional:,.0f}')}* · "
         f"Spread *{escape_md(f'{spread_bp:.0f}bp')}* · Every *{escape_md(f'{interval_seconds}s')}*\n"
         f"Leverage *{escape_md(f'{leverage:.0f}x')}* · Slippage *{escape_md(f'{slippage:.1f}%')}* · "
-        f"TP/SL *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}*"
+        f"{'PnL SL *' + escape_md(f'{max_loss_pct:.1f}%') + '*' if strategy_id == 'rgrid' else 'TP/SL *' + escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%') + '*'}"
         f"{extra_cfg}\n\n"
         f"📈 *Analytics*\n"
         f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *{escape_md(f'${required_margin:,.2f}')}* required\n"

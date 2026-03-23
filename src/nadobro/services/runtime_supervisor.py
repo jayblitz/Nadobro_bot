@@ -11,8 +11,8 @@ _STARTED = False
 _POOLS: dict[str, ProcessPoolExecutor] = {}
 
 _WORKER_GROUP_MAP = {
-    "mm": "mm_grid",
     "grid": "mm_grid",
+    "rgrid": "mm_grid",
     "dn": "dn",
     "vol": "vol",
     "bro": "bro",

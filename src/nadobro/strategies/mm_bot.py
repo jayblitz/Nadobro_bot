@@ -1,8 +1,8 @@
 """
-MM Bot (Grid + MM) — places symmetric limit orders around mid price.
-MM mode: tight spread, 1-2 levels each side.
-Grid mode: wider spacing, 3-5 levels each side.
-Cancels stale orders that drifted beyond threshold from current mid.
+Strategy engine for GRID + Reverse GRID (RGRID).
+GRID mode: symmetric maker grid around reference (former mm behavior).
+RGRID mode: reverse-grid quoting with exposure anchor and PnL risk controls.
+Cancels stale orders that drift beyond threshold from current mid.
 """
 import logging
 import time
@@ -17,6 +17,7 @@ GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
 GRID_MIN_SPREAD_BP = 8.0
 DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
+GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -102,19 +103,32 @@ def _compute_grid_prices(
     spread_bp: float,
     levels: int,
     strategy: str,
+    net_units: float = 0.0,
+    mid_price: float | None = None,
+    soft_reset_side: str | None = None,
     min_range_pct: float = 1.0,
     max_range_pct: float = 1.0,
 ) -> list[dict]:
     half_spread = spread_bp / 10000.0
     orders = []
-    if strategy == "grid":
-        min_off = max(0.0001, min_range_pct / 100.0)
-        max_off = max(min_off, max_range_pct / 100.0)
-        step = (max_off - min_off) / max(levels - 1, 1)
+    if strategy == "rgrid":
+        base_off = max(0.0, abs(spread_bp) / 10000.0)
         for i in range(levels):
-            offset = min_off + (step * i)
-            buy_price = reference_price * (1.0 - offset)
-            sell_price = reference_price * (1.0 + offset)
+            lvl = i + 1
+            offset = base_off * lvl
+            # Reverse Grid:
+            # - buy quote at/above anchor (fills on upward continuation)
+            # - sell quote at/below anchor (fills on downward continuation)
+            buy_price = reference_price * (1.0 + offset)
+            sell_price = reference_price * (1.0 - offset)
+
+            if soft_reset_side and mid_price and mid_price > 0:
+                reset_nudge = (0.1 * lvl) / 10000.0
+                if soft_reset_side == "buy":
+                    buy_price = mid_price * (1.0 + reset_nudge)
+                elif soft_reset_side == "sell":
+                    sell_price = mid_price * (1.0 - reset_nudge)
+
             lvl = i + 1
             orders.append({"price": buy_price, "is_long": True, "level": lvl})
             orders.append({"price": sell_price, "is_long": False, "level": lvl})
@@ -138,6 +152,7 @@ def _cancel_stale_orders(
     order_birth_ts: dict,
     quote_ttl_seconds: int,
     close_offset_bp: float = 0.0,
+    cancelled_digests: set[str] | None = None,
 ) -> int:
     if not open_orders:
         return 0
@@ -162,6 +177,8 @@ def _cancel_stale_orders(
                 if result.get("success"):
                     cancelled += 1
                     order_birth_ts.pop(digest, None)
+                    if cancelled_digests is not None:
+                        cancelled_digests.add(str(digest))
                     stale_reason = (
                         f"TTL {age_seconds:.0f}s >= {quote_ttl_seconds}s"
                         if is_ttl_stale
@@ -169,6 +186,95 @@ def _cancel_stale_orders(
                     )
                     logger.info("Cancelled stale order %s (%s)", digest[:12], stale_reason)
     return cancelled
+
+
+def _compute_grid_cycle_pnl_usd(positions: list, product_id: int) -> float:
+    total = 0.0
+    for p in positions:
+        if int(p.get("product_id", -1)) != product_id:
+            continue
+        for key in ("pnl", "unrealized_pnl", "realized_pnl", "net_pnl"):
+            v = p.get(key)
+            if v is None:
+                continue
+            try:
+                total += float(v)
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def _append_grid_exposure_fill(state: dict, quote: dict) -> None:
+    side_key = "grid_buy_fills" if bool(quote.get("is_long")) else "grid_sell_fills"
+    fills = state.setdefault(side_key, [])
+    if not isinstance(fills, list):
+        fills = []
+        state[side_key] = fills
+    fills.append(
+        {
+            "price": float(quote.get("price") or 0.0),
+            "size": max(0.0, float(quote.get("size") or 0.0)),
+            "ts": float(quote.get("placed_ts") or time.time()),
+        }
+    )
+    if len(fills) > 300:
+        del fills[:-300]
+
+
+def _rolling_vwap_recent_fraction(fills: list, fraction: float) -> float:
+    if not fills:
+        return 0.0
+    safe_fraction = _clamp(float(fraction or 0.12), 0.02, 1.0)
+    total_size = 0.0
+    for f in fills:
+        try:
+            total_size += max(0.0, float(f.get("size") or 0.0))
+        except Exception:
+            continue
+    if total_size <= 0:
+        return 0.0
+    target = total_size * safe_fraction
+    if target <= 0:
+        return 0.0
+    acc_size = 0.0
+    acc_notional = 0.0
+    for f in reversed(fills):
+        px = float(f.get("price") or 0.0)
+        sz = max(0.0, float(f.get("size") or 0.0))
+        if px <= 0 or sz <= 0:
+            continue
+        take = min(sz, max(0.0, target - acc_size))
+        if take <= 0:
+            break
+        acc_size += take
+        acc_notional += px * take
+        if acc_size >= target:
+            break
+    if acc_size <= 0:
+        return 0.0
+    return acc_notional / acc_size
+
+
+def _reconcile_executed_quotes(
+    state: dict,
+    open_orders: list,
+    cancelled_digests: set[str],
+) -> list[dict]:
+    tracked = state.setdefault("mm_tracked_quotes", {})
+    if not isinstance(tracked, dict):
+        tracked = {}
+        state["mm_tracked_quotes"] = tracked
+    active_digests = {str(o.get("digest")) for o in (open_orders or []) if o.get("digest")}
+    executed: list[dict] = []
+    for digest, meta in list(tracked.items()):
+        if digest in active_digests:
+            continue
+        if digest in cancelled_digests:
+            tracked.pop(digest, None)
+            continue
+        executed.append(meta if isinstance(meta, dict) else {})
+        tracked.pop(digest, None)
+    return executed
 
 
 def run_cycle(
@@ -181,7 +287,9 @@ def run_cycle(
     **kwargs,
 ) -> dict:
     product = state.get("product", "BTC")
-    strategy = state.get("strategy", "mm")
+    strategy = str(state.get("strategy", "grid") or "grid").lower()
+    if strategy == "mm":
+        strategy = "grid"
     product_id = get_product_id(product)
     if product_id is None:
         return {"success": False, "error": f"Invalid product '{product}'", "orders_placed": 0}
@@ -257,9 +365,17 @@ def run_cycle(
         order_birth_ts = {}
         state["mm_order_birth_ts"] = order_birth_ts
 
-    if strategy == "grid":
+    if strategy == "rgrid":
         levels = max(1, int(state.get("levels", GRID_DEFAULT_LEVELS)))
-        spread_bp = max(spread_bp, GRID_MIN_SPREAD_BP)
+        if "rgrid_spread_bp" in state:
+            spread_bp = float(state.get("rgrid_spread_bp") or 0.0)
+        elif "grid_spread_bp" in state:
+            spread_bp = float(state.get("grid_spread_bp") or 0.0)
+        elif "spread_bp" in state:
+            spread_bp = float(state.get("spread_bp") or 0.0)
+        else:
+            # Legacy fallback: map old range pct to bps scale.
+            spread_bp = float(state.get("max_range_pct") or state.get("min_range_pct") or GRID_MIN_SPREAD_BP * 2.0) * 100.0
     else:
         levels = max(1, int(state.get("levels", MM_DEFAULT_LEVELS)))
         spread_bp = max(spread_bp, MM_MIN_SPREAD_BP)
@@ -278,11 +394,15 @@ def run_cycle(
     history = _update_mid_history(state, mid, max_points=max(vol_window, 8))
     vol_bp = _compute_realized_vol_bp(history[-vol_window:])
     dynamic_spread_bp = spread_bp * (1.0 + (vol_bp * vol_sensitivity / 100.0))
-    dynamic_spread_bp = _clamp(dynamic_spread_bp, min_spread_bp, max_spread_bp)
+    if strategy == "rgrid":
+        max_abs = max(abs(min_spread_bp), abs(max_spread_bp))
+        dynamic_spread_bp = _clamp(dynamic_spread_bp, -max_abs, max_abs)
+    else:
+        dynamic_spread_bp = _clamp(dynamic_spread_bp, min_spread_bp, max_spread_bp)
     reference_price = _compute_reference_price(state, mid, reference_mode, ema_fast_alpha, ema_slow_alpha)
     reference_price = reference_price if reference_price > 0 else mid
 
-    if threshold_bp > 0 and strategy == "mm":
+    if threshold_bp > 0 and strategy == "grid":
         # Avoid a cold-start deadlock: while mid history is short, price vs session ref is ~0 bp,
         # so we would never place quotes until the market drifts. Allow quotes until history warms up.
         hist = state.get("mm_mid_history") or []
@@ -312,6 +432,80 @@ def run_cycle(
         net_units += amt if side == "LONG" else -amt
     inv_usd = abs(net_units) * mid
 
+    cancelled_digests = set(str(d) for d in (state.get("mm_recently_cancelled_digests") or []))
+    executed_quotes = _reconcile_executed_quotes(state, open_orders, cancelled_digests)
+    state["mm_recently_cancelled_digests"] = []
+    if strategy == "rgrid" and executed_quotes:
+        for q in executed_quotes:
+            _append_grid_exposure_fill(state, q)
+
+    if strategy == "rgrid":
+        grid_anchor_price = float(state.get("grid_anchor_price") or 0.0)
+        discretion = _clamp(float(state.get("rgrid_discretion") or state.get("grid_discretion") or 0.06), 0.01, 0.5)
+        recent_fraction = _clamp(discretion * 2.0, 0.02, 0.5)
+        buy_exposure = _rolling_vwap_recent_fraction(state.get("grid_buy_fills") or [], recent_fraction)
+        sell_exposure = _rolling_vwap_recent_fraction(state.get("grid_sell_fills") or [], recent_fraction)
+        if buy_exposure > 0 and sell_exposure > 0:
+            grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
+        elif buy_exposure > 0:
+            grid_anchor_price = buy_exposure
+        elif sell_exposure > 0:
+            grid_anchor_price = sell_exposure
+        if grid_anchor_price <= 0:
+            grid_anchor_price = float(state.get("grid_last_fill_price") or 0.0)
+        if grid_anchor_price <= 0:
+            grid_anchor_price = reference_price
+        if executed_quotes:
+            last_exec = executed_quotes[-1]
+            exec_price = float(last_exec.get("price") or 0.0)
+            if exec_price > 0:
+                state["grid_last_fill_price"] = exec_price
+                grid_anchor_price = exec_price
+        elif float(state.get("grid_last_fill_price") or 0.0) <= 0 and grid_anchor_price > 0:
+            state["grid_last_fill_price"] = grid_anchor_price
+        state["grid_prev_net_units"] = net_units
+        state["grid_anchor_price"] = grid_anchor_price
+        state["grid_buy_exposure_price"] = round(buy_exposure, 8) if buy_exposure > 0 else 0.0
+        state["grid_sell_exposure_price"] = round(sell_exposure, 8) if sell_exposure > 0 else 0.0
+        reference_price = grid_anchor_price
+
+        pnl_stop_pct = max(0.0, float(state.get("rgrid_stop_loss_pct") or state.get("grid_stop_loss_pct") or state.get("sl_pct") or 0.0))
+        pnl_take_pct = max(0.0, float(state.get("rgrid_take_profit_pct") or state.get("grid_take_profit_pct") or state.get("tp_pct") or 0.0))
+        max_loss_usd = (pnl_stop_pct / 100.0) * max(0.0, notional)
+        max_profit_usd = (pnl_take_pct / 100.0) * max(0.0, notional)
+        grid_cycle_pnl = _compute_grid_cycle_pnl_usd(positions, product_id)
+        state["grid_last_cycle_pnl_usd"] = round(grid_cycle_pnl, 6)
+        if max_loss_usd > 0 and grid_cycle_pnl <= (-max_loss_usd):
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": 0,
+                "action": "grid_stop_loss_hit",
+                "detail": (
+                    f"Grid PnL stop-loss hit: pnl ${grid_cycle_pnl:,.2f} <= -${max_loss_usd:,.2f} "
+                    f"({pnl_stop_pct:.2f}% of margin)"
+                ),
+                "grid_cycle_pnl_usd": grid_cycle_pnl,
+                "grid_max_loss_usd": max_loss_usd,
+                "reference_price": reference_price,
+                "spread_bp": dynamic_spread_bp,
+            }
+        if max_profit_usd > 0 and grid_cycle_pnl >= max_profit_usd:
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": 0,
+                "action": "grid_take_profit_hit",
+                "detail": (
+                    f"Reverse GRID take-profit hit: pnl ${grid_cycle_pnl:,.2f} >= ${max_profit_usd:,.2f} "
+                    f"({pnl_take_pct:.2f}% of margin)"
+                ),
+                "grid_cycle_pnl_usd": grid_cycle_pnl,
+                "grid_take_profit_usd": max_profit_usd,
+                "reference_price": reference_price,
+                "spread_bp": dynamic_spread_bp,
+            }
+
     buy_mult, sell_mult, pause_flatten_only, pause_reason = _resolve_side_multipliers(
         directional_bias, net_units, inv_soft_limit_usd, mid
     )
@@ -338,7 +532,10 @@ def run_cycle(
         order_birth_ts=order_birth_ts,
         quote_ttl_seconds=quote_ttl_seconds,
         close_offset_bp=close_offset_bp,
+        cancelled_digests=cancelled_digests,
     )
+    if cancelled_digests:
+        state["mm_recently_cancelled_digests"] = list(cancelled_digests)
 
     if orders_cancelled > 0:
         open_orders = client.get_open_orders(product_id)
@@ -360,11 +557,62 @@ def run_cycle(
         if p > 0:
             existing_prices.append(p)
 
+    soft_reset_side = None
+    if strategy == "rgrid":
+        reset_threshold_pct = max(0.0, float(state.get("rgrid_reset_threshold_pct") or state.get("grid_reset_threshold_pct") or 0.0))
+        reset_timeout_s = max(
+            GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS,
+            int(state.get("rgrid_reset_timeout_seconds") or state.get("grid_reset_timeout_seconds") or 120),
+        )
+        reset_active = bool(state.get("grid_reset_active"))
+        reset_started = float(state.get("grid_reset_started_ts") or 0.0)
+        now_ts = time.time()
+        drift_from_anchor_pct = 0.0
+        if reference_price > 0:
+            drift_from_anchor_pct = abs(mid - reference_price) / reference_price * 100.0
+        state["grid_drift_from_anchor_pct"] = round(drift_from_anchor_pct, 6)
+        grid_cycle_pnl = float(state.get("grid_last_cycle_pnl_usd") or 0.0)
+        favorable_trend_up = mid > reference_price
+        favorable_trend_down = mid < reference_price
+        if grid_cycle_pnl > 0 and reset_threshold_pct > 0 and reference_price > 0:
+            if favorable_trend_up and ((mid - reference_price) / reference_price * 100.0 >= reset_threshold_pct):
+                reset_active = True
+                if not reset_started:
+                    reset_started = now_ts
+                # Trend is up; move opposite leg (sell) toward market to lock profit.
+                soft_reset_side = "sell"
+            elif favorable_trend_down and ((reference_price - mid) / reference_price * 100.0 >= reset_threshold_pct):
+                reset_active = True
+                if not reset_started:
+                    reset_started = now_ts
+                # Trend is down; move opposite leg (buy) toward market to lock profit.
+                soft_reset_side = "buy"
+
+        if reset_active and not soft_reset_side:
+            soft_reset_side = str(state.get("grid_reset_side") or "")
+            if soft_reset_side not in ("buy", "sell"):
+                soft_reset_side = "sell" if net_units > 0 else ("buy" if net_units < 0 else None)
+
+        if reset_active:
+            timed_out = bool(reset_started and (now_ts - reset_started) >= reset_timeout_s)
+            rebalanced = abs(net_units) <= 1e-9
+            if timed_out or rebalanced:
+                reset_active = False
+                reset_started = 0.0
+                soft_reset_side = None
+
+        state["grid_reset_active"] = bool(reset_active)
+        state["grid_reset_side"] = soft_reset_side or ""
+        state["grid_reset_started_ts"] = float(reset_started or 0.0)
+
     grid_orders = _compute_grid_prices(
         reference_price,
         dynamic_spread_bp,
         levels,
         strategy=strategy,
+        net_units=net_units,
+        mid_price=mid,
+        soft_reset_side=soft_reset_side,
         min_range_pct=min_range_pct,
         max_range_pct=max_range_pct,
     )
@@ -448,7 +696,20 @@ def run_cycle(
             existing_prices.append(order_price)
             digest = result.get("digest")
             if digest and digest != "unknown":
-                order_birth_ts[str(digest)] = time.time()
+                digest_s = str(digest)
+                now_placed = time.time()
+                order_birth_ts[digest_s] = now_placed
+                tracked_quotes = state.setdefault("mm_tracked_quotes", {})
+                if not isinstance(tracked_quotes, dict):
+                    tracked_quotes = {}
+                    state["mm_tracked_quotes"] = tracked_quotes
+                tracked_quotes[digest_s] = {
+                    "digest": digest_s,
+                    "price": float(order_price),
+                    "is_long": bool(order_spec["is_long"]),
+                    "size": float(size_to_use),
+                    "placed_ts": now_placed,
+                }
             placed_notional_usd += max(0.0, float(size_to_use) * float(order_price))
             if reference_price > 0:
                 quote_distances_bp.append(abs(order_price - reference_price) / reference_price * 10000.0)
@@ -512,6 +773,9 @@ def run_cycle(
         "inventory_skew_usd": inv_usd,
         "pause_reason": state.get("mm_pause_reason") or None,
         "errors": errors if errors else None,
+        "grid_reset_active": bool(state.get("grid_reset_active", False)) if strategy == "rgrid" else None,
+        "grid_reset_side": state.get("grid_reset_side") if strategy == "rgrid" else None,
+        "grid_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd") if strategy == "rgrid" else None,
     }
 
     # Update cumulative PnL tracking

@@ -29,6 +29,39 @@ _tasks: dict[str, asyncio.Task] = {}
 _process_worker_mode = False
 
 
+def _normalize_strategy_id(strategy: str) -> str:
+    sid = str(strategy or "").lower().strip()
+    if sid == "mm":
+        return "grid"
+    if sid in ("reverse_grid", "reverse-grid"):
+        return "rgrid"
+    return sid
+
+
+def _migrate_state_strategy(state: dict) -> dict:
+    if not isinstance(state, dict):
+        return state
+    sid = str(state.get("strategy") or "").lower().strip()
+    if sid == "mm":
+        state["strategy"] = "grid"
+        state["strategy_id_v2"] = 1
+    elif sid == "grid" and int(state.get("strategy_id_v2") or 0) < 1:
+        state["strategy"] = "rgrid"
+        state["strategy_id_v2"] = 1
+    elif sid in ("grid", "rgrid", "dn", "vol", "bro"):
+        state["strategy_id_v2"] = int(state.get("strategy_id_v2") or 1)
+    return state
+
+
+def _strategy_display_name(strategy: str) -> str:
+    sid = _normalize_strategy_id(strategy)
+    if sid == "grid":
+        return "GRID"
+    if sid == "rgrid":
+        return "REVERSE GRID"
+    return sid.upper() if sid else "STRATEGY"
+
+
 def set_bot_app(app):
     global _bot_app, _runtime_loop
     _bot_app = app
@@ -82,6 +115,7 @@ def _load_state(telegram_id: int, network: str) -> dict:
         loaded = json.loads(raw)
         state = _default_state()
         state.update(loaded if isinstance(loaded, dict) else {})
+        _migrate_state_strategy(state)
         return state
     except Exception:
         logger.warning("Invalid bot state JSON for user %s", telegram_id)
@@ -108,9 +142,10 @@ async def _notify(telegram_id: int, text: str, **fmt_kwargs):
 
 
 def _strategy_defaults(strategy: str) -> dict:
+    strategy = _normalize_strategy_id(strategy)
     default_bro_products = get_perp_products()[:6] or ["BTC", "ETH", "SOL"]
     presets = {
-        "mm": {
+        "grid": {
             "notional_usd": 400.0,
             "cycle_notional_usd": 400.0,
             "spread_bp": 4.0,
@@ -118,7 +153,21 @@ def _strategy_defaults(strategy: str) -> dict:
             "threshold_bp": 12.0,
             "close_offset_bp": 24.0,
         },
-        "grid": {"notional_usd": 100.0, "spread_bp": 10.0, "interval_seconds": 60, "levels": 4, "min_range_pct": 1.0, "max_range_pct": 1.0},
+        "rgrid": {
+            "notional_usd": 100.0,
+            "spread_bp": 10.0,
+            "rgrid_spread_bp": 10.0,
+            "interval_seconds": 60,
+            "levels": 4,
+            "rgrid_stop_loss_pct": 0.8,
+            "rgrid_take_profit_pct": 1.2,
+            "rgrid_discretion": 0.06,
+            "rgrid_reset_threshold_pct": 1.0,
+            "rgrid_reset_timeout_seconds": 120,
+            # Legacy fallback (read-only compatibility).
+            "min_range_pct": 1.0,
+            "max_range_pct": 1.0,
+        },
         "dn": {
             "notional_usd": 50.0,
             "spread_bp": 3.0,
@@ -139,7 +188,7 @@ def _strategy_defaults(strategy: str) -> dict:
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
 
 
-SUPPORTED_STRATEGIES = ("mm", "grid", "dn", "vol", "bro")
+SUPPORTED_STRATEGIES = ("grid", "rgrid", "dn", "vol", "bro")
 
 
 def start_user_bot(
@@ -150,7 +199,7 @@ def start_user_bot(
     slippage_pct: float = 1.0,
     **kwargs,
 ) -> tuple[bool, str]:
-    strategy = (strategy or "").lower()
+    strategy = _normalize_strategy_id(strategy)
     if strategy not in SUPPORTED_STRATEGIES:
         return False, "Unknown strategy."
     try:
@@ -214,6 +263,7 @@ def start_user_bot(
         {
             "running": True,
             "strategy": strategy,
+            "strategy_id_v2": 1,
             "product": product.upper(),
             "leverage": float(leverage or 3.0),
             "slippage_pct": float(slippage_pct or 1.0),
@@ -237,7 +287,7 @@ def start_user_bot(
         )
     return (
         True,
-        f"{strategy.upper()} bot started on {product.upper()}-PERP ({network}) "
+        f"{_strategy_display_name(strategy)} bot started on {product.upper()}-PERP ({network}) "
         f"| TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
     )
 
@@ -403,6 +453,19 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "dn_last_funding_rate": state.get("dn_last_funding_rate"),
         "dn_unfavorable_count": state.get("dn_unfavorable_count"),
         "dn_mode": state.get("dn_mode") or state.get("funding_entry_mode"),
+        # Reverse GRID telemetry surface for runtime status.
+        "rgrid_anchor_price": state.get("grid_anchor_price"),
+        "rgrid_buy_exposure_price": state.get("grid_buy_exposure_price"),
+        "rgrid_sell_exposure_price": state.get("grid_sell_exposure_price"),
+        "rgrid_drift_from_anchor_pct": state.get("grid_drift_from_anchor_pct"),
+        "rgrid_reset_active": bool(state.get("grid_reset_active")),
+        "rgrid_reset_side": state.get("grid_reset_side"),
+        "rgrid_last_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd"),
+        "rgrid_stop_loss_pct": state.get("rgrid_stop_loss_pct") or state.get("grid_stop_loss_pct") or state.get("sl_pct"),
+        "rgrid_take_profit_pct": state.get("rgrid_take_profit_pct") or state.get("grid_take_profit_pct") or state.get("tp_pct"),
+        "rgrid_reset_threshold_pct": state.get("rgrid_reset_threshold_pct") or state.get("grid_reset_threshold_pct"),
+        "rgrid_reset_timeout_seconds": state.get("rgrid_reset_timeout_seconds") or state.get("grid_reset_timeout_seconds"),
+        "rgrid_discretion": state.get("rgrid_discretion") or state.get("grid_discretion"),
         "other_running_networks": other_running_networks,
     }
 
@@ -607,7 +670,7 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
                        client, mid: float, product_id: int, product: str, open_orders: list) -> dict:
     from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
 
-    if strategy in ("mm", "grid"):
+    if strategy in ("grid", "rgrid"):
         return mm_bot.run_cycle(
             telegram_id, network, state,
             client=client, mid=mid, open_orders=open_orders,
@@ -684,7 +747,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         return True, None
 
     product = state.get("product", "BTC")
-    strategy = state.get("strategy")
+    strategy = _normalize_strategy_id(state.get("strategy"))
+    state["strategy"] = strategy
 
     if strategy == "bro":
         client = await run_blocking(get_user_readonly_client, telegram_id)
@@ -782,61 +846,62 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
-    move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
-    sl_pct = float(state.get("sl_pct") or 0.0)
-    tp_pct = float(state.get("tp_pct") or 0.0)
-    if sl_pct > 0 and move_pct >= sl_pct:
-        state["running"] = False
-        state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
-        _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, network)
-        if close_res.get("success"):
-            await _notify(
-                telegram_id,
-                "🛑 {strategy} stopped on {product}-PERP ({network}) - SL hit ({pct}%).",
-                strategy=strategy.upper(), product=product, network=network, pct=f"{move_pct:.2f}",
-            )
-        else:
-            logger.warning(
-                "SL stop close_all_positions reported failure for user %s on %s: %s",
-                telegram_id,
-                network,
-                close_res.get("error", "unknown"),
-            )
-            await _notify(
-                telegram_id,
-                "⚠️ SL triggered for {strategy} on {product}-PERP ({network}), "
-                "but full cleanup failed. Please close remaining exposure on Nado. "
-                "Error: {error}",
-                strategy=strategy.upper(), product=product, network=network, error=close_res.get('error', 'unknown'),
-            )
-        return True, None
-    if tp_pct > 0 and move_pct >= tp_pct:
-        state["running"] = False
-        state["last_error"] = None
-        _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, network)
-        if close_res.get("success"):
-            await _notify(
-                telegram_id,
-                "✅ {strategy} target reached on {product}-PERP ({network}) - TP hit ({pct}%).",
-                strategy=strategy.upper(), product=product, network=network, pct=f"{move_pct:.2f}",
-            )
-        else:
-            logger.warning(
-                "TP stop close_all_positions reported failure for user %s on %s: %s",
-                telegram_id,
-                network,
-                close_res.get("error", "unknown"),
-            )
-            await _notify(
-                telegram_id,
-                "⚠️ TP triggered for {strategy} on {product}-PERP ({network}), "
-                "but full cleanup failed. Please close remaining exposure on Nado. "
-                "Error: {error}",
-                strategy=strategy.upper(), product=product, network=network, error=close_res.get('error', 'unknown'),
-            )
-        return True, None
+    if strategy != "rgrid":
+        move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
+        sl_pct = float(state.get("sl_pct") or 0.0)
+        tp_pct = float(state.get("tp_pct") or 0.0)
+        if sl_pct > 0 and move_pct >= sl_pct:
+            state["running"] = False
+            state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
+            _save_state(telegram_id, network, state)
+            close_res = await run_blocking(close_all_positions, telegram_id, network)
+            if close_res.get("success"):
+                await _notify(
+                    telegram_id,
+                    "🛑 {strategy} stopped on {product}-PERP ({network}) - SL hit ({pct}%).",
+                    strategy=_strategy_display_name(strategy), product=product, network=network, pct=f"{move_pct:.2f}",
+                )
+            else:
+                logger.warning(
+                    "SL stop close_all_positions reported failure for user %s on %s: %s",
+                    telegram_id,
+                    network,
+                    close_res.get("error", "unknown"),
+                )
+                await _notify(
+                    telegram_id,
+                    "⚠️ SL triggered for {strategy} on {product}-PERP ({network}), "
+                    "but full cleanup failed. Please close remaining exposure on Nado. "
+                    "Error: {error}",
+                    strategy=_strategy_display_name(strategy), product=product, network=network, error=close_res.get('error', 'unknown'),
+                )
+            return True, None
+        if tp_pct > 0 and move_pct >= tp_pct:
+            state["running"] = False
+            state["last_error"] = None
+            _save_state(telegram_id, network, state)
+            close_res = await run_blocking(close_all_positions, telegram_id, network)
+            if close_res.get("success"):
+                await _notify(
+                    telegram_id,
+                    "✅ {strategy} target reached on {product}-PERP ({network}) - TP hit ({pct}%).",
+                    strategy=_strategy_display_name(strategy), product=product, network=network, pct=f"{move_pct:.2f}",
+                )
+            else:
+                logger.warning(
+                    "TP stop close_all_positions reported failure for user %s on %s: %s",
+                    telegram_id,
+                    network,
+                    close_res.get("error", "unknown"),
+                )
+                await _notify(
+                    telegram_id,
+                    "⚠️ TP triggered for {strategy} on {product}-PERP ({network}), "
+                    "but full cleanup failed. Please close remaining exposure on Nado. "
+                    "Error: {error}",
+                    strategy=_strategy_display_name(strategy), product=product, network=network, error=close_res.get('error', 'unknown'),
+                )
+            return True, None
 
     with timed_metric("runtime.open_orders.fetch"):
         open_orders = await run_blocking(client.get_open_orders, product_id)
@@ -848,12 +913,63 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             client, mid, product_id, product, open_orders,
         )
 
+    if strategy == "rgrid" and result.get("action") == "grid_stop_loss_hit":
+        state["running"] = False
+        state["last_error"] = result.get("detail") or "GRID stop-loss triggered."
+        _save_state(telegram_id, network, state)
+        close_res = await run_blocking(close_all_positions, telegram_id, network)
+        if close_res.get("success"):
+            await _notify(
+                telegram_id,
+                "🛑 GRID stopped on {product}-PERP ({network}) - PnL stop-loss triggered.\n{detail}",
+                product=product, network=network, detail=(result.get("detail") or "")[:180],
+            )
+        else:
+            logger.warning(
+                "GRID PnL stop close_all_positions failed for user %s on %s: %s",
+                telegram_id,
+                network,
+                close_res.get("error", "unknown"),
+            )
+            await _notify(
+                telegram_id,
+                "⚠️ GRID PnL stop-loss triggered on {product}-PERP ({network}), "
+                "but cleanup failed. Error: {error}",
+                product=product, network=network, error=close_res.get("error", "unknown"),
+            )
+        return True, None
+    if strategy == "rgrid" and result.get("action") == "grid_take_profit_hit":
+        state["running"] = False
+        state["last_error"] = None
+        _save_state(telegram_id, network, state)
+        close_res = await run_blocking(close_all_positions, telegram_id, network)
+        if close_res.get("success"):
+            await _notify(
+                telegram_id,
+                "✅ Reverse GRID completed on {product}-PERP ({network}) - PnL take-profit triggered.\n{detail}",
+                product=product, network=network, detail=(result.get("detail") or "")[:180],
+            )
+        else:
+            logger.warning(
+                "Reverse GRID PnL take-profit close_all_positions failed for user %s on %s: %s",
+                telegram_id,
+                network,
+                close_res.get("error", "unknown"),
+            )
+            await _notify(
+                telegram_id,
+                "⚠️ Reverse GRID PnL take-profit triggered on {product}-PERP ({network}), "
+                "but cleanup failed. Error: {error}",
+                product=product, network=network, error=close_res.get("error", "unknown"),
+            )
+        return True, None
+
     tk_post = _task_key(telegram_id, network)
     if (not _process_worker_mode) and (tk_post not in _tasks or not state.get("running", True)):
         state["running"] = False
         _save_state(telegram_id, network, state)
         if tk_post in _tasks:
-            await _notify(telegram_id, "✅ {strategy} completed on {product}-PERP ({network}).", strategy=strategy.upper(), product=product, network=network)
+            await _notify(telegram_id, "✅ {strategy} completed on {product}-PERP ({network}).", strategy=_strategy_display_name(strategy), product=product, network=network)
         return True, None
 
     state["last_run_ts"] = time.time()

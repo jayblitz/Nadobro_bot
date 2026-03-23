@@ -562,7 +562,7 @@ def fmt_help():
         "Place market or limit orders from guided flow or natural language commands\\.\n"
         "\n"
         "🧠 *Strategy Lab*\n"
-        "Configure and run automated strategies: MM Bot, Grid Reactor, Mirror DN, and Volume Engine\\.\n"
+        "Configure and run automated strategies: GRID, Reverse GRID, Mirror DN, and Volume Engine\\.\n"
         "Mirror DN now runs a real hedge on Nado: buy spot \\(BTC/ETH\\) and short the matching perp \\(1x\\-5x\\) to farm funding\\.\n"
         "Each dashboard includes a \"How it works\" explainer and pre\\-trade analytics\\.\n"
         "\n"
@@ -751,6 +751,41 @@ def fmt_status_overview(status: dict, onboarding: dict):
                 f"{_loc('Quotes')}: "
                 f"{escape_md(f'{float(maker_fill_ratio) * 100:.0f}%')} {_loc('fills')} · "
                 f"{escape_md(f'{float(cancellation_ratio or 0) * 100:.0f}%')} {_loc('cancels')}"
+            )
+        if strategy == "RGRID":
+            anchor = float(status.get("rgrid_anchor_price") or 0.0)
+            buy_exp = float(status.get("rgrid_buy_exposure_price") or 0.0)
+            sell_exp = float(status.get("rgrid_sell_exposure_price") or 0.0)
+            drift_pct = float(status.get("rgrid_drift_from_anchor_pct") or 0.0)
+            reset_active = bool(status.get("rgrid_reset_active"))
+            reset_side = str(status.get("rgrid_reset_side") or "none").upper()
+            cycle_pnl = float(status.get("rgrid_last_cycle_pnl_usd") or 0.0)
+            sl_pct = float(status.get("rgrid_stop_loss_pct") or 0.0)
+            tp_pct = float(status.get("rgrid_take_profit_pct") or 0.0)
+            reset_threshold = float(status.get("rgrid_reset_threshold_pct") or 0.0)
+            reset_timeout = int(float(status.get("rgrid_reset_timeout_seconds") or 0.0))
+            discretion = float(status.get("rgrid_discretion") or 0.0)
+            pnl_sign = "+" if cycle_pnl >= 0 else ""
+            lines.append("")
+            lines.append("*Reverse GRID Telemetry*")
+            lines.append(
+                f"Anchor: *{escape_md(f'{anchor:,.6f}') if anchor > 0 else 'n/a'}* \\| "
+                f"Drift: *{escape_md(f'{drift_pct:.3f}%')}*"
+            )
+            lines.append(
+                f"Exposure VWAP: Buy *{escape_md(f'{buy_exp:,.6f}') if buy_exp > 0 else 'n/a'}* · "
+                f"Sell *{escape_md(f'{sell_exp:,.6f}') if sell_exp > 0 else 'n/a'}*"
+            )
+            lines.append(
+                f"Soft Reset: *{escape_md('ON' if reset_active else 'OFF')}* \\| "
+                f"Side *{escape_md(reset_side)}* \\| "
+                f"Threshold *{escape_md(f'{reset_threshold:.2f}%')}* \\| "
+                f"Timeout *{escape_md(f'{reset_timeout}s' if reset_timeout > 0 else 'n/a')}*"
+            )
+            lines.append(
+                f"PnL Cycle: *{escape_md(f'{pnl_sign}${cycle_pnl:,.2f}')}* \\| "
+                f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}* \\| "
+                f"Discretion: *{escape_md(f'{discretion:.2f}')}*"
             )
 
     return "\n".join(lines)
