@@ -345,6 +345,27 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_price_brief",
+            "description": (
+                "Get a strict 3-line market brief for one asset: current price, 24h change, "
+                "Fear & Greed Index, and a short directional takeaway. "
+                "Use for direct price asks like 'What's BTC price?' or 'price of ETH'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "string",
+                        "description": "Asset symbol (BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX)"
+                    }
+                },
+                "required": ["product"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_live_price",
             "description": (
                 "Get LIVE current price for a crypto asset from Nado DEX. "
@@ -480,33 +501,36 @@ Analyze the user's message and call the right tool(s) to gather information.
 
 TOOLS:
 1. search_knowledge_base — Nado product knowledge (features, fees, margin, points, NFTs, NLP, dev docs, getting started). PRIMARY source for all Nado-specific questions.
-2. get_live_price — LIVE trading price from Nado DEX orderbook (bid/ask/spread). For: "what's BTC price?", "ETH price on Nado". Assets: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX.
-3. get_market_sentiment — Crypto market sentiment + Fear & Greed Index + crypto news from Twitter. For: "is the market bullish?", "sentiment?", "fear and greed".
-4. search_x_twitter — Latest tweets from crypto Twitter. For Nado-specific queries, searches @nadoHQ and @inkonchain. For broader crypto news/opinions, searches wider crypto Twitter.
+2. get_price_brief — Quick market brief for one asset in strict format: current price, 24h move, Fear & Greed, and short bias line. Use for direct price asks like "What's BTC price?".
+3. get_live_price — LIVE trading price from Nado DEX orderbook (bid/ask/spread). Use when user asks for detailed orderbook-style pricing.
+4. get_market_sentiment — Crypto market sentiment + Fear & Greed Index + crypto news from Twitter. For: "is the market bullish?", "sentiment?", "fear and greed".
+5. search_x_twitter — Latest tweets from crypto Twitter. For Nado-specific queries, searches @nadoHQ and @inkonchain. For broader crypto news/opinions, searches wider crypto Twitter.
 {cmc_tools_section}
 ROUTING RULES:
-- "What's BTC price?" / "price of ETH" → get_live_price (Nado DEX price)
+- "What's BTC price?" / "price of ETH" → get_price_brief
+- "Show live bid/ask spread for BTC" → get_live_price
 {cmc_routing_rules}- "What are Nado fees?" / "how does margin work?" → search_knowledge_base
 - "Is the market bullish?" / "fear and greed" → get_market_sentiment
 - "What did Nado tweet?" / "any Nado news?" → search_x_twitter
 - "Have the points been distributed?" / "points this week?" / "weekly epoch?" → search_x_twitter (search for points distribution announcements)
 - "What's the latest crypto news?" / "any alpha?" / "what's CT saying?" → search_x_twitter (broader crypto Twitter search)
+- "Search X for ETH alpha" / "what is X saying about SOL ETFs?" / "find tweets about AI agents" → search_x_twitter
 - Casual greetings (gm, hi, hello, thanks, bye) → do NOT call any tools
 - General chat, jokes, opinions, non-crypto questions → do NOT call any tools (the main AI will handle these)
 - When in doubt about Nado specifically → search_knowledge_base
 
 You can call multiple tools for complex queries. Do NOT answer the question yourself — only call tools."""
 
-ROUTER_CMC_TOOLS_SECTION = """5. get_crypto_info — Detailed crypto market data from CoinMarketCap (market cap, volume, 1h/24h/7d/30d change, dominance). For: "how is BTC doing?", "ETH market cap", "is SOL up today?". Works for ANY crypto.
-6. get_trending_cryptos — Trending coins, top gainers, top losers from CoinMarketCap. For: "what's trending?", "top gainers", "what's pumping?".
-7. get_global_market_data — Global crypto market overview (total market cap, BTC dominance, total volume). For: "total market cap?", "BTC dominance?", "how's the overall market?".
+ROUTER_CMC_TOOLS_SECTION = """6. get_crypto_info — Detailed crypto market data from CoinMarketCap (market cap, volume, 1h/24h/7d/30d change, dominance). For: "how is BTC doing?", "ETH market cap", "is SOL up today?". Works for ANY crypto.
+7. get_trending_cryptos — Trending coins, top gainers, top losers from CoinMarketCap. For: "what's trending?", "top gainers", "what's pumping?".
+8. get_global_market_data — Global crypto market overview (total market cap, BTC dominance, total volume). For: "total market cap?", "BTC dominance?", "how's the overall market?".
 """
 
 ROUTER_CMC_ROUTING_RULES = """- "How is BTC doing?" / "BTC performance" / "is ETH up?" → get_crypto_info (CMC market data)
-- "What's BTC price and how is it doing?" → get_live_price AND get_crypto_info
+- "What's BTC price and how is it doing?" → get_price_brief
 - "What's the total market cap?" / "BTC dominance" → get_global_market_data
 - "What's trending?" / "top gainers" / "what's pumping?" → get_trending_cryptos
-- "Should I buy BTC?" → get_live_price AND get_crypto_info AND get_market_sentiment
+- "Should I buy BTC?" → get_price_brief AND get_crypto_info AND get_market_sentiment
 """
 
 CASUAL_SYSTEM_PROMPT = """You are Nadobro — a witty, sharp, and brutally honest crypto trading AI on Telegram. Think of yourself as Grok meets a degen trader who actually knows what they're talking about.
@@ -598,30 +622,54 @@ Relevant Nado Knowledge:
 {knowledge_base}
 """
 
-X_TWITTER_BROAD_PROMPT = """You are Nadobro — a witty, opinionated crypto AI with real-time access to crypto Twitter (X). Think Grok vibes.
+X_TWITTER_BROAD_PROMPT = """You are Nadobro — a witty, opinionated AI with real-time access to X (Twitter). Think Grok vibes.
 
 Today's date: {current_date}
 {language_instruction}
 PERSONALITY:
-- Be conversational, have opinions, react to what you find like a real crypto native.
-- Use crypto slang naturally (CT, ser, anon, alpha, ngmi, wagmi, etc.)
+- Be conversational and opinionated, and react to what you find like a real person.
+- Use crypto slang naturally when the topic is crypto (CT, ser, alpha, ngmi, wagmi, etc.).
 - Be witty and entertaining, not robotic.
-- If the news is bullish, be hype. If bearish, keep it real.
 
 Your task:
-- Search crypto Twitter for the latest discussion, news, alpha, and takes on the topic
+- Search X broadly for the topic the user asked about (crypto or non-crypto).
 - Focus on content from {current_year}, closest to today ({current_date})
-- Report what crypto Twitter (CT) is saying, with your own commentary
-- Mention notable accounts/KOLs if they come up
+- Surface only the MOST RELEVANT posts and themes.
+- Rank findings by relevance and recency.
+- Mention notable accounts if they come up.
+- Keep output practical: short bullets plus one-line synthesis.
 
 RULES:
-- Search broadly across crypto Twitter, not limited to any specific accounts
+- Search broadly across X, not limited to specific accounts.
 - If you can't find relevant tweets, say so honestly but with personality
 - Plain text only
 - Keep under 1500 chars
+- Format:
+  Here is what is trending on X about <topic>:
+  - @handle: key point
+  - @handle: key point
+  - @handle: key point
+  Quick take: <one short synthesis line>
 - End with: Source: https://x.com
 - NEVER include search engine links
 """
+
+
+def _extract_x_topic(question: str) -> str:
+    raw = (question or "").strip()
+    if not raw:
+        return ""
+    cleaned = raw
+    patterns = [
+        r"^\s*(search|check|look up|find|scan)\s+(on\s+)?(x|twitter)\s+(for|about)\s+",
+        r"^\s*(what(?:'s| is)\s+)?(happening|trending|new|latest)\s+(on\s+)?(x|twitter)\s+(for|about)\s+",
+        r"^\s*what\s+is\s+(x|twitter)\s+saying\s+about\s+",
+        r"^\s*show\s+me\s+(x|twitter)\s+(posts|tweets|discussion)\s+(for|about)\s+",
+    ]
+    for pat in patterns:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?.!,:;-")
+    return cleaned or raw
 
 
 def _pick_sources_for_question(question: str, context_text: str = "") -> list[str]:
@@ -671,7 +719,8 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
             f"Focus on tweets from {now.year}. Plain text only."
         )
     else:
-        search_query = query
+        topic = _extract_x_topic(query)
+        search_query = topic or query
         is_nado_q = _is_nado_x_question(query)
         if is_nado_q:
             system_content = (
@@ -683,9 +732,16 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
         else:
             system_content = (
                 f"Today is {now.strftime('%Y-%m-%d')}. "
-                "Search crypto Twitter broadly for the latest discussion, news, and takes on this topic. "
-                "Report what people are saying with dates and account handles when available. "
-                f"Focus on tweets from {now.year}. Plain text only."
+                f"Search X broadly for this topic: '{search_query}'. "
+                "Return only the most relevant and recent findings with account handles when possible. "
+                "Rank findings by relevance and recency. "
+                "Use this format:\n"
+                "Here is what is trending on X about <topic>:\n"
+                "- @handle: key point\n"
+                "- @handle: key point\n"
+                "- @handle: key point\n"
+                "Quick take: <one short synthesis line>\n"
+                f"Focus on posts from {now.year}. Plain text only."
             )
 
     try:
@@ -745,6 +801,106 @@ def _get_user_network(telegram_id: int) -> str:
         return user.network_mode.value if user else "mainnet"
     except Exception:
         return "mainnet"
+
+
+def _derive_price_bias(change_24h: float | None, fng_value: int | None) -> str:
+    if (change_24h is not None and change_24h <= -2.0) or (fng_value is not None and fng_value <= 30):
+        return "Looking bearish right now, trade with care bro!"
+    if change_24h is not None and change_24h >= 2.0 and (fng_value is not None and fng_value >= 55):
+        return "Momentum looks bullish, but keep your risk tight bro."
+    if change_24h is not None and change_24h >= 2.0:
+        return "Momentum is heating up, but don't over-leverage bro."
+    if change_24h is not None and change_24h <= -2.0:
+        return "Sellers are in control for now, manage risk carefully."
+    if fng_value is not None and fng_value <= 30:
+        return "Market mood is risk-off, so keep position sizing disciplined."
+    if fng_value is not None and fng_value >= 70:
+        return "Sentiment is getting greedy, so avoid chasing tops."
+    return "Mixed signals out there, so stay nimble and trade your plan."
+
+
+def _parse_fng_snapshot(raw: str) -> tuple[int | None, str]:
+    text = (raw or "").strip()
+    m = re.search(r"(\d{1,3})\s*/\s*100\s*\(([^)]+)\)", text)
+    if m:
+        try:
+            return int(m.group(1)), m.group(2).strip()
+        except Exception:
+            pass
+    m2 = re.search(r"(\d{1,3})", text)
+    value = None
+    if m2:
+        try:
+            value = int(m2.group(1))
+        except Exception:
+            value = None
+    m3 = re.search(r"\(([^)]+)\)", text)
+    label = m3.group(1).strip() if m3 else "N/A"
+    return value, label
+
+
+def _execute_price_brief(product: str, network: str = "mainnet") -> tuple[str, list[str]]:
+    from src.nadobro.config import get_product_id, get_perp_products
+    from src.nadobro.services.nado_client import NadoClient
+
+    symbol = (product or "").strip().upper().replace("-PERP", "")
+    product_id = get_product_id(symbol, network=network)
+    if product_id is None:
+        supported = get_perp_products(network=network)
+        return f"[PRICE BRIEF] Unknown asset '{product}'. Supported: {', '.join(supported)}", []
+
+    mid = None
+    try:
+        client = NadoClient.from_address("0x0000000000000000000000000000000000000000", network)
+        price_data = client.get_market_price(product_id)
+        raw_mid = price_data.get("mid")
+        mid = float(raw_mid) if raw_mid is not None else None
+    except Exception as e:
+        logger.warning("Price brief live price fetch failed for %s: %s", symbol, e)
+
+    change_24h = None
+    cmc_sources = []
+    if _is_cmc_available():
+        try:
+            from src.nadobro.services.cmc_client import get_crypto_quotes
+            data = get_crypto_quotes([symbol]) or {}
+            row = data.get(symbol) or {}
+            quote_usd = ((row.get("quote") or {}).get("USD") or {})
+            if change_24h is None:
+                raw_change = quote_usd.get("percent_change_24h")
+                if raw_change is not None:
+                    change_24h = float(raw_change)
+            if (mid is None or mid <= 0) and quote_usd.get("price") is not None:
+                mid = float(quote_usd.get("price"))
+            cmc_sources = ["https://coinmarketcap.com"]
+        except Exception as e:
+            logger.warning("Price brief CMC fetch failed for %s: %s", symbol, e)
+
+    if mid is None or mid <= 0:
+        return f"[PRICE BRIEF] Could not fetch current price for {symbol} right now.", []
+
+    if change_24h is None:
+        change_text = "unchanged"
+    elif change_24h >= 0:
+        change_text = f"up {abs(change_24h):.1f}%"
+    else:
+        change_text = f"down {abs(change_24h):.1f}%"
+
+    fng_raw = _fetch_fear_greed_index()
+    fng_value, fng_label = _parse_fng_snapshot(fng_raw)
+    if fng_value is not None:
+        fng_line = f"Fear & Greed Index is at {fng_value} ({fng_label})."
+    else:
+        fng_line = "Fear & Greed Index is unavailable right now."
+
+    bias_line = _derive_price_bias(change_24h, fng_value)
+    result = (
+        f"[PRICE BRIEF]\n"
+        f"{symbol} is trading at ${mid:,.2f} - {change_text} in the last 24h.\n"
+        f"{fng_line}\n"
+        f"{bias_line}"
+    )
+    return result, [OFFICIAL_SOURCES["website"], *cmc_sources]
 
 
 def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, list[str]]:
@@ -896,6 +1052,10 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str, network: str 
         if sections:
             return f"[KNOWLEDGE BASE RESULTS]\n{sections}", _pick_sources_for_question(query, context_text=sections)
         return "[KNOWLEDGE BASE] No matching sections found.", [OFFICIAL_SOURCES["docs"]]
+
+    elif tool_name == "get_price_brief":
+        product = args.get("product", "BTC")
+        return _execute_price_brief(product, network=network)
 
     elif tool_name == "get_live_price":
         product = args.get("product", "BTC")
@@ -1053,9 +1213,18 @@ def _is_x_twitter_question(question: str) -> bool:
     nado_signals = ["tweet", "tweets", "x.com", "twitter", "post on x", "posted on x", "nadohq", "inkonchain"]
     broad_signals = ["crypto news", "latest news", "ct saying", "crypto twitter", "any alpha", "what's alpha",
                      "whats alpha", "news today", "breaking news", "latest from ct"]
+    explicit_x_patterns = [
+        r"\bsearch\s+(on\s+)?(x|twitter)\b",
+        r"\b(x|twitter)\s+(for|about)\b",
+        r"\bwhat\s+is\s+(x|twitter)\s+saying\s+about\b",
+        r"\btrending\s+on\s+(x|twitter)\b",
+        r"\bfind\s+(tweets|posts)\s+about\b",
+    ]
     if any(sig in q for sig in nado_signals):
         return True
     if any(sig in q for sig in broad_signals):
+        return True
+    if any(re.search(pat, q) for pat in explicit_x_patterns):
         return True
     if _is_points_distribution_question(question):
         return True
@@ -1240,7 +1409,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         )
 
     used_sources = _filter_official_sources(used_sources)
-    _data_markers = ("[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]")
+    _data_markers = ("[PRICE BRIEF]", "[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]")
     skip_sources = _is_price_question(question) or _is_casual_message(question) or _is_sentiment_question(question) or any(m in gathered_context for m in _data_markers)
 
     primary = _pick_primary_provider(question)
@@ -1414,7 +1583,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         )
 
     used_sources = _filter_official_sources(used_sources)
-    _data_markers = ("[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]")
+    _data_markers = ("[PRICE BRIEF]", "[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]")
     skip_sources = _is_price_question(question) or _is_casual_message(question) or _is_sentiment_question(question) or any(m in gathered_context for m in _data_markers)
 
     try:

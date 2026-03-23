@@ -297,11 +297,43 @@ async def _edit_message_safely(query, text: str, reply_markup=None):
         raise
 
 
-async def open_trade_card_from_message(update: Update, context: CallbackContext, telegram_id: int) -> bool:
+async def open_trade_card_from_message(
+    update: Update,
+    context: CallbackContext,
+    telegram_id: int,
+    *,
+    prefer_reply_to_message: bool = False,
+) -> bool:
     if not is_trade_card_mode_enabled() or not update.message:
         return False
     session = _get_trade_card_session(context, touch=True)
     chat_id = update.effective_chat.id
+
+    if prefer_reply_to_message:
+        if not session:
+            session = {
+                "session_id": _new_session_id(),
+                "state": "direction",
+                "origin_chat_id": chat_id,
+            }
+        lang = get_active_language()
+        try:
+            message = await update.message.reply_text(
+                localize_text(_build_trade_card_text(session), lang),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=localize_markup(_card_keyboard(session), lang),
+            )
+        except BadRequest as e:
+            if "Can't parse entities" not in str(e):
+                raise
+            message = await update.message.reply_text(
+                localize_text(_build_trade_card_text(session), lang).replace("\\", ""),
+                reply_markup=localize_markup(_card_keyboard(session), lang),
+            )
+        session["origin_chat_id"] = chat_id
+        session["origin_message_id"] = message.message_id
+        _set_trade_card_session(context, session)
+        return True
 
     if session and session.get("origin_chat_id") == chat_id and session.get("origin_message_id"):
         await _edit_or_send_trade_card(

@@ -85,7 +85,21 @@ def _remember_home_card(context: CallbackContext, chat_id: int, message_id: int)
     }
 
 
-async def _edit_or_send_card(update, context: CallbackContext, text: str, reply_markup):
+async def _edit_or_send_card(
+    update,
+    context: CallbackContext,
+    text: str,
+    reply_markup,
+    *,
+    prefer_reply_to_message: bool = False,
+):
+    """Show or refresh the home / module card.
+
+    When *prefer_reply_to_message* is True (reply-keyboard flows), we always send a
+    new message replying to the user's message. Editing only the last remembered
+    home-card message updates a bubble that may be far above the viewport, so
+    users think the bot ignored the tap until they tap again or scroll up.
+    """
     chat_id = update.effective_chat.id
     lang = get_active_language()
     text = localize_text(text, lang)
@@ -107,6 +121,24 @@ async def _edit_or_send_card(update, context: CallbackContext, text: str, reply_
             context.user_data[KEYBOARD_REMOVED_KEY] = True
         except Exception:
             pass
+
+    user_message = getattr(update, "message", None)
+    if prefer_reply_to_message and user_message:
+        try:
+            msg = await user_message.reply_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=reply_markup,
+            )
+        except BadRequest as e:
+            if "Can't parse entities" not in str(e):
+                raise
+            msg = await user_message.reply_text(
+                _plain_text_fallback(text),
+                reply_markup=reply_markup,
+            )
+        _remember_home_card(context, chat_id, msg.message_id)
+        return
 
     home = context.user_data.get(HOME_CARD_KEY) or {}
     message_id = home.get("message_id") if home.get("chat_id") == chat_id else None
@@ -248,7 +280,7 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
 
 async def open_home_card_view_from_message(update, context: CallbackContext, telegram_id: int, callback_data: str):
     text, kb = await resolve_home_view(callback_data, telegram_id)
-    await _edit_or_send_card(update, context, text, kb)
+    await _edit_or_send_card(update, context, text, kb, prefer_reply_to_message=True)
 
 
 async def open_home_card_from_command(update, context: CallbackContext, telegram_id: int):

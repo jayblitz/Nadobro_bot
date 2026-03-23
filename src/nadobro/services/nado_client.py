@@ -429,7 +429,7 @@ class NadoClient:
         if not info:
             return positions
         candidate_lists = []
-        for attr in ("perp_positions", "positions", "perp_balances"):
+        for attr in ("perp_positions", "positions", "perp_balances", "perpPositions", "perpBalances"):
             val = getattr(info, attr, None)
             if val:
                 candidate_lists.append(val)
@@ -438,21 +438,41 @@ class NadoClient:
 
         for plist in candidate_lists:
             for p in plist:
-                product_id = getattr(p, "product_id", None)
+                product_id = (
+                    getattr(p, "product_id", None)
+                    or getattr(p, "productId", None)
+                    or getattr(p, "pid", None)
+                )
                 if product_id is None:
                     continue
                 balance_obj = getattr(p, "balance", None)
                 amount_raw = None
                 v_quote_raw = None
                 if balance_obj is not None:
-                    amount_raw = getattr(balance_obj, "amount", None)
-                    v_quote_raw = getattr(balance_obj, "v_quote_balance", None)
+                    amount_raw = (
+                        getattr(balance_obj, "amount", None)
+                        or getattr(balance_obj, "amount_x18", None)
+                        or getattr(balance_obj, "size", None)
+                        or getattr(balance_obj, "size_x18", None)
+                    )
+                    v_quote_raw = (
+                        getattr(balance_obj, "v_quote_balance", None)
+                        or getattr(balance_obj, "vQuoteBalance", None)
+                        or getattr(balance_obj, "v_quote_balance_x18", None)
+                        or getattr(balance_obj, "vQuoteBalanceX18", None)
+                    )
                 if amount_raw is None:
                     amount_raw = (
                         getattr(p, "amount", None)
                         or getattr(p, "amount_x18", None)
+                        or getattr(p, "amountX18", None)
                         or getattr(p, "size", None)
                         or getattr(p, "size_x18", None)
+                        or getattr(p, "sizeX18", None)
+                        or getattr(p, "base_amount", None)
+                        or getattr(p, "base_amount_x18", None)
+                        or getattr(p, "baseAmount", None)
+                        or getattr(p, "baseAmountX18", None)
                     )
                 amount = self._from_x18_dynamic(amount_raw)
                 if abs(amount) <= 0:
@@ -460,9 +480,13 @@ class NadoClient:
 
                 price_raw = (
                     getattr(p, "entry_price_x18", None)
+                    or getattr(p, "entryPriceX18", None)
                     or getattr(p, "avg_entry_price_x18", None)
+                    or getattr(p, "avgEntryPriceX18", None)
                     or getattr(p, "price_x18", None)
+                    or getattr(p, "priceX18", None)
                     or getattr(p, "entry_price", None)
+                    or getattr(p, "entryPrice", None)
                     or 0
                 )
                 price = self._from_x18_dynamic(price_raw)
@@ -473,7 +497,7 @@ class NadoClient:
 
                 side_hint = self._normalize_side(
                     raw_side=getattr(p, "side", None) or (getattr(balance_obj, "side", None) if balance_obj is not None else None),
-                    raw_is_long=getattr(p, "is_long", None),
+                    raw_is_long=getattr(p, "is_long", None) if getattr(p, "is_long", None) is not None else getattr(p, "isLong", None),
                     raw_direction=getattr(p, "direction", None),
                     signed_amount=amount,
                 )
@@ -505,7 +529,7 @@ class NadoClient:
         if not payload:
             return positions
         lists = []
-        for key in ("perp_positions", "positions", "perp_balances"):
+        for key in ("perp_positions", "positions", "perp_balances", "perpPositions", "perpBalances"):
             val = payload.get(key)
             if isinstance(val, list) and val:
                 lists.append(val)
@@ -515,21 +539,43 @@ class NadoClient:
         for plist in lists:
             for p in plist:
                 try:
-                    product_id = int(p.get("product_id"))
+                    product_id = int(
+                        p.get("product_id")
+                        or p.get("productId")
+                        or p.get("pid")
+                    )
                 except Exception:
                     continue
                 balance_dict = p.get("balance") if isinstance(p.get("balance"), dict) else None
                 amount_raw = None
                 v_quote_raw = None
                 if balance_dict:
-                    amount_raw = balance_dict.get("amount")
-                    v_quote_raw = balance_dict.get("v_quote_balance")
+                    amount_raw = (
+                        balance_dict.get("amount")
+                        or balance_dict.get("amount_x18")
+                        or balance_dict.get("amountX18")
+                        or balance_dict.get("size")
+                        or balance_dict.get("size_x18")
+                        or balance_dict.get("sizeX18")
+                    )
+                    v_quote_raw = (
+                        balance_dict.get("v_quote_balance")
+                        or balance_dict.get("vQuoteBalance")
+                        or balance_dict.get("v_quote_balance_x18")
+                        or balance_dict.get("vQuoteBalanceX18")
+                    )
                 if amount_raw is None:
                     amount_raw = (
                         p.get("amount")
                         or p.get("amount_x18")
+                        or p.get("amountX18")
                         or p.get("size")
                         or p.get("size_x18")
+                        or p.get("sizeX18")
+                        or p.get("base_amount")
+                        or p.get("base_amount_x18")
+                        or p.get("baseAmount")
+                        or p.get("baseAmountX18")
                         or 0
                     )
                 amount = self._from_x18_dynamic(amount_raw)
@@ -537,9 +583,13 @@ class NadoClient:
                     continue
                 price_raw = (
                     p.get("entry_price_x18")
+                    or p.get("entryPriceX18")
                     or p.get("avg_entry_price_x18")
+                    or p.get("avgEntryPriceX18")
                     or p.get("price_x18")
+                    or p.get("priceX18")
                     or p.get("entry_price")
+                    or p.get("entryPrice")
                     or 0
                 )
                 price = self._from_x18_dynamic(price_raw)
@@ -550,7 +600,7 @@ class NadoClient:
 
                 side_hint = self._normalize_side(
                     raw_side=p.get("side") or (balance_dict.get("side") if balance_dict else None),
-                    raw_is_long=p.get("is_long"),
+                    raw_is_long=p.get("is_long") if p.get("is_long") is not None else p.get("isLong"),
                     raw_direction=p.get("direction"),
                     signed_amount=amount,
                 )
@@ -593,6 +643,12 @@ class NadoClient:
             if data.get("status") == "success":
                 subaccount_info_succeeded = True
                 payload = data.get("data", {}) or {}
+                if isinstance(payload, dict):
+                    for nested_key in ("subaccount_info", "subaccountInfo", "account", "result"):
+                        nested = payload.get(nested_key)
+                        if isinstance(nested, dict) and nested:
+                            payload = nested
+                            break
                 rest_positions = self._extract_positions_from_rest_payload(payload)
                 return rest_positions
         except Exception as e:

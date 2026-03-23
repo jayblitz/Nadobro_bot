@@ -466,7 +466,12 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "nav:trade":
         clear_pending_user_state(context)
         if is_trade_card_mode_enabled():
-            await open_trade_card_from_message(update, context, telegram_id)
+            await open_trade_card_from_message(
+                update,
+                context,
+                telegram_id,
+                prefer_reply_to_message=True,
+            )
             return
         await _reply_loc(update.message, 
             "🤖 *Trade Console*\n\nSelect direction:",
@@ -487,7 +492,12 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
                     reply_markup=localize_markup(persistent_menu_kb(), lang),
                 )
                 return
-            await open_trade_card_from_message(update, context, telegram_id)
+            await open_trade_card_from_message(
+                update,
+                context,
+                telegram_id,
+                prefer_reply_to_message=True,
+            )
             return
         await _handle_trade_flow_button(update, context, telegram_id, callback_data)
         return
