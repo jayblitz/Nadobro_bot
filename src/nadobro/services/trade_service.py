@@ -1106,6 +1106,16 @@ def get_trade_analytics(telegram_id: int) -> dict:
     losses = len([t for t in pnl_trades if float(t["pnl"]) <= 0])
     win_rate = (wins / len(pnl_trades) * 100) if pnl_trades else 0
     total_volume = sum(float(t.get("size") or 0) * float(t.get("price") or 0) for t in completed)
+
+    by_product = {}
+    for t in pnl_trades:
+        product = (t.get("product_name") or "Unknown").replace("-PERP", "")
+        if product not in by_product:
+            by_product[product] = {"pnl": 0.0, "count": 0}
+        by_product[product]["pnl"] += float(t["pnl"])
+        by_product[product]["count"] += 1
+    by_product = dict(sorted(by_product.items(), key=lambda x: abs(x[1]["pnl"]), reverse=True))
+
     return {
         "total_trades": total,
         "filled": len(filled),
@@ -1116,4 +1126,5 @@ def get_trade_analytics(telegram_id: int) -> dict:
         "wins": wins,
         "losses": losses,
         "total_volume": total_volume,
+        "by_product": by_product,
     }

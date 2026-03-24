@@ -20,6 +20,12 @@ DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
 
 
+MOMENTUM_EMA_CROSSOVER_BP = 5.0       # EMA fast-slow divergence threshold (bp)
+MOMENTUM_VOLUME_SURGE_MULT = 1.8       # Volume must be this multiple of recent avg
+MOMENTUM_FUNDING_SHIFT_BP = 2.0        # Funding rate shift threshold (bp)
+MOMENTUM_COOLDOWN_SECONDS = 300        # Min time between mode switches
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(v, hi))
 
@@ -96,6 +102,117 @@ def _resolve_side_multipliers(directional_bias: str, net_units: float, inv_soft_
             sell_mult *= 0.55
 
     return buy_mult, sell_mult, pause_to_flatten_only, pause_reason
+
+
+def _detect_ema_crossover(state: dict, mid: float, ema_fast_alpha: float, ema_slow_alpha: float) -> dict:
+    """Detect EMA fast/slow crossover for momentum detection."""
+    prev_fast = float(state.get("mm_ref_ema_fast") or mid)
+    prev_slow = float(state.get("mm_ref_ema_slow") or mid)
+    ema_fast = (ema_fast_alpha * mid) + ((1.0 - ema_fast_alpha) * prev_fast)
+    ema_slow = (ema_slow_alpha * mid) + ((1.0 - ema_slow_alpha) * prev_slow)
+
+    divergence_bp = abs(ema_fast - ema_slow) / max(ema_slow, 1e-9) * 10000.0
+    prev_divergence_sign = 1 if prev_fast > prev_slow else -1
+    curr_divergence_sign = 1 if ema_fast > ema_slow else -1
+    crossed = prev_divergence_sign != curr_divergence_sign
+
+    return {
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "divergence_bp": divergence_bp,
+        "bullish": ema_fast > ema_slow,
+        "crossed": crossed,
+        "strong": divergence_bp >= MOMENTUM_EMA_CROSSOVER_BP,
+    }
+
+
+def _detect_volume_surge(history: list[float], window: int = 10) -> dict:
+    """Detect if recent volume (price movement) is surging compared to average."""
+    if len(history) < window + 2:
+        return {"surge": False, "ratio": 0.0}
+    recent_returns = []
+    for i in range(len(history) - window, len(history)):
+        prev = float(history[i - 1] or 0)
+        cur = float(history[i] or 0)
+        if prev > 0 and cur > 0:
+            recent_returns.append(abs((cur - prev) / prev))
+    older_returns = []
+    start = max(1, len(history) - window * 3)
+    end = len(history) - window
+    for i in range(start, end):
+        prev = float(history[i - 1] or 0)
+        cur = float(history[i] or 0)
+        if prev > 0 and cur > 0:
+            older_returns.append(abs((cur - prev) / prev))
+    avg_recent = sum(recent_returns) / max(len(recent_returns), 1)
+    avg_older = sum(older_returns) / max(len(older_returns), 1)
+    ratio = avg_recent / max(avg_older, 1e-12)
+    return {
+        "surge": ratio >= MOMENTUM_VOLUME_SURGE_MULT,
+        "ratio": ratio,
+    }
+
+
+def _detect_funding_shift(state: dict, client, product_id: int) -> dict:
+    """Detect funding rate shift indicating directional bias."""
+    try:
+        fr_data = client.get_funding_rate(product_id)
+        if not fr_data:
+            return {"shift": False, "rate_bp": 0.0}
+        rate = float(fr_data.get("funding_rate", 0) or 0)
+        rate_bp = rate * 10000.0
+        prev_rate_bp = float(state.get("rgrid_prev_funding_bp") or 0.0)
+        state["rgrid_prev_funding_bp"] = rate_bp
+        shift_bp = abs(rate_bp - prev_rate_bp)
+        return {
+            "shift": shift_bp >= MOMENTUM_FUNDING_SHIFT_BP,
+            "rate_bp": rate_bp,
+            "shift_bp": shift_bp,
+            "direction": "long" if rate_bp < 0 else "short",
+        }
+    except Exception:
+        return {"shift": False, "rate_bp": 0.0}
+
+
+def _evaluate_rgrid_momentum(state: dict, mid: float, history: list[float],
+                              ema_fast_alpha: float, ema_slow_alpha: float,
+                              client=None, product_id: int = 0) -> dict:
+    """Evaluate all momentum signals for R-GRID dynamic mode switching."""
+    ema_signal = _detect_ema_crossover(state, mid, ema_fast_alpha, ema_slow_alpha)
+    vol_signal = _detect_volume_surge(history)
+    funding_signal = _detect_funding_shift(state, client, product_id) if client else {"shift": False, "rate_bp": 0.0}
+
+    signals_active = sum([
+        ema_signal.get("strong", False),
+        vol_signal.get("surge", False),
+        funding_signal.get("shift", False),
+    ])
+
+    # Momentum break requires at least 2 of 3 signals
+    momentum_break = signals_active >= 2
+
+    # Determine momentum direction
+    direction = None
+    if momentum_break:
+        if ema_signal.get("bullish"):
+            direction = "bullish"
+        else:
+            direction = "bearish"
+
+    # Check cooldown
+    now = time.time()
+    last_switch_ts = float(state.get("rgrid_last_mode_switch_ts") or 0.0)
+    in_cooldown = (now - last_switch_ts) < MOMENTUM_COOLDOWN_SECONDS
+
+    return {
+        "momentum_break": momentum_break and not in_cooldown,
+        "signals_active": signals_active,
+        "direction": direction,
+        "ema": ema_signal,
+        "volume": vol_signal,
+        "funding": funding_signal,
+        "in_cooldown": in_cooldown,
+    }
 
 
 def _compute_grid_prices(
@@ -397,6 +514,43 @@ def run_cycle(
     if strategy == "rgrid":
         max_abs = max(abs(min_spread_bp), abs(max_spread_bp))
         dynamic_spread_bp = _clamp(dynamic_spread_bp, -max_abs, max_abs)
+
+        # --- R-GRID Momentum Detection & Dynamic Mode Switching ---
+        momentum = _evaluate_rgrid_momentum(
+            state, mid, history, ema_fast_alpha, ema_slow_alpha,
+            client=client, product_id=product_id,
+        )
+        rgrid_mode = str(state.get("rgrid_active_mode") or "classic")
+        if momentum["momentum_break"] and rgrid_mode == "classic":
+            # Momentum break detected — switch to reversed mode
+            rgrid_mode = "reversed"
+            state["rgrid_active_mode"] = "reversed"
+            state["rgrid_momentum_direction"] = momentum["direction"]
+            state["rgrid_last_mode_switch_ts"] = time.time()
+            logger.info(
+                "RGRID momentum break: switching to reversed mode (direction=%s, signals=%d/3, "
+                "ema_div=%.1fbp, vol_ratio=%.2f, funding_shift=%.1fbp)",
+                momentum["direction"], momentum["signals_active"],
+                momentum["ema"]["divergence_bp"], momentum["volume"]["ratio"],
+                momentum["funding"].get("shift_bp", 0),
+            )
+        elif rgrid_mode == "reversed" and not momentum["momentum_break"] and momentum["signals_active"] == 0:
+            # Momentum has faded — revert to classic mode
+            rgrid_mode = "classic"
+            state["rgrid_active_mode"] = "classic"
+            state["rgrid_momentum_direction"] = None
+            state["rgrid_last_mode_switch_ts"] = time.time()
+            logger.info("RGRID momentum faded: reverting to classic mode (signals=%d/3)", momentum["signals_active"])
+        state["rgrid_momentum_signals"] = momentum["signals_active"]
+
+        # In reversed mode, flip the grid direction to follow momentum
+        if rgrid_mode == "reversed":
+            mom_dir = state.get("rgrid_momentum_direction")
+            if mom_dir == "bullish":
+                directional_bias = "long_bias"
+            elif mom_dir == "bearish":
+                directional_bias = "short_bias"
+        # --- End Momentum Detection ---
     else:
         dynamic_spread_bp = _clamp(dynamic_spread_bp, min_spread_bp, max_spread_bp)
     reference_price = _compute_reference_price(state, mid, reference_mode, ema_fast_alpha, ema_slow_alpha)

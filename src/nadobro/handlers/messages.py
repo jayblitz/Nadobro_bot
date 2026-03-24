@@ -1279,22 +1279,38 @@ async def _handle_pending_alert(update, context, telegram_id, text):
         return False
 
     product = pending["product"]
+    pre_selected_condition = pending.get("condition")
     context.user_data.pop("pending_alert", None)
 
-    try:
-        parts = text.lower().split()
-        condition = parts[0]
-        target = float(parts[1])
-    except (ValueError, IndexError):
-        await _reply_loc(update.message, 
-            "⚠️ Invalid format\\. Use: `above 100000` or `below 90000`",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
-        return True
+    valid_conditions = ("above", "below", "funding_above", "funding_below", "pnl_above", "pnl_below")
 
-    if condition not in ("above", "below"):
-        await _reply_loc(update.message, 
-            "⚠️ Invalid condition\\. Use: above, below",
+    if pre_selected_condition:
+        # Condition was picked via button — user only enters target value
+        condition = pre_selected_condition
+        try:
+            target = float(text.strip())
+        except ValueError:
+            await _reply_loc(update.message,
+                "⚠️ Invalid value\\. Please enter a number\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return True
+    else:
+        # Legacy flow: user types "above 100000"
+        try:
+            parts = text.lower().split()
+            condition = parts[0]
+            target = float(parts[1])
+        except (ValueError, IndexError):
+            await _reply_loc(update.message,
+                "⚠️ Invalid format\\. Use: `above 100000` or `below 90000`",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return True
+
+    if condition not in valid_conditions:
+        await _reply_loc(update.message,
+            "⚠️ Invalid condition\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True

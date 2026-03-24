@@ -21,10 +21,17 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
     if not user:
         return {"success": False, "error": _loc("User not found.")}
 
-    cond_map = {"above": AlertCondition.ABOVE.value, "below": AlertCondition.BELOW.value}
+    cond_map = {
+        "above": AlertCondition.ABOVE.value,
+        "below": AlertCondition.BELOW.value,
+        "funding_above": AlertCondition.FUNDING_ABOVE.value,
+        "funding_below": AlertCondition.FUNDING_BELOW.value,
+        "pnl_above": AlertCondition.PNL_ABOVE.value,
+        "pnl_below": AlertCondition.PNL_BELOW.value,
+    }
     alert_cond = cond_map.get(condition)
     if not alert_cond:
-        return {"success": False, "error": _loc("Unknown condition '{condition}'. Use: above, below").format(condition=condition)}
+        return {"success": False, "error": _loc("Unknown condition '{condition}'.").format(condition=condition)}
 
     network = user.network_mode.value
     alert_id = insert_alert({
@@ -73,23 +80,57 @@ def delete_alert(telegram_id: int, alert_id: int) -> dict:
     return {"success": True, "message": _loc("Alert #{alert_id} deleted.").format(alert_id=alert_id)}
 
 
-def get_triggered_alerts(prices: dict) -> list:
+def get_triggered_alerts(prices: dict, funding_rates: dict = None, positions_by_user: dict = None) -> list:
     triggered = []
     active_alerts = get_all_active_alerts()
     for alert in active_alerts:
         product_name = (alert.get("product_name") or "").replace("-PERP", "")
-        if product_name not in prices:
-            continue
-        current_price = prices[product_name].get("mid", 0)
-        if current_price == 0:
-            continue
         cond = alert.get("condition")
         target = float(alert.get("target_value") or 0)
         should_trigger = False
-        if cond == AlertCondition.ABOVE.value and current_price >= target:
-            should_trigger = True
-        elif cond == AlertCondition.BELOW.value and current_price <= target:
-            should_trigger = True
+        current_value = 0
+
+        if cond in (AlertCondition.ABOVE.value, AlertCondition.BELOW.value):
+            if product_name not in prices:
+                continue
+            current_value = prices[product_name].get("mid", 0)
+            if current_value == 0:
+                continue
+            if cond == AlertCondition.ABOVE.value and current_value >= target:
+                should_trigger = True
+            elif cond == AlertCondition.BELOW.value and current_value <= target:
+                should_trigger = True
+
+        elif cond in (AlertCondition.FUNDING_ABOVE.value, AlertCondition.FUNDING_BELOW.value):
+            if not funding_rates or product_name not in funding_rates:
+                continue
+            current_value = funding_rates[product_name]
+            if cond == AlertCondition.FUNDING_ABOVE.value and current_value >= target:
+                should_trigger = True
+            elif cond == AlertCondition.FUNDING_BELOW.value and current_value <= target:
+                should_trigger = True
+
+        elif cond in (AlertCondition.PNL_ABOVE.value, AlertCondition.PNL_BELOW.value):
+            if not positions_by_user:
+                continue
+            user_id = alert.get("user_id")
+            user_positions = positions_by_user.get(user_id, [])
+            position_pnl = None
+            for pos in user_positions:
+                pos_product = (pos.get("product_name") or "").replace("-PERP", "")
+                if pos_product == product_name:
+                    pnl = pos.get("unrealized_pnl")
+                    if pnl is not None:
+                        position_pnl = float(pnl)
+                    break
+            if position_pnl is None:
+                continue
+            current_value = position_pnl
+            if cond == AlertCondition.PNL_ABOVE.value and current_value >= target:
+                should_trigger = True
+            elif cond == AlertCondition.PNL_BELOW.value and current_value <= target:
+                should_trigger = True
+
         if should_trigger:
             alert_network = alert.get("network", "mainnet")
             update_alert_triggered(alert["id"], network=alert_network)
@@ -98,6 +139,6 @@ def get_triggered_alerts(prices: dict) -> list:
                 "product": alert.get("product_name"),
                 "condition": cond,
                 "target": target,
-                "current_price": current_price,
+                "current_price": current_value,
             })
     return triggered
