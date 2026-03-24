@@ -407,6 +407,92 @@ def init_db():
             conn.commit()
             logger.info("Copy trading tables verified/created")
 
+        # --- New columns on trades_testnet / trades_mainnet ---
+        _NEW_TRADE_COLS = [
+            ("fill_price", "DOUBLE PRECISION"),
+            ("fill_size", "DOUBLE PRECISION"),
+            ("fill_fee", "DOUBLE PRECISION DEFAULT 0"),
+            ("slippage_bps", "DOUBLE PRECISION"),
+            ("source", "TEXT DEFAULT 'manual'"),
+            ("strategy_session_id", "INT"),
+            ("realized_pnl", "DOUBLE PRECISION"),
+            ("is_taker", "BOOLEAN"),
+            ("funding_paid", "DOUBLE PRECISION DEFAULT 0"),
+        ]
+        with conn.cursor() as cur:
+            for net in ("testnet", "mainnet"):
+                table = f"trades_{net}"
+                for col, col_type in _NEW_TRADE_COLS:
+                    try:
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                        conn.commit()
+                        logger.info("Added column %s.%s", table, col)
+                    except Exception:
+                        conn.rollback()
+            # Also add to the legacy trades table for backwards compat
+            for col, col_type in _NEW_TRADE_COLS:
+                try:
+                    cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+
+        # --- strategy_sessions table ---
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_sessions (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    product_id INT,
+                    product_name TEXT,
+                    network TEXT NOT NULL,
+                    started_at TIMESTAMPTZ DEFAULT now(),
+                    stopped_at TIMESTAMPTZ,
+                    status TEXT DEFAULT 'running',
+                    total_cycles INT DEFAULT 0,
+                    total_orders_placed INT DEFAULT 0,
+                    total_orders_filled INT DEFAULT 0,
+                    total_orders_cancelled INT DEFAULT 0,
+                    realized_pnl DOUBLE PRECISION DEFAULT 0,
+                    total_fees_paid DOUBLE PRECISION DEFAULT 0,
+                    total_volume_usd DOUBLE PRECISION DEFAULT 0,
+                    total_funding_paid DOUBLE PRECISION DEFAULT 0,
+                    config_snapshot JSONB,
+                    stop_reason TEXT,
+                    error_message TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_strategy_sessions_user
+                    ON strategy_sessions (user_id, network, strategy);
+                CREATE INDEX IF NOT EXISTS idx_strategy_sessions_status
+                    ON strategy_sessions (status);
+            """)
+            conn.commit()
+            logger.info("strategy_sessions table verified/created")
+
+        # --- fill_sync_queue table ---
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS fill_sync_queue (
+                    id SERIAL PRIMARY KEY,
+                    trade_id INT NOT NULL,
+                    network TEXT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    subaccount_hex TEXT NOT NULL,
+                    order_digest TEXT NOT NULL,
+                    product_id INT NOT NULL,
+                    placed_at_ts DOUBLE PRECISION,
+                    status TEXT DEFAULT 'pending',
+                    attempts INT DEFAULT 0,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    resolved_at TIMESTAMPTZ
+                );
+                CREATE INDEX IF NOT EXISTS idx_fill_sync_pending
+                    ON fill_sync_queue (status) WHERE status = 'pending';
+            """)
+            conn.commit()
+            logger.info("fill_sync_queue table verified/created")
+
         logger.info("Database tables verified/created")
     except Exception:
         conn.rollback()

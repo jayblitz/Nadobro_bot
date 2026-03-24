@@ -139,6 +139,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     leverage=leverage,
                     slippage_pct=slippage_pct,
                     enforce_rate_limit=False,
+                    source="vol",
+                    strategy_session_id=state.get("strategy_session_id"),
                 )
                 if not close_result.get("success"):
                     return {
@@ -196,6 +198,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         is_long=is_long,
         leverage=leverage,
         enforce_rate_limit=False,
+        source="vol",
+        strategy_session_id=state.get("strategy_session_id"),
     )
 
     if open_result.get("success"):

@@ -689,6 +689,8 @@ def run_cycle(
             is_long=order_spec["is_long"],
             leverage=leverage,
             enforce_rate_limit=False,
+            source=strategy,
+            strategy_session_id=state.get("strategy_session_id"),
         )
 
         if result.get("success"):

@@ -6,7 +6,10 @@ import time
 from datetime import datetime
 
 from src.nadobro.config import get_product_id, get_product_max_leverage, get_spot_product_id, get_perp_products
-from src.nadobro.models.database import get_bot_state_raw, set_bot_state
+from src.nadobro.models.database import (
+    get_bot_state_raw, set_bot_state,
+    insert_strategy_session, update_strategy_session, increment_session_metrics,
+)
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
@@ -191,6 +194,50 @@ def _strategy_defaults(strategy: str) -> dict:
 SUPPORTED_STRATEGIES = ("grid", "rgrid", "dn", "vol", "bro")
 
 
+def _create_session(telegram_id: int, strategy: str, product: str, network: str, state: dict) -> int | None:
+    """Create a strategy_sessions row and return the session_id."""
+    try:
+        session_id = insert_strategy_session({
+            "user_id": telegram_id,
+            "strategy": strategy,
+            "product_name": product,
+            "product_id": get_product_id(product, network=network) if product != "MULTI" else None,
+            "network": network,
+            "config_snapshot": json.dumps({
+                k: v for k, v in state.items()
+                if k in (
+                    "notional_usd", "cycle_notional_usd", "spread_bp", "leverage",
+                    "slippage_pct", "interval_seconds", "tp_pct", "sl_pct", "levels",
+                    "budget_usd", "risk_level", "max_positions", "products",
+                    "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
+                    "rgrid_discretion", "rgrid_reset_threshold_pct",
+                    "target_volume_usd", "funding_entry_mode",
+                )
+            }),
+        })
+        if session_id:
+            logger.info("Created strategy session #%s for user %s (%s/%s)", session_id, telegram_id, strategy, network)
+        return session_id
+    except Exception as e:
+        logger.warning("Failed to create strategy session for user %s: %s", telegram_id, e)
+        return None
+
+
+def _finalize_session(state: dict, stop_reason: str = "stopped"):
+    """Mark the strategy session as completed/stopped."""
+    session_id = state.get("strategy_session_id")
+    if not session_id:
+        return
+    try:
+        update_strategy_session(int(session_id), {
+            "status": "completed" if stop_reason in ("tp_hit", "target_reached") else "stopped",
+            "stopped_at": datetime.utcnow().isoformat(),
+            "stop_reason": str(stop_reason)[:200],
+        })
+    except Exception as e:
+        logger.warning("Failed to finalize session #%s: %s", session_id, e)
+
+
 def start_user_bot(
     telegram_id: int,
     strategy: str,
@@ -238,6 +285,9 @@ def start_user_bot(
             }
         )
         state["worker_group"] = strategy_worker_group("bro")
+        session_id = _create_session(telegram_id, "bro", "MULTI", network, state)
+        if session_id:
+            state["strategy_session_id"] = session_id
         _save_state(telegram_id, network, state)
         _ensure_task(telegram_id, network)
         return True, "Bro Mode activated 🧠"
@@ -277,6 +327,9 @@ def start_user_bot(
     from src.nadobro.services.runtime_supervisor import strategy_worker_group
 
     state["worker_group"] = strategy_worker_group(strategy)
+    session_id = _create_session(telegram_id, strategy, product.upper(), network, state)
+    if session_id:
+        state["strategy_session_id"] = session_id
     _save_state(telegram_id, network, state)
     _ensure_task(telegram_id, network)
     if strategy == "dn":
@@ -339,6 +392,7 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
     if not state.get("running"):
         return False, "No running strategy bot found."
 
+    _finalize_session(state, stop_reason="user_stop")
     state["running"] = False
     _save_state(telegram_id, network, state)
 
@@ -372,6 +426,7 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             state = json.loads(row.get("value") or "{}")
             if not state.get("running"):
                 continue
+            _finalize_session(state, stop_reason="user_stop_all")
             state["running"] = False
             set_bot_state(key, state)
             tk = _task_key(telegram_id, network)
@@ -467,6 +522,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "rgrid_reset_timeout_seconds": state.get("rgrid_reset_timeout_seconds") or state.get("grid_reset_timeout_seconds"),
         "rgrid_discretion": state.get("rgrid_discretion") or state.get("grid_discretion"),
         "other_running_networks": other_running_networks,
+        "strategy_session_id": state.get("strategy_session_id"),
     }
 
 
@@ -488,6 +544,7 @@ def stop_all_strategies_for_user(telegram_id: int) -> None:
             if not state.get("running"):
                 continue
             strategy = state.get("strategy", "unknown")
+            _finalize_session(state, stop_reason="network_switch")
             state["running"] = False
             state["last_error"] = "Stopped due to network switch"
             set_bot_state(key, state)
@@ -731,6 +788,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         return True, None
     if user.network_mode.value != network:
+        _finalize_session(state, stop_reason="mode_switch")
         state["running"] = False
         state["last_error"] = f"Stopped because active mode switched to {user.network_mode.value}"
         _save_state(telegram_id, network, state)
@@ -822,6 +880,21 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             state["runs"], telegram_id, bro_action, bro_confidence, bro_detail[:100],
         )
 
+        # Increment bro session metrics
+        session_id = state.get("strategy_session_id")
+        if session_id:
+            try:
+                orders = 1 if bro_action in ("open_long", "open_short", "close") else 0
+                increment_session_metrics(
+                    int(session_id),
+                    cycles=1,
+                    orders_placed=orders,
+                    orders_filled=orders,
+                    pnl=float(result.get("pnl", 0) or 0),
+                )
+            except Exception:
+                pass
+
         if not result.get("success", True):
             return False, str(result.get("error", "unknown"))[:300]
         return True, None
@@ -851,6 +924,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         sl_pct = float(state.get("sl_pct") or 0.0)
         tp_pct = float(state.get("tp_pct") or 0.0)
         if sl_pct > 0 and move_pct >= sl_pct:
+            _finalize_session(state, stop_reason="sl_hit")
             state["running"] = False
             state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
             _save_state(telegram_id, network, state)
@@ -877,6 +951,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 )
             return True, None
         if tp_pct > 0 and move_pct >= tp_pct:
+            _finalize_session(state, stop_reason="tp_hit")
             state["running"] = False
             state["last_error"] = None
             _save_state(telegram_id, network, state)
@@ -914,6 +989,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         )
 
     if strategy == "rgrid" and result.get("action") == "grid_stop_loss_hit":
+        _finalize_session(state, stop_reason="grid_sl_hit")
         state["running"] = False
         state["last_error"] = result.get("detail") or "GRID stop-loss triggered."
         _save_state(telegram_id, network, state)
@@ -939,6 +1015,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             )
         return True, None
     if strategy == "rgrid" and result.get("action") == "grid_take_profit_hit":
+        _finalize_session(state, stop_reason="tp_hit")
         state["running"] = False
         state["last_error"] = None
         _save_state(telegram_id, network, state)
@@ -981,6 +1058,21 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     drift_seconds = max(0.0, state["last_run_ts"] - last_run - interval) if last_run > 0 else 0.0
     if drift_seconds > 0:
         record_metric("runtime.cycle_drift_ms", drift_seconds * 1000.0)
+
+    # Increment strategy session metrics from cycle result
+    session_id = state.get("strategy_session_id")
+    if session_id and result.get("success", True):
+        try:
+            increment_session_metrics(
+                int(session_id),
+                cycles=1,
+                orders_placed=int(result.get("orders_placed", 0)),
+                orders_filled=int(result.get("orders_filled", 0)),
+                orders_cancelled=int(result.get("orders_cancelled", 0)),
+                volume=float(result.get("placed_notional_usd", 0) or result.get("volume_done_usd", 0) or 0),
+            )
+        except Exception:
+            pass
 
     if not result.get("success", True):
         error_msg = str(result.get("error", "unknown"))[:300]
