@@ -54,11 +54,11 @@ def _build_fill_update(fill_data: dict | None, mid_price: float = 0.0) -> dict:
         update = {
             "fill_price": fill_data["fill_price"],
             "price": fill_data["fill_price"],
-            "fill_size": fill_data.get("fill_size"),
+            "fill_size": fill_data.get("fill_size", 0),
             "fill_fee": fill_data.get("fee", 0),
             "fees": fill_data.get("fee", 0),
             "realized_pnl": fill_data.get("realized_pnl", 0),
-            "is_taker": fill_data.get("is_taker"),
+            "is_taker": fill_data.get("is_taker", False),
         }
         if mid_price > 0 and fill_data["fill_price"] > 0:
             update["slippage_bps"] = abs(fill_data["fill_price"] - mid_price) / mid_price * 10000
@@ -799,6 +799,28 @@ def limit_close_position(
     if not r.get("success"):
         return {"success": False, "error": r.get("error", "Limit close failed.")}
 
+    digest = r.get("digest")
+
+    # Record close trade in DB and enqueue for fill sync
+    try:
+        trade_id = insert_trade({
+            "user_id": telegram_id,
+            "product_id": product_id,
+            "product_name": product_name,
+            "order_type": "LIMIT_CLOSE",
+            "side": "BUY" if not is_long else "SELL",
+            "size": close_sz,
+            "price": float(lp),
+            "leverage": leverage,
+            "status": TradeStatus.PENDING.value,
+            "order_digest": digest,
+            "source": "manual",
+        }, network=network)
+        if trade_id and digest:
+            _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+    except Exception as exc:
+        logger.warning("limit_close_position: DB recording failed: %s", exc)
+
     return {
         "success": True,
         "kind": "LIMIT_CLOSE",
@@ -806,7 +828,7 @@ def limit_close_position(
         "network": network,
         "size": close_sz,
         "limit_price": float(lp),
-        "digest": r.get("digest"),
+        "digest": digest,
         "side": "LONG" if is_long else "SHORT",
     }
 
@@ -934,9 +956,9 @@ def _record_close_in_db(
                 update_data["fill_price"] = close_price
                 update_data["fill_fee"] = close_fee
                 update_data["fees"] = close_fee
-                update_data["fill_size"] = fill_data.get("fill_size")
+                update_data["fill_size"] = fill_data.get("fill_size", 0)
                 update_data["realized_pnl"] = fill_data.get("realized_pnl", 0)
-                update_data["is_taker"] = fill_data.get("is_taker")
+                update_data["is_taker"] = fill_data.get("is_taker", False)
 
             if is_full_close:
                 update_data["status"] = TradeStatus.CLOSED.value
@@ -975,10 +997,10 @@ def _record_close_in_db(
                 close_trade_data["fill_price"] = close_price
                 close_trade_data["fill_fee"] = close_fee
                 close_trade_data["fees"] = close_fee
-                close_trade_data["fill_size"] = fill_data.get("fill_size")
+                close_trade_data["fill_size"] = fill_data.get("fill_size", 0)
                 close_trade_data["realized_pnl"] = fill_data.get("realized_pnl", 0)
                 close_trade_data["pnl"] = round(archive_pnl, 4) if archive_pnl is not None else 0.0
-                close_trade_data["is_taker"] = fill_data.get("is_taker")
+                close_trade_data["is_taker"] = fill_data.get("is_taker", False)
             insert_trade(close_trade_data, network=selected_network)
             logger.info(
                 "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f fee=%.4f",

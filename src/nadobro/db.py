@@ -493,6 +493,29 @@ def init_db():
             conn.commit()
             logger.info("fill_sync_queue table verified/created")
 
+        # --- Additional indexes and constraints ---
+        with conn.cursor() as cur:
+            # Unique constraint on fill_sync_queue to prevent duplicate entries
+            try:
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_fill_sync_trade_network
+                        ON fill_sync_queue (trade_id, network)
+                """)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            # Index on strategy_session_id for fast strategy-trade lookups
+            for net in ("testnet", "mainnet"):
+                try:
+                    cur.execute(f"""
+                        CREATE INDEX IF NOT EXISTS idx_trades_{net}_session
+                            ON trades_{net} (strategy_session_id)
+                            WHERE strategy_session_id IS NOT NULL
+                    """)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+
         logger.info("Database tables verified/created")
     except Exception:
         conn.rollback()

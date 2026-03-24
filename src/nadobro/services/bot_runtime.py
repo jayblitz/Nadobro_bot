@@ -767,10 +767,10 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
 
     if is_trading_paused():
         if str(state.get("strategy", "")).lower() == "dn" and float(state.get("auto_close_on_maintenance") or 0) >= 0.5:
+            _finalize_session(state, stop_reason="maintenance_pause")
             state["running"] = False
             state["last_error"] = "Auto-closed on maintenance pause."
             _save_state(telegram_id, network, state)
-            tk = _task_key(telegram_id, network)
             close_res = await run_blocking(close_all_positions, telegram_id, network)
             if close_res.get("success"):
                 await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
@@ -784,6 +784,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         return True, None
     user = await run_blocking(get_user, telegram_id)
     if not user:
+        _finalize_session(state, stop_reason="user_deleted")
         state["running"] = False
         _save_state(telegram_id, network, state)
         return True, None
@@ -822,6 +823,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             )
         tk_check = _task_key(telegram_id, network)
         if (not _process_worker_mode) and (tk_check not in _tasks or not state.get("running", True)):
+            _finalize_session(state, stop_reason="completed")
             state["running"] = False
             _save_state(telegram_id, network, state)
             if tk_check not in _tasks:
@@ -887,11 +889,12 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         if session_id:
             try:
                 orders = 1 if bro_action in ("open_long", "open_short", "close") else 0
+                filled = orders if result.get("success") else 0
                 increment_session_metrics(
                     int(session_id),
                     cycles=1,
                     orders_placed=orders,
-                    orders_filled=orders,
+                    orders_filled=filled,
                     pnl=float(result.get("pnl", 0) or 0),
                 )
             except Exception:
@@ -1049,6 +1052,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
 
     tk_post = _task_key(telegram_id, network)
     if (not _process_worker_mode) and (tk_post not in _tasks or not state.get("running", True)):
+        _finalize_session(state, stop_reason="completed")
         state["running"] = False
         _save_state(telegram_id, network, state)
         if tk_post in _tasks:
