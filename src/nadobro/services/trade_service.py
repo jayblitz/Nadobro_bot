@@ -153,8 +153,12 @@ def validate_trade(
     balances = balance.get("balances", {}) or {}
     usdt_balance = balances.get(0, balances.get("0", 0))
 
-    mp = client.get_market_price(product_id)
-    if mp["mid"] == 0:
+    try:
+        mp = client.get_market_price(product_id)
+    except Exception as e:
+        logger.warning("get_market_price failed in validate_trade for %s: %s", product, e)
+        return False, f"Could not fetch {product} price. Market may be unavailable."
+    if not mp or mp.get("mid", 0) == 0:
         return False, f"Could not fetch {product} price. Market may be unavailable."
 
     notional = size * mp["mid"]
@@ -258,36 +262,45 @@ def execute_market_order(
 
     if result["success"]:
         digest = result.get("digest", "")
-        fill_data = _resolve_fill_data(client, digest, network)
-        fill_update = _build_fill_update(fill_data, mid_price=pre_order_mid)
-        update_data = {
-            "status": TradeStatus.FILLED.value,
-            "order_digest": digest,
-            "filled_at": datetime.utcnow().isoformat(),
-        }
-        update_data.update(fill_update)
-        if "price" not in update_data or not update_data.get("price"):
-            update_data["price"] = _get_post_fill_price(client, product_id) or result.get("price", 0)
-        update_trade(trade_id, update_data, network=network)
+        try:
+            fill_data = _resolve_fill_data(client, digest, network)
+            fill_update = _build_fill_update(fill_data, mid_price=pre_order_mid)
+            update_data = {
+                "status": TradeStatus.FILLED.value,
+                "order_digest": digest,
+                "filled_at": datetime.utcnow().isoformat(),
+            }
+            update_data.update(fill_update)
+            if "price" not in update_data or not update_data.get("price"):
+                update_data["price"] = _get_post_fill_price(client, product_id) or result.get("price", 0)
+            update_trade(trade_id, update_data, network=network)
 
-        # Enqueue for background sync if archive didn't resolve
-        if not fill_data:
-            _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+            # Enqueue for background sync if archive didn't resolve
+            if not fill_data:
+                _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+        except Exception as e:
+            logger.error("Post-fill processing failed for trade %s: %s", trade_id, e)
     else:
-        update_trade(trade_id, {
-            "status": TradeStatus.FAILED.value,
-            "error_message": result.get("error", "Unknown error"),
-        }, network=network)
+        try:
+            update_trade(trade_id, {
+                "status": TradeStatus.FAILED.value,
+                "error_message": result.get("error", "Unknown error"),
+            }, network=network)
+        except Exception as e:
+            logger.error("Failed to update trade %s status to FAILED: %s", trade_id, e)
 
     if result["success"]:
-        mp = client.get_market_price(product_id)
-        update_trade_stats(telegram_id, size * mp["mid"])
+        try:
+            mp = client.get_market_price(product_id)
+            update_trade_stats(telegram_id, size * mp["mid"])
+        except Exception as e:
+            logger.warning("Post-order stats update failed: %s", e)
         payload = {
             "success": True,
             "side": "LONG" if is_long else "SHORT",
             "size": size,
             "product": get_product_name(product_id, network=network),
-            "price": mp["mid"],
+            "price": pre_order_mid or result.get("price", 0),
             "digest": result.get("digest"),
             "network": user.network_mode.value,
         }
@@ -503,18 +516,24 @@ def execute_limit_order(
 
     if result["success"]:
         digest = result.get("digest", "")
-        update_trade(
-            trade_id,
-            {
-                "status": TradeStatus.PENDING.value,
-                "order_digest": digest,
-            },
-            network=network,
-        )
-        # Enqueue for background fill sync (limit orders fill asynchronously)
-        _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+        try:
+            update_trade(
+                trade_id,
+                {
+                    "status": TradeStatus.PENDING.value,
+                    "order_digest": digest,
+                },
+                network=network,
+            )
+            # Enqueue for background fill sync (limit orders fill asynchronously)
+            _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+        except Exception as e:
+            logger.error("Post-limit-order processing failed for trade %s: %s", trade_id, e)
     else:
-        update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")}, network=network)
+        try:
+            update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")}, network=network)
+        except Exception as e:
+            logger.error("Failed to update limit trade %s status to FAILED: %s", trade_id, e)
 
     if result["success"]:
         return {

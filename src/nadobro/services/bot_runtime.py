@@ -809,7 +809,9 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     state["strategy"] = strategy
 
     if strategy == "bro":
-        client = await run_blocking(get_user_readonly_client, telegram_id)
+        client = await run_blocking(get_user_nado_client, telegram_id)
+        if not client:
+            client = await run_blocking(get_user_readonly_client, telegram_id)
         if not client:
             raise RuntimeError("Wallet client unavailable")
         with timed_metric("runtime.strategy.dispatch.bro"):
@@ -903,7 +905,11 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")
 
-    client = await run_blocking(get_user_readonly_client, telegram_id)
+    # Use signing client so strategies can cancel orders and perform writes.
+    # Falls back to readonly if signing client isn't available (read-only mode).
+    client = await run_blocking(get_user_nado_client, telegram_id)
+    if not client:
+        client = await run_blocking(get_user_readonly_client, telegram_id)
     if not client:
         raise RuntimeError("Wallet client unavailable")
 
