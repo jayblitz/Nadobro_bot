@@ -88,7 +88,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     remaining = target_volume - volume_done if target_volume > 0 else flip_size_usd
     this_flip_usd = min(flip_size_usd, remaining) if target_volume > 0 else flip_size_usd
 
-    product_id = get_product_id(product)
+    product_id = get_product_id(product, network=network)
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'"}
 

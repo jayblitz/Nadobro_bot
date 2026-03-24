@@ -16,7 +16,7 @@ MM_DEFAULT_LEVELS = 2
 GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
 GRID_MIN_SPREAD_BP = 8.0
-DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
+DEFAULT_MIN_ORDER_NOTIONAL_USD = 10.0
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
 
 
@@ -290,7 +290,7 @@ def run_cycle(
     strategy = str(state.get("strategy", "grid") or "grid").lower()
     if strategy == "mm":
         strategy = "grid"
-    product_id = get_product_id(product)
+    product_id = get_product_id(product, network=network)
     if product_id is None:
         return {"success": False, "error": f"Invalid product '{product}'", "orders_placed": 0}
 
@@ -404,9 +404,11 @@ def run_cycle(
 
     if threshold_bp > 0 and strategy == "grid":
         # Avoid a cold-start deadlock: while mid history is short, price vs session ref is ~0 bp,
-        # so we would never place quotes until the market drifts. Allow quotes until history warms up.
+        # so we would never place quotes until the market drifts. Allow quotes until history warms up
+        # or when no quotes have been placed yet (need to seed the grid).
         hist = state.get("mm_mid_history") or []
-        if len(hist) >= 4:
+        has_active_quotes = bool(open_orders) or bool(state.get("mm_tracked_quotes"))
+        if len(hist) >= 4 and has_active_quotes:
             reference = float(state.get("reference_price") or mid)
             moved_bp = abs(mid - reference) / max(reference, 1e-9) * 10000.0
             if moved_bp < threshold_bp:

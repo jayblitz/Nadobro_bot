@@ -1055,8 +1055,9 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             await _notify(telegram_id, "✅ {strategy} completed on {product}-PERP ({network}).", strategy=_strategy_display_name(strategy), product=product, network=network)
         return True, None
 
+    prev_runs = int(state.get("runs") or 0)
     state["last_run_ts"] = time.time()
-    state["runs"] = int(state.get("runs") or 0) + 1
+    state["runs"] = prev_runs + 1
     state["last_error"] = result.get("error")
     state["last_action"] = result.get("action", "cycle")
     state["last_action_detail"] = str(result.get("detail", ""))[:200]
@@ -1065,6 +1066,34 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     if drift_seconds > 0:
         record_metric("runtime.cycle_drift_ms", drift_seconds * 1000.0)
 
+    # Notify user on first successful cycle with order placement confirmation
+    orders_placed = int(result.get("orders_placed", 0))
+    if prev_runs == 0 and result.get("success", True):
+        if orders_placed > 0:
+            await _notify(
+                telegram_id,
+                "{strategy} is live on {product}-PERP ({network}) — {n} order(s) placed.",
+                strategy=_strategy_display_name(strategy), product=product,
+                network=network, n=orders_placed,
+            )
+        else:
+            reason = result.get("reason") or result.get("detail") or result.get("action") or "waiting for conditions"
+            await _notify(
+                telegram_id,
+                "{strategy} cycle #1 on {product}-PERP ({network}): no orders placed — {reason}",
+                strategy=_strategy_display_name(strategy), product=product,
+                network=network, reason=str(reason)[:150],
+            )
+
+    # Surface persistent order-placement failures (cycles 2-5)
+    if 1 <= prev_runs <= 4 and result.get("success", True) and orders_placed == 0:
+        reason = result.get("reason") or result.get("detail") or result.get("action") or ""
+        if reason and reason not in ("below threshold", "wait", "waiting"):
+            logger.warning(
+                "%s cycle #%d for user %s: 0 orders placed — %s",
+                strategy, prev_runs + 1, telegram_id, reason,
+            )
+
     # Increment strategy session metrics from cycle result
     session_id = state.get("strategy_session_id")
     if session_id and result.get("success", True):
@@ -1072,7 +1101,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             increment_session_metrics(
                 int(session_id),
                 cycles=1,
-                orders_placed=int(result.get("orders_placed", 0)),
+                orders_placed=orders_placed,
                 orders_filled=int(result.get("orders_filled", 0)),
                 orders_cancelled=int(result.get("orders_cancelled", 0)),
                 volume=float(result.get("placed_notional_usd", 0) or result.get("volume_done_usd", 0) or 0),
