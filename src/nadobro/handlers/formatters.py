@@ -1,11 +1,8 @@
-import logging
 import re
 import time
 from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
 from src.nadobro.i18n import get_active_language, localize_text
-
-logger = logging.getLogger(__name__)
 
 
 def _loc(text):
@@ -26,51 +23,42 @@ def escape_md(text):
 
 
 def _calc_position_pnl(position: dict, current_price: float) -> Optional[float]:
-    def _inventory_pnl() -> Optional[float]:
-        v_quote = position.get("v_quote_balance")
-        signed_amount = position.get("signed_amount")
-        if v_quote is None or signed_amount is None or not current_price:
-            return None
+    """Unrealized PnL aligned with Nado: prefer exchange-reported uPnL, else v_quote settlement."""
+    raw = position.get("unrealized_pnl")
+    if raw is not None:
+        try:
+            return float(raw)
+        except Exception:
+            pass
+
+    v_quote = position.get("v_quote_balance")
+    signed_amount = position.get("signed_amount")
+    if v_quote is not None and signed_amount is not None and current_price:
         try:
             return float(v_quote) + float(signed_amount) * float(current_price)
         except Exception:
-            return None
+            pass
 
-    def _directional_pnl() -> Optional[float]:
-        entry = float(position.get("price", 0) or 0)
-        amount = abs(float(position.get("amount", 0) or 0))
-        if not current_price or not entry or not amount:
-            return None
-        side = str(position.get("side", "LONG")).upper()
-        if side == "LONG":
-            return (float(current_price) - entry) * amount
-        return (entry - float(current_price)) * amount
+    entry = float(position.get("price", 0) or 0)
+    amount = abs(float(position.get("amount", 0) or 0))
+    if not current_price or not entry or not amount:
+        return None
+    side = str(position.get("side", "LONG")).upper()
+    if side == "LONG":
+        return (float(current_price) - entry) * amount
+    return (entry - float(current_price)) * amount
 
-    inventory = _inventory_pnl()
-    directional = _directional_pnl()
 
-    if inventory is None:
-        return directional
-    if directional is None:
-        return inventory
-
-    diff = abs(inventory - directional)
-    scale = max(abs(inventory), abs(directional), 1.0)
-    # When formulas diverge materially, directional (entry/side based) is
-    # typically closer to platform UI expectations for a single position row.
-    if diff > max(25.0, scale * 0.35):
-        logger.warning(
-            "PnL formula divergence for %s: side=%s entry=%.8f mark=%.8f inv=%.4f dir=%.4f",
-            position.get("product_name", "unknown"),
-            str(position.get("side", "LONG")).upper(),
-            float(position.get("price", 0) or 0),
-            float(current_price or 0),
-            inventory,
-            directional,
-        )
-        return directional
-
-    return inventory
+def _has_exchange_unrealized_pnl(position: dict) -> bool:
+    """True when the position dict carries a parseable uPnL from the exchange."""
+    raw = position.get("unrealized_pnl")
+    if raw is None:
+        return False
+    try:
+        float(raw)
+        return True
+    except Exception:
+        return False
 
 
 def fmt_price(price, product="BTC"):
@@ -94,6 +82,7 @@ def fmt_positions(positions, prices=None):
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
+    any_estimated_pnl = False
 
     for i, p in enumerate(positions, 1):
         side = p.get("side", "LONG")
@@ -115,6 +104,8 @@ def fmt_positions(positions, prices=None):
         if current:
             pnl = _calc_position_pnl(p, current)
             if pnl is not None:
+                if not _has_exchange_unrealized_pnl(p):
+                    any_estimated_pnl = True
                 pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
                 mark_str = f"${fmt_price(current, base)}"
@@ -125,6 +116,13 @@ def fmt_positions(positions, prices=None):
 
     lines.append("")
     lines.append(f"{_loc('Total')}: {escape_md(str(len(positions)))} {_loc('order(s)')}")
+    if any_estimated_pnl:
+        lines.append("")
+        lines.append(
+            _loc(
+                "ℹ️ PnL is estimated from mark vs\\. entry when the exchange does not report uPnL for this position\\."
+            )
+        )
     return "\n".join(lines)
 
 
@@ -247,10 +245,16 @@ def fmt_trade_result(result):
             f"📌 *{_loc_md('Side')}:* {escape_md(result.get('side', '?'))}",
             f"🪙 *{_loc_md('Product')}:* {escape_md(result.get('product', '?'))}",
             f"📏 *{_loc_md('Size')}:* {escape_md(str(result.get('size', '?')))}",
-            f"💲 *{_loc_md('Price')}:* {escape_md(price_str)}",
+            f"💲 *{_loc_md('Fill price')}:* {escape_md(price_str)}",
             "",
             f"🌐 *{_loc_md('Network:')}* {escape_md(result.get('network', '?'))}",
         ]
+        if result.get("fee") is not None:
+            try:
+                fee_v = float(result.get("fee") or 0)
+                lines.insert(-2, f"🧾 *{_loc_md('Fee')}:* {escape_md(f'${fee_v:,.4f}')}")
+            except Exception:
+                pass
         if result.get("tp_requested"):
             if result.get("tp_set"):
                 lines.append(f"📈 *{_loc_md('Take Profit')}:* {escape_md(str(result.get('tp_price')))}")
@@ -765,6 +769,20 @@ def fmt_status_overview(status: dict, onboarding: dict):
         lines.append(
             f"⚠️ {_loc('Other running network(s)')}: *{escape_md(', '.join(str(n).upper() for n in other_running))}*"
         )
+        lines.append("")
+
+    rs = status.get("running_sessions") or []
+    if len(rs) > 1:
+        lines.append(f"📋 *{_loc('Active sessions (database)')}*")
+        for s in rs[:6]:
+            st = str(s.get("strategy") or "").upper()
+            pn = str(s.get("product_name") or "?").replace("-PERP", "")
+            sid = s.get("id")
+            tc = int(s.get("total_cycles") or 0)
+            lines.append(
+                f"• *{escape_md(st)}* · *{escape_md(pn)}* · \\#{escape_md(str(sid))} · "
+                f"{_loc('DB cycles')} *{escape_md(str(tc))}*"
+            )
         lines.append("")
 
     if not running:

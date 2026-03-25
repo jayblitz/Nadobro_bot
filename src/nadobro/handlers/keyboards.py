@@ -156,6 +156,16 @@ def home_card_kb():
     ])
 
 
+def status_kb():
+    """Inline actions for /status (matches Portfolio Deck refresh pattern)."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data="status:refresh"),
+        ],
+        [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+    ])
+
+
 def portfolio_kb(has_positions: bool = False):
     rows = [
         [
@@ -506,7 +516,9 @@ def trade_confirm_kb(trade_id="pending"):
 
 
 def positions_kb(positions):
-    rows = []
+    rows = [
+        [InlineKeyboardButton("🔄 Refresh", callback_data="pos:view")],
+    ]
     seen = set()
     for p in positions:
         pname = p.get("product_name", "").replace("-PERP", "")

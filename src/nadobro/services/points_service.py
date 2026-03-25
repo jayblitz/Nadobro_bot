@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.handlers.keyboards import points_followup_options_kb, points_scope_kb
@@ -485,12 +486,23 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     payload = build_dashboard_payload(parsed)
     save_points_snapshot(telegram_id, payload)
     complete_pending_request(bot_data, req)
-    await bot_app.bot.send_message(
-        chat_id=chat_id,
-        text=fmt_points_dashboard(payload),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=points_scope_kb("week"),
-    )
+    dash_text = fmt_points_dashboard(payload)
+    try:
+        await bot_app.bot.send_message(
+            chat_id=chat_id,
+            text=dash_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=points_scope_kb("week"),
+        )
+    except BadRequest as e:
+        if "Can't parse entities" not in str(e):
+            raise
+        logger.warning("Points dashboard MarkdownV2 failed; sending plain text: %s", e)
+        await bot_app.bot.send_message(
+            chat_id=chat_id,
+            text=dash_text.replace("\\", ""),
+            reply_markup=points_scope_kb("week"),
+        )
 
     session_id = str(req.get("relay_session_id", "")).strip()
     if session_id:

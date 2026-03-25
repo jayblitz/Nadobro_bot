@@ -21,7 +21,7 @@ from src.nadobro.handlers.keyboards import (
     risk_profile_kb, strategy_hub_kb, strategy_action_kb,
     onboarding_language_kb,
     points_scope_kb,
-    mode_kb,     home_card_kb, portfolio_kb, portfolio_history_kb, portfolio_analytics_kb,
+    mode_kb,     home_card_kb, status_kb, portfolio_kb, portfolio_history_kb, portfolio_analytics_kb,
     onboarding_accept_tos_kb,
     copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
@@ -40,6 +40,7 @@ from src.nadobro.services.trade_service import (
 from src.nadobro.services.alert_service import create_alert, get_user_alerts, delete_alert
 from src.nadobro.services.admin_service import is_trading_paused, is_admin
 from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
+from src.nadobro.services.onboarding_service import evaluate_readiness
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.points_service import (
     get_points_dashboard,
@@ -139,6 +140,8 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
             await _handle_positions(query, data, telegram_id, context)
         elif data.startswith("portfolio:"):
             await _handle_portfolio(query, data, telegram_id)
+        elif data.startswith("status:"):
+            await _handle_status_callback(query, data, telegram_id)
         elif data.startswith("wallet:"):
             await _handle_wallet(query, data, telegram_id, context)
         elif data.startswith("points:"):
@@ -681,6 +684,37 @@ async def _handle_portfolio(query, data, telegram_id):
         if "Message is not modified" in str(e):
             return
         raise
+
+
+async def _handle_status_callback(query, data: str, telegram_id: int):
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else "refresh"
+    if action != "refresh":
+        return
+    with language_context(get_user_language(telegram_id)):
+        lang = get_active_language()
+        status = get_user_bot_status(telegram_id)
+        onboarding = evaluate_readiness(telegram_id)
+        text = fmt_status_overview(status, onboarding)
+        localized = localize_text(text, lang)
+        try:
+            await query.edit_message_text(
+                localized,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=localize_markup(status_kb(), lang),
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
+            if "Can't parse entities" in str(e):
+                from src.nadobro.handlers.home_card import _plain_text_fallback
+
+                await query.edit_message_text(
+                    _plain_text_fallback(localized),
+                    reply_markup=localize_markup(status_kb(), lang),
+                )
+                return
+            raise
 
 
 async def _handle_wallet(query, data, telegram_id, context):

@@ -13,6 +13,7 @@ from src.nadobro.handlers.keyboards import (
     onboarding_language_kb,
     onboarding_accept_tos_kb,
     home_card_kb,
+    status_kb,
 )
 from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_user_bots
 from src.nadobro.services.onboarding_service import (
@@ -118,7 +119,7 @@ async def cmd_status(update: Update, context: CallbackContext):
 
         lang = get_active_language()
         localized = localize_text(text, lang)
-        reply_markup = localize_markup(home_card_kb() if DUAL_MODE_CARD_FLOW else persistent_menu_kb(), lang)
+        reply_markup = localize_markup(status_kb(), lang)
         # Always send a visible reply so /status works even when the home card is off-screen
         # or edit-in-place fails (webhook / concurrent updates).
         try:

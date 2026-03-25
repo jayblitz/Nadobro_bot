@@ -5,10 +5,23 @@ import os
 import time
 from datetime import datetime
 
+# Keys that must never be overwritten from persisted strategy *settings* into live runtime state.
+_STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
+    "running", "strategy", "strategy_id_v2", "product", "last_run_ts", "runs", "started_at",
+    "reference_price", "last_error", "error_streak", "last_action", "last_action_detail",
+    "strategy_session_id", "bro_state", "mm_paused", "mm_pause_reason", "mm_last_metrics",
+    "worker_group", "worker_last_heartbeat", "last_dispatch_ts", "last_cycle_ms",
+    "last_cycle_result", "worker_pid", "grid_anchor_price", "grid_buy_exposure_price",
+    "grid_sell_exposure_price", "grid_drift_from_anchor_pct", "grid_reset_active",
+    "grid_reset_side", "grid_last_cycle_pnl_usd", "dn_last_funding_rate", "dn_unfavorable_count",
+    "dn_mode",
+})
+
 from src.nadobro.config import get_product_id, get_product_max_leverage, get_spot_product_id, get_perp_products
 from src.nadobro.models.database import (
     get_bot_state_raw, set_bot_state,
     insert_strategy_session, update_strategy_session, increment_session_metrics,
+    get_running_strategy_sessions,
 )
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
@@ -54,6 +67,33 @@ def _migrate_state_strategy(state: dict) -> dict:
     elif sid in ("grid", "rgrid", "dn", "vol", "bro"):
         state["strategy_id_v2"] = int(state.get("strategy_id_v2") or 1)
     return state
+
+
+def _safe_last_run_ts(raw) -> float:
+    """Parse last_run_ts from JSON state (float, ISO string, or datetime)."""
+    if raw is None:
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, datetime):
+        try:
+            return float(raw.timestamp())
+        except Exception:
+            return 0.0
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return 0.0
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        try:
+            iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
+            return float(datetime.fromisoformat(iso).timestamp())
+        except Exception:
+            return 0.0
+    return 0.0
 
 
 def _strategy_display_name(strategy: str) -> str:
@@ -194,6 +234,23 @@ def _strategy_defaults(strategy: str) -> dict:
 SUPPORTED_STRATEGIES = ("grid", "rgrid", "dn", "vol", "bro")
 
 
+def _mark_previous_sessions_superseded(telegram_id: int, network: str) -> None:
+    """Stop duplicate 'running' DB rows when user starts a new strategy on the same network."""
+    try:
+        rows = get_running_strategy_sessions(telegram_id, network)
+        for row in rows:
+            sid = row.get("id")
+            if not sid:
+                continue
+            update_strategy_session(int(sid), {
+                "status": "stopped",
+                "stopped_at": datetime.utcnow().isoformat(),
+                "stop_reason": "superseded_by_new_strategy",
+            })
+    except Exception as e:
+        logger.warning("Could not supersede old sessions for user %s: %s", telegram_id, e)
+
+
 def _create_session(telegram_id: int, strategy: str, product: str, network: str, state: dict) -> int | None:
     """Create a strategy_sessions row and return the session_id."""
     try:
@@ -257,6 +314,7 @@ def start_user_bot(
         network = "mainnet"
 
     if strategy == "bro":
+        _mark_previous_sessions_superseded(telegram_id, network)
         _, strat_cfg = get_strategy_settings(telegram_id, strategy)
         state = _default_state()
         state.update(_strategy_defaults(strategy))
@@ -305,6 +363,7 @@ def start_user_bot(
     if float(leverage or 0) < 1:
         return False, "Leverage must be at least 1x."
 
+    _mark_previous_sessions_superseded(telegram_id, network)
     _, strat_cfg = get_strategy_settings(telegram_id, strategy)
     state = _default_state()
     state.update(_strategy_defaults(strategy))
@@ -451,7 +510,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
     state = _load_state(telegram_id, network)
-    last_run = float(state.get("last_run_ts") or 0)
+    last_run = _safe_last_run_ts(state.get("last_run_ts"))
     interval = int(state.get("interval_seconds") or 60)
     next_cycle_in = max(0, int(interval - (time.time() - last_run))) if last_run > 0 else 0
     other_running_networks: list[str] = []
@@ -471,6 +530,21 @@ def get_user_bot_status(telegram_id: int) -> dict:
                 other_running_networks.append(row_network)
     except Exception:
         pass
+
+    running_sessions: list[dict] = []
+    try:
+        for row in get_running_strategy_sessions(telegram_id, network):
+            running_sessions.append({
+                "id": row.get("id"),
+                "strategy": row.get("strategy"),
+                "product_name": row.get("product_name"),
+                "network": row.get("network"),
+                "started_at": row.get("started_at"),
+                "total_cycles": int(row.get("total_cycles") or 0),
+            })
+    except Exception:
+        pass
+
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -523,6 +597,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "rgrid_discretion": state.get("rgrid_discretion") or state.get("grid_discretion"),
         "other_running_networks": other_running_networks,
         "strategy_session_id": state.get("strategy_session_id"),
+        "running_sessions": running_sessions,
     }
 
 
@@ -761,6 +836,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             _, cfg = get_strategy_settings(telegram_id, strategy_key)
             if isinstance(cfg, dict):
                 for k, v in cfg.items():
+                    if k in _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST:
+                        continue
                     state[k] = v
     except Exception:
         logger.warning("Failed to merge strategy settings into runtime state for user %s", telegram_id, exc_info=True)
@@ -800,9 +877,9 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         )
         return True, None
 
-    last_run = float(state.get("last_run_ts") or 0.0)
+    last_run = _safe_last_run_ts(state.get("last_run_ts"))
     interval = int(state.get("interval_seconds") or 60)
-    if time.time() - last_run < interval:
+    if last_run > 0 and time.time() - last_run < interval:
         return True, None
 
     product = state.get("product", "BTC")
@@ -821,15 +898,6 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 strategy, telegram_id, network, state,
                 client, 0.0, 0, "MULTI", [],
             )
-        tk_check = _task_key(telegram_id, network)
-        if (not _process_worker_mode) and (tk_check not in _tasks or not state.get("running", True)):
-            _finalize_session(state, stop_reason="completed")
-            state["running"] = False
-            _save_state(telegram_id, network, state)
-            if tk_check not in _tasks:
-                return True, None
-            await _notify(telegram_id, "🧠 Bro Mode completed on {network}.", network=network)
-            return True, None
         prev_runs = int(state.get("runs") or 0)
         state["last_run_ts"] = time.time()
         bro_action = result.get("action", "")
@@ -1048,15 +1116,6 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 "but cleanup failed. Error: {error}",
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
-        return True, None
-
-    tk_post = _task_key(telegram_id, network)
-    if (not _process_worker_mode) and (tk_post not in _tasks or not state.get("running", True)):
-        _finalize_session(state, stop_reason="completed")
-        state["running"] = False
-        _save_state(telegram_id, network, state)
-        if tk_post in _tasks:
-            await _notify(telegram_id, "✅ {strategy} completed on {product}-PERP ({network}).", strategy=_strategy_display_name(strategy), product=product, network=network)
         return True, None
 
     prev_runs = int(state.get("runs") or 0)

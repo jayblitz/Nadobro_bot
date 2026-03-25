@@ -424,6 +424,51 @@ class NadoClient:
             return side
         return "LONG" if float(signed_amount or 0.0) >= 0 else "SHORT"
 
+    def _extract_unrealized_pnl_sdk(self, p, balance_obj=None) -> float | None:
+        """Best-effort uPnL from SDK objects (matches Nado when the API exposes it)."""
+        for obj in (p, balance_obj):
+            if obj is None:
+                continue
+            for attr in (
+                "unrealized_pnl",
+                "unrealizedPnl",
+                "unsettled_pnl",
+                "unsettledPnl",
+                "u_pnl",
+                "perp_pnl",
+                "perpPnl",
+            ):
+                raw = getattr(obj, attr, None)
+                if raw is not None:
+                    try:
+                        return float(self._from_x18_dynamic(raw))
+                    except Exception:
+                        continue
+        return None
+
+    def _extract_unrealized_pnl_rest(self, p: dict, balance_dict: dict | None) -> float | None:
+        """Best-effort uPnL from REST dicts (matches Nado when the API exposes it)."""
+        for obj in (p, balance_dict or {}):
+            if not isinstance(obj, dict):
+                continue
+            for key in (
+                "unrealized_pnl",
+                "unrealizedPnl",
+                "unsettled_pnl",
+                "unsettledPnl",
+                "u_pnl",
+                "perp_pnl",
+                "perpPnl",
+                "unrealized_pnl_x18",
+                "unrealizedPnlX18",
+            ):
+                if obj.get(key) is not None:
+                    try:
+                        return float(self._from_x18_dynamic(obj[key]))
+                    except Exception:
+                        continue
+        return None
+
     def _extract_positions_from_sdk_info(self, info) -> list:
         positions = []
         if not info:
@@ -521,6 +566,9 @@ class NadoClient:
                 }
                 if v_quote_val is not None:
                     pos["v_quote_balance"] = float(v_quote_val)
+                upnl = self._extract_unrealized_pnl_sdk(p, balance_obj)
+                if upnl is not None:
+                    pos["unrealized_pnl"] = upnl
                 positions.append(pos)
         return positions
 
@@ -623,6 +671,9 @@ class NadoClient:
                 }
                 if v_quote_val is not None:
                     pos["v_quote_balance"] = float(v_quote_val)
+                upnl = self._extract_unrealized_pnl_rest(p, balance_dict)
+                if upnl is not None:
+                    pos["unrealized_pnl"] = upnl
                 positions.append(pos)
         return positions
 
