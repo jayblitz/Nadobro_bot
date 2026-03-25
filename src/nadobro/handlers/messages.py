@@ -250,8 +250,24 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         budget_usd = float(action_data.get("budget_usd", 100))
         risk_factor = float(action_data.get("risk_factor", 1.0))
         max_leverage = float(action_data.get("max_leverage", 10))
+        cumulative_stop_loss_pct = action_data.get("cumulative_stop_loss_pct")
+        cumulative_take_profit_pct = action_data.get("cumulative_take_profit_pct")
         from src.nadobro.services.copy_service import start_copy
-        ok, msg = await run_blocking(start_copy, telegram_id, trader_id, budget_usd, risk_factor, max_leverage)
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        # Map legacy setup fields to the v2 copy mirror model.
+        margin_per_trade = max(5.0, min(5000.0, budget_usd * max(risk_factor, 0.1)))
+        start_kwargs = {
+            "network": network,
+            "margin_per_trade": margin_per_trade,
+            "max_leverage": max_leverage,
+            "total_allocated_usd": budget_usd,
+        }
+        if cumulative_stop_loss_pct is not None:
+            start_kwargs["cumulative_stop_loss_pct"] = float(cumulative_stop_loss_pct)
+        if cumulative_take_profit_pct is not None:
+            start_kwargs["cumulative_take_profit_pct"] = float(cumulative_take_profit_pct)
+        ok, msg = await run_blocking(start_copy, telegram_id, trader_id, **start_kwargs)
         if ok:
             reply = f"🔁 {escape_md(msg)}"
         else:
@@ -1317,10 +1333,16 @@ async def _handle_pending_alert(update, context, telegram_id, text):
 
     result = create_alert(telegram_id, product, condition, target)
     if result["success"]:
+        if condition.startswith("funding"):
+            target_str = f"{target:,.4f}%"
+        elif condition.startswith("pnl"):
+            target_str = f"${target:,.2f}"
+        else:
+            target_str = f"${target:,.2f}"
         await _reply_loc(update.message, 
             f"✅ Alert set\\!\n"
             f"{escape_md(result['product'])} {escape_md(condition)} "
-            f"{escape_md(f'${target:,.2f}')}",
+            f"{escape_md(target_str)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
         )

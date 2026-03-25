@@ -389,11 +389,16 @@ def fmt_alerts(alerts):
     ]
 
     for a in alerts:
-        target_str = f"${a['target']:,.2f}"
+        condition = str(a.get("condition") or "")
+        target = float(a.get("target") or 0)
+        if condition.startswith("funding"):
+            target_str = f"{target:,.4f}%"
+        else:
+            target_str = f"${target:,.2f}"
         lines.append(
             f"\\#{escape_md(str(a['id']))} {escape_md(a['product'])} "
-            f"{escape_md(a['condition'])} {escape_md(target_str)} "
-            f"\\({escape_md(a['network'])}\\)"
+            f"{escape_md(condition)} {escape_md(target_str)} "
+            f"\\({escape_md(a.get('network', 'mainnet'))}\\)"
         )
 
     return "\n".join(lines)

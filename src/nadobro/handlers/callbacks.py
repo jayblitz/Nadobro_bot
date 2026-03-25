@@ -2336,24 +2336,23 @@ async def _handle_copy(query, data, context, telegram_id):
         mirrors = await run_blocking(get_user_copies, telegram_id)
         lang = get_active_language()
         if mirrors:
-            l_budget = localize_text("Budget", lang)
-            l_risk = localize_text("Risk", lang)
+            l_alloc = localize_text("Allocated", lang)
+            l_margin = localize_text("Margin/Trade", lang)
             l_lev = localize_text("Lev", lang)
-            l_trades = localize_text("Trades", lang)
-            l_filled = localize_text("Filled", lang)
-            l_failed = localize_text("Failed", lang)
+            l_positions = localize_text("Open Positions", lang)
             l_pnl = localize_text("PnL", lang)
             lines = [localize_text("📋 *My Copy Trades*\n", lang)]
             for m in mirrors:
                 status_label = localize_text("PAUSED", lang) if m.get("paused") else localize_text("ACTIVE", lang)
                 status_icon = f"⏸ {status_label}" if m.get("paused") else f"🟢 {status_label}"
-                pnl = m.get("pnl", 0)
+                pnl = float(m.get("cumulative_pnl", 0) or 0)
                 pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 pnl_str = escape_md(pnl_str)
                 lines.append(
                     f"• *{escape_md(m['trader_label'])}* — {status_icon}\n"
-                    f"  {l_budget}: ${m['budget_usd']:.0f} \\| {l_risk}: {m['risk_factor']}x \\| {l_lev}: {m['max_leverage']:.0f}x\n"
-                    f"  {l_trades}: {m.get('total_trades', 0)} \\| {l_filled}: {m['recent_filled']} \\| {l_failed}: {m['recent_failed']}\n"
+                    f"  {l_alloc}: ${float(m.get('total_allocated_usd', 0) or 0):.0f} \\| "
+                    f"{l_margin}: ${float(m.get('margin_per_trade', 0) or 0):.0f} \\| {l_lev}: {float(m.get('max_leverage', 0) or 0):.0f}x\n"
+                    f"  {l_positions}: {int(m.get('open_positions', 0) or 0)}\n"
                     f"  {l_pnl}: *{pnl_str}*"
                 )
         else:
