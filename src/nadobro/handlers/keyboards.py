@@ -158,13 +158,46 @@ def home_card_kb():
 
 def portfolio_kb(has_positions: bool = False):
     rows = [
-        [InlineKeyboardButton("📌 Open Positions", callback_data="pos:view")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:view")],
+        [
+            InlineKeyboardButton("📌 Positions", callback_data="pos:view"),
+            InlineKeyboardButton("📜 History", callback_data="portfolio:history"),
+        ],
+        [
+            InlineKeyboardButton("📊 Analytics", callback_data="portfolio:analytics"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:view"),
+        ],
     ]
     if has_positions:
-        rows.insert(1, [InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
+        rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
     rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
+
+
+def portfolio_history_kb(page: int = 0, has_more: bool = False):
+    rows = []
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀ Prev", callback_data=f"portfolio:history:{page - 1}"))
+    if has_more:
+        nav_row.append(InlineKeyboardButton("Next ▶", callback_data=f"portfolio:history:{page + 1}"))
+    if nav_row:
+        rows.append(nav_row)
+    rows.append([
+        InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
+        InlineKeyboardButton("📊 Analytics", callback_data="portfolio:analytics"),
+    ])
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def portfolio_analytics_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
+            InlineKeyboardButton("📜 History", callback_data="portfolio:history"),
+        ],
+        [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+    ])
 
 
 def trade_direction_kb():
@@ -539,6 +572,27 @@ def alert_product_kb():
     return InlineKeyboardMarkup(rows)
 
 
+def alert_condition_kb(product):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📈 Price Above", callback_data=f"alert:cond:{product}:above"),
+            InlineKeyboardButton("📉 Price Below", callback_data=f"alert:cond:{product}:below"),
+        ],
+        [
+            InlineKeyboardButton("💹 Funding Above", callback_data=f"alert:cond:{product}:funding_above"),
+            InlineKeyboardButton("💸 Funding Below", callback_data=f"alert:cond:{product}:funding_below"),
+        ],
+        [
+            InlineKeyboardButton("🟢 PnL Above", callback_data=f"alert:cond:{product}:pnl_above"),
+            InlineKeyboardButton("🔴 PnL Below", callback_data=f"alert:cond:{product}:pnl_below"),
+        ],
+        [
+            InlineKeyboardButton("◀ Back", callback_data="alert:set"),
+            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+        ],
+    ])
+
+
 def alert_delete_kb(alerts):
     rows = []
     for a in alerts:
@@ -674,14 +728,18 @@ def strategy_hub_kb():
 
 def points_scope_kb(scope: str = "week"):
     scope_norm = (scope or "week").lower()
-    week_label = "✅ Last 7 Days" if scope_norm == "week" else "Last 7 Days"
+    week_label = "✅ 7d" if scope_norm == "week" else "7d"
+    month_label = "✅ 30d" if scope_norm == "month" else "30d"
+    all_label = "✅ All" if scope_norm == "all" else "All"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(week_label, callback_data="points:scope:week"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="points:refresh"),
+            InlineKeyboardButton(month_label, callback_data="points:scope:month"),
+            InlineKeyboardButton(all_label, callback_data="points:scope:all"),
         ],
         [
-            InlineKeyboardButton("❌ Cancel Request", callback_data="points:cancel"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="points:refresh"),
+            InlineKeyboardButton("❌ Cancel", callback_data="points:cancel"),
         ],
         [
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
@@ -712,7 +770,7 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", availabl
         InlineKeyboardButton(product, callback_data=f"strategy:pair:{strategy_id}:{product}")
         for product in products[:3]
     ]
-    return InlineKeyboardMarkup([
+    rows = [
         [
             InlineKeyboardButton("✅ Arm Strategy", callback_data=f"strategy:activate:{strategy_id}"),
             InlineKeyboardButton("⚙️ Tune Risk", callback_data="settings:risk_menu"),
@@ -736,11 +794,14 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", availabl
             InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status"),
             InlineKeyboardButton("🛑 Stop Runtime", callback_data="strategy:stop"),
         ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
-            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-        ],
+    ]
+    if strategy_id == "vol":
+        rows.append([InlineKeyboardButton("🏆 Points Impact", callback_data="points:view")])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def bro_action_kb():
@@ -925,6 +986,36 @@ def copy_leverage_kb():
         [
             InlineKeyboardButton("30x", callback_data="copy:lev:30"),
             InlineKeyboardButton("40x", callback_data="copy:lev:40"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
+    ])
+
+
+def copy_cumulative_sl_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("5%", callback_data="copy:csl:5"),
+            InlineKeyboardButton("10%", callback_data="copy:csl:10"),
+            InlineKeyboardButton("20%", callback_data="copy:csl:20"),
+        ],
+        [
+            InlineKeyboardButton("50%", callback_data="copy:csl:50"),
+            InlineKeyboardButton("⏭ Skip (No SL)", callback_data="copy:csl:0"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
+    ])
+
+
+def copy_cumulative_tp_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("10%", callback_data="copy:ctp:10"),
+            InlineKeyboardButton("25%", callback_data="copy:ctp:25"),
+            InlineKeyboardButton("50%", callback_data="copy:ctp:50"),
+        ],
+        [
+            InlineKeyboardButton("100%", callback_data="copy:ctp:100"),
+            InlineKeyboardButton("⏭ Skip (No TP)", callback_data="copy:ctp:0"),
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
     ])
