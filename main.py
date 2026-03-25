@@ -116,6 +116,20 @@ def _resolve_transport_settings():
     return transport_mode, webhook_url, webhook_path
 
 
+async def _start_bootstrap_health_server(port: int):
+    """Serve a minimal temporary health endpoint during webhook startup."""
+    async def _bootstrap_health_handler(reader, writer):
+        try:
+            await reader.read(4096)
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nBOOTING")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    return await asyncio.start_server(_bootstrap_health_handler, "0.0.0.0", port)
+
+
 def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, filters
     from telegram import Update
@@ -237,6 +251,13 @@ async def run_bot():
 
     webhook_listen = os.environ.get("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0").strip()
     webhook_port = int(os.environ.get("PORT", os.environ.get("TELEGRAM_WEBHOOK_PORT", "8080")))
+    bootstrap_health_server = None
+    if transport_mode == "webhook":
+        try:
+            bootstrap_health_server = await _start_bootstrap_health_server(webhook_port)
+            logger.info("Bootstrap health check listening on port %s", webhook_port)
+        except Exception as e:
+            logger.warning("Bootstrap health server failed to start (non-fatal): %s", e)
 
     logger.info("Starting bot (transport=%s)...", transport_mode)
     await bot_app.initialize()
@@ -253,6 +274,12 @@ async def run_bot():
     logger.info("Bot commands registered in Menu")
 
     if transport_mode == "webhook":
+        if bootstrap_health_server:
+            try:
+                bootstrap_health_server.close()
+                await bootstrap_health_server.wait_closed()
+            except Exception:
+                pass
         logger.info(
             "Starting webhook server listen=%s port=%s path=%s",
             webhook_listen,
