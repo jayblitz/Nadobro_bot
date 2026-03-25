@@ -123,6 +123,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     leverage=leverage,
                     slippage_pct=float(state.get("slippage_pct") or 1.0),
                     enforce_rate_limit=False,
+                    source="dn",
+                    strategy_session_id=state.get("strategy_session_id"),
                 )
             spot_close_result = {"success": True}
             if spot_size > 0:
@@ -133,6 +135,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     is_buy=False,
                     enforce_rate_limit=False,
                     slippage_pct=float(state.get("slippage_pct") or 1.0),
+                    source="dn",
+                    strategy_session_id=state.get("strategy_session_id"),
                 )
             result["action"] = "exit"
             result["exit_reason"] = f"Funding unfavorable for {unfavorable_count} cycles"
@@ -180,6 +184,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 is_buy=True,
                 enforce_rate_limit=False,
                 slippage_pct=float(state.get("slippage_pct") or 1.0),
+                source="dn",
+                strategy_session_id=state.get("strategy_session_id"),
             )
             result["action"] = "spot_buy"
             result["spot_adjust_result"] = spot_adjust.get("success", False)
@@ -197,6 +203,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 is_buy=False,
                 enforce_rate_limit=False,
                 slippage_pct=float(state.get("slippage_pct") or 1.0),
+                source="dn",
+                strategy_session_id=state.get("strategy_session_id"),
             )
             result["action"] = "spot_sell"
             result["spot_adjust_result"] = spot_adjust.get("success", False)
@@ -225,6 +233,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     leverage=leverage,
                     slippage_pct=float(state.get("slippage_pct") or 1.0),
                     enforce_rate_limit=False,
+                    source="dn",
+                    strategy_session_id=state.get("strategy_session_id"),
                 )
                 result["action"] = "adjust_increase"
                 result["adjust_result"] = adj_result.get("success", False)
@@ -242,6 +252,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     leverage=leverage,
                     slippage_pct=float(state.get("slippage_pct") or 1.0),
                     enforce_rate_limit=False,
+                    source="dn",
+                    strategy_session_id=state.get("strategy_session_id"),
                 )
                 result["action"] = "adjust_decrease"
                 result["adjust_result"] = adj_result.get("success", False)
@@ -265,6 +277,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             leverage=leverage,
             slippage_pct=float(state.get("slippage_pct") or 1.0),
             enforce_rate_limit=False,
+            source="dn",
+            strategy_session_id=state.get("strategy_session_id"),
         )
         if close_wrong_side.get("success"):
             result["action"] = "close_wrong_side"
@@ -286,6 +300,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         leverage=leverage,
         slippage_pct=float(state.get("slippage_pct") or 1.0),
         enforce_rate_limit=False,
+        source="dn",
+        strategy_session_id=state.get("strategy_session_id"),
     )
 
     if order_result.get("success"):
