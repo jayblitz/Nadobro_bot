@@ -20,6 +20,85 @@ _MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SE
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
 
 
+def _format_alert_metric_value(condition: str, value: float) -> str:
+    condition = str(condition or "")
+    if condition.startswith("funding_"):
+        return f"{float(value):,.4f}%"
+    return f"${float(value):,.2f}"
+
+
+def _alert_condition_label(condition: str) -> str:
+    labels = {
+        "above": "Price Above",
+        "below": "Price Below",
+        "funding_above": "Funding Above",
+        "funding_below": "Funding Below",
+        "pnl_above": "PnL Above",
+        "pnl_below": "PnL Below",
+    }
+    return labels.get(str(condition or ""), str(condition or ""))
+
+
+async def _build_alert_context() -> tuple[dict, dict]:
+    """Build optional context maps used by funding/pnl alerts."""
+    from src.nadobro.models.database import get_all_active_alerts, AlertCondition
+    from src.nadobro.config import get_product_id
+    from src.nadobro.services.user_service import get_user_readonly_client
+
+    funding_rates: dict = {}
+    positions_by_user: dict = {}
+
+    active_alerts = await run_blocking(get_all_active_alerts)
+    if not active_alerts:
+        return funding_rates, positions_by_user
+
+    needs_funding = False
+    needs_pnl = False
+    funding_products: set[str] = set()
+    pnl_user_ids: set[int] = set()
+
+    for alert in active_alerts:
+        cond = alert.get("condition")
+        if cond in (AlertCondition.FUNDING_ABOVE.value, AlertCondition.FUNDING_BELOW.value):
+            needs_funding = True
+            product = str((alert.get("product_name") or "")).replace("-PERP", "")
+            if product:
+                funding_products.add(product)
+        elif cond in (AlertCondition.PNL_ABOVE.value, AlertCondition.PNL_BELOW.value):
+            needs_pnl = True
+            uid = alert.get("user_id")
+            if uid is not None:
+                try:
+                    pnl_user_ids.add(int(uid))
+                except Exception:
+                    continue
+
+    if needs_funding and _check_client:
+        for product in funding_products:
+            try:
+                pid = get_product_id(product)
+                if pid is None:
+                    continue
+                fr = await run_blocking(_check_client.get_funding_rate, pid)
+                if isinstance(fr, dict):
+                    funding_rates[product] = float(fr.get("funding_rate", 0) or 0)
+            except Exception:
+                continue
+
+    if needs_pnl:
+        for user_id in pnl_user_ids:
+            try:
+                client = await run_blocking(get_user_readonly_client, user_id)
+                if not client:
+                    continue
+                positions = await run_blocking(client.get_all_positions)
+                positions_by_user[user_id] = positions or []
+            except Exception:
+                continue
+
+    return funding_rates, positions_by_user
+
+
 def set_bot_app(app):
     global _bot_app
     _bot_app = app
@@ -50,16 +129,23 @@ async def handle_alert_job(payload: dict):
             prices = await _get_market_snapshot()
         if not prices:
             return
-        triggered = await run_blocking(get_triggered_alerts, prices)
+        funding_rates, positions_by_user = await _build_alert_context()
+        triggered = await run_blocking(get_triggered_alerts, prices, funding_rates, positions_by_user)
         for alert in triggered:
             try:
                 from src.nadobro.i18n import language_context, get_user_language, localize_text, get_active_language
                 with language_context(get_user_language(alert["user_id"])):
                     lang = get_active_language()
+                    condition_label = _alert_condition_label(alert.get("condition"))
+                    target_fmt = _format_alert_metric_value(alert.get("condition"), alert.get("target", 0))
+                    current_fmt = _format_alert_metric_value(
+                        alert.get("condition"),
+                        alert.get("current_value", alert.get("current_price", 0)),
+                    )
                     msg = (
                         f"{localize_text('Alert Triggered!', lang)}\n"
-                        f"{alert['product']} {localize_text('is', lang)} {alert['condition']} ${alert['target']:,.2f}\n"
-                        f"{localize_text('Current price:', lang)} ${alert['current_price']:,.2f}"
+                        f"{alert['product']} {localize_text('is', lang)} {condition_label}: {target_fmt}\n"
+                        f"{localize_text('Current value:', lang)} {current_fmt}"
                     )
                 await _bot_app.bot.send_message(chat_id=alert["user_id"], text=msg)
                 logger.info(f"Alert sent to user {alert['user_id']}: {alert['product']} {alert['condition']}")
@@ -172,15 +258,127 @@ async def poll_lowiqpts_relay():
         logger.error("LOWIQPTS relay poll failed: %s", e)
 
 
+async def sync_pending_fills():
+    """Background job: resolve pending fills via Nado archive API."""
+    try:
+        from src.nadobro.models.database import (
+            get_pending_fill_syncs, update_trade, resolve_fill_sync,
+            expire_fill_sync, increment_fill_sync_attempts,
+            increment_session_metrics,
+        )
+        from src.nadobro.services.nado_archive import query_order_by_digest
+
+        pending = await run_blocking(get_pending_fill_syncs, 50)
+        if not pending:
+            return
+
+        resolved_count = 0
+        for entry in pending:
+            try:
+                sync_id = entry["id"]
+                trade_id = entry["trade_id"]
+                network = entry["network"]
+                digest = entry["order_digest"]
+                attempts = int(entry.get("attempts", 0))
+
+                # Expire old entries
+                created = entry.get("created_at")
+                if created and attempts >= 10:
+                    from datetime import datetime as dt, timezone
+
+                    if isinstance(created, str):
+                        # Keep explicit timezone offsets (including trailing Z -> UTC).
+                        created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
+                    else:
+                        created_dt = created
+
+                    # Normalize both sides to aware UTC before comparing.
+                    if created_dt.tzinfo is None:
+                        created_dt = created_dt.replace(tzinfo=timezone.utc)
+                    age_seconds = (dt.now(timezone.utc) - created_dt.astimezone(timezone.utc)).total_seconds()
+                    if age_seconds > 7200:  # 2 hours
+                        await run_blocking(expire_fill_sync, sync_id)
+                        continue
+
+                await run_blocking(increment_fill_sync_attempts, sync_id)
+
+                fill_data = await run_blocking(
+                    query_order_by_digest, network, digest, 0.5, 0.3,
+                )
+                if not fill_data or not fill_data.get("is_filled"):
+                    # Check if order was cancelled (no fill, high attempts)
+                    if attempts >= 5:
+                        try:
+                            from src.nadobro.services.user_service import get_user_nado_client
+                            user_id = entry["user_id"]
+                            product_id = entry["product_id"]
+                            client = get_user_nado_client(int(user_id), network=network)
+                            if client:
+                                open_orders = client.get_open_orders(product_id) or []
+                                digest_still_open = any(
+                                    str(o.get("digest")) == digest for o in open_orders
+                                )
+                                if not digest_still_open:
+                                    await run_blocking(
+                                        update_trade, trade_id,
+                                        {"status": "cancelled"}, network,
+                                    )
+                                    await run_blocking(resolve_fill_sync, sync_id)
+                                    resolved_count += 1
+                                    continue
+                        except Exception:
+                            pass
+                    continue
+
+                # Fill resolved — update trade
+                update_data = {
+                    "status": "filled",
+                    "fill_price": fill_data["fill_price"],
+                    "price": fill_data["fill_price"],
+                    "fill_size": fill_data.get("fill_size"),
+                    "fill_fee": fill_data.get("fee", 0),
+                    "fees": fill_data.get("fee", 0),
+                    "realized_pnl": fill_data.get("realized_pnl", 0),
+                    "is_taker": fill_data.get("is_taker"),
+                }
+                if fill_data.get("first_fill_ts"):
+                    from datetime import datetime as dt
+                    try:
+                        update_data["filled_at"] = dt.utcfromtimestamp(
+                            int(fill_data["first_fill_ts"])
+                        ).isoformat()
+                    except Exception:
+                        pass
+
+                await run_blocking(update_trade, trade_id, update_data, network)
+                await run_blocking(resolve_fill_sync, sync_id)
+                resolved_count += 1
+
+                logger.info(
+                    "Fill sync resolved trade #%s: price=%.6f fee=%.6f pnl=%.6f",
+                    trade_id, fill_data["fill_price"],
+                    fill_data.get("fee", 0), fill_data.get("realized_pnl", 0),
+                )
+            except Exception as e:
+                logger.warning("Fill sync error for entry %s: %s", entry.get("id"), e)
+                continue
+
+        if resolved_count > 0:
+            logger.info("Fill sync: resolved %d/%d pending fills", resolved_count, len(pending))
+    except Exception as e:
+        logger.error("Fill sync job failed: %s", e)
+
+
 def start_scheduler():
     relay_poll_seconds = relay_poll_interval_seconds()
     scheduler.add_job(check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS, id="check_alerts", replace_existing=True)
     scheduler.add_job(tick_price_tracker, "interval", seconds=60, id="price_tracker", replace_existing=True)
     scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True)
     scheduler.add_job(poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds, id="lowiqpts_relay_poll", replace_existing=True)
+    scheduler.add_job(sync_pending_fills, "interval", seconds=30, id="fill_sync", replace_existing=True)
     scheduler.start()
     logger.info(
-        "Scheduler started - alerts %ss, price tracker 60s, HOWL nightly 02:00 UTC, LOWIQ relay %ss",
+        "Scheduler started - alerts %ss, price tracker 60s, HOWL nightly 02:00 UTC, LOWIQ relay %ss, fill sync 30s",
         _ALERT_SCAN_SECONDS,
         relay_poll_seconds,
     )

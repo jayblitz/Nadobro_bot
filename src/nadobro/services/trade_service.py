@@ -1,9 +1,10 @@
 import logging
+import time
 from datetime import datetime, timedelta
 from src.nadobro.models.database import (
     TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
     get_last_trade_for_rate_limit, insert_trade, update_trade, get_trades_by_user,
-    find_open_trade,
+    find_open_trade, insert_fill_sync,
 )
 from src.nadobro.config import (
     get_product_id,
@@ -16,8 +17,53 @@ from src.nadobro.config import (
     MIN_TRADE_SIZE_USD,
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
+from src.nadobro.services.nado_archive import query_order_by_digest
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_fill_data(client, digest: str, network: str) -> dict | None:
+    """Query Nado archive for actual fill data after order placement."""
+    try:
+        return query_order_by_digest(network, digest, max_wait_seconds=2.0)
+    except Exception as e:
+        logger.warning("Archive fill resolution failed for %s: %s", digest[:16] if digest else "?", e)
+        return None
+
+
+def _enqueue_fill_sync(trade_id: int, network: str, user_id: int, client, digest: str, product_id: int):
+    """Enqueue a trade for background fill sync when inline resolution fails."""
+    try:
+        subaccount_hex = getattr(client, "subaccount_hex", None) or ""
+        insert_fill_sync({
+            "trade_id": trade_id,
+            "network": network,
+            "user_id": user_id,
+            "subaccount_hex": subaccount_hex,
+            "order_digest": digest,
+            "product_id": product_id,
+            "placed_at_ts": time.time(),
+        })
+    except Exception as e:
+        logger.warning("Failed to enqueue fill sync for trade %s: %s", trade_id, e)
+
+
+def _build_fill_update(fill_data: dict | None, mid_price: float = 0.0) -> dict:
+    """Build trade update dict from fill data, with market-mid fallback."""
+    if fill_data and fill_data.get("fill_price", 0) > 0:
+        update = {
+            "fill_price": fill_data["fill_price"],
+            "price": fill_data["fill_price"],
+            "fill_size": fill_data.get("fill_size", 0),
+            "fill_fee": fill_data.get("fee", 0),
+            "fees": fill_data.get("fee", 0),
+            "realized_pnl": fill_data.get("realized_pnl", 0),
+            "is_taker": fill_data.get("is_taker", False),
+        }
+        if mid_price > 0 and fill_data["fill_price"] > 0:
+            update["slippage_bps"] = abs(fill_data["fill_price"] - mid_price) / mid_price * 10000
+        return update
+    return {"price": mid_price} if mid_price > 0 else {}
 
 
 def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[str]]:
@@ -107,8 +153,12 @@ def validate_trade(
     balances = balance.get("balances", {}) or {}
     usdt_balance = balances.get(0, balances.get("0", 0))
 
-    mp = client.get_market_price(product_id)
-    if mp["mid"] == 0:
+    try:
+        mp = client.get_market_price(product_id)
+    except Exception as e:
+        logger.warning("get_market_price failed in validate_trade for %s: %s", product, e)
+        return False, f"Could not fetch {product} price. Market may be unavailable."
+    if not mp or mp.get("mid", 0) == 0:
         return False, f"Could not fetch {product} price. Market may be unavailable."
 
     notional = size * mp["mid"]
@@ -143,6 +193,8 @@ def execute_market_order(
     enforce_rate_limit: bool = True,
     tp_price: float = None,
     sl_price: float = None,
+    source: str = "manual",
+    strategy_session_id: int = None,
     **kwargs,
 ) -> dict:
     valid, msg = validate_trade(
@@ -162,7 +214,7 @@ def execute_market_order(
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
-    trade_id = insert_trade({
+    trade_data = {
         "user_id": telegram_id,
         "product_id": product_id,
         "product_name": get_product_name(product_id, network=network),
@@ -172,7 +224,11 @@ def execute_market_order(
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
         "created_at": datetime.utcnow().isoformat(),
-    }, network=network)
+        "source": source,
+    }
+    if strategy_session_id:
+        trade_data["strategy_session_id"] = strategy_session_id
+    trade_id = insert_trade(trade_data, network=network)
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
 
@@ -186,6 +242,15 @@ def execute_market_order(
                 isolated_margin = (float(size) * mid) / max(1.0, float(leverage))
         except Exception:
             isolated_margin = None
+
+    # Capture mid price before order for slippage calculation
+    pre_order_mid = 0.0
+    try:
+        pre_mp = client.get_market_price(product_id)
+        pre_order_mid = float(pre_mp.get("mid", 0) or 0)
+    except Exception:
+        pass
+
     result = client.place_market_order(
         product_id,
         size,
@@ -196,27 +261,46 @@ def execute_market_order(
     )
 
     if result["success"]:
-        update_trade(trade_id, {
-            "status": TradeStatus.FILLED.value,
-            "order_digest": result.get("digest"),
-            "price": _get_post_fill_price(client, product_id) or result.get("price", 0),
-            "filled_at": datetime.utcnow().isoformat(),
-        }, network=network)
+        digest = result.get("digest", "")
+        try:
+            fill_data = _resolve_fill_data(client, digest, network)
+            fill_update = _build_fill_update(fill_data, mid_price=pre_order_mid)
+            update_data = {
+                "status": TradeStatus.FILLED.value,
+                "order_digest": digest,
+                "filled_at": datetime.utcnow().isoformat(),
+            }
+            update_data.update(fill_update)
+            if "price" not in update_data or not update_data.get("price"):
+                update_data["price"] = _get_post_fill_price(client, product_id) or result.get("price", 0)
+            update_trade(trade_id, update_data, network=network)
+
+            # Enqueue for background sync if archive didn't resolve
+            if not fill_data:
+                _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+        except Exception as e:
+            logger.error("Post-fill processing failed for trade %s: %s", trade_id, e)
     else:
-        update_trade(trade_id, {
-            "status": TradeStatus.FAILED.value,
-            "error_message": result.get("error", "Unknown error"),
-        }, network=network)
+        try:
+            update_trade(trade_id, {
+                "status": TradeStatus.FAILED.value,
+                "error_message": result.get("error", "Unknown error"),
+            }, network=network)
+        except Exception as e:
+            logger.error("Failed to update trade %s status to FAILED: %s", trade_id, e)
 
     if result["success"]:
-        mp = client.get_market_price(product_id)
-        update_trade_stats(telegram_id, size * mp["mid"])
+        try:
+            mp = client.get_market_price(product_id)
+            update_trade_stats(telegram_id, size * mp["mid"])
+        except Exception as e:
+            logger.warning("Post-order stats update failed: %s", e)
         payload = {
             "success": True,
             "side": "LONG" if is_long else "SHORT",
             "size": size,
             "product": get_product_name(product_id, network=network),
-            "price": mp["mid"],
+            "price": pre_order_mid or result.get("price", 0),
             "digest": result.get("digest"),
             "network": user.network_mode.value,
         }
@@ -251,6 +335,8 @@ def execute_spot_market_order(
     is_buy: bool,
     enforce_rate_limit: bool = False,
     slippage_pct: float = 1.0,
+    source: str = "manual",
+    strategy_session_id: int = None,
 ) -> dict:
     asset = (asset or "").upper().strip()
     spot_product_id = get_spot_product_id(asset)
@@ -311,7 +397,7 @@ def execute_spot_market_order(
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
     network = user.network_mode.value
 
-    trade_id = insert_trade({
+    spot_trade_data = {
         "user_id": telegram_id,
         "product_id": spot_product_id,
         "product_name": f"{asset}-SPOT",
@@ -321,19 +407,31 @@ def execute_spot_market_order(
         "leverage": 1.0,
         "status": TradeStatus.PENDING.value,
         "created_at": datetime.utcnow().isoformat(),
-    }, network=network)
+        "source": source,
+    }
+    if strategy_session_id:
+        spot_trade_data["strategy_session_id"] = strategy_session_id
+    trade_id = insert_trade(spot_trade_data, network=network)
     if not trade_id:
         return {"success": False, "error": "Failed to record spot trade."}
 
     result = client.place_market_order(spot_product_id, size, is_buy=is_buy, slippage_pct=slippage_pct)
     if result.get("success"):
-        post_px = _get_post_fill_price(client, spot_product_id) or mid
-        update_trade(trade_id, {
+        digest = result.get("digest", "")
+        fill_data = _resolve_fill_data(client, digest, network)
+        fill_update = _build_fill_update(fill_data, mid_price=mid)
+        post_px = fill_update.get("price") or _get_post_fill_price(client, spot_product_id) or mid
+        update_data = {
             "status": TradeStatus.FILLED.value,
-            "order_digest": result.get("digest"),
-            "price": post_px,
+            "order_digest": digest,
             "filled_at": datetime.utcnow().isoformat(),
-        }, network=network)
+        }
+        update_data.update(fill_update)
+        if "price" not in update_data or not update_data.get("price"):
+            update_data["price"] = post_px
+        update_trade(trade_id, update_data, network=network)
+        if not fill_data:
+            _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, spot_product_id)
         update_trade_stats(telegram_id, abs(size * post_px))
         return {
             "success": True,
@@ -342,7 +440,7 @@ def execute_spot_market_order(
             "size": size,
             "price": post_px,
             "product_id": spot_product_id,
-            "digest": result.get("digest"),
+            "digest": digest,
             "network": network,
         }
 
@@ -363,6 +461,8 @@ def execute_limit_order(
     enforce_rate_limit: bool = True,
     tp_price: float = None,
     sl_price: float = None,
+    source: str = "manual",
+    strategy_session_id: int = None,
     **kwargs,
 ) -> dict:
     valid, msg = validate_trade(
@@ -382,7 +482,7 @@ def execute_limit_order(
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
-    trade_id = insert_trade({
+    limit_trade_data = {
         "user_id": telegram_id,
         "product_id": product_id,
         "product_name": get_product_name(product_id, network=network),
@@ -393,7 +493,11 @@ def execute_limit_order(
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
         "created_at": datetime.utcnow().isoformat(),
-    }, network=network)
+        "source": source,
+    }
+    if strategy_session_id:
+        limit_trade_data["strategy_session_id"] = strategy_session_id
+    trade_id = insert_trade(limit_trade_data, network=network)
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
 
@@ -411,16 +515,25 @@ def execute_limit_order(
     )
 
     if result["success"]:
-        update_trade(
-            trade_id,
-            {
-                "status": TradeStatus.PENDING.value,
-                "order_digest": result.get("digest"),
-            },
-            network=network,
-        )
+        digest = result.get("digest", "")
+        try:
+            update_trade(
+                trade_id,
+                {
+                    "status": TradeStatus.PENDING.value,
+                    "order_digest": digest,
+                },
+                network=network,
+            )
+            # Enqueue for background fill sync (limit orders fill asynchronously)
+            _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+        except Exception as e:
+            logger.error("Post-limit-order processing failed for trade %s: %s", trade_id, e)
     else:
-        update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")}, network=network)
+        try:
+            update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")}, network=network)
+        except Exception as e:
+            logger.error("Failed to update limit trade %s status to FAILED: %s", trade_id, e)
 
     if result["success"]:
         return {
@@ -686,6 +799,28 @@ def limit_close_position(
     if not r.get("success"):
         return {"success": False, "error": r.get("error", "Limit close failed.")}
 
+    digest = r.get("digest")
+
+    # Record close trade in DB and enqueue for fill sync
+    try:
+        trade_id = insert_trade({
+            "user_id": telegram_id,
+            "product_id": product_id,
+            "product_name": product_name,
+            "order_type": "LIMIT_CLOSE",
+            "side": "BUY" if not is_long else "SELL",
+            "size": close_sz,
+            "price": float(lp),
+            "leverage": leverage,
+            "status": TradeStatus.PENDING.value,
+            "order_digest": digest,
+            "source": "manual",
+        }, network=network)
+        if trade_id and digest:
+            _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+    except Exception as exc:
+        logger.warning("limit_close_position: DB recording failed: %s", exc)
+
     return {
         "success": True,
         "kind": "LIMIT_CLOSE",
@@ -693,7 +828,7 @@ def limit_close_position(
         "network": network,
         "size": close_sz,
         "limit_price": float(lp),
-        "digest": r.get("digest"),
+        "digest": digest,
         "side": "LONG" if is_long else "SHORT",
     }
 
@@ -765,13 +900,25 @@ def _record_close_in_db(
     client,
     fill_price: float = None,
     network: str | None = None,
+    fill_data: dict | None = None,
 ):
     try:
         user = get_user(telegram_id)
         selected_network = str(network or (user.network_mode.value if user else "mainnet"))
 
-        close_price = fill_price or 0.0
-        if not close_price:
+        # Determine close price: prefer archive fill_data > fill_price param > market mid
+        close_price = 0.0
+        close_fee = 0.0
+        archive_pnl = None  # Authoritative PnL from exchange
+
+        if fill_data and fill_data.get("fill_price", 0) > 0:
+            close_price = fill_data["fill_price"]
+            close_fee = fill_data.get("fee", 0)
+            if fill_data.get("realized_pnl", 0) != 0:
+                archive_pnl = fill_data["realized_pnl"]
+        elif fill_price and fill_price > 0:
+            close_price = fill_price
+        else:
             try:
                 price_data = client.get_market_price(product_id)
                 close_price = float(price_data.get("mid", 0) or 0)
@@ -782,39 +929,56 @@ def _record_close_in_db(
         is_full_close = close_size >= pos_size
 
         if open_trade:
-            open_price = float(open_trade.get("price") or 0)
+            open_price = float(open_trade.get("fill_price") or open_trade.get("price") or 0)
             open_side = open_trade.get("side", "")
-            pnl = 0.0
-            if open_price > 0 and close_price > 0:
+
+            # Use exchange-reported realized PnL if available (authoritative)
+            if archive_pnl is not None:
+                pnl = archive_pnl
+            elif open_price > 0 and close_price > 0:
                 if open_side == "long":
                     pnl = (close_price - open_price) * close_size
                 elif open_side == "short":
                     pnl = (open_price - close_price) * close_size
+                else:
+                    pnl = 0.0
+                # Subtract fees from PnL for net profit
+                open_fee = float(open_trade.get("fill_fee") or open_trade.get("fees") or 0)
+                pnl = pnl - open_fee - close_fee
+            else:
+                pnl = 0.0
+
+            update_data = {
+                "close_price": close_price,
+                "pnl": round(pnl, 4),
+            }
+            if fill_data:
+                update_data["fill_price"] = close_price
+                update_data["fill_fee"] = close_fee
+                update_data["fees"] = close_fee
+                update_data["fill_size"] = fill_data.get("fill_size", 0)
+                update_data["realized_pnl"] = fill_data.get("realized_pnl", 0)
+                update_data["is_taker"] = fill_data.get("is_taker", False)
 
             if is_full_close:
-                update_trade(open_trade["id"], {
-                    "status": TradeStatus.CLOSED.value,
-                    "close_price": close_price,
-                    "closed_at": datetime.utcnow().isoformat(),
-                    "pnl": round(pnl, 4),
-                }, network=selected_network)
+                update_data["status"] = TradeStatus.CLOSED.value
+                update_data["closed_at"] = datetime.utcnow().isoformat()
+                update_trade(open_trade["id"], update_data, network=selected_network)
                 logger.info(
-                    "Trade #%d fully closed: %s %s size=%.4f open=%.2f close=%.2f pnl=%.4f",
+                    "Trade #%d fully closed: %s %s size=%.4f open=%.2f close=%.2f pnl=%.4f fee=%.4f%s",
                     open_trade["id"], open_side, get_product_name(product_id),
-                    close_size, open_price, close_price, pnl,
+                    close_size, open_price, close_price, pnl, close_fee,
+                    " (archive)" if archive_pnl is not None else "",
                 )
             else:
-                update_trade(open_trade["id"], {
-                    "pnl": round(pnl, 4),
-                    "close_price": close_price,
-                }, network=selected_network)
+                update_trade(open_trade["id"], update_data, network=selected_network)
                 logger.info(
                     "Trade #%d partially closed: %s %s closed=%.4f/%.4f open=%.2f close=%.2f pnl=%.4f",
                     open_trade["id"], open_side, get_product_name(product_id),
                     close_size, pos_size, open_price, close_price, pnl,
                 )
         else:
-            insert_trade({
+            close_trade_data = {
                 "user_id": telegram_id,
                 "product_id": product_id,
                 "product_name": get_product_name(product_id),
@@ -828,10 +992,19 @@ def _record_close_in_db(
                 "closed_at": datetime.utcnow().isoformat(),
                 "created_at": datetime.utcnow().isoformat(),
                 "filled_at": datetime.utcnow().isoformat(),
-            }, network=selected_network)
+            }
+            if fill_data:
+                close_trade_data["fill_price"] = close_price
+                close_trade_data["fill_fee"] = close_fee
+                close_trade_data["fees"] = close_fee
+                close_trade_data["fill_size"] = fill_data.get("fill_size", 0)
+                close_trade_data["realized_pnl"] = fill_data.get("realized_pnl", 0)
+                close_trade_data["pnl"] = round(archive_pnl, 4) if archive_pnl is not None else 0.0
+                close_trade_data["is_taker"] = fill_data.get("is_taker", False)
+            insert_trade(close_trade_data, network=selected_network)
             logger.info(
-                "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f",
-                side, get_product_name(product_id), close_size, close_price,
+                "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f fee=%.4f",
+                side, get_product_name(product_id), close_size, close_price, close_fee,
             )
     except Exception as e:
         logger.warning("Failed to record close in DB: %s", e)
@@ -902,7 +1075,10 @@ def close_position(
         )
         if not r.get("success"):
             return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
-        fill_price = _get_post_fill_price(client, product_id)
+        # Resolve actual fill data from Nado archive
+        close_digest = r.get("digest", "")
+        close_fill_data = _resolve_fill_data(client, close_digest, selected_network or "mainnet") if close_digest else None
+        fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, product_id)
         _record_close_in_db(
             telegram_id,
             product_id,
@@ -912,6 +1088,7 @@ def close_position(
             client,
             fill_price=fill_price,
             network=selected_network or None,
+            fill_data=close_fill_data,
         )
         remaining_size -= this_close_size
 
@@ -1006,7 +1183,9 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
                 product_name = p.get("product_name", get_product_name(pid, network=selected_network or "mainnet"))
                 products_closed.add(product_name)
                 close_side = "short" if signed_amount > 0 else "long"
-                fill_price = _get_post_fill_price(client, pid)
+                close_digest = r.get("digest", "")
+                close_fill_data = _resolve_fill_data(client, close_digest, selected_network or "mainnet") if close_digest else None
+                fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, pid)
                 _record_close_in_db(
                     telegram_id,
                     pid,
@@ -1016,6 +1195,7 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
                     client,
                     fill_price=fill_price,
                     network=selected_network or None,
+                    fill_data=close_fill_data,
                 )
             else:
                 errors.append(
@@ -1106,6 +1286,16 @@ def get_trade_analytics(telegram_id: int) -> dict:
     losses = len([t for t in pnl_trades if float(t["pnl"]) <= 0])
     win_rate = (wins / len(pnl_trades) * 100) if pnl_trades else 0
     total_volume = sum(float(t.get("size") or 0) * float(t.get("price") or 0) for t in completed)
+
+    by_product = {}
+    for t in pnl_trades:
+        product = (t.get("product_name") or "Unknown").replace("-PERP", "")
+        if product not in by_product:
+            by_product[product] = {"pnl": 0.0, "count": 0}
+        by_product[product]["pnl"] += float(t["pnl"])
+        by_product[product]["count"] += 1
+    by_product = dict(sorted(by_product.items(), key=lambda x: abs(x[1]["pnl"]), reverse=True))
+
     return {
         "total_trades": total,
         "filled": len(filled),
@@ -1116,4 +1306,5 @@ def get_trade_analytics(telegram_id: int) -> dict:
         "wins": wins,
         "losses": losses,
         "total_volume": total_volume,
+        "by_product": by_product,
     }

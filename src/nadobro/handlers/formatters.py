@@ -526,6 +526,105 @@ def fmt_portfolio(stats, positions, prices=None):
     return "\n".join(lines)
 
 
+def fmt_trade_history(trades, page=0, page_size=10):
+    start = page * page_size
+    page_trades = trades[start:start + page_size]
+
+    lines = [
+        _loc("📜 *Trade History*"),
+        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+    ]
+
+    if not page_trades:
+        lines.append("")
+        lines.append(_loc("No trade history yet\\."))
+        return "\n".join(lines)
+
+    total = len(trades)
+    lines.append(f"*{_loc('Showing')}* {escape_md(str(start + 1))}\\-{escape_md(str(min(start + page_size, total)))} {_loc('of')} {escape_md(str(total))}")
+    lines.append("")
+
+    for t in page_trades:
+        product = t.get("product", "???")
+        side = (t.get("side") or "???").upper()
+        side_emoji = "🟢" if side == "LONG" else "🔴"
+        status = (t.get("status") or "???").upper()
+        price = t.get("price")
+        close_price = t.get("close_price")
+        pnl = t.get("pnl")
+        created = t.get("created_at", "")[:16]
+
+        price_str = fmt_price(float(price), product.replace("-PERP", "")) if price else "N/A"
+        close_str = fmt_price(float(close_price), product.replace("-PERP", "")) if close_price else "—"
+
+        pnl_str = "—"
+        if pnl is not None:
+            pnl_val = float(pnl)
+            pnl_str = f"+${pnl_val:,.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):,.2f}"
+
+        lines.append(f"{side_emoji} *{escape_md(side)}* {escape_md(product)} \\| {escape_md(status)}")
+        lines.append(f"   {_loc('Entry:')} {escape_md(price_str)} → {_loc('Exit:')} {escape_md(close_str)}")
+        lines.append(f"   {_loc('PnL:')} {escape_md(pnl_str)} \\| {escape_md(created)}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def fmt_analytics(stats):
+    lines = [
+        _loc("📊 *Trading Analytics*"),
+        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        "",
+    ]
+
+    total_trades = int(stats.get("total_trades", 0) or 0)
+    if total_trades == 0:
+        lines.append(_loc("No trades recorded yet\\."))
+        return "\n".join(lines)
+
+    filled = int(stats.get("filled", 0) or 0)
+    closed = int(stats.get("closed", 0) or 0)
+    failed = int(stats.get("failed", 0) or 0)
+    wins = int(stats.get("wins", 0) or 0)
+    losses = int(stats.get("losses", 0) or 0)
+    win_rate = float(stats.get("win_rate", 0) or 0)
+    total_pnl = float(stats.get("total_pnl", 0) or 0)
+    total_volume = float(stats.get("total_volume", 0) or 0)
+
+    pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+    pnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
+
+    avg_trade = total_volume / max(filled + closed, 1)
+
+    lines.extend([
+        f"*{_loc('Performance')}*",
+        f"{pnl_emoji} *{_loc('Total PnL:')}* {escape_md(pnl_str)}",
+        f"🏆 *{_loc('Win Rate:')}* {escape_md(f'{win_rate:.1f}%')}",
+        f"✅ *{_loc('Wins:')}* {escape_md(str(wins))} \\| ❌ *{_loc('Losses:')}* {escape_md(str(losses))}",
+        "",
+        f"*{_loc('Volume')}*",
+        f"💰 *{_loc('Total Volume:')}* {escape_md(f'${total_volume:,.2f}')}",
+        f"📏 *{_loc('Avg Trade Size:')}* {escape_md(f'${avg_trade:,.2f}')}",
+        "",
+        f"*{_loc('Trades')}*",
+        f"📋 *{_loc('Total:')}* {escape_md(str(total_trades))}",
+        f"✅ *{_loc('Filled:')}* {escape_md(str(filled))} \\| 🔒 *{_loc('Closed:')}* {escape_md(str(closed))} \\| ❌ *{_loc('Failed:')}* {escape_md(str(failed))}",
+    ])
+
+    # Per-product breakdown if available
+    by_product = stats.get("by_product")
+    if by_product:
+        lines.extend(["", f"*{_loc('PnL by Product')}*"])
+        for product, data in by_product.items():
+            p_pnl = float(data.get("pnl", 0))
+            p_emoji = "🟢" if p_pnl >= 0 else "🔴"
+            p_str = f"+${p_pnl:,.2f}" if p_pnl >= 0 else f"-${abs(p_pnl):,.2f}"
+            p_count = int(data.get("count", 0))
+            lines.append(f"{p_emoji} {escape_md(product)}: {escape_md(p_str)} \\({escape_md(str(p_count))} {_loc('trades')}\\)")
+
+    return "\n".join(lines)
+
+
 def fmt_settings(user_data):
     leverage = user_data.get("default_leverage", 1)
     slippage = user_data.get("slippage", 1)

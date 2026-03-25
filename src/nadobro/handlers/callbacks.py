@@ -11,16 +11,17 @@ from src.nadobro.handlers.formatters import (
     fmt_trade_preview, fmt_trade_result,
     fmt_wallet_info, fmt_alerts, fmt_portfolio,
     fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard,
+    fmt_trade_history, fmt_analytics,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
     trade_confirm_kb, positions_kb, wallet_kb, wallet_kb_not_linked, wallet_revoke_confirm_kb, alerts_kb,
-    alert_product_kb, alert_delete_kb, settings_kb, settings_leverage_kb,
+    alert_product_kb, alert_condition_kb, alert_delete_kb, settings_kb, settings_leverage_kb,
     settings_slippage_kb, settings_language_kb, close_product_kb, confirm_close_all_kb, back_kb,
     risk_profile_kb, strategy_hub_kb, strategy_action_kb,
     onboarding_language_kb,
     points_scope_kb,
-    mode_kb,     home_card_kb, portfolio_kb,
+    mode_kb,     home_card_kb, portfolio_kb, portfolio_history_kb, portfolio_analytics_kb,
     onboarding_accept_tos_kb,
     copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
@@ -617,13 +618,50 @@ async def _handle_positions(query, data, telegram_id, context):
 async def _handle_portfolio(query, data, telegram_id):
     client = get_user_readonly_client(telegram_id)
     if not client:
-        await _edit_loc(query, 
+        await _edit_loc(query,
             "⚠️ Wallet not initialized\\. Use /start first\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
         )
         return
 
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else "view"
+
+    if action == "history":
+        page = int(parts[2]) if len(parts) > 2 else 0
+        PAGE_SIZE = 10
+        trades = await run_blocking(get_trade_history, telegram_id, limit=500)
+        has_more = len(trades) > (page + 1) * PAGE_SIZE
+        msg = fmt_trade_history(trades, page=page, page_size=PAGE_SIZE)
+        try:
+            await _edit_loc(query,
+                msg,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=portfolio_history_kb(page=page, has_more=has_more),
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
+            raise
+        return
+
+    if action == "analytics":
+        stats = await run_blocking(get_trade_analytics, telegram_id)
+        msg = fmt_analytics(stats)
+        try:
+            await _edit_loc(query,
+                msg,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=portfolio_analytics_kb(),
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
+            raise
+        return
+
+    # Default: portfolio overview
     with timed_metric("cb.portfolio.view"):
         positions = (await run_blocking(client.get_all_positions)) or []
     prices = None
@@ -634,7 +672,7 @@ async def _handle_portfolio(query, data, telegram_id):
     stats = await run_blocking(get_trade_analytics, telegram_id)
     msg = fmt_portfolio(stats, positions, prices)
     try:
-        await _edit_loc(query, 
+        await _edit_loc(query,
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=portfolio_kb(has_positions=bool(positions)),
@@ -851,22 +889,49 @@ async def _handle_alert(query, data, telegram_id, context):
     elif action == "product" and len(parts) >= 3:
         product = parts[2]
         context.user_data["pending_alert"] = {"product": product}
+        await _edit_loc(query,
+            "🔔 *Alert for {product}\\-PERP*\n\n{choose_type}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=alert_condition_kb(product),
+            product=escape_md(product),
+            choose_type=localize_text("Choose alert condition:", get_active_language()),
+        )
+
+    elif action == "cond" and len(parts) >= 4:
+        product = parts[2]
+        condition = parts[3]
+        context.user_data["pending_alert"] = {"product": product, "condition": condition}
         _lang = get_active_language()
-        await _edit_loc(query, 
-            "🔔 *Alert for {product}\\-PERP*\n\n{enter_condition}\n{ex_above}\n{ex_below}",
+        condition_labels = {
+            "above": "Price Above",
+            "below": "Price Below",
+            "funding_above": "Funding Rate Above",
+            "funding_below": "Funding Rate Below",
+            "pnl_above": "PnL Above",
+            "pnl_below": "PnL Below",
+        }
+        label = condition_labels.get(condition, condition)
+        if condition.startswith("funding"):
+            example = localize_text("Example: `0.01` (funding rate in %)", _lang)
+        elif condition.startswith("pnl"):
+            example = localize_text("Example: `50` (PnL in USD)", _lang)
+        else:
+            example = localize_text("Example: `100000` (price in USD)", _lang)
+        await _edit_loc(query,
+            "🔔 *{product}\\-PERP* — *{label}*\n\n{enter_value}\n{example}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
             product=escape_md(product),
-            enter_condition=localize_text("Enter condition and price:", _lang),
-            ex_above=localize_text("Example: `above 100000`", _lang),
-            ex_below=localize_text("Example: `below 90000`", _lang),
+            label=escape_md(label),
+            enter_value=localize_text("Enter target value:", _lang),
+            example=example,
         )
 
     elif action == "view":
         alerts = get_user_alerts(telegram_id)
         msg = fmt_alerts(alerts)
         kb = alert_delete_kb(alerts) if alerts else back_kb()
-        await _edit_loc(query, 
+        await _edit_loc(query,
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=kb,
@@ -2146,20 +2211,63 @@ async def _handle_copy(query, data, context, telegram_id):
             await _edit_loc(query, "⚠️ No setup in progress\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
             return
         setup["max_leverage"] = float(parts[2])
+        setup["step"] = "cumulative_sl"
+        from src.nadobro.handlers.keyboards import copy_cumulative_sl_kb
+        await _edit_loc(query,
+            "🛡 *Cumulative Stop Loss*\n\nBudget: *${budget}* \\| Risk: *{risk}x* \\| Leverage: *{leverage}x*\n\nSet a cumulative loss limit \\(% of budget\\)\\. Copying stops if total losses hit this threshold\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_cumulative_sl_kb(),
+            budget=f"{setup['budget_usd']:.0f}",
+            risk=setup['risk_factor'],
+            leverage=f"{setup['max_leverage']:.0f}",
+        )
+
+    elif action == "csl" and len(parts) >= 3:
+        setup = context.user_data.get("copy_setup")
+        if not setup:
+            await _edit_loc(query, "⚠️ No setup in progress\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+        csl_pct = float(parts[2])
+        setup["cumulative_stop_loss_pct"] = csl_pct if csl_pct > 0 else None
+        setup["step"] = "cumulative_tp"
+        from src.nadobro.handlers.keyboards import copy_cumulative_tp_kb
+        sl_label = f"{csl_pct:.0f}%" if csl_pct > 0 else "None"
+        await _edit_loc(query,
+            "🎯 *Cumulative Take Profit*\n\nBudget: *${budget}* \\| SL: *{sl}*\n\nSet a cumulative profit target \\(% of budget\\)\\. Copying stops when total profits hit this threshold\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_cumulative_tp_kb(),
+            budget=f"{setup['budget_usd']:.0f}",
+            sl=escape_md(sl_label),
+        )
+
+    elif action == "ctp" and len(parts) >= 3:
+        setup = context.user_data.get("copy_setup")
+        if not setup:
+            await _edit_loc(query, "⚠️ No setup in progress\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+        ctp_pct = float(parts[2])
+        setup["cumulative_take_profit_pct"] = ctp_pct if ctp_pct > 0 else None
         setup["step"] = "confirm"
 
         traders = await run_blocking(get_available_traders)
         trader = next((t for t in traders if t["id"] == setup["trader_id"]), None)
         trader_label = trader["label"] if trader else "Unknown"
 
+        csl = setup.get("cumulative_stop_loss_pct")
+        ctp = setup.get("cumulative_take_profit_pct")
+        sl_str = f"{csl:.0f}%" if csl else "None"
+        tp_str = f"{ctp:.0f}%" if ctp else "None"
+
         await _edit_loc(query,
-            "✅ *Confirm Copy Setup*\n\nTrader: *{trader}*\nBudget: *${budget}*\nRisk Factor: *{risk}x*\nMax Leverage: *{leverage}x*\n\nReady to start?",
+            "✅ *Confirm Copy Setup*\n\nTrader: *{trader}*\nBudget: *${budget}*\nRisk Factor: *{risk}x*\nMax Leverage: *{leverage}x*\nCumulative SL: *{sl}*\nCumulative TP: *{tp}*\n\nReady to start?",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=copy_confirm_kb(),
             trader=escape_md(trader_label),
             budget=f"{setup['budget_usd']:.0f}",
             risk=setup['risk_factor'],
             leverage=f"{setup['max_leverage']:.0f}",
+            sl=escape_md(sl_str),
+            tp=escape_md(tp_str),
         )
 
     elif action == "confirm":
@@ -2178,16 +2286,18 @@ async def _handle_copy(query, data, context, telegram_id):
             return
 
         from src.nadobro.handlers.messages import execute_action_directly
-        await execute_action_directly(
-            query, context, telegram_id,
-            {
-                "type": "start_copy",
-                "trader_id": setup["trader_id"],
-                "budget_usd": setup["budget_usd"],
-                "risk_factor": setup["risk_factor"],
-                "max_leverage": setup["max_leverage"],
-            },
-        )
+        action_data = {
+            "type": "start_copy",
+            "trader_id": setup["trader_id"],
+            "budget_usd": setup["budget_usd"],
+            "risk_factor": setup["risk_factor"],
+            "max_leverage": setup["max_leverage"],
+        }
+        if setup.get("cumulative_stop_loss_pct"):
+            action_data["cumulative_stop_loss_pct"] = setup["cumulative_stop_loss_pct"]
+        if setup.get("cumulative_take_profit_pct"):
+            action_data["cumulative_take_profit_pct"] = setup["cumulative_take_profit_pct"]
+        await execute_action_directly(query, context, telegram_id, action_data)
 
     elif action == "pause" and len(parts) >= 3:
         mirror_id = int(parts[2])

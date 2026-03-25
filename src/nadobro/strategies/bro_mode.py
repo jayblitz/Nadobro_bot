@@ -337,6 +337,8 @@ def _handle_open(
         enforce_rate_limit=False,
         tp_price=tp_price,
         sl_price=sl_price,
+        source="bro",
+        strategy_session_id=state.get("strategy_session_id"),
     )
 
     bro_state = state.get("bro_state", {})
@@ -419,6 +421,8 @@ def _handle_close(
         leverage=1.0,
         slippage_pct=1.5,
         enforce_rate_limit=False,
+        source="bro",
+        strategy_session_id=state.get("strategy_session_id"),
     )
 
     if result.get("success"):

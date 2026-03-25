@@ -97,6 +97,9 @@ _TRADE_INSERT_ALLOWED_COLS = frozenset({
     "size", "price", "leverage", "status", "order_digest", "pnl",
     "fees", "error_message", "created_at", "filled_at",
     "close_price", "closed_at",
+    "fill_price", "fill_size", "fill_fee", "slippage_bps",
+    "source", "strategy_session_id", "realized_pnl", "is_taker",
+    "funding_paid",
 })
 
 
@@ -120,6 +123,9 @@ def insert_trade(data: dict, network: str = "mainnet") -> Optional[int]:
 _TRADE_UPDATE_ALLOWED_COLS = frozenset({
     "status", "order_digest", "price", "filled_at", "error_message",
     "pnl", "fees", "close_price", "closed_at",
+    "fill_price", "fill_size", "fill_fee", "slippage_bps",
+    "source", "strategy_session_id", "realized_pnl", "is_taker",
+    "funding_paid",
 })
 
 
@@ -617,4 +623,157 @@ def get_latest_copy_snapshot(trader_id: int, network: str) -> Optional[dict]:
     return query_one(
         "SELECT * FROM copy_snapshots WHERE trader_id = %s AND network = %s ORDER BY captured_at DESC LIMIT 1",
         (trader_id, network),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Strategy Sessions ORM
+# ---------------------------------------------------------------------------
+
+_STRATEGY_SESSION_INSERT_COLS = frozenset({
+    "user_id", "strategy", "product_id", "product_name", "network",
+    "started_at", "status", "config_snapshot",
+})
+
+
+def insert_strategy_session(data: dict) -> Optional[int]:
+    filtered = {k: v for k, v in data.items() if k in _STRATEGY_SESSION_INSERT_COLS and v is not None}
+    if "started_at" not in filtered:
+        filtered["started_at"] = datetime.utcnow().isoformat()
+    if "status" not in filtered:
+        filtered["status"] = "running"
+    cols = list(filtered.keys())
+    vals = [filtered[c] for c in cols]
+    query = pgsql.SQL("INSERT INTO strategy_sessions ({}) VALUES ({}) RETURNING id").format(
+        pgsql.SQL(", ").join(pgsql.Identifier(c) for c in cols),
+        pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols)),
+    )
+    row = execute_returning(
+        query,
+        vals,
+    )
+    return row["id"] if row else None
+
+
+_STRATEGY_SESSION_UPDATE_COLS = frozenset({
+    "stopped_at", "status", "total_cycles", "total_orders_placed",
+    "total_orders_filled", "total_orders_cancelled", "realized_pnl",
+    "total_fees_paid", "total_volume_usd", "total_funding_paid",
+    "stop_reason", "error_message",
+})
+
+
+def update_strategy_session(session_id: int, data: dict):
+    filtered = {k: v for k, v in data.items() if k in _STRATEGY_SESSION_UPDATE_COLS}
+    if not filtered:
+        return
+    set_clause = pgsql.SQL(", ").join(
+        pgsql.SQL("{} = %s").format(pgsql.Identifier(k)) for k in filtered.keys()
+    )
+    query = pgsql.SQL("UPDATE strategy_sessions SET {} WHERE id = %s").format(set_clause)
+    vals = list(filtered.values()) + [session_id]
+    execute(query, vals)
+
+
+def increment_session_metrics(
+    session_id: int,
+    cycles: int = 0,
+    orders_placed: int = 0,
+    orders_filled: int = 0,
+    orders_cancelled: int = 0,
+    pnl: float = 0.0,
+    fees: float = 0.0,
+    volume: float = 0.0,
+    funding: float = 0.0,
+):
+    execute(
+        """UPDATE strategy_sessions SET
+            total_cycles = total_cycles + %s,
+            total_orders_placed = total_orders_placed + %s,
+            total_orders_filled = total_orders_filled + %s,
+            total_orders_cancelled = total_orders_cancelled + %s,
+            realized_pnl = realized_pnl + %s,
+            total_fees_paid = total_fees_paid + %s,
+            total_volume_usd = total_volume_usd + %s,
+            total_funding_paid = total_funding_paid + %s
+        WHERE id = %s""",
+        (cycles, orders_placed, orders_filled, orders_cancelled,
+         pnl, fees, volume, funding, session_id),
+    )
+
+
+def get_strategy_sessions_by_user(
+    user_id: int,
+    strategy: str = None,
+    network: str = None,
+    limit: int = 50,
+) -> list:
+    conditions = ["user_id = %s"]
+    params: list = [user_id]
+    if strategy:
+        conditions.append("strategy = %s")
+        params.append(strategy)
+    if network:
+        conditions.append("network = %s")
+        params.append(network)
+    params.append(limit)
+    where = " AND ".join(conditions)
+    return query_all(
+        f"SELECT * FROM strategy_sessions WHERE {where} ORDER BY started_at DESC LIMIT %s",
+        params,
+    )
+
+
+def get_active_strategy_session(user_id: int, network: str) -> Optional[dict]:
+    return query_one(
+        "SELECT * FROM strategy_sessions WHERE user_id = %s AND network = %s AND status = 'running' ORDER BY started_at DESC LIMIT 1",
+        (user_id, network),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fill Sync Queue ORM
+# ---------------------------------------------------------------------------
+
+def insert_fill_sync(data: dict) -> Optional[int]:
+    cols = ["trade_id", "network", "user_id", "subaccount_hex", "order_digest", "product_id", "placed_at_ts"]
+    filtered = {k: v for k, v in data.items() if k in cols and v is not None}
+    col_names = list(filtered.keys())
+    vals = [filtered[c] for c in col_names]
+    query = pgsql.SQL("INSERT INTO fill_sync_queue ({}) VALUES ({}) RETURNING id").format(
+        pgsql.SQL(", ").join(pgsql.Identifier(c) for c in col_names),
+        pgsql.SQL(", ").join(pgsql.Placeholder() * len(col_names)),
+    )
+    row = execute_returning(
+        query,
+        vals,
+    )
+    return row["id"] if row else None
+
+
+def get_pending_fill_syncs(limit: int = 100) -> list:
+    return query_all(
+        "SELECT * FROM fill_sync_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT %s",
+        (limit,),
+    )
+
+
+def resolve_fill_sync(sync_id: int):
+    execute(
+        "UPDATE fill_sync_queue SET status = 'resolved', resolved_at = %s WHERE id = %s",
+        (datetime.utcnow().isoformat(), sync_id),
+    )
+
+
+def expire_fill_sync(sync_id: int):
+    execute(
+        "UPDATE fill_sync_queue SET status = 'expired', resolved_at = %s WHERE id = %s",
+        (datetime.utcnow().isoformat(), sync_id),
+    )
+
+
+def increment_fill_sync_attempts(sync_id: int):
+    execute(
+        "UPDATE fill_sync_queue SET attempts = attempts + 1 WHERE id = %s",
+        (sync_id,),
     )
