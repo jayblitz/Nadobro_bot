@@ -20,6 +20,66 @@ _MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SE
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
 
 
+async def _build_alert_context() -> tuple[dict, dict]:
+    """Build optional context maps used by funding/pnl alerts."""
+    from src.nadobro.models.database import get_all_active_alerts, AlertCondition
+    from src.nadobro.config import get_product_id
+    from src.nadobro.services.user_service import get_user_readonly_client
+
+    funding_rates: dict = {}
+    positions_by_user: dict = {}
+
+    active_alerts = await run_blocking(get_all_active_alerts)
+    if not active_alerts:
+        return funding_rates, positions_by_user
+
+    needs_funding = False
+    needs_pnl = False
+    funding_products: set[str] = set()
+    pnl_user_ids: set[int] = set()
+
+    for alert in active_alerts:
+        cond = alert.get("condition")
+        if cond in (AlertCondition.FUNDING_ABOVE.value, AlertCondition.FUNDING_BELOW.value):
+            needs_funding = True
+            product = str((alert.get("product_name") or "")).replace("-PERP", "")
+            if product:
+                funding_products.add(product)
+        elif cond in (AlertCondition.PNL_ABOVE.value, AlertCondition.PNL_BELOW.value):
+            needs_pnl = True
+            uid = alert.get("user_id")
+            if uid is not None:
+                try:
+                    pnl_user_ids.add(int(uid))
+                except Exception:
+                    continue
+
+    if needs_funding and _check_client:
+        for product in funding_products:
+            try:
+                pid = get_product_id(product)
+                if pid is None:
+                    continue
+                fr = await run_blocking(_check_client.get_funding_rate, pid)
+                if isinstance(fr, dict):
+                    funding_rates[product] = float(fr.get("funding_rate", 0) or 0)
+            except Exception:
+                continue
+
+    if needs_pnl:
+        for user_id in pnl_user_ids:
+            try:
+                client = await run_blocking(get_user_readonly_client, user_id)
+                if not client:
+                    continue
+                positions = await run_blocking(client.get_all_positions)
+                positions_by_user[user_id] = positions or []
+            except Exception:
+                continue
+
+    return funding_rates, positions_by_user
+
+
 def set_bot_app(app):
     global _bot_app
     _bot_app = app
@@ -50,7 +110,8 @@ async def handle_alert_job(payload: dict):
             prices = await _get_market_snapshot()
         if not prices:
             return
-        triggered = await run_blocking(get_triggered_alerts, prices)
+        funding_rates, positions_by_user = await _build_alert_context()
+        triggered = await run_blocking(get_triggered_alerts, prices, funding_rates, positions_by_user)
         for alert in triggered:
             try:
                 from src.nadobro.i18n import language_context, get_user_language, localize_text, get_active_language
@@ -59,7 +120,7 @@ async def handle_alert_job(payload: dict):
                     msg = (
                         f"{localize_text('Alert Triggered!', lang)}\n"
                         f"{alert['product']} {localize_text('is', lang)} {alert['condition']} ${alert['target']:,.2f}\n"
-                        f"{localize_text('Current price:', lang)} ${alert['current_price']:,.2f}"
+                        f"{localize_text('Current value:', lang)} ${alert['current_price']:,.2f}"
                     )
                 await _bot_app.bot.send_message(chat_id=alert["user_id"], text=msg)
                 logger.info(f"Alert sent to user {alert['user_id']}: {alert['product']} {alert['condition']}")
