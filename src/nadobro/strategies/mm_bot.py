@@ -539,6 +539,7 @@ def run_cycle(
             rgrid_mode = "classic"
             state["rgrid_active_mode"] = "classic"
             state["rgrid_momentum_direction"] = None
+            state["rgrid_directional_bias"] = None
             state["rgrid_last_mode_switch_ts"] = time.time()
             logger.info("RGRID momentum faded: reverting to classic mode (signals=%d/3)", momentum["signals_active"])
         state["rgrid_momentum_signals"] = momentum["signals_active"]
@@ -550,6 +551,12 @@ def run_cycle(
                 directional_bias = "long_bias"
             elif mom_dir == "bearish":
                 directional_bias = "short_bias"
+            else:
+                # Keep the last resolved reversed-mode bias sticky when direction is temporarily unknown.
+                sticky_bias = str(state.get("rgrid_directional_bias") or "").strip()
+                if sticky_bias in {"long_bias", "short_bias", "neutral"}:
+                    directional_bias = sticky_bias
+            state["rgrid_directional_bias"] = directional_bias
         # --- End Momentum Detection ---
     else:
         dynamic_spread_bp = _clamp(dynamic_spread_bp, min_spread_bp, max_spread_bp)

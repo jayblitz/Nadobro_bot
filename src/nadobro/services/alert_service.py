@@ -134,11 +134,20 @@ def get_triggered_alerts(prices: dict, funding_rates: dict = None, positions_by_
         if should_trigger:
             alert_network = alert.get("network", "mainnet")
             update_alert_triggered(alert["id"], network=alert_network)
+            if cond in (AlertCondition.FUNDING_ABOVE.value, AlertCondition.FUNDING_BELOW.value):
+                value_type = "funding_rate"
+            elif cond in (AlertCondition.PNL_ABOVE.value, AlertCondition.PNL_BELOW.value):
+                value_type = "pnl"
+            else:
+                value_type = "price"
             triggered.append({
                 "user_id": alert.get("user_id"),
                 "product": alert.get("product_name"),
                 "condition": cond,
                 "target": target,
+                "value_type": value_type,
+                "current_value": current_value,
+                # Backwards compatibility for older callers that still read this key.
                 "current_price": current_value,
             })
     return triggered

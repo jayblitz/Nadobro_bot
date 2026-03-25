@@ -20,6 +20,25 @@ _MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SE
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
 
 
+def _format_alert_metric_value(condition: str, value: float) -> str:
+    condition = str(condition or "")
+    if condition.startswith("funding_"):
+        return f"{float(value):,.4f}%"
+    return f"${float(value):,.2f}"
+
+
+def _alert_condition_label(condition: str) -> str:
+    labels = {
+        "above": "Price Above",
+        "below": "Price Below",
+        "funding_above": "Funding Above",
+        "funding_below": "Funding Below",
+        "pnl_above": "PnL Above",
+        "pnl_below": "PnL Below",
+    }
+    return labels.get(str(condition or ""), str(condition or ""))
+
+
 async def _build_alert_context() -> tuple[dict, dict]:
     """Build optional context maps used by funding/pnl alerts."""
     from src.nadobro.models.database import get_all_active_alerts, AlertCondition
@@ -117,10 +136,16 @@ async def handle_alert_job(payload: dict):
                 from src.nadobro.i18n import language_context, get_user_language, localize_text, get_active_language
                 with language_context(get_user_language(alert["user_id"])):
                     lang = get_active_language()
+                    condition_label = _alert_condition_label(alert.get("condition"))
+                    target_fmt = _format_alert_metric_value(alert.get("condition"), alert.get("target", 0))
+                    current_fmt = _format_alert_metric_value(
+                        alert.get("condition"),
+                        alert.get("current_value", alert.get("current_price", 0)),
+                    )
                     msg = (
                         f"{localize_text('Alert Triggered!', lang)}\n"
-                        f"{alert['product']} {localize_text('is', lang)} {alert['condition']} ${alert['target']:,.2f}\n"
-                        f"{localize_text('Current value:', lang)} ${alert['current_price']:,.2f}"
+                        f"{alert['product']} {localize_text('is', lang)} {condition_label}: {target_fmt}\n"
+                        f"{localize_text('Current value:', lang)} {current_fmt}"
                     )
                 await _bot_app.bot.send_message(chat_id=alert["user_id"], text=msg)
                 logger.info(f"Alert sent to user {alert['user_id']}: {alert['product']} {alert['condition']}")
@@ -259,11 +284,18 @@ async def sync_pending_fills():
                 # Expire old entries
                 created = entry.get("created_at")
                 if created and attempts >= 10:
-                    from datetime import datetime as dt
+                    from datetime import datetime as dt, timezone
+
                     if isinstance(created, str):
-                        age_seconds = (dt.utcnow() - dt.fromisoformat(created.replace("Z", "+00:00").replace("+00:00", ""))).total_seconds()
+                        # Keep explicit timezone offsets (including trailing Z -> UTC).
+                        created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
                     else:
-                        age_seconds = (dt.utcnow() - created).total_seconds()
+                        created_dt = created
+
+                    # Normalize both sides to aware UTC before comparing.
+                    if created_dt.tzinfo is None:
+                        created_dt = created_dt.replace(tzinfo=timezone.utc)
+                    age_seconds = (dt.now(timezone.utc) - created_dt.astimezone(timezone.utc)).total_seconds()
                     if age_seconds > 7200:  # 2 hours
                         await run_blocking(expire_fill_sync, sync_id)
                         continue

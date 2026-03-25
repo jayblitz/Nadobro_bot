@@ -644,10 +644,12 @@ def insert_strategy_session(data: dict) -> Optional[int]:
         filtered["status"] = "running"
     cols = list(filtered.keys())
     vals = [filtered[c] for c in cols]
-    placeholders = ", ".join(["%s"] * len(cols))
-    col_str = ", ".join(cols)
+    query = pgsql.SQL("INSERT INTO strategy_sessions ({}) VALUES ({}) RETURNING id").format(
+        pgsql.SQL(", ").join(pgsql.Identifier(c) for c in cols),
+        pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols)),
+    )
     row = execute_returning(
-        f"INSERT INTO strategy_sessions ({col_str}) VALUES ({placeholders}) RETURNING id",
+        query,
         vals,
     )
     return row["id"] if row else None
@@ -738,10 +740,12 @@ def insert_fill_sync(data: dict) -> Optional[int]:
     filtered = {k: v for k, v in data.items() if k in cols and v is not None}
     col_names = list(filtered.keys())
     vals = [filtered[c] for c in col_names]
-    placeholders = ", ".join(["%s"] * len(col_names))
-    col_str = ", ".join(col_names)
+    query = pgsql.SQL("INSERT INTO fill_sync_queue ({}) VALUES ({}) RETURNING id").format(
+        pgsql.SQL(", ").join(pgsql.Identifier(c) for c in col_names),
+        pgsql.SQL(", ").join(pgsql.Placeholder() * len(col_names)),
+    )
     row = execute_returning(
-        f"INSERT INTO fill_sync_queue ({col_str}) VALUES ({placeholders}) RETURNING id",
+        query,
         vals,
     )
     return row["id"] if row else None
