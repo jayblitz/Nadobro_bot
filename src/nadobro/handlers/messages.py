@@ -37,7 +37,11 @@ from src.nadobro.handlers.trade_card import (
     handle_trade_card_text_input,
     is_trade_card_mode_enabled,
 )
-from src.nadobro.handlers.home_card import open_home_card_view_from_message
+from src.nadobro.handlers.home_card import (
+    build_portfolio_view,
+    build_positions_view,
+    open_home_card_view_from_message,
+)
 from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
@@ -555,55 +559,28 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "pos:view":
         await update.message.chat.send_action(ChatAction.TYPING)
-        client = get_user_readonly_client(telegram_id)
-        if not client:
-            await _reply_loc(update.message, 
-                localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", lang),
-                parse_mode=ParseMode.MARKDOWN_V2,
-            )
-            return
         with timed_metric("msg.positions.view"):
-            positions = await run_blocking(client.get_all_positions)
-        prices = None
-        try:
-            prices = await run_blocking(client.get_all_market_prices)
-        except Exception:
-            pass
-        msg = fmt_positions(positions, prices)
+            msg, reply_markup = await run_blocking(build_positions_view, telegram_id)
         await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(positions_kb(positions or []), lang),
+            reply_markup=localize_markup(reply_markup, lang),
         )
         return
 
     if callback_data == "portfolio:view":
         await update.message.chat.send_action(ChatAction.TYPING)
-        client = get_user_readonly_client(telegram_id)
-        if not client:
-            await _reply_loc(update.message, 
-                localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", lang),
-                parse_mode=ParseMode.MARKDOWN_V2,
-            )
-            return
         with timed_metric("msg.portfolio.view"):
-            positions = (await run_blocking(client.get_all_positions)) or []
-        prices = None
-        try:
-            prices = await run_blocking(client.get_all_market_prices)
-        except Exception:
-            pass
-        stats = await run_blocking(get_trade_analytics, telegram_id)
-        msg = fmt_portfolio(stats, positions, prices)
+            msg, reply_markup = await run_blocking(build_portfolio_view, telegram_id)
         await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(portfolio_kb(has_positions=bool(positions)), lang),
+            reply_markup=localize_markup(reply_markup, lang),
         )
         return
 
     if callback_data == "points:view":
-        payload = get_points_dashboard(telegram_id, scope="week")
+        payload = await run_blocking(get_points_dashboard, telegram_id, "week")
         await _reply_loc(
             update.message,
             fmt_points_dashboard(payload),

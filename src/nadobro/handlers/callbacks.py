@@ -27,7 +27,12 @@ from src.nadobro.handlers.keyboards import (
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback
-from src.nadobro.handlers.home_card import build_home_card_text
+from src.nadobro.handlers.home_card import (
+    _plain_text_fallback,
+    build_home_card_text_async,
+    build_portfolio_view,
+    build_positions_view,
+)
 from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_readonly_client, get_user_wallet_info,
@@ -86,10 +91,9 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
         if "Message is not modified" in str(e):
             return
         if "Can't parse entities" in str(e) and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
-            # Fallback for occasional MarkdownV2 edge cases in dynamic text.
             fallback_kwargs = dict(kwargs)
             fallback_kwargs.pop("parse_mode", None)
-            return await query.edit_message_text((localized or "").replace("\\", ""), **fallback_kwargs)
+            return await query.edit_message_text(_plain_text_fallback(localized), **fallback_kwargs)
         raise
 
 
@@ -193,7 +197,7 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
 # New onboarding (language → ToS) message text
 _ONB_WELCOME_LANG_MSG = """Welcome to Nadobro 👋
 
-Your trading companion for perps on Nado DEX — fast execution, automated strategies, and AI-powered insights, all from Telegram.
+Trade perps on Nado DEX from Telegram with guided execution, portfolio tools, automation, and AI support.
 
 Pick your language:"""
 
@@ -206,7 +210,7 @@ We generate a secure 1CT signing key for your account. Your main wallet keys are
 
 Ready?"""
 
-_ONB_DASHBOARD_MSG = """🚀 You're all set! Pick a module below to get started."""
+_ONB_DASHBOARD_MSG = """🚀 You're all set! Pick a module below to trade, review portfolio and points, or launch automation."""
 
 
 async def _handle_onb_new(query, data, telegram_id, context):
@@ -229,7 +233,7 @@ async def _handle_onb_new(query, data, telegram_id, context):
 
 
 async def _show_dashboard(query, telegram_id):
-    await _edit_loc(query, build_home_card_text(telegram_id),
+    await _edit_loc(query, await build_home_card_text_async(telegram_id),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=home_card_kb(),
     )
@@ -578,27 +582,12 @@ async def _handle_positions(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else "view"
 
     if action == "view":
-        client = get_user_readonly_client(telegram_id)
-        if not client:
-            await _edit_loc(query, 
-                "⚠️ Wallet not initialized\\. Use /start first\\.",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb(),
-            )
-            return
-
         with timed_metric("cb.positions.view"):
-            positions = await run_blocking(client.get_all_positions)
-        prices = None
-        try:
-            prices = await run_blocking(client.get_all_market_prices)
-        except Exception:
-            pass
-        msg = fmt_positions(positions, prices)
+            msg, reply_markup = await run_blocking(build_positions_view, telegram_id)
         await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=positions_kb(positions or []),
+            reply_markup=reply_markup,
         )
 
     elif action == "close" and len(parts) >= 3:
@@ -619,20 +608,14 @@ async def _handle_positions(query, data, telegram_id, context):
 
 
 async def _handle_portfolio(query, data, telegram_id):
-    client = get_user_readonly_client(telegram_id)
-    if not client:
-        await _edit_loc(query,
-            "⚠️ Wallet not initialized\\. Use /start first\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-        )
-        return
-
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "view"
 
     if action == "history":
-        page = int(parts[2]) if len(parts) > 2 else 0
+        try:
+            page = max(0, int(parts[2])) if len(parts) > 2 else 0
+        except (TypeError, ValueError):
+            page = 0
         PAGE_SIZE = 10
         trades = await run_blocking(get_trade_history, telegram_id, limit=500)
         has_more = len(trades) > (page + 1) * PAGE_SIZE
@@ -650,7 +633,11 @@ async def _handle_portfolio(query, data, telegram_id):
         return
 
     if action == "analytics":
-        stats = await run_blocking(get_trade_analytics, telegram_id)
+        try:
+            stats = await run_blocking(get_trade_analytics, telegram_id)
+        except Exception as e:
+            logger.warning("portfolio_analytics_failed user=%s err=%s", telegram_id, e)
+            stats = {}
         msg = fmt_analytics(stats)
         try:
             await _edit_loc(query,
@@ -666,19 +653,12 @@ async def _handle_portfolio(query, data, telegram_id):
 
     # Default: portfolio overview
     with timed_metric("cb.portfolio.view"):
-        positions = (await run_blocking(client.get_all_positions)) or []
-    prices = None
-    try:
-        prices = await run_blocking(client.get_all_market_prices)
-    except Exception:
-        pass
-    stats = await run_blocking(get_trade_analytics, telegram_id)
-    msg = fmt_portfolio(stats, positions, prices)
+        msg, reply_markup = await run_blocking(build_portfolio_view, telegram_id)
     try:
         await _edit_loc(query,
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=portfolio_kb(has_positions=bool(positions)),
+            reply_markup=reply_markup,
         )
     except BadRequest as e:
         if "Message is not modified" in str(e):
@@ -693,8 +673,8 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
         return
     with language_context(get_user_language(telegram_id)):
         lang = get_active_language()
-        status = get_user_bot_status(telegram_id)
-        onboarding = evaluate_readiness(telegram_id)
+        status = await run_blocking(get_user_bot_status, telegram_id)
+        onboarding = await run_blocking(evaluate_readiness, telegram_id)
         text = fmt_status_overview(status, onboarding)
         localized = localize_text(text, lang)
         try:
@@ -829,7 +809,7 @@ async def _handle_points(query, data, telegram_id, context):
     scope = parts[2] if len(parts) > 2 else "week"
 
     if action == "view":
-        payload = get_points_dashboard(telegram_id, scope="week")
+        payload = await run_blocking(get_points_dashboard, telegram_id, "week")
         await _edit_loc(
             query,
             fmt_points_dashboard(payload),
@@ -839,7 +819,7 @@ async def _handle_points(query, data, telegram_id, context):
         return
 
     if action == "scope":
-        payload = get_points_dashboard(telegram_id, scope=scope)
+        payload = await run_blocking(get_points_dashboard, telegram_id, scope)
         await _edit_loc(
             query,
             fmt_points_dashboard(payload),

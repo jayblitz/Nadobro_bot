@@ -40,6 +40,7 @@ from src.nadobro.models.database import (
 from src.nadobro.services.user_service import get_user, get_user_nado_client
 from src.nadobro.services.trade_service import execute_market_order
 from src.nadobro.services.nado_client import NadoClient
+from src.nadobro.services.async_utils import run_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -239,15 +240,20 @@ async def start_copy_polling():
     global _poll_task
     if _poll_task and not _poll_task.done():
         return
-    _poll_task = asyncio.create_task(_poll_loop())
+    _poll_task = asyncio.create_task(_poll_loop(), name="nadobro-copy-poll")
     logger.info("Copy trading polling loop started (interval=%ds)", POLL_INTERVAL_SECONDS)
 
 
 async def stop_copy_polling():
     global _poll_task
-    if _poll_task:
-        _poll_task.cancel()
-        _poll_task = None
+    task = _poll_task
+    _poll_task = None
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
         logger.info("Copy trading polling loop stopped")
 
 
@@ -265,7 +271,7 @@ async def _poll_loop():
 
 async def _poll_all_mirrors():
     """Poll all active mirrors and process position changes."""
-    mirrors = get_all_active_mirrors_v2()
+    mirrors = await run_blocking(get_all_active_mirrors_v2)
     if not mirrors:
         return
 
@@ -281,48 +287,7 @@ async def _poll_all_mirrors():
         wallet = group_mirrors[0].get("wallet_address", "")
 
         try:
-            leader_client = NadoClient.from_address(wallet, network)
-            leader_positions = leader_client.get_all_positions() or []
-            leader_orders_by_product = {}
-
-            # Build a map of leader's current positions
-            leader_pos_map = {}
-            for pos in leader_positions:
-                pid = int(pos.get("product_id", -1))
-                amount = float(pos.get("amount", 0) or 0)
-                if abs(amount) > 0:
-                    side = pos.get("side", "").upper()
-                    if not side:
-                        side = "LONG" if amount > 0 else "SHORT"
-                    leader_pos_map[pid] = {
-                        "product_id": pid,
-                        "side": side,
-                        "size": abs(amount),
-                        "entry_price": float(pos.get("entry_price", 0) or 0),
-                        "unrealized_pnl": float(pos.get("unrealized_pnl", 0) or 0),
-                    }
-                    # Fetch TP/SL orders for this product
-                    try:
-                        orders = leader_client.get_open_orders(pid) or []
-                        tp_price = None
-                        sl_price = None
-                        for o in orders:
-                            otype = (o.get("order_type") or o.get("type") or "").lower()
-                            if "take_profit" in otype or "tp" in otype:
-                                tp_price = float(o.get("price", 0) or 0)
-                            elif "stop_loss" in otype or "sl" in otype:
-                                sl_price = float(o.get("price", 0) or 0)
-                        leader_pos_map[pid]["tp_price"] = tp_price
-                        leader_pos_map[pid]["sl_price"] = sl_price
-                        leader_orders_by_product[pid] = orders
-                    except Exception as e:
-                        logger.debug("Failed to fetch orders for product %s: %s", pid, e)
-
-            # Save snapshot for debugging
-            try:
-                save_copy_snapshot(trader_id, network, json.dumps(list(leader_pos_map.values())))
-            except Exception:
-                pass
+            leader_pos_map = await run_blocking(_load_leader_position_map, trader_id, wallet, network)
 
             # Process each mirror
             for mirror in group_mirrors:
@@ -336,6 +301,46 @@ async def _poll_all_mirrors():
 
         except Exception as e:
             logger.error("Failed to poll trader %s on %s: %s", wallet[:10], network, e)
+
+
+def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict:
+    leader_client = NadoClient.from_address(wallet, network)
+    leader_positions = leader_client.get_all_positions() or []
+    leader_pos_map = {}
+    for pos in leader_positions:
+        pid = int(pos.get("product_id", -1))
+        amount = float(pos.get("amount", 0) or 0)
+        if abs(amount) <= 0:
+            continue
+        side = pos.get("side", "").upper()
+        if not side:
+            side = "LONG" if amount > 0 else "SHORT"
+        leader_pos_map[pid] = {
+            "product_id": pid,
+            "side": side,
+            "size": abs(amount),
+            "entry_price": float(pos.get("entry_price", 0) or 0),
+            "unrealized_pnl": float(pos.get("unrealized_pnl", 0) or 0),
+        }
+        try:
+            orders = leader_client.get_open_orders(pid) or []
+            tp_price = None
+            sl_price = None
+            for o in orders:
+                otype = (o.get("order_type") or o.get("type") or "").lower()
+                if "take_profit" in otype or "tp" in otype:
+                    tp_price = float(o.get("price", 0) or 0)
+                elif "stop_loss" in otype or "sl" in otype:
+                    sl_price = float(o.get("price", 0) or 0)
+            leader_pos_map[pid]["tp_price"] = tp_price
+            leader_pos_map[pid]["sl_price"] = sl_price
+        except Exception as e:
+            logger.debug("Failed to fetch orders for product %s: %s", pid, e)
+    try:
+        save_copy_snapshot(trader_id, network, json.dumps(list(leader_pos_map.values())))
+    except Exception:
+        pass
+    return leader_pos_map
 
 
 async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
@@ -354,7 +359,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     if total_allocated > 0:
         pnl_pct = (cumulative_pnl / total_allocated) * 100
         if cumulative_pnl < 0 and abs(pnl_pct) >= cumulative_stop_loss_pct:
-            auto_stop_mirror(mirror_id, f"Cumulative stop loss hit: {pnl_pct:.1f}%")
+            await run_blocking(auto_stop_mirror, mirror_id, f"Cumulative stop loss hit: {pnl_pct:.1f}%")
             await _notify_user(
                 user_id,
                 f"🛑 Copy Trading Auto-Stopped\n"
@@ -363,7 +368,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             )
             return
         if cumulative_pnl > 0 and pnl_pct >= cumulative_take_profit_pct:
-            auto_stop_mirror(mirror_id, f"Cumulative take profit hit: {pnl_pct:.1f}%")
+            await run_blocking(auto_stop_mirror, mirror_id, f"Cumulative take profit hit: {pnl_pct:.1f}%")
             await _notify_user(
                 user_id,
                 f"🎯 Copy Trading Auto-Stopped — Target Hit!\n"
@@ -373,7 +378,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             return
 
     # Get current copy positions for this mirror
-    open_copy_positions = get_open_copy_positions(mirror_id)
+    open_copy_positions = await run_blocking(get_open_copy_positions, mirror_id)
     copy_pos_by_product = {}
     for cp in open_copy_positions:
         copy_pos_by_product[cp["product_id"]] = cp
@@ -387,7 +392,8 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             try:
                 # Close by opening opposite side
                 is_close_long = cp["side"].upper() != "LONG"
-                result = execute_market_order(
+                result = await run_blocking(
+                    execute_market_order,
                     telegram_id=user_id,
                     product=product_key,
                     size=float(cp.get("size", 0)),
@@ -397,8 +403,8 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     enforce_rate_limit=False,
                 )
                 pnl = float(result.get("pnl", 0) or 0)
-                close_copy_position(cp["id"], pnl=pnl, reason="leader_closed")
-                update_mirror_cumulative_pnl(mirror_id, pnl)
+                await run_blocking(close_copy_position, cp["id"], pnl=pnl, reason="leader_closed")
+                await run_blocking(update_mirror_cumulative_pnl, mirror_id, pnl)
                 await _notify_user(
                     user_id,
                     f"📋 Copy Position Closed\n"
@@ -413,7 +419,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         if pid in copy_pos_by_product:
             # Already tracking this position — update TP/SL if changed
             existing = copy_pos_by_product[pid]
-            _update_tp_sl_if_changed(existing, leader_pos, user_id, network)
+            await run_blocking(_update_tp_sl_if_changed, existing, leader_pos, user_id, network)
             continue
 
         # New position from leader — open a copy
@@ -434,7 +440,8 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             continue
 
         try:
-            result = execute_market_order(
+            result = await run_blocking(
+                execute_market_order,
                 telegram_id=user_id,
                 product=product_key,
                 size=copy_size,
@@ -447,24 +454,36 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             if result.get("success"):
                 fill_price = float(result.get("price", leader_entry) or leader_entry)
                 # Record the copy position
-                insert_copy_position({
-                    "mirror_id": mirror_id,
-                    "user_id": user_id,
-                    "product_id": pid,
-                    "product_name": product_name,
-                    "side": "long" if is_long else "short",
-                    "entry_price": fill_price,
-                    "size": copy_size,
-                    "leverage": leverage,
-                    "tp_price": leader_pos.get("tp_price"),
-                    "sl_price": leader_pos.get("sl_price"),
-                    "leader_entry_price": leader_entry,
-                    "leader_size": leader_pos["size"],
-                })
+                await run_blocking(
+                    insert_copy_position,
+                    {
+                        "mirror_id": mirror_id,
+                        "user_id": user_id,
+                        "product_id": pid,
+                        "product_name": product_name,
+                        "side": "long" if is_long else "short",
+                        "entry_price": fill_price,
+                        "size": copy_size,
+                        "leverage": leverage,
+                        "tp_price": leader_pos.get("tp_price"),
+                        "sl_price": leader_pos.get("sl_price"),
+                        "leader_entry_price": leader_entry,
+                        "leader_size": leader_pos["size"],
+                    },
+                )
 
                 # Place TP/SL orders if leader has them
-                _place_tp_sl_orders(user_id, product_key, pid, copy_size, is_long,
-                                    leverage, leader_pos.get("tp_price"), leader_pos.get("sl_price"))
+                await run_blocking(
+                    _place_tp_sl_orders,
+                    user_id,
+                    product_key,
+                    pid,
+                    copy_size,
+                    is_long,
+                    leverage,
+                    leader_pos.get("tp_price"),
+                    leader_pos.get("sl_price"),
+                )
 
                 side_emoji = "🟢 LONG" if is_long else "🔴 SHORT"
                 wallet = mirror.get("wallet_address", "")

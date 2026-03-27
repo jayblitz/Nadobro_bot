@@ -26,13 +26,14 @@ from src.nadobro.handlers.home_card import (
     open_home_card_from_command,
     open_help_card_from_command,
 )
+from src.nadobro.services.async_utils import run_blocking
 logger = logging.getLogger(__name__)
 
 
 # New onboarding messages (exact copy from spec)
 WELCOME_MSG = """Welcome to Nadobro 👋
 
-Your trading companion for perps on Nado DEX — fast execution, automated strategies, and AI-powered insights, all from Telegram.
+Trade perps on Nado DEX from Telegram with guided execution, portfolio tools, automation, and AI support.
 
 Pick your language:"""
 
@@ -47,7 +48,7 @@ Ready?"""
 
 DASHBOARD_MSG = """🤖 Nadobro Command Center online.
 
-Select a module below to trade, monitor, and run strategy automation."""
+Open a module below to trade, review portfolio and points, manage strategies, and adjust risk settings."""
 
 
 async def cmd_start(update: Update, context: CallbackContext):
@@ -113,8 +114,8 @@ async def cmd_help(update: Update, context: CallbackContext):
 async def cmd_status(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     with language_context(get_user_language(telegram_id)):
-        status = get_user_bot_status(telegram_id)
-        onboarding = evaluate_readiness(telegram_id)
+        status = await run_blocking(get_user_bot_status, telegram_id)
+        onboarding = await run_blocking(evaluate_readiness, telegram_id)
         text = fmt_status_overview(status, onboarding)
 
         lang = get_active_language()

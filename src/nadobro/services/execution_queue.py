@@ -100,8 +100,13 @@ def start_workers(strategy_workers: int = 2, alert_workers: int = 1):
     )
 
 
-def stop_workers():
-    for task in list(_workers):
-        task.cancel()
+async def stop_workers():
+    if not _workers:
+        return
+    tasks = list(_workers)
     _workers.clear()
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    logger.info("Execution queues stopped")
 

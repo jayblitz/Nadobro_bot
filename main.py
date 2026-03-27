@@ -265,11 +265,11 @@ async def run_bot():
 
     from telegram import BotCommand
     await bot_app.bot.set_my_commands([
-        BotCommand("start", "Open dashboard"),
-        BotCommand("help", "Show help"),
-        BotCommand("status", "Bot & strategy status"),
-        BotCommand("revoke", "Revoke linked signer"),
-        BotCommand("stop_all", "Stop strategy runtime"),
+        BotCommand("start", "Open home dashboard"),
+        BotCommand("help", "Show guide and examples"),
+        BotCommand("status", "View bot and strategy status"),
+        BotCommand("revoke", "Show signer revoke steps"),
+        BotCommand("stop_all", "Stop all running strategies"),
     ])
     logger.info("Bot commands registered in Menu")
 
@@ -349,7 +349,7 @@ async def run_bot():
         await stop_copy_polling()
         stop_runtime()
         stop_runtime_supervisor()
-        stop_workers()
+        await stop_workers()
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()
