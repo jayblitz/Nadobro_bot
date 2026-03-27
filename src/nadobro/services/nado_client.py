@@ -10,7 +10,8 @@ from typing import Optional
 from src.nadobro.config import (
     NADO_TESTNET_REST, NADO_MAINNET_REST,
     NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE,
-    get_product_name, get_perp_products, get_product_id
+    get_product_name, get_perp_products, get_product_id,
+    get_nado_builder_routing_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -974,9 +975,17 @@ class NadoClient:
         return int((Decimal(str(value)) * Decimal("1000000")).to_integral_value(rounding=ROUND_HALF_UP))
 
     @staticmethod
-    def _build_order_appendix(order_type_int: int, isolated: bool = False, reduce_only: bool = False, margin_x6: int = 0) -> int:
+    def _build_order_appendix(
+        order_type_int: int,
+        isolated: bool = False,
+        reduce_only: bool = False,
+        margin_x6: int = 0,
+        builder_id: int = 0,
+        builder_fee_rate: int = 0,
+    ) -> int:
         # Bit layout:
-        # version[0..7], isolated[8], order_type[9..10], reduce_only[11], value[64..127]
+        # value[64..127], builder[48..63], builder_fee_rate[38..47], reserved[14..37],
+        # trigger[12..13], reduce_only[11], order_type[9..10], isolated[8], version[0..7]
         version = 1
         appendix = int(version & 0xFF)
         if isolated:
@@ -984,6 +993,8 @@ class NadoClient:
         appendix |= ((int(order_type_int) & 0x03) << 9)
         if reduce_only:
             appendix |= (1 << 11)
+        appendix |= ((int(builder_fee_rate) & 0x3FF) << 38)
+        appendix |= ((int(builder_id) & 0xFFFF) << 48)
         if isolated and margin_x6 > 0:
             appendix |= (int(margin_x6) << 64)
         return appendix
@@ -1078,6 +1089,12 @@ class NadoClient:
             return {"success": False, "error": "Client not initialized. Please try /start again."}
 
         try:
+            try:
+                builder_id, builder_fee_rate = get_nado_builder_routing_config()
+            except ValueError as cfg_err:
+                logger.error("Builder routing misconfiguration; rejecting order: %s", cfg_err)
+                return {"success": False, "error": f"Builder routing misconfigured: {cfg_err}"}
+
             self._warm_product_increment_cache(product_id)
             size_increment = _size_increment_cache.get((self.network, product_id))
             size_increment_x18 = _size_increment_x18_cache.get((self.network, product_id))
@@ -1169,6 +1186,8 @@ class NadoClient:
                     isolated=bool(isolated_only),
                     reduce_only=bool(reduce_only),
                     margin_x6=isolated_margin_x6,
+                    builder_id=builder_id,
+                    builder_fee_rate=builder_fee_rate,
                 ),
             )
 

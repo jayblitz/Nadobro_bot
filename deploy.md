@@ -36,8 +36,15 @@ fly secrets set \
   ENCRYPTION_KEY="your-encryption-key" \
   XAI_API_KEY="your-xai-api-key" \
   OPENAI_API_KEY="your-openai-api-key" \
-  SESSION_SECRET="your-session-secret"
+  SESSION_SECRET="your-session-secret" \
+  NADO_BUILDER_ID="your-builder-id" \
+  NADO_BUILDER_FEE_RATE="10"
 ```
+
+Builder routing safety:
+- `NADO_BUILDER_ID` is required for order placement.
+- `NADO_BUILDER_FEE_RATE` must stay `10` (1 bps in 0.1 bps units).
+- If either value is invalid/missing, the bot rejects order submission (hard fail).
 
 ### Optional: Enable webhook transport (recommended for speed and scale)
 
