@@ -45,7 +45,6 @@ from src.nadobro.services.trade_service import (
 from src.nadobro.services.alert_service import create_alert, get_user_alerts, delete_alert
 from src.nadobro.services.admin_service import is_trading_paused, is_admin
 from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
-from src.nadobro.services.onboarding_service import evaluate_readiness
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.points_service import (
     get_points_dashboard,
