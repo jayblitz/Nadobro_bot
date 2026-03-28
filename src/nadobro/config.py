@@ -130,3 +130,43 @@ def is_product_isolated_only(product: str, network: str = None, client=None) -> 
 EST_FEE_RATE = 0.0003
 EST_FILL_EFFICIENCY = 0.45
 DUAL_MODE_CARD_FLOW = os.environ.get("DUAL_MODE_CARD_FLOW", "true").strip().lower() in ("1", "true", "yes", "on")
+
+NADO_BUILDER_ID_ENV = "NADO_BUILDER_ID"
+NADO_BUILDER_FEE_RATE_ENV = "NADO_BUILDER_FEE_RATE"
+NADO_BUILDER_FEE_RATE_1_BPS = 10  # 0.1 bps units
+
+
+def get_nado_builder_routing_config() -> tuple[int, int]:
+    """Return validated (builder_id, builder_fee_rate) for order routing.
+
+    Safety-first behavior:
+    - Builder routing is mandatory for order placement.
+    - Fee rate is locked to 1 bps (10 units) to avoid accidental fee changes.
+    """
+    builder_id_raw = (os.environ.get(NADO_BUILDER_ID_ENV) or "").strip()
+    if not builder_id_raw:
+        raise ValueError(f"{NADO_BUILDER_ID_ENV} is required for order placement.")
+
+    try:
+        builder_id = int(builder_id_raw)
+    except ValueError as exc:
+        raise ValueError(f"{NADO_BUILDER_ID_ENV} must be an integer in [1, 65535].") from exc
+
+    if builder_id < 1 or builder_id > 65535:
+        raise ValueError(f"{NADO_BUILDER_ID_ENV} must be in [1, 65535].")
+
+    fee_rate_raw = (os.environ.get(NADO_BUILDER_FEE_RATE_ENV) or str(NADO_BUILDER_FEE_RATE_1_BPS)).strip()
+    try:
+        fee_rate = int(fee_rate_raw)
+    except ValueError as exc:
+        raise ValueError(f"{NADO_BUILDER_FEE_RATE_ENV} must be an integer in [0, 1023].") from exc
+
+    if fee_rate < 0 or fee_rate > 1023:
+        raise ValueError(f"{NADO_BUILDER_FEE_RATE_ENV} must be in [0, 1023].")
+
+    if fee_rate != NADO_BUILDER_FEE_RATE_1_BPS:
+        raise ValueError(
+            f"{NADO_BUILDER_FEE_RATE_ENV} must be {NADO_BUILDER_FEE_RATE_1_BPS} (1 bps) for safe routing."
+        )
+
+    return builder_id, fee_rate

@@ -2,7 +2,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from _stubs import install_test_stubs
 
@@ -10,14 +10,90 @@ install_test_stubs()
 
 from src.nadobro.handlers.intent_handlers import _enrich_trade_payload
 from src.nadobro.handlers.intent_parser import parse_interaction_intent, parse_position_management_intent
+from src.nadobro.handlers import callbacks, home_card
+from src.nadobro.i18n import get_active_language, language_context
 from src.nadobro.services import bot_runtime
+from src.nadobro.services import execution_queue
 from src.nadobro.services import runtime_supervisor
+from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
 from src.nadobro.services.trade_service import _place_take_profit_order
 from src.nadobro.strategies import delta_neutral
 
 
 class RuntimeAndLeverageTests(unittest.TestCase):
+    def test_run_blocking_preserves_language_contextvars(self):
+        async def _run():
+            with language_context("fr"):
+                self.assertEqual(get_active_language(), "fr")
+                self.assertEqual(await run_blocking(get_active_language), "fr")
+
+        asyncio.run(_run())
+
+    def test_build_portfolio_view_handles_position_failures(self):
+        class FailingClient:
+            def get_all_positions(self):
+                raise RuntimeError("boom")
+
+        with patch.object(home_card, "get_user_readonly_client", return_value=FailingClient()):
+            text, reply_markup = home_card.build_portfolio_view(telegram_id=7)
+
+        self.assertIn("Portfolio refresh is temporarily unavailable", text)
+        self.assertIsNotNone(reply_markup)
+
+    def test_resolve_home_view_uses_blocking_wrapper_for_portfolio(self):
+        run_blocking_mock = AsyncMock(return_value=("portfolio", "keyboard"))
+        with patch.object(home_card, "run_blocking", run_blocking_mock):
+            result = asyncio.run(home_card.resolve_home_view("portfolio:view", telegram_id=5))
+
+        self.assertEqual(result, ("portfolio", "keyboard"))
+        run_blocking_mock.assert_awaited_once_with(home_card._view_portfolio_text, 5)
+
+    def test_handle_portfolio_history_invalid_page_does_not_raise(self):
+        query = SimpleNamespace()
+        edit_mock = AsyncMock()
+
+        async def _run_blocking_stub(func, *args, **kwargs):
+            if func is callbacks.get_trade_history:
+                return [
+                    {
+                        "product": "BTC-PERP",
+                        "side": "LONG",
+                        "status": "closed",
+                        "price": 60000,
+                        "close_price": 60500,
+                        "pnl": 25,
+                        "created_at": "2026-03-27T12:00:00Z",
+                    }
+                ]
+            return func(*args, **kwargs)
+
+        with patch.object(callbacks, "run_blocking", side_effect=_run_blocking_stub), patch.object(
+            callbacks, "_edit_loc", edit_mock
+        ):
+            asyncio.run(callbacks._handle_portfolio(query, "portfolio:history:not-a-number", telegram_id=77))
+
+        edit_mock.assert_awaited()
+
+    def test_stop_workers_cancels_and_awaits_worker_tasks(self):
+        async def _worker():
+            await asyncio.sleep(60)
+
+        async def _run():
+            old_workers = list(execution_queue._workers)
+            try:
+                task1 = asyncio.create_task(_worker())
+                task2 = asyncio.create_task(_worker())
+                execution_queue._workers = [task1, task2]
+                await execution_queue.stop_workers()
+                self.assertEqual(execution_queue._workers, [])
+                self.assertTrue(task1.cancelled())
+                self.assertTrue(task2.cancelled())
+            finally:
+                execution_queue._workers = old_workers
+
+        asyncio.run(_run())
+
     def test_enrich_trade_payload_clamps_leverage_by_product_cap(self):
         payload = {
             "direction": "long",
@@ -141,6 +217,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         ), patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
             bot_runtime, "get_user_readonly_client", return_value=FakeClient()
         ), patch.object(
+            bot_runtime, "get_user_nado_client", return_value=FakeClient()
+        ), patch.object(
             bot_runtime, "_save_state"
         ), patch.object(
             bot_runtime, "close_all_positions", return_value={"success": True}
@@ -180,6 +258,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             bot_runtime, "run_blocking", side_effect=_run_blocking_stub
         ), patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
             bot_runtime, "get_user_readonly_client", return_value=FakeClient()
+        ), patch.object(
+            bot_runtime, "get_user_nado_client", return_value=FakeClient()
         ), patch.object(
             bot_runtime, "_dispatch_strategy", return_value={"success": True, "action": "grid_stop_loss_hit", "detail": "stop"}
         ), patch.object(

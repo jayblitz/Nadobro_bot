@@ -22,12 +22,32 @@ from src.nadobro.services.nado_archive import query_order_by_digest
 logger = logging.getLogger(__name__)
 
 
+def _trade_ts_display(val) -> str:
+    if not val:
+        return ""
+    if isinstance(val, datetime):
+        return val.isoformat()[:19]
+    s = str(val)
+    return s[:19] if len(s) >= 19 else s
+
+
 def _resolve_fill_data(client, digest: str, network: str) -> dict | None:
     """Query Nado archive for actual fill data after order placement."""
     try:
-        return query_order_by_digest(network, digest, max_wait_seconds=2.0)
+        # IOC fills can take a moment to appear in the indexer; wait long enough to match Nado.
+        return query_order_by_digest(network, digest, max_wait_seconds=5.0, poll_interval=0.35)
     except Exception as e:
         logger.warning("Archive fill resolution failed for %s: %s", digest[:16] if digest else "?", e)
+        return None
+
+
+def _resolve_fill_data_retry(network: str, digest: str) -> dict | None:
+    """Second-chance archive poll (e.g. after first path returned partial)."""
+    if not digest:
+        return None
+    try:
+        return query_order_by_digest(network, digest, max_wait_seconds=3.0, poll_interval=0.4)
+    except Exception:
         return None
 
 
@@ -262,8 +282,12 @@ def execute_market_order(
 
     if result["success"]:
         digest = result.get("digest", "")
+        fill_data = None
+        update_data: dict = {}
         try:
             fill_data = _resolve_fill_data(client, digest, network)
+            if (not fill_data or not float(fill_data.get("fill_price") or 0)) and digest:
+                fill_data = _resolve_fill_data_retry(network, digest) or fill_data
             fill_update = _build_fill_update(fill_data, mid_price=pre_order_mid)
             update_data = {
                 "status": TradeStatus.FILLED.value,
@@ -295,15 +319,27 @@ def execute_market_order(
             update_trade_stats(telegram_id, size * mp["mid"])
         except Exception as e:
             logger.warning("Post-order stats update failed: %s", e)
+        exec_px = float(
+            (update_data.get("fill_price") if update_data.get("fill_price") else None)
+            or update_data.get("price")
+            or 0
+        )
+        if exec_px <= 0:
+            exec_px = float(pre_order_mid or result.get("price", 0) or 0)
+        exec_fee = update_data.get("fees")
+        if exec_fee is None:
+            exec_fee = update_data.get("fill_fee")
         payload = {
             "success": True,
             "side": "LONG" if is_long else "SHORT",
             "size": size,
             "product": get_product_name(product_id, network=network),
-            "price": pre_order_mid or result.get("price", 0),
+            "price": exec_px,
             "digest": result.get("digest"),
             "network": user.network_mode.value,
         }
+        if exec_fee is not None and float(exec_fee or 0) >= 0:
+            payload["fee"] = float(exec_fee or 0)
         tp_result = _place_take_profit_order(
             client=client,
             product_id=product_id,
@@ -1262,8 +1298,8 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
             "pnl": t.get("pnl"),
             "close_price": t.get("close_price"),
             "network": network,
-            "created_at": t.get("created_at", "")[:19] if t.get("created_at") else "",
-            "closed_at": t.get("closed_at", "")[:19] if t.get("closed_at") else "",
+            "created_at": _trade_ts_display(t.get("created_at")),
+            "closed_at": _trade_ts_display(t.get("closed_at")),
         }
         result.append(entry)
     return result

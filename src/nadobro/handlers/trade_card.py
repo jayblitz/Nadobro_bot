@@ -30,7 +30,7 @@ from src.nadobro.handlers.keyboards import (
     trade_card_text_input_kb,
     trade_card_confirm_kb,
 )
-from src.nadobro.handlers.home_card import build_home_card_text
+from src.nadobro.handlers.home_card import build_home_card_text_async
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.onboarding_service import get_resume_step
 from src.nadobro.services.settings_service import get_user_settings
@@ -371,7 +371,7 @@ async def open_trade_card_from_callback(query, context: CallbackContext, telegra
 
 
 async def _render_home_on_card(query, telegram_id: int):
-    text = build_home_card_text(telegram_id)
+    text = await build_home_card_text_async(telegram_id)
     await _edit_message_safely(query, text, home_card_kb())
 
 

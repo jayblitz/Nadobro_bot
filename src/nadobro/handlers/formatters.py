@@ -1,11 +1,8 @@
-import logging
 import re
 import time
 from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
 from src.nadobro.i18n import get_active_language, localize_text
-
-logger = logging.getLogger(__name__)
 
 
 def _loc(text):
@@ -26,51 +23,42 @@ def escape_md(text):
 
 
 def _calc_position_pnl(position: dict, current_price: float) -> Optional[float]:
-    def _inventory_pnl() -> Optional[float]:
-        v_quote = position.get("v_quote_balance")
-        signed_amount = position.get("signed_amount")
-        if v_quote is None or signed_amount is None or not current_price:
-            return None
+    """Unrealized PnL aligned with Nado: prefer exchange-reported uPnL, else v_quote settlement."""
+    raw = position.get("unrealized_pnl")
+    if raw is not None:
+        try:
+            return float(raw)
+        except Exception:
+            pass
+
+    v_quote = position.get("v_quote_balance")
+    signed_amount = position.get("signed_amount")
+    if v_quote is not None and signed_amount is not None and current_price:
         try:
             return float(v_quote) + float(signed_amount) * float(current_price)
         except Exception:
-            return None
+            pass
 
-    def _directional_pnl() -> Optional[float]:
-        entry = float(position.get("price", 0) or 0)
-        amount = abs(float(position.get("amount", 0) or 0))
-        if not current_price or not entry or not amount:
-            return None
-        side = str(position.get("side", "LONG")).upper()
-        if side == "LONG":
-            return (float(current_price) - entry) * amount
-        return (entry - float(current_price)) * amount
+    entry = float(position.get("price", 0) or 0)
+    amount = abs(float(position.get("amount", 0) or 0))
+    if not current_price or not entry or not amount:
+        return None
+    side = str(position.get("side", "LONG")).upper()
+    if side == "LONG":
+        return (float(current_price) - entry) * amount
+    return (entry - float(current_price)) * amount
 
-    inventory = _inventory_pnl()
-    directional = _directional_pnl()
 
-    if inventory is None:
-        return directional
-    if directional is None:
-        return inventory
-
-    diff = abs(inventory - directional)
-    scale = max(abs(inventory), abs(directional), 1.0)
-    # When formulas diverge materially, directional (entry/side based) is
-    # typically closer to platform UI expectations for a single position row.
-    if diff > max(25.0, scale * 0.35):
-        logger.warning(
-            "PnL formula divergence for %s: side=%s entry=%.8f mark=%.8f inv=%.4f dir=%.4f",
-            position.get("product_name", "unknown"),
-            str(position.get("side", "LONG")).upper(),
-            float(position.get("price", 0) or 0),
-            float(current_price or 0),
-            inventory,
-            directional,
-        )
-        return directional
-
-    return inventory
+def _has_exchange_unrealized_pnl(position: dict) -> bool:
+    """True when the position dict carries a parseable uPnL from the exchange."""
+    raw = position.get("unrealized_pnl")
+    if raw is None:
+        return False
+    try:
+        float(raw)
+        return True
+    except Exception:
+        return False
 
 
 def fmt_price(price, product="BTC"):
@@ -87,44 +75,79 @@ def fmt_price(price, product="BTC"):
 
 def fmt_positions(positions, prices=None):
     if not positions:
-        return _loc("📋 *Open Orders*") + "\n\n" + _loc("No open orders found\\.")
+        return _loc("📋 *Open Positions*") + "\n\n" + _loc("No open positions\\.")
 
     lines = [
-        _loc("📋 *Open Orders*"),
+        _loc("📋 *Open Positions*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
+    any_estimated_pnl = False
 
     for i, p in enumerate(positions, 1):
         side = p.get("side", "LONG")
         side_emoji = "🟢" if side == "LONG" else "🔴"
         amount = abs(p.get("amount", 0))
         pname = p.get("product_name", "???")
-        entry = p.get("price", 0)
+        entry = float(p.get("price", 0) or 0)
         base = pname.replace("-PERP", "")
 
+        lines.append(f"{side_emoji} *{escape_md(side)}* {escape_md(pname)}")
+
+        current = 0.0
+        if prices and base in prices:
+            current = float(prices[base].get("mid", 0) or 0)
+
+        mark_str = f"${fmt_price(current, base)}" if current else "—"
         lines.append(
-            f"{side_emoji} *{escape_md(side)}* {escape_md(f'{amount:.4f}')} "
-            f"{escape_md(pname)} @ {escape_md(f'${entry:,.2f}')}"
+            f"  • {_loc('Entry price')}: {escape_md(f'${entry:,.2f}')}"
+        )
+        lines.append(
+            f"  • {_loc('Current price')}: {escape_md(mark_str)}"
         )
 
-        current = 0
-        if prices and base in prices:
-            current = prices[base].get("mid", 0)
-
+        pnl = None
         if current:
             pnl = _calc_position_pnl(p, current)
-            if pnl is not None:
-                pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
-                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                mark_str = f"${fmt_price(current, base)}"
-                lines.append(
-                    f"  └ {_loc('Mark')}: {escape_md(mark_str)} \\| "
-                    f"{_loc('PnL')}: {pnl_emoji} {escape_md(pnl_str)}"
-                )
+        if pnl is not None:
+            if not _has_exchange_unrealized_pnl(p):
+                any_estimated_pnl = True
+            pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+            lines.append(
+                f"  • {_loc('uPnL')}: {pnl_emoji} {escape_md(pnl_str)}"
+            )
+        else:
+            lines.append(f"  • {_loc('uPnL')}: —")
 
-    lines.append("")
-    lines.append(f"{_loc('Total')}: {escape_md(str(len(positions)))} {_loc('order(s)')}")
+        liq_raw = p.get("liquidation_price")
+        if liq_raw is not None:
+            try:
+                liq_v = float(liq_raw)
+                if liq_v > 0:
+                    lines.append(
+                        f"  • {_loc('Liquidation price')}: {escape_md(f'${fmt_price(liq_v, base)}')}"
+                    )
+                else:
+                    lines.append(f"  • {_loc('Liquidation price')}: —")
+            except Exception:
+                lines.append(f"  • {_loc('Liquidation price')}: —")
+        else:
+            lines.append(f"  • {_loc('Liquidation price')}: —")
+
+        lines.append(
+            f"  • {_loc('Position size')}: {escape_md(f'{amount:.4f}')} {escape_md(base)}"
+        )
+        lines.append("")
+
+    lines.append(f"{_loc('Total')}: {escape_md(str(len(positions)))} {_loc('position(s)')}")
+    if any_estimated_pnl:
+        lines.append("")
+        lines.append(
+            _loc(
+                "ℹ️ PnL is estimated from mark vs\\. entry when the exchange does not report uPnL for this position\\."
+            )
+        )
     return "\n".join(lines)
 
 
@@ -240,17 +263,28 @@ def fmt_trade_result(result):
         r_price = result.get("price", 0)
         r_product = result.get("product", "BTC")
         price_str = "$" + fmt_price(r_price, r_product)
+        order_type_u = str(result.get("type", "MARKET") or "MARKET").upper()
+        status_u = str(result.get("status", "") or "").lower()
+        is_limit_pending = order_type_u == "LIMIT" and status_u == "pending"
+        header = _loc("✅ *Limit order submitted*") if is_limit_pending else _loc("✅ *Trade Executed\\!*")
+        price_label = _loc_md("Limit price") if is_limit_pending else _loc_md("Fill price")
         lines = [
-            _loc("✅ *Trade Executed\\!*"),
+            header,
             escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             "",
             f"📌 *{_loc_md('Side')}:* {escape_md(result.get('side', '?'))}",
             f"🪙 *{_loc_md('Product')}:* {escape_md(result.get('product', '?'))}",
             f"📏 *{_loc_md('Size')}:* {escape_md(str(result.get('size', '?')))}",
-            f"💲 *{_loc_md('Price')}:* {escape_md(price_str)}",
+            f"💲 *{price_label}:* {escape_md(price_str)}",
             "",
             f"🌐 *{_loc_md('Network:')}* {escape_md(result.get('network', '?'))}",
         ]
+        if result.get("fee") is not None:
+            try:
+                fee_v = float(result.get("fee") or 0)
+                lines.insert(-2, f"🧾 *{_loc_md('Fee')}:* {escape_md(f'${fee_v:,.4f}')}")
+            except Exception:
+                pass
         if result.get("tp_requested"):
             if result.get("tp_set"):
                 lines.append(f"📈 *{_loc_md('Take Profit')}:* {escape_md(str(result.get('tp_price')))}")
@@ -389,11 +423,16 @@ def fmt_alerts(alerts):
     ]
 
     for a in alerts:
-        target_str = f"${a['target']:,.2f}"
+        condition = str(a.get("condition") or "")
+        target = float(a.get("target") or 0)
+        if condition.startswith("funding"):
+            target_str = f"{target:,.4f}%"
+        else:
+            target_str = f"${target:,.2f}"
         lines.append(
             f"\\#{escape_md(str(a['id']))} {escape_md(a['product'])} "
-            f"{escape_md(a['condition'])} {escape_md(target_str)} "
-            f"\\({escape_md(a['network'])}\\)"
+            f"{escape_md(condition)} {escape_md(target_str)} "
+            f"\\({escape_md(a.get('network', 'mainnet'))}\\)"
         )
 
     return "\n".join(lines)
@@ -642,31 +681,33 @@ def fmt_settings(user_data):
 
 def fmt_help():
     _HELP_TEXT = (
-        "📖 *Trading Bot Guide*\n"
+        "📖 *Nadobro Guide*\n"
         + escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n"
         "\n"
         "*Available Commands:*\n"
-        "/start \\- Open command center\n"
-        "/help \\- Show this guide\n"
-        "/status \\- Runtime health and strategy status\n"
-        "/revoke \\- Show 1CT revoke steps\n"
-        "/stop\\_all \\- Stop running strategy loops\n"
+        "/start \\- Open the home dashboard\n"
+        "/help \\- Show commands, modules, and examples\n"
+        "/status \\- View runtime health, setup, and strategy status\n"
+        "/revoke \\- Show 1CT signer revoke steps\n"
+        "/stop\\_all \\- Stop all running strategy loops\n"
         "\n"
-        "*Sections:*\n"
+        "*Core Modules:*\n"
         "\n"
         "💼 *Wallet Vault*\n"
-        "Link your wallet with secure 1CT flow, view balances, and manage signer access\\.\n"
+        "Link your wallet with the secure 1CT flow, check balances, and manage signer access\\.\n"
         "\n"
         "🤖 *Trading Console*\n"
-        "Place market or limit orders from guided flow or natural language commands\\.\n"
+        "Place market or limit orders from the guided flow or with plain\\-language trade commands\\.\n"
         "\n"
         "🧠 *Strategy Lab*\n"
-        "Configure and run automated strategies: GRID, Reverse GRID, Mirror DN, and Volume Engine\\.\n"
-        "Mirror DN now runs a real hedge on Nado: buy spot \\(BTC/ETH\\) and short the matching perp \\(1x\\-5x\\) to farm funding\\.\n"
-        "Each dashboard includes a \"How it works\" explainer and pre\\-trade analytics\\.\n"
+        "Configure and run automated strategies including GRID, Reverse GRID, Delta Neutral, Volume, and Bro mode\\.\n"
+        "Each strategy dashboard includes controls, safety settings, and pre\\-trade context before launch\\.\n"
         "\n"
         "📁 *Portfolio Deck*\n"
-        "Track open positions, realized/unrealized PnL, and runtime performance stats\\.\n"
+        "Refresh open positions, realized and unrealized PnL, trade history, and analytics in one place\\.\n"
+        "\n"
+        "🏆 *Points And Market Radar*\n"
+        "Check points updates, market radar, and LOWIQPTS refresh flows from the same Telegram workspace\\.\n"
         "\n"
         "🔒 *Security*\n"
         "• 1CT signer keys are encrypted with server key\n"
@@ -677,13 +718,14 @@ def fmt_help():
         "Ask docs, API, trading, and troubleshooting questions directly in chat\\.\n"
         "\n"
         "*Examples:*\n"
-        "  • `Long BTC 0\\.01`\n"
-        "  • `Short ETH 0\\.05 at 10x`\n"
-        "  • `What is unified margin?`\n"
+        "  • `Long BTC 0\\.01 at 5x`\n"
+        "  • `Short ETH 0\\.05 limit 2400`\n"
+        "  • `Show my portfolio`\n"
         "  • `Show my positions`\n"
-        "  • `Close all`\n"
+        "  • `What is unified margin?`\n"
+        "  • `Close all positions`\n"
         "\n"
-        "Need support? Ask in chat with full error context and command used\\."
+        "Need support? Ask in chat with the error details and the command or button flow you used\\."
     )
     return _loc(_HELP_TEXT)
 
@@ -760,6 +802,20 @@ def fmt_status_overview(status: dict, onboarding: dict):
         lines.append(
             f"⚠️ {_loc('Other running network(s)')}: *{escape_md(', '.join(str(n).upper() for n in other_running))}*"
         )
+        lines.append("")
+
+    rs = status.get("running_sessions") or []
+    if len(rs) > 1:
+        lines.append(f"📋 *{_loc('Active sessions (database)')}*")
+        for s in rs[:6]:
+            st = str(s.get("strategy") or "").upper()
+            pn = str(s.get("product_name") or "?").replace("-PERP", "")
+            sid = s.get("id")
+            tc = int(s.get("total_cycles") or 0)
+            lines.append(
+                f"• *{escape_md(st)}* · *{escape_md(pn)}* · \\#{escape_md(str(sid))} · "
+                f"{_loc('DB cycles')} *{escape_md(str(tc))}*"
+            )
         lines.append("")
 
     if not running:

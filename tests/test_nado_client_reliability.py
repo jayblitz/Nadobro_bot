@@ -24,12 +24,57 @@ class _FakeResponse:
 
 class NadoClientReliabilityTests(unittest.TestCase):
     def test_build_order_appendix_sets_isolated_reduce_only_and_margin(self):
-        appendix = NadoClient._build_order_appendix(1, isolated=True, reduce_only=True, margin_x6=12500000)
+        appendix = NadoClient._build_order_appendix(
+            1,
+            isolated=True,
+            reduce_only=True,
+            margin_x6=12500000,
+            builder_id=4321,
+            builder_fee_rate=10,
+        )
         self.assertEqual(appendix & 0xFF, 1)  # version
         self.assertEqual((appendix >> 8) & 0x1, 1)  # isolated
         self.assertEqual((appendix >> 9) & 0x3, 1)  # ioc
         self.assertEqual((appendix >> 11) & 0x1, 1)  # reduce_only
+        self.assertEqual((appendix >> 38) & 0x3FF, 10)  # 1 bps fee rate
+        self.assertEqual((appendix >> 48) & 0xFFFF, 4321)  # builder id
         self.assertEqual((appendix >> 64), 12500000)  # margin_x6
+
+    def test_place_order_hard_fails_when_builder_id_missing(self):
+        client = NadoClient(private_key="0xabc", network="mainnet")
+        client._initialized = True
+        client.client = object()
+        with patch.dict("os.environ", {}, clear=True):
+            result = client.place_order(product_id=2, size=0.1, price=100000.0, is_buy=True)
+        self.assertEqual(result.get("success"), False)
+        self.assertIn("NADO_BUILDER_ID", result.get("error", ""))
+
+    def test_place_order_hard_fails_when_builder_id_is_zero(self):
+        client = NadoClient(private_key="0xabc", network="mainnet")
+        client._initialized = True
+        client.client = object()
+        with patch.dict("os.environ", {"NADO_BUILDER_ID": "0", "NADO_BUILDER_FEE_RATE": "10"}, clear=True):
+            result = client.place_order(product_id=2, size=0.1, price=100000.0, is_buy=True)
+        self.assertEqual(result.get("success"), False)
+        self.assertIn("NADO_BUILDER_ID", result.get("error", ""))
+
+    def test_place_order_hard_fails_when_builder_id_out_of_range(self):
+        client = NadoClient(private_key="0xabc", network="mainnet")
+        client._initialized = True
+        client.client = object()
+        with patch.dict("os.environ", {"NADO_BUILDER_ID": "70000", "NADO_BUILDER_FEE_RATE": "10"}, clear=True):
+            result = client.place_order(product_id=2, size=0.1, price=100000.0, is_buy=True)
+        self.assertEqual(result.get("success"), False)
+        self.assertIn("NADO_BUILDER_ID", result.get("error", ""))
+
+    def test_place_order_hard_fails_when_builder_fee_rate_not_one_bps(self):
+        client = NadoClient(private_key="0xabc", network="mainnet")
+        client._initialized = True
+        client.client = object()
+        with patch.dict("os.environ", {"NADO_BUILDER_ID": "123", "NADO_BUILDER_FEE_RATE": "11"}, clear=True):
+            result = client.place_order(product_id=2, size=0.1, price=100000.0, is_buy=True)
+        self.assertEqual(result.get("success"), False)
+        self.assertIn("NADO_BUILDER_FEE_RATE", result.get("error", ""))
 
     def test_query_rest_retries_after_non_json_response(self):
         client = NadoClient(private_key="0xabc", network="mainnet")

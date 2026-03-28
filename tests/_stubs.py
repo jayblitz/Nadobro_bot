@@ -9,64 +9,70 @@ def install_test_stubs() -> None:
     telegram_ext = sys.modules.get("telegram.ext") or types.ModuleType("telegram.ext")
     telegram_error = sys.modules.get("telegram.error") or types.ModuleType("telegram.error")
 
-    class _ParseMode:
-        MARKDOWN_V2 = "MARKDOWN_V2"
-        MARKDOWN = "MARKDOWN"
+    if hasattr(telegram_error, "BadRequest") and hasattr(telegram_mod, "InlineKeyboardButton"):
+        sys.modules["telegram"] = telegram_mod
+        sys.modules["telegram.constants"] = telegram_constants
+        sys.modules["telegram.ext"] = telegram_ext
+        sys.modules["telegram.error"] = telegram_error
+    else:
+        class _ParseMode:
+            MARKDOWN_V2 = "MARKDOWN_V2"
+            MARKDOWN = "MARKDOWN"
 
-    class _ChatAction:
-        TYPING = "typing"
+        class _ChatAction:
+            TYPING = "typing"
 
-    class _CallbackContext:
-        user_data = {}
+        class _CallbackContext:
+            user_data = {}
 
-    class _Update:
-        pass
+        class _Update:
+            pass
 
-    class _InlineKeyboardButton:
-        def __init__(self, text, callback_data=None):
-            self.text = text
-            self.callback_data = callback_data
+        class _InlineKeyboardButton:
+            def __init__(self, text, callback_data=None):
+                self.text = text
+                self.callback_data = callback_data
 
-    class _InlineKeyboardMarkup:
-        def __init__(self, inline_keyboard):
-            self.inline_keyboard = inline_keyboard
+        class _InlineKeyboardMarkup:
+            def __init__(self, inline_keyboard):
+                self.inline_keyboard = inline_keyboard
 
-    class _ReplyKeyboardMarkup:
-        def __init__(self, keyboard=None, **kwargs):
-            self.keyboard = keyboard or []
-            self.kwargs = kwargs
+        class _ReplyKeyboardMarkup:
+            def __init__(self, keyboard=None, **kwargs):
+                self.keyboard = keyboard or []
+                self.kwargs = kwargs
 
-    class _KeyboardButton:
-        def __init__(self, text):
-            self.text = text
+        class _KeyboardButton:
+            def __init__(self, text):
+                self.text = text
 
-    class _ReplyKeyboardRemove:
-        pass
+        class _ReplyKeyboardRemove:
+            pass
 
-    class _BotCommand:
-        def __init__(self, command, description):
-            self.command = command
-            self.description = description
+        class _BotCommand:
+            def __init__(self, command, description):
+                self.command = command
+                self.description = description
 
-    class _BadRequest(Exception):
-        pass
+        class _BadRequest(Exception):
+            pass
 
-    telegram_constants.ParseMode = _ParseMode
-    telegram_constants.ChatAction = _ChatAction
-    telegram_ext.CallbackContext = _CallbackContext
-    telegram_mod.Update = _Update
-    telegram_mod.InlineKeyboardButton = _InlineKeyboardButton
-    telegram_mod.InlineKeyboardMarkup = _InlineKeyboardMarkup
-    telegram_mod.ReplyKeyboardMarkup = _ReplyKeyboardMarkup
-    telegram_mod.KeyboardButton = _KeyboardButton
-    telegram_mod.ReplyKeyboardRemove = _ReplyKeyboardRemove
-    telegram_mod.BotCommand = _BotCommand
-    telegram_error.BadRequest = _BadRequest
+        telegram_constants.ParseMode = _ParseMode
+        telegram_constants.ChatAction = _ChatAction
+        telegram_ext.CallbackContext = _CallbackContext
+        telegram_mod.Update = _Update
+        telegram_mod.InlineKeyboardButton = _InlineKeyboardButton
+        telegram_mod.InlineKeyboardMarkup = _InlineKeyboardMarkup
+        telegram_mod.ReplyKeyboardMarkup = _ReplyKeyboardMarkup
+        telegram_mod.KeyboardButton = _KeyboardButton
+        telegram_mod.ReplyKeyboardRemove = _ReplyKeyboardRemove
+        telegram_mod.BotCommand = _BotCommand
+        telegram_error.BadRequest = _BadRequest
 
-    sys.modules["telegram"] = telegram_mod
-    sys.modules["telegram.constants"] = telegram_constants
-    sys.modules["telegram.ext"] = telegram_ext
-    sys.modules["telegram.error"] = telegram_error
+        sys.modules["telegram"] = telegram_mod
+        sys.modules["telegram.constants"] = telegram_constants
+        sys.modules["telegram.ext"] = telegram_ext
+        sys.modules["telegram.error"] = telegram_error
 
     # psycopg2
     if "psycopg2" not in sys.modules:
@@ -158,5 +164,42 @@ def install_test_stubs() -> None:
                 key = types.SimpleNamespace(hex=lambda: "0x0")
                 return types.SimpleNamespace(key=key, address="0x" + "0" * 40)
 
+            @staticmethod
+            def from_key(_private_key):
+                return types.SimpleNamespace(address="0x" + "0" * 40)
+
         eth_account_mod.Account = _Account
         sys.modules["eth_account"] = eth_account_mod
+
+    # httpx
+    if "httpx" not in sys.modules:
+        httpx_mod = types.ModuleType("httpx")
+
+        class _HttpxResponse:
+            status_code = 200
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {}
+
+        class _AsyncClient:
+            def __init__(self, *args, **kwargs):
+                self.is_closed = False
+
+            async def request(self, *args, **kwargs):
+                return _HttpxResponse()
+
+            async def aclose(self):
+                self.is_closed = True
+
+        class _HTTPStatusError(Exception):
+            def __init__(self, *args, response=None, **kwargs):
+                super().__init__(*args)
+                self.response = response or _HttpxResponse()
+
+        httpx_mod.AsyncClient = _AsyncClient
+        httpx_mod.HTTPStatusError = _HTTPStatusError
+        sys.modules["httpx"] = httpx_mod

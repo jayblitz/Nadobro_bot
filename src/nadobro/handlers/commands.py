@@ -13,6 +13,7 @@ from src.nadobro.handlers.keyboards import (
     onboarding_language_kb,
     onboarding_accept_tos_kb,
     home_card_kb,
+    status_kb,
 )
 from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_user_bots
 from src.nadobro.services.onboarding_service import (
@@ -25,13 +26,14 @@ from src.nadobro.handlers.home_card import (
     open_home_card_from_command,
     open_help_card_from_command,
 )
+from src.nadobro.services.async_utils import run_blocking
 logger = logging.getLogger(__name__)
 
 
 # New onboarding messages (exact copy from spec)
 WELCOME_MSG = """Welcome to Nadobro 👋
 
-Your trading companion for perps on Nado DEX — fast execution, automated strategies, and AI-powered insights, all from Telegram.
+Trade perps on Nado DEX from Telegram with guided execution, portfolio tools, automation, and AI support.
 
 Pick your language:"""
 
@@ -46,7 +48,7 @@ Ready?"""
 
 DASHBOARD_MSG = """🤖 Nadobro Command Center online.
 
-Select a module below to trade, monitor, and run strategy automation."""
+Open a module below to trade, review portfolio and points, manage strategies, and adjust risk settings."""
 
 
 async def cmd_start(update: Update, context: CallbackContext):
@@ -112,13 +114,13 @@ async def cmd_help(update: Update, context: CallbackContext):
 async def cmd_status(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     with language_context(get_user_language(telegram_id)):
-        status = get_user_bot_status(telegram_id)
-        onboarding = evaluate_readiness(telegram_id)
+        status = await run_blocking(get_user_bot_status, telegram_id)
+        onboarding = await run_blocking(evaluate_readiness, telegram_id)
         text = fmt_status_overview(status, onboarding)
 
         lang = get_active_language()
         localized = localize_text(text, lang)
-        reply_markup = localize_markup(home_card_kb() if DUAL_MODE_CARD_FLOW else persistent_menu_kb(), lang)
+        reply_markup = localize_markup(status_kb(), lang)
         # Always send a visible reply so /status works even when the home card is off-screen
         # or edit-in-place fails (webhook / concurrent updates).
         try:

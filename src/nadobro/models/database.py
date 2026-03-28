@@ -731,6 +731,20 @@ def get_active_strategy_session(user_id: int, network: str) -> Optional[dict]:
     )
 
 
+def get_running_strategy_sessions(user_id: int, network: str | None = None) -> list:
+    """All sessions still marked running (used for status display and supersede on new start)."""
+    conditions = ["user_id = %s", "status = 'running'"]
+    params: list = [user_id]
+    if network:
+        conditions.append("network = %s")
+        params.append(network)
+    where = " AND ".join(conditions)
+    return query_all(
+        f"SELECT * FROM strategy_sessions WHERE {where} ORDER BY started_at DESC",
+        tuple(params),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fill Sync Queue ORM
 # ---------------------------------------------------------------------------

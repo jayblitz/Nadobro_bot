@@ -37,7 +37,11 @@ from src.nadobro.handlers.trade_card import (
     handle_trade_card_text_input,
     is_trade_card_mode_enabled,
 )
-from src.nadobro.handlers.home_card import open_home_card_view_from_message
+from src.nadobro.handlers.home_card import (
+    build_portfolio_view,
+    build_positions_view,
+    open_home_card_view_from_message,
+)
 from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
@@ -250,8 +254,24 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         budget_usd = float(action_data.get("budget_usd", 100))
         risk_factor = float(action_data.get("risk_factor", 1.0))
         max_leverage = float(action_data.get("max_leverage", 10))
+        cumulative_stop_loss_pct = action_data.get("cumulative_stop_loss_pct")
+        cumulative_take_profit_pct = action_data.get("cumulative_take_profit_pct")
         from src.nadobro.services.copy_service import start_copy
-        ok, msg = await run_blocking(start_copy, telegram_id, trader_id, budget_usd, risk_factor, max_leverage)
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        # Map legacy setup fields to the v2 copy mirror model.
+        margin_per_trade = max(5.0, min(5000.0, budget_usd * max(risk_factor, 0.1)))
+        start_kwargs = {
+            "network": network,
+            "margin_per_trade": margin_per_trade,
+            "max_leverage": max_leverage,
+            "total_allocated_usd": budget_usd,
+        }
+        if cumulative_stop_loss_pct is not None:
+            start_kwargs["cumulative_stop_loss_pct"] = float(cumulative_stop_loss_pct)
+        if cumulative_take_profit_pct is not None:
+            start_kwargs["cumulative_take_profit_pct"] = float(cumulative_take_profit_pct)
+        ok, msg = await run_blocking(start_copy, telegram_id, trader_id, **start_kwargs)
         if ok:
             reply = f"🔁 {escape_md(msg)}"
         else:
@@ -539,55 +559,28 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "pos:view":
         await update.message.chat.send_action(ChatAction.TYPING)
-        client = get_user_readonly_client(telegram_id)
-        if not client:
-            await _reply_loc(update.message, 
-                localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", lang),
-                parse_mode=ParseMode.MARKDOWN_V2,
-            )
-            return
         with timed_metric("msg.positions.view"):
-            positions = await run_blocking(client.get_all_positions)
-        prices = None
-        try:
-            prices = await run_blocking(client.get_all_market_prices)
-        except Exception:
-            pass
-        msg = fmt_positions(positions, prices)
+            msg, reply_markup = await run_blocking(build_positions_view, telegram_id)
         await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(positions_kb(positions or []), lang),
+            reply_markup=localize_markup(reply_markup, lang),
         )
         return
 
     if callback_data == "portfolio:view":
         await update.message.chat.send_action(ChatAction.TYPING)
-        client = get_user_readonly_client(telegram_id)
-        if not client:
-            await _reply_loc(update.message, 
-                localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", lang),
-                parse_mode=ParseMode.MARKDOWN_V2,
-            )
-            return
         with timed_metric("msg.portfolio.view"):
-            positions = (await run_blocking(client.get_all_positions)) or []
-        prices = None
-        try:
-            prices = await run_blocking(client.get_all_market_prices)
-        except Exception:
-            pass
-        stats = await run_blocking(get_trade_analytics, telegram_id)
-        msg = fmt_portfolio(stats, positions, prices)
+            msg, reply_markup = await run_blocking(build_portfolio_view, telegram_id)
         await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(portfolio_kb(has_positions=bool(positions)), lang),
+            reply_markup=localize_markup(reply_markup, lang),
         )
         return
 
     if callback_data == "points:view":
-        payload = get_points_dashboard(telegram_id, scope="week")
+        payload = await run_blocking(get_points_dashboard, telegram_id, "week")
         await _reply_loc(
             update.message,
             fmt_points_dashboard(payload),
@@ -1317,10 +1310,16 @@ async def _handle_pending_alert(update, context, telegram_id, text):
 
     result = create_alert(telegram_id, product, condition, target)
     if result["success"]:
+        if condition.startswith("funding"):
+            target_str = f"{target:,.4f}%"
+        elif condition.startswith("pnl"):
+            target_str = f"${target:,.2f}"
+        else:
+            target_str = f"${target:,.2f}"
         await _reply_loc(update.message, 
             f"✅ Alert set\\!\n"
             f"{escape_md(result['product'])} {escape_md(condition)} "
-            f"{escape_md(f'${target:,.2f}')}",
+            f"{escape_md(target_str)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
         )

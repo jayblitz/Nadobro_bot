@@ -68,14 +68,60 @@ def build_home_card_text(telegram_id: int) -> str:
         "🤖 *Nadobro Command Center*\n\n"
         f"Mode: *{escape_md(network_label)}*\n"
         f"Balance: *{escape_md(balance_str)}*\n\n"
-        "Use this control panel for trading, portfolio, strategy lab, and risk settings\\.\n"
-        "Use chat messages for AI Q\\&A and typed trade commands\\."
+        "Use this control panel to trade, review your portfolio and points, launch strategies, and adjust risk settings\\.\n"
+        "Use chat for AI Q\\&A, support questions, and plain\\-language trade commands\\."
     )
 
 
 async def build_home_card_text_async(telegram_id: int) -> str:
     with timed_metric("card.home.build"):
         return await run_blocking(build_home_card_text, telegram_id)
+
+
+def build_positions_view(telegram_id: int):
+    client = get_user_readonly_client(telegram_id)
+    if not client:
+        return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
+    try:
+        positions = client.get_all_positions() or []
+    except Exception as e:
+        logger.warning("positions_view_failed user=%s err=%s", telegram_id, e)
+        return localize_text(
+            "⚠️ Positions refresh is temporarily unavailable\\. Try again shortly\\.",
+            get_active_language(),
+        ), home_card_kb()
+    prices = None
+    try:
+        prices = client.get_all_market_prices()
+    except Exception as e:
+        logger.debug("positions_prices_failed user=%s err=%s", telegram_id, e)
+    return fmt_positions(positions, prices), positions_kb(positions or [])
+
+
+def build_portfolio_view(telegram_id: int):
+    client = get_user_readonly_client(telegram_id)
+    if not client:
+        return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
+    try:
+        positions = client.get_all_positions() or []
+    except Exception as e:
+        logger.warning("portfolio_positions_failed user=%s err=%s", telegram_id, e)
+        return localize_text(
+            "⚠️ Portfolio refresh is temporarily unavailable\\. Try again shortly\\.",
+            get_active_language(),
+        ), home_card_kb()
+    prices = None
+    try:
+        prices = client.get_all_market_prices()
+    except Exception as e:
+        logger.debug("portfolio_prices_failed user=%s err=%s", telegram_id, e)
+    try:
+        stats = get_trade_analytics(telegram_id)
+    except Exception as e:
+        logger.warning("portfolio_stats_failed user=%s err=%s", telegram_id, e)
+        stats = {}
+    msg = fmt_portfolio(stats, positions, prices)
+    return msg, portfolio_kb(has_positions=bool(positions))
 
 
 def _remember_home_card(context: CallbackContext, chat_id: int, message_id: int) -> None:
@@ -154,6 +200,8 @@ async def _edit_or_send_card(
             )
             return
         except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
             if "Can't parse entities" not in str(e):
                 logger.info("home_card_edit_failed_new_message chat_id=%s", chat_id)
             else:
@@ -165,6 +213,10 @@ async def _edit_or_send_card(
                         reply_markup=reply_markup,
                     )
                     return
+                except BadRequest as e2:
+                    if "Message is not modified" in str(e2):
+                        return
+                    logger.info("home_card_edit_fallback_failed_new_message chat_id=%s", chat_id)
                 except Exception:
                     logger.info("home_card_edit_fallback_failed_new_message chat_id=%s", chat_id)
         except Exception:
@@ -212,31 +264,11 @@ def _view_wallet_text(telegram_id: int):
 
 
 def _view_positions_text(telegram_id: int):
-    client = get_user_readonly_client(telegram_id)
-    if not client:
-        return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
-    positions = client.get_all_positions()
-    prices = None
-    try:
-        prices = client.get_all_market_prices()
-    except Exception:
-        pass
-    return fmt_positions(positions, prices), positions_kb(positions or [])
+    return build_positions_view(telegram_id)
 
 
 def _view_portfolio_text(telegram_id: int):
-    client = get_user_readonly_client(telegram_id)
-    if not client:
-        return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
-    positions = client.get_all_positions() or []
-    prices = None
-    try:
-        prices = client.get_all_market_prices()
-    except Exception:
-        pass
-    stats = get_trade_analytics(telegram_id)
-    msg = fmt_portfolio(stats, positions, prices)
-    return msg, portfolio_kb(has_positions=bool(positions))
+    return build_portfolio_view(telegram_id)
 
 
 def _view_points_text(telegram_id: int):
@@ -264,17 +296,17 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
     if callback_data == "nav:strategy_hub":
         return _view_strategy_text()
     if callback_data == "wallet:view":
-        return _view_wallet_text(telegram_id)
+        return await run_blocking(_view_wallet_text, telegram_id)
     if callback_data == "portfolio:view":
-        return _view_portfolio_text(telegram_id)
+        return await run_blocking(_view_portfolio_text, telegram_id)
     if callback_data == "pos:view":
-        return _view_positions_text(telegram_id)
+        return await run_blocking(_view_positions_text, telegram_id)
     if callback_data == "points:view":
-        return _view_points_text(telegram_id)
+        return await run_blocking(_view_points_text, telegram_id)
     if callback_data == "alert:menu":
         return _view_alerts_text()
     if callback_data == "settings:view":
-        return _view_settings_text(telegram_id)
+        return await run_blocking(_view_settings_text, telegram_id)
     return await build_home_card_text_async(telegram_id), home_card_kb()
 
 
