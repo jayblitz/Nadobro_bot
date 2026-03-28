@@ -11,15 +11,25 @@ install_test_stubs()
 from src.nadobro.handlers.intent_handlers import _enrich_trade_payload
 from src.nadobro.handlers.intent_parser import parse_interaction_intent, parse_position_management_intent
 from src.nadobro.handlers import callbacks, home_card
+from src.nadobro.i18n import get_active_language, language_context
 from src.nadobro.services import bot_runtime
 from src.nadobro.services import execution_queue
 from src.nadobro.services import runtime_supervisor
+from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
 from src.nadobro.services.trade_service import _place_take_profit_order
 from src.nadobro.strategies import delta_neutral
 
 
 class RuntimeAndLeverageTests(unittest.TestCase):
+    def test_run_blocking_preserves_language_contextvars(self):
+        async def _run():
+            with language_context("fr"):
+                self.assertEqual(get_active_language(), "fr")
+                self.assertEqual(await run_blocking(get_active_language), "fr")
+
+        asyncio.run(_run())
+
     def test_build_portfolio_view_handles_position_failures(self):
         class FailingClient:
             def get_all_positions(self):
