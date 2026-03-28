@@ -200,6 +200,8 @@ async def _edit_or_send_card(
             )
             return
         except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
             if "Can't parse entities" not in str(e):
                 logger.info("home_card_edit_failed_new_message chat_id=%s", chat_id)
             else:
@@ -211,6 +213,10 @@ async def _edit_or_send_card(
                         reply_markup=reply_markup,
                     )
                     return
+                except BadRequest as e2:
+                    if "Message is not modified" in str(e2):
+                        return
+                    logger.info("home_card_edit_fallback_failed_new_message chat_id=%s", chat_id)
                 except Exception:
                     logger.info("home_card_edit_fallback_failed_new_message chat_id=%s", chat_id)
         except Exception:

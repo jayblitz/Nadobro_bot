@@ -92,7 +92,12 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
         if "Can't parse entities" in str(e) and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
             fallback_kwargs = dict(kwargs)
             fallback_kwargs.pop("parse_mode", None)
-            return await query.edit_message_text(_plain_text_fallback(localized), **fallback_kwargs)
+            try:
+                return await query.edit_message_text(_plain_text_fallback(localized), **fallback_kwargs)
+            except BadRequest as e2:
+                if "Message is not modified" in str(e2):
+                    return
+                raise
         raise
 
 
@@ -179,6 +184,19 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=back_kb(),
             )
+    except BadRequest as e:
+        # Harmless: refresh/navigation edited the message to identical text+keyboard.
+        if "Message is not modified" in str(e):
+            return
+        logger.error(f"Callback BadRequest for '{data}': {e}", exc_info=True)
+        try:
+            await _edit_loc(query,
+                "⚠️ An error occurred\\. Please try again\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb(),
+            )
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Callback error for '{data}': {e}", exc_info=True)
         try:
@@ -688,10 +706,15 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
             if "Can't parse entities" in str(e):
                 from src.nadobro.handlers.home_card import _plain_text_fallback
 
-                await query.edit_message_text(
-                    _plain_text_fallback(localized),
-                    reply_markup=localize_markup(status_kb(), lang),
-                )
+                try:
+                    await query.edit_message_text(
+                        _plain_text_fallback(localized),
+                        reply_markup=localize_markup(status_kb(), lang),
+                    )
+                except BadRequest as e2:
+                    if "Message is not modified" in str(e2):
+                        return
+                    raise
                 return
             raise
 

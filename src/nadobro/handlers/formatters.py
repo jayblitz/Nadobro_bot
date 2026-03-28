@@ -75,10 +75,10 @@ def fmt_price(price, product="BTC"):
 
 def fmt_positions(positions, prices=None):
     if not positions:
-        return _loc("📋 *Open Orders*") + "\n\n" + _loc("No open orders found\\.")
+        return _loc("📋 *Open Positions*") + "\n\n" + _loc("No open positions\\.")
 
     lines = [
-        _loc("📋 *Open Orders*"),
+        _loc("📋 *Open Positions*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
@@ -89,33 +89,58 @@ def fmt_positions(positions, prices=None):
         side_emoji = "🟢" if side == "LONG" else "🔴"
         amount = abs(p.get("amount", 0))
         pname = p.get("product_name", "???")
-        entry = p.get("price", 0)
+        entry = float(p.get("price", 0) or 0)
         base = pname.replace("-PERP", "")
 
+        lines.append(f"{side_emoji} *{escape_md(side)}* {escape_md(pname)}")
+
+        current = 0.0
+        if prices and base in prices:
+            current = float(prices[base].get("mid", 0) or 0)
+
+        mark_str = f"${fmt_price(current, base)}" if current else "—"
         lines.append(
-            f"{side_emoji} *{escape_md(side)}* {escape_md(f'{amount:.4f}')} "
-            f"{escape_md(pname)} @ {escape_md(f'${entry:,.2f}')}"
+            f"  • {_loc('Entry price')}: {escape_md(f'${entry:,.2f}')}"
+        )
+        lines.append(
+            f"  • {_loc('Current price')}: {escape_md(mark_str)}"
         )
 
-        current = 0
-        if prices and base in prices:
-            current = prices[base].get("mid", 0)
-
+        pnl = None
         if current:
             pnl = _calc_position_pnl(p, current)
-            if pnl is not None:
-                if not _has_exchange_unrealized_pnl(p):
-                    any_estimated_pnl = True
-                pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
-                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                mark_str = f"${fmt_price(current, base)}"
-                lines.append(
-                    f"  └ {_loc('Mark')}: {escape_md(mark_str)} \\| "
-                    f"{_loc('PnL')}: {pnl_emoji} {escape_md(pnl_str)}"
-                )
+        if pnl is not None:
+            if not _has_exchange_unrealized_pnl(p):
+                any_estimated_pnl = True
+            pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+            lines.append(
+                f"  • {_loc('uPnL')}: {pnl_emoji} {escape_md(pnl_str)}"
+            )
+        else:
+            lines.append(f"  • {_loc('uPnL')}: —")
 
-    lines.append("")
-    lines.append(f"{_loc('Total')}: {escape_md(str(len(positions)))} {_loc('order(s)')}")
+        liq_raw = p.get("liquidation_price")
+        if liq_raw is not None:
+            try:
+                liq_v = float(liq_raw)
+                if liq_v > 0:
+                    lines.append(
+                        f"  • {_loc('Liquidation price')}: {escape_md(f'${fmt_price(liq_v, base)}')}"
+                    )
+                else:
+                    lines.append(f"  • {_loc('Liquidation price')}: —")
+            except Exception:
+                lines.append(f"  • {_loc('Liquidation price')}: —")
+        else:
+            lines.append(f"  • {_loc('Liquidation price')}: —")
+
+        lines.append(
+            f"  • {_loc('Position size')}: {escape_md(f'{amount:.4f}')} {escape_md(base)}"
+        )
+        lines.append("")
+
+    lines.append(f"{_loc('Total')}: {escape_md(str(len(positions)))} {_loc('position(s)')}")
     if any_estimated_pnl:
         lines.append("")
         lines.append(
@@ -238,14 +263,19 @@ def fmt_trade_result(result):
         r_price = result.get("price", 0)
         r_product = result.get("product", "BTC")
         price_str = "$" + fmt_price(r_price, r_product)
+        order_type_u = str(result.get("type", "MARKET") or "MARKET").upper()
+        status_u = str(result.get("status", "") or "").lower()
+        is_limit_pending = order_type_u == "LIMIT" and status_u == "pending"
+        header = _loc("✅ *Limit order submitted*") if is_limit_pending else _loc("✅ *Trade Executed\\!*")
+        price_label = _loc_md("Limit price") if is_limit_pending else _loc_md("Fill price")
         lines = [
-            _loc("✅ *Trade Executed\\!*"),
+            header,
             escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             "",
             f"📌 *{_loc_md('Side')}:* {escape_md(result.get('side', '?'))}",
             f"🪙 *{_loc_md('Product')}:* {escape_md(result.get('product', '?'))}",
             f"📏 *{_loc_md('Size')}:* {escape_md(str(result.get('size', '?')))}",
-            f"💲 *{_loc_md('Fill price')}:* {escape_md(price_str)}",
+            f"💲 *{price_label}:* {escape_md(price_str)}",
             "",
             f"🌐 *{_loc_md('Network:')}* {escape_md(result.get('network', '?'))}",
         ]

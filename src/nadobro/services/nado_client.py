@@ -470,6 +470,62 @@ class NadoClient:
                         continue
         return None
 
+    def _extract_liquidation_price_sdk(self, p, balance_obj) -> float | None:
+        """Best-effort liquidation / est. liq price from SDK position objects."""
+        for obj in (p, balance_obj):
+            if obj is None:
+                continue
+            for attr in (
+                "liquidation_price_x18",
+                "liquidationPriceX18",
+                "liquidation_price",
+                "liquidationPrice",
+                "est_liquidation_price_x18",
+                "estLiquidationPriceX18",
+                "est_liquidation_price",
+                "estLiquidationPrice",
+                "liq_price_x18",
+                "liqPriceX18",
+                "liq_price",
+                "liqPrice",
+            ):
+                raw = getattr(obj, attr, None)
+                if raw is not None:
+                    try:
+                        v = float(self._from_x18_dynamic(raw))
+                        if v > 0:
+                            return v
+                    except Exception:
+                        continue
+        return None
+
+    def _extract_liquidation_price_rest(self, p: dict, balance_dict: dict | None) -> float | None:
+        for obj in (p, balance_dict or {}):
+            if not isinstance(obj, dict):
+                continue
+            for key in (
+                "liquidation_price_x18",
+                "liquidationPriceX18",
+                "liquidation_price",
+                "liquidationPrice",
+                "est_liquidation_price_x18",
+                "estLiquidationPriceX18",
+                "est_liquidation_price",
+                "estLiquidationPrice",
+                "liq_price_x18",
+                "liqPriceX18",
+                "liq_price",
+                "liqPrice",
+            ):
+                if obj.get(key) is not None:
+                    try:
+                        v = float(self._from_x18_dynamic(obj[key]))
+                        if v > 0:
+                            return v
+                    except Exception:
+                        continue
+        return None
+
     def _extract_positions_from_sdk_info(self, info) -> list:
         positions = []
         if not info:
@@ -570,6 +626,9 @@ class NadoClient:
                 upnl = self._extract_unrealized_pnl_sdk(p, balance_obj)
                 if upnl is not None:
                     pos["unrealized_pnl"] = upnl
+                liq = self._extract_liquidation_price_sdk(p, balance_obj)
+                if liq is not None:
+                    pos["liquidation_price"] = liq
                 positions.append(pos)
         return positions
 
@@ -675,6 +734,9 @@ class NadoClient:
                 upnl = self._extract_unrealized_pnl_rest(p, balance_dict)
                 if upnl is not None:
                     pos["unrealized_pnl"] = upnl
+                liq = self._extract_liquidation_price_rest(p, balance_dict)
+                if liq is not None:
+                    pos["liquidation_price"] = liq
                 positions.append(pos)
         return positions
 

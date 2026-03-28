@@ -18,6 +18,15 @@ class DynamicProductCatalogTests(unittest.TestCase):
         self.assertEqual(intent.get("product"), "XAG")
         self.assertEqual(intent.get("missing"), [])
 
+    def test_at_price_implies_limit_order(self):
+        with patch("src.nadobro.handlers.intent_parser.get_perp_products", return_value=["BTC", "SOL"]):
+            intent = parse_trade_intent("Long 2 SOL 5x at 83.0", network="mainnet")
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.get("order_type"), "limit")
+        self.assertAlmostEqual(intent.get("limit_price"), 83.0)
+        self.assertEqual(intent.get("size"), 2.0)
+        self.assertEqual(intent.get("missing"), [])
+
     def test_catalog_discovers_dynamic_products(self):
         fake_rows = [
             {"product_id": 2, "symbol": "BTC-PERP", "max_leverage": 40},

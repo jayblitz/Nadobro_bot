@@ -65,6 +65,19 @@ def parse_trade_intent(text: str, network: str = "mainnet", client=None) -> Opti
         except (TypeError, ValueError):
             limit_price = None
 
+    # "Long 2 SOL 5x at 83.0" — treat explicit "at <price>" as a limit order (not a market quote).
+    at_price_match = re.search(r"\bat\s+(\d+(?:\.\d+)?)\b", text_lower)
+    if at_price_match:
+        try:
+            at_px = float(at_price_match.group(1))
+            consumed.append(at_price_match.span(1))
+            if order_type == "market":
+                order_type = "limit"
+            if limit_price is None:
+                limit_price = at_px
+        except (TypeError, ValueError):
+            pass
+
     if lev_match:
         consumed.append(lev_match.span(1))
 
