@@ -290,7 +290,6 @@ def execute_market_order(
                     trade_id,
                     {
                         "order_digest": digest,
-                        "filled_at": datetime.utcnow().isoformat(),
                     },
                     network=network,
                 )

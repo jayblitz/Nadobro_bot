@@ -267,6 +267,8 @@ def get_trader_stats(trader_id: int) -> dict:
             if status == "failed":
                 stats["failed"] += 1
                 continue
+            if status != "filled":
+                continue
 
             stats["filled"] += 1
             try:
