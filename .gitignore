@@ -63,3 +63,4 @@ relay/*.session
 relay/*.session-journal
 relay/.relay_auth_token_generated
 relay/.fly-bootstrap.env
+.claude/
