@@ -161,8 +161,16 @@ def _detect_funding_shift(state: dict, client, product_id: int) -> dict:
             return {"shift": False, "rate_bp": 0.0}
         rate = float(fr_data.get("funding_rate", 0) or 0)
         rate_bp = rate * 10000.0
-        prev_rate_bp = float(state.get("rgrid_prev_funding_bp") or 0.0)
+        prev_rate_raw = state.get("rgrid_prev_funding_bp")
+        prev_rate_bp = float(prev_rate_raw) if prev_rate_raw is not None else None
         state["rgrid_prev_funding_bp"] = rate_bp
+        if prev_rate_bp is None:
+            return {
+                "shift": False,
+                "rate_bp": rate_bp,
+                "shift_bp": 0.0,
+                "direction": "long" if rate_bp < 0 else "short",
+            }
         shift_bp = abs(rate_bp - prev_rate_bp)
         return {
             "shift": shift_bp >= MOMENTUM_FUNDING_SHIFT_BP,
@@ -310,14 +318,19 @@ def _compute_grid_cycle_pnl_usd(positions: list, product_id: int) -> float:
     for p in positions:
         if int(p.get("product_id", -1)) != product_id:
             continue
-        for key in ("pnl", "unrealized_pnl", "realized_pnl", "net_pnl"):
+        # Avoid double counting when exchanges expose overlapping pnl fields.
+        selected = None
+        for key in ("net_pnl", "unrealized_pnl", "pnl", "realized_pnl"):
             v = p.get(key)
             if v is None:
                 continue
             try:
-                total += float(v)
+                selected = float(v)
+                break
             except (TypeError, ValueError):
                 continue
+        if selected is not None:
+            total += selected
     return total
 
 
@@ -374,6 +387,7 @@ def _rolling_vwap_recent_fraction(fills: list, fraction: float) -> float:
 
 def _reconcile_executed_quotes(
     state: dict,
+    network: str,
     open_orders: list,
     cancelled_digests: set[str],
 ) -> list[dict]:
@@ -383,14 +397,36 @@ def _reconcile_executed_quotes(
         state["mm_tracked_quotes"] = tracked
     active_digests = {str(o.get("digest")) for o in (open_orders or []) if o.get("digest")}
     executed: list[dict] = []
+    now_ts = time.time()
     for digest, meta in list(tracked.items()):
         if digest in active_digests:
             continue
         if digest in cancelled_digests:
             tracked.pop(digest, None)
             continue
-        executed.append(meta if isinstance(meta, dict) else {})
-        tracked.pop(digest, None)
+        filled = False
+        try:
+            from src.nadobro.services.nado_archive import query_order_by_digest
+            fill_data = query_order_by_digest(network, str(digest), 0.6, 0.2)
+            filled = bool(fill_data and fill_data.get("is_filled"))
+        except Exception:
+            filled = False
+
+        if filled:
+            executed.append(meta if isinstance(meta, dict) else {})
+            tracked.pop(digest, None)
+            continue
+
+        placed_ts = 0.0
+        if isinstance(meta, dict):
+            try:
+                placed_ts = float(meta.get("placed_ts") or 0.0)
+            except Exception:
+                placed_ts = 0.0
+        # If an order disappeared and remains unconfirmed for too long, drop the
+        # tracker entry so stale metadata does not accumulate forever.
+        if placed_ts > 0 and (now_ts - placed_ts) > 1800:
+            tracked.pop(digest, None)
     return executed
 
 
@@ -596,7 +632,7 @@ def run_cycle(
     inv_usd = abs(net_units) * mid
 
     cancelled_digests = set(str(d) for d in (state.get("mm_recently_cancelled_digests") or []))
-    executed_quotes = _reconcile_executed_quotes(state, open_orders, cancelled_digests)
+    executed_quotes = _reconcile_executed_quotes(state, network, open_orders, cancelled_digests)
     state["mm_recently_cancelled_digests"] = []
     if strategy == "rgrid" and executed_quotes:
         for q in executed_quotes:
@@ -945,6 +981,12 @@ def run_cycle(
 
     # Update cumulative PnL tracking
     cycle_pnl = float(result.get("pnl", 0) or 0)
+    if strategy == "rgrid":
+        current_grid_pnl = float(state.get("grid_last_cycle_pnl_usd") or 0.0)
+        previous_grid_pnl = float(state.get("grid_prev_cycle_pnl_usd") or 0.0)
+        cycle_pnl = current_grid_pnl - previous_grid_pnl
+        state["grid_prev_cycle_pnl_usd"] = current_grid_pnl
     state["mm_cumulative_pnl"] = mm_cumulative_pnl + cycle_pnl
+    result["cycle_pnl_usd"] = cycle_pnl
 
     return result
