@@ -42,6 +42,7 @@ STRATEGY_ERROR_ALERT_STREAK = 3
 _bot_app = None
 _runtime_loop: asyncio.AbstractEventLoop | None = None
 _tasks: dict[str, asyncio.Task] = {}
+_job_locks: dict[str, asyncio.Lock] = {}
 _process_worker_mode = False
 
 
@@ -726,55 +727,66 @@ async def _bot_loop(telegram_id: int, network: str):
 async def handle_strategy_job(payload: dict):
     telegram_id = int(payload.get("telegram_id"))
     network = str(payload.get("network"))
-    state = _load_state(telegram_id, network)
-    if not state.get("running"):
-        return
-    cycle_started = time.perf_counter()
-    try:
-        from src.nadobro.services.runtime_supervisor import (
-            is_multiprocess_enabled,
-            strategy_worker_group,
-            submit_cycle_job,
+    key = _task_key(telegram_id, network)
+    lock = _job_locks.setdefault(key, asyncio.Lock())
+    if lock.locked():
+        logger.warning(
+            "Skipping overlapping strategy cycle for user %s on %s",
+            telegram_id,
+            network,
         )
+        return
 
-        if is_multiprocess_enabled():
-            strategy = str(state.get("strategy") or "")
-            worker_group = strategy_worker_group(strategy)
-            state["worker_group"] = worker_group
-            state["last_dispatch_ts"] = time.time()
-            _save_state(telegram_id, network, state)
-            delegated = await submit_cycle_job(
-                {
-                    "telegram_id": telegram_id,
-                    "network": network,
-                    "strategy": strategy,
-                    "worker_group": worker_group,
-                }
+    cycle_started = time.perf_counter()
+    async with lock:
+        state = _load_state(telegram_id, network)
+        if not state.get("running"):
+            return
+        try:
+            from src.nadobro.services.runtime_supervisor import (
+                is_multiprocess_enabled,
+                strategy_worker_group,
+                submit_cycle_job,
             )
-            ok = bool(delegated.get("ok", True))
-            error_msg = delegated.get("error")
-            refreshed = _load_state(telegram_id, network)
-            refreshed["worker_group"] = worker_group
-            refreshed["worker_last_heartbeat"] = float(delegated.get("completed_at") or time.time())
-            refreshed["last_cycle_ms"] = float(delegated.get("elapsed_ms") or 0.0)
-            refreshed["last_cycle_result"] = "ok" if ok else "error"
-            refreshed["worker_pid"] = delegated.get("worker_pid")
-            _save_state(telegram_id, network, refreshed)
-        else:
-            ok, error_msg = await _run_cycle(telegram_id, network, state)
-        if ok:
-            refreshed = _load_state(telegram_id, network)
-            if refreshed.get("error_streak") or refreshed.get("last_error"):
-                refreshed["error_streak"] = 0
-                refreshed["last_error"] = None
+
+            if is_multiprocess_enabled():
+                strategy = str(state.get("strategy") or "")
+                worker_group = strategy_worker_group(strategy)
+                state["worker_group"] = worker_group
+                state["last_dispatch_ts"] = time.time()
+                _save_state(telegram_id, network, state)
+                delegated = await submit_cycle_job(
+                    {
+                        "telegram_id": telegram_id,
+                        "network": network,
+                        "strategy": strategy,
+                        "worker_group": worker_group,
+                    }
+                )
+                ok = bool(delegated.get("ok", True))
+                error_msg = delegated.get("error")
+                refreshed = _load_state(telegram_id, network)
+                refreshed["worker_group"] = worker_group
+                refreshed["worker_last_heartbeat"] = float(delegated.get("completed_at") or time.time())
+                refreshed["last_cycle_ms"] = float(delegated.get("elapsed_ms") or 0.0)
+                refreshed["last_cycle_result"] = "ok" if ok else "error"
+                refreshed["worker_pid"] = delegated.get("worker_pid")
                 _save_state(telegram_id, network, refreshed)
-        else:
-            await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
-    except Exception as e:
-        logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
-        await _mark_cycle_error(telegram_id, network, str(e))
-    finally:
-        record_metric("runtime.strategy_cycle.total", (time.perf_counter() - cycle_started) * 1000.0)
+            else:
+                ok, error_msg = await _run_cycle(telegram_id, network, state)
+            if ok:
+                refreshed = _load_state(telegram_id, network)
+                if refreshed.get("error_streak") or refreshed.get("last_error"):
+                    refreshed["error_streak"] = 0
+                    refreshed["last_error"] = None
+                    _save_state(telegram_id, network, refreshed)
+            else:
+                await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
+        except Exception as e:
+            logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
+            await _mark_cycle_error(telegram_id, network, str(e))
+        finally:
+            record_metric("runtime.strategy_cycle.total", (time.perf_counter() - cycle_started) * 1000.0)
 
 
 async def _mark_cycle_error(telegram_id: int, network: str, error_msg: str):

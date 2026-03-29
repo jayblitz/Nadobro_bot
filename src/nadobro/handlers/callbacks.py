@@ -1178,7 +1178,51 @@ async def _handle_strategy(query, data, context, telegram_id):
         raw_value = parts[4]
         if strategy_id not in supported:
             return
-        value = float(raw_value)
+        allowed_numeric_fields = {
+            "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
+            "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
+            "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
+            "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
+            "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
+            "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
+            "auto_close_on_maintenance", "is_long_bias",
+        }
+        if field not in allowed_numeric_fields:
+            return
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return
+        limits = {
+            "notional_usd": (1, 1000000),
+            "spread_bp": (0.1, 200),
+            "interval_seconds": (10, 3600),
+            "tp_pct": (0.05, 100),
+            "sl_pct": (0.05, 100),
+            "levels": (1, 20),
+            "min_range_pct": (0.1, 20),
+            "max_range_pct": (0.1, 40),
+            "threshold_bp": (1, 500),
+            "close_offset_bp": (1, 1000),
+            "cycle_notional_usd": (1, 1000000),
+            "session_notional_cap_usd": (0, 10000000),
+            "inventory_soft_limit_usd": (1, 1000000),
+            "quote_ttl_seconds": (5, 86400),
+            "min_spread_bp": (0.1, 200),
+            "max_spread_bp": (0.1, 500),
+            "vol_sensitivity": (0.0, 1.0),
+            "rgrid_spread_bp": (0.1, 200),
+            "rgrid_stop_loss_pct": (0.05, 100),
+            "rgrid_take_profit_pct": (0.05, 200),
+            "rgrid_reset_threshold_pct": (0.05, 20),
+            "rgrid_reset_timeout_seconds": (15, 86400),
+            "rgrid_discretion": (0.01, 0.5),
+            "auto_close_on_maintenance": (0, 1),
+            "is_long_bias": (0, 1),
+        }
+        lo, hi = limits[field]
+        if value < lo or value > hi:
+            return
         int_fields = {
             "interval_seconds", "levels", "max_open_orders",
             "auto_close_on_maintenance", "is_long_bias", "rgrid_reset_timeout_seconds",

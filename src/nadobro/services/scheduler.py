@@ -76,7 +76,11 @@ async def _build_alert_context() -> tuple[dict, dict]:
     if needs_funding and _check_client:
         for product in funding_products:
             try:
-                pid = get_product_id(product)
+                pid = get_product_id(
+                    product,
+                    network=getattr(_check_client, "network", "mainnet"),
+                    client=_check_client,
+                )
                 if pid is None:
                     continue
                 fr = await run_blocking(_check_client.get_funding_rate, pid)
@@ -303,18 +307,19 @@ async def sync_pending_fills():
                 await run_blocking(increment_fill_sync_attempts, sync_id)
 
                 fill_data = await run_blocking(
-                    query_order_by_digest, network, digest, 0.5, 0.3,
+                    query_order_by_digest, network, digest, 1.5, 0.5,
                 )
                 if not fill_data or not fill_data.get("is_filled"):
-                    # Check if order was cancelled (no fill, high attempts)
-                    if attempts >= 5:
+                    # Check if order was cancelled only after enough retries to avoid
+                    # misclassifying late archive indexing as cancellation.
+                    if attempts >= 8:
                         try:
                             from src.nadobro.services.user_service import get_user_nado_client
                             user_id = entry["user_id"]
                             product_id = entry["product_id"]
                             client = get_user_nado_client(int(user_id), network=network)
                             if client:
-                                open_orders = client.get_open_orders(product_id) or []
+                                open_orders = client.get_open_orders(product_id, refresh=True) or []
                                 digest_still_open = any(
                                     str(o.get("digest")) == digest for o in open_orders
                                 )

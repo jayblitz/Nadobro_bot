@@ -640,7 +640,9 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
                 otype = (o.get("order_type") or o.get("type") or "").lower()
                 if "take_profit" in otype or "stop_loss" in otype or "tp" in otype or "sl" in otype:
                     try:
-                        client.cancel_order(pid, o.get("order_digest") or o.get("id"))
+                        digest = o.get("digest") or o.get("order_digest") or o.get("id")
+                        if digest:
+                            client.cancel_order(pid, str(digest))
                     except Exception:
                         pass
     except Exception as e:
