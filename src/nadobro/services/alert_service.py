@@ -13,13 +13,14 @@ def _loc(text):
 
 
 def create_alert(telegram_id: int, product: str, condition: str, target_value: float) -> dict:
-    product_id = get_product_id(product)
-    if product_id is None:
-        return {"success": False, "error": _loc("Unknown product '{product}'.").format(product=product)}
-
     user = get_user(telegram_id)
     if not user:
         return {"success": False, "error": _loc("User not found.")}
+    network = user.network_mode.value
+
+    product_id = get_product_id(product, network=network)
+    if product_id is None:
+        return {"success": False, "error": _loc("Unknown product '{product}'.").format(product=product)}
 
     cond_map = {
         "above": AlertCondition.ABOVE.value,
@@ -33,11 +34,10 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
     if not alert_cond:
         return {"success": False, "error": _loc("Unknown condition '{condition}'.").format(condition=condition)}
 
-    network = user.network_mode.value
     alert_id = insert_alert({
         "user_id": telegram_id,
         "product_id": product_id,
-        "product_name": get_product_name(product_id),
+        "product_name": get_product_name(product_id, network=network),
         "condition": alert_cond,
         "target_value": target_value,
     }, network=network)
@@ -47,7 +47,7 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
     return {
         "success": True,
         "alert_id": alert_id,
-        "product": get_product_name(product_id),
+        "product": get_product_name(product_id, network=network),
         "condition": condition,
         "target": target_value,
     }

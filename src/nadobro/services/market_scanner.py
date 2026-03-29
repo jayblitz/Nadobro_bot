@@ -40,9 +40,13 @@ def _get_funding_rates(client, products: list[str]) -> dict[str, float]:
 
             pid = get_product_id(product, network=getattr(client, "network", "mainnet"), client=client)
             if pid is not None:
-                rate = client.get_funding_rate(pid)
-                if rate is not None:
-                    rates[product] = float(rate)
+                rate_data = client.get_funding_rate(pid)
+                if isinstance(rate_data, dict):
+                    value = rate_data.get("funding_rate")
+                else:
+                    value = rate_data
+                if value is not None:
+                    rates[product] = float(value)
         except Exception as e:
             logger.debug("Funding rate fetch failed for %s: %s", product, e)
     return rates

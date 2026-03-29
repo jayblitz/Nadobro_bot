@@ -284,6 +284,17 @@ def execute_market_order(
         digest = result.get("digest", "")
         fill_data = None
         update_data: dict = {}
+        if digest:
+            try:
+                update_trade(
+                    trade_id,
+                    {
+                        "order_digest": digest,
+                    },
+                    network=network,
+                )
+            except Exception:
+                pass
         try:
             fill_data = _resolve_fill_data(client, digest, network)
             if (not fill_data or not float(fill_data.get("fill_price") or 0)) and digest:
@@ -304,6 +315,11 @@ def execute_market_order(
                 _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
         except Exception as e:
             logger.error("Post-fill processing failed for trade %s: %s", trade_id, e)
+            if digest:
+                try:
+                    _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
+                except Exception:
+                    pass
     else:
         try:
             update_trade(trade_id, {

@@ -36,6 +36,7 @@ from src.nadobro.models.database import (
     close_copy_position,
     save_copy_snapshot,
     get_latest_copy_snapshot,
+    get_copy_trades_by_mirror,
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client
 from src.nadobro.services.trade_service import execute_market_order
@@ -231,6 +232,60 @@ def get_available_traders() -> list[dict]:
         }
         for t in traders
     ]
+
+
+def get_trader_stats(trader_id: int) -> dict:
+    """Aggregate display metrics for a copy trader across active mirrors.
+
+    This keeps callback handlers resilient even when richer analytics sources
+    are unavailable, and preserves the expected response shape.
+    """
+    mirrors = get_mirrors_for_trader(trader_id) or []
+    stats = {
+        "pnl_usd": 0.0,
+        "volume_usd": 0.0,
+        "win_rate": 0.0,
+        "total_trades": 0,
+        "filled": 0,
+        "failed": 0,
+    }
+    if not mirrors:
+        return stats
+
+    for mirror in mirrors:
+        mirror_id = int(mirror.get("id") or 0)
+        if mirror_id <= 0:
+            continue
+
+        # Mirror-level cumulative PnL is the most reliable value currently tracked.
+        stats["pnl_usd"] += float(mirror.get("cumulative_pnl") or 0.0)
+
+        trades = get_copy_trades_by_mirror(mirror_id, limit=500) or []
+        for t in trades:
+            status = str(t.get("status") or "").lower()
+            stats["total_trades"] += 1
+            if status == "failed":
+                stats["failed"] += 1
+                continue
+            if status != "filled":
+                continue
+
+            stats["filled"] += 1
+            try:
+                nado_sz = float(t.get("nado_size") or 0.0)
+                nado_px = float(t.get("nado_price") or 0.0)
+                hl_sz = float(t.get("hl_size") or 0.0)
+                hl_px = float(t.get("hl_price") or 0.0)
+                notional = abs(nado_sz * nado_px) if nado_sz and nado_px else abs(hl_sz * hl_px)
+                stats["volume_usd"] += float(notional or 0.0)
+            except Exception:
+                pass
+
+    # We currently don't persist per-trade realized PnL in copy_trades, so
+    # represent win-rate as execution success ratio for now.
+    if stats["total_trades"] > 0:
+        stats["win_rate"] = (stats["filled"] / stats["total_trades"]) * 100.0
+    return stats
 
 
 # ─── Position Monitoring Loop ─────────────────────────────────
@@ -587,7 +642,9 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
                 otype = (o.get("order_type") or o.get("type") or "").lower()
                 if "take_profit" in otype or "stop_loss" in otype or "tp" in otype or "sl" in otype:
                     try:
-                        client.cancel_order(pid, o.get("order_digest") or o.get("id"))
+                        digest = o.get("digest") or o.get("order_digest") or o.get("id")
+                        if digest:
+                            client.cancel_order(pid, str(digest))
                     except Exception:
                         pass
     except Exception as e:
