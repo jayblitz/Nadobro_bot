@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import os
+from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.nadobro.services.alert_service import get_triggered_alerts
 from src.nadobro.services.stop_loss_service import process_stop_losses
@@ -262,6 +263,98 @@ async def poll_lowiqpts_relay():
         logger.error("LOWIQPTS relay poll failed: %s", e)
 
 
+def _is_partial_fill(requested_size: float, fill_size: float, epsilon: float = 1e-12) -> bool:
+    if requested_size <= 0:
+        return False
+    if fill_size <= 0:
+        return False
+    return fill_size + epsilon < requested_size
+
+
+async def _notify_limit_order_filled_once(trade_row: dict, network: str):
+    global _bot_app
+    if not _bot_app or not trade_row:
+        return
+    try:
+        from src.nadobro.models.database import get_bot_state, set_bot_state
+
+        trade_id = int(trade_row.get("id"))
+        dedupe_key = f"limit_fill_notified:{network}:{trade_id}"
+        if get_bot_state(dedupe_key):
+            return
+
+        user_id = int(trade_row.get("user_id"))
+        side = str(trade_row.get("side") or "").upper()
+        product = str(trade_row.get("product_name") or "")
+        size = float(trade_row.get("size") or 0)
+        fill_price = float(trade_row.get("fill_price") or trade_row.get("price") or 0)
+
+        msg = (
+            "✅ Limit order filled\n\n"
+            "📋 Type: LIMIT\n"
+            f"📌 Side: {side or '?'}\n"
+            f"🪙 Product: {product or '?'}\n"
+            f"📏 Size: {size:.4f}\n"
+            f"💲 Fill price: ${fill_price:,.6f}\n"
+            "📶 Status: fully filled\n"
+            f"🌐 Network: {network}"
+        )
+        await _bot_app.bot.send_message(chat_id=user_id, text=msg)
+        set_bot_state(dedupe_key, {"notified_at": datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        logger.warning("Failed to send limit-fill notification: %s", e)
+
+
+def _infer_cancel_source(trade_row: dict) -> str:
+    source = str((trade_row or {}).get("source") or "").strip().lower()
+    # Best-effort: manual/chat-driven trades are usually user-originated.
+    if source in {"manual", "chat", "intent", "ui"}:
+        return "user_initiated"
+    return "system_detected"
+
+
+async def _notify_limit_order_cancelled_once(
+    trade_row: dict,
+    network: str,
+    cancel_source: str = "system_detected",
+):
+    global _bot_app
+    if not _bot_app or not trade_row:
+        return
+    try:
+        from src.nadobro.models.database import get_bot_state, set_bot_state
+
+        trade_id = int(trade_row.get("id"))
+        dedupe_key = f"limit_cancel_notified:{network}:{trade_id}"
+        if get_bot_state(dedupe_key):
+            return
+
+        user_id = int(trade_row.get("user_id"))
+        side = str(trade_row.get("side") or "").upper()
+        product = str(trade_row.get("product_name") or "")
+        size = float(trade_row.get("size") or 0)
+        limit_price = float(trade_row.get("price") or 0)
+
+        is_user = str(cancel_source or "").lower() == "user_initiated"
+        headline = "🟠 Limit order cancelled by user" if is_user else "⚙️ Limit order cancelled (system-detected)"
+        source_label = "user-initiated" if is_user else "system-detected"
+        msg = (
+            f"{headline}\n\n"
+            "📋 Type: LIMIT\n"
+            f"📌 Side: {side or '?'}\n"
+            f"🪙 Product: {product or '?'}\n"
+            f"📏 Size: {size:.4f}\n"
+            f"💲 Limit price: ${limit_price:,.6f}\n"
+            "📶 Status: cancelled\n"
+            f"🧭 Cancel source: {source_label}\n"
+            f"🌐 Network: {network}"
+        )
+        await _bot_app.bot.send_message(chat_id=user_id, text=msg)
+        set_bot_state(dedupe_key, {"notified_at": datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        logger.warning("Failed to send limit-cancel notification: %s", e)
+
+
 async def sync_pending_fills():
     """Background job: resolve pending fills via Nado archive API."""
     try:
@@ -269,6 +362,7 @@ async def sync_pending_fills():
             get_pending_fill_syncs, update_trade, resolve_fill_sync,
             expire_fill_sync, increment_fill_sync_attempts,
             increment_session_metrics,
+            get_trade_by_id,
         )
         from src.nadobro.services.nado_archive import query_order_by_digest
 
@@ -284,11 +378,12 @@ async def sync_pending_fills():
                 network = entry["network"]
                 digest = entry["order_digest"]
                 attempts = int(entry.get("attempts", 0))
+                trade_row = await run_blocking(get_trade_by_id, trade_id, network)
 
                 # Expire old entries
                 created = entry.get("created_at")
                 if created and attempts >= 10:
-                    from datetime import datetime as dt, timezone
+                    from datetime import datetime as dt
 
                     if isinstance(created, str):
                         # Keep explicit timezone offsets (including trailing Z -> UTC).
@@ -328,6 +423,13 @@ async def sync_pending_fills():
                                         update_trade, trade_id,
                                         {"status": "cancelled"}, network,
                                     )
+                                    refreshed_trade = await run_blocking(get_trade_by_id, trade_id, network)
+                                    trade_for_notify = refreshed_trade or trade_row
+                                    await _notify_limit_order_cancelled_once(
+                                        trade_for_notify,
+                                        network,
+                                        cancel_source=_infer_cancel_source(trade_for_notify or {}),
+                                    )
                                     await run_blocking(resolve_fill_sync, sync_id)
                                     resolved_count += 1
                                     continue
@@ -335,9 +437,13 @@ async def sync_pending_fills():
                             pass
                     continue
 
-                # Fill resolved — update trade
+                requested_size = abs(float((trade_row or {}).get("size") or 0))
+                filled_size = abs(float(fill_data.get("fill_size") or 0))
+                is_partial = _is_partial_fill(requested_size, filled_size)
+
+                # Fill resolved — update trade. Keep queue pending for partial fills.
                 update_data = {
-                    "status": "filled",
+                    "status": "partially_filled" if is_partial else "filled",
                     "fill_price": fill_data["fill_price"],
                     "price": fill_data["fill_price"],
                     "fill_size": fill_data.get("fill_size"),
@@ -356,14 +462,40 @@ async def sync_pending_fills():
                         pass
 
                 await run_blocking(update_trade, trade_id, update_data, network)
-                await run_blocking(resolve_fill_sync, sync_id)
-                resolved_count += 1
+                if is_partial:
+                    digest_still_open = True
+                    try:
+                        from src.nadobro.services.user_service import get_user_nado_client
+                        user_id = entry["user_id"]
+                        product_id = entry["product_id"]
+                        client = get_user_nado_client(int(user_id), network=network)
+                        if client:
+                            open_orders = client.get_open_orders(product_id, refresh=True) or []
+                            digest_still_open = any(str(o.get("digest")) == digest for o in open_orders)
+                    except Exception:
+                        digest_still_open = True
+                    if not digest_still_open:
+                        await run_blocking(resolve_fill_sync, sync_id)
+                        resolved_count += 1
+                    logger.info(
+                        "Fill sync partial trade #%s: filled=%.6f/%.6f price=%.6f",
+                        trade_id,
+                        filled_size,
+                        requested_size,
+                        fill_data["fill_price"],
+                    )
+                else:
+                    await run_blocking(resolve_fill_sync, sync_id)
+                    resolved_count += 1
+                    refreshed_trade = await run_blocking(get_trade_by_id, trade_id, network)
+                    await _notify_limit_order_filled_once(refreshed_trade or trade_row, network)
 
-                logger.info(
-                    "Fill sync resolved trade #%s: price=%.6f fee=%.6f pnl=%.6f",
-                    trade_id, fill_data["fill_price"],
-                    fill_data.get("fee", 0), fill_data.get("realized_pnl", 0),
-                )
+                if not is_partial:
+                    logger.info(
+                        "Fill sync resolved trade #%s: price=%.6f fee=%.6f pnl=%.6f",
+                        trade_id, fill_data["fill_price"],
+                        fill_data.get("fee", 0), fill_data.get("realized_pnl", 0),
+                    )
             except Exception as e:
                 logger.warning("Fill sync error for entry %s: %s", entry.get("id"), e)
                 continue
