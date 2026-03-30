@@ -361,6 +361,8 @@ async def _handle_nav(query, data, telegram_id, context=None):
 async def _handle_trade(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
     if not is_new_onboarding_complete(telegram_id):
         await _edit_loc(query,
             "⚠️ Complete setup first (language + accept terms).",
@@ -386,7 +388,7 @@ async def _handle_trade(query, data, telegram_id, context):
         await _edit_loc(query,
             "*{label}*\n\n{select_product}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=trade_product_kb(action),
+            reply_markup=trade_product_kb(action, network=network),
             label=escape_md(action_label),
             select_product=localize_text("Select a product:", get_active_language()),
         )
@@ -396,7 +398,7 @@ async def _handle_trade(query, data, telegram_id, context):
         await _edit_loc(query, 
             "*{label}*\n\n{select_product}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=trade_product_kb(action),
+            reply_markup=trade_product_kb(action, network=network),
             label=escape_md(action_label),
             select_product=localize_text("Select a product:", get_active_language()),
         )
@@ -404,7 +406,7 @@ async def _handle_trade(query, data, telegram_id, context):
         await _edit_loc(query, 
             "*Close Position*\n\nSelect the product to close:",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=close_product_kb(),
+            reply_markup=close_product_kb(network=network),
         )
     elif action == "close_all":
         await _edit_loc(query, 
@@ -669,8 +671,9 @@ async def _handle_portfolio(query, data, telegram_id):
         return
 
     # Default: portfolio overview
+    force_refresh_orders = action == "refresh"
     with timed_metric("cb.portfolio.view"):
-        msg, reply_markup = await run_blocking(build_portfolio_view, telegram_id)
+        msg, reply_markup = await run_blocking(build_portfolio_view, telegram_id, force_refresh_orders)
     try:
         await _edit_loc(query,
             msg,
@@ -907,6 +910,8 @@ async def _handle_points(query, data, telegram_id, context):
 async def _handle_alert(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
 
     if action == "menu":
         await _edit_loc(query, 
@@ -919,7 +924,7 @@ async def _handle_alert(query, data, telegram_id, context):
         await _edit_loc(query, 
             "🔔 *Set Alert*\n\nSelect a product:",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=alert_product_kb(),
+            reply_markup=alert_product_kb(network=network),
         )
 
     elif action == "product" and len(parts) >= 3:

@@ -1056,7 +1056,7 @@ def _record_close_in_db(
             insert_trade(close_trade_data, network=selected_network)
             logger.info(
                 "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f fee=%.4f",
-                side, get_product_name(product_id), close_size, close_price, close_fee,
+                side, get_product_name(product_id, network=selected_network), close_size, close_price, close_fee,
             )
     except Exception as e:
         logger.warning("Failed to record close in DB: %s", e)
@@ -1069,12 +1069,14 @@ def close_position(
     network: str | None = None,
     **kwargs,
 ) -> dict:
-    selected_network = str(network or "")
-    product_id = get_product_id(product, network=selected_network or "mainnet")
+    user = get_user(telegram_id)
+    active_network = user.network_mode.value if user else "mainnet"
+    selected_network = str(network or active_network)
+    product_id = get_product_id(product, network=selected_network)
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'."}
 
-    client = get_user_nado_client(telegram_id, network=selected_network or None)
+    client = get_user_nado_client(telegram_id, network=selected_network)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
     cancelled_orders, order_errors = _cancel_open_orders_for_product(client, product_id)
@@ -1086,7 +1088,7 @@ def close_position(
             return {
                 "success": True,
                 "cancelled": 0.0,
-                "product": get_product_name(product_id, network=selected_network or "mainnet"),
+                "product": get_product_name(product_id, network=selected_network),
                 "cancelled_orders": cancelled_orders,
                 "order_errors": order_errors if order_errors else None,
             }
@@ -1129,7 +1131,7 @@ def close_position(
             return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
         # Resolve actual fill data from Nado archive
         close_digest = r.get("digest", "")
-        close_fill_data = _resolve_fill_data(client, close_digest, selected_network or "mainnet") if close_digest else None
+        close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
         fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, product_id)
         _record_close_in_db(
             telegram_id,
@@ -1139,7 +1141,7 @@ def close_position(
             close_side,
             client,
             fill_price=fill_price,
-            network=selected_network or None,
+            network=selected_network,
             fill_data=close_fill_data,
         )
         remaining_size -= this_close_size
@@ -1163,7 +1165,7 @@ def close_position(
     payload = {
         "success": True,
         "cancelled": close_size,
-        "product": get_product_name(product_id, network=selected_network or "mainnet"),
+        "product": get_product_name(product_id, network=selected_network),
     }
     if cancelled_orders:
         payload["cancelled_orders"] = cancelled_orders
@@ -1173,16 +1175,18 @@ def close_position(
 
 
 def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) -> dict:
-    selected_network = str(network or "")
-    client = get_user_nado_client(telegram_id, network=selected_network or None)
+    user = get_user(telegram_id)
+    active_network = user.network_mode.value if user else "mainnet"
+    selected_network = str(network or active_network)
+    client = get_user_nado_client(telegram_id, network=selected_network)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
 
     cancelled_orders = 0
     order_errors = []
     # Always cancel stale open orders first so strategy stop leaves no resting orders.
-    for product_name in get_perp_products(network=selected_network or "mainnet", client=client):
-        pid = get_product_id(product_name, network=selected_network or "mainnet", client=client)
+    for product_name in get_perp_products(network=selected_network, client=client):
+        pid = get_product_id(product_name, network=selected_network, client=client)
         if pid is None:
             continue
         c_count, c_errors = _cancel_open_orders_for_product(client, pid)
@@ -1232,11 +1236,11 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
             )
             if r["success"]:
                 cancelled += pos_size
-                product_name = p.get("product_name", get_product_name(pid, network=selected_network or "mainnet"))
+                product_name = p.get("product_name", get_product_name(pid, network=selected_network))
                 products_closed.add(product_name)
                 close_side = "short" if signed_amount > 0 else "long"
                 close_digest = r.get("digest", "")
-                close_fill_data = _resolve_fill_data(client, close_digest, selected_network or "mainnet") if close_digest else None
+                close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
                 fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, pid)
                 _record_close_in_db(
                     telegram_id,
@@ -1246,12 +1250,12 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
                     close_side,
                     client,
                     fill_price=fill_price,
-                    network=selected_network or None,
+                    network=selected_network,
                     fill_data=close_fill_data,
                 )
             else:
                 errors.append(
-                    f"{p.get('product_name', get_product_name(pid, network=selected_network or 'mainnet'))}: "
+                    f"{p.get('product_name', get_product_name(pid, network=selected_network))}: "
                     f"{r.get('error', 'unknown')}"
                 )
         except Exception as e:
@@ -1278,11 +1282,11 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
         result["success"] = False
         result["error"] = (
             "Close-all verification failed: open positions remain on "
-            + ", ".join(get_product_name(pid, network=selected_network or "mainnet") for pid in post_positions.keys())
+            + ", ".join(get_product_name(pid, network=selected_network) for pid in post_positions.keys())
         )
     remaining_orders = 0
-    for product_name in get_perp_products(network=selected_network or "mainnet", client=client):
-        pid = get_product_id(product_name, network=selected_network or "mainnet", client=client)
+    for product_name in get_perp_products(network=selected_network, client=client):
+        pid = get_product_id(product_name, network=selected_network, client=client)
         if pid is None:
             continue
         try:
@@ -1321,7 +1325,7 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
     return result
 
 
-def get_open_limit_orders(telegram_id: int, refresh: bool = True) -> list[dict]:
+def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]:
     """
     Return currently open exchange orders for the active user/network, enriched
     with local trade metadata so the UI can display pending/partial states.
@@ -1352,39 +1356,36 @@ def get_open_limit_orders(telegram_id: int, refresh: bool = True) -> list[dict]:
         by_digest[digest] = t
 
     rows: list[dict] = []
-    for product_name in get_perp_products(network=network, client=client):
-        pid = get_product_id(product_name, network=network, client=client)
-        if pid is None:
-            continue
-        try:
-            open_orders = client.get_open_orders(pid, refresh=refresh) or []
-        except Exception:
-            continue
-        for order in open_orders:
-            digest = str(order.get("digest") or "").strip()
-            trade = by_digest.get(digest)
-            db_status = str((trade or {}).get("status") or "").lower()
-            status_label = "pending"
-            if db_status == TradeStatus.PARTIALLY_FILLED.value:
-                status_label = "partially filled"
-            order_type = str((trade or {}).get("order_type") or "LIMIT").upper()
-            created_at = (trade or {}).get("created_at") or ""
-            requested_size = float((trade or {}).get("size") or order.get("amount") or 0)
-            filled_size = float((trade or {}).get("fill_size") or 0)
-            rows.append(
-                {
-                    "digest": digest,
-                    "type": order_type,
-                    "side": str(order.get("side") or (trade or {}).get("side") or "").upper(),
-                    "product": str(order.get("product_name") or (trade or {}).get("product_name") or ""),
-                    "size": float(order.get("amount") or 0),
-                    "limit_price": float(order.get("price") or 0),
-                    "created_at": _trade_ts_display(created_at),
-                    "status": status_label,
-                    "requested_size": requested_size,
-                    "filled_size": max(0.0, filled_size),
-                }
-            )
+    try:
+        all_open_orders = client.get_all_open_orders(refresh=refresh) or []
+    except Exception:
+        all_open_orders = []
+
+    for order in all_open_orders:
+        digest = str(order.get("digest") or "").strip()
+        trade = by_digest.get(digest)
+        db_status = str((trade or {}).get("status") or "").lower()
+        status_label = "pending"
+        if db_status == TradeStatus.PARTIALLY_FILLED.value:
+            status_label = "partially filled"
+        order_type = str((trade or {}).get("order_type") or "LIMIT").upper()
+        created_at = (trade or {}).get("created_at") or ""
+        requested_size = float((trade or {}).get("size") or order.get("amount") or 0)
+        filled_size = float((trade or {}).get("fill_size") or 0)
+        rows.append(
+            {
+                "digest": digest,
+                "type": order_type,
+                "side": str(order.get("side") or (trade or {}).get("side") or "").upper(),
+                "product": str(order.get("product_name") or (trade or {}).get("product_name") or ""),
+                "size": float(order.get("amount") or 0),
+                "limit_price": float(order.get("price") or 0),
+                "created_at": _trade_ts_display(created_at),
+                "status": status_label,
+                "requested_size": requested_size,
+                "filled_size": max(0.0, filled_size),
+            }
+        )
 
     rows.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
     return rows

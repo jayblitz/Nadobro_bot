@@ -1657,7 +1657,7 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
         await _reply_loc(update.message, 
             "*Close Position*\n\nSelect the product to close:",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=close_product_kb(),
+            reply_markup=close_product_kb(network=network),
         )
         return True
 

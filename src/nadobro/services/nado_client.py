@@ -379,6 +379,41 @@ class NadoClient:
         _open_orders_cache[cache_key] = {"data": [], "ts": time.time()}
         return []
 
+    def get_all_open_orders(self, refresh: bool = False) -> list[dict]:
+        """
+        Fetch open orders for all perp products concurrently.
+
+        This avoids serial per-product REST calls on Portfolio refresh paths.
+        """
+        product_pairs = []
+        for name in get_perp_products(network=self.network, client=self):
+            pid = get_product_id(name, network=self.network, client=self)
+            if pid is not None:
+                product_pairs.append((name, int(pid)))
+
+        if not product_pairs:
+            return []
+
+        rows: list[dict] = []
+        max_workers = max(1, min(len(product_pairs), _FANOUT_WORKERS))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self.get_open_orders, pid, refresh): (name, pid)
+                for name, pid in product_pairs
+            }
+            for fut in as_completed(futures):
+                _name, pid = futures[fut]
+                try:
+                    for order in fut.result() or []:
+                        normalized = dict(order)
+                        normalized["product_id"] = int(normalized.get("product_id") or pid)
+                        if not normalized.get("product_name"):
+                            normalized["product_name"] = get_product_name(pid, network=self.network, client=self)
+                        rows.append(normalized)
+                except Exception:
+                    continue
+        return rows
+
     @staticmethod
     def _from_x18_dynamic(value) -> float:
         if value is None:
@@ -1525,6 +1560,123 @@ class NadoClient:
     def get_funding_rate(self, product_id: int) -> Optional[dict]:
         rates = self.get_all_funding_rates()
         return rates.get(product_id)
+
+    def get_product_market_stats(self, product_id: int) -> dict:
+        """
+        Best-effort market stats for a product from Nado gateway payloads.
+
+        Fields are optional because API payload keys can differ by environment.
+        """
+        stats = {
+            "product_id": int(product_id),
+            "product_name": get_product_name(int(product_id), network=self.network, client=self),
+            "bid": 0.0,
+            "ask": 0.0,
+            "mid": 0.0,
+            "spread": 0.0,
+            "spread_bps": 0.0,
+            "funding_rate": None,
+            "volume_24h_usd": None,
+            "open_interest": None,
+            "change_24h_pct": None,
+            "high_24h": None,
+            "low_24h": None,
+            "mark_price": None,
+            "index_price": None,
+        }
+
+        try:
+            px = self.get_market_price(int(product_id)) or {}
+            bid = float(px.get("bid") or 0)
+            ask = float(px.get("ask") or 0)
+            mid = float(px.get("mid") or 0)
+            spread = (ask - bid) if (ask > 0 and bid > 0) else 0.0
+            spread_bps = (spread / mid * 10000.0) if mid > 0 else 0.0
+            stats.update(
+                {
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": mid,
+                    "spread": spread,
+                    "spread_bps": spread_bps,
+                }
+            )
+        except Exception:
+            pass
+
+        try:
+            fr = self.get_funding_rate(int(product_id)) or {}
+            if isinstance(fr, dict) and fr.get("funding_rate") is not None:
+                stats["funding_rate"] = float(fr.get("funding_rate") or 0)
+        except Exception:
+            pass
+
+        try:
+            data = self._query_rest("all_products") or {}
+            if data.get("status") != "success":
+                return stats
+            rows = ((data.get("data") or {}).get("perp_products") or [])
+            if not isinstance(rows, list):
+                return stats
+            row = None
+            for candidate in rows:
+                try:
+                    if int(candidate.get("product_id")) == int(product_id):
+                        row = candidate
+                        break
+                except Exception:
+                    continue
+            if not isinstance(row, dict):
+                return stats
+
+            book = row.get("book_info") or {}
+
+            def _pick(*keys):
+                for key in keys:
+                    if key in row and row.get(key) is not None:
+                        return row.get(key)
+                    if key in book and book.get(key) is not None:
+                        return book.get(key)
+                return None
+
+            volume_raw = _pick(
+                "volume_24h",
+                "quote_volume_24h",
+                "notional_volume_24h",
+                "turnover_24h",
+                "total_volume_24h",
+                "volume24h",
+            )
+            oi_raw = _pick("open_interest", "open_interest_x18", "oi", "oi_x18")
+            change_raw = _pick(
+                "change_24h_pct",
+                "price_change_24h_pct",
+                "percent_change_24h",
+                "change24h",
+            )
+            high_raw = _pick("high_24h", "price_high_24h")
+            low_raw = _pick("low_24h", "price_low_24h")
+            mark_raw = _pick("mark_price", "mark_price_x18")
+            index_raw = _pick("index_price", "index_price_x18", "oracle_price", "oracle_price_x18")
+
+            if volume_raw is not None:
+                stats["volume_24h_usd"] = float(self._from_x18_dynamic(volume_raw))
+            if oi_raw is not None:
+                stats["open_interest"] = float(self._from_x18_dynamic(oi_raw))
+            if change_raw is not None:
+                stats["change_24h_pct"] = float(self._from_x18_dynamic(change_raw))
+            if high_raw is not None:
+                stats["high_24h"] = float(self._from_x18_dynamic(high_raw))
+            if low_raw is not None:
+                stats["low_24h"] = float(self._from_x18_dynamic(low_raw))
+            if mark_raw is not None:
+                stats["mark_price"] = float(self._from_x18_dynamic(mark_raw))
+            if index_raw is not None:
+                stats["index_price"] = float(self._from_x18_dynamic(index_raw))
+        except Exception as e:
+            logger.debug("get_product_market_stats all_products lookup failed for %s: %s", product_id, e)
+
+        return stats
 
     def get_all_products_info(self) -> dict:
         cache_key = f"{self.network}:products"

@@ -1,4 +1,5 @@
 import logging
+import time
 
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
@@ -79,7 +80,9 @@ async def build_home_card_text_async(telegram_id: int) -> str:
 
 
 def build_positions_view(telegram_id: int):
-    client = get_user_readonly_client(telegram_id)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    client = get_user_readonly_client(telegram_id, network=network)
     if not client:
         return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
     try:
@@ -98,12 +101,17 @@ def build_positions_view(telegram_id: int):
     return fmt_positions(positions, prices), positions_kb(positions or [])
 
 
-def build_portfolio_view(telegram_id: int):
-    client = get_user_readonly_client(telegram_id)
+def build_portfolio_view(telegram_id: int, force_refresh_orders: bool = False):
+    started = time.perf_counter()
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    client = get_user_readonly_client(telegram_id, network=network)
     if not client:
         return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
     try:
+        t_positions = time.perf_counter()
         positions = client.get_all_positions() or []
+        t_positions = time.perf_counter() - t_positions
     except Exception as e:
         logger.warning("portfolio_positions_failed user=%s err=%s", telegram_id, e)
         return localize_text(
@@ -112,21 +120,42 @@ def build_portfolio_view(telegram_id: int):
         ), home_card_kb()
     prices = None
     try:
+        t_prices = time.perf_counter()
         prices = client.get_all_market_prices()
+        t_prices = time.perf_counter() - t_prices
     except Exception as e:
         logger.debug("portfolio_prices_failed user=%s err=%s", telegram_id, e)
+        t_prices = 0.0
     try:
+        t_stats = time.perf_counter()
         stats = get_trade_analytics(telegram_id)
+        t_stats = time.perf_counter() - t_stats
     except Exception as e:
         logger.warning("portfolio_stats_failed user=%s err=%s", telegram_id, e)
         stats = {}
+        t_stats = 0.0
     try:
-        # Force refresh so explicit "Refresh" reflects current exchange open orders.
-        open_orders = get_open_limit_orders(telegram_id, refresh=True)
+        t_orders = time.perf_counter()
+        open_orders = get_open_limit_orders(telegram_id, refresh=force_refresh_orders)
+        t_orders = time.perf_counter() - t_orders
     except Exception as e:
         logger.warning("portfolio_open_orders_failed user=%s err=%s", telegram_id, e)
         open_orders = []
+        t_orders = 0.0
     msg = fmt_portfolio(stats, positions, prices, open_orders=open_orders)
+    elapsed = time.perf_counter() - started
+    if elapsed >= 1.2:
+        logger.info(
+            "portfolio_view_slow user=%s mode=%s refresh=%s total=%.3fs positions=%.3fs prices=%.3fs stats=%.3fs orders=%.3fs",
+            telegram_id,
+            network,
+            force_refresh_orders,
+            elapsed,
+            t_positions if "t_positions" in locals() else 0.0,
+            t_prices,
+            t_stats,
+            t_orders,
+        )
     return msg, portfolio_kb(has_positions=bool(positions))
 
 
