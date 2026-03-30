@@ -6,6 +6,9 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 XAI_API_KEY = os.environ.get("XAI_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
+PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
+PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "nadobro")
+X_API_BEARER_TOKEN = os.environ.get("X_API_BEARER_TOKEN")
 ADMIN_USER_IDS = [int(uid.strip()) for uid in os.environ.get("ADMIN_USER_IDS", "").split(",") if uid.strip()]
 
 NADO_TESTNET_REST = "https://gateway.test.nado.xyz/v1"

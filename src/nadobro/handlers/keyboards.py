@@ -777,10 +777,21 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", availabl
     if strategy_id == "dn":
         products = ["BTC", "ETH"]
     else:
-        products = [p.upper() for p in (available_products or _perp_products()[:3] or ["BTC", "ETH", "SOL"])]
+        products = [p.upper() for p in (available_products or _perp_products() or ["BTC", "ETH", "SOL"])]
+    if not products:
+        products = ["BTC", "ETH", "SOL"]
+    selected = str(selected_product or products[0]).upper()
+    if selected not in products:
+        selected = products[0]
+    featured = list(products[:3])
+    if selected not in featured:
+        featured = [selected] + featured[:2]
     pair_buttons = [
-        InlineKeyboardButton(product, callback_data=f"strategy:pair:{strategy_id}:{product}")
-        for product in products[:3]
+        InlineKeyboardButton(
+            f"{'✅ ' if product == selected else ''}{product}",
+            callback_data=f"strategy:pair:{strategy_id}:{product}",
+        )
+        for product in featured[:3]
     ]
     rows = [
         [
@@ -795,8 +806,8 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", availabl
         ],
         [
             InlineKeyboardButton(
-                f"🚀 Launch {selected_product.upper()}",
-                callback_data=f"strategy:start:{strategy_id}:{selected_product.upper()}",
+                f"🚀 Launch {selected}",
+                callback_data=f"strategy:start:{strategy_id}:{selected}",
             ),
         ],
         [
@@ -807,12 +818,57 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", availabl
             InlineKeyboardButton("🛑 Stop Runtime", callback_data="strategy:stop"),
         ],
     ]
+    if strategy_id != "dn":
+        rows.insert(3, [InlineKeyboardButton("🎛️ Custom Asset", callback_data=f"strategy:custom:{strategy_id}:0")])
     if strategy_id == "vol":
         rows.append([InlineKeyboardButton("🏆 Points Impact", callback_data="points:view")])
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
         InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
     ])
+    return InlineKeyboardMarkup(rows)
+
+
+def strategy_product_picker_kb(
+    strategy_id: str,
+    selected_product: str = "BTC",
+    available_products: list[str] | None = None,
+    page: int = 0,
+):
+    products = [p.upper() for p in (available_products or _perp_products() or ["BTC", "ETH", "SOL"])]
+    if not products:
+        products = ["BTC", "ETH", "SOL"]
+    selected = str(selected_product or products[0]).upper()
+    if selected not in products:
+        selected = products[0]
+
+    per_page = 12
+    max_page = max(0, (len(products) - 1) // per_page)
+    page = max(0, min(int(page or 0), max_page))
+    start = page * per_page
+    chunk = products[start:start + per_page]
+
+    rows = []
+    row = []
+    for product in chunk:
+        label = f"✅ {product}" if product == selected else product
+        row.append(InlineKeyboardButton(label, callback_data=f"strategy:pair:{strategy_id}:{product}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀ Prev", callback_data=f"strategy:custom:{strategy_id}:{page - 1}"))
+    if page < max_page:
+        nav_row.append(InlineKeyboardButton("Next ▶", callback_data=f"strategy:custom:{strategy_id}:{page + 1}"))
+    if nav_row:
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("◀ Back", callback_data=f"strategy:preview:{strategy_id}")])
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
 
 

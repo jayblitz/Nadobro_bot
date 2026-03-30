@@ -21,7 +21,7 @@ from src.nadobro.services.crypto import encrypt_with_server_key
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id, get_product_max_leverage, get_perp_products
 from src.nadobro.handlers.formatters import (
-    escape_md, fmt_positions, fmt_trade_preview, fmt_strategy_update,
+    escape_md, format_ai_response, fmt_positions, fmt_trade_preview, fmt_strategy_update,
     fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, build_trade_preview_text,
 )
 from src.nadobro.handlers.keyboards import (
@@ -1566,15 +1566,15 @@ async def _handle_nado_question(update, context, question):
                     draft_ok = False
 
         if full_text.strip():
-            await _reply_loc(update.message, 
-                f"🧠 *Ask NadoBro*\n\n{escape_md(full_text)}",
+            await _reply_loc(update.message,
+                f"🧠 *Ask NadoBro*\n\n{format_ai_response(full_text)}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
                 ]),
             )
         else:
-            await _reply_loc(update.message, 
+            await _reply_loc(update.message,
                 "⚠️ I couldn't generate an answer\\. Please try again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([
@@ -1585,8 +1585,8 @@ async def _handle_nado_question(update, context, question):
         logger.error(f"Nado Q&A error: {e}", exc_info=True)
         if full_text.strip():
             try:
-                await _reply_loc(update.message, 
-                    f"🧠 *Ask NadoBro*\n\n{escape_md(full_text)}",
+                await _reply_loc(update.message,
+                    f"🧠 *Ask NadoBro*\n\n{format_ai_response(full_text)}",
                     parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
