@@ -18,7 +18,7 @@ from src.nadobro.handlers.keyboards import (
     trade_confirm_kb, positions_kb, wallet_kb, wallet_kb_not_linked, wallet_revoke_confirm_kb, alerts_kb,
     alert_product_kb, alert_condition_kb, alert_delete_kb, settings_kb, settings_leverage_kb,
     settings_slippage_kb, settings_language_kb, close_product_kb, confirm_close_all_kb, back_kb,
-    risk_profile_kb, strategy_hub_kb, strategy_action_kb,
+    risk_profile_kb, strategy_hub_kb, strategy_action_kb, strategy_product_picker_kb,
     onboarding_language_kb,
     points_scope_kb,
     mode_kb,     home_card_kb, status_kb, portfolio_kb, portfolio_history_kb, portfolio_analytics_kb,
@@ -1135,14 +1135,44 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        available_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network)[:3] or ("BTC", "ETH", "SOL"))
-        selected_product = context.user_data.get(f"strategy_pair:{strategy_id}", available_pairs[0])
+        available_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+        selected_product = str(context.user_data.get(f"strategy_pair:{strategy_id}", available_pairs[0]) or available_pairs[0]).upper()
+        if selected_product not in available_pairs:
+            selected_product = available_pairs[0]
+            context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
         with timed_metric("cb.strategy.preview"):
             preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
         await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_action_kb(strategy_id, selected_product, list(available_pairs)),
+        )
+    elif action == "custom" and len(parts) >= 4:
+        strategy_id = parts[2]
+        if strategy_id not in supported:
+            return
+        if strategy_id == "dn":
+            return
+        try:
+            page = int(parts[3])
+        except (TypeError, ValueError):
+            page = 0
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        available_pairs = tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+        selected_product = str(context.user_data.get(f"strategy_pair:{strategy_id}", available_pairs[0]) or available_pairs[0]).upper()
+        if selected_product not in available_pairs:
+            selected_product = available_pairs[0]
+        await _edit_loc(
+            query,
+            f"🎯 *Select Asset for {escape_md(strategy_id.upper())}*",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=strategy_product_picker_kb(
+                strategy_id=strategy_id,
+                selected_product=selected_product,
+                available_products=list(available_pairs),
+                page=page,
+            ),
         )
     elif action == "pair" and len(parts) >= 4:
         strategy_id = parts[2]
@@ -1151,7 +1181,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        allowed_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network)[:3] or ("BTC", "ETH", "SOL"))
+        allowed_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
         if selected_product not in allowed_pairs:
             return
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
@@ -1333,8 +1363,20 @@ async def _handle_strategy(query, data, context, telegram_id):
         )
     elif action == "start" and len(parts) >= 4:
         strategy_id = parts[2]
-        product = parts[3]
+        product = str(parts[3] or "").upper()
         if strategy_id not in supported:
+            return
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        available_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+        allowed_pairs = set(available_pairs)
+        if product not in allowed_pairs:
+            await _edit_loc(
+                query,
+                f"⚠️ {escape_md(product)} is not currently available on {escape_md(network)}\\.\nPlease pick another asset\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=strategy_action_kb(strategy_id, available_pairs[0], list(available_pairs)),
+            )
             return
         if not is_new_onboarding_complete(telegram_id):
             await _edit_loc(query, 
