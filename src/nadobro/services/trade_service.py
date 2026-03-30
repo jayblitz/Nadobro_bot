@@ -1321,6 +1321,75 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
     return result
 
 
+def get_open_limit_orders(telegram_id: int, refresh: bool = True) -> list[dict]:
+    """
+    Return currently open exchange orders for the active user/network, enriched
+    with local trade metadata so the UI can display pending/partial states.
+    """
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    client = get_user_readonly_client(telegram_id, network=network)
+    if not client:
+        return []
+
+    try:
+        trades = get_trades_by_user(telegram_id, limit=500, network=network) or []
+    except Exception:
+        trades = []
+
+    pending_like = {
+        TradeStatus.PENDING.value,
+        TradeStatus.PARTIALLY_FILLED.value,
+    }
+    by_digest: dict[str, dict] = {}
+    for t in trades:
+        digest = str(t.get("order_digest") or "").strip()
+        if not digest:
+            continue
+        status = str(t.get("status") or "").lower()
+        if status not in pending_like:
+            continue
+        by_digest[digest] = t
+
+    rows: list[dict] = []
+    for product_name in get_perp_products(network=network, client=client):
+        pid = get_product_id(product_name, network=network, client=client)
+        if pid is None:
+            continue
+        try:
+            open_orders = client.get_open_orders(pid, refresh=refresh) or []
+        except Exception:
+            continue
+        for order in open_orders:
+            digest = str(order.get("digest") or "").strip()
+            trade = by_digest.get(digest)
+            db_status = str((trade or {}).get("status") or "").lower()
+            status_label = "pending"
+            if db_status == TradeStatus.PARTIALLY_FILLED.value:
+                status_label = "partially filled"
+            order_type = str((trade or {}).get("order_type") or "LIMIT").upper()
+            created_at = (trade or {}).get("created_at") or ""
+            requested_size = float((trade or {}).get("size") or order.get("amount") or 0)
+            filled_size = float((trade or {}).get("fill_size") or 0)
+            rows.append(
+                {
+                    "digest": digest,
+                    "type": order_type,
+                    "side": str(order.get("side") or (trade or {}).get("side") or "").upper(),
+                    "product": str(order.get("product_name") or (trade or {}).get("product_name") or ""),
+                    "size": float(order.get("amount") or 0),
+                    "limit_price": float(order.get("price") or 0),
+                    "created_at": _trade_ts_display(created_at),
+                    "status": status_label,
+                    "requested_size": requested_size,
+                    "filled_size": max(0.0, filled_size),
+                }
+            )
+
+    rows.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+    return rows
+
+
 def get_trade_analytics(telegram_id: int) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"

@@ -26,7 +26,7 @@ from src.nadobro.handlers.keyboards import (
     portfolio_kb,
     persistent_menu_kb,
 )
-from src.nadobro.services.trade_service import get_trade_analytics
+from src.nadobro.services.trade_service import get_trade_analytics, get_open_limit_orders
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
 from src.nadobro.services.points_service import get_points_dashboard
@@ -120,7 +120,13 @@ def build_portfolio_view(telegram_id: int):
     except Exception as e:
         logger.warning("portfolio_stats_failed user=%s err=%s", telegram_id, e)
         stats = {}
-    msg = fmt_portfolio(stats, positions, prices)
+    try:
+        # Force refresh so explicit "Refresh" reflects current exchange open orders.
+        open_orders = get_open_limit_orders(telegram_id, refresh=True)
+    except Exception as e:
+        logger.warning("portfolio_open_orders_failed user=%s err=%s", telegram_id, e)
+        open_orders = []
+    msg = fmt_portfolio(stats, positions, prices, open_orders=open_orders)
     return msg, portfolio_kb(has_positions=bool(positions))
 
 

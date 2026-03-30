@@ -11,7 +11,6 @@ from telegram.error import BadRequest
 
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.handlers.keyboards import points_followup_options_kb, points_scope_kb
-from src.nadobro.handlers.points_mascot import mascot_caption_for_cost, mascot_path_for_cost
 from src.nadobro.services.lowiq_relay_client import (
     close_session as relay_close_session,
     poll_events as relay_poll_events,
@@ -507,21 +506,6 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     session_id = str(req.get("relay_session_id", "")).strip()
     if session_id:
         await relay_close_session(session_id=session_id, reason="completed")
-
-    if bool(payload.get("no_activity")):
-        return
-
-    mascot_path = mascot_path_for_cost(float(payload.get("cost_per_point", 0) or 0))
-    if mascot_path:
-        try:
-            with open(mascot_path, "rb") as img:
-                await bot_app.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=img,
-                    caption=mascot_caption_for_cost(float(payload.get("cost_per_point", 0) or 0)),
-                )
-        except Exception:
-            logger.warning("Failed to send points mascot image", exc_info=True)
 
 
 async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: int) -> dict:

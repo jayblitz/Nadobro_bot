@@ -626,8 +626,9 @@ def _compute_exchange_stats(positions, prices):
     return unrealized_pnl, position_value
 
 
-def fmt_portfolio(stats, positions, prices=None):
+def fmt_portfolio(stats, positions, prices=None, open_orders=None):
     total_trades = int(stats.get("total_trades", 0) or 0)
+    open_orders = open_orders or []
 
     unrealized_pnl, position_value = _compute_exchange_stats(positions, prices)
 
@@ -639,6 +640,7 @@ def fmt_portfolio(stats, positions, prices=None):
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
         f"📌 *{_loc('Open Positions:')}* {escape_md(str(len(positions or [])))}",
+        f"📬 *{_loc('Open Orders:')}* {escape_md(str(len(open_orders)))}",
         f"💎 *{_loc('Position Value:')}* {escape_md(f'${position_value:,.2f}')}",
         f"{upnl_emoji} *{_loc('Unrealized PnL:')}* {escape_md(upnl_str)}",
     ]
@@ -656,6 +658,34 @@ def fmt_portfolio(stats, positions, prices=None):
             f"{rpnl_emoji} *{_loc('Realized PnL:')}* {escape_md(rpnl_str)}",
             f"🏆 *{_loc('Win Rate:')}* {escape_md(f'{win_rate:.1f}%')} \\| {_loc('Trades:')} {escape_md(str(total_trades))}",
         ])
+
+    lines.extend(["", f"*{_loc('Open Orders')}*"])
+    if not open_orders:
+        lines.append(_loc("No open orders right now\\."))
+    else:
+        for order in open_orders[:5]:
+            o_type = str(order.get("type") or "LIMIT").upper()
+            side = str(order.get("side") or "?").upper()
+            product = str(order.get("product") or "?")
+            size = float(order.get("size") or 0)
+            limit_price = float(order.get("limit_price") or 0)
+            created = str(order.get("created_at") or "")[:16]
+            status = str(order.get("status") or "pending")
+            filled_size = float(order.get("filled_size") or 0)
+            requested_size = float(order.get("requested_size") or size)
+            limit_price_str = f"${fmt_price(limit_price, product.replace('-PERP', ''))}"
+            fill_progress = ""
+            if requested_size > 0 and filled_size > 0:
+                fill_progress = f" \\| {_loc('Filled')}: {escape_md(f'{filled_size:.4f}/{requested_size:.4f}')}"
+            lines.append(
+                f"• {escape_md(o_type)} \\| {escape_md(side)} \\| {escape_md(product)} \\| "
+                f"{_loc('Size')}: {escape_md(f'{size:.4f}')} \\| {_loc('Limit')}: {escape_md(limit_price_str)}"
+            )
+            lines.append(
+                f"  {_loc('Status')}: *{escape_md(status)}*{fill_progress} \\| {_loc('Created')}: {escape_md(created if created else '—')}"
+            )
+        if len(open_orders) > 5:
+            lines.append(f"• \\.\\.\\. {_loc('and')} {escape_md(str(len(open_orders) - 5))} {_loc('more')}")
 
     if not positions:
         lines.append("")

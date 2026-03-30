@@ -168,6 +168,11 @@ def get_trades_by_user(telegram_id: int, limit: int = 50, network: str = "mainne
     )
 
 
+def get_trade_by_id(trade_id: int, network: str = "mainnet") -> Optional[dict]:
+    table = _trades_table(network)
+    return query_one(f"SELECT * FROM {table} WHERE id = %s LIMIT 1", (trade_id,))
+
+
 _ALERT_INSERT_ALLOWED_COLS = frozenset({
     "user_id", "product_id", "product_name", "condition",
     "target_value", "is_active", "created_at",
