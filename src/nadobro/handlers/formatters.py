@@ -1,8 +1,11 @@
 import re
 import time
+import logging
 from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
 from src.nadobro.i18n import get_active_language, localize_text
+
+logger = logging.getLogger(__name__)
 
 
 def _loc(text):
@@ -20,6 +23,128 @@ def escape_md(text):
     text = text.replace('\\', '\\\\')
     special = r'_*[]()~`>#+-=|{}.!'
     return re.sub(r'([' + re.escape(special) + r'])', r'\\\1', text)
+
+
+def format_ai_response(text: str) -> str:
+    """Convert LLM markdown output to Telegram MarkdownV2.
+
+    Preserves bold, bullet points, numbered lists, and emojis while
+    escaping everything else for safe Telegram rendering.  Falls back
+    to full ``escape_md`` on any error.
+    """
+    if not text:
+        return ""
+    try:
+        return _md_to_tg_md2(text)
+    except Exception:
+        logger.warning("format_ai_response fallback to escape_md", exc_info=True)
+        return escape_md(text)
+
+
+# ── Telegram MarkdownV2 converter ────────────────────────────────────
+
+# Characters that Telegram requires escaped outside of formatting spans.
+_TG_SPECIAL = set(r'_[]()~`>#+-=|{}.!')
+
+def _escape_tg(s: str) -> str:
+    """Escape for MarkdownV2 but leave already-escaped chars alone."""
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == '\\' and i + 1 < len(s):
+            # already escaped – pass through
+            out.append(ch)
+            out.append(s[i + 1])
+            i += 2
+            continue
+        if ch in _TG_SPECIAL:
+            out.append('\\')
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _escape_and_convert_inline(raw: str) -> str:
+    """Process inline markdown on a RAW (unescaped) string.
+
+    Finds **bold** and `code` spans first, escapes everything else.
+    This avoids the problem of escaping destroying markdown markers.
+    """
+    result: list[str] = []
+    i = 0
+    while i < len(raw):
+        # Bold: **...**
+        if raw[i:i+2] == '**':
+            end = raw.find('**', i + 2)
+            if end != -1:
+                inner = _escape_tg(raw[i+2:end])
+                result.append(f'*{inner}*')
+                i = end + 2
+                continue
+        # Inline code: `...`
+        if raw[i] == '`':
+            end = raw.find('`', i + 1)
+            if end != -1:
+                inner = raw[i+1:end]  # code content not escaped in TG
+                result.append(f'`{inner}`')
+                i = end + 1
+                continue
+        # Regular character — escape if special
+        ch = raw[i]
+        if ch == '\\' and i + 1 < len(raw):
+            result.append(ch)
+            result.append(raw[i + 1])
+            i += 2
+            continue
+        if ch in _TG_SPECIAL:
+            result.append('\\')
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
+def _md_to_tg_md2(text: str) -> str:
+    """Convert standard markdown produced by the LLM into Telegram MarkdownV2."""
+    lines = text.split('\n')
+    out: list[str] = []
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+
+        # Empty line → preserve spacing
+        if not line:
+            out.append("")
+            continue
+
+        # Bullet point: - text  or • text
+        bullet_match = re.match(r'^(\s*)([-•])\s+(.+)$', line)
+        if bullet_match:
+            indent = bullet_match.group(1)
+            body = _escape_and_convert_inline(bullet_match.group(3))
+            out.append(f'{indent}\\- {body}')
+            continue
+
+        # Numbered list: 1. text
+        num_match = re.match(r'^(\s*)(\d+)\.\s+(.+)$', line)
+        if num_match:
+            indent = num_match.group(1)
+            num = _escape_tg(num_match.group(2))
+            body = _escape_and_convert_inline(num_match.group(3))
+            out.append(f'{indent}{num}\\. {body}')
+            continue
+
+        # Section header: ### text or ## text — render as bold line
+        header_match = re.match(r'^#{1,4}\s+(.+)$', line)
+        if header_match:
+            body = _escape_tg(header_match.group(1))
+            out.append(f'*{body}*')
+            continue
+
+        # Regular line — process inline formatting on raw text
+        out.append(_escape_and_convert_inline(line))
+
+    return '\n'.join(out)
 
 
 def _calc_position_pnl(position: dict, current_price: float) -> Optional[float]:

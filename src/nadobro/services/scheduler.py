@@ -374,6 +374,27 @@ async def sync_pending_fills():
         logger.error("Fill sync job failed: %s", e)
 
 
+async def tick_edge_scanner():
+    """Scan for trading edges, promotions, and multipliers on X."""
+    try:
+        from src.nadobro.services.edge_scanner import async_scan_edges
+        await async_scan_edges()
+    except Exception as e:
+        logger.error("Edge scanner tick failed: %s", e)
+
+
+async def initial_ai_setup():
+    """Run initial AI setup: KB indexing + first edge scan."""
+    try:
+        from src.nadobro.services.edge_scanner import async_initial_scan
+        await async_initial_scan()
+    except Exception as e:
+        logger.error("Initial AI setup failed: %s", e)
+
+
+_EDGE_SCAN_SECONDS = int(os.environ.get("EDGE_SCAN_INTERVAL_SECONDS", "1800"))
+
+
 def start_scheduler():
     relay_poll_seconds = relay_poll_interval_seconds()
     scheduler.add_job(check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS, id="check_alerts", replace_existing=True)
@@ -381,11 +402,14 @@ def start_scheduler():
     scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True)
     scheduler.add_job(poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds, id="lowiqpts_relay_poll", replace_existing=True)
     scheduler.add_job(sync_pending_fills, "interval", seconds=30, id="fill_sync", replace_existing=True)
+    scheduler.add_job(tick_edge_scanner, "interval", seconds=_EDGE_SCAN_SECONDS, id="edge_scanner", replace_existing=True)
+    scheduler.add_job(initial_ai_setup, "date", id="initial_ai_setup", replace_existing=True)
     scheduler.start()
     logger.info(
-        "Scheduler started - alerts %ss, price tracker 60s, HOWL nightly 02:00 UTC, LOWIQ relay %ss, fill sync 30s",
+        "Scheduler started - alerts %ss, price tracker 60s, HOWL nightly 02:00 UTC, LOWIQ relay %ss, fill sync 30s, edge scanner %ss",
         _ALERT_SCAN_SECONDS,
         relay_poll_seconds,
+        _EDGE_SCAN_SECONDS,
     )
 
 

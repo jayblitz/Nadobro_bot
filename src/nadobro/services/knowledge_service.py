@@ -177,6 +177,8 @@ def _is_complex_question(question: str) -> bool:
         return True
     complexity_signals = [
         "compare", "difference", "architecture", "sdk", "api",
+        "should i", "what's the best", "recommend", "strategy",
+        "analysis", "breakdown", "pros and cons", "versus", " vs ",
         "gateway", "signature", "auth", "websocket", "debug",
         "error", "best practice", "production", "integration",
         "explain step by step",
@@ -195,17 +197,26 @@ def _wants_detailed_answer(question: str) -> bool:
 
 def _model_for(provider: str) -> str:
     if provider == "openai":
-        return os.environ.get("OPENAI_SUPPORT_MODEL", "gpt-4.1-mini")
+        return os.environ.get("OPENAI_SUPPORT_MODEL", "gpt-4o")
     return os.environ.get("XAI_SUPPORT_MODEL", "grok-3-mini-fast")
 
 
+_knowledge_base_loaded_at: float = 0.0
+KNOWLEDGE_REFRESH_INTERVAL = 3600  # 1 hour
+
+
 def _load_knowledge_base():
-    global _knowledge_base
-    if _knowledge_base is None:
-        try:
-            _knowledge_base = KNOWLEDGE_FILE.read_text(encoding="utf-8")
-            logger.info(f"Loaded knowledge base: {len(_knowledge_base)} chars")
-        except Exception as e:
+    global _knowledge_base, _knowledge_sections, _knowledge_base_loaded_at
+    now = time.time()
+    if _knowledge_base is not None and (now - _knowledge_base_loaded_at) < KNOWLEDGE_REFRESH_INTERVAL:
+        return _knowledge_base
+    try:
+        _knowledge_base = KNOWLEDGE_FILE.read_text(encoding="utf-8")
+        _knowledge_sections = None  # force re-parse on next access
+        _knowledge_base_loaded_at = now
+        logger.info(f"Loaded knowledge base: {len(_knowledge_base)} chars")
+    except Exception as e:
+        if _knowledge_base is None:
             logger.error(f"Failed to load knowledge base: {e}")
             _knowledge_base = ""
     return _knowledge_base
@@ -289,6 +300,22 @@ def _expand_with_synonyms(tokens: set) -> set:
 
 
 def _search_knowledge_sections(query: str, top_k: int = 4) -> str:
+    # Try Pinecone semantic search first
+    try:
+        from src.nadobro.services.vector_store import is_available, search_similar, NS_KNOWLEDGE
+        if is_available():
+            hits = search_similar(query, top_k=top_k, namespace=NS_KNOWLEDGE)
+            if hits:
+                return "\n\n".join(h["text"] for h in hits if h.get("text"))
+    except Exception:
+        logger.debug("Pinecone KB search unavailable, falling back to keyword", exc_info=True)
+
+    # Fallback: keyword-based search
+    return _keyword_search_knowledge(query, top_k=top_k)
+
+
+def _keyword_search_knowledge(query: str, top_k: int = 4) -> str:
+    """Original keyword-based knowledge search (fallback when Pinecone unavailable)."""
     sections = _load_knowledge_sections()
     if not sections:
         return ""
@@ -479,6 +506,23 @@ AGENT_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_edges",
+            "description": (
+                "Get current trading edges, active promotions, point multipliers, and alpha "
+                "opportunities on Nado DEX. Use when user asks about promotions, how to maximize "
+                "points, current multipliers, trading edges, alpha opportunities, best pairs to "
+                "trade right now, or what's special this week on Nado."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]
 
 XAI_X_SEARCH_MODEL = os.environ.get("XAI_X_SEARCH_MODEL", "grok-3")
@@ -505,7 +549,8 @@ TOOLS:
 3. get_live_price — LIVE trading price from Nado DEX orderbook (bid/ask/spread). Use when user asks for detailed orderbook-style pricing.
 4. get_market_sentiment — Crypto market sentiment + Fear & Greed Index + crypto news from Twitter. For: "is the market bullish?", "sentiment?", "fear and greed".
 5. search_x_twitter — Latest tweets from crypto Twitter. For Nado-specific queries, searches @nadoHQ and @inkonchain. For broader crypto news/opinions, searches wider crypto Twitter.
-{cmc_tools_section}
+{cmc_tools_section}{edge_tool_number}. get_current_edges — Current trading edges, active promotions, point multipliers, and alpha on Nado DEX. For: "any promotions?", "how to get more points?", "trading edges?", "what's special this week?".
+
 ROUTING RULES:
 - "What's BTC price?" / "price of ETH" → get_price_brief
 - "Show live bid/ask spread for BTC" → get_live_price
@@ -515,9 +560,16 @@ ROUTING RULES:
 - "Have the points been distributed?" / "points this week?" / "weekly epoch?" → search_x_twitter (search for points distribution announcements)
 - "What's the latest crypto news?" / "any alpha?" / "what's CT saying?" → search_x_twitter (broader crypto Twitter search)
 - "Search X for ETH alpha" / "what is X saying about SOL ETFs?" / "find tweets about AI agents" → search_x_twitter
+- "Any promotions?" / "how to maximize points?" / "trading edges?" / "best pair to trade?" → get_current_edges
 - Casual greetings (gm, hi, hello, thanks, bye) → do NOT call any tools
 - General chat, jokes, opinions, non-crypto questions → do NOT call any tools (the main AI will handle these)
 - When in doubt about Nado specifically → search_knowledge_base
+
+MULTI-TOOL STRATEGIES (call multiple tools for richer answers):
+- "Should I buy SOL?" → get_price_brief("SOL") + get_market_sentiment("SOL market outlook") + get_current_edges()
+- "Best trade right now?" → get_current_edges() + get_market_sentiment("best crypto trade")
+- "Any Nado promotions?" → get_current_edges() + search_x_twitter("nado promotions multipliers")
+- "How to get more points?" → get_current_edges() + search_knowledge_base("points rewards earning")
 
 You can call multiple tools for complex queries. Do NOT answer the question yourself — only call tools."""
 
@@ -548,12 +600,13 @@ PERSONALITY — THIS IS WHO YOU ARE:
 - Keep casual responses SHORT and punchy (1-3 sentences). No essays for "hello."
 - If thanked, be smooth about it. "That's what I'm here for, fren" > "You're welcome!"
 - You can reference memes, crypto culture, CT (Crypto Twitter) vibes naturally.
+- Use emojis naturally to add energy — 🔥 💪 🚀 😤 💀 😂 — but don't overdo it.
 
 You run on Nado DEX. Users can trade by typing things like "long BTC 0.01 5x market" — mention this casually when it fits, don't force it.
 
 IMPORTANT: You are NOT limited to Nado topics. You can chat about anything — crypto, life, jokes, opinions, memes. Be a real conversationalist.
 
-Plain text only. No markdown. No source links for casual chat."""
+No source links for casual chat."""
 
 SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro — a witty, sharp, and opinionated crypto trading AI on Telegram. You're built into Nado DEX (a CLOB exchange on Ink L2, backed by Kraken). Think Grok on X, but for crypto trading.
 
@@ -574,10 +627,18 @@ ANSWERING RULES:
 2. For Nado-specific questions (fees, features, margin, points, etc.), use the provided context. Be accurate about Nado facts.
 3. For general crypto questions, market opinions, or anything outside Nado — USE YOUR OWN KNOWLEDGE. You are NOT limited to the context below. Be a real conversationalist.
 4. For price data, mention it's from Nado DEX casually. For CMC data, cite inline ("CMC shows..."). No separate Sources section for data.
-5. Plain text only — no markdown formatting.
-6. Keep it conversational: 2-6 sentences for simple things, longer for complex stuff. Don't pad responses with filler.
-7. If you genuinely don't know something specific about Nado and it's not in context, say so — but for everything else (crypto, markets, general knowledge, opinions), just answer.
-8. Only include a source link if directly useful. Max 1 link. No links for price/sentiment/data responses.
+5. Keep it conversational: 2-6 sentences for simple things, longer for complex stuff. Don't pad responses with filler.
+6. If you genuinely don't know something specific about Nado and it's not in context, say so — but for everything else (crypto, markets, general knowledge, opinions), just answer.
+7. Only include a source link if directly useful. Max 1 link. No links for price/sentiment/data responses.
+
+FORMAT FOR SCANNABILITY:
+- Use **bold** for key numbers, prices, percentages, and important terms
+- Use bullet points (- ) for lists of features, pros/cons, comparisons
+- Use numbered lists (1. 2. 3.) for steps, rankings, or strategies
+- Use emojis for key indicators: 📈📉 price direction, 🔥 hot takes, ⚡ key info, 🎯 targets, ⚠️ warnings, 💡 tips, 💰 money/profits, 🏆 rankings
+- Structure longer answers with **Section Title** on its own line followed by content
+- Keep bullets concise — one key point each
+- For strategy/comparison questions: use structured sections with clear headers
 
 CONTEXT (use for Nado-specific facts, supplement with your own knowledge for everything else):
 {context}"""
@@ -613,8 +674,10 @@ For POINTS DISTRIBUTION questions:
 RULES:
 - Focus on @nadoHQ and @inkonchain content
 - If you can't find relevant tweets, say so honestly but with personality
-- Plain text only
-- Keep under 1500 chars
+- Keep under 2000 chars
+- Use **bold** for key announcements, dates, and numbers
+- Use emojis for key indicators: 📢 announcements, 📅 dates, 🔥 hot news, ⚡ key info, 💰 rewards/points
+- Use bullet points (- ) for listing multiple findings
 - End with: Sources: https://x.com/nadoHQ, https://x.com/inkonchain
 - NEVER include search engine links
 
@@ -642,14 +705,15 @@ Your task:
 RULES:
 - Search broadly across X, not limited to specific accounts.
 - If you can't find relevant tweets, say so honestly but with personality
-- Plain text only
-- Keep under 1500 chars
+- Keep under 2000 chars
+- Use **bold** for key findings and important names
+- Use emojis: 🔥 hot takes, 📈📉 market moves, ⚡ breaking, 🎯 key points
 - Format:
-  Here is what is trending on X about <topic>:
+  **What X is saying about <topic>:**
   - @handle: key point
   - @handle: key point
   - @handle: key point
-  Quick take: <one short synthesis line>
+  💡 **Quick take:** <one short synthesis line>
 - End with: Source: https://x.com
 - NEVER include search engine links
 """
@@ -698,13 +762,81 @@ def _pick_sources_for_question(question: str, context_text: str = "") -> list[st
 
 
 def _execute_x_search(query: str) -> tuple[str, list[str]]:
-    client = _get_xai_client()
-    if not client:
-        return "[X SEARCH] xAI client not available — cannot search X/Twitter.", []
-
+    """Search X/Twitter — uses X API v2 first, then Grok fallback."""
     now = datetime.utcnow()
     is_points_q = _is_points_distribution_question(query)
+    is_nado_q = _is_nado_x_question(query)
     weekday = now.strftime("%A")
+
+    # ── Try X API v2 first (real tweets) ──
+    x_api_result = _x_search_via_api(query, is_nado_q, is_points_q)
+    if x_api_result is not None:
+        return x_api_result
+
+    # ── Fallback to Grok's built-in X search ──
+    return _x_search_via_grok(query, is_nado_q, is_points_q, weekday, now)
+
+
+def _x_search_via_api(query: str, is_nado_q: bool, is_points_q: bool):
+    """Search X via direct API v2. Returns None to trigger Grok fallback."""
+    try:
+        from src.nadobro.services.x_api_client import (
+            is_available, get_nado_tweets, search_topic_tweets,
+            format_tweets_for_context,
+        )
+    except ImportError:
+        return None
+
+    if not is_available():
+        return None
+
+    # Fetch tweets
+    if is_nado_q or is_points_q:
+        tweets = get_nado_tweets(max_results=20, hours_back=168)
+    else:
+        topic = _extract_x_topic(query) or query
+        tweets = search_topic_tweets(topic, max_results=15, hours_back=168)
+
+    if not tweets:
+        # If Grok is unavailable, return a deterministic no-results response
+        # instead of falling through to an unavailable fallback path.
+        if _get_xai_client() is None:
+            if is_nado_q or is_points_q:
+                return "[X/TWITTER RESULTS] No recent tweets found from @nadoHQ or @inkonchain.", [
+                    OFFICIAL_SOURCES["x_nado"],
+                    OFFICIAL_SOURCES["x_ink"],
+                ]
+            return "[X/TWITTER RESULTS] No recent tweets found for that topic.", ["https://x.com"]
+        return None  # Fall back to Grok when available
+
+    formatted = format_tweets_for_context(tweets, max_tweets=10)
+
+    if is_nado_q:
+        sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
+    else:
+        sources = ["https://x.com"]
+
+    header = "[X/TWITTER RESULTS — REAL TWEETS VIA X API]"
+    if is_points_q:
+        header = "[X/TWITTER RESULTS — POINTS DISTRIBUTION (REAL TWEETS)]"
+        formatted += f"\n\nNote: Nado distributes points every Friday in weekly epochs."
+
+    return f"{header}\n{formatted}", sources
+
+
+def _x_search_via_grok(query: str, is_nado_q: bool, is_points_q: bool, weekday: str, now: datetime) -> tuple[str, list[str]]:
+    """Fallback: search X via Grok's built-in X search."""
+    client = _get_xai_client()
+    if not client:
+        if is_points_q:
+            points_note = "Points for this week likely haven't been distributed yet." if weekday != "Friday" else "It's Friday — check @nadoHQ for updates!"
+            return (
+                f"[X/TWITTER RESULTS — POINTS DISTRIBUTION]\n"
+                f"Could not search X right now. Based on Nado's schedule, points are distributed every Friday. "
+                f"Today is {weekday}. {points_note}",
+                [OFFICIAL_SOURCES["x_nado"]],
+            )
+        return "[X SEARCH] X search not available — neither X API nor xAI configured.", []
 
     if is_points_q:
         search_query = "Nado points distributed rewards epoch weekly"
@@ -716,18 +848,17 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
             "If you find a distribution announcement, report it with dates. "
             "If you find NO recent points distribution announcement for this week, "
             "explicitly say 'No points distribution announcement found for this week.' "
-            f"Focus on tweets from {now.year}. Plain text only."
+            f"Focus on tweets from {now.year}."
         )
     else:
         topic = _extract_x_topic(query)
         search_query = topic or query
-        is_nado_q = _is_nado_x_question(query)
         if is_nado_q:
             system_content = (
                 f"Today is {now.strftime('%Y-%m-%d')}. "
                 "Search X for the most recent posts from @nadoHQ and @inkonchain. "
                 "Return the actual tweet content verbatim with dates. "
-                f"Focus on tweets from {now.year}. Plain text only."
+                f"Focus on tweets from {now.year}."
             )
         else:
             system_content = (
@@ -741,7 +872,7 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
                 "- @handle: key point\n"
                 "- @handle: key point\n"
                 "Quick take: <one short synthesis line>\n"
-                f"Focus on posts from {now.year}. Plain text only."
+                f"Focus on posts from {now.year}."
             )
 
     try:
@@ -751,7 +882,7 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": search_query},
             ],
-            max_tokens=600,
+            max_tokens=800,
             temperature=0.1,
             extra_body={"search_parameters": _pick_x_search_params(search_query)},
         )
@@ -781,7 +912,7 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
                 [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]],
             )
     except Exception as e:
-        logger.warning(f"X search failed: {e}")
+        logger.warning(f"Grok X search failed: {e}")
 
     if is_points_q:
         points_note = "Points for this week likely haven't been distributed yet." if weekday != "Friday" else "It's Friday — check @nadoHQ for updates!"
@@ -791,7 +922,7 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
             f"Today is {weekday}. {points_note}",
             [OFFICIAL_SOURCES["x_nado"]],
         )
-    return "[X SEARCH] No results found from @nadoHQ or @inkonchain.", []
+    return "[X SEARCH] No results found.", []
 
 
 def _get_user_network(telegram_id: int) -> str:
@@ -1049,9 +1180,25 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str, network: str 
     if tool_name == "search_knowledge_base":
         query = args.get("query", question)
         sections = _search_knowledge_sections(query, top_k=5)
+
+        # Supplement with relevant past Q&A from vector store
+        qa_supplement = ""
+        try:
+            from src.nadobro.services.vector_store import search_qa_history, is_available as _vs_ok
+            if _vs_ok():
+                qa_hits = search_qa_history(query, top_k=2)
+                qa_parts = []
+                for h in qa_hits:
+                    if h.get("score", 0) > 0.8 and h.get("text"):
+                        qa_parts.append(f"Q: {h.get('title', '')}\nA: {h['text']}")
+                if qa_parts:
+                    qa_supplement = "\n\n[RELATED PAST ANSWERS]\n" + "\n\n".join(qa_parts)
+        except Exception:
+            pass
+
         if sections:
-            return f"[KNOWLEDGE BASE RESULTS]\n{sections}", _pick_sources_for_question(query, context_text=sections)
-        return "[KNOWLEDGE BASE] No matching sections found.", [OFFICIAL_SOURCES["docs"]]
+            return f"[KNOWLEDGE BASE RESULTS]\n{sections}{qa_supplement}", _pick_sources_for_question(query, context_text=sections)
+        return "[KNOWLEDGE BASE] No matching sections found." + qa_supplement, [OFFICIAL_SOURCES["docs"]]
 
     elif tool_name == "get_price_brief":
         product = args.get("product", "BTC")
@@ -1079,7 +1226,23 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str, network: str 
     elif tool_name == "get_global_market_data":
         return _execute_global_market_data()
 
+    elif tool_name == "get_current_edges":
+        return _execute_current_edges()
+
     return f"[ERROR] Unknown tool: {tool_name}", []
+
+
+def _execute_current_edges() -> tuple[str, list[str]]:
+    """Return cached edges from the edge scanner."""
+    try:
+        from src.nadobro.services.edge_scanner import get_edges_context, get_cached_edges
+        context = get_edges_context()
+        if context:
+            return context, [OFFICIAL_SOURCES["x_nado"]]
+        return "[CURRENT EDGES] No active promotions or edges found right now.", [OFFICIAL_SOURCES["x_nado"]]
+    except Exception as e:
+        logger.warning(f"Edge tool failed: {e}")
+        return "[CURRENT EDGES] Edge scanner unavailable.", []
 
 
 def _run_agent_pipeline(question: str, provider: str, network: str = "mainnet") -> tuple[str, list[str]]:
@@ -1099,6 +1262,7 @@ def _run_agent_pipeline(question: str, provider: str, network: str = "mainnet") 
         current_date=current_date,
         cmc_tools_section=ROUTER_CMC_TOOLS_SECTION if cmc_enabled else "",
         cmc_routing_rules=ROUTER_CMC_ROUTING_RULES if cmc_enabled else "",
+        edge_tool_number=9 if cmc_enabled else 6,
     )
     router_model = _model_for(provider)
 
@@ -1111,7 +1275,7 @@ def _run_agent_pipeline(question: str, provider: str, network: str = "mainnet") 
             ],
             tools=active_tools,
             tool_choice="auto",
-            max_tokens=120,
+            max_tokens=200,
             temperature=0.0,
         )
     except Exception as e:
@@ -1171,7 +1335,7 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    max_tokens = 800 if (_wants_detailed_answer(question) or x_search) else 550
+    max_tokens = 1800 if (_wants_detailed_answer(question) or x_search) else 1200
 
     messages = [{"role": "system", "content": system}]
     if history:
@@ -1353,7 +1517,14 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
             _add_to_chat_history(telegram_id, "assistant", fallback_msg)
         return
 
-    if _is_x_twitter_question(question) and not xai_client:
+    # Check if X questions can be handled: either via Grok (xai_client) or X API v2
+    _x_api_ready = False
+    try:
+        from src.nadobro.services.x_api_client import is_available as _x_is_available
+        _x_api_ready = _x_is_available()
+    except Exception:
+        pass
+    if _is_x_twitter_question(question) and not xai_client and not _x_api_ready:
         from src.nadobro.i18n import localize_text as _lt
         yield _lt("X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!", lang)
         return
@@ -1361,6 +1532,8 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
     _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
+    # Direct Grok X streaming only when Grok is available; otherwise agent
+    # pipeline handles X questions via _execute_x_search() -> X API fallback.
     use_x_prompt = is_x_question and xai_client is not None
 
     gathered_context = ""
@@ -1401,15 +1574,25 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
                 gathered_context = _search_knowledge_sections(question, top_k=5)
                 used_sources = _pick_sources_for_question(question, context_text=gathered_context)
 
+        # Inject active edges/promotions into context when relevant
+        if "[CURRENT EDGES" not in gathered_context:
+            try:
+                from src.nadobro.services.edge_scanner import get_edges_context
+                edges_ctx = get_edges_context()
+                if edges_ctx:
+                    gathered_context = gathered_context + "\n\n" + edges_ctx
+            except Exception:
+                pass
+
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
-            context=gathered_context[:12000],
+            context=gathered_context[:14000],
             language_instruction=lang_instruction,
         )
 
     used_sources = _filter_official_sources(used_sources)
-    _data_markers = ("[PRICE BRIEF]", "[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]")
+    _data_markers = ("[PRICE BRIEF]", "[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]", "[CURRENT EDGES")
     skip_sources = _is_price_question(question) or _is_casual_message(question) or _is_sentiment_question(question) or any(m in gathered_context for m in _data_markers)
 
     primary = _pick_primary_provider(question)
@@ -1465,6 +1648,20 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
                 _add_to_chat_history(telegram_id, "assistant", full_answer.strip())
 
             _answer_cache[_normalize_question(question)] = {"ts": time.time(), "answer": full_answer}
+
+            # Index unique Q&A pairs into Pinecone for future retrieval
+            try:
+                from src.nadobro.services.vector_store import index_qa_if_unique, is_available as _vs_available
+                if _vs_available() and not _is_casual_message(question):
+                    import threading
+                    threading.Thread(
+                        target=index_qa_if_unique,
+                        args=(question, full_answer),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                pass
+
             logger.info("Streamed answer via %s in %.1fs", provider, time.time() - started_at)
             return
         except Exception as provider_error:
@@ -1512,7 +1709,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                     messages.extend(history_msgs[-CHAT_HISTORY_MAX_MESSAGES:])
                 messages.append({"role": "user", "content": question})
                 resp = client.chat.completions.create(
-                    model=_model_for(p), messages=messages, max_tokens=350, temperature=0.6,
+                    model=_model_for(p), messages=messages, max_tokens=500, temperature=0.6,
                 )
                 return resp.choices[0].message.content.strip()
 
@@ -1528,13 +1725,22 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                 _add_to_chat_history(telegram_id, "assistant", fallback)
             return fallback
 
-    if _is_x_twitter_question(question) and not xai_client:
+    # Check if X questions can be handled: either via Grok (xai_client) or X API v2
+    _x_api_ready2 = False
+    try:
+        from src.nadobro.services.x_api_client import is_available as _x_is_available2
+        _x_api_ready2 = _x_is_available2()
+    except Exception:
+        pass
+    if _is_x_twitter_question(question) and not xai_client and not _x_api_ready2:
         from src.nadobro.i18n import localize_text as _lt
         return _lt("X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!", lang)
 
     _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
+    # Direct Grok X streaming only when Grok is available; otherwise agent
+    # pipeline handles X questions via _execute_x_search() -> X API fallback.
     use_x_prompt = is_x_question and xai_client is not None
 
     gathered_context = ""
@@ -1575,15 +1781,25 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
                 gathered_context = _search_knowledge_sections(question, top_k=5)
                 used_sources = _pick_sources_for_question(question, context_text=gathered_context)
 
+        # Inject active edges/promotions into context when relevant
+        if "[CURRENT EDGES" not in gathered_context:
+            try:
+                from src.nadobro.services.edge_scanner import get_edges_context
+                edges_ctx = get_edges_context()
+                if edges_ctx:
+                    gathered_context = gathered_context + "\n\n" + edges_ctx
+            except Exception:
+                pass
+
         system = SYNTHESIZER_SYSTEM_PROMPT.format(
             current_date=current_date,
             user_name=display_name,
-            context=gathered_context[:12000],
+            context=gathered_context[:14000],
             language_instruction=lang_instruction,
         )
 
     used_sources = _filter_official_sources(used_sources)
-    _data_markers = ("[PRICE BRIEF]", "[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]")
+    _data_markers = ("[PRICE BRIEF]", "[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]", "[CURRENT EDGES")
     skip_sources = _is_price_question(question) or _is_casual_message(question) or _is_sentiment_question(question) or any(m in gathered_context for m in _data_markers)
 
     try:

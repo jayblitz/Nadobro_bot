@@ -3,6 +3,7 @@ cryptography==46.0.5
 eth-account>=0.8.0,<0.9.0
 nado-protocol==0.3.3
 openai==2.17.0
+pinecone-client>=3.0.0
 psycopg2-binary==2.9.11
 python-dotenv==1.2.1
 python-telegram-bot[webhooks]==22.6
