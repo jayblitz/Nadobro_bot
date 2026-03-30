@@ -165,12 +165,13 @@ def _build_trade_card_text(session: dict) -> str:
 def _card_keyboard(session: dict):
     session_id = session["session_id"]
     state = session.get("state", "direction")
+    network = session.get("network", "mainnet")
     if state == "direction":
         return trade_card_direction_kb(session_id)
     if state == "order_type":
         return trade_card_order_type_kb(session_id)
     if state == "product":
-        return trade_card_product_kb(session_id)
+        return trade_card_product_kb(session_id, network=network)
     if state == "leverage":
         return trade_card_leverage_kb(session_id, session.get("product", "BTC"))
     if state == "size":
@@ -311,11 +312,18 @@ async def open_trade_card_from_message(
 
     if prefer_reply_to_message:
         if not session:
+            user = get_user(telegram_id)
+            network = user.network_mode.value if user else "mainnet"
             session = {
                 "session_id": _new_session_id(),
                 "state": "direction",
                 "origin_chat_id": chat_id,
+                "network": network,
             }
+        else:
+            user = get_user(telegram_id)
+            network = user.network_mode.value if user else "mainnet"
+            session["network"] = network
         lang = get_active_language()
         try:
             message = await update.message.reply_text(
@@ -345,10 +353,13 @@ async def open_trade_card_from_message(
         )
         return True
 
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
     session = {
         "session_id": _new_session_id(),
         "state": "direction",
         "origin_chat_id": chat_id,
+        "network": network,
     }
     message_id = await _edit_or_send_trade_card(context, telegram_id, session, chat_id=chat_id)
     session["origin_message_id"] = message_id
@@ -359,11 +370,14 @@ async def open_trade_card_from_message(
 async def open_trade_card_from_callback(query, context: CallbackContext, telegram_id: int) -> bool:
     if not is_trade_card_mode_enabled():
         return False
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
     session = {
         "session_id": _new_session_id(),
         "state": "direction",
         "origin_chat_id": query.message.chat_id,
         "origin_message_id": query.message.message_id,
+        "network": network,
     }
     _set_trade_card_session(context, session)
     await _edit_message_safely(query, _build_trade_card_text(session), _card_keyboard(session))
@@ -450,6 +464,9 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
             session_id,
         )
         return True
+
+    user = get_user(telegram_id)
+    session["network"] = user.network_mode.value if user else session.get("network", "mainnet")
 
     session.pop("error", None)
     state = session.get("state", "direction")

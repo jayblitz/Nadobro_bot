@@ -374,9 +374,9 @@ AGENT_TOOLS = [
         "function": {
             "name": "get_price_brief",
             "description": (
-                "Get a strict 3-line market brief for one asset: current price, 24h change, "
-                "Fear & Greed Index, and a short directional takeaway. "
-                "Use for direct price asks like 'What's BTC price?' or 'price of ETH'."
+                "Get market stats for one Nado asset directly from Nado APIs: current price, "
+                "funding rate, spread, and any available 24h stats (volume/change/high/low/open interest). "
+                "Use for price/stat asks like 'What's BTC price?' or 'WTI funding and volume?'."
             ),
             "parameters": {
                 "type": "object",
@@ -545,14 +545,14 @@ Analyze the user's message and call the right tool(s) to gather information.
 
 TOOLS:
 1. search_knowledge_base — Nado product knowledge (features, fees, margin, points, NFTs, NLP, dev docs, getting started). PRIMARY source for all Nado-specific questions.
-2. get_price_brief — Quick market brief for one asset in strict format: current price, 24h move, Fear & Greed, and short bias line. Use for direct price asks like "What's BTC price?".
+2. get_price_brief — Market stats from Nado APIs for one asset: price, spread, funding, and available 24h stats.
 3. get_live_price — LIVE trading price from Nado DEX orderbook (bid/ask/spread). Use when user asks for detailed orderbook-style pricing.
 4. get_market_sentiment — Crypto market sentiment + Fear & Greed Index + crypto news from Twitter. For: "is the market bullish?", "sentiment?", "fear and greed".
 5. search_x_twitter — Latest tweets from crypto Twitter. For Nado-specific queries, searches @nadoHQ and @inkonchain. For broader crypto news/opinions, searches wider crypto Twitter.
 {cmc_tools_section}{edge_tool_number}. get_current_edges — Current trading edges, active promotions, point multipliers, and alpha on Nado DEX. For: "any promotions?", "how to get more points?", "trading edges?", "what's special this week?".
 
 ROUTING RULES:
-- "What's BTC price?" / "price of ETH" → get_price_brief
+- "What's BTC price?" / "price of ETH" / "WTI stats" / "XAG funding" → get_price_brief
 - "Show live bid/ask spread for BTC" → get_live_price
 {cmc_routing_rules}- "What are Nado fees?" / "how does margin work?" → search_knowledge_base
 - "Is the market bullish?" / "fear and greed" → get_market_sentiment
@@ -970,7 +970,71 @@ def _parse_fng_snapshot(raw: str) -> tuple[int | None, str]:
     return value, label
 
 
-def _execute_price_brief(product: str, network: str = "mainnet") -> tuple[str, list[str]]:
+def _format_usd_compact(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    n = float(value)
+    abs_n = abs(n)
+    if abs_n >= 1_000_000_000:
+        return f"${n/1_000_000_000:.2f}B"
+    if abs_n >= 1_000_000:
+        return f"${n/1_000_000:.2f}M"
+    if abs_n >= 1_000:
+        return f"${n/1_000:.2f}K"
+    return f"${n:,.2f}"
+
+
+def _extract_market_product(question: str, network: str = "mainnet") -> str | None:
+    from src.nadobro.config import get_perp_products
+
+    q = _normalize_question(question)
+    products = sorted(get_perp_products(network=network), key=len, reverse=True)
+    for symbol in products:
+        s = symbol.lower()
+        if re.search(rf"\b{re.escape(s)}\b", q) or re.search(rf"\b{re.escape(s)}-perp\b", q):
+            return symbol.upper()
+    return None
+
+
+def _is_market_stats_question(question: str) -> bool:
+    q = _normalize_question(question)
+    stat_signals = (
+        "price", "funding", "volume", "24h", "stats", "statistic",
+        "open interest", "oi", "bid", "ask", "spread", "mark", "index",
+    )
+    return any(sig in q for sig in stat_signals)
+
+
+def _requested_market_fields(question: str) -> set[str]:
+    q = _normalize_question(question)
+    generic_full_signals = ("stats", "statistic", "overview", "snapshot", "all", "everything")
+    if any(sig in q for sig in generic_full_signals):
+        return set()
+
+    fields = set()
+    if any(sig in q for sig in ("price", "mid", "mark", "index", "quote", "trading at", "how much")):
+        fields.add("price")
+    if "funding" in q:
+        fields.add("funding")
+    if "volume" in q:
+        fields.add("volume")
+    if "open interest" in q or re.search(r"\boi\b", q):
+        fields.add("open_interest")
+    if "spread" in q or "bid" in q or "ask" in q:
+        fields.add("spread")
+    if "24h" in q or "24hr" in q or "24 hour" in q:
+        fields.add("change_24h")
+    if "high" in q or "low" in q or "range" in q:
+        fields.add("range_24h")
+
+    return fields
+
+
+def _execute_price_brief(
+    product: str,
+    network: str = "mainnet",
+    requested_fields: set[str] | None = None,
+) -> tuple[str, list[str]]:
     from src.nadobro.config import get_product_id, get_perp_products
     from src.nadobro.services.nado_client import NadoClient
 
@@ -981,15 +1045,33 @@ def _execute_price_brief(product: str, network: str = "mainnet") -> tuple[str, l
         return f"[PRICE BRIEF] Unknown asset '{product}'. Supported: {', '.join(supported)}", []
 
     mid = None
+    bid = 0.0
+    ask = 0.0
+    spread = 0.0
+    spread_bps = 0.0
+    funding_rate = None
+    volume_24h_usd = None
+    open_interest = None
+    high_24h = None
+    low_24h = None
+    change_24h = None
     try:
         client = NadoClient.from_address("0x0000000000000000000000000000000000000000", network)
-        price_data = client.get_market_price(product_id)
-        raw_mid = price_data.get("mid")
-        mid = float(raw_mid) if raw_mid is not None else None
+        stats = client.get_product_market_stats(product_id)
+        mid = float(stats.get("mid") or 0) or None
+        bid = float(stats.get("bid") or 0)
+        ask = float(stats.get("ask") or 0)
+        spread = float(stats.get("spread") or 0)
+        spread_bps = float(stats.get("spread_bps") or 0)
+        funding_rate = stats.get("funding_rate")
+        volume_24h_usd = stats.get("volume_24h_usd")
+        open_interest = stats.get("open_interest")
+        high_24h = stats.get("high_24h")
+        low_24h = stats.get("low_24h")
+        change_24h = stats.get("change_24h_pct")
     except Exception as e:
         logger.warning("Price brief live price fetch failed for %s: %s", symbol, e)
 
-    change_24h = None
     cmc_sources = []
     if _is_cmc_available():
         try:
@@ -1025,12 +1107,55 @@ def _execute_price_brief(product: str, network: str = "mainnet") -> tuple[str, l
         fng_line = "Fear & Greed Index is unavailable right now."
 
     bias_line = _derive_price_bias(change_24h, fng_value)
-    result = (
-        f"[PRICE BRIEF]\n"
-        f"{symbol} is trading at ${mid:,.2f} - {change_text} in the last 24h.\n"
-        f"{fng_line}\n"
-        f"{bias_line}"
+    funding_line = (
+        f"Funding: {float(funding_rate) * 100:.4f}%"
+        if funding_rate is not None
+        else "Funding: N/A"
     )
+    volume_line = f"24h Volume: {_format_usd_compact(volume_24h_usd)}"
+    oi_line = f"Open Interest: {_format_usd_compact(open_interest)}"
+
+    range_parts = []
+    if high_24h is not None:
+        range_parts.append(f"H ${float(high_24h):,.2f}")
+    if low_24h is not None:
+        range_parts.append(f"L ${float(low_24h):,.2f}")
+    range_line = f"24h Range: {' | '.join(range_parts)}" if range_parts else "24h Range: N/A"
+
+    requested_fields = set(requested_fields or set())
+    if requested_fields and len(requested_fields) <= 2:
+        concise_lines = [f"[NADO MARKET STAT]", f"{symbol}-PERP on Nado"]
+        if "price" in requested_fields:
+            concise_lines.append(f"Price: ${mid:,.2f} ({change_text} 24h)")
+        if "funding" in requested_fields:
+            concise_lines.append(
+                f"Funding: {float(funding_rate) * 100:.4f}%"
+                if funding_rate is not None
+                else "Funding: N/A"
+            )
+        if "volume" in requested_fields:
+            concise_lines.append(f"24h Volume: {_format_usd_compact(volume_24h_usd)}")
+        if "open_interest" in requested_fields:
+            concise_lines.append(f"Open Interest: {_format_usd_compact(open_interest)}")
+        if "spread" in requested_fields:
+            concise_lines.append(
+                f"Bid ${bid:,.2f} | Ask ${ask:,.2f} | Spread ${spread:,.2f} ({spread_bps:.1f} bps)"
+            )
+        if "change_24h" in requested_fields and "price" not in requested_fields:
+            concise_lines.append(f"24h Change: {change_text}")
+        if "range_24h" in requested_fields:
+            concise_lines.append(range_line)
+        result = "\n".join(concise_lines)
+    else:
+        result = (
+            f"[NADO MARKET STATS]\n"
+            f"{symbol}-PERP on Nado: ${mid:,.2f} ({change_text} 24h)\n"
+            f"Bid ${bid:,.2f} | Ask ${ask:,.2f} | Spread ${spread:,.2f} ({spread_bps:.1f} bps)\n"
+            f"{funding_line} | {volume_line} | {oi_line}\n"
+            f"{range_line}\n"
+            f"{fng_line}\n"
+            f"{bias_line}"
+        )
     return result, [OFFICIAL_SOURCES["website"], *cmc_sources]
 
 
@@ -1529,6 +1654,20 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         yield _lt("X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!", lang)
         return
 
+    user_network = _get_user_network(telegram_id) if telegram_id else "mainnet"
+    market_product = _extract_market_product(question, network=user_network)
+    if market_product and _is_market_stats_question(question):
+        requested_fields = _requested_market_fields(question)
+        direct_answer, _ = _execute_price_brief(
+            market_product,
+            network=user_network,
+            requested_fields=requested_fields,
+        )
+        if telegram_id:
+            _add_to_chat_history(telegram_id, "assistant", direct_answer)
+        yield direct_answer
+        return
+
     _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
@@ -1560,7 +1699,6 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         loop = asyncio.get_event_loop()
 
         primary = _pick_primary_provider(question)
-        user_network = _get_user_network(telegram_id) if telegram_id else "mainnet"
         if _should_skip_router(question):
             gathered_context = _search_knowledge_sections(question, top_k=5)
             used_sources = _pick_sources_for_question(question, context_text=gathered_context)
@@ -1736,6 +1874,19 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         from src.nadobro.i18n import localize_text as _lt
         return _lt("X/Twitter search needs my xAI connection, and it's not set up right now. Hit me with a different question!", lang)
 
+    user_network = _get_user_network(telegram_id) if telegram_id else "mainnet"
+    market_product = _extract_market_product(question, network=user_network)
+    if market_product and _is_market_stats_question(question):
+        requested_fields = _requested_market_fields(question)
+        direct_answer, _ = _execute_price_brief(
+            market_product,
+            network=user_network,
+            requested_fields=requested_fields,
+        )
+        if telegram_id:
+            _add_to_chat_history(telegram_id, "assistant", direct_answer)
+        return direct_answer
+
     _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
@@ -1767,7 +1918,6 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         loop = asyncio.get_event_loop()
 
         primary = _pick_primary_provider(question)
-        user_network = _get_user_network(telegram_id) if telegram_id else "mainnet"
         if _should_skip_router(question):
             gathered_context = _search_knowledge_sections(question, top_k=5)
             used_sources = _pick_sources_for_question(question, context_text=gathered_context)

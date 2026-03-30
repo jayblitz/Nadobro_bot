@@ -174,7 +174,7 @@ def portfolio_kb(has_positions: bool = False):
         ],
         [
             InlineKeyboardButton("📊 Analytics", callback_data="portfolio:analytics"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:view"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
         ],
     ]
     if has_positions:
@@ -344,10 +344,10 @@ def trade_card_order_type_kb(session_id: str):
     ])
 
 
-def trade_card_product_kb(session_id: str):
+def trade_card_product_kb(session_id: str, network: str = "mainnet"):
     rows = []
     row = []
-    for name in _perp_products():
+    for name in _perp_products(network=network):
         row.append(InlineKeyboardButton(name, callback_data=trade_card_cb(session_id, "product", name)))
         if len(row) == 4:
             rows.append(row)
@@ -460,10 +460,10 @@ def trade_card_confirm_kb(session_id: str):
     ])
 
 
-def trade_product_kb(action):
+def trade_product_kb(action, network: str = "mainnet"):
     rows = []
     row = []
-    for name in _perp_products():
+    for name in _perp_products(network=network):
         row.append(InlineKeyboardButton(name, callback_data=f"product:{action}:{name}"))
         if len(row) == 4:
             rows.append(row)
@@ -567,10 +567,10 @@ def alerts_kb():
     ])
 
 
-def alert_product_kb():
+def alert_product_kb(network: str = "mainnet"):
     rows = []
     row = []
-    for name in _perp_products():
+    for name in _perp_products(network=network):
         row.append(InlineKeyboardButton(name, callback_data=f"alert:product:{name}"))
         if len(row) == 4:
             rows.append(row)
@@ -946,10 +946,10 @@ def howl_approval_kb(suggestion_count: int):
     return InlineKeyboardMarkup(rows)
 
 
-def close_product_kb():
+def close_product_kb(network: str = "mainnet"):
     rows = []
     row = []
-    for name in _perp_products():
+    for name in _perp_products(network=network):
         row.append(InlineKeyboardButton(name, callback_data=f"pos:close:{name}"))
         if len(row) == 4:
             rows.append(row)

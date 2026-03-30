@@ -198,15 +198,21 @@ def fmt_price(price, product="BTC"):
 
 
 
-def fmt_positions(positions, prices=None):
+def fmt_positions(positions, prices=None, mode_label: str | None = None):
     if not positions:
-        return _loc("📋 *Open Positions*") + "\n\n" + _loc("No open positions\\.")
+        header = [_loc("📋 *Open Positions*")]
+        if mode_label:
+            header.append(f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}")
+        return "\n".join(header) + "\n\n" + _loc("No open positions\\.")
 
     lines = [
         _loc("📋 *Open Positions*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
+    if mode_label:
+        lines.append(f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}")
+        lines.append("")
     any_estimated_pnl = False
 
     for i, p in enumerate(positions, 1):
@@ -626,7 +632,7 @@ def _compute_exchange_stats(positions, prices):
     return unrealized_pnl, position_value
 
 
-def fmt_portfolio(stats, positions, prices=None, open_orders=None):
+def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: str | None = None):
     total_trades = int(stats.get("total_trades", 0) or 0)
     open_orders = open_orders or []
 
@@ -639,11 +645,18 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None):
         _loc("📁 *Portfolio Deck*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
+    ]
+    if mode_label:
+        lines.extend([
+            f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}",
+            "",
+        ])
+    lines.extend([
         f"📌 *{_loc('Open Positions:')}* {escape_md(str(len(positions or [])))}",
         f"📬 *{_loc('Open Orders:')}* {escape_md(str(len(open_orders)))}",
         f"💎 *{_loc('Position Value:')}* {escape_md(f'${position_value:,.2f}')}",
         f"{upnl_emoji} *{_loc('Unrealized PnL:')}* {escape_md(upnl_str)}",
-    ]
+    ])
 
     if total_trades > 0:
         total_volume = float(stats.get("total_volume", 0) or 0)
@@ -720,7 +733,7 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None):
     return "\n".join(lines)
 
 
-def fmt_trade_history(trades, page=0, page_size=10):
+def fmt_trade_history(trades, page=0, page_size=10, mode_label: str | None = None):
     start = page * page_size
     page_trades = trades[start:start + page_size]
 
@@ -728,6 +741,8 @@ def fmt_trade_history(trades, page=0, page_size=10):
         _loc("📜 *Trade History*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
     ]
+    if mode_label:
+        lines.extend(["", f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}"])
 
     if not page_trades:
         lines.append("")
@@ -764,12 +779,14 @@ def fmt_trade_history(trades, page=0, page_size=10):
     return "\n".join(lines)
 
 
-def fmt_analytics(stats):
+def fmt_analytics(stats, mode_label: str | None = None):
     lines = [
         _loc("📊 *Trading Analytics*"),
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         "",
     ]
+    if mode_label:
+        lines.extend([f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}", ""])
 
     total_trades = int(stats.get("total_trades", 0) or 0)
     if total_trades == 0:
