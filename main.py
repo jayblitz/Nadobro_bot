@@ -198,7 +198,7 @@ async def run_bot():
     set_copy_bot_app(bot_app)
     register_handlers(handle_strategy_job, handle_alert_job)
     start_workers(
-        strategy_workers=int(os.environ.get("NADO_STRATEGY_WORKERS", "2")),
+        strategy_workers=int(os.environ.get("NADO_STRATEGY_WORKERS", "1")),
         alert_workers=int(os.environ.get("NADO_ALERT_WORKERS", "1")),
     )
     start_runtime_supervisor()
