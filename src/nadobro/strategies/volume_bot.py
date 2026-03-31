@@ -80,6 +80,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         return {
             "success": True,
             "done": True,
+            "orders_placed": 0,
+            "placed_notional_usd": 0.0,
             "volume_done_usd": volume_done,
             "fees_paid": fees_paid,
             "message": "Target volume reached — bot auto-stopped.",
@@ -105,9 +107,16 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     now_ts = time.time()
 
     if phase == "open_wait":
+        cycle_traded_notional = 0.0
         opened_at = float(state.get("vol_opened_at") or 0.0)
         if opened_at > 0 and (now_ts - opened_at) < interval_seconds:
-            return {"success": True, "done": False, "action": "waiting"}
+            return {
+                "success": True,
+                "done": False,
+                "action": "waiting",
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+            }
 
         # Interval exhausted -> close immediately and clean any stale open orders.
         signer_client = get_user_nado_client(telegram_id)
@@ -146,13 +155,18 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     return {
                         "success": False,
                         "error": close_result.get("error", "Close after interval failed"),
+                        "orders_placed": 0,
+                        "placed_notional_usd": 0.0,
                         "volume_done_usd": round(volume_done, 4),
                         "fees_paid": round(fees_paid, 6),
                     }
                 close_notional = pos_size * mid
-                close_fee = close_notional * EST_FEE_RATE
-                volume_done += close_notional
-                fees_paid += close_fee
+                # Count both sides only after we observe a real open position:
+                # opening fill notional + closing fill notional.
+                cycle_traded_notional = close_notional * 2.0
+                cycle_fees = cycle_traded_notional * EST_FEE_RATE
+                volume_done += cycle_traded_notional
+                fees_paid += cycle_fees
                 state["volume_done_usd"] = round(volume_done, 4)
                 state["fees_paid"] = round(fees_paid, 6)
 
@@ -175,6 +189,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             return {
                 "success": True,
                 "done": True,
+                "orders_placed": 1,
+                "placed_notional_usd": round(cycle_traded_notional, 4),
                 "volume_done_usd": round(volume_done, 4),
                 "fees_paid": round(fees_paid, 6),
                 "message": "Target volume reached — bot auto-stopped.",
@@ -184,6 +200,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             "success": True,
             "done": False,
             "action": "closed_after_interval",
+            "orders_placed": 1 if cycle_traded_notional > 0 else 0,
+            "placed_notional_usd": round(cycle_traded_notional, 4),
             "volume_done_usd": round(volume_done, 4),
             "fees_paid": round(fees_paid, 6),
         }
@@ -204,12 +222,6 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
 
     if open_result.get("success"):
         notional = size * mid
-        fee = notional * EST_FEE_RATE
-
-        volume_done += notional
-        fees_paid += fee
-        state["volume_done_usd"] = round(volume_done, 4)
-        state["fees_paid"] = round(fees_paid, 6)
         state["last_side"] = "long" if is_long else "short"
         state["vol_phase"] = "open_wait"
         state["vol_opened_at"] = now_ts
@@ -219,6 +231,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         return {
             "success": True,
             "done": False,
+            "orders_placed": 1,
+            "placed_notional_usd": round(notional, 4),
             "volume_done_usd": round(volume_done, 4),
             "target_volume_usd": target_volume,
             "fees_paid": round(fees_paid, 6),
@@ -232,6 +246,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     return {
         "success": False,
         "error": open_result.get("error", "Limit order failed"),
+        "orders_placed": 0,
+        "placed_notional_usd": 0.0,
         "volume_done_usd": round(volume_done, 4),
         "fees_paid": round(fees_paid, 6),
     }

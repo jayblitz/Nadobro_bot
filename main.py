@@ -182,7 +182,7 @@ def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, filters
     from telegram import Update
 
-    from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_stop_all, cmd_revoke
+    from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_ops, cmd_stop_all, cmd_revoke
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
 
@@ -205,6 +205,7 @@ def setup_bot():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("ops", cmd_ops))
     app.add_handler(CommandHandler("stop_all", cmd_stop_all))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
 

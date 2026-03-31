@@ -860,6 +860,7 @@ def fmt_help():
         "/start \\- Open the home dashboard\n"
         "/help \\- Show commands, modules, and examples\n"
         "/status \\- View runtime health, setup, and strategy status\n"
+        "/ops \\- View order flow and builder route diagnostics\n"
         "/revoke \\- Show 1CT signer revoke steps\n"
         "/stop\\_all \\- Stop all running strategy loops\n"
         "\n"
@@ -1061,6 +1062,36 @@ def fmt_status_overview(status: dict, onboarding: dict):
                 f"{_loc('coalesced')}: *{escape_md(str(pending_ticks))}*"
             )
 
+        order_obs = status.get("order_observability") or {}
+        if order_obs:
+            obs_placed = int(order_obs.get("orders_placed") or 0)
+            obs_filled = int(order_obs.get("orders_filled") or 0)
+            obs_cancelled = int(order_obs.get("orders_cancelled") or 0)
+            obs_cycles = int(order_obs.get("cycles") or 0)
+            obs_zero = int(order_obs.get("zero_order_cycles") or 0)
+            lines.append(
+                f"{_loc('Order Flow')}: "
+                f"{_loc('placed')} *{escape_md(str(obs_placed))}* · "
+                f"{_loc('filled')} *{escape_md(str(obs_filled))}* · "
+                f"{_loc('cancelled')} *{escape_md(str(obs_cancelled))}*"
+            )
+            if obs_cycles > 0:
+                lines.append(
+                    f"{_loc('Orderless cycles')}: *{escape_md(str(obs_zero))}/{escape_md(str(obs_cycles))}*"
+                )
+
+        builder_route = status.get("builder_route") or {}
+        if builder_route.get("configured"):
+            lines.append(
+                f"{_loc('Builder Route')}: "
+                f"ID *{escape_md(str(builder_route.get('builder_id')))}* · "
+                f"fee *{escape_md(str(builder_route.get('builder_fee_rate')))}*"
+            )
+        elif builder_route.get("error"):
+            lines.append(
+                f"⚠️ {_loc('Builder Route')}: {escape_md(str(builder_route.get('error'))[:120])}"
+            )
+
         if strategy == "DN":
             dn_mode = status.get("dn_mode") or "enter_anyway"
             dn_fr = float(status.get("dn_last_funding_rate") or 0.0)
@@ -1124,6 +1155,69 @@ def fmt_status_overview(status: dict, onboarding: dict):
                 f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}* \\| "
                 f"Discretion: *{escape_md(f'{discretion:.2f}')}*"
             )
+
+    return "\n".join(lines)
+
+
+def fmt_ops_overview(status: dict, ops: dict) -> str:
+    runtime_diag = status.get("runtime_diagnostics") or {}
+    queue_diag = runtime_diag.get("queue") or {}
+    order_obs = status.get("order_observability") or {}
+    builder_route = status.get("builder_route") or {}
+
+    strategy = str(status.get("strategy") or "none").upper()
+    running = bool(status.get("running"))
+
+    lines = [
+        "🧪 *Ops Snapshot*",
+        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        f"{_loc('Strategy')}: *{escape_md(strategy)}* · {'ON' if running else 'OFF'}",
+    ]
+
+    if builder_route.get("configured"):
+        lines.append(
+            f"{_loc('Builder Route')}: ID *{escape_md(str(builder_route.get('builder_id')))}* · "
+            f"fee *{escape_md(str(builder_route.get('builder_fee_rate')))}*"
+        )
+    else:
+        lines.append(
+            f"⚠️ {_loc('Builder Route')}: {escape_md(str(builder_route.get('error') or 'not configured')[:140])}"
+        )
+
+    lines.append(
+        f"{_loc('Queue')}: *{escape_md(str(int(queue_diag.get('strategy_qsize') or 0)))}*"
+        f"/{escape_md(str(int(queue_diag.get('strategy_qmax') or 0)))} · "
+        f"{_loc('coalesced')}: *{escape_md(str(int(runtime_diag.get('pending_coalesced_ticks') or 0)))}*"
+    )
+
+    if order_obs:
+        lines.append(
+            f"{_loc('Order Flow')}: {_loc('placed')} *{escape_md(str(int(order_obs.get('orders_placed') or 0)))}* · "
+            f"{_loc('filled')} *{escape_md(str(int(order_obs.get('orders_filled') or 0)))}* · "
+            f"{_loc('cancelled')} *{escape_md(str(int(order_obs.get('orders_cancelled') or 0)))}*"
+        )
+        lines.append(
+            f"{_loc('Cycles')}: *{escape_md(str(int(order_obs.get('ok_cycles') or 0)))}* ok / "
+            f"*{escape_md(str(int(order_obs.get('failed_cycles') or 0)))}* failed / "
+            f"*{escape_md(str(int(order_obs.get('zero_order_cycles') or 0)))}* orderless"
+        )
+        last_reason = str(order_obs.get("last_reason") or "").strip()
+        if last_reason:
+            lines.append(f"{_loc('Last reason')}: {escape_md(last_reason[:160])}")
+
+    queue_stats = queue_diag.get("stats") or {}
+    lines.append(
+        f"{_loc('Queue stats')}: enq *{escape_md(str(int(queue_stats.get('strategy_enqueued') or 0)))}* · "
+        f"dedup *{escape_md(str(int(queue_stats.get('strategy_deduped') or 0)))}* · "
+        f"drop *{escape_md(str(int(queue_stats.get('strategy_dropped') or 0)))}*"
+    )
+
+    perf = ops.get("perf") or {}
+    if perf:
+        lines.append(
+            f"{_loc('Perf')}: active *{escape_md(str(int(perf.get('active_timers') or 0)))}* · "
+            f"totals *{escape_md(str(int(perf.get('total_records') or 0)))}*"
+        )
 
     return "\n".join(lines)
 

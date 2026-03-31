@@ -14,10 +14,16 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     "last_cycle_result", "worker_pid", "grid_anchor_price", "grid_buy_exposure_price",
     "grid_sell_exposure_price", "grid_drift_from_anchor_pct", "grid_reset_active",
     "grid_reset_side", "grid_last_cycle_pnl_usd", "dn_last_funding_rate", "dn_unfavorable_count",
-    "dn_mode",
+    "dn_mode", "order_observability",
 })
 
-from src.nadobro.config import get_product_id, get_product_max_leverage, get_spot_product_id, get_perp_products
+from src.nadobro.config import (
+    get_product_id,
+    get_product_max_leverage,
+    get_spot_product_id,
+    get_perp_products,
+    get_nado_builder_routing_config,
+)
 from src.nadobro.models.database import (
     get_bot_state_raw, set_bot_state,
     insert_strategy_session, update_strategy_session, increment_session_metrics,
@@ -113,6 +119,48 @@ def _strategy_display_name(strategy: str) -> str:
     if sid == "rgrid":
         return "REVERSE GRID"
     return sid.upper() if sid else "STRATEGY"
+
+
+def _update_order_observability(state: dict, result: dict) -> None:
+    obs = state.get("order_observability")
+    if not isinstance(obs, dict):
+        obs = {
+            "cycles": 0,
+            "ok_cycles": 0,
+            "failed_cycles": 0,
+            "cycles_with_orders": 0,
+            "zero_order_cycles": 0,
+            "orders_placed": 0,
+            "orders_filled": 0,
+            "orders_cancelled": 0,
+            "last_action": "",
+            "last_reason": "",
+            "last_ts": 0.0,
+        }
+
+    orders_placed = int(result.get("orders_placed", 0) or 0)
+    orders_filled = int(result.get("orders_filled", 0) or 0)
+    orders_cancelled = int(result.get("orders_cancelled", 0) or 0)
+    success = bool(result.get("success", True))
+
+    obs["cycles"] = int(obs.get("cycles", 0) or 0) + 1
+    if success:
+        obs["ok_cycles"] = int(obs.get("ok_cycles", 0) or 0) + 1
+    else:
+        obs["failed_cycles"] = int(obs.get("failed_cycles", 0) or 0) + 1
+
+    if orders_placed > 0:
+        obs["cycles_with_orders"] = int(obs.get("cycles_with_orders", 0) or 0) + 1
+    else:
+        obs["zero_order_cycles"] = int(obs.get("zero_order_cycles", 0) or 0) + 1
+
+    obs["orders_placed"] = int(obs.get("orders_placed", 0) or 0) + orders_placed
+    obs["orders_filled"] = int(obs.get("orders_filled", 0) or 0) + orders_filled
+    obs["orders_cancelled"] = int(obs.get("orders_cancelled", 0) or 0) + orders_cancelled
+    obs["last_action"] = str(result.get("action") or "")
+    obs["last_reason"] = str(result.get("reason") or result.get("detail") or result.get("error") or "")[:200]
+    obs["last_ts"] = time.time()
+    state["order_observability"] = obs
 
 
 def set_bot_app(app):
@@ -228,7 +276,14 @@ def _strategy_defaults(strategy: str) -> dict:
             "auto_close_on_maintenance": 1.0,
             "funding_entry_mode": "enter_anyway",
         },
-        "vol": {"notional_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
+        "vol": {
+            "notional_usd": 200.0,
+            "target_volume_usd": 10000.0,
+            "interval_seconds": 30,
+            # VOL uses its own open/close cycle logic; avoid directional runtime auto-stop defaults.
+            "tp_pct": 0.0,
+            "sl_pct": 0.0,
+        },
         "bro": {
             "budget_usd": 500.0, "risk_level": "balanced", "max_positions": 3,
             "interval_seconds": 300, "cycle_seconds": 300,
@@ -555,6 +610,20 @@ def get_user_bot_status(telegram_id: int) -> dict:
     except Exception:
         pass
 
+    builder_route = {}
+    try:
+        builder_id, builder_fee_rate = get_nado_builder_routing_config()
+        builder_route = {
+            "configured": True,
+            "builder_id": int(builder_id),
+            "builder_fee_rate": int(builder_fee_rate),
+        }
+    except Exception as e:
+        builder_route = {
+            "configured": False,
+            "error": str(e),
+        }
+
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -608,6 +677,8 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "other_running_networks": other_running_networks,
         "strategy_session_id": state.get("strategy_session_id"),
         "running_sessions": running_sessions,
+        "order_observability": state.get("order_observability") or {},
+        "builder_route": builder_route,
         "runtime_diagnostics": get_runtime_diagnostics(),
     }
 
@@ -875,7 +946,13 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
             product=product, open_orders=open_orders,
         )
     elif strategy == "vol":
-        return volume_bot.run_cycle(telegram_id, network, state)
+        return volume_bot.run_cycle(
+            telegram_id,
+            network,
+            state,
+            client=client,
+            mid=mid,
+        )
     elif strategy == "bro":
         from src.nadobro.strategies import bro_mode
         return bro_mode.run_cycle(
@@ -1057,7 +1134,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
-    if strategy != "rgrid":
+    if strategy not in ("rgrid", "dn", "vol"):
         move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
         sl_pct = float(state.get("sl_pct") or 0.0)
         tp_pct = float(state.get("tp_pct") or 0.0)
@@ -1185,6 +1262,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     state["last_error"] = result.get("error")
     state["last_action"] = result.get("action", "cycle")
     state["last_action_detail"] = str(result.get("detail", ""))[:200]
+    _update_order_observability(state, result)
     _save_state(telegram_id, network, state)
     drift_seconds = max(0.0, state["last_run_ts"] - last_run - interval) if last_run > 0 else 0.0
     if drift_seconds > 0:
@@ -1228,7 +1306,11 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 orders_placed=orders_placed,
                 orders_filled=int(result.get("orders_filled", 0)),
                 orders_cancelled=int(result.get("orders_cancelled", 0)),
-                volume=float(result.get("placed_notional_usd", 0) or result.get("volume_done_usd", 0) or 0),
+                volume=float(
+                    result.get("placed_notional_usd", 0)
+                    or result.get("cycle_placed_notional_usd", 0)
+                    or 0
+                ),
             )
         except Exception:
             pass

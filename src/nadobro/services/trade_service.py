@@ -15,6 +15,7 @@ from src.nadobro.config import (
     is_product_isolated_only,
     RATE_LIMIT_SECONDS,
     MIN_TRADE_SIZE_USD,
+    get_nado_builder_routing_config,
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 from src.nadobro.services.nado_archive import query_order_by_digest
@@ -30,6 +31,17 @@ def _trade_ts_display(val) -> str:
         return val.isoformat()[:19]
     s = str(val)
     return s[:19] if len(s) >= 19 else s
+
+
+def _builder_route_payload() -> dict:
+    try:
+        builder_id, builder_fee_rate = get_nado_builder_routing_config()
+        return {
+            "builder_id": int(builder_id),
+            "builder_fee_rate": int(builder_fee_rate),
+        }
+    except Exception as e:
+        return {"error": f"Builder routing misconfigured: {e}"}
 
 
 def _resolve_fill_data(client, digest: str, network: str) -> dict | None:
@@ -218,6 +230,10 @@ def execute_market_order(
     strategy_session_id: int = None,
     **kwargs,
 ) -> dict:
+    builder_route = _builder_route_payload()
+    if builder_route.get("error"):
+        return {"success": False, "error": builder_route["error"]}
+
     valid, msg = validate_trade(
         telegram_id,
         product,
@@ -355,6 +371,7 @@ def execute_market_order(
             "digest": result.get("digest"),
             "network": user.network_mode.value,
         }
+        payload.update(builder_route)
         if exec_fee is not None and float(exec_fee or 0) >= 0:
             payload["fee"] = float(exec_fee or 0)
         tp_result = _place_take_profit_order(
@@ -391,6 +408,10 @@ def execute_spot_market_order(
     source: str = "manual",
     strategy_session_id: int = None,
 ) -> dict:
+    builder_route = _builder_route_payload()
+    if builder_route.get("error"):
+        return {"success": False, "error": builder_route["error"]}
+
     asset = (asset or "").upper().strip()
     spot_product_id = get_spot_product_id(asset)
     if spot_product_id is None:
@@ -495,6 +516,8 @@ def execute_spot_market_order(
             "product_id": spot_product_id,
             "digest": digest,
             "network": network,
+            "builder_id": builder_route.get("builder_id"),
+            "builder_fee_rate": builder_route.get("builder_fee_rate"),
         }
 
     update_trade(trade_id, {
@@ -516,8 +539,13 @@ def execute_limit_order(
     sl_price: float = None,
     source: str = "manual",
     strategy_session_id: int = None,
+    reduce_only: bool = False,
     **kwargs,
 ) -> dict:
+    builder_route = _builder_route_payload()
+    if builder_route.get("error"):
+        return {"success": False, "error": builder_route["error"]}
+
     valid, msg = validate_trade(
         telegram_id,
         product,
@@ -563,6 +591,7 @@ def execute_limit_order(
         size,
         price,
         is_buy=is_long,
+        reduce_only=bool(reduce_only),
         isolated_only=isolated_only,
         isolated_margin=isolated_margin,
     )
@@ -600,6 +629,8 @@ def execute_limit_order(
             "type": "LIMIT",
             "status": TradeStatus.PENDING.value,
             "message": "Limit order accepted and recorded as pending until execution.",
+            "builder_id": builder_route.get("builder_id"),
+            "builder_fee_rate": builder_route.get("builder_fee_rate"),
         }
 
     return result
@@ -616,7 +647,17 @@ def _place_take_profit_order(client, product_id: int, size: float, is_long: bool
         return {"tp_requested": True, "tp_set": False, "tp_error": "TP price must be greater than 0."}
 
     # TP for a long is a sell limit, for a short is a buy limit.
-    tp_result = client.place_limit_order(product_id, float(size), tp, is_buy=(not is_long))
+    try:
+        tp_result = client.place_limit_order(
+            product_id,
+            float(size),
+            tp,
+            is_buy=(not is_long),
+            reduce_only=True,
+        )
+    except TypeError:
+        # Backward compatibility for mocked/legacy clients without reduce_only.
+        tp_result = client.place_limit_order(product_id, float(size), tp, is_buy=(not is_long))
     if tp_result.get("success"):
         return {
             "tp_requested": True,

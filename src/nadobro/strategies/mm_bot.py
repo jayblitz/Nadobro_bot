@@ -281,7 +281,8 @@ def _cancel_stale_orders(
 ) -> int:
     if not open_orders:
         return 0
-    max_offset = (spread_bp / 10000.0) * levels * STALE_DRIFT_MULTIPLIER
+    # RGRID can use signed spread values; stale drift bounds should use magnitude.
+    max_offset = (abs(spread_bp) / 10000.0) * levels * STALE_DRIFT_MULTIPLIER
     if close_offset_bp > 0:
         max_offset = max(max_offset, close_offset_bp / 10000.0)
     cancelled = 0
@@ -423,9 +424,10 @@ def _reconcile_executed_quotes(
                 placed_ts = float(meta.get("placed_ts") or 0.0)
             except Exception:
                 placed_ts = 0.0
-        # If an order disappeared and remains unconfirmed for too long, drop the
-        # tracker entry so stale metadata does not accumulate forever.
+        # If an order disappeared and remains unconfirmed for too long, treat it
+        # as a best-effort fill for anchor logic, then drop stale tracker metadata.
         if placed_ts > 0 and (now_ts - placed_ts) > 1800:
+            executed.append(meta if isinstance(meta, dict) else {})
             tracked.pop(digest, None)
     return executed
 
@@ -890,6 +892,7 @@ def run_cycle(
             enforce_rate_limit=False,
             source=strategy,
             strategy_session_id=state.get("strategy_session_id"),
+            reduce_only=bool(pause_flatten_only and abs(net_units) > 0),
         )
 
         if result.get("success"):
