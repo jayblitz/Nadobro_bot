@@ -4,6 +4,8 @@ import sys
 import logging
 import asyncio
 import signal
+import json
+import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -72,6 +74,9 @@ def check_config():
         missing.append("TELEGRAM_TRANSPORT must be polling or webhook")
     if transport_mode == "webhook" and not webhook_url:
         missing.append("TELEGRAM_WEBHOOK_URL (required when TELEGRAM_TRANSPORT=webhook)")
+    data_env = (os.environ.get("DATA_ENV") or "").strip()
+    if data_env and data_env not in ("nadoMainnet", "nadoTestnet"):
+        missing.append("DATA_ENV must be nadoMainnet or nadoTestnet when set")
     xai_key = os.environ.get("XAI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     if not xai_key and not openai_key:
@@ -86,6 +91,13 @@ def check_config():
     if missing:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
+
+    if data_env == "nadoMainnet":
+        require_linked = os.environ.get("NADO_REQUIRE_MAINNET_LINKED_SIGNER", "true").strip().lower() in ("1", "true", "yes", "on")
+        if require_linked:
+            logger.info("Mainnet guardrail enabled: linked signer required for active wallet readiness checks.")
+    if (os.environ.get("NADO_TOOLING_ENABLE", "true").strip().lower() in ("1", "true", "yes", "on")):
+        logger.info("Nado tooling adapter enabled (SDK writes remain primary).")
 
     logger.info("Configuration check passed (transport=%s)", transport_mode)
 
@@ -121,13 +133,49 @@ async def _start_bootstrap_health_server(port: int):
     async def _bootstrap_health_handler(reader, writer):
         try:
             await reader.read(4096)
-            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nBOOTING")
+            body = json.dumps({"status": "booting", "ts": time.time()}).encode("utf-8")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+                + body
+            )
             await writer.drain()
         finally:
             writer.close()
             await writer.wait_closed()
 
     return await asyncio.start_server(_bootstrap_health_handler, "0.0.0.0", port)
+
+
+def _runtime_health_payload() -> dict:
+    payload = {"status": "ok", "ts": time.time()}
+    try:
+        from src.nadobro.services.execution_queue import get_queue_diagnostics
+        from src.nadobro.services.runtime_supervisor import get_runtime_supervisor_diagnostics
+        from src.nadobro.services.copy_service import get_copy_polling_diagnostics
+        from src.nadobro.services.scheduler import get_scheduler_diagnostics
+        from src.nadobro.services.perf import summary_lines
+
+        queue_diag = get_queue_diagnostics()
+        scheduler_diag = get_scheduler_diagnostics()
+        payload.update(
+            {
+                "queue": queue_diag,
+                "scheduler": scheduler_diag,
+                "runtime_supervisor": get_runtime_supervisor_diagnostics(),
+                "copy_polling": get_copy_polling_diagnostics(),
+                "perf_top": summary_lines(top_n=5),
+            }
+        )
+        if int(queue_diag.get("strategy_qsize") or 0) >= int(queue_diag.get("strategy_qmax") or 0):
+            payload["status"] = "degraded"
+        if not scheduler_diag.get("running"):
+            payload["status"] = "degraded"
+    except Exception as e:
+        payload["status"] = "degraded"
+        payload["health_error"] = str(e)
+    return payload
 
 
 def setup_bot():
@@ -312,7 +360,15 @@ async def run_bot():
                 async def _health_handler(reader, writer):
                     try:
                         await reader.read(4096)
-                        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                        payload = _runtime_health_payload()
+                        body = json.dumps(payload).encode("utf-8")
+                        status_line = b"HTTP/1.1 200 OK\r\n" if payload.get("status") == "ok" else b"HTTP/1.1 503 Service Unavailable\r\n"
+                        writer.write(
+                            status_line
+                            + b"Content-Type: application/json\r\n"
+                            + f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+                            + body
+                        )
                         await writer.drain()
                     finally:
                         writer.close()

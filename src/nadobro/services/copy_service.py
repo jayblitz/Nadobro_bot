@@ -312,6 +312,16 @@ async def stop_copy_polling():
         logger.info("Copy trading polling loop stopped")
 
 
+def get_copy_polling_diagnostics() -> dict:
+    task = _poll_task
+    return {
+        "enabled": bool(task),
+        "running": bool(task and not task.done()),
+        "interval_seconds": int(POLL_INTERVAL_SECONDS),
+        "task_name": str(task.get_name()) if task else "",
+    }
+
+
 async def _poll_loop():
     """Main polling loop: check all active mirrors and sync positions."""
     while True:

@@ -1050,6 +1050,16 @@ def fmt_status_overview(status: dict, onboarding: dict):
                 f"{_loc('hb')}: *{escape_md(heartbeat)}* · "
                 f"{escape_md(f'{cycle_ms:.0f}ms')}"
             )
+        runtime_diag = status.get("runtime_diagnostics") or {}
+        queue_diag = runtime_diag.get("queue") or {}
+        strategy_qsize = int(queue_diag.get("strategy_qsize") or 0)
+        strategy_qmax = int(queue_diag.get("strategy_qmax") or 0)
+        pending_ticks = int(runtime_diag.get("pending_coalesced_ticks") or 0)
+        if strategy_qmax > 0 or pending_ticks > 0:
+            lines.append(
+                f"{_loc('Queue')}: *{escape_md(str(strategy_qsize))}/{escape_md(str(strategy_qmax))}* · "
+                f"{_loc('coalesced')}: *{escape_md(str(pending_ticks))}*"
+            )
 
         if strategy == "DN":
             dn_mode = status.get("dn_mode") or "enter_anyway"

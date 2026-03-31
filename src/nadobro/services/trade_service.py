@@ -18,6 +18,7 @@ from src.nadobro.config import (
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 from src.nadobro.services.nado_archive import query_order_by_digest
+from src.nadobro.services.nado_tooling_service import get_account_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -1429,4 +1430,16 @@ def get_trade_analytics(telegram_id: int) -> dict:
         "losses": losses,
         "total_volume": total_volume,
         "by_product": by_product,
+    }
+
+
+def get_account_and_performance_snapshot(telegram_id: int, prefer_cli: bool = False) -> dict:
+    account = get_account_snapshot(telegram_id, prefer_cli=prefer_cli)
+    performance = get_trade_analytics(telegram_id)
+    return {
+        "success": bool(account.get("success")),
+        "account_source": account.get("source"),
+        "account": account.get("data"),
+        "account_error": account.get("error"),
+        "performance": performance,
     }

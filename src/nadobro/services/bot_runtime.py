@@ -45,6 +45,13 @@ _tasks: dict[str, asyncio.Task] = {}
 _job_locks: dict[str, asyncio.Lock] = {}
 _job_pending_payloads: dict[str, dict] = {}
 _job_coalesce_counts: dict[str, int] = {}
+_job_stats: dict[str, int] = {
+    "cycles_started": 0,
+    "cycles_ok": 0,
+    "cycles_failed": 0,
+    "coalesced_ticks": 0,
+    "deferred_cycles": 0,
+}
 _process_worker_mode = False
 
 
@@ -601,6 +608,23 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "other_running_networks": other_running_networks,
         "strategy_session_id": state.get("strategy_session_id"),
         "running_sessions": running_sessions,
+        "runtime_diagnostics": get_runtime_diagnostics(),
+    }
+
+
+def get_runtime_diagnostics() -> dict:
+    from src.nadobro.services.execution_queue import get_queue_diagnostics
+
+    active_loops = len([t for t in _tasks.values() if not t.done()])
+    pending_keys = len(_job_pending_payloads)
+    pending_coalesced_ticks = sum(int(v or 0) for v in _job_coalesce_counts.values())
+    return {
+        "active_strategy_loops": active_loops,
+        "tracked_job_locks": len(_job_locks),
+        "pending_keys": pending_keys,
+        "pending_coalesced_ticks": pending_coalesced_ticks,
+        "queue": get_queue_diagnostics(),
+        "stats": dict(_job_stats),
     }
 
 
@@ -734,6 +758,7 @@ async def handle_strategy_job(payload: dict):
     if lock.locked():
         _job_pending_payloads[key] = payload
         _job_coalesce_counts[key] = int(_job_coalesce_counts.get(key, 0)) + 1
+        _job_stats["coalesced_ticks"] += 1
         logger.info(
             "Coalescing overlapping strategy cycle for user %s on %s (pending=%s)",
             telegram_id,
@@ -745,6 +770,7 @@ async def handle_strategy_job(payload: dict):
     async with lock:
         while True:
             cycle_started = time.perf_counter()
+            _job_stats["cycles_started"] += 1
             state = _load_state(telegram_id, network)
             if not state.get("running"):
                 _job_pending_payloads.pop(key, None)
@@ -783,14 +809,17 @@ async def handle_strategy_job(payload: dict):
                 else:
                     ok, error_msg = await _run_cycle(telegram_id, network, state)
                 if ok:
+                    _job_stats["cycles_ok"] += 1
                     refreshed = _load_state(telegram_id, network)
                     if refreshed.get("error_streak") or refreshed.get("last_error"):
                         refreshed["error_streak"] = 0
                         refreshed["last_error"] = None
                         _save_state(telegram_id, network, refreshed)
                 else:
+                    _job_stats["cycles_failed"] += 1
                     await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
             except Exception as e:
+                _job_stats["cycles_failed"] += 1
                 logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
                 await _mark_cycle_error(telegram_id, network, str(e))
             finally:
@@ -800,6 +829,7 @@ async def handle_strategy_job(payload: dict):
             coalesced_count = int(_job_coalesce_counts.pop(key, 0))
             if not pending_payload:
                 break
+            _job_stats["deferred_cycles"] += 1
             logger.info(
                 "Running deferred coalesced strategy cycle for user %s on %s (%s coalesced tick(s))",
                 telegram_id,
