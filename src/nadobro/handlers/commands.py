@@ -7,7 +7,7 @@ from src.nadobro.i18n import language_context, get_user_language, localize_text,
 from src.nadobro.services.user_service import get_or_create_user, get_user
 
 INTRO_VIDEO_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "intro_video.mov")
-from src.nadobro.handlers.formatters import escape_md, fmt_help, fmt_status_overview
+from src.nadobro.handlers.formatters import escape_md, fmt_help, fmt_status_overview, fmt_ops_overview
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb,
     onboarding_language_kb,
@@ -16,6 +16,7 @@ from src.nadobro.handlers.keyboards import (
     status_kb,
 )
 from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_user_bots
+from src.nadobro.services.nado_tooling_service import get_ops_diagnostics
 from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
     get_new_onboarding_state,
@@ -123,6 +124,31 @@ async def cmd_status(update: Update, context: CallbackContext):
         reply_markup = localize_markup(status_kb(), lang)
         # Always send a visible reply so /status works even when the home card is off-screen
         # or edit-in-place fails (webhook / concurrent updates).
+        try:
+            await update.message.reply_text(
+                localized,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            from src.nadobro.handlers.home_card import _plain_text_fallback
+
+            await update.message.reply_text(
+                _plain_text_fallback(localized),
+                reply_markup=reply_markup,
+            )
+
+
+async def cmd_ops(update: Update, context: CallbackContext):
+    telegram_id = update.effective_user.id
+    with language_context(get_user_language(telegram_id)):
+        status = await run_blocking(get_user_bot_status, telegram_id)
+        ops = await run_blocking(get_ops_diagnostics, telegram_id)
+        text = fmt_ops_overview(status, ops)
+
+        lang = get_active_language()
+        localized = localize_text(text, lang)
+        reply_markup = localize_markup(status_kb(), lang)
         try:
             await update.message.reply_text(
                 localized,

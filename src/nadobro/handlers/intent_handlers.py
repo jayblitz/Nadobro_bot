@@ -23,10 +23,18 @@ from src.nadobro.services.trade_service import (
     close_position,
     execute_market_order,
     execute_limit_order,
+    get_account_and_performance_snapshot,
     limit_close_position,
 )
 from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
 from src.nadobro.config import get_product_id, get_product_max_leverage
+from src.nadobro.services.nado_tooling_service import (
+    parse_trigger_intent,
+    parse_twap_intent,
+    preview_trigger_plan,
+    preview_twap_plan,
+    tooling_enabled,
+)
 
 PENDING_TEXT_TRADE_KEY = "pending_text_trade"
 logger = logging.getLogger(__name__)
@@ -172,6 +180,91 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
 
 
 async def handle_trade_intent_message(update, context: CallbackContext, telegram_id: int, text: str) -> bool:
+    normalized_text = str(text or "").strip().lower()
+    if tooling_enabled() and any(token in normalized_text for token in ("account snapshot", "performance snapshot", "portfolio snapshot")):
+        snap = get_account_and_performance_snapshot(telegram_id, prefer_cli=True)
+        perf = snap.get("performance") or {}
+        account_src = str(snap.get("account_source") or "sdk").upper()
+        account_ok = bool(snap.get("success"))
+        total_trades = int(perf.get("total_trades") or 0)
+        win_rate = float(perf.get("win_rate") or 0.0)
+        total_pnl = float(perf.get("total_pnl") or 0.0)
+        total_volume = float(perf.get("total_volume") or 0.0)
+        pnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
+        msg = (
+            "📈 *Account & Performance Snapshot*\\n\\n"
+            f"• Account source: *{escape_md(account_src)}*\\n"
+            f"• Account status: *{escape_md('OK' if account_ok else 'UNAVAILABLE')}*\\n"
+            f"• Total trades: *{escape_md(str(total_trades))}*\\n"
+            f"• Win rate: *{escape_md(f'{win_rate:.1f}%')}*\\n"
+            f"• Total PnL: *{escape_md(pnl_str)}*\\n"
+            f"• Total volume: *{escape_md(f'${total_volume:,.2f}')}*"
+        )
+        if not account_ok and snap.get("account_error"):
+            msg += f"\\n\\n⚠️ {escape_md(str(snap.get('account_error')))}"
+        await _reply_md_safe(update.message, msg)
+        return True
+
+    if tooling_enabled():
+        twap_intent = parse_twap_intent(text)
+        if twap_intent:
+            preview = preview_twap_plan(
+                telegram_id=telegram_id,
+                product=twap_intent["product"],
+                side=twap_intent["side"],
+                quantity=twap_intent["quantity"],
+                duration_minutes=twap_intent["duration_minutes"],
+            )
+            if preview.get("success"):
+                data = preview.get("data") or {}
+                qty_txt = f"{float(data.get('quantity') or 0):.6f}"
+                notional_txt = f"${float(data.get('estimated_notional_usd') or 0):,.2f}"
+                msg = (
+                    "📊 *TWAP Preview*\\n\\n"
+                    f"• Product: *{escape_md(str(data.get('product')))}*\\n"
+                    f"• Side: *{escape_md(str(data.get('side')).upper())}*\\n"
+                    f"• Size: *{escape_md(qty_txt)}*\\n"
+                    f"• Duration: *{escape_md(str(data.get('duration_minutes')))}m*\\n"
+                    f"• Interval: *{escape_md(str(data.get('interval_seconds')))}s*\\n"
+                    f"• Slices: *{escape_md(str(data.get('estimated_slices')))}*\\n"
+                    f"• Est Notional: *{escape_md(notional_txt)}*\\n\\n"
+                    "This is a preview only\\. Execution flow will be added behind an explicit confirmation step\\."
+                )
+                await _reply_md_safe(update.message, msg)
+            else:
+                await _reply_md_safe(update.message, f"⚠️ {escape_md(str(preview.get('error') or 'TWAP preview failed'))}")
+            return True
+
+        trigger_intent = parse_trigger_intent(text)
+        if trigger_intent:
+            preview = preview_trigger_plan(
+                telegram_id=telegram_id,
+                product=trigger_intent["product"],
+                side=trigger_intent["side"],
+                trigger_price=trigger_intent["trigger_price"],
+                quantity=trigger_intent["quantity"],
+            )
+            if preview.get("success"):
+                data = preview.get("data") or {}
+                qty_txt = f"{float(data.get('quantity') or 0):.6f}"
+                trigger_txt = f"${float(data.get('trigger_price') or 0):,.2f}"
+                mid_txt = f"${float(data.get('reference_mid_price') or 0):,.2f}"
+                distance_txt = f"{float(data.get('distance_pct_from_mid') or 0):+.2f}%"
+                msg = (
+                    "🎯 *Trigger Preview*\\n\\n"
+                    f"• Product: *{escape_md(str(data.get('product')))}*\\n"
+                    f"• Side: *{escape_md(str(data.get('side')).upper())}*\\n"
+                    f"• Size: *{escape_md(qty_txt)}*\\n"
+                    f"• Trigger: *{escape_md(trigger_txt)}*\\n"
+                    f"• Mid: *{escape_md(mid_txt)}*\\n"
+                    f"• Distance: *{escape_md(distance_txt)}*\\n\\n"
+                    "This is a preview only\\. Execution flow will be added behind an explicit confirmation step\\."
+                )
+                await _reply_md_safe(update.message, msg)
+            else:
+                await _reply_md_safe(update.message, f"⚠️ {escape_md(str(preview.get('error') or 'Trigger preview failed'))}")
+            return True
+
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
     intent = parse_trade_intent(text, network=network)

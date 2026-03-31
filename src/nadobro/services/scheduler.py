@@ -549,3 +549,15 @@ def stop_scheduler():
     if scheduler.running:
         scheduler.shutdown(wait=False)
         logger.info("Scheduler stopped")
+
+
+def get_scheduler_diagnostics() -> dict:
+    try:
+        jobs = scheduler.get_jobs() if scheduler.running else []
+    except Exception:
+        jobs = []
+    return {
+        "running": bool(scheduler.running),
+        "job_count": len(jobs),
+        "alert_scan_seconds": int(_ALERT_SCAN_SECONDS),
+    }

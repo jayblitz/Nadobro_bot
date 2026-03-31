@@ -71,6 +71,30 @@ def stop_runtime_supervisor() -> None:
     _STARTED = False
 
 
+def get_runtime_supervisor_diagnostics() -> dict[str, Any]:
+    pools = {}
+    for name, pool in _POOLS.items():
+        max_workers = getattr(pool, "_max_workers", 0)
+        processes = getattr(pool, "_processes", {}) or {}
+        alive = 0
+        for proc in processes.values():
+            try:
+                if proc.is_alive():
+                    alive += 1
+            except Exception:
+                continue
+        pools[name] = {
+            "max_workers": int(max_workers or 0),
+            "alive_workers": int(alive),
+        }
+    return {
+        "mode": runtime_mode(),
+        "multiprocess_enabled": is_multiprocess_enabled(),
+        "started": bool(_STARTED),
+        "pools": pools,
+    }
+
+
 def _run_cycle_job(payload: dict[str, Any]) -> dict[str, Any]:
     # Imported lazily inside workers so this module stays lightweight.
     from src.nadobro.services.bot_runtime import run_cycle_job_sync

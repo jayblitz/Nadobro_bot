@@ -28,6 +28,13 @@ COOLDOWN_CYCLES = 3
 COOLDOWN_CONFIDENCE_BUMP = 0.15
 
 
+def _normalize_product_symbol(product: str) -> str:
+    raw = str(product or "").upper().strip()
+    if raw.endswith("-PERP"):
+        raw = raw[:-5]
+    return raw
+
+
 def run_cycle(
     telegram_id: int,
     network: str,
@@ -255,7 +262,7 @@ def _handle_open(
     budget, remaining, max_leverage, max_positions,
     bro_settings,
 ) -> dict:
-    product = decision.get("product", "BTC").upper()
+    product = _normalize_product_symbol(decision.get("product", "BTC"))
     is_long = decision["action"] == "open_long"
     confidence = decision.get("confidence", 0)
     leverage = min(int(decision.get("leverage", 3)), max_leverage)
@@ -282,7 +289,10 @@ def _handle_open(
             return {"success": True, "action": "blocked",
                     "detail": f"Max positions ({max_positions}) reached, holding"}
 
-        existing_products = {p.get("product", "").upper() for p in snapshot.get("positions", [])}
+        existing_products = {
+            _normalize_product_symbol(p.get("product", ""))
+            for p in snapshot.get("positions", [])
+        }
         if product in existing_products:
             return {"success": True, "action": "blocked",
                     "detail": f"Already have a position in {product}, holding"}
@@ -368,7 +378,7 @@ def _handle_open(
         bro_state["trades_log"] = trades_log[-100:]
 
         logger.info(
-            "Bro Mode OPENED %s %s: $%.0f @ $%,.2f (%dx) conf=%.0f%% score=%.2f — %s",
+            "Bro Mode OPENED %s %s: $%.0f @ $%.2f (%dx) conf=%.0f%% score=%.2f — %s",
             product, "LONG" if is_long else "SHORT",
             notional_usd, mid, leverage, confidence * 100,
             decision.get("composite_score", 0),
@@ -397,11 +407,17 @@ def _handle_open(
 def _handle_close(
     telegram_id, network, state, decision, positions,
 ) -> dict:
-    close_product = decision.get("close_product", decision.get("product", "")).upper()
+    close_product = _normalize_product_symbol(
+        decision.get("close_product", decision.get("product", ""))
+    )
     if not close_product:
         return {"success": True, "action": "hold", "detail": "No product specified for close"}
 
-    matching = [p for p in positions if p.get("product", "").upper() == close_product]
+    matching = [
+        p
+        for p in positions
+        if _normalize_product_symbol(p.get("product", "")) == close_product
+    ]
     if not matching:
         return {"success": True, "action": "hold", "detail": f"No open position for {close_product}"}
 

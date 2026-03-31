@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Optional
@@ -215,9 +216,44 @@ def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
             False,
             _loc("Wallet not linked. Use the Wallet button to connect your wallet (Linked Signer)."),
         )
+    if user.network_mode.value == "mainnet":
+        require_linked = os.environ.get("NADO_REQUIRE_MAINNET_LINKED_SIGNER", "true").strip().lower() in ("1", "true", "yes", "on")
+        if require_linked and user.main_address and user.linked_signer_address:
+            if str(user.main_address).lower() == str(user.linked_signer_address).lower():
+                return (
+                    False,
+                    _loc("Mainnet requires a linked signer hot key. Re-link wallet with a separate signer key."),
+                )
     if user.salt:
         return False, "Your wallet key uses an old format. Please unlink and re-link your wallet."
     return True, ""
+
+
+def get_runtime_wallet_readiness(telegram_id: int, verify_signer: bool = True) -> dict:
+    user = get_user(telegram_id)
+    if not user:
+        return {"ready": False, "error": "user_not_found"}
+    ready, message = ensure_active_wallet_ready(telegram_id)
+    selected_network = str(user.network_mode.value)
+    has_signing_client = bool(get_user_nado_client(telegram_id, network=selected_network))
+    has_readonly_client = bool(get_user_readonly_client(telegram_id, network=selected_network))
+    payload = {
+        "ready": bool(ready and has_signing_client),
+        "network": selected_network,
+        "message": message,
+        "has_signing_client": has_signing_client,
+        "has_readonly_client": has_readonly_client,
+        "linked_signer_address": user.linked_signer_address,
+        "main_address": user.main_address,
+    }
+    if verify_signer and user.linked_signer_address and user.main_address:
+        try:
+            ro = get_user_readonly_client(telegram_id, network=selected_network)
+            if ro:
+                payload["signer_verification"] = ro.verify_linked_signer(user.linked_signer_address)
+        except Exception as e:
+            payload["signer_verification"] = {"verified": False, "error": str(e)}
+    return payload
 
 
 def update_trade_stats(telegram_id: int, volume_usd: float):

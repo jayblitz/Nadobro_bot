@@ -14,10 +14,16 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     "last_cycle_result", "worker_pid", "grid_anchor_price", "grid_buy_exposure_price",
     "grid_sell_exposure_price", "grid_drift_from_anchor_pct", "grid_reset_active",
     "grid_reset_side", "grid_last_cycle_pnl_usd", "dn_last_funding_rate", "dn_unfavorable_count",
-    "dn_mode",
+    "dn_mode", "order_observability",
 })
 
-from src.nadobro.config import get_product_id, get_product_max_leverage, get_spot_product_id, get_perp_products
+from src.nadobro.config import (
+    get_product_id,
+    get_product_max_leverage,
+    get_spot_product_id,
+    get_perp_products,
+    get_nado_builder_routing_config,
+)
 from src.nadobro.models.database import (
     get_bot_state_raw, set_bot_state,
     insert_strategy_session, update_strategy_session, increment_session_metrics,
@@ -43,6 +49,15 @@ _bot_app = None
 _runtime_loop: asyncio.AbstractEventLoop | None = None
 _tasks: dict[str, asyncio.Task] = {}
 _job_locks: dict[str, asyncio.Lock] = {}
+_job_pending_payloads: dict[str, dict] = {}
+_job_coalesce_counts: dict[str, int] = {}
+_job_stats: dict[str, int] = {
+    "cycles_started": 0,
+    "cycles_ok": 0,
+    "cycles_failed": 0,
+    "coalesced_ticks": 0,
+    "deferred_cycles": 0,
+}
 _process_worker_mode = False
 
 
@@ -104,6 +119,48 @@ def _strategy_display_name(strategy: str) -> str:
     if sid == "rgrid":
         return "REVERSE GRID"
     return sid.upper() if sid else "STRATEGY"
+
+
+def _update_order_observability(state: dict, result: dict) -> None:
+    obs = state.get("order_observability")
+    if not isinstance(obs, dict):
+        obs = {
+            "cycles": 0,
+            "ok_cycles": 0,
+            "failed_cycles": 0,
+            "cycles_with_orders": 0,
+            "zero_order_cycles": 0,
+            "orders_placed": 0,
+            "orders_filled": 0,
+            "orders_cancelled": 0,
+            "last_action": "",
+            "last_reason": "",
+            "last_ts": 0.0,
+        }
+
+    orders_placed = int(result.get("orders_placed", 0) or 0)
+    orders_filled = int(result.get("orders_filled", 0) or 0)
+    orders_cancelled = int(result.get("orders_cancelled", 0) or 0)
+    success = bool(result.get("success", True))
+
+    obs["cycles"] = int(obs.get("cycles", 0) or 0) + 1
+    if success:
+        obs["ok_cycles"] = int(obs.get("ok_cycles", 0) or 0) + 1
+    else:
+        obs["failed_cycles"] = int(obs.get("failed_cycles", 0) or 0) + 1
+
+    if orders_placed > 0:
+        obs["cycles_with_orders"] = int(obs.get("cycles_with_orders", 0) or 0) + 1
+    else:
+        obs["zero_order_cycles"] = int(obs.get("zero_order_cycles", 0) or 0) + 1
+
+    obs["orders_placed"] = int(obs.get("orders_placed", 0) or 0) + orders_placed
+    obs["orders_filled"] = int(obs.get("orders_filled", 0) or 0) + orders_filled
+    obs["orders_cancelled"] = int(obs.get("orders_cancelled", 0) or 0) + orders_cancelled
+    obs["last_action"] = str(result.get("action") or "")
+    obs["last_reason"] = str(result.get("reason") or result.get("detail") or result.get("error") or "")[:200]
+    obs["last_ts"] = time.time()
+    state["order_observability"] = obs
 
 
 def set_bot_app(app):
@@ -219,7 +276,14 @@ def _strategy_defaults(strategy: str) -> dict:
             "auto_close_on_maintenance": 1.0,
             "funding_entry_mode": "enter_anyway",
         },
-        "vol": {"notional_usd": 200.0, "target_volume_usd": 10000.0, "interval_seconds": 30},
+        "vol": {
+            "notional_usd": 200.0,
+            "target_volume_usd": 10000.0,
+            "interval_seconds": 30,
+            # VOL uses its own open/close cycle logic; avoid directional runtime auto-stop defaults.
+            "tp_pct": 0.0,
+            "sl_pct": 0.0,
+        },
         "bro": {
             "budget_usd": 500.0, "risk_level": "balanced", "max_positions": 3,
             "interval_seconds": 300, "cycle_seconds": 300,
@@ -546,6 +610,20 @@ def get_user_bot_status(telegram_id: int) -> dict:
     except Exception:
         pass
 
+    builder_route = {}
+    try:
+        builder_id, builder_fee_rate = get_nado_builder_routing_config()
+        builder_route = {
+            "configured": True,
+            "builder_id": int(builder_id),
+            "builder_fee_rate": int(builder_fee_rate),
+        }
+    except Exception as e:
+        builder_route = {
+            "configured": False,
+            "error": str(e),
+        }
+
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -599,6 +677,25 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "other_running_networks": other_running_networks,
         "strategy_session_id": state.get("strategy_session_id"),
         "running_sessions": running_sessions,
+        "order_observability": state.get("order_observability") or {},
+        "builder_route": builder_route,
+        "runtime_diagnostics": get_runtime_diagnostics(),
+    }
+
+
+def get_runtime_diagnostics() -> dict:
+    from src.nadobro.services.execution_queue import get_queue_diagnostics
+
+    active_loops = len([t for t in _tasks.values() if not t.done()])
+    pending_keys = len(_job_pending_payloads)
+    pending_coalesced_ticks = sum(int(v or 0) for v in _job_coalesce_counts.values())
+    return {
+        "active_strategy_loops": active_loops,
+        "tracked_job_locks": len(_job_locks),
+        "pending_keys": pending_keys,
+        "pending_coalesced_ticks": pending_coalesced_ticks,
+        "queue": get_queue_diagnostics(),
+        "stats": dict(_job_stats),
     }
 
 
@@ -730,63 +827,86 @@ async def handle_strategy_job(payload: dict):
     key = _task_key(telegram_id, network)
     lock = _job_locks.setdefault(key, asyncio.Lock())
     if lock.locked():
-        logger.warning(
-            "Skipping overlapping strategy cycle for user %s on %s",
+        _job_pending_payloads[key] = payload
+        _job_coalesce_counts[key] = int(_job_coalesce_counts.get(key, 0)) + 1
+        _job_stats["coalesced_ticks"] += 1
+        logger.info(
+            "Coalescing overlapping strategy cycle for user %s on %s (pending=%s)",
             telegram_id,
             network,
+            _job_coalesce_counts[key],
         )
         return
 
-    cycle_started = time.perf_counter()
     async with lock:
-        state = _load_state(telegram_id, network)
-        if not state.get("running"):
-            return
-        try:
-            from src.nadobro.services.runtime_supervisor import (
-                is_multiprocess_enabled,
-                strategy_worker_group,
-                submit_cycle_job,
-            )
-
-            if is_multiprocess_enabled():
-                strategy = str(state.get("strategy") or "")
-                worker_group = strategy_worker_group(strategy)
-                state["worker_group"] = worker_group
-                state["last_dispatch_ts"] = time.time()
-                _save_state(telegram_id, network, state)
-                delegated = await submit_cycle_job(
-                    {
-                        "telegram_id": telegram_id,
-                        "network": network,
-                        "strategy": strategy,
-                        "worker_group": worker_group,
-                    }
+        while True:
+            cycle_started = time.perf_counter()
+            _job_stats["cycles_started"] += 1
+            state = _load_state(telegram_id, network)
+            if not state.get("running"):
+                _job_pending_payloads.pop(key, None)
+                _job_coalesce_counts.pop(key, None)
+                return
+            try:
+                from src.nadobro.services.runtime_supervisor import (
+                    is_multiprocess_enabled,
+                    strategy_worker_group,
+                    submit_cycle_job,
                 )
-                ok = bool(delegated.get("ok", True))
-                error_msg = delegated.get("error")
-                refreshed = _load_state(telegram_id, network)
-                refreshed["worker_group"] = worker_group
-                refreshed["worker_last_heartbeat"] = float(delegated.get("completed_at") or time.time())
-                refreshed["last_cycle_ms"] = float(delegated.get("elapsed_ms") or 0.0)
-                refreshed["last_cycle_result"] = "ok" if ok else "error"
-                refreshed["worker_pid"] = delegated.get("worker_pid")
-                _save_state(telegram_id, network, refreshed)
-            else:
-                ok, error_msg = await _run_cycle(telegram_id, network, state)
-            if ok:
-                refreshed = _load_state(telegram_id, network)
-                if refreshed.get("error_streak") or refreshed.get("last_error"):
-                    refreshed["error_streak"] = 0
-                    refreshed["last_error"] = None
+
+                if is_multiprocess_enabled():
+                    strategy = str(state.get("strategy") or "")
+                    worker_group = strategy_worker_group(strategy)
+                    state["worker_group"] = worker_group
+                    state["last_dispatch_ts"] = time.time()
+                    _save_state(telegram_id, network, state)
+                    delegated = await submit_cycle_job(
+                        {
+                            "telegram_id": telegram_id,
+                            "network": network,
+                            "strategy": strategy,
+                            "worker_group": worker_group,
+                        }
+                    )
+                    ok = bool(delegated.get("ok", True))
+                    error_msg = delegated.get("error")
+                    refreshed = _load_state(telegram_id, network)
+                    refreshed["worker_group"] = worker_group
+                    refreshed["worker_last_heartbeat"] = float(delegated.get("completed_at") or time.time())
+                    refreshed["last_cycle_ms"] = float(delegated.get("elapsed_ms") or 0.0)
+                    refreshed["last_cycle_result"] = "ok" if ok else "error"
+                    refreshed["worker_pid"] = delegated.get("worker_pid")
                     _save_state(telegram_id, network, refreshed)
-            else:
-                await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
-        except Exception as e:
-            logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
-            await _mark_cycle_error(telegram_id, network, str(e))
-        finally:
-            record_metric("runtime.strategy_cycle.total", (time.perf_counter() - cycle_started) * 1000.0)
+                else:
+                    ok, error_msg = await _run_cycle(telegram_id, network, state)
+                if ok:
+                    _job_stats["cycles_ok"] += 1
+                    refreshed = _load_state(telegram_id, network)
+                    if refreshed.get("error_streak") or refreshed.get("last_error"):
+                        refreshed["error_streak"] = 0
+                        refreshed["last_error"] = None
+                        _save_state(telegram_id, network, refreshed)
+                else:
+                    _job_stats["cycles_failed"] += 1
+                    await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
+            except Exception as e:
+                _job_stats["cycles_failed"] += 1
+                logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
+                await _mark_cycle_error(telegram_id, network, str(e))
+            finally:
+                record_metric("runtime.strategy_cycle.total", (time.perf_counter() - cycle_started) * 1000.0)
+
+            pending_payload = _job_pending_payloads.pop(key, None)
+            coalesced_count = int(_job_coalesce_counts.pop(key, 0))
+            if not pending_payload:
+                break
+            _job_stats["deferred_cycles"] += 1
+            logger.info(
+                "Running deferred coalesced strategy cycle for user %s on %s (%s coalesced tick(s))",
+                telegram_id,
+                network,
+                coalesced_count or 1,
+            )
 
 
 async def _mark_cycle_error(telegram_id: int, network: str, error_msg: str):
@@ -826,7 +946,13 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
             product=product, open_orders=open_orders,
         )
     elif strategy == "vol":
-        return volume_bot.run_cycle(telegram_id, network, state)
+        return volume_bot.run_cycle(
+            telegram_id,
+            network,
+            state,
+            client=client,
+            mid=mid,
+        )
     elif strategy == "bro":
         from src.nadobro.strategies import bro_mode
         return bro_mode.run_cycle(
@@ -1008,7 +1134,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
-    if strategy != "rgrid":
+    if strategy not in ("rgrid", "dn", "vol"):
         move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
         sl_pct = float(state.get("sl_pct") or 0.0)
         tp_pct = float(state.get("tp_pct") or 0.0)
@@ -1136,6 +1262,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     state["last_error"] = result.get("error")
     state["last_action"] = result.get("action", "cycle")
     state["last_action_detail"] = str(result.get("detail", ""))[:200]
+    _update_order_observability(state, result)
     _save_state(telegram_id, network, state)
     drift_seconds = max(0.0, state["last_run_ts"] - last_run - interval) if last_run > 0 else 0.0
     if drift_seconds > 0:
@@ -1179,7 +1306,11 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 orders_placed=orders_placed,
                 orders_filled=int(result.get("orders_filled", 0)),
                 orders_cancelled=int(result.get("orders_cancelled", 0)),
-                volume=float(result.get("placed_notional_usd", 0) or result.get("volume_done_usd", 0) or 0),
+                volume=float(
+                    result.get("placed_notional_usd", 0)
+                    or result.get("cycle_placed_notional_usd", 0)
+                    or 0
+                ),
             )
         except Exception:
             pass
