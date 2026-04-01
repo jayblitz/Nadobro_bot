@@ -860,7 +860,7 @@ def fmt_help():
         "/start \\- Open the home dashboard\n"
         "/help \\- Show commands, modules, and examples\n"
         "/status \\- View runtime health, setup, and strategy status\n"
-        "/ops \\- View order flow and builder route diagnostics\n"
+        "/ops \\- View order flow and runtime diagnostics\n"
         "/revoke \\- Show 1CT signer revoke steps\n"
         "/stop\\_all \\- Stop all running strategy loops\n"
         "\n"
@@ -1080,18 +1080,6 @@ def fmt_status_overview(status: dict, onboarding: dict):
                     f"{_loc('Orderless cycles')}: *{escape_md(str(obs_zero))}/{escape_md(str(obs_cycles))}*"
                 )
 
-        builder_route = status.get("builder_route") or {}
-        if builder_route.get("configured"):
-            lines.append(
-                f"{_loc('Builder Route')}: "
-                f"ID *{escape_md(str(builder_route.get('builder_id')))}* · "
-                f"fee *{escape_md(str(builder_route.get('builder_fee_rate')))}*"
-            )
-        elif builder_route.get("error"):
-            lines.append(
-                f"⚠️ {_loc('Builder Route')}: {escape_md(str(builder_route.get('error'))[:120])}"
-            )
-
         if strategy == "DN":
             dn_mode = status.get("dn_mode") or "enter_anyway"
             dn_fr = float(status.get("dn_last_funding_rate") or 0.0)
@@ -1163,7 +1151,6 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
     runtime_diag = status.get("runtime_diagnostics") or {}
     queue_diag = runtime_diag.get("queue") or {}
     order_obs = status.get("order_observability") or {}
-    builder_route = status.get("builder_route") or {}
 
     strategy = str(status.get("strategy") or "none").upper()
     running = bool(status.get("running"))
@@ -1173,16 +1160,6 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
         f"{_loc('Strategy')}: *{escape_md(strategy)}* · {'ON' if running else 'OFF'}",
     ]
-
-    if builder_route.get("configured"):
-        lines.append(
-            f"{_loc('Builder Route')}: ID *{escape_md(str(builder_route.get('builder_id')))}* · "
-            f"fee *{escape_md(str(builder_route.get('builder_fee_rate')))}*"
-        )
-    else:
-        lines.append(
-            f"⚠️ {_loc('Builder Route')}: {escape_md(str(builder_route.get('error') or 'not configured')[:140])}"
-        )
 
     lines.append(
         f"{_loc('Queue')}: *{escape_md(str(int(queue_diag.get('strategy_qsize') or 0)))}*"
@@ -1206,6 +1183,14 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
             lines.append(f"{_loc('Last reason')}: {escape_md(last_reason[:160])}")
 
     queue_stats = queue_diag.get("stats") or {}
+    strategy_workers_running = int(queue_diag.get("strategy_workers_running") or 0)
+    strategy_workers_target = int(queue_diag.get("strategy_workers_target") or 0)
+    alert_workers_running = int(queue_diag.get("alert_workers_running") or 0)
+    alert_workers_target = int(queue_diag.get("alert_workers_target") or 0)
+    lines.append(
+        f"{_loc('Workers')}: strategy *{escape_md(str(strategy_workers_running))}/{escape_md(str(strategy_workers_target))}* · "
+        f"alert *{escape_md(str(alert_workers_running))}/{escape_md(str(alert_workers_target))}*"
+    )
     lines.append(
         f"{_loc('Queue stats')}: enq *{escape_md(str(int(queue_stats.get('strategy_enqueued') or 0)))}* · "
         f"dedup *{escape_md(str(int(queue_stats.get('strategy_deduped') or 0)))}* · "

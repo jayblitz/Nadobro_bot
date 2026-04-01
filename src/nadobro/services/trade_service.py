@@ -371,7 +371,6 @@ def execute_market_order(
             "digest": result.get("digest"),
             "network": user.network_mode.value,
         }
-        payload.update(builder_route)
         if exec_fee is not None and float(exec_fee or 0) >= 0:
             payload["fee"] = float(exec_fee or 0)
         tp_result = _place_take_profit_order(
@@ -516,8 +515,6 @@ def execute_spot_market_order(
             "product_id": spot_product_id,
             "digest": digest,
             "network": network,
-            "builder_id": builder_route.get("builder_id"),
-            "builder_fee_rate": builder_route.get("builder_fee_rate"),
         }
 
     update_trade(trade_id, {
@@ -629,8 +626,6 @@ def execute_limit_order(
             "type": "LIMIT",
             "status": TradeStatus.PENDING.value,
             "message": "Limit order accepted and recorded as pending until execution.",
-            "builder_id": builder_route.get("builder_id"),
-            "builder_fee_rate": builder_route.get("builder_fee_rate"),
         }
 
     return result

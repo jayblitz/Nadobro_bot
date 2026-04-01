@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 _strategy_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
 _alert_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
 _workers: list[asyncio.Task] = []
+_strategy_worker_target: int = 1
+_alert_worker_target: int = 1
 _dedupe_seen: dict[str, float] = {}
 _DEDUP_TTL_SECONDS = 20.0
 _stats: dict[str, int] = {
@@ -50,6 +52,9 @@ def _dedupe_ok(dedupe_key: str) -> bool:
 
 
 async def enqueue_strategy(payload: dict[str, Any], dedupe_key: str) -> bool:
+    if not any((not t.done()) and (t.get_name() or "").startswith("strategy-") for t in _workers):
+        logger.warning("No active strategy queue workers detected; restarting workers")
+        start_workers(_strategy_worker_target, _alert_worker_target)
     if not _dedupe_ok(f"strategy:{dedupe_key}"):
         _stats["strategy_deduped"] += 1
         return False
@@ -94,23 +99,38 @@ async def _worker_loop(name: str, queue: asyncio.Queue, handler_getter: Callable
 
 
 def start_workers(strategy_workers: int = 2, alert_workers: int = 1):
+    global _strategy_worker_target, _alert_worker_target
+    _strategy_worker_target = max(1, int(strategy_workers))
+    _alert_worker_target = max(1, int(alert_workers))
+
+    # Prune done/cancelled tasks so startup is idempotent across reconnects.
     if _workers:
-        return
-    for idx in range(max(1, strategy_workers)):
+        _workers[:] = [t for t in _workers if not t.done()]
+
+    strategy_running = len(
+        [t for t in _workers if (t.get_name() or "").startswith("strategy-")]
+    )
+    alert_running = len(
+        [t for t in _workers if (t.get_name() or "").startswith("alert-")]
+    )
+
+    for idx in range(strategy_running, _strategy_worker_target):
         _workers.append(
             asyncio.create_task(
-                _worker_loop(f"strategy-{idx}", _strategy_queue, lambda: _strategy_handler)
+                _worker_loop(f"strategy-{idx}", _strategy_queue, lambda: _strategy_handler),
+                name=f"strategy-{idx}",
             )
         )
-    for idx in range(max(1, alert_workers)):
+    for idx in range(alert_running, _alert_worker_target):
         _workers.append(
             asyncio.create_task(
-                _worker_loop(f"alert-{idx}", _alert_queue, lambda: _alert_handler)
+                _worker_loop(f"alert-{idx}", _alert_queue, lambda: _alert_handler),
+                name=f"alert-{idx}",
             )
         )
     logger.info(
         "Execution queues started (strategy_workers=%s alert_workers=%s)",
-        strategy_workers, alert_workers,
+        _strategy_worker_target, _alert_worker_target,
     )
 
 
@@ -126,12 +146,19 @@ async def stop_workers():
 
 
 def get_queue_diagnostics() -> dict[str, Any]:
+    running_tasks = [t for t in _workers if not t.done()]
+    strategy_running = len([t for t in running_tasks if (t.get_name() or "").startswith("strategy-")])
+    alert_running = len([t for t in running_tasks if (t.get_name() or "").startswith("alert-")])
     return {
         "strategy_qsize": int(_strategy_queue.qsize()),
         "strategy_qmax": int(_strategy_queue.maxsize),
         "alert_qsize": int(_alert_queue.qsize()),
         "alert_qmax": int(_alert_queue.maxsize),
-        "workers_running": len([t for t in _workers if not t.done()]),
+        "workers_running": len(running_tasks),
+        "strategy_workers_running": strategy_running,
+        "alert_workers_running": alert_running,
+        "strategy_workers_target": int(_strategy_worker_target),
+        "alert_workers_target": int(_alert_worker_target),
         "dedupe_cache_size": len(_dedupe_seen),
         "stats": dict(_stats),
     }

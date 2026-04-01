@@ -317,6 +317,7 @@ async def run_bot():
         BotCommand("start", "Open home dashboard"),
         BotCommand("help", "Show guide and examples"),
         BotCommand("status", "View bot and strategy status"),
+        BotCommand("ops", "View runtime diagnostics"),
         BotCommand("revoke", "Show signer revoke steps"),
         BotCommand("stop_all", "Stop all running strategies"),
     ])
