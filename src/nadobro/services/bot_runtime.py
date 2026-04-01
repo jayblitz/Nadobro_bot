@@ -22,7 +22,6 @@ from src.nadobro.config import (
     get_product_max_leverage,
     get_spot_product_id,
     get_perp_products,
-    get_nado_builder_routing_config,
 )
 from src.nadobro.models.database import (
     get_bot_state_raw, set_bot_state,
@@ -610,20 +609,6 @@ def get_user_bot_status(telegram_id: int) -> dict:
     except Exception:
         pass
 
-    builder_route = {}
-    try:
-        builder_id, builder_fee_rate = get_nado_builder_routing_config()
-        builder_route = {
-            "configured": True,
-            "builder_id": int(builder_id),
-            "builder_fee_rate": int(builder_fee_rate),
-        }
-    except Exception as e:
-        builder_route = {
-            "configured": False,
-            "error": str(e),
-        }
-
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -678,7 +663,6 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "strategy_session_id": state.get("strategy_session_id"),
         "running_sessions": running_sessions,
         "order_observability": state.get("order_observability") or {},
-        "builder_route": builder_route,
         "runtime_diagnostics": get_runtime_diagnostics(),
     }
 
