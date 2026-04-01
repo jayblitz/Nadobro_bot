@@ -460,6 +460,19 @@ class NadoClient:
             return side
         return "LONG" if float(signed_amount or 0.0) >= 0 else "SHORT"
 
+    @staticmethod
+    def _nested_position_container(obj):
+        if obj is None:
+            return None
+        for key in ("subaccount_info", "subaccountInfo", "account", "result", "data"):
+            if isinstance(obj, dict):
+                nested = obj.get(key)
+            else:
+                nested = getattr(obj, key, None)
+            if nested:
+                return nested
+        return None
+
     def _extract_unrealized_pnl_sdk(self, p, balance_obj=None) -> float | None:
         """Best-effort uPnL from SDK objects (matches Nado when the API exposes it)."""
         for obj in (p, balance_obj):
@@ -571,6 +584,9 @@ class NadoClient:
             if val:
                 candidate_lists.append(val)
         if not candidate_lists:
+            nested = self._nested_position_container(info)
+            if nested is not None and nested is not info:
+                return self._extract_positions_from_sdk_info(nested)
             return positions
 
         for plist in candidate_lists:
@@ -589,8 +605,14 @@ class NadoClient:
                     amount_raw = (
                         getattr(balance_obj, "amount", None)
                         or getattr(balance_obj, "amount_x18", None)
+                        or getattr(balance_obj, "amountX18", None)
+                        or getattr(balance_obj, "balance_amount", None)
+                        or getattr(balance_obj, "balanceAmount", None)
+                        or getattr(balance_obj, "balance_amount_x18", None)
+                        or getattr(balance_obj, "balanceAmountX18", None)
                         or getattr(balance_obj, "size", None)
                         or getattr(balance_obj, "size_x18", None)
+                        or getattr(balance_obj, "sizeX18", None)
                     )
                     v_quote_raw = (
                         getattr(balance_obj, "v_quote_balance", None)
@@ -603,6 +625,10 @@ class NadoClient:
                         getattr(p, "amount", None)
                         or getattr(p, "amount_x18", None)
                         or getattr(p, "amountX18", None)
+                        or getattr(p, "balance_amount", None)
+                        or getattr(p, "balanceAmount", None)
+                        or getattr(p, "balance_amount_x18", None)
+                        or getattr(p, "balanceAmountX18", None)
                         or getattr(p, "size", None)
                         or getattr(p, "size_x18", None)
                         or getattr(p, "sizeX18", None)
@@ -677,6 +703,9 @@ class NadoClient:
             if isinstance(val, list) and val:
                 lists.append(val)
         if not lists:
+            nested = self._nested_position_container(payload)
+            if isinstance(nested, dict) and nested is not payload:
+                return self._extract_positions_from_rest_payload(nested)
             return positions
 
         for plist in lists:
@@ -697,6 +726,10 @@ class NadoClient:
                         balance_dict.get("amount")
                         or balance_dict.get("amount_x18")
                         or balance_dict.get("amountX18")
+                        or balance_dict.get("balance_amount")
+                        or balance_dict.get("balanceAmount")
+                        or balance_dict.get("balance_amount_x18")
+                        or balance_dict.get("balanceAmountX18")
                         or balance_dict.get("size")
                         or balance_dict.get("size_x18")
                         or balance_dict.get("sizeX18")
@@ -712,6 +745,10 @@ class NadoClient:
                         p.get("amount")
                         or p.get("amount_x18")
                         or p.get("amountX18")
+                        or p.get("balance_amount")
+                        or p.get("balanceAmount")
+                        or p.get("balance_amount_x18")
+                        or p.get("balanceAmountX18")
                         or p.get("size")
                         or p.get("size_x18")
                         or p.get("sizeX18")
