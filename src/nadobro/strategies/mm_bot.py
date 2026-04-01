@@ -408,7 +408,7 @@ def _reconcile_executed_quotes(
         filled = False
         try:
             from src.nadobro.services.nado_archive import query_order_by_digest
-            fill_data = query_order_by_digest(network, str(digest), 0.6, 0.2)
+            fill_data = query_order_by_digest(network, str(digest), 2.0, 0.4)
             filled = bool(fill_data and fill_data.get("is_filled"))
         except Exception:
             filled = False
@@ -424,10 +424,10 @@ def _reconcile_executed_quotes(
                 placed_ts = float(meta.get("placed_ts") or 0.0)
             except Exception:
                 placed_ts = 0.0
-        # If an order disappeared and remains unconfirmed for too long, treat it
-        # as a best-effort fill for anchor logic, then drop stale tracker metadata.
+        # If an order disappeared and remains unconfirmed for too long, drop stale
+        # tracker metadata without treating it as a fill. Anchor logic should move
+        # only on confirmed executions.
         if placed_ts > 0 and (now_ts - placed_ts) > 1800:
-            executed.append(meta if isinstance(meta, dict) else {})
             tracked.pop(digest, None)
     return executed
 
@@ -601,6 +601,7 @@ def run_cycle(
     reference_price = _compute_reference_price(state, mid, reference_mode, ema_fast_alpha, ema_slow_alpha)
     reference_price = reference_price if reference_price > 0 else mid
 
+    threshold_wait_result = None
     if threshold_bp > 0 and strategy == "grid":
         # Avoid a cold-start deadlock: while mid history is short, price vs session ref is ~0 bp,
         # so we would never place quotes until the market drifts. Allow quotes until history warms up
@@ -611,7 +612,7 @@ def run_cycle(
             reference = float(state.get("reference_price") or mid)
             moved_bp = abs(mid - reference) / max(reference, 1e-9) * 10000.0
             if moved_bp < threshold_bp:
-                return {
+                threshold_wait_result = {
                     "success": True,
                     "orders_placed": 0,
                     "orders_cancelled": 0,
@@ -740,6 +741,10 @@ def run_cycle(
 
     if orders_cancelled > 0:
         open_orders = client.get_open_orders(product_id)
+
+    if threshold_wait_result is not None:
+        threshold_wait_result["orders_cancelled"] = int(orders_cancelled)
+        return threshold_wait_result
 
     available_slots = max(0, max_orders - len(open_orders))
     if available_slots == 0:

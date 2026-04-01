@@ -1211,6 +1211,76 @@ def close_position(
     return payload
 
 
+def close_delta_neutral_legs(
+    telegram_id: int,
+    asset: str,
+    network: str | None = None,
+    slippage_pct: float = 1.0,
+    source: str = "dn",
+    strategy_session_id: int | None = None,
+) -> dict:
+    asset = str(asset or "").upper().replace("-PERP", "").strip()
+    if not asset:
+        return {"success": False, "error": "Asset is required to close delta-neutral legs."}
+
+    user = get_user(telegram_id)
+    active_network = user.network_mode.value if user else "mainnet"
+    selected_network = str(network or active_network)
+
+    readonly = get_user_readonly_client(telegram_id, network=selected_network)
+    if not readonly:
+        return {"success": False, "error": "Readonly client unavailable for DN close."}
+
+    perp_result: dict = {"success": True, "skipped": True}
+    try:
+        close_result = close_position(telegram_id, asset, network=selected_network)
+        if close_result.get("success") or "No open positions" in str(close_result.get("error") or ""):
+            perp_result = close_result if close_result.get("success") else {"success": True, "skipped": True}
+        else:
+            perp_result = close_result
+    except Exception as e:
+        perp_result = {"success": False, "error": str(e)}
+
+    spot_result: dict = {"success": True, "skipped": True, "spot_size": 0.0}
+    try:
+        spot_product_id = get_spot_product_id(asset)
+        if spot_product_id is not None:
+            balance = readonly.get_balance() or {}
+            balances = balance.get("balances", {}) or {}
+            spot_size = float(balances.get(spot_product_id, balances.get(str(spot_product_id), 0)) or 0.0)
+            spot_result["spot_size"] = spot_size
+            if spot_size > 0:
+                spot_result = execute_spot_market_order(
+                    telegram_id,
+                    asset,
+                    spot_size,
+                    is_buy=False,
+                    enforce_rate_limit=False,
+                    slippage_pct=slippage_pct,
+                    source=source,
+                    strategy_session_id=strategy_session_id,
+                )
+    except Exception as e:
+        spot_result = {"success": False, "error": str(e)}
+
+    success = bool(perp_result.get("success")) and bool(spot_result.get("success"))
+    if success:
+        return {
+            "success": True,
+            "asset": asset,
+            "perp": perp_result,
+            "spot": spot_result,
+        }
+
+    return {
+        "success": False,
+        "asset": asset,
+        "error": perp_result.get("error") or spot_result.get("error") or "Failed to close delta-neutral legs.",
+        "perp": perp_result,
+        "spot": spot_result,
+    }
+
+
 def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) -> dict:
     user = get_user(telegram_id)
     active_network = user.network_mode.value if user else "mainnet"
