@@ -17,6 +17,9 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 _bot_app = None
 _check_client = None
 _ALERT_SCAN_SECONDS = int(os.environ.get("ALERT_SCAN_SECONDS", "5"))
+# Archive indexer can lag behind fills; allow longer polling than inline trade resolution.
+_FILL_SYNC_DIGEST_WAIT = float(os.environ.get("NADO_FILL_SYNC_DIGEST_WAIT_SECONDS", "12"))
+_FILL_SYNC_DIGEST_POLL = float(os.environ.get("NADO_FILL_SYNC_DIGEST_POLL_SECONDS", "0.45"))
 _MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SECONDS", "3.0"))
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
 
@@ -402,7 +405,11 @@ async def sync_pending_fills():
                 await run_blocking(increment_fill_sync_attempts, sync_id)
 
                 fill_data = await run_blocking(
-                    query_order_by_digest, network, digest, 1.5, 0.5,
+                    query_order_by_digest,
+                    network,
+                    digest,
+                    _FILL_SYNC_DIGEST_WAIT,
+                    _FILL_SYNC_DIGEST_POLL,
                 )
                 if not fill_data or not fill_data.get("is_filled"):
                     # Check if order was cancelled only after enough retries to avoid

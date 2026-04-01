@@ -215,6 +215,28 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertIn(444, net)
         self.assertAlmostEqual(float(net[444]["signed_amount"]), -6.0, places=6)
 
+    def test_archive_unwraps_orders_under_data(self):
+        from src.nadobro.services.nado_archive import _orders_list_from_archive_response
+
+        row = {"digest": "0xabc", "base_filled": 1e18, "quote_filled": 100e18}
+        self.assertEqual(
+            _orders_list_from_archive_response({"data": {"orders": [row]}}),
+            [row],
+        )
+
+    def test_parse_order_reads_camelCase_fill_fields(self):
+        from src.nadobro.services.nado_archive import _parse_order
+
+        o = _parse_order(
+            {
+                "digest": "0x1",
+                "baseFilled": 5e18,
+                "quoteFilled": 500e18,
+            }
+        )
+        self.assertTrue(o["is_filled"])
+        self.assertGreater(o["fill_size"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
