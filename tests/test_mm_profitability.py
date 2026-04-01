@@ -259,7 +259,7 @@ class MmProfitabilityTests(unittest.TestCase):
         self.assertEqual(result.get("action"), "grid_stop_loss_hit")
         self.assertLessEqual(float(result.get("grid_cycle_pnl_usd") or 0.0), -10.0)
 
-    def test_grid_anchor_uses_disappeared_quote_digest_as_fill(self):
+    def test_grid_anchor_does_not_treat_disappeared_quote_as_fill(self):
         state = {
             "strategy": "rgrid",
             "product": "BTC",
@@ -284,8 +284,9 @@ class MmProfitabilityTests(unittest.TestCase):
             result = mm_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client, mid=100.0, open_orders=[])
 
         self.assertTrue(result["success"])
-        self.assertAlmostEqual(float(state.get("grid_last_fill_price") or 0.0), 101.25, places=6)
-        self.assertAlmostEqual(float(state.get("grid_anchor_price") or 0.0), 101.25, places=6)
+        self.assertAlmostEqual(float(state.get("grid_last_fill_price") or 0.0), 100.0, places=6)
+        self.assertAlmostEqual(float(state.get("grid_anchor_price") or 0.0), 100.0, places=6)
+        self.assertNotIn("d-filled", state.get("mm_tracked_quotes") or {})
 
 
 if __name__ == "__main__":

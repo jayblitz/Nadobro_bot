@@ -31,7 +31,7 @@ from src.nadobro.models.database import (
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
-from src.nadobro.services.trade_service import close_all_positions
+from src.nadobro.services.trade_service import close_all_positions, close_delta_neutral_legs
 from src.nadobro.services.user_service import get_user_nado_client, get_user_readonly_client, get_user
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, record_metric
@@ -525,7 +525,17 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
         task.cancel()
 
     if cancel_orders:
-        close_res = close_all_positions(telegram_id, network=network)
+        strategy = str(state.get("strategy") or "").lower()
+        if strategy == "dn":
+            close_res = close_delta_neutral_legs(
+                telegram_id,
+                str(state.get("product") or ""),
+                network=network,
+                slippage_pct=float(state.get("slippage_pct") or 1.0),
+                strategy_session_id=state.get("strategy_session_id"),
+            )
+        else:
+            close_res = close_all_positions(telegram_id, network=network)
         if not close_res.get("success"):
             return False, f"Strategy loop stopped, but cleanup failed: {close_res.get('error', 'unknown')}"
 
@@ -557,7 +567,17 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             if task:
                 task.cancel()
             if cancel_orders:
-                close_res = close_all_positions(telegram_id, network=network)
+                strategy = str(state.get("strategy") or "").lower()
+                if strategy == "dn":
+                    close_res = close_delta_neutral_legs(
+                        telegram_id,
+                        str(state.get("product") or ""),
+                        network=network,
+                        slippage_pct=float(state.get("slippage_pct") or 1.0),
+                        strategy_session_id=state.get("strategy_session_id"),
+                    )
+                else:
+                    close_res = close_all_positions(telegram_id, network=network)
                 if not close_res.get("success"):
                     close_errors.append(f"{network}: {close_res.get('error', 'close_all_positions failed')}")
             stopped += 1
@@ -574,6 +594,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
     state = _load_state(telegram_id, network)
+    global_pause_active = bool(is_trading_paused())
     last_run = _safe_last_run_ts(state.get("last_run_ts"))
     interval = int(state.get("interval_seconds") or 60)
     next_cycle_in = max(0, int(interval - (time.time() - last_run))) if last_run > 0 else 0
@@ -612,6 +633,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
     return {
         "network": network,
         "running": bool(state.get("running")),
+        "global_pause_active": global_pause_active,
         "strategy": state.get("strategy"),
         "product": state.get("product"),
         "notional_usd": state.get("notional_usd"),
@@ -965,12 +987,22 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         logger.warning("Failed to merge strategy settings into runtime state for user %s", telegram_id, exc_info=True)
 
     if is_trading_paused():
+        state["last_action"] = "maintenance_pause"
+        state["last_action_detail"] = "Global trading pause active. Strategy execution is suspended."
         if str(state.get("strategy", "")).lower() == "dn" and float(state.get("auto_close_on_maintenance") or 0) >= 0.5:
             _finalize_session(state, stop_reason="maintenance_pause")
             state["running"] = False
             state["last_error"] = "Auto-closed on maintenance pause."
             _save_state(telegram_id, network, state)
-            close_res = await run_blocking(close_all_positions, telegram_id, network)
+            close_res = await run_blocking(
+                close_delta_neutral_legs,
+                telegram_id,
+                str(state.get("product") or ""),
+                network,
+                float(state.get("slippage_pct") or 1.0),
+                "dn",
+                state.get("strategy_session_id"),
+            )
             if close_res.get("success"):
                 await _notify(telegram_id, "Delta Neutral stopped and auto-closed due to maintenance pause.")
             else:
@@ -980,6 +1012,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                     "Please close manually and check open orders. Error: {error}",
                     error=close_res.get('error', 'unknown'),
                 )
+        else:
+            _save_state(telegram_id, network, state)
         return True, None
     user = await run_blocking(get_user, telegram_id)
     if not user:

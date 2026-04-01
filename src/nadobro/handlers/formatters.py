@@ -1001,12 +1001,14 @@ def fmt_status_overview(status: dict, onboarding: dict):
     else:
         strategy = (status.get("strategy") or "").upper()
         product = str(status.get("product", "BTC"))
+        global_pause_active = bool(status.get("global_pause_active"))
         runs = status.get("runs", 0)
         interval = status.get("interval_seconds", 0)
         uptime = _fmt_uptime(status.get("started_at"))
         next_in = status.get("next_cycle_in", 0)
 
-        lines.append(f"{_loc('Strategy:')} *{escape_md(strategy)}* · {_loc('ON')}")
+        state_label = _loc('PAUSED') if global_pause_active else _loc('ON')
+        lines.append(f"{_loc('Strategy:')} *{escape_md(strategy)}* · {state_label}")
         if product != "MULTI":
             lines.append(f"{_loc('Pair:')} *{escape_md(product)}\\-PERP*")
         else:
@@ -1037,10 +1039,14 @@ def fmt_status_overview(status: dict, onboarding: dict):
 
         if status.get("is_paused"):
             lines.append(f"⚠️ *{_loc('PAUSED')}*: {escape_md(str(status.get('pause_reason') or _loc('Unknown')))}")
+        if global_pause_active:
+            lines.append(f"⚠️ *{_loc('PAUSED')}*: {escape_md(_loc('Global trading pause is active. Strategy execution is suspended.'))}")
 
         error_streak = status.get("error_streak", 0)
         if error_streak >= 3:
             lines.append(f"⚠️ {escape_md(str(error_streak))} {_loc('errors in a row')}")
+        if status.get("last_error"):
+            lines.append(f"{_loc('Note:')} {escape_md(str(status.get('last_error'))[:160])}")
 
         worker_group = status.get("worker_group")
         if worker_group:
@@ -1154,12 +1160,16 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
 
     strategy = str(status.get("strategy") or "none").upper()
     running = bool(status.get("running"))
+    global_pause_active = bool(status.get("global_pause_active"))
 
     lines = [
         "🧪 *Ops Snapshot*",
         escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        f"{_loc('Strategy')}: *{escape_md(strategy)}* · {'ON' if running else 'OFF'}",
+        f"{_loc('Strategy')}: *{escape_md(strategy)}* · {('PAUSED' if global_pause_active else ('ON' if running else 'OFF'))}",
     ]
+
+    if global_pause_active:
+        lines.append(f"⚠️ {_loc('Global trading pause is active. Strategy execution is suspended.')}")
 
     lines.append(
         f"{_loc('Queue')}: *{escape_md(str(int(queue_diag.get('strategy_qsize') or 0)))}*"

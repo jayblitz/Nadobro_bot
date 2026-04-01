@@ -49,7 +49,11 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         return {"success": False, "error": "Missing client, price, or product_id"}
 
     from src.nadobro.config import get_spot_product_id
-    from src.nadobro.services.trade_service import execute_market_order, execute_spot_market_order
+    from src.nadobro.services.trade_service import (
+        close_delta_neutral_legs,
+        execute_market_order,
+        execute_spot_market_order,
+    )
 
     notional = float(state.get("notional_usd") or 100.0)
     leverage = float(state.get("leverage") or 3.0)
@@ -112,37 +116,21 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "DN user %s: funding unfavorable for %d cycles, unwinding DN legs",
                 telegram_id, unfavorable_count,
             )
-            close_result = {"success": True}
-            if current_position and current_size > 0:
-                close_side = current_side != "LONG"
-                close_result = execute_market_order(
-                    telegram_id,
-                    product,
-                    current_size,
-                    is_long=close_side,
-                    leverage=leverage,
-                    slippage_pct=float(state.get("slippage_pct") or 1.0),
-                    enforce_rate_limit=False,
-                    source="dn",
-                    strategy_session_id=state.get("strategy_session_id"),
-                )
-            spot_close_result = {"success": True}
-            if spot_size > 0:
-                spot_close_result = execute_spot_market_order(
-                    telegram_id,
-                    product,
-                    spot_size,
-                    is_buy=False,
-                    enforce_rate_limit=False,
-                    slippage_pct=float(state.get("slippage_pct") or 1.0),
-                    source="dn",
-                    strategy_session_id=state.get("strategy_session_id"),
-                )
+            close_bundle = close_delta_neutral_legs(
+                telegram_id,
+                product,
+                network=network,
+                slippage_pct=float(state.get("slippage_pct") or 1.0),
+                source="dn",
+                strategy_session_id=state.get("strategy_session_id"),
+            )
+            close_result = close_bundle.get("perp") or {"success": True}
+            spot_close_result = close_bundle.get("spot") or {"success": True}
             result["action"] = "exit"
             result["exit_reason"] = f"Funding unfavorable for {unfavorable_count} cycles"
             result["close_result"] = close_result.get("success", False)
             result["spot_close_result"] = spot_close_result.get("success", False)
-            if close_result.get("success") and spot_close_result.get("success"):
+            if close_bundle.get("success"):
                 state["dn_position_side"] = None
                 state["dn_entry_price"] = 0.0
                 state["dn_unfavorable_count"] = 0
@@ -150,7 +138,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             else:
                 result["success"] = False
                 result["order_error"] = (
-                    close_result.get("error")
+                    close_bundle.get("error")
+                    or close_result.get("error")
                     or spot_close_result.get("error")
                     or "Failed to unwind delta-neutral legs"
                 )
