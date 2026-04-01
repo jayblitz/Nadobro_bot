@@ -76,14 +76,62 @@ def _post(url: str, payload: dict) -> dict | list | None:
     return None
 
 
+def _orders_list_from_archive_response(result) -> list:
+    """Normalize archive POST bodies that may return orders at top level or under data."""
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    if not isinstance(result, dict):
+        return []
+    o = result.get("orders")
+    if isinstance(o, list):
+        return o
+    data = result.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        inner = data.get("orders")
+        if isinstance(inner, list):
+            return inner
+    return []
+
+
+def _matches_list_from_archive_response(result) -> list:
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    if not isinstance(result, dict):
+        return []
+    m = result.get("matches")
+    if isinstance(m, list):
+        return m
+    data = result.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        inner = data.get("matches")
+        if isinstance(inner, list):
+            return inner
+    return []
+
+
+def _pick(d: dict, *keys, default=0):
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return default
+
+
 def _parse_order(order: dict) -> dict:
     """Parse a single order from the archive orders response."""
-    base_filled = _from_x18(order.get("base_filled", 0))
-    quote_filled = _from_x18(order.get("quote_filled", 0))
-    fee = _from_x18(order.get("fee", 0))
-    realized_pnl = _from_x18(order.get("realized_pnl", 0))
-    closed_amount = _from_x18(order.get("closed_amount", 0))
-    closed_net_entry = _from_x18(order.get("closed_net_entry", 0))
+    base_filled = _from_x18(_pick(order, "base_filled", "baseFilled", default=0))
+    quote_filled = _from_x18(_pick(order, "quote_filled", "quoteFilled", default=0))
+    fee = _from_x18(_pick(order, "fee", default=0))
+    realized_pnl = _from_x18(_pick(order, "realized_pnl", "realizedPnl", default=0))
+    closed_amount = _from_x18(_pick(order, "closed_amount", "closedAmount", default=0))
+    closed_net_entry = _from_x18(_pick(order, "closed_net_entry", "closedNetEntry", default=0))
 
     fill_price = 0.0
     if abs(base_filled) > 0 and abs(quote_filled) > 0:
@@ -167,7 +215,7 @@ def query_order_by_digest(
         attempt += 1
         result = _post(url, payload)
         if result:
-            orders = result if isinstance(result, list) else result.get("orders", [])
+            orders = _orders_list_from_archive_response(result)
             if isinstance(orders, list):
                 for o in orders:
                     if not isinstance(o, dict):
@@ -209,7 +257,7 @@ def query_orders_by_subaccount(
     if not result:
         return []
 
-    orders_raw = result if isinstance(result, list) else result.get("orders", [])
+    orders_raw = _orders_list_from_archive_response(result)
     if not isinstance(orders_raw, list):
         return []
     return [_parse_order(o) for o in orders_raw if isinstance(o, dict)]
@@ -237,7 +285,7 @@ def query_matches_by_subaccount(
     if not result:
         return []
 
-    matches_raw = result if isinstance(result, list) else result.get("matches", [])
+    matches_raw = _matches_list_from_archive_response(result)
     if not isinstance(matches_raw, list):
         return []
     return [_parse_match(m) for m in matches_raw if isinstance(m, dict)]

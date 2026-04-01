@@ -579,7 +579,18 @@ class NadoClient:
         if not info:
             return positions
         candidate_lists = []
-        for attr in ("perp_positions", "positions", "perp_balances", "perpPositions", "perpBalances"):
+        for attr in (
+            "perp_positions",
+            "positions",
+            "perp_balances",
+            "perpPositions",
+            "perpBalances",
+            "balances",
+            "margin_balances",
+            "marginBalances",
+            "cross_positions",
+            "crossPositions",
+        ):
             val = getattr(info, attr, None)
             if val:
                 candidate_lists.append(val)
@@ -591,12 +602,16 @@ class NadoClient:
 
         for plist in candidate_lists:
             for p in plist:
-                product_id = (
+                raw_pid = (
                     getattr(p, "product_id", None)
                     or getattr(p, "productId", None)
                     or getattr(p, "pid", None)
                 )
-                if product_id is None:
+                if raw_pid is None:
+                    continue
+                try:
+                    product_id = int(int(float(str(raw_pid).strip())))
+                except Exception:
                     continue
                 balance_obj = getattr(p, "balance", None)
                 amount_raw = None
@@ -676,7 +691,7 @@ class NadoClient:
 
                 pos = {
                     "product_id": int(product_id),
-                    "product_name": get_product_name(int(product_id)),
+                    "product_name": get_product_name(int(product_id), network=self.network, client=self),
                     "amount": abs_amount,
                     "signed_amount": signed_amount,
                     "price": float(price),
@@ -698,7 +713,18 @@ class NadoClient:
         if not payload:
             return positions
         lists = []
-        for key in ("perp_positions", "positions", "perp_balances", "perpPositions", "perpBalances"):
+        for key in (
+            "perp_positions",
+            "positions",
+            "perp_balances",
+            "perpPositions",
+            "perpBalances",
+            "balances",
+            "margin_balances",
+            "marginBalances",
+            "cross_positions",
+            "crossPositions",
+        ):
             val = payload.get(key)
             if isinstance(val, list) and val:
                 lists.append(val)
@@ -711,11 +737,10 @@ class NadoClient:
         for plist in lists:
             for p in plist:
                 try:
-                    product_id = int(
-                        p.get("product_id")
-                        or p.get("productId")
-                        or p.get("pid")
-                    )
+                    raw_pid = p.get("product_id") or p.get("productId") or p.get("pid")
+                    if raw_pid is None:
+                        continue
+                    product_id = int(int(float(str(raw_pid).strip())))
                 except Exception:
                     continue
                 balance_dict = p.get("balance") if isinstance(p.get("balance"), dict) else None
@@ -795,7 +820,7 @@ class NadoClient:
                     )
                 pos = {
                     "product_id": product_id,
-                    "product_name": get_product_name(product_id),
+                    "product_name": get_product_name(product_id, network=self.network, client=self),
                     "amount": abs_amount,
                     "signed_amount": signed_amount,
                     "price": float(price),
@@ -820,7 +845,12 @@ class NadoClient:
                 info = self.client.context.engine_client.get_subaccount_info(self.subaccount_hex)
                 subaccount_info_succeeded = True
                 sdk_positions = self._extract_positions_from_sdk_info(info)
-                return sdk_positions
+                if sdk_positions:
+                    return sdk_positions
+                logger.info(
+                    "SDK subaccount_info returned no parseable positions; trying REST (subaccount=%s)",
+                    (self.subaccount_hex or "")[:22],
+                )
             except Exception as e:
                 logger.warning(f"SDK get_all_positions via subaccount_info failed: {e}")
 
@@ -836,14 +866,19 @@ class NadoClient:
                             payload = nested
                             break
                 rest_positions = self._extract_positions_from_rest_payload(payload)
-                return rest_positions
+                if rest_positions:
+                    return rest_positions
         except Exception as e:
             logger.warning(f"REST get_all_positions via subaccount_info failed: {e}")
 
-        # If subaccount_info read succeeded and returned no perp positions, do not
-        # fan out into per-product order scans.
+        # If subaccount_info read succeeded but both SDK and REST parsers returned empty,
+        # still try the per-product scan. Newer products (e.g. catalog-only perps) sometimes
+        # use response shapes we do not yet parse, while open orders / engine state still show exposure.
         if subaccount_info_succeeded:
-            return []
+            logger.info(
+                "Subaccount info succeeded but zero positions parsed; attempting per-product fallback (subaccount=%s)",
+                (self.subaccount_hex or "")[:22],
+            )
 
         # Fallback to open orders for backward compatibility.
         fallback_key = (self.network, str(self.subaccount_hex or ""))
