@@ -41,6 +41,20 @@ logger = logging.getLogger(__name__)
 
 STATE_PREFIX = "strategy_bot:"
 RUNTIME_TICK_SECONDS = 20
+
+
+def _strategy_cycle_timeout_seconds() -> float | None:
+    """Wall-clock cap for one strategy cycle (single-process path). 0 or unset disables."""
+    raw = (os.environ.get("NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS") or "180").strip()
+    try:
+        v = float(raw)
+    except ValueError:
+        return 180.0
+    if v <= 0:
+        return None
+    return v
+
+
 MAX_OPEN_ORDERS_PER_PRODUCT = 6
 STRATEGY_ERROR_ALERT_STREAK = 3
 
@@ -56,6 +70,7 @@ _job_stats: dict[str, int] = {
     "cycles_failed": 0,
     "coalesced_ticks": 0,
     "deferred_cycles": 0,
+    "cycle_timeouts": 0,
 }
 _process_worker_mode = False
 
@@ -691,6 +706,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
 
 def get_runtime_diagnostics() -> dict:
     from src.nadobro.services.execution_queue import get_queue_diagnostics
+    from src.nadobro.services.runtime_supervisor import runtime_mode
 
     active_loops = len([t for t in _tasks.values() if not t.done()])
     pending_keys = len(_job_pending_payloads)
@@ -702,6 +718,11 @@ def get_runtime_diagnostics() -> dict:
         "pending_coalesced_ticks": pending_coalesced_ticks,
         "queue": get_queue_diagnostics(),
         "stats": dict(_job_stats),
+        "env": {
+            "NADO_RUNTIME_MODE": runtime_mode(),
+            "NADO_STRATEGY_WORKERS": (os.environ.get("NADO_STRATEGY_WORKERS") or "2").strip(),
+            "NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS": (os.environ.get("NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS") or "180").strip(),
+        },
     }
 
 
@@ -810,12 +831,28 @@ async def _bot_loop(telegram_id: int, network: str):
             state = _load_state(telegram_id, network)
             if not state.get("running"):
                 break
+            interval = max(1, int(state.get("interval_seconds") or 60))
+            last_run = _safe_last_run_ts(state.get("last_run_ts"))
+            now = time.time()
+            # Avoid flooding the global strategy queue: only tick when the strategy interval has elapsed.
+            if last_run > 0 and (now - last_run) < interval:
+                wait_for = interval - (now - last_run)
+                sleep_s = min(float(RUNTIME_TICK_SECONDS), max(0.5, wait_for))
+                await asyncio.sleep(sleep_s)
+                continue
             try:
                 now_bucket = int(time.time() / max(1, RUNTIME_TICK_SECONDS))
-                await enqueue_strategy(
+                enqueued = await enqueue_strategy(
                     {"telegram_id": telegram_id, "network": network},
                     dedupe_key=f"{telegram_id}:{network}:{now_bucket}",
                 )
+                if not enqueued:
+                    logger.debug(
+                        "Strategy tick deduped user=%s network=%s bucket=%s",
+                        telegram_id,
+                        network,
+                        now_bucket,
+                    )
             except Exception as cycle_error:
                 logger.error("Cycle failure for user %s: %s", telegram_id, cycle_error, exc_info=True)
                 state["last_error"] = str(cycle_error)
@@ -854,10 +891,20 @@ async def handle_strategy_job(payload: dict):
                 _job_coalesce_counts.pop(key, None)
                 return
             try:
+                from src.nadobro.services.execution_queue import get_queue_diagnostics
                 from src.nadobro.services.runtime_supervisor import (
                     is_multiprocess_enabled,
                     strategy_worker_group,
                     submit_cycle_job,
+                )
+
+                qsz = int((get_queue_diagnostics() or {}).get("strategy_qsize") or 0)
+                logger.info(
+                    "Strategy cycle start user=%s network=%s strategy=%s queue_depth=%s",
+                    telegram_id,
+                    network,
+                    state.get("strategy"),
+                    qsz,
                 )
 
                 if is_multiprocess_enabled():
@@ -884,7 +931,34 @@ async def handle_strategy_job(payload: dict):
                     refreshed["worker_pid"] = delegated.get("worker_pid")
                     _save_state(telegram_id, network, refreshed)
                 else:
-                    ok, error_msg = await _run_cycle(telegram_id, network, state)
+                    timeout_sec = _strategy_cycle_timeout_seconds()
+                    try:
+                        if timeout_sec:
+                            ok, error_msg = await asyncio.wait_for(
+                                _run_cycle(telegram_id, network, state),
+                                timeout=timeout_sec,
+                            )
+                        else:
+                            ok, error_msg = await _run_cycle(telegram_id, network, state)
+                    except asyncio.TimeoutError:
+                        _job_stats["cycle_timeouts"] += 1
+                        tsec = timeout_sec or 180.0
+                        ok = False
+                        error_msg = (
+                            f"Strategy cycle timed out after {tsec:.0f}s "
+                            "(NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS)"
+                        )
+                        logger.error(
+                            "Strategy cycle timeout user=%s network=%s strategy=%s",
+                            telegram_id,
+                            network,
+                            state.get("strategy"),
+                        )
+                    hb_state = _load_state(telegram_id, network)
+                    hb_state["worker_last_heartbeat"] = time.time()
+                    hb_state["last_cycle_ms"] = (time.perf_counter() - cycle_started) * 1000.0
+                    hb_state["last_cycle_result"] = "ok" if ok else "error"
+                    _save_state(telegram_id, network, hb_state)
                 if ok:
                     _job_stats["cycles_ok"] += 1
                     refreshed = _load_state(telegram_id, network)
@@ -900,7 +974,14 @@ async def handle_strategy_job(payload: dict):
                 logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
                 await _mark_cycle_error(telegram_id, network, str(e))
             finally:
-                record_metric("runtime.strategy_cycle.total", (time.perf_counter() - cycle_started) * 1000.0)
+                elapsed_ms = (time.perf_counter() - cycle_started) * 1000.0
+                record_metric("runtime.strategy_cycle.total", elapsed_ms)
+                logger.info(
+                    "Strategy cycle end user=%s network=%s elapsed_ms=%.1f",
+                    telegram_id,
+                    network,
+                    elapsed_ms,
+                )
 
             pending_payload = _job_pending_payloads.pop(key, None)
             coalesced_count = int(_job_coalesce_counts.pop(key, 0))

@@ -1054,7 +1054,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
             cycle_ms = float(status.get("last_cycle_ms") or 0.0)
             lines.append(
                 f"{_loc('Worker')}: *{escape_md(str(worker_group).upper())}* · "
-                f"{_loc('hb')}: *{escape_md(heartbeat)}* · "
+                f"{_loc('Last cycle')}: *{escape_md(heartbeat)}* · "
                 f"{escape_md(f'{cycle_ms:.0f}ms')}"
             )
         runtime_diag = status.get("runtime_diagnostics") or {}
@@ -1193,6 +1193,12 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
             lines.append(f"{_loc('Last reason')}: {escape_md(last_reason[:160])}")
 
     queue_stats = queue_diag.get("stats") or {}
+    rt_stats = (ops.get("runtime") or {}).get("stats") or {}
+    cycle_timeouts = int(rt_stats.get("cycle_timeouts") or 0)
+    if cycle_timeouts > 0:
+        lines.append(
+            f"{_loc('Cycle timeouts')}: *{escape_md(str(cycle_timeouts))}*"
+        )
     strategy_workers_running = int(queue_diag.get("strategy_workers_running") or 0)
     strategy_workers_target = int(queue_diag.get("strategy_workers_target") or 0)
     alert_workers_running = int(queue_diag.get("alert_workers_running") or 0)
@@ -1213,6 +1219,29 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
             f"{_loc('Perf')}: active *{escape_md(str(int(perf.get('active_timers') or 0)))}* · "
             f"totals *{escape_md(str(int(perf.get('total_records') or 0)))}*"
         )
+
+    renv = ops.get("runtime_env") or {}
+    if renv:
+        lines.append(
+            f"{_loc('Runtime env')}: mode *{escape_md(str(renv.get('NADO_RUNTIME_MODE')))}* · "
+            f"workers *{escape_md(str(renv.get('NADO_STRATEGY_WORKERS')))}* · "
+            f"cycle cap *{escape_md(str(renv.get('NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS')))}s*"
+        )
+
+    snap = ops.get("account_snapshot") or {}
+    if snap:
+        if snap.get("success"):
+            lines.append(
+                f"{_loc('SDK snapshot')}: pos *{escape_md(str(int(snap.get('positions_count') or 0)))}* · "
+                f"orders *{escape_md(str(int(snap.get('open_orders_count') or 0)))}* · "
+                f"src *{escape_md(str(snap.get('source') or ''))}*"
+            )
+        else:
+            err = str(snap.get("error") or "").strip()[:120]
+            lines.append(
+                f"{_loc('SDK snapshot')}: *{_loc('unavailable')}*"
+                + (f" — {escape_md(err)}" if err else "")
+            )
 
     return "\n".join(lines)
 

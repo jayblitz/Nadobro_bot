@@ -272,13 +272,31 @@ def parse_trigger_intent(text: str) -> dict[str, Any] | None:
 
 def get_ops_diagnostics(telegram_id: int | None = None) -> dict[str, Any]:
     from src.nadobro.services.bot_runtime import get_runtime_diagnostics
+    from src.nadobro.services.runtime_supervisor import runtime_mode
 
     payload: dict[str, Any] = {
         "ts": time.time(),
         "queue": get_queue_diagnostics(),
         "runtime": get_runtime_diagnostics(),
         "perf": perf_snapshot(),
+        "runtime_env": {
+            "NADO_RUNTIME_MODE": runtime_mode(),
+            "NADO_STRATEGY_WORKERS": (os.environ.get("NADO_STRATEGY_WORKERS") or "2").strip(),
+            "NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS": (os.environ.get("NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS") or "180").strip(),
+        },
     }
     if telegram_id is not None:
         payload["wallet_readiness"] = get_runtime_wallet_readiness(telegram_id, verify_signer=False)
+        if tooling_enabled():
+            snap = get_account_snapshot(telegram_id, prefer_cli=False)
+            entry: dict[str, Any] = {
+                "success": bool(snap.get("success")),
+                "source": snap.get("source"),
+                "error": (snap.get("error") or "")[:200],
+            }
+            if snap.get("success") and isinstance(snap.get("data"), dict):
+                d = snap["data"]
+                entry["positions_count"] = len(d.get("positions") or [])
+                entry["open_orders_count"] = len(d.get("open_orders") or [])
+            payload["account_snapshot"] = entry
     return payload
