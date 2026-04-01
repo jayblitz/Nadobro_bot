@@ -246,11 +246,20 @@ async def run_bot():
     set_runtime_app(bot_app)
     set_copy_bot_app(bot_app)
     register_handlers(handle_strategy_job, handle_alert_job)
+    _sw = int(os.environ.get("NADO_STRATEGY_WORKERS", "2"))
     start_workers(
-        strategy_workers=int(os.environ.get("NADO_STRATEGY_WORKERS", "1")),
+        strategy_workers=max(1, _sw),
         alert_workers=int(os.environ.get("NADO_ALERT_WORKERS", "1")),
     )
     start_runtime_supervisor()
+    from src.nadobro.services.runtime_supervisor import runtime_mode
+
+    logger.info(
+        "Strategy queue: NADO_STRATEGY_WORKERS=%s NADO_RUNTIME_MODE=%s NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS=%s",
+        max(1, _sw),
+        runtime_mode(),
+        (os.environ.get("NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS") or "180").strip(),
+    )
 
     try:
         from src.nadobro.services.nado_client import NadoClient
