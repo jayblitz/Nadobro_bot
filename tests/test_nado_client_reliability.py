@@ -6,6 +6,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.services.nado_client import NadoClient
+from src.nadobro.services.trade_service import _normalize_net_positions
 
 
 class _FakeResponse:
@@ -151,6 +152,68 @@ class NadoClientReliabilityTests(unittest.TestCase):
             positions = client.get_all_positions()
         self.assertEqual(len(positions), 1)
         self.assertEqual(positions[0]["product_id"], 111)
+
+    def test_extract_positions_from_rest_payload_supports_balance_amount_fields(self):
+        client = NadoClient(private_key="0xabc", network="mainnet")
+        payload = {
+            "perpBalances": [
+                {
+                    "productId": 222,
+                    "balance": {
+                        "balanceAmountX18": "-6000000000000000000",
+                        "vQuoteBalanceX18": "-617880000000000000000",
+                    },
+                    "entryPriceX18": "102980000000000000000",
+                    "side": "SHORT",
+                }
+            ]
+        }
+        positions = client._extract_positions_from_rest_payload(payload)
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]["product_id"], 222)
+        self.assertEqual(positions[0]["side"], "SHORT")
+        self.assertAlmostEqual(float(positions[0]["amount"]), 6.0, places=6)
+        self.assertAlmostEqual(float(positions[0]["signed_amount"]), -6.0, places=6)
+
+    def test_extract_positions_from_sdk_info_unwraps_nested_container(self):
+        client = NadoClient(private_key="0xabc", network="mainnet")
+
+        class _Balance:
+            amountX18 = "-2000000000000000000"
+
+        class _Position:
+            productId = 333
+            balance = _Balance()
+            entryPriceX18 = "50000000000000000000"
+            side = "SHORT"
+
+        class _Container:
+            perpBalances = [_Position()]
+
+        class _Wrapper:
+            subaccount_info = _Container()
+
+        positions = client._extract_positions_from_sdk_info(_Wrapper())
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]["product_id"], 333)
+        self.assertEqual(positions[0]["side"], "SHORT")
+        self.assertAlmostEqual(float(positions[0]["signed_amount"]), -2.0, places=6)
+
+    def test_normalize_net_positions_uses_signed_amount_when_amount_missing(self):
+        net = _normalize_net_positions(
+            [
+                {
+                    "product_id": 444,
+                    "product_name": "WTI-PERP",
+                    "signed_amount": -6.0,
+                    "amount": 0.0,
+                    "side": "",
+                    "price": 103.0,
+                }
+            ]
+        )
+        self.assertIn(444, net)
+        self.assertAlmostEqual(float(net[444]["signed_amount"]), -6.0, places=6)
 
 
 if __name__ == "__main__":

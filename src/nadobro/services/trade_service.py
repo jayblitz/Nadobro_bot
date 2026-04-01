@@ -938,17 +938,23 @@ def _normalize_net_positions(positions: list) -> dict[int, dict]:
             pid = int(p.get("product_id", -1))
             if pid < 0:
                 continue
+            signed_amount_raw = p.get("signed_amount", None)
+            signed_amount = float(signed_amount_raw) if signed_amount_raw is not None else 0.0
             side = str(p.get("side", "") or "").upper()
             amount = float(p.get("amount", 0) or 0)
+            if amount <= 0 and signed_amount != 0:
+                amount = abs(signed_amount)
             if amount <= 0:
                 continue
+            if side not in ("LONG", "SHORT"):
+                side = "LONG" if (signed_amount if signed_amount != 0 else amount) > 0 else "SHORT"
             # Fingerprint rounded values to suppress near-identical duplicates.
             fp = (pid, side, round(amount, 12), round(float(p.get("price", 0) or 0), 8))
             if fp in seen_rows:
                 continue
             seen_rows.add(fp)
 
-            signed = amount if side == "LONG" else -amount
+            signed = signed_amount if signed_amount != 0 else (amount if side == "LONG" else -amount)
             current = net_by_product.get(
                 pid,
                 {"product_name": p.get("product_name", get_product_name(pid)), "signed_amount": 0.0},
