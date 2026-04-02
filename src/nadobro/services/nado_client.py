@@ -37,6 +37,23 @@ _REST_POOL_MAXSIZE = int(os.environ.get("NADO_HTTP_POOL_MAXSIZE", "64"))
 _OPEN_ORDERS_CACHE_TTL = float(os.environ.get("NADO_OPEN_ORDERS_CACHE_TTL_SECONDS", "2.0"))
 _POSITIONS_FALLBACK_TTL = float(os.environ.get("NADO_POSITIONS_FALLBACK_TTL_SECONDS", "6.0"))
 _POSITIONS_FALLBACK_MAX_PRODUCTS = int(os.environ.get("NADO_POSITIONS_FALLBACK_MAX_PRODUCTS", "16"))
+
+# Nado requires a finite order expiration; limit/post-only orders used 3600s (1h) before.
+# Default 7 days. Override with NADO_LIMIT_ORDER_EXPIRATION_SECONDS (seconds, min 60). IOC stays 10s.
+_SEVEN_DAYS_SEC = 7 * 24 * 3600
+
+
+def _limit_order_expiration_seconds() -> int:
+    default = _SEVEN_DAYS_SEC
+    raw = (os.environ.get("NADO_LIMIT_ORDER_EXPIRATION_SECONDS") or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(float(raw))
+    except ValueError:
+        logger.warning("Invalid NADO_LIMIT_ORDER_EXPIRATION_SECONDS=%r; using %s", raw, default)
+        return default
+    return max(60, v)
 _rest_session = requests.Session()
 _rest_session.mount(
     "https://",
@@ -1297,7 +1314,7 @@ class NadoClient:
             }.get(order_type, 0)
 
             amount = size if is_buy else -size
-            expiration_secs = 10 if order_type == "ioc" else 3600
+            expiration_secs = 10 if order_type == "ioc" else _limit_order_expiration_seconds()
 
             amount_x18 = self._to_x18_int(amount)
             if size_increment_x18 and size_increment_x18 > 0:
