@@ -135,3 +135,30 @@ Current production runtime uses Telegram webhook mode.
 1. Keep ingress stateless and enqueue heavy work.
 2. Use idempotency keys on jobs to avoid duplicate execution.
 3. Scale ingress and worker capacity independently.
+
+## Telegram Mini App (same Fly app)
+
+The Docker image serves three processes behind **nginx** on `PORT` (8080):
+
+1. **Static SPA** — `miniapp_web/dist` at `/`
+2. **Mini App API** — FastAPI + uvicorn on `127.0.0.1:8081`; proxied at `/api/` and `/ws/`
+3. **Telegram webhook** — python-telegram-bot on `127.0.0.1:8082`; proxied at `POST /telegram/webhook`
+
+Set:
+
+```bash
+fly secrets set \
+  MINIAPP_URL="https://YOUR_APP.fly.dev/" \
+  GEMINI_API_KEY="..." \
+  TELEGRAM_WEBHOOK_URL="https://YOUR_APP.fly.dev/telegram/webhook" \
+  TELEGRAM_WEBHOOK_PATH="/telegram/webhook" \
+  TELEGRAM_TRANSPORT="webhook"
+```
+
+- `MINIAPP_URL` — HTTPS URL of the Mini App (same origin as the SPA). Used for the **Menu** Web App button and the home card **Mini App** button. Must match what you configure in [@BotFather](https://t.me/BotFather) for the Web App URL.
+- `GEMINI_API_KEY` — required for **Speak with Bro** (Gemini Live WebSocket proxy at `/ws/voice`).
+- `TELEGRAM_WEBHOOK_PORT` is set to `8082` in the image so nginx keeps `PORT`/`8080` for public ingress; do not override unless you know what you are doing.
+
+Health check: Fly should use `GET /health` (proxied to the Mini App API).
+
+**BotFather:** Set the Mini App URL to your Fly HTTPS origin (e.g. `https://YOUR_APP.fly.dev/`).

@@ -308,7 +308,9 @@ async def run_bot():
             webhook_url = base + webhook_path
 
     webhook_listen = os.environ.get("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0").strip()
-    webhook_port = int(os.environ.get("PORT", os.environ.get("TELEGRAM_WEBHOOK_PORT", "8080")))
+    # Prefer TELEGRAM_WEBHOOK_PORT when set so a reverse proxy can own PORT (e.g. nginx on 8080, PTB on 8082).
+    _wh = os.environ.get("TELEGRAM_WEBHOOK_PORT", "").strip()
+    webhook_port = int(_wh) if _wh else int(os.environ.get("PORT", "8080"))
     bootstrap_health_server = None
     if transport_mode == "webhook":
         try:
@@ -331,6 +333,18 @@ async def run_bot():
         BotCommand("stop_all", "Stop all running strategies"),
     ])
     logger.info("Bot commands registered in Menu")
+
+    try:
+        from src.nadobro.config import MINIAPP_URL
+        if MINIAPP_URL:
+            from telegram import MenuButtonWebApp, WebAppInfo
+
+            await bot_app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="Mini App", web_app=WebAppInfo(url=MINIAPP_URL)),
+            )
+            logger.info("Mini App menu button registered (MINIAPP_URL set)")
+    except Exception as e:
+        logger.warning("Mini App menu button not set: %s", e)
 
     if transport_mode == "webhook":
         if bootstrap_health_server:

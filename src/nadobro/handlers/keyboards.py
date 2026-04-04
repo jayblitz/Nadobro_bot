@@ -1,5 +1,5 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW, get_product_max_leverage, get_perp_products
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, WebAppInfo
+from src.nadobro.config import PRODUCTS, DUAL_MODE_CARD_FLOW, get_product_max_leverage, get_perp_products, MINIAPP_URL
 
 PERP_PRODUCTS = [name for name, info in PRODUCTS.items() if info["type"] == "perp"]
 
@@ -136,7 +136,12 @@ def persistent_menu_kb():
 
 
 def home_card_kb():
-    return InlineKeyboardMarkup([
+    rows = []
+    if MINIAPP_URL:
+        rows.append([
+            InlineKeyboardButton("🌐 Mini App", web_app=WebAppInfo(url=MINIAPP_URL)),
+        ])
+    rows.extend([
         [
             InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
             InlineKeyboardButton("📁 Portfolio Deck", callback_data="portfolio:view"),
@@ -154,6 +159,7 @@ def home_card_kb():
             InlineKeyboardButton("🌐 Execution Mode", callback_data="home:mode"),
         ],
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def status_kb():
