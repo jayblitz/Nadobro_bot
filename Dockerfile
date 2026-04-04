@@ -23,6 +23,7 @@ COPY main.py ./
 COPY src/ ./src/
 COPY miniapp_api/ ./miniapp_api/
 COPY deploy/nginx-miniapp.conf /etc/nginx/nginx.conf
+RUN nginx -t
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 

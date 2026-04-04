@@ -9,11 +9,10 @@ against the existing service layer and return results to Gemini for narration.
 """
 
 import asyncio
-import base64
 import json
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -24,10 +23,8 @@ from src.nadobro.services.user_service import (
     get_or_create_user,
     get_user_nado_client as _get_nado_client,
 )
-from src.nadobro.services.nado_client import NadoClient
 from src.nadobro.services.trade_service import (
     execute_market_order,
-    execute_limit_order,
     close_position,
     close_all_positions,
 )
@@ -39,6 +36,33 @@ router = APIRouter()
 
 # Session timeout: 5 minutes of silence
 _SESSION_TIMEOUT = 300
+
+# Max WebSocket JSON payload (auth + audio metadata); prevents huge JSON DoS.
+_MAX_WS_JSON_BYTES = 512 * 1024
+
+
+async def _receive_json_capped(ws: WebSocket, *, max_bytes: int = _MAX_WS_JSON_BYTES) -> dict:
+    """Parse one WebSocket text/bytes JSON message with a size cap."""
+    message = await ws.receive()
+    if message.get("type") != "websocket.receive":
+        raise WebSocketDisconnect()
+    if "bytes" in message:
+        raw = message["bytes"]
+        if len(raw) > max_bytes:
+            raise ValueError("message too large")
+        return json.loads(raw.decode("utf-8"))
+    if "text" in message:
+        text = message["text"]
+        if len(text.encode("utf-8")) > max_bytes:
+            raise ValueError("message too large")
+        return json.loads(text)
+    raise ValueError("empty websocket frame")
+
+
+def _client_safe_error() -> str:
+    """Do not leak stack traces or internals to the browser."""
+    return "Request failed. Please try again."
+
 
 # -------------------------------------------------------------------
 # Gemini function-calling tools exposed to the voice model
@@ -230,7 +254,7 @@ async def _execute_function(
 
     except Exception as exc:
         logger.exception("Voice function %s failed", func_name)
-        return {"status": "error", "error": str(exc)}
+        return {"status": "error", "error": _client_safe_error()}
 
 
 @router.websocket("/ws/voice")
@@ -259,8 +283,12 @@ async def voice_ws(ws: WebSocket):
 
     # Step 1: Authenticate
     try:
-        auth_msg = await asyncio.wait_for(ws.receive_json(), timeout=10)
+        auth_msg = await asyncio.wait_for(_receive_json_capped(ws), timeout=10)
     except (asyncio.TimeoutError, WebSocketDisconnect):
+        await ws.close()
+        return
+    except (ValueError, json.JSONDecodeError):
+        await ws.send_json({"type": "error", "message": "Invalid message"})
         await ws.close()
         return
 
@@ -338,8 +366,8 @@ async def voice_ws(ws: WebSocket):
         logger.info("Gemini session established: %s", json.dumps(setup_data)[:200])
 
     except Exception as exc:
-        logger.error("Failed to connect to Gemini: %s", exc)
-        await ws.send_json({"type": "error", "message": f"Voice AI connection failed: {exc}"})
+        logger.error("Failed to connect to Gemini: %s", exc, exc_info=True)
+        await ws.send_json({"type": "error", "message": "Voice AI connection failed. Try again later."})
         if gemini_ws:
             await gemini_ws.close()
         await ws.close()
@@ -354,7 +382,7 @@ async def voice_ws(ws: WebSocket):
         try:
             while True:
                 msg = await asyncio.wait_for(
-                    ws.receive_json(), timeout=_SESSION_TIMEOUT
+                    _receive_json_capped(ws), timeout=_SESSION_TIMEOUT
                 )
                 last_activity = time.time()
                 msg_type = msg.get("type")
@@ -394,6 +422,8 @@ async def voice_ws(ws: WebSocket):
 
         except (asyncio.TimeoutError, WebSocketDisconnect):
             pass
+        except (ValueError, json.JSONDecodeError):
+            logger.warning("Client->Gemini: invalid or oversized JSON")
         except Exception as exc:
             logger.warning("Client->Gemini error: %s", exc)
 
@@ -438,7 +468,8 @@ async def voice_ws(ws: WebSocket):
                         fargs = fc.get("args", {})
                         fid = fc.get("id", "")
 
-                        logger.info("Voice function call: %s(%s)", fname, json.dumps(fargs)[:200])
+                        _args_preview = json.dumps(fargs, default=str)[:200]
+                        logger.info("Voice function call: %s(%s)", fname, _args_preview)
 
                         result = await _execute_function(
                             fname, fargs, tg_user.id, network
