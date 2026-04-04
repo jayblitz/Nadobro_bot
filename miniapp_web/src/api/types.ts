@@ -130,6 +130,29 @@ export interface QuotesResponse {
   error?: string;
 }
 
+// --- Strategies (bot runtime) ---
+
+export interface StrategyBotStatus {
+  network: string;
+  running: boolean;
+  global_pause_active?: boolean;
+  strategy?: string | null;
+  product?: string | null;
+  runs?: number;
+  last_error?: string | null;
+  started_at?: string | null;
+  tp_pct?: number | null;
+  sl_pct?: number | null;
+  interval_seconds?: number;
+  next_cycle_in?: number;
+  [key: string]: unknown;
+}
+
+export interface StrategyActionResponse {
+  ok: boolean;
+  message?: string;
+}
+
 // --- Voice ---
 
 export interface VoiceMessage {

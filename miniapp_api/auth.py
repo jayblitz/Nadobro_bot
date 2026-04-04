@@ -102,7 +102,8 @@ def validate_init_data(init_data: str, *, max_age: int = _MAX_AUTH_AGE) -> Teleg
 def parse_init_data_unsafe(init_data: str) -> Optional[TelegramUser]:
     """Best-effort extraction of the user without HMAC checks.
 
-    Used only in development/testing. Returns ``None`` on any failure.
+    **Do not use in production routes** — any client could forge ``user`` JSON.
+    For local tooling or unit tests only. Returns ``None`` on any failure.
     """
     try:
         parsed = parse_qs(init_data, keep_blank_values=True)

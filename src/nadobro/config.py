@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Optional
 
@@ -174,3 +175,11 @@ def get_nado_builder_routing_config() -> tuple[int, int]:
         )
 
     return builder_id, fee_rate
+
+
+_logger = logging.getLogger(__name__)
+if MINIAPP_URL and not MINIAPP_URL.lower().startswith("https://"):
+    _logger.warning(
+        "MINIAPP_URL must use https for Telegram Web Apps (Mini App may not open).",
+    )
+

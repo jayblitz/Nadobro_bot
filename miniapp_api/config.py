@@ -27,14 +27,26 @@ from src.nadobro.config import (  # noqa: F401 — re-exported for convenience
 # Mini-app-only settings
 # ---------------------------------------------------------------------------
 
-MINIAPP_CORS_ORIGINS: list[str] = [
-    o.strip()
-    for o in os.environ.get(
-        "MINIAPP_CORS_ORIGINS",
-        "https://web-app.telegram.org,https://tg.dev",
-    ).split(",")
-    if o.strip()
-]
+
+def _load_cors_origins() -> list[str]:
+    raw = [
+        o.strip()
+        for o in os.environ.get(
+            "MINIAPP_CORS_ORIGINS",
+            "https://web-app.telegram.org,https://tg.dev",
+        ).split(",")
+        if o.strip()
+    ]
+    # Reject "*": CORSMiddleware with allow_credentials=True cannot use wildcard origins safely.
+    return [o for o in raw if o != "*"]
+
+
+MINIAPP_CORS_ORIGINS: list[str] = _load_cors_origins()
+
+# Allow browser calls from the same host as the SPA (e.g. Fly URL) when testing outside Telegram iframe.
+_miniapp_origin = (os.environ.get("MINIAPP_URL") or "").strip().rstrip("/")
+if _miniapp_origin.startswith("https://") and _miniapp_origin not in MINIAPP_CORS_ORIGINS:
+    MINIAPP_CORS_ORIGINS = [*MINIAPP_CORS_ORIGINS, _miniapp_origin]
 
 MINIAPP_API_PORT: int = int(os.environ.get("MINIAPP_API_PORT", "8081"))
 
