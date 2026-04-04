@@ -17,7 +17,9 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from miniapp_api.auth import AuthError, validate_init_data
-from miniapp_api.config import GEMINI_API_KEY, GEMINI_MODEL
+from miniapp_api.config import GEMINI_API_KEY, GEMINI_MODEL, get_product_id
+from miniapp_api.ip_utils import client_ip_from_scope
+from miniapp_api.rate_limit import check_rate_limit
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.user_service import (
     get_or_create_user,
@@ -29,6 +31,7 @@ from src.nadobro.services.trade_service import (
     close_all_positions,
 )
 from src.nadobro.models.database import NetworkMode
+from src.nadobro.config import MIN_TRADE_SIZE_USD
 
 logger = logging.getLogger(__name__)
 
@@ -69,18 +72,37 @@ def _client_safe_error() -> str:
 # -------------------------------------------------------------------
 VOICE_TOOLS = [
     {
-        "name": "execute_trade",
-        "description": "Open a new perpetual futures position. Call this when the user says things like 'long BTC 100 dollars 5x' or 'short ETH $50'.",
+        "name": "prepare_trade_order",
+        "description": (
+            "Stage a market order for confirmation only — DO NOT execute. "
+            "Use when the user asks to open a position (e.g. 'long 10 WTI 5x market'). "
+            "After this, wait for the user to say confirm or decline."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "product": {"type": "string", "description": "Asset symbol (BTC, ETH, SOL, etc.)"},
+                "product": {"type": "string", "description": "Asset symbol (BTC, ETH, WTI, etc.)"},
                 "side": {"type": "string", "enum": ["long", "short"]},
                 "size_usd": {"type": "number", "description": "Position size in USD"},
                 "leverage": {"type": "number", "description": "Leverage multiplier, default 1"},
             },
             "required": ["product", "side", "size_usd"],
         },
+    },
+    {
+        "name": "confirm_trade_order",
+        "description": (
+            "Execute the previously staged trade after the user clearly confirms "
+            "(e.g. 'confirm', 'yes', 'execute'). Only call if a prepare_trade_order was done."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cancel_trade_order",
+        "description": (
+            "Discard the staged trade when the user declines (e.g. 'decline', 'cancel', 'stop')."
+        ),
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "close_position",
@@ -125,16 +147,24 @@ def _build_system_prompt(username: str) -> str:
 The user's name is {username}. When they greet you (e.g. "Yo Bro", "Hey Bro"), respond warmly: "Hi {username}, how can I help you today?"
 
 Your capabilities:
-- Execute trades (long/short perpetual futures) on Nado DEX
+- Stage and confirm trades (long/short perpetual futures) on Nado DEX — same rules as text chat
 - Check portfolio, positions, and balances
 - Get current market prices
 - Close positions (full or partial)
 
-Available trading pairs: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX (all perpetual futures).
+Available trading pairs include BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX, WTI, and other listed perps.
 
-Rules:
-- Execute trades DIRECTLY when requested — no confirmation needed.
-- After executing a trade, read back the confirmation details (side, product, size, fill price).
+Rules for NEW positions (opening trades):
+- NEVER execute a market order on first request. Always call prepare_trade_order first.
+- After prepare_trade_order returns, tell the user clearly, for example: "Executing Trade — Long 10 WTI with leverage 5. Say confirm to execute or Decline to stop."
+- When they say confirm / yes / go ahead, call confirm_trade_order.
+- When they say decline / cancel / stop, call cancel_trade_order.
+- If they change the trade details before confirming, call prepare_trade_order again with the new parameters.
+
+Rules after a trade is filled:
+- Read back side, product, size, leverage, and fill price briefly.
+
+General:
 - Be concise but friendly. Use the bro persona — casual, confident, helpful.
 - If the user's request is unclear, ask for clarification.
 - Keep responses short for voice — 1-2 sentences max unless they ask for details.
@@ -144,22 +174,71 @@ Rules:
 
 
 async def _execute_function(
-    func_name: str, args: dict, telegram_id: int, network: str
+    func_name: str,
+    args: dict,
+    telegram_id: int,
+    network: str,
+    session: dict[str, Any],
 ) -> dict[str, Any]:
     """Execute a Gemini function call against real services."""
     try:
-        if func_name == "execute_trade":
-            product = args["product"].upper()
-            side = args["side"]
+        if func_name == "prepare_trade_order":
+            product = str(args["product"]).upper().strip()
+            side = str(args["side"]).lower().strip()
             size_usd = float(args["size_usd"])
-            leverage = float(args.get("leverage", 1))
+            leverage = float(args.get("leverage", 1) or 1)
+            if side not in ("long", "short"):
+                return {"status": "error", "error": "Side must be long or short"}
+            if size_usd < float(MIN_TRADE_SIZE_USD):
+                return {
+                    "status": "error",
+                    "error": f"Minimum order size is ${MIN_TRADE_SIZE_USD} USD.",
+                }
+            pid = get_product_id(product, network=network)
+            if pid is None:
+                return {"status": "error", "error": f"Unknown or unsupported product: {product}"}
+
+            session["pending_trade"] = {
+                "product": product,
+                "side": side,
+                "size_usd": size_usd,
+                "leverage": leverage,
+            }
+            action = "Long" if side == "long" else "Short"
+            summary = (
+                f"Executing Trade ({action} {size_usd:g} {product} with leverage {leverage:g}). "
+                "Say confirm to execute or Decline to stop."
+            )
+            return {
+                "status": "awaiting_confirmation",
+                "product": product,
+                "side": side,
+                "size_usd": size_usd,
+                "leverage": leverage,
+                "summary": summary,
+            }
+
+        elif func_name == "confirm_trade_order":
+            pending = session.get("pending_trade")
+            if not pending:
+                return {"status": "error", "error": "No staged trade. Describe your order first."}
+
+            product = pending["product"]
+            side = pending["side"]
+            size_usd = float(pending["size_usd"])
+            leverage = float(pending.get("leverage", 1))
             is_long = side == "long"
 
             result = await run_blocking(
                 execute_market_order,
-                telegram_id, product, size_usd, is_long,
+                telegram_id,
+                product,
+                size_usd,
+                is_long,
                 leverage=leverage,
+                enforce_rate_limit=True,
             )
+            session["pending_trade"] = None
             if result.get("success"):
                 return {
                     "status": "filled",
@@ -171,6 +250,12 @@ async def _execute_function(
                     "digest": result.get("digest"),
                 }
             return {"status": "failed", "error": result.get("error", "Trade failed")}
+
+        elif func_name == "cancel_trade_order":
+            had = session.pop("pending_trade", None)
+            if not had:
+                return {"status": "idle", "message": "No staged trade to cancel."}
+            return {"status": "cancelled", "message": "Staged trade discarded."}
 
         elif func_name == "close_position":
             product = args["product"].upper()
@@ -233,7 +318,6 @@ async def _execute_function(
 
         elif func_name == "get_price":
             product = args["product"].upper()
-            from miniapp_api.config import get_product_id
             pid = get_product_id(product, network=network)
             if pid is None:
                 return {"status": "error", "error": f"Unknown product: {product}"}
@@ -274,6 +358,13 @@ async def voice_ws(ws: WebSocket):
       - {"type": "function_call", "name": "...", "result": {...}} — function execution result
       - {"type": "error", "message": "..."}
     """
+    try:
+        if not await run_blocking(check_rate_limit, client_ip_from_scope(ws.scope)):
+            await ws.close(code=1008)
+            return
+    except Exception:
+        logger.exception("Voice rate limit check failed; allowing connection")
+
     await ws.accept()
 
     if not GEMINI_API_KEY:
@@ -322,6 +413,8 @@ async def voice_ws(ws: WebSocket):
 
     await ws.send_json({"type": "auth_ok", "username": username})
     logger.info("Voice session started for %s (tid=%d)", username, tg_user.id)
+
+    session: dict[str, Any] = {"pending_trade": None}
 
     # Step 2: Connect to Gemini Multimodal Live API
     gemini_ws = None
@@ -472,7 +565,7 @@ async def voice_ws(ws: WebSocket):
                         logger.info("Voice function call: %s(%s)", fname, _args_preview)
 
                         result = await _execute_function(
-                            fname, fargs, tg_user.id, network
+                            fname, fargs, tg_user.id, network, session
                         )
 
                         # Notify client about function execution

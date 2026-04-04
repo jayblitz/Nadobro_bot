@@ -6,7 +6,6 @@ REST + WebSocket API for the Telegram Mini App frontend.
 
 import logging
 import os
-import sys
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -16,10 +15,11 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from miniapp_api.asgi_rate_limit import RateLimitMiddleware
 from miniapp_api.config import MINIAPP_API_PORT, MINIAPP_CORS_ORIGINS
 
 # Import routers
-from miniapp_api.routers import users, market, trade, positions, candles, quotes
+from miniapp_api.routers import users, market, trade, positions, candles, quotes, strategies
 from miniapp_api.ws import voice
 
 logging.basicConfig(
@@ -37,6 +37,13 @@ async def lifespan(app: FastAPI):
 
     logger.info("Initialising database pool...")
     get_pool()
+    try:
+        from miniapp_api.rate_limit import ensure_rate_limit_table
+
+        ensure_rate_limit_table()
+        logger.info("miniapp_rate_limit table ready")
+    except Exception:
+        logger.exception("Could not ensure miniapp_rate_limit table (rate limiting may fail)")
     logger.info("Mini App API ready")
 
     yield
@@ -60,6 +67,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Outermost: rate limit mutating /api/* (last added runs first in Starlette).
+app.add_middleware(RateLimitMiddleware)
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -70,6 +79,7 @@ app.include_router(candles.router, prefix="/api", tags=["candles"])
 app.include_router(quotes.router, prefix="/api", tags=["quotes"])
 app.include_router(trade.router, prefix="/api", tags=["trade"])
 app.include_router(positions.router, prefix="/api", tags=["positions"])
+app.include_router(strategies.router, prefix="/api", tags=["strategies"])
 app.include_router(voice.router, tags=["voice"])
 
 

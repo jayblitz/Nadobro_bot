@@ -156,24 +156,19 @@ class TradeHistoryItem(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Strategies
+# Strategies (bot_runtime: grid, rgrid, dn, vol, bro)
 # ---------------------------------------------------------------------------
 
-class StrategyStatusResponse(BaseModel):
-    strategy_type: str
-    product: str
-    is_running: bool = False
-    cycles: int = 0
-    pnl: Optional[float] = None
-    fills: int = 0
-    errors: int = 0
-    settings: dict[str, Any] = {}
+class StrategyStartRequest(BaseModel):
+    strategy: str = Field(..., pattern=r"^(grid|rgrid|dn|vol|bro)$")
+    product: str = Field(default="BTC", min_length=1, max_length=32)
+    leverage: float = Field(default=3.0, ge=1)
+    slippage_pct: float = Field(default=1.0, ge=0, le=100)
 
 
-class StartStrategyRequest(BaseModel):
-    strategy_type: str = Field(..., pattern=r"^(grid|rgrid|dn|volume|bro)$")
-    product: str
-    settings: dict[str, Any] = {}
+class StrategyActionResponse(BaseModel):
+    ok: bool
+    message: str = ""
 
 
 # ---------------------------------------------------------------------------
