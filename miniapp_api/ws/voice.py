@@ -1,0 +1,491 @@
+"""Gemini Multimodal Live API WebSocket proxy for voice trading.
+
+Architecture:
+  Browser <-> miniapp_api /ws/voice <-> Gemini 2.0 Live API
+
+The Gemini API key stays server-side.  Audio frames are proxied bidirectionally.
+When Gemini calls a function (trade, portfolio, etc.) we execute it server-side
+against the existing service layer and return results to Gemini for narration.
+"""
+
+import asyncio
+import base64
+import json
+import logging
+import time
+from typing import Any, Optional
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from miniapp_api.auth import AuthError, validate_init_data
+from miniapp_api.config import GEMINI_API_KEY, GEMINI_MODEL
+from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.user_service import (
+    get_or_create_user,
+    get_user_nado_client as _get_nado_client,
+)
+from src.nadobro.services.nado_client import NadoClient
+from src.nadobro.services.trade_service import (
+    execute_market_order,
+    execute_limit_order,
+    close_position,
+    close_all_positions,
+)
+from src.nadobro.models.database import NetworkMode
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+# Session timeout: 5 minutes of silence
+_SESSION_TIMEOUT = 300
+
+# -------------------------------------------------------------------
+# Gemini function-calling tools exposed to the voice model
+# -------------------------------------------------------------------
+VOICE_TOOLS = [
+    {
+        "name": "execute_trade",
+        "description": "Open a new perpetual futures position. Call this when the user says things like 'long BTC 100 dollars 5x' or 'short ETH $50'.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product": {"type": "string", "description": "Asset symbol (BTC, ETH, SOL, etc.)"},
+                "side": {"type": "string", "enum": ["long", "short"]},
+                "size_usd": {"type": "number", "description": "Position size in USD"},
+                "leverage": {"type": "number", "description": "Leverage multiplier, default 1"},
+            },
+            "required": ["product", "side", "size_usd"],
+        },
+    },
+    {
+        "name": "close_position",
+        "description": "Close an open position fully or partially.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product": {"type": "string", "description": "Asset symbol"},
+                "close_pct": {"type": "number", "description": "Percentage to close (1-100), default 100"},
+            },
+            "required": ["product"],
+        },
+    },
+    {
+        "name": "close_all_positions",
+        "description": "Emergency close all open positions.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_portfolio",
+        "description": "Get current positions, balance, and PnL summary.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_price",
+        "description": "Get the current market price of a crypto asset.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product": {"type": "string", "description": "Asset symbol"},
+            },
+            "required": ["product"],
+        },
+    },
+]
+
+
+def _build_system_prompt(username: str) -> str:
+    """Build Gemini system prompt with NadoBro's Bro personality."""
+    return f"""You are NadoBro — a confident, knowledgeable crypto trading assistant with a friendly "bro" personality.
+
+The user's name is {username}. When they greet you (e.g. "Yo Bro", "Hey Bro"), respond warmly: "Hi {username}, how can I help you today?"
+
+Your capabilities:
+- Execute trades (long/short perpetual futures) on Nado DEX
+- Check portfolio, positions, and balances
+- Get current market prices
+- Close positions (full or partial)
+
+Available trading pairs: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX (all perpetual futures).
+
+Rules:
+- Execute trades DIRECTLY when requested — no confirmation needed.
+- After executing a trade, read back the confirmation details (side, product, size, fill price).
+- Be concise but friendly. Use the bro persona — casual, confident, helpful.
+- If the user's request is unclear, ask for clarification.
+- Keep responses short for voice — 1-2 sentences max unless they ask for details.
+- When reporting prices, round to reasonable decimals (2 for BTC/ETH, 4 for others).
+- Always mention leverage if it's not 1x.
+"""
+
+
+async def _execute_function(
+    func_name: str, args: dict, telegram_id: int, network: str
+) -> dict[str, Any]:
+    """Execute a Gemini function call against real services."""
+    try:
+        if func_name == "execute_trade":
+            product = args["product"].upper()
+            side = args["side"]
+            size_usd = float(args["size_usd"])
+            leverage = float(args.get("leverage", 1))
+            is_long = side == "long"
+
+            result = await run_blocking(
+                execute_market_order,
+                telegram_id, product, size_usd, is_long,
+                leverage=leverage,
+            )
+            if result.get("success"):
+                return {
+                    "status": "filled",
+                    "product": product,
+                    "side": side,
+                    "size_usd": size_usd,
+                    "leverage": leverage,
+                    "fill_price": result.get("fill_price") or result.get("price"),
+                    "digest": result.get("digest"),
+                }
+            return {"status": "failed", "error": result.get("error", "Trade failed")}
+
+        elif func_name == "close_position":
+            product = args["product"].upper()
+            close_pct = float(args.get("close_pct", 100))
+
+            # Get current position to determine size
+            client = await run_blocking(_get_nado_client, telegram_id, network)
+            if not client:
+                return {"status": "failed", "error": "No exchange client"}
+
+            positions = await run_blocking(client.get_all_positions)
+            target = None
+            for pos in (positions or []):
+                if pos.get("product_name", "").upper() == product:
+                    target = pos
+                    break
+
+            if not target:
+                return {"status": "failed", "error": f"No open {product} position"}
+
+            total_size = abs(float(target.get("amount", 0)))
+            close_size = total_size * (close_pct / 100) if close_pct < 100 else None
+
+            result = await run_blocking(
+                close_position, telegram_id, product,
+                size=close_size, network=network,
+            )
+            if result.get("success"):
+                return {"status": "closed", "product": product, "close_pct": close_pct}
+            return {"status": "failed", "error": result.get("error", "Close failed")}
+
+        elif func_name == "close_all_positions":
+            result = await run_blocking(close_all_positions, telegram_id, network=network)
+            return {"status": "closed_all", "results": result}
+
+        elif func_name == "get_portfolio":
+            client = await run_blocking(_get_nado_client, telegram_id, network)
+            if not client:
+                return {"status": "error", "error": "No exchange client"}
+
+            positions = await run_blocking(client.get_all_positions) or []
+            balance_data = await run_blocking(client.get_balance)
+            balances = balance_data.get("balances", {}) if balance_data else {}
+            usdt_balance = float(balances.get(0, 0))
+
+            pos_summary = []
+            for p in positions:
+                pos_summary.append({
+                    "product": p.get("product_name"),
+                    "side": p.get("side"),
+                    "size": abs(float(p.get("amount", 0))),
+                    "entry_price": float(p.get("price", 0)),
+                })
+
+            return {
+                "balance_usdt": usdt_balance,
+                "positions": pos_summary,
+                "position_count": len(positions),
+            }
+
+        elif func_name == "get_price":
+            product = args["product"].upper()
+            from miniapp_api.config import get_product_id
+            pid = get_product_id(product, network=network)
+            if pid is None:
+                return {"status": "error", "error": f"Unknown product: {product}"}
+
+            client = await run_blocking(_get_nado_client, telegram_id, network)
+            if not client:
+                return {"status": "error", "error": "No exchange client"}
+
+            price = await run_blocking(client.get_market_price, pid)
+            return {
+                "product": product,
+                "bid": price.get("bid"),
+                "ask": price.get("ask"),
+                "mid": price.get("mid"),
+            }
+
+        return {"status": "error", "error": f"Unknown function: {func_name}"}
+
+    except Exception as exc:
+        logger.exception("Voice function %s failed", func_name)
+        return {"status": "error", "error": str(exc)}
+
+
+@router.websocket("/ws/voice")
+async def voice_ws(ws: WebSocket):
+    """WebSocket endpoint for Gemini voice proxy.
+
+    Client sends:
+      - {"type": "auth", "init_data": "..."} — first message, authenticate
+      - {"type": "audio", "data": "<base64 pcm>"} — audio chunks
+      - {"type": "text", "text": "..."} — text input fallback
+      - {"type": "end"} — end session
+
+    Server sends:
+      - {"type": "auth_ok", "username": "..."}
+      - {"type": "audio", "data": "<base64 pcm>"} — Gemini audio response
+      - {"type": "text", "text": "..."} — transcript
+      - {"type": "function_call", "name": "...", "result": {...}} — function execution result
+      - {"type": "error", "message": "..."}
+    """
+    await ws.accept()
+
+    if not GEMINI_API_KEY:
+        await ws.send_json({"type": "error", "message": "Voice AI not configured. GEMINI_API_KEY is missing."})
+        await ws.close()
+        return
+
+    # Step 1: Authenticate
+    try:
+        auth_msg = await asyncio.wait_for(ws.receive_json(), timeout=10)
+    except (asyncio.TimeoutError, WebSocketDisconnect):
+        await ws.close()
+        return
+
+    if auth_msg.get("type") != "auth" or not auth_msg.get("init_data"):
+        await ws.send_json({"type": "error", "message": "First message must be auth"})
+        await ws.close()
+        return
+
+    try:
+        tg_user = validate_init_data(auth_msg["init_data"])
+    except AuthError as exc:
+        await ws.send_json({"type": "error", "message": f"Auth failed: {exc}"})
+        await ws.close()
+        return
+
+    user_row, _, _ = await run_blocking(get_or_create_user, tg_user.id, tg_user.username)
+    if not user_row:
+        await ws.send_json({"type": "error", "message": "User not found"})
+        await ws.close()
+        return
+
+    network = "mainnet"
+    if hasattr(user_row, "network_mode"):
+        nm = user_row.network_mode
+        if isinstance(nm, NetworkMode):
+            network = nm.value
+        else:
+            network = str(nm or "mainnet")
+
+    username = tg_user.first_name or tg_user.username or "Bro"
+
+    await ws.send_json({"type": "auth_ok", "username": username})
+    logger.info("Voice session started for %s (tid=%d)", username, tg_user.id)
+
+    # Step 2: Connect to Gemini Multimodal Live API
+    gemini_ws = None
+    try:
+        import websockets
+
+        gemini_url = (
+            f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage"
+            f".v1beta.GenerativeService.BidiGenerateContent"
+            f"?key={GEMINI_API_KEY}"
+        )
+
+        gemini_ws = await websockets.connect(gemini_url)
+
+        # Send setup message with system prompt and tools
+        setup_msg = {
+            "setup": {
+                "model": f"models/{GEMINI_MODEL}",
+                "system_instruction": {
+                    "parts": [{"text": _build_system_prompt(username)}]
+                },
+                "tools": [
+                    {
+                        "function_declarations": VOICE_TOOLS,
+                    }
+                ],
+                "generation_config": {
+                    "response_modalities": ["AUDIO", "TEXT"],
+                    "speech_config": {
+                        "voice_config": {
+                            "prebuilt_voice_config": {"voice_name": "Puck"}
+                        }
+                    },
+                },
+            }
+        }
+        await gemini_ws.send(json.dumps(setup_msg))
+
+        # Wait for setup confirmation
+        setup_resp = await asyncio.wait_for(gemini_ws.recv(), timeout=15)
+        setup_data = json.loads(setup_resp)
+        logger.info("Gemini session established: %s", json.dumps(setup_data)[:200])
+
+    except Exception as exc:
+        logger.error("Failed to connect to Gemini: %s", exc)
+        await ws.send_json({"type": "error", "message": f"Voice AI connection failed: {exc}"})
+        if gemini_ws:
+            await gemini_ws.close()
+        await ws.close()
+        return
+
+    # Step 3: Bidirectional proxy
+    last_activity = time.time()
+
+    async def client_to_gemini():
+        """Forward audio/text from client to Gemini."""
+        nonlocal last_activity
+        try:
+            while True:
+                msg = await asyncio.wait_for(
+                    ws.receive_json(), timeout=_SESSION_TIMEOUT
+                )
+                last_activity = time.time()
+                msg_type = msg.get("type")
+
+                if msg_type == "audio":
+                    # Forward audio chunk to Gemini
+                    audio_data = msg.get("data", "")
+                    gemini_msg = {
+                        "realtime_input": {
+                            "media_chunks": [
+                                {
+                                    "data": audio_data,
+                                    "mime_type": "audio/pcm;rate=16000",
+                                }
+                            ]
+                        }
+                    }
+                    await gemini_ws.send(json.dumps(gemini_msg))
+
+                elif msg_type == "text":
+                    # Text fallback — send as content turn
+                    gemini_msg = {
+                        "client_content": {
+                            "turns": [
+                                {
+                                    "role": "user",
+                                    "parts": [{"text": msg.get("text", "")}],
+                                }
+                            ],
+                            "turn_complete": True,
+                        }
+                    }
+                    await gemini_ws.send(json.dumps(gemini_msg))
+
+                elif msg_type == "end":
+                    break
+
+        except (asyncio.TimeoutError, WebSocketDisconnect):
+            pass
+        except Exception as exc:
+            logger.warning("Client->Gemini error: %s", exc)
+
+    async def gemini_to_client():
+        """Forward Gemini responses (audio, text, function calls) to client."""
+        nonlocal last_activity
+        try:
+            async for raw_msg in gemini_ws:
+                last_activity = time.time()
+                data = json.loads(raw_msg)
+
+                server_content = data.get("serverContent")
+                tool_call = data.get("toolCall")
+
+                if server_content:
+                    parts = []
+                    model_turn = server_content.get("modelTurn", {})
+                    for part in model_turn.get("parts", []):
+                        if "text" in part:
+                            await ws.send_json({
+                                "type": "text",
+                                "text": part["text"],
+                            })
+                        elif "inlineData" in part:
+                            inline = part["inlineData"]
+                            await ws.send_json({
+                                "type": "audio",
+                                "data": inline.get("data", ""),
+                                "mime_type": inline.get("mimeType", "audio/pcm;rate=24000"),
+                            })
+
+                    if server_content.get("turnComplete"):
+                        await ws.send_json({"type": "turn_complete"})
+
+                elif tool_call:
+                    # Gemini wants to call a function — execute it
+                    function_calls = tool_call.get("functionCalls", [])
+                    responses = []
+
+                    for fc in function_calls:
+                        fname = fc.get("name", "")
+                        fargs = fc.get("args", {})
+                        fid = fc.get("id", "")
+
+                        logger.info("Voice function call: %s(%s)", fname, json.dumps(fargs)[:200])
+
+                        result = await _execute_function(
+                            fname, fargs, tg_user.id, network
+                        )
+
+                        # Notify client about function execution
+                        await ws.send_json({
+                            "type": "function_call",
+                            "name": fname,
+                            "args": fargs,
+                            "result": result,
+                        })
+
+                        responses.append({
+                            "id": fid,
+                            "name": fname,
+                            "response": {"result": result},
+                        })
+
+                    # Send function results back to Gemini
+                    tool_response = {
+                        "tool_response": {
+                            "function_responses": responses,
+                        }
+                    }
+                    await gemini_ws.send(json.dumps(tool_response))
+
+        except (WebSocketDisconnect, Exception) as exc:
+            if not isinstance(exc, WebSocketDisconnect):
+                logger.warning("Gemini->Client error: %s", exc)
+
+    try:
+        # Run both directions concurrently
+        done, pending = await asyncio.wait(
+            [
+                asyncio.create_task(client_to_gemini()),
+                asyncio.create_task(gemini_to_client()),
+            ],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+    finally:
+        logger.info("Voice session ended for %s", username)
+        if gemini_ws:
+            await gemini_ws.close()
+        try:
+            await ws.close()
+        except Exception:
+            pass

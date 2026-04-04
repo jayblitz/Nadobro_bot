@@ -3,6 +3,7 @@ from typing import Optional
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+MINIAPP_URL = (os.environ.get("MINIAPP_URL") or "").strip()
 XAI_API_KEY = os.environ.get("XAI_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")

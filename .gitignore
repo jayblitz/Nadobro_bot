@@ -9,7 +9,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -64,3 +64,8 @@ relay/*.session-journal
 relay/.relay_auth_token_generated
 relay/.fly-bootstrap.env
 .claude/
+
+# Telegram Mini App frontend (built in Docker)
+miniapp_web/node_modules/
+miniapp_web/dist/
+miniapp_web/tsconfig.tsbuildinfo

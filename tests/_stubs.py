@@ -28,10 +28,16 @@ def install_test_stubs() -> None:
         class _Update:
             pass
 
+        class _WebAppInfo:
+            def __init__(self, url=""):
+                self.url = url
+
         class _InlineKeyboardButton:
-            def __init__(self, text, callback_data=None):
+            def __init__(self, text, callback_data=None, url=None, web_app=None):
                 self.text = text
                 self.callback_data = callback_data
+                self.url = url
+                self.web_app = web_app
 
         class _InlineKeyboardMarkup:
             def __init__(self, inline_keyboard):
@@ -67,6 +73,7 @@ def install_test_stubs() -> None:
         telegram_mod.KeyboardButton = _KeyboardButton
         telegram_mod.ReplyKeyboardRemove = _ReplyKeyboardRemove
         telegram_mod.BotCommand = _BotCommand
+        telegram_mod.WebAppInfo = _WebAppInfo
         telegram_error.BadRequest = _BadRequest
 
         sys.modules["telegram"] = telegram_mod

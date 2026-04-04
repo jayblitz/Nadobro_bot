@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Telegram theme CSS custom properties are injected by the WebApp SDK.
+   Fallbacks for standalone browser testing: */
+:root {
+  --nb-cyan: #22d3ee;
+  --nb-green: #4ade80;
+  --nb-bg-deep: #0a0e12;
+  --tg-theme-bg-color: #0a0e12;
+  --tg-theme-secondary-bg-color: #17212b;
+  --tg-theme-text-color: #ffffff;
+  --tg-theme-hint-color: #708499;
+  --tg-theme-link-color: #22d3ee;
+  --tg-theme-button-color: #22d3ee;
+  --tg-theme-button-text-color: #ffffff;
+  --tg-viewport-height: 100vh;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  height: var(--tg-viewport-height, 100vh);
+}
+
+/* Hide scrollbar but keep scrollable */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Telegram-style safe area insets */
+.safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 16px);
+}

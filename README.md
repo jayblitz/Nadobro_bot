@@ -38,3 +38,13 @@ Nadobro is a Telegram trading bot for Nado DEX that lets users manage wallets, p
 ## Deployment
 
 For Fly.io deployment instructions, see `deploy.md`.
+
+## Telegram Mini App
+
+The repo includes `miniapp_web/` (Vite + React) and `miniapp_api/` (FastAPI) for a Telegram Web App: trading UI, portfolio, and **Speak with Bro** (Gemini Live) voice. Production Docker builds the SPA and serves it with **nginx** alongside the bot webhook and API (see `deploy.md`).
+
+- Set `MINIAPP_URL` to your public HTTPS origin (e.g. `https://<app>.fly.dev/`).
+- Set `GEMINI_API_KEY` for voice.
+- Docs: [nadobro.gitbook.io/docs](https://nadobro.gitbook.io/docs)
+
+Local dev: `cd miniapp_web && npm ci && npm run dev` (proxies `/api` and `/ws` to `localhost:8081`); run `uvicorn miniapp_api.main:app --host 127.0.0.1 --port 8081` from the repo root with `PYTHONPATH=.` and the same env vars as the bot.
