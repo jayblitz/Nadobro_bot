@@ -156,7 +156,8 @@ fly secrets set \
 ```
 
 - `MINIAPP_URL` — HTTPS URL of the Mini App (same origin as the SPA). Used for the **Menu** Web App button and the home card **Mini App** button. Must match what you configure in [@BotFather](https://t.me/BotFather) for the Web App URL.
-- `GEMINI_API_KEY` — required for **Speak with Bro** (Gemini Live WebSocket proxy at `/ws/voice`).
+- `GEMINI_API_KEY` — **Speak with Bro** uses the **Gemini Live API** through your backend: the browser opens a WebSocket to `/ws/voice`, and the API connects to Google with this key (key stays on the server). Create a key in [Google AI Studio](https://aistudio.google.com/apikey) with the Generative Language API enabled. If voice fails with “API Key not found”, the secret is missing, mistyped, or revoked — `fly secrets list` does not show values; set again with `fly secrets set GEMINI_API_KEY="..."`. Alternatively `GOOGLE_API_KEY` is read as a fallback (same value).
+- `GEMINI_MODEL` — optional. Defaults to **`gemini-3.1-flash-live-preview`** (see `miniapp_api/config.py`). Override if Google renames the Live model, e.g. `fly secrets set GEMINI_MODEL="gemini-3.1-flash-live-preview"`.
 - `TELEGRAM_WEBHOOK_PORT` is set to `8082` in the image so nginx keeps `PORT`/`8080` for public ingress; do not override unless you know what you are doing.
 
 Health check: Fly should use `GET /health` (proxied to the Mini App API).

@@ -178,4 +178,6 @@ export interface VoiceServerMessage {
   args?: Record<string, unknown>;
   result?: Record<string, unknown>;
   message?: string;
+  /** Server error code, e.g. invalid_gemini_key */
+  code?: string;
 }

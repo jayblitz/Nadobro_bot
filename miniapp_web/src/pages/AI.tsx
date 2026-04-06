@@ -4,7 +4,9 @@ import { getInitData } from "@/lib/telegram";
 import { hapticImpact, hapticSuccess, hapticError } from "@/lib/haptics";
 import type { VoiceServerMessage } from "@/api/types";
 
-const WS_BASE = import.meta.env.VITE_WS_URL ?? `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
+const WS_BASE =
+  import.meta.env.VITE_WS_URL ??
+  `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
 
 const LISTENING_BAR_HEIGHTS_PX = [14, 22, 16, 20, 12];
 
@@ -21,6 +23,7 @@ export default function AI() {
   const [textInput, setTextInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [, setUsername] = useState("");
+
   const wsRef = useRef<WebSocket | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -221,6 +224,7 @@ export default function AI() {
           break;
 
         case "error":
+          setConnected(false);
           setError(msg.message ?? "Unknown error");
           hapticError();
           break;
@@ -351,6 +355,7 @@ export default function AI() {
       <div className="px-4 pb-4 pt-2 border-t border-white/5">
         <div className="flex items-center justify-center mb-3">
           <button
+            type="button"
             onClick={toggleListening}
             aria-label={listening ? "Stop listening" : "Start voice chat"}
             className={clsx(
@@ -409,6 +414,7 @@ export default function AI() {
             className="flex-1 bg-white/5 rounded-xl px-4 py-3 text-sm text-white outline-none placeholder:text-white/20"
           />
           <button
+            type="button"
             onClick={sendText}
             disabled={!textInput.trim()}
             className="px-4 py-3 rounded-xl bg-tg-button text-tg-button-text text-sm font-medium disabled:opacity-40"

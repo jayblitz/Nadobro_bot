@@ -13,6 +13,7 @@ import json
 import logging
 import time
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -367,8 +368,12 @@ async def voice_ws(ws: WebSocket):
 
     await ws.accept()
 
-    if not GEMINI_API_KEY:
-        await ws.send_json({"type": "error", "message": "Voice AI not configured. GEMINI_API_KEY is missing."})
+    if not GEMINI_API_KEY or len(GEMINI_API_KEY) < 12:
+        await ws.send_json({
+            "type": "error",
+            "message": "Voice AI not configured. Set GEMINI_API_KEY (Google AI Studio) on the server.",
+            "code": "missing_gemini_key",
+        })
         await ws.close()
         return
 
@@ -411,25 +416,24 @@ async def voice_ws(ws: WebSocket):
 
     username = tg_user.first_name or tg_user.username or "Bro"
 
-    await ws.send_json({"type": "auth_ok", "username": username})
-    logger.info("Voice session started for %s (tid=%d)", username, tg_user.id)
-
     session: dict[str, Any] = {"pending_trade": None}
 
-    # Step 2: Connect to Gemini Multimodal Live API
+    # Step 2: Connect to Gemini Live API BEFORE auth_ok so the client does not show
+    # a greeting when the upstream connection will fail (e.g. invalid API key on Fly).
     gemini_ws = None
     try:
         import websockets
 
+        # URL-encode key so +, /, & in secrets cannot break the query string.
+        key_q = quote(GEMINI_API_KEY, safe="")
         gemini_url = (
-            f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage"
-            f".v1beta.GenerativeService.BidiGenerateContent"
-            f"?key={GEMINI_API_KEY}"
+            "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage"
+            ".v1beta.GenerativeService.BidiGenerateContent"
+            f"?key={key_q}"
         )
 
         gemini_ws = await websockets.connect(gemini_url)
 
-        # Send setup message with system prompt and tools
         setup_msg = {
             "setup": {
                 "model": f"models/{GEMINI_MODEL}",
@@ -453,18 +457,37 @@ async def voice_ws(ws: WebSocket):
         }
         await gemini_ws.send(json.dumps(setup_msg))
 
-        # Wait for setup confirmation
         setup_resp = await asyncio.wait_for(gemini_ws.recv(), timeout=15)
         setup_data = json.loads(setup_resp)
         logger.info("Gemini session established: %s", json.dumps(setup_data)[:200])
 
+        if isinstance(setup_data, dict) and setup_data.get("error"):
+            raise RuntimeError(str(setup_data["error"]))
+
     except Exception as exc:
+        err_s = str(exc).lower()
         logger.error("Failed to connect to Gemini: %s", exc, exc_info=True)
-        await ws.send_json({"type": "error", "message": "Voice AI connection failed. Try again later."})
         if gemini_ws:
-            await gemini_ws.close()
+            try:
+                await gemini_ws.close()
+            except Exception:
+                pass
+            gemini_ws = None
+        if "api key" in err_s or "api_key" in err_s or "not found" in err_s:
+            msg = (
+                "Voice AI could not start: the Gemini API key on the server is missing or rejected. "
+                "Add a valid key from Google AI Studio (GEMINI_API_KEY) and redeploy."
+            )
+            code = "invalid_gemini_key"
+        else:
+            msg = "Voice AI connection failed. Try again in a moment."
+            code = "gemini_connect_failed"
+        await ws.send_json({"type": "error", "message": msg, "code": code})
         await ws.close()
         return
+
+    await ws.send_json({"type": "auth_ok", "username": username})
+    logger.info("Voice session started for %s (tid=%d)", username, tg_user.id)
 
     # Step 3: Bidirectional proxy
     last_activity = time.time()

@@ -50,6 +50,8 @@ if _miniapp_origin.startswith("https://") and _miniapp_origin not in MINIAPP_COR
 
 MINIAPP_API_PORT: int = int(os.environ.get("MINIAPP_API_PORT", "8081"))
 
-# Gemini Live API
-GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
+# Gemini Live API (Google AI Studio key: https://aistudio.google.com/apikey)
+# Strip whitespace — Fly secrets sometimes include accidental newlines.
+_GEMINI_RAW = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+GEMINI_API_KEY: str = _GEMINI_RAW.strip()
 GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
