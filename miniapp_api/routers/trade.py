@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _reference_price(price_data: dict) -> float:
+    """Mid price; fall back to (bid+ask)/2, then ask/bid."""
+    bid = float(price_data.get("bid") or 0)
+    ask = float(price_data.get("ask") or 0)
+    mid = price_data.get("mid")
+    if mid is not None:
+        m = float(mid)
+        if m > 0:
+            return m
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2.0
+    return max(bid, ask, 0.0)
+
+
 @router.post("/trade/market", response_model=TradeResponse)
 async def place_market_order(body: MarketOrderRequest, user: AuthUser):
     """Execute a market order (IOC with slippage tolerance)."""
@@ -32,7 +46,12 @@ async def place_market_order(body: MarketOrderRequest, user: AuthUser):
     # a current price estimate.
     tp_price = None
     sl_price = None
-    if body.take_profit_pct is not None or body.stop_loss_pct is not None:
+    wants_tp = (
+        body.take_profit_pct is not None
+        or body.take_profit_price is not None
+    )
+    wants_sl = body.stop_loss_pct is not None or body.stop_loss_price is not None
+    if wants_tp or wants_sl:
         from src.nadobro.services.user_service import get_user_nado_client as _get_client
         from miniapp_api.config import get_product_id
         client = await run_blocking(_get_client, user.telegram_id, user.network)
@@ -40,11 +59,23 @@ async def place_market_order(body: MarketOrderRequest, user: AuthUser):
             pid = get_product_id(body.product, network=user.network)
             if pid is not None:
                 price_data = await run_blocking(client.get_market_price, pid)
-                mid = price_data.get("mid") or price_data.get("ask") or 0
-                if mid and body.take_profit_pct is not None:
-                    tp_price = mid * (1 + body.take_profit_pct / 100) if is_long else mid * (1 - body.take_profit_pct / 100)
-                if mid and body.stop_loss_pct is not None:
-                    sl_price = mid * (1 - body.stop_loss_pct / 100) if is_long else mid * (1 + body.stop_loss_pct / 100)
+                ref = _reference_price(price_data or {})
+                if body.take_profit_price is not None:
+                    tp_price = float(body.take_profit_price)
+                elif body.take_profit_pct is not None and ref > 0:
+                    tp_price = (
+                        ref * (1 + body.take_profit_pct / 100)
+                        if is_long
+                        else ref * (1 - body.take_profit_pct / 100)
+                    )
+                if body.stop_loss_price is not None:
+                    sl_price = float(body.stop_loss_price)
+                elif body.stop_loss_pct is not None and ref > 0:
+                    sl_price = (
+                        ref * (1 - body.stop_loss_pct / 100)
+                        if is_long
+                        else ref * (1 + body.stop_loss_pct / 100)
+                    )
 
     result = await run_blocking(
         execute_market_order,

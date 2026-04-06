@@ -52,4 +52,4 @@ MINIAPP_API_PORT: int = int(os.environ.get("MINIAPP_API_PORT", "8081"))
 
 # Gemini Live API
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-live")
+GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-live-preview")

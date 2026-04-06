@@ -13,6 +13,7 @@ import Portfolio from "@/pages/Portfolio";
 import Strategies from "@/pages/Strategies";
 import AI from "@/pages/AI";
 import Settings from "@/pages/Settings";
+import ErrorBoundary from "@/components/common/ErrorBoundary";
 
 export default function App() {
   const { user, loading, error, fetchUser } = useAuthStore();
@@ -64,16 +65,18 @@ export default function App() {
   return (
     <div className="flex flex-col h-full">
       <main className="flex-1 flex flex-col overflow-hidden">
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/product/:product" element={<ProductDetail />} />
-          <Route path="/trade" element={<Trade />} />
-          <Route path="/portfolio" element={<Portfolio />} />
-          <Route path="/strategies" element={<Strategies />} />
-          <Route path="/ai" element={<AI />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <ErrorBoundary>
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/product/:product" element={<ProductDetail />} />
+            <Route path="/trade" element={<Trade />} />
+            <Route path="/portfolio" element={<Portfolio />} />
+            <Route path="/strategies" element={<Strategies />} />
+            <Route path="/ai" element={<AI />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </ErrorBoundary>
       </main>
       <BottomTabs />
     </div>

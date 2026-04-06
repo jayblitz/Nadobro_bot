@@ -69,6 +69,8 @@ class MarketOrderRequest(BaseModel):
     leverage: float = Field(1.0, ge=1)
     take_profit_pct: Optional[float] = None
     stop_loss_pct: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    stop_loss_price: Optional[float] = None
 
 
 class LimitOrderRequest(BaseModel):
@@ -134,9 +136,15 @@ class ClosePositionRequest(BaseModel):
 
 class PortfolioSummary(BaseModel):
     equity: float = 0.0
+    balance_usd: float = 0.0
     available_balance: float = 0.0
     total_unrealized_pnl: float = 0.0
+    unrealized_spot_pnl: float = 0.0
     total_margin_used: float = 0.0
+    margin_utilization: Optional[float] = None
+    total_volume_usd: float = 0.0
+    fee_tier_display: str = "—"
+    nlp_balance_usd: float = 0.0
     positions: list[PositionResponse] = []
     open_orders_count: int = 0
 

@@ -6,6 +6,7 @@ import { hapticImpact, hapticSuccess, hapticError } from "@/lib/haptics";
 import type { ProductInfo, TradeResponse } from "@/api/types";
 import { useMarketStore } from "@/store/market";
 import { Link } from "react-router-dom";
+import TpSlFields, { type TpSlInputMode } from "@/components/trade/TpSlFields";
 
 export default function Trade() {
   const { selectedProduct, selectProduct, prices } = useMarketStore();
@@ -16,6 +17,11 @@ export default function Trade() {
   const [limitPrice, setLimitPrice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [lastResult, setLastResult] = useState<TradeResponse | null>(null);
+  const [tpSlMode, setTpSlMode] = useState<TpSlInputMode>("pct");
+  const [tpPct, setTpPct] = useState("");
+  const [slPct, setSlPct] = useState("");
+  const [tpPrice, setTpPrice] = useState("");
+  const [slPrice, setSlPrice] = useState("");
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Auto-dismiss trade result after 4 seconds.
@@ -52,11 +58,24 @@ export default function Trade() {
       if (orderType === "limit" && limitPrice) {
         body.price = Number(limitPrice);
       }
+      if (orderType === "market") {
+        if (tpSlMode === "pct") {
+          if (tpPct.trim()) body.take_profit_pct = Number(tpPct);
+          if (slPct.trim()) body.stop_loss_pct = Number(slPct);
+        } else {
+          if (tpPrice.trim()) body.take_profit_price = Number(tpPrice);
+          if (slPrice.trim()) body.stop_loss_price = Number(slPrice);
+        }
+      }
       const res = await api.post<TradeResponse>(path, body);
       setLastResult(res);
       if (res.ok) {
         hapticSuccess();
         setSizeUsd("");
+        setTpPct("");
+        setSlPct("");
+        setTpPrice("");
+        setSlPrice("");
       } else {
         hapticError();
       }
@@ -203,6 +222,21 @@ export default function Trade() {
             <span className="text-[10px] text-tg-hint">{maxLev}x</span>
           </div>
         </div>
+
+        {orderType === "market" && (
+          <TpSlFields
+            mode={tpSlMode}
+            onModeChange={setTpSlMode}
+            tpPct={tpPct}
+            slPct={slPct}
+            tpPrice={tpPrice}
+            slPrice={slPrice}
+            onTpPct={setTpPct}
+            onSlPct={setSlPct}
+            onTpPrice={setTpPrice}
+            onSlPrice={setSlPrice}
+          />
+        )}
 
         {/* Order preview */}
         {sizeUsd && Number(sizeUsd) > 0 && (
