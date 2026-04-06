@@ -50,7 +50,7 @@ export default function Home() {
   const { portfolio, setPortfolio } = useAccountStore();
 
   // Fetch products
-  const { data: productsData } = useQuery({
+  const { data: productsData, isPending: productsLoading } = useQuery({
     queryKey: ["products"],
     queryFn: () => api.get<ProductInfo[]>("/api/products"),
     staleTime: 60_000,
@@ -121,7 +121,7 @@ export default function Home() {
           <div className="divide-y divide-white/5">
             {positions.slice(0, 3).map((pos) => {
               const pnl = pos.unrealized_pnl;
-              const isLong = pos.side === "LONG";
+              const isLong = pos.side?.toLowerCase() === "long";
               return (
                 <button
                   key={`${pos.product_id}-${pos.side}`}
@@ -212,7 +212,18 @@ export default function Home() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 px-4">
-        {(products.length > 0 ? products : []).map((p) => {
+        {productsLoading && products.length === 0 && (
+          <>
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div
+                key={`sk-${i}`}
+                className="bg-white/5 rounded-2xl p-4 h-[120px] animate-pulse"
+              />
+            ))}
+          </>
+        )}
+        {!productsLoading &&
+          (products.length > 0 ? products : []).map((p) => {
           const quote: CryptoQuote | undefined = quotes[p.name];
           const priceData = prices[p.name];
           const mid = priceData?.mid ?? quote?.price;

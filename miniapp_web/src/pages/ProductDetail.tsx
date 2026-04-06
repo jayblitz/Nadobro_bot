@@ -13,6 +13,7 @@ import type {
   TradeResponse,
   QuotesResponse,
 } from "@/api/types";
+import TpSlFields, { type TpSlInputMode } from "@/components/trade/TpSlFields";
 
 const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 type Interval = (typeof INTERVALS)[number];
@@ -53,6 +54,11 @@ export default function ProductDetail() {
   const [submitting, setSubmitting] = useState(false);
   const [lastResult, setLastResult] = useState<TradeResponse | null>(null);
   const [showOrderForm, setShowOrderForm] = useState(false);
+  const [tpSlMode, setTpSlMode] = useState<TpSlInputMode>("pct");
+  const [tpPct, setTpPct] = useState("");
+  const [slPct, setSlPct] = useState("");
+  const [tpPrice, setTpPrice] = useState("");
+  const [slPrice, setSlPrice] = useState("");
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const productName = product?.toUpperCase() ?? "BTC";
@@ -187,11 +193,24 @@ export default function ProductDetail() {
       if (orderType === "limit" && limitPrice) {
         body.price = Number(limitPrice);
       }
+      if (orderType === "market") {
+        if (tpSlMode === "pct") {
+          if (tpPct.trim()) body.take_profit_pct = Number(tpPct);
+          if (slPct.trim()) body.stop_loss_pct = Number(slPct);
+        } else {
+          if (tpPrice.trim()) body.take_profit_price = Number(tpPrice);
+          if (slPrice.trim()) body.stop_loss_price = Number(slPrice);
+        }
+      }
       const res = await api.post<TradeResponse>(path, body);
       setLastResult(res);
       if (res.ok) {
         hapticSuccess();
         setSizeUsd("");
+        setTpPct("");
+        setSlPct("");
+        setTpPrice("");
+        setSlPrice("");
         setShowOrderForm(false);
       } else {
         hapticError();
@@ -202,7 +221,19 @@ export default function ProductDetail() {
     } finally {
       setSubmitting(false);
     }
-  }, [sizeUsd, orderType, productName, side, leverage, limitPrice]);
+  }, [
+    sizeUsd,
+    orderType,
+    productName,
+    side,
+    leverage,
+    limitPrice,
+    tpSlMode,
+    tpPct,
+    slPct,
+    tpPrice,
+    slPrice,
+  ]);
 
   return (
     <div className="flex-1 flex flex-col overflow-y-auto hide-scrollbar">
@@ -422,6 +453,21 @@ export default function ProductDetail() {
               <span className="text-[10px] text-tg-hint">{maxLev}x</span>
             </div>
           </div>
+
+          {orderType === "market" && (
+            <TpSlFields
+              mode={tpSlMode}
+              onModeChange={setTpSlMode}
+              tpPct={tpPct}
+              slPct={slPct}
+              tpPrice={tpPrice}
+              slPrice={slPrice}
+              onTpPct={setTpPct}
+              onSlPct={setSlPct}
+              onTpPrice={setTpPrice}
+              onSlPrice={setSlPrice}
+            />
+          )}
 
           {/* Est. margin */}
           {sizeUsd && Number(sizeUsd) > 0 && (

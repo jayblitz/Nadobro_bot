@@ -1427,6 +1427,7 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
             "side": t.get("side"),
             "size": t.get("size"),
             "price": t.get("price"),
+            "leverage": float(t.get("leverage") or 1),
             "status": t.get("status"),
             "pnl": t.get("pnl"),
             "close_price": t.get("close_price"),

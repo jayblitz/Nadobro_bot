@@ -59,9 +59,15 @@ export interface PositionResponse {
 
 export interface PortfolioSummary {
   equity: number;
+  balance_usd: number;
   available_balance: number;
   total_unrealized_pnl: number;
+  unrealized_spot_pnl: number;
   total_margin_used: number;
+  margin_utilization: number | null;
+  total_volume_usd: number;
+  fee_tier_display: string;
+  nlp_balance_usd: number;
   positions: PositionResponse[];
   open_orders_count: number;
 }

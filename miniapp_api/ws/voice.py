@@ -1,7 +1,7 @@
 """Gemini Multimodal Live API WebSocket proxy for voice trading.
 
 Architecture:
-  Browser <-> miniapp_api /ws/voice <-> Gemini 2.0 Live API
+  Browser <-> miniapp_api /ws/voice <-> Gemini Live API (default: 3.1 Flash Live preview)
 
 The Gemini API key stays server-side.  Audio frames are proxied bidirectionally.
 When Gemini calls a function (trade, portfolio, etc.) we execute it server-side
