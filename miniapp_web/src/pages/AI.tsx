@@ -221,6 +221,7 @@ export default function AI() {
           break;
 
         case "error":
+          setConnected(false);
           setError(msg.message ?? "Unknown error");
           hapticError();
           break;
