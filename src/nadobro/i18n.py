@@ -950,12 +950,12 @@ _TEXTS = {
         "ru": "⚠️ Копи-сделка не удалась\nТрейдер: {trader} ({wallet})\n{coin} {side}: {error}",
         "ko": "⚠️ 카피 트레이드 실패\n트레이더: {trader} ({wallet})\n{coin} {side}: {error}",
     },
-    "ℹ️ Copy Trade Skipped\nTrader opened {coin} — not available on Nado DEX.\nSupported: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE": {
-        "zh": "ℹ️ 跟单交易已跳过\n交易员开仓 {coin} — 在 Nado DEX 不可用。\n支持: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
-        "fr": "ℹ️ Copie ignorée\nLe trader a ouvert {coin} — non disponible sur Nado DEX.\nSupportés: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
-        "ar": "ℹ️ تم تخطي صفقة النسخ\nفتح المتداول {coin} — غير متوفر على Nado DEX.\nالمدعومة: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
-        "ru": "ℹ️ Копи-сделка пропущена\nТрейдер открыл {coin} — недоступно на Nado DEX.\nПоддерживаются: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
-        "ko": "ℹ️ 카피 트레이드 건너뜀\n트레이더가 {coin} 개시 — Nado DEX에서 지원되지 않음.\n지원: BTC, ETH, SOL, XRP, BNB, LINK, AVAX, DOGE",
+    "ℹ️ Copy Trade Skipped\nTrader opened {coin} — not available on Nado DEX.\nSupported: BTC, ETH, SOL, XRP, BNB, LINK, DOGE": {
+        "zh": "ℹ️ 跟单交易已跳过\n交易员开仓 {coin} — 在 Nado DEX 不可用。\n支持: BTC, ETH, SOL, XRP, BNB, LINK, DOGE",
+        "fr": "ℹ️ Copie ignorée\nLe trader a ouvert {coin} — non disponible sur Nado DEX.\nSupportés: BTC, ETH, SOL, XRP, BNB, LINK, DOGE",
+        "ar": "ℹ️ تم تخطي صفقة النسخ\nفتح المتداول {coin} — غير متوفر على Nado DEX.\nالمدعومة: BTC, ETH, SOL, XRP, BNB, LINK, DOGE",
+        "ru": "ℹ️ Копи-сделка пропущена\nТрейдер открыл {coin} — недоступно на Nado DEX.\nПоддерживаются: BTC, ETH, SOL, XRP, BNB, LINK, DOGE",
+        "ko": "ℹ️ 카피 트레이드 건너뜀\n트레이더가 {coin} 개시 — Nado DEX에서 지원되지 않음.\n지원: BTC, ETH, SOL, XRP, BNB, LINK, DOGE",
     },
     "No traders available yet\\. Add a custom wallet or ask an admin to add traders\\.": {
         "zh": "尚无可用交易员\\。添加自定义钱包或请求管理员添加交易员\\。",

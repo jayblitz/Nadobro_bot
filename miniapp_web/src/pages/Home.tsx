@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { clsx } from "clsx";
@@ -6,6 +6,8 @@ import { api } from "@/api/client";
 import { hapticImpact } from "@/lib/haptics";
 import { useMarketStore } from "@/store/market";
 import { useAccountStore } from "@/store/account";
+import { useFavoritePerps } from "@/hooks/useFavoritePerps";
+import AssetAvatar from "@/components/common/AssetAvatar";
 import type {
   ProductInfo,
   PortfolioSummary,
@@ -14,17 +16,26 @@ import type {
   AllPricesResponse,
 } from "@/api/types";
 
-/** Crypto token color map for avatar backgrounds */
-const TOKEN_COLORS: Record<string, string> = {
-  BTC: "#F7931A",
-  ETH: "#627EEA",
-  SOL: "#9945FF",
-  XRP: "#23292F",
-  BNB: "#F3BA2F",
-  LINK: "#2A5ADA",
-  DOGE: "#C2A633",
-  AVAX: "#E84142",
-};
+type CategoryTabId =
+  | "all"
+  | "perps"
+  | "spot"
+  | "memes"
+  | "defi"
+  | "chains"
+  | "commodities"
+  | "favorites";
+
+const CATEGORY_TABS: { id: CategoryTabId; label: string }[] = [
+  { id: "all", label: "All assets" },
+  { id: "perps", label: "Perps" },
+  { id: "spot", label: "Spot" },
+  { id: "memes", label: "Memes" },
+  { id: "defi", label: "DeFi" },
+  { id: "chains", label: "Chains" },
+  { id: "commodities", label: "Commodities" },
+  { id: "favorites", label: "Favorites" },
+];
 
 function formatPrice(n: number | null | undefined): string {
   if (n == null) return "--";
@@ -44,10 +55,27 @@ function formatFunding(n: number | null | undefined): string {
   return `${(n * 100).toFixed(4)}%`;
 }
 
+function filterByCategory(
+  products: ProductInfo[],
+  tab: CategoryTabId,
+  favorites: Set<string>,
+): ProductInfo[] {
+  if (tab === "all") return products;
+  if (tab === "favorites") {
+    return products.filter((p) => favorites.has(p.name.toUpperCase()));
+  }
+  if (tab === "spot") {
+    return products.filter((p) => (p.category ?? "perps") === "spot");
+  }
+  return products.filter((p) => (p.category ?? "perps") === tab);
+}
+
 export default function Home() {
   const navigate = useNavigate();
   const { products, prices, setProducts, updatePrices, selectProduct } = useMarketStore();
   const { portfolio, setPortfolio } = useAccountStore();
+  const { favorites, toggle, isFavorite } = useFavoritePerps();
+  const [categoryTab, setCategoryTab] = useState<CategoryTabId>("all");
 
   // Fetch products
   const { data: productsData, isPending: productsLoading } = useQuery({
@@ -93,11 +121,24 @@ export default function Home() {
   const quotes = quotesData?.quotes ?? {};
   const positions = portfolio?.positions ?? [];
 
+  const filteredProducts = useMemo(
+    () => filterByCategory(products, categoryTab, favorites),
+    [products, categoryTab, favorites],
+  );
+
   const openProduct = (name: string) => {
     hapticImpact("light");
     selectProduct(name);
     navigate(`/product/${name}`);
   };
+
+  const emptySpot =
+    categoryTab === "spot" &&
+    !productsLoading &&
+    products.every((p) => (p.category ?? "perps") !== "spot");
+
+  const emptyFavorites =
+    categoryTab === "favorites" && !productsLoading && filteredProducts.length === 0;
 
   return (
     <div className="flex-1 flex flex-col overflow-y-auto hide-scrollbar pb-2">
@@ -204,11 +245,31 @@ export default function Home() {
         </div>
       )}
 
-      {/* Trending Perps grid */}
-      <div className="px-4 mb-2">
-        <h2 className="text-sm font-semibold text-tg-hint uppercase tracking-wide">
-          Trending Perps
-        </h2>
+      {/* Category tabs */}
+      <div className="mb-2 pl-4">
+        <div className="flex gap-2 overflow-x-auto hide-scrollbar pb-1 pr-4">
+          {CATEGORY_TABS.map((tab) => {
+            const active = categoryTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => {
+                  hapticImpact("light");
+                  setCategoryTab(tab.id);
+                }}
+                className={clsx(
+                  "shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-colors",
+                  active
+                    ? "bg-white/15 text-white"
+                    : "bg-white/5 text-tg-hint active:bg-white/10",
+                )}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 px-4">
@@ -222,63 +283,87 @@ export default function Home() {
             ))}
           </>
         )}
+
+        {!productsLoading && emptySpot && (
+          <div className="col-span-2 text-center py-8 text-sm text-tg-hint">
+            Spot markets are not available in Nadobro yet. Trade perps from the other tabs.
+          </div>
+        )}
+
+        {!productsLoading && emptyFavorites && (
+          <div className="col-span-2 text-center py-8 text-sm text-tg-hint">
+            Tap the star on a market to add favorites.
+          </div>
+        )}
+
         {!productsLoading &&
-          (products.length > 0 ? products : []).map((p) => {
-          const quote: CryptoQuote | undefined = quotes[p.name];
-          const priceData = prices[p.name];
-          const mid = priceData?.mid ?? quote?.price;
-          const change = quote?.change_24h;
-          const bgColor = TOKEN_COLORS[p.name] ?? "#5288c1";
+          !emptySpot &&
+          filteredProducts.map((p) => {
+            const quote: CryptoQuote | undefined = quotes[p.name];
+            const priceData = prices[p.name];
+            const mid = priceData?.mid ?? quote?.price;
+            const change = quote?.change_24h;
+            const fav = isFavorite(p.name);
 
-          return (
-            <button
-              key={p.name}
-              onClick={() => openProduct(p.name)}
-              className="bg-white/5 rounded-2xl p-4 text-left active:scale-[0.98] transition-transform"
-            >
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <div
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white"
-                    style={{ backgroundColor: bgColor }}
-                  >
-                    {p.name.slice(0, 2)}
+            return (
+              <div
+                key={p.name}
+                className="bg-white/5 rounded-2xl p-4 text-left active:scale-[0.98] transition-transform cursor-pointer"
+                onClick={() => openProduct(p.name)}
+              >
+                <div className="flex items-start justify-between gap-2 mb-3">
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                    <button
+                      type="button"
+                      aria-label={fav ? "Remove from favorites" : "Add to favorites"}
+                      className={clsx(
+                        "shrink-0 text-lg leading-none px-0.5 rounded active:opacity-70",
+                        fav ? "text-amber-400" : "text-tg-hint/70",
+                      )}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        hapticImpact("light");
+                        toggle(p.name);
+                      }}
+                    >
+                      {fav ? "★" : "☆"}
+                    </button>
+                    <AssetAvatar symbol={p.name} size={32} />
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-white truncate">{p.name}</div>
+                      <div className="text-[10px] text-tg-hint truncate">{p.name}-PERP</div>
+                    </div>
                   </div>
-                  <div>
-                    <div className="text-sm font-semibold text-white">{p.name}</div>
-                    <div className="text-[10px] text-tg-hint">{p.name}-PERP</div>
-                  </div>
-                </div>
-                <span className="text-[10px] font-medium text-tg-hint bg-white/10 px-1.5 py-0.5 rounded">
-                  {p.max_leverage}x
-                </span>
-              </div>
-
-              <div className="text-lg font-bold text-white tabular-nums">
-                {formatPrice(mid)}
-              </div>
-              <div className="flex items-center gap-2 mt-0.5">
-                <span
-                  className={clsx(
-                    "text-xs font-medium",
-                    change == null
-                      ? "text-tg-hint"
-                      : change >= 0
-                        ? "text-long"
-                        : "text-short",
-                  )}
-                >
-                  {formatChange(change)}
-                </span>
-                {quote?.funding_rate != null && (
-                  <span className="text-[10px] text-tg-hint">
-                    F: {formatFunding(quote.funding_rate)}
+                  <span className="text-[10px] font-medium text-tg-hint bg-white/10 px-1.5 py-0.5 rounded shrink-0">
+                    {p.max_leverage}x
                   </span>
-                )}
+                </div>
+
+                <div className="text-lg font-bold text-white tabular-nums">
+                  {formatPrice(mid)}
+                </div>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span
+                    className={clsx(
+                      "text-xs font-medium",
+                      change == null
+                        ? "text-tg-hint"
+                        : change >= 0
+                          ? "text-long"
+                          : "text-short",
+                    )}
+                  >
+                    {formatChange(change)}
+                  </span>
+                  {quote?.funding_rate != null && (
+                    <span className="text-[10px] text-tg-hint">
+                      F: {formatFunding(quote.funding_rate)}
+                    </span>
+                  )}
+                </div>
               </div>
-            </button>
-          );
-        })}
+            );
+          })}
       </div>
     </div>
   );

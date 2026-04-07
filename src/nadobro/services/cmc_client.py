@@ -13,7 +13,7 @@ _cache: dict = {}
 
 CMC_SYMBOL_ID_MAP = {
     "BTC": 1, "ETH": 1027, "SOL": 5426, "XRP": 52,
-    "BNB": 1839, "LINK": 1975, "DOGE": 74, "AVAX": 5805,
+    "BNB": 1839, "LINK": 1975, "DOGE": 74,
     "INK": 34618,
 }
 

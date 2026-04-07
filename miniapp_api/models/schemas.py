@@ -44,6 +44,8 @@ class ProductInfo(BaseModel):
     type: str = "perp"
     max_leverage: int = 20
     isolated_only: bool = False
+    # Nado-style tab: perps, spot, memes, defi, chains, commodities
+    category: str = "perps"
 
 
 class PriceResponse(BaseModel):

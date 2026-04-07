@@ -28,7 +28,6 @@ PRODUCTS = {
     "BNB": {"id": 14, "type": "perp", "symbol": "BNB-PERP"},
     "LINK": {"id": 16, "type": "perp", "symbol": "LINK-PERP"},
     "DOGE": {"id": 22, "type": "perp", "symbol": "DOGE-PERP"},
-    "AVAX": {"id": 18, "type": "perp", "symbol": "AVAX-PERP"},
 }
 
 # Spot product ids currently supported for DN hedge legs.
@@ -81,19 +80,18 @@ def get_spot_product_id(name: str) -> Optional[int]:
     return SPOT_PRODUCT_IDS.get((name or "").upper().strip())
 
 RATE_LIMIT_SECONDS = 5
-MAX_LEVERAGE = 40
+MAX_LEVERAGE = 50
 MIN_TRADE_SIZE_USD = 1.0
 
-# Asset-specific leverage caps. BTC/ETH support 40x, others are capped lower.
+# Fallback leverage caps when the live catalog is unavailable (Nado mainnet overrides via API).
 PRODUCT_MAX_LEVERAGE = {
-    "BTC": 40,
-    "ETH": 40,
-    "SOL": 20,
+    "BTC": 50,
+    "ETH": 50,
+    "SOL": 40,
     "XRP": 20,
     "BNB": 20,
     "LINK": 20,
     "DOGE": 20,
-    "AVAX": 20,
 }
 
 

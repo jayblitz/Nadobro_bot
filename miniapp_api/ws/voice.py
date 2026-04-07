@@ -153,7 +153,7 @@ Your capabilities:
 - Get current market prices
 - Close positions (full or partial)
 
-Available trading pairs include BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX, WTI, and other listed perps.
+Available trading pairs include BTC, ETH, SOL, XRP, BNB, LINK, DOGE, WTI, and other listed perps.
 
 Rules for NEW positions (opening trades):
 - NEVER execute a market order on first request. Always call prepare_trade_order first.

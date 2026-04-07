@@ -5,7 +5,11 @@ import time
 
 from fastapi import APIRouter
 
-from miniapp_api.config import PRODUCTS, get_perp_products
+from miniapp_api.config import get_perp_products, get_product_max_leverage
+
+
+def _leverage_map_for_network(names: list[str], network: str) -> dict[str, int]:
+    return {n: get_product_max_leverage(n, network=network) for n in names}
 from miniapp_api.dependencies import AuthUser, UserClient
 from src.nadobro.services.async_utils import run_blocking
 
@@ -47,6 +51,7 @@ async def get_quotes(client: UserClient, user: AuthUser):
 
     # Map ticker_id (e.g. "BTC-PERP_USDT") to our product names
     perp_names = await run_blocking(get_perp_products, user.network)
+    leverages = await run_blocking(_leverage_map_for_network, perp_names, user.network)
     quotes: dict[str, dict] = {}
 
     for ticker_id, info in contracts.items():
@@ -59,7 +64,7 @@ async def get_quotes(client: UserClient, user: AuthUser):
         if base not in perp_names:
             continue
 
-        product_info = PRODUCTS.get(base, {})
+        max_lev = leverages.get(base, 20)
         quotes[base] = {
             "price": info.get("last_price"),
             "change_24h": info.get("price_change_percent_24h"),
@@ -69,7 +74,7 @@ async def get_quotes(client: UserClient, user: AuthUser):
             "funding_rate": info.get("funding_rate"),
             "open_interest": info.get("open_interest"),
             "open_interest_usd": info.get("open_interest_usd"),
-            "max_leverage": product_info.get("max_leverage", 20) if isinstance(product_info, dict) else 20,
+            "max_leverage": max_lev,
         }
 
     _tickers_cache[cache_key] = (now, quotes)
