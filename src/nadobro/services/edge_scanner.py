@@ -194,8 +194,12 @@ def _scan_via_x_api():
     except json.JSONDecodeError:
         logger.warning("Edge scanner: LLM returned invalid JSON for X API tweets")
         return []
-    except Exception:
-        logger.warning("Edge scanner: LLM analysis failed", exc_info=True)
+    except Exception as e:
+        status = getattr(e, "status_code", None)
+        if status == 403:
+            logger.warning("Edge scanner: LLM analysis permission denied (403); skipping scan cycle")
+            return []
+        logger.warning("Edge scanner: LLM analysis failed: %s", e)
         return None
 
 
@@ -224,8 +228,15 @@ def _scan_via_grok_search():
     except json.JSONDecodeError:
         logger.warning("Edge scanner: Grok returned invalid JSON")
         return None
-    except Exception:
-        logger.warning("Edge scanner: Grok search failed", exc_info=True)
+    except Exception as e:
+        status = getattr(e, "status_code", None)
+        if status == 410:
+            logger.warning("Edge scanner: Grok live search deprecated (410); disabling fallback search")
+            return []
+        if status == 403:
+            logger.warning("Edge scanner: Grok search permission denied (403)")
+            return []
+        logger.warning("Edge scanner: Grok search failed: %s", e)
         return None
 
 

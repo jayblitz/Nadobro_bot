@@ -12,16 +12,20 @@ from dotenv import load_dotenv
 
 class _TokenRedactFilter(logging.Filter):
     _BOT_TOKEN_RE = re.compile(r"/bot\d+:[A-Za-z0-9_-]+/")
+    _ADDR_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 
     def _redact(self, val):
         s = str(val)
         if self._BOT_TOKEN_RE.search(s):
-            return self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", s)
-        return val
+            s = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", s)
+        if self._ADDR_RE.search(s):
+            s = self._ADDR_RE.sub("0x<REDACTED_ADDR>", s)
+        return s
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
             record.msg = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", record.msg)
+            record.msg = self._ADDR_RE.sub("0x<REDACTED_ADDR>", record.msg)
         if record.args:
             if isinstance(record.args, dict):
                 record.args = {k: self._redact(v) for k, v in record.args.items()}
@@ -312,6 +316,18 @@ async def run_bot():
     _wh = os.environ.get("TELEGRAM_WEBHOOK_PORT", "").strip()
     webhook_port = int(_wh) if _wh else int(os.environ.get("PORT", "8080"))
     bootstrap_health_server = None
+    async def _start_polling_mode():
+        # Ensure Telegram stops sending updates to webhook before polling starts.
+        try:
+            await bot_app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logger.warning("Could not delete existing webhook before polling fallback: %s", e)
+        await bot_app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+        )
+        logger.info("Nadobro is live in polling mode.")
+
     if transport_mode == "webhook":
         try:
             bootstrap_health_server = await _start_bootstrap_health_server(webhook_port)
@@ -359,22 +375,29 @@ async def run_bot():
             webhook_port,
             webhook_path,
         )
-        await bot_app.updater.start_webhook(
-            listen=webhook_listen,
-            port=webhook_port,
-            url_path=webhook_path.lstrip("/"),
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"],
-            secret_token=webhook_secret or None,
-        )
-        logger.info("Nadobro is live in webhook mode.")
+        try:
+            await bot_app.updater.start_webhook(
+                listen=webhook_listen,
+                port=webhook_port,
+                url_path=webhook_path.lstrip("/"),
+                webhook_url=webhook_url,
+                drop_pending_updates=True,
+                allowed_updates=["message", "callback_query"],
+                secret_token=webhook_secret or None,
+            )
+            logger.info("Nadobro is live in webhook mode.")
+        except OSError as e:
+            if getattr(e, "errno", None) == 98:
+                logger.error(
+                    "Webhook bind failed on %s:%s (address in use). Falling back to polling mode.",
+                    webhook_listen,
+                    webhook_port,
+                )
+                await _start_polling_mode()
+            else:
+                raise
     else:
-        await bot_app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"],
-        )
-        logger.info("Nadobro is live in polling mode.")
+        await _start_polling_mode()
 
         # Polling mode only: lightweight TCP health responder on PORT.
         port_str = os.environ.get("PORT")

@@ -67,6 +67,13 @@ _open_orders_cache: dict[tuple[str, str, int], dict] = {}
 _positions_fallback_cache: dict[tuple[str, str], dict] = {}
 
 
+def _mask_address(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("0x") and len(text) >= 12:
+        return f"{text[:6]}...{text[-4:]}"
+    return text
+
+
 class NadoClient:
     def __init__(self, private_key: str, network: str = "testnet", main_address: str = None):
         self.private_key = private_key
@@ -128,7 +135,7 @@ class NadoClient:
             self.private_key = None  # Clear raw key after SDK init
             logger.info(
                 "Nado client initialized: signer=%s, query=%s, network=%s",
-                self.address, query_addr, self.network,
+                _mask_address(self.address), _mask_address(query_addr), self.network,
             )
             return True
         except ImportError:
@@ -287,6 +294,39 @@ class NadoClient:
                 except Exception:
                     prices[name] = {"bid": 0, "ask": 0, "mid": 0}
         return prices
+
+    def get_perp_contracts(self) -> dict:
+        """Best-effort contracts/tickers payload used by miniapp quotes.
+
+        Returns a map keyed by ticker id (e.g. BTC-PERP_USDT). Never raises.
+        """
+        try:
+            # Future-compatible: if gateway adds a contracts query, use it.
+            data = self._query_rest("contracts") or {}
+            if data.get("status") == "success":
+                payload = data.get("data") or {}
+                if isinstance(payload, dict):
+                    rows = payload.get("contracts") or payload.get("tickers") or payload
+                    if isinstance(rows, dict):
+                        return rows
+                    if isinstance(rows, list):
+                        out: dict[str, dict] = {}
+                        for row in rows:
+                            if not isinstance(row, dict):
+                                continue
+                            key = str(
+                                row.get("ticker_id")
+                                or row.get("symbol")
+                                or row.get("ticker")
+                                or row.get("name")
+                                or ""
+                            )
+                            if key:
+                                out[key] = row
+                        return out
+        except Exception:
+            pass
+        return {}
 
     def get_balance(self) -> dict:
         if self._initialized and self.client:
