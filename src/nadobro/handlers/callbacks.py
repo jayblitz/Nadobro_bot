@@ -1213,6 +1213,8 @@ async def _handle_strategy(query, data, context, telegram_id):
         raw_value = parts[4]
         if strategy_id not in supported:
             return
+        if strategy_id == "vol" and field not in {"tp_pct", "sl_pct"}:
+            return
         allowed_numeric_fields = {
             "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
             "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
@@ -1291,6 +1293,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         allowed_text = {
             "reference_mode": {"mid", "ema_fast", "ema_slow"},
             "directional_bias": {"neutral", "long_bias", "short_bias"},
+            "vol_direction": {"long", "short"},
         }
         allowed_vals = allowed_text.get(field, set())
         if raw_value not in allowed_vals:
@@ -1321,6 +1324,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
             "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
         )
+        if strategy_id == "vol" and field not in {"tp_pct", "sl_pct"}:
+            return
         if field not in allowed_inputs:
             return
         context.user_data["pending_strategy_input"] = {
@@ -1369,6 +1374,9 @@ async def _handle_strategy(query, data, context, telegram_id):
     elif action == "start" and len(parts) >= 4:
         strategy_id = parts[2]
         product = str(parts[3] or "").upper()
+        start_direction = "long"
+        if strategy_id == "vol" and len(parts) >= 5:
+            start_direction = "short" if str(parts[4]).lower() == "short" else "long"
         if strategy_id not in supported:
             return
         user = get_user(telegram_id)
@@ -1412,6 +1420,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "product": product,
             "leverage": strategy_leverage,
             "slippage_pct": settings.get("slippage", 1),
+            "direction": start_direction,
         })
     elif action == "status":
         st = get_user_bot_status(telegram_id)
@@ -1777,6 +1786,20 @@ def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
 
 
 def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
+    if strategy == "vol":
+        tp_pct = float(conf.get("tp_pct", 1.0))
+        sl_pct = float(conf.get("sl_pct", 1.0))
+        direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
+        return (
+            "⚙️ *VOL*\n\n"
+            f"Mode: *{escape_md(network.upper())}*\n"
+            f"Fixed margin: *{escape_md('$100.00')}* · Fixed leverage: *{escape_md('1x')}*\n"
+            f"Direction: *{escape_md(direction)}*\n"
+            "Entry: *Limit @ mid* · Exit: *Market close after 60s from fill*\n"
+            f"Session TP/SL: *{escape_md(f'{tp_pct:.2f}%/{sl_pct:.2f}%')}* of fixed margin\n\n"
+            "Use controls below to change direction or TP/SL only\\."
+        )
+
     notional = float(conf.get("notional_usd", 100.0))
     spread_bp = float(conf.get("spread_bp", 5.0))
     if strategy == "rgrid":
@@ -1840,6 +1863,32 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
 
 
 def _strategy_config_kb(strategy: str):
+    if strategy == "vol":
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Direction LONG", callback_data="strategy:set_text:vol:vol_direction:long"),
+                InlineKeyboardButton("Direction SHORT", callback_data="strategy:set_text:vol:vol_direction:short"),
+            ],
+            [
+                InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:vol:tp_pct:0.5"),
+                InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:vol:tp_pct:1.0"),
+                InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:vol:tp_pct:2.0"),
+            ],
+            [
+                InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:vol:sl_pct:0.5"),
+                InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:vol:sl_pct:1.0"),
+                InlineKeyboardButton("SL 2.0%", callback_data="strategy:set:vol:sl_pct:2.0"),
+            ],
+            [
+                InlineKeyboardButton("Custom TP", callback_data="strategy:input:vol:tp_pct"),
+                InlineKeyboardButton("Custom SL", callback_data="strategy:input:vol:sl_pct"),
+            ],
+            [
+                InlineKeyboardButton("◀ Back", callback_data="strategy:preview:vol"),
+                InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+            ],
+        ])
+
     rows = [
         [
             InlineKeyboardButton("Margin $50", callback_data=f"strategy:set:{strategy}:notional_usd:50"),
@@ -2097,6 +2146,31 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     est_funding = 0.0
     if strategy_id == "dn":
         est_funding = abs(funding_rate) * notional * 3
+    if strategy_id == "vol":
+        est_daily_volume = 0.0
+        # One round trip per minute after fills => approx 1440 loops/day max.
+        if mid > 0:
+            est_daily_volume = 100.0 * 2.0 * 1440.0
+        est_fees = est_daily_volume * EST_FEE_RATE
+        max_loss = 100.0 * (sl_pct / 100.0)
+        max_gain = 100.0 * (tp_pct / 100.0)
+        direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
+        margin_flag = "✅" if available_margin >= 100.0 else "⚠️"
+        return (
+            "🤖 *Volume Bot Dashboard*\n"
+            "Status: 🟢 *READY*\n"
+            "Simple fixed-direction volume loop\\.\n\n"
+            "📊 *Settings*\n"
+            f"Pair *{escape_md(product)}\\-PERP* · Mid *{escape_md(mid_str)}* · Mode *{escape_md(network.upper())}*\n"
+            "Fixed margin *$100* · Fixed leverage *1x* · Entry *Limit @ mid*\n"
+            f"Direction *{escape_md(direction)}* · Exit *Market close after 60s from fill*\n"
+            f"Session TP/SL *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}* \\(±{escape_md(f'${max_gain:,.2f}')} / {escape_md(f'${max_loss:,.2f}')}\\)\n\n"
+            "📈 *Analytics*\n"
+            f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *$100.00* required\n"
+            f"Est\\. Daily Volume \\(max cadence\\): *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
+            f"Est\\. Daily Fees: *{escape_md(f'${est_fees:,.2f}')}*\n\n"
+            "Tune direction/TP/SL, then launch LONG or SHORT\\."
+        )
     max_loss_pct = float(conf.get("rgrid_stop_loss_pct", conf.get("grid_stop_loss_pct", sl_pct))) if strategy_id == "rgrid" else sl_pct
     max_loss = required_margin * (max_loss_pct / 100.0)
     est_net = est_spread_pnl + est_funding - est_fees

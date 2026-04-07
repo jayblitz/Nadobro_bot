@@ -291,12 +291,13 @@ def _strategy_defaults(strategy: str) -> dict:
             "funding_entry_mode": "enter_anyway",
         },
         "vol": {
-            "notional_usd": 200.0,
-            "target_volume_usd": 10000.0,
-            "interval_seconds": 30,
-            # VOL uses its own open/close cycle logic; avoid directional runtime auto-stop defaults.
-            "tp_pct": 0.0,
-            "sl_pct": 0.0,
+            "notional_usd": 100.0,
+            "fixed_margin_usd": 100.0,
+            "leverage": 1.0,
+            "interval_seconds": 10,
+            "vol_direction": "long",
+            "tp_pct": 1.0,
+            "sl_pct": 1.0,
         },
         "bro": {
             "budget_usd": 500.0, "risk_level": "balanced", "max_positions": 3,
@@ -347,7 +348,7 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
                     "budget_usd", "risk_level", "max_positions", "products",
                     "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
                     "rgrid_discretion", "rgrid_reset_threshold_pct",
-                    "target_volume_usd", "funding_entry_mode",
+                    "target_volume_usd", "funding_entry_mode", "fixed_margin_usd", "vol_direction",
                 )
             }),
         })
@@ -437,6 +438,8 @@ def start_user_bot(
     max_leverage = get_product_max_leverage(product, network=network)
     if strategy == "dn":
         max_leverage = min(max_leverage, 5)
+    if strategy == "vol":
+        max_leverage = 1
     if float(leverage or 0) > max_leverage:
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
     if float(leverage or 0) < 1:
@@ -453,7 +456,7 @@ def start_user_bot(
             "strategy": strategy,
             "strategy_id_v2": 1,
             "product": product.upper(),
-            "leverage": float(leverage or 3.0),
+            "leverage": 1.0 if strategy == "vol" else float(leverage or 3.0),
             "slippage_pct": float(slippage_pct or 1.0),
             "reference_price": 0.0,
             "started_at": datetime.utcnow().isoformat(),
@@ -462,6 +465,15 @@ def start_user_bot(
             "runs": 0,
         }
     )
+    if strategy == "vol":
+        direction = str(kwargs.get("direction") or strat_cfg.get("vol_direction") or "long").strip().lower()
+        direction = "short" if direction == "short" else "long"
+        state["vol_direction"] = direction
+        state["direction"] = direction
+        state["fixed_margin_usd"] = 100.0
+        state["notional_usd"] = 100.0
+        state["vol_phase"] = "idle"
+        state["session_realized_pnl_usd"] = 0.0
     from src.nadobro.services.runtime_supervisor import strategy_worker_group
 
     state["worker_group"] = strategy_worker_group(strategy)
@@ -475,6 +487,13 @@ def start_user_bot(
             True,
             f"DN bot started with {product.upper()} spot long + {product.upper()}-PERP short ({network}) "
             f"| TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}% | Leverage {state.get('leverage')}x",
+        )
+    if strategy == "vol":
+        direction = str(state.get("vol_direction") or "long").upper()
+        return (
+            True,
+            f"VOL bot started on {product.upper()}-PERP ({network}) "
+            f"| Direction {direction} | Margin $100 @ 1x | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
         )
     return (
         True,
@@ -1352,6 +1371,33 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 "⚠️ Reverse GRID PnL take-profit triggered on {product}-PERP ({network}), "
                 "but cleanup failed. Error: {error}",
                 product=product, network=network, error=close_res.get("error", "unknown"),
+            )
+        return True, None
+    if strategy == "vol" and result.get("done") and str(result.get("stop_reason") or "") in ("tp_hit", "sl_hit"):
+        stop_reason = str(result.get("stop_reason"))
+        _finalize_session(state, stop_reason=stop_reason)
+        state["running"] = False
+        state["last_error"] = None if stop_reason == "tp_hit" else (
+            result.get("error")
+            or f"Stopped by session SL ({float(state.get('session_realized_pnl_usd') or 0.0):.4f} USD)."
+        )
+        _save_state(telegram_id, network, state)
+        close_res = await run_blocking(close_all_positions, telegram_id, network)
+        if close_res.get("success"):
+            await _notify(
+                telegram_id,
+                "✅ Volume strategy stopped on {product}-PERP ({network}) - {reason}.",
+                product=product,
+                network=network,
+                reason="session TP hit" if stop_reason == "tp_hit" else "session SL hit",
+            )
+        else:
+            await _notify(
+                telegram_id,
+                "⚠️ Volume strategy stop triggered on {product}-PERP ({network}), but cleanup failed. Error: {error}",
+                product=product,
+                network=network,
+                error=close_res.get("error", "unknown"),
             )
         return True, None
 

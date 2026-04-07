@@ -45,6 +45,7 @@ async def strategies_start(body: StrategyStartRequest, user: AuthUser):
         product,
         body.leverage,
         body.slippage_pct,
+        direction=body.direction,
     )
     if not ok:
         raise HTTPException(status_code=400, detail=message)

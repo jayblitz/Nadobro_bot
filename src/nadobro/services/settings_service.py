@@ -42,7 +42,14 @@ def _default_strategy_settings() -> dict:
             "auto_close_on_maintenance": 1.0,
             "funding_entry_mode": "enter_anyway",
         },
-        "vol": {"notional_usd": 100.0, "spread_bp": 6.0, "interval_seconds": 30, "tp_pct": 0.8, "sl_pct": 0.6},
+        "vol": {
+            "notional_usd": 100.0,
+            "fixed_margin_usd": 100.0,
+            "interval_seconds": 10,
+            "tp_pct": 1.0,
+            "sl_pct": 1.0,
+            "vol_direction": "long",
+        },
         "bro": {
             "budget_usd": 500.0,
             "risk_level": "balanced",

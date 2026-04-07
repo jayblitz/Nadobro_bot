@@ -174,6 +174,7 @@ class StrategyStartRequest(BaseModel):
     product: str = Field(default="BTC", min_length=1, max_length=32)
     leverage: float = Field(default=3.0, ge=1)
     slippage_pct: float = Field(default=1.0, ge=0, le=100)
+    direction: str = Field(default="long", pattern=r"^(long|short)$")
 
 
 class StrategyActionResponse(BaseModel):

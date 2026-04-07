@@ -36,7 +36,7 @@ const STRATEGIES: StrategyCard[] = [
   {
     type: "vol",
     name: "Volume Bot",
-    description: "Alternating long/short flips to hit a target volume.",
+    description: "Fixed-side 1x loop: limit at mid, then market close after 60s.",
     color: "from-orange-500/20 to-transparent",
   },
   {
@@ -53,6 +53,7 @@ export default function Strategies() {
   const [product, setProduct] = useState("BTC");
   const [leverage, setLeverage] = useState(3);
   const [slippage, setSlippage] = useState(1);
+  const [volDirection, setVolDirection] = useState<"long" | "short">("long");
   const [formError, setFormError] = useState<string | null>(null);
 
   const { data: products } = useQuery({
@@ -88,8 +89,9 @@ export default function Strategies() {
       api.post<StrategyActionResponse>("/api/strategies/start", {
         strategy: selected,
         product: selected === "bro" ? "MULTI" : product,
-        leverage,
+        leverage: selected === "vol" ? 1 : leverage,
         slippage_pct: slippage,
+        direction: selected === "vol" ? volDirection : "long",
       }),
     onSuccess: () => {
       setFormError(null);
@@ -245,6 +247,20 @@ export default function Strategies() {
           </div>
         )}
 
+        {selected === "vol" && (
+          <div>
+            <label className="text-[11px] text-tg-hint block mb-1">Direction</label>
+            <select
+              value={volDirection}
+              onChange={(e) => setVolDirection(e.target.value as "long" | "short")}
+              className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+            >
+              <option value="long">Long</option>
+              <option value="short">Short</option>
+            </select>
+          </div>
+        )}
+
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-[11px] text-tg-hint block mb-1">Leverage</label>
@@ -252,8 +268,9 @@ export default function Strategies() {
               type="number"
               min={1}
               max={maxLev}
-              value={leverage}
+              value={selected === "vol" ? 1 : leverage}
               onChange={(e) => setLeverage(Number(e.target.value))}
+              disabled={selected === "vol"}
               className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
             />
           </div>

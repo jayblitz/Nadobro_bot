@@ -1,253 +1,280 @@
-"""
-Volume Bot cycle:
-1) Place a LIMIT order at current mid (alternating long/short each round)
-2) Wait until strategy interval elapses
-3) Cancel leftover open orders and close the opened position immediately
-"""
+"""Simple volume strategy: fixed-side, fixed-margin, timed close loop."""
 import logging
 import time
 
 from src.nadobro.config import EST_FEE_RATE, get_product_id
-from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
-from src.nadobro.services.user_service import get_user_readonly_client, get_user_nado_client
+from src.nadobro.services.nado_archive import query_order_by_digest
+from src.nadobro.services.trade_service import execute_limit_order, execute_market_order
+from src.nadobro.services.user_service import get_user_readonly_client
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FLIP_SIZE_USD = 200.0
-MIN_FLIP_SIZE_USD = 10.0
+FIXED_MARGIN_USD = 100.0
+FIXED_LEVERAGE = 1.0
+CLOSE_AFTER_SECONDS = 60.0
+MIN_SIZE = 0.0001
+
+
+def _normalize_direction(raw: str) -> str:
+    val = str(raw or "").strip().lower()
+    return "short" if val == "short" else "long"
+
+
+def _load_position(client, product_id: int) -> dict | None:
+    for p in (client.get_all_positions() or []):
+        if int(p.get("product_id", -1)) == product_id:
+            amount = abs(float(p.get("amount", 0) or 0))
+            if amount > 0:
+                return p
+    return None
+
+
+def _entry_fill_data(network: str, digest: str) -> dict | None:
+    if not digest:
+        return None
+    return query_order_by_digest(network, digest, max_wait_seconds=0.05, poll_interval=0.05)
+
+
+def _close_realized_pnl(network: str, digest: str) -> tuple[float | None, float]:
+    if not digest:
+        return None, 0.0
+    parsed = query_order_by_digest(network, digest, max_wait_seconds=0.35, poll_interval=0.1)
+    if not parsed:
+        return None, 0.0
+    return float(parsed.get("realized_pnl", 0.0) or 0.0), float(parsed.get("fee", 0.0) or 0.0)
 
 
 def get_fee_pnl_preview(telegram_id: int, product: str, target_volume_usd: float) -> dict:
-    """Return estimated fees and PnL range for *target_volume_usd* of flips."""
     estimated_fees = target_volume_usd * EST_FEE_RATE
-    num_flips = max(1, int(target_volume_usd / DEFAULT_FLIP_SIZE_USD))
-    estimated_slippage = target_volume_usd * 0.0002
-
     return {
         "target_volume_usd": target_volume_usd,
-        "flip_size_usd": DEFAULT_FLIP_SIZE_USD,
-        "num_flips": num_flips,
+        "flip_size_usd": FIXED_MARGIN_USD,
+        "num_flips": max(1, int(target_volume_usd / FIXED_MARGIN_USD)),
         "fee_rate": EST_FEE_RATE,
         "estimated_fees": round(estimated_fees, 4),
-        "estimated_slippage": round(estimated_slippage, 4),
-        "estimated_total_cost": round(estimated_fees + estimated_slippage, 4),
+        "estimated_slippage": round(target_volume_usd * 0.0002, 4),
+        "estimated_total_cost": round(estimated_fees + (target_volume_usd * 0.0002), 4),
         "product": product,
     }
 
 
 def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
-    """
-    One round:
-      - open with LIMIT at mid
-      - on next eligible cycle (after interval), close immediately
-
-    Expected state keys (managed by bot_runtime):
-      - product            : e.g. "BTC"
-      - target_volume_usd  : total volume goal
-      - volume_done_usd    : cumulative volume executed so far
-      - fees_paid          : cumulative fees estimate
-      - last_side          : "long" | "short" — last direction executed
-      - leverage           : leverage multiplier
-      - slippage_pct       : slippage tolerance %
-      - flip_size_usd      : per-flip notional (default 200)
-
-    Returns dict with cycle results.
-    """
-    # Verify network matches to prevent cross-network trading
-    client = kwargs.get("client")
-    if client and hasattr(client, 'network') and client.network != network:
+    client = kwargs.get("client") or get_user_readonly_client(telegram_id)
+    if not client:
+        return {"success": False, "error": "Wallet client unavailable"}
+    if hasattr(client, "network") and client.network != network:
         return {"success": False, "error": f"Network mismatch: expected {network}, got {client.network}"}
 
-    product = state.get("product", "BTC")
-    target_volume = float(state.get("target_volume_usd") or 0)
-    volume_done = float(state.get("volume_done_usd") or 0)
-    fees_paid = float(state.get("fees_paid") or 0)
-    last_side = state.get("last_side", "short")
-    leverage = float(state.get("leverage") or 1.0)
+    product = str(state.get("product") or "BTC").upper()
+    direction = _normalize_direction(state.get("vol_direction") or state.get("direction") or "long")
+    state["vol_direction"] = direction
+    state["direction"] = direction
+
+    fixed_margin = float(state.get("fixed_margin_usd") or FIXED_MARGIN_USD)
+    state["fixed_margin_usd"] = FIXED_MARGIN_USD
+    state["leverage"] = FIXED_LEVERAGE
     slippage_pct = float(state.get("slippage_pct") or 1.0)
-    interval_seconds = int(state.get("interval_seconds") or 30)
-    flip_size_usd = float(
-        state.get("flip_size_usd")
-        or state.get("notional_usd")
-        or DEFAULT_FLIP_SIZE_USD
-    )
-
-    if flip_size_usd < MIN_FLIP_SIZE_USD:
-        flip_size_usd = MIN_FLIP_SIZE_USD
-
-    if target_volume > 0 and volume_done >= target_volume:
-        state["running"] = False
-        return {
-            "success": True,
-            "done": True,
-            "orders_placed": 0,
-            "placed_notional_usd": 0.0,
-            "volume_done_usd": volume_done,
-            "fees_paid": fees_paid,
-            "message": "Target volume reached — bot auto-stopped.",
-        }
-
-    remaining = target_volume - volume_done if target_volume > 0 else flip_size_usd
-    this_flip_usd = min(flip_size_usd, remaining) if target_volume > 0 else flip_size_usd
 
     product_id = get_product_id(product, network=network)
     if product_id is None:
         return {"success": False, "error": f"Unknown product '{product}'"}
 
-    client = get_user_readonly_client(telegram_id)
-    if not client:
-        return {"success": False, "error": "Wallet client unavailable"}
-
     mp = client.get_market_price(product_id)
-    mid = float(mp.get("mid") or 0)
+    mid = float(mp.get("mid") or 0.0)
     if mid <= 0:
         return {"success": False, "error": "Could not fetch market price"}
 
-    phase = state.get("vol_phase", "idle")
+    phase = str(state.get("vol_phase") or "idle")
     now_ts = time.time()
+    session_pnl = float(state.get("session_realized_pnl_usd") or 0.0)
+    volume_done = float(state.get("volume_done_usd") or 0.0)
 
-    if phase == "open_wait":
-        cycle_traded_notional = 0.0
-        opened_at = float(state.get("vol_opened_at") or 0.0)
-        if opened_at > 0 and (now_ts - opened_at) < interval_seconds:
-            return {
-                "success": True,
-                "done": False,
-                "action": "waiting",
-                "orders_placed": 0,
-                "placed_notional_usd": 0.0,
-            }
+    tp_pct = float(state.get("tp_pct") or 0.0)
+    sl_pct = float(state.get("sl_pct") or 0.0)
+    tp_usd = (fixed_margin * tp_pct / 100.0) if tp_pct > 0 else 0.0
+    sl_usd = (fixed_margin * sl_pct / 100.0) if sl_pct > 0 else 0.0
+    if tp_usd > 0 and session_pnl >= tp_usd:
+        state["running"] = False
+        return {
+            "success": True,
+            "done": True,
+            "stop_reason": "tp_hit",
+            "action": "session_tp_hit",
+            "session_realized_pnl_usd": round(session_pnl, 6),
+            "orders_placed": 0,
+            "placed_notional_usd": 0.0,
+        }
+    if sl_usd > 0 and session_pnl <= -sl_usd:
+        state["running"] = False
+        return {
+            "success": True,
+            "done": True,
+            "stop_reason": "sl_hit",
+            "action": "session_sl_hit",
+            "session_realized_pnl_usd": round(session_pnl, 6),
+            "orders_placed": 0,
+            "placed_notional_usd": 0.0,
+        }
 
-        # Interval exhausted -> close immediately and clean any stale open orders.
-        signer_client = get_user_nado_client(telegram_id)
-        if signer_client:
-            try:
-                for order in (client.get_open_orders(product_id) or []):
-                    digest = order.get("digest")
-                    if digest:
-                        signer_client.cancel_order(product_id, digest)
-            except Exception as e:
-                logger.warning("Volume bot order cancel sweep failed for user %s: %s", telegram_id, e)
+    if phase == "pending_fill":
+        entry_digest = str(state.get("vol_entry_digest") or "")
+        if not entry_digest:
+            state["vol_phase"] = "idle"
+            return {"success": True, "done": False, "action": "entry_digest_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
 
-        pos = None
-        for p in (client.get_all_positions() or []):
-            if int(p.get("product_id", -1)) == product_id:
-                pos = p
-                break
+        open_digests = {str(o.get("digest") or "") for o in (client.get_open_orders(product_id) or [])}
+        if entry_digest in open_digests:
+            return {"success": True, "done": False, "action": "waiting_entry_fill", "orders_placed": 0, "placed_notional_usd": 0.0}
 
-        if pos:
-            pos_size = abs(float(pos.get("amount", 0) or 0))
-            if pos_size > 0:
-                side = str(pos.get("side", "") or "").upper()
-                close_is_long = side == "SHORT"
-                close_result = execute_market_order(
-                    telegram_id,
-                    product,
-                    pos_size,
-                    is_long=close_is_long,
-                    leverage=leverage,
-                    slippage_pct=slippage_pct,
-                    enforce_rate_limit=False,
-                    source="vol",
-                    strategy_session_id=state.get("strategy_session_id"),
-                )
-                if not close_result.get("success"):
-                    return {
-                        "success": False,
-                        "error": close_result.get("error", "Close after interval failed"),
-                        "orders_placed": 0,
-                        "placed_notional_usd": 0.0,
-                        "volume_done_usd": round(volume_done, 4),
-                        "fees_paid": round(fees_paid, 6),
-                    }
-                close_notional = pos_size * mid
-                # Count both sides only after we observe a real open position:
-                # opening fill notional + closing fill notional.
-                cycle_traded_notional = close_notional * 2.0
-                cycle_fees = cycle_traded_notional * EST_FEE_RATE
-                volume_done += cycle_traded_notional
-                fees_paid += cycle_fees
-                state["volume_done_usd"] = round(volume_done, 4)
-                state["fees_paid"] = round(fees_paid, 6)
+        fill_data = _entry_fill_data(network, entry_digest)
+        pos = _load_position(client, product_id)
+        if not fill_data and not pos:
+            # If the order disappeared and no position exists (manual cancel, etc.), reset and repost.
+            state["vol_phase"] = "idle"
+            state["vol_entry_digest"] = None
+            return {"success": True, "done": False, "action": "entry_not_filled_repost", "orders_placed": 0, "placed_notional_usd": 0.0}
 
-        if not pos and signer_client:
-            try:
-                for order in (client.get_open_orders(product_id) or []):
-                    digest = order.get("digest")
-                    if digest:
-                        signer_client.cancel_order(product_id, digest)
-            except Exception as e:
-                logger.warning("Volume bot stale order cleanup failed for user %s: %s", telegram_id, e)
+        entry_price = float((fill_data or {}).get("fill_price") or mid)
+        entry_size = float((fill_data or {}).get("fill_size") or 0.0)
+        if entry_size <= 0 and pos:
+            entry_size = abs(float(pos.get("amount") or 0.0))
+        entry_size = max(entry_size, MIN_SIZE)
 
+        state["vol_phase"] = "filled_wait_close"
+        state["vol_entry_fill_ts"] = now_ts
+        state["vol_entry_fill_price"] = entry_price
+        state["vol_entry_size"] = entry_size
+        return {
+            "success": True,
+            "done": False,
+            "action": "entry_filled_wait_close",
+            "orders_placed": 0,
+            "placed_notional_usd": round(entry_size * entry_price, 4),
+        }
+
+    if phase == "filled_wait_close":
+        entry_ts = float(state.get("vol_entry_fill_ts") or 0.0)
+        if entry_ts <= 0:
+            state["vol_phase"] = "idle"
+            return {"success": True, "done": False, "action": "entry_ts_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
+        if now_ts < (entry_ts + CLOSE_AFTER_SECONDS):
+            return {"success": True, "done": False, "action": "waiting_close_timer", "orders_placed": 0, "placed_notional_usd": 0.0}
+
+        pos = _load_position(client, product_id)
+        if not pos:
+            state["vol_phase"] = "idle"
+            state["vol_entry_digest"] = None
+            return {"success": True, "done": False, "action": "position_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
+
+        pos_size = abs(float(pos.get("amount", 0.0) or 0.0))
+        pos_side = str(pos.get("side", "") or "").upper()
+        close_is_long = pos_side == "SHORT"
+        close_result = execute_market_order(
+            telegram_id,
+            product,
+            pos_size,
+            is_long=close_is_long,
+            leverage=FIXED_LEVERAGE,
+            slippage_pct=slippage_pct,
+            enforce_rate_limit=False,
+            source="vol",
+            strategy_session_id=state.get("strategy_session_id"),
+        )
+        if not close_result.get("success"):
+            return {"success": False, "error": close_result.get("error", "Market close failed"), "orders_placed": 0, "placed_notional_usd": 0.0}
+
+        close_price = float(close_result.get("price") or mid)
+        close_digest = str(close_result.get("digest") or "")
+        close_pnl, close_fee = _close_realized_pnl(network, close_digest)
+        entry_price = float(state.get("vol_entry_fill_price") or mid)
+        entry_size = float(state.get("vol_entry_size") or pos_size or MIN_SIZE)
+        side_sign = 1.0 if direction == "long" else -1.0
+        approx_pnl = side_sign * (close_price - entry_price) * min(entry_size, pos_size)
+        if close_pnl is None:
+            cycle_pnl = approx_pnl - ((entry_size * entry_price + pos_size * close_price) * EST_FEE_RATE)
+        else:
+            cycle_pnl = close_pnl - close_fee
+
+        traded_notional = (entry_size * entry_price) + (pos_size * close_price)
+        volume_done += traded_notional
+        session_pnl += cycle_pnl
+
+        state["volume_done_usd"] = round(volume_done, 4)
+        state["session_realized_pnl_usd"] = round(session_pnl, 6)
         state["vol_phase"] = "idle"
-        state["vol_opened_at"] = 0.0
-        state["vol_position_size"] = 0.0
-        state["vol_position_side"] = None
+        state["vol_entry_digest"] = None
+        state["vol_entry_fill_ts"] = 0.0
+        state["vol_entry_fill_price"] = 0.0
+        state["vol_entry_size"] = 0.0
 
-        if target_volume > 0 and volume_done >= target_volume:
+        if tp_usd > 0 and session_pnl >= tp_usd:
             state["running"] = False
             return {
                 "success": True,
                 "done": True,
+                "stop_reason": "tp_hit",
+                "action": "closed_and_session_tp_hit",
                 "orders_placed": 1,
-                "placed_notional_usd": round(cycle_traded_notional, 4),
+                "placed_notional_usd": round(traded_notional, 4),
+                "session_realized_pnl_usd": round(session_pnl, 6),
+                "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
-                "fees_paid": round(fees_paid, 6),
-                "message": "Target volume reached — bot auto-stopped.",
+            }
+        if sl_usd > 0 and session_pnl <= -sl_usd:
+            state["running"] = False
+            return {
+                "success": True,
+                "done": True,
+                "stop_reason": "sl_hit",
+                "action": "closed_and_session_sl_hit",
+                "orders_placed": 1,
+                "placed_notional_usd": round(traded_notional, 4),
+                "session_realized_pnl_usd": round(session_pnl, 6),
+                "cycle_realized_pnl_usd": round(cycle_pnl, 6),
+                "volume_done_usd": round(volume_done, 4),
             }
 
         return {
             "success": True,
             "done": False,
-            "action": "closed_after_interval",
-            "orders_placed": 1 if cycle_traded_notional > 0 else 0,
-            "placed_notional_usd": round(cycle_traded_notional, 4),
+            "action": "closed_reloop",
+            "orders_placed": 1,
+            "placed_notional_usd": round(traded_notional, 4),
+            "session_realized_pnl_usd": round(session_pnl, 6),
+            "cycle_realized_pnl_usd": round(cycle_pnl, 6),
             "volume_done_usd": round(volume_done, 4),
-            "fees_paid": round(fees_paid, 6),
         }
 
-    size = max(this_flip_usd / mid, 0.0001)
-    is_long = last_side != "long"
+    # phase == idle
+    size = max(fixed_margin / mid, MIN_SIZE)
+    is_long = direction == "long"
     open_result = execute_limit_order(
         telegram_id,
         product,
         size,
         mid,
         is_long=is_long,
-        leverage=leverage,
+        leverage=FIXED_LEVERAGE,
         enforce_rate_limit=False,
         source="vol",
         strategy_session_id=state.get("strategy_session_id"),
     )
+    if not open_result.get("success"):
+        return {"success": False, "error": open_result.get("error", "Limit order failed"), "orders_placed": 0, "placed_notional_usd": 0.0}
 
-    if open_result.get("success"):
-        notional = size * mid
-        state["last_side"] = "long" if is_long else "short"
-        state["vol_phase"] = "open_wait"
-        state["vol_opened_at"] = now_ts
-        state["vol_position_size"] = size
-        state["vol_position_side"] = "LONG" if is_long else "SHORT"
-
-        return {
-            "success": True,
-            "done": False,
-            "orders_placed": 1,
-            "placed_notional_usd": round(notional, 4),
-            "volume_done_usd": round(volume_done, 4),
-            "target_volume_usd": target_volume,
-            "fees_paid": round(fees_paid, 6),
-            "this_open_notional": round(notional, 4),
-            "side": "LONG" if is_long else "SHORT",
-            "entry_price": round(mid, 8),
-            "action": "opened_limit_mid",
-            "remaining_usd": round(max(target_volume - volume_done, 0), 4) if target_volume > 0 else None,
-        }
-
+    state["vol_phase"] = "pending_fill"
+    state["vol_entry_digest"] = open_result.get("digest")
+    state["vol_entry_size"] = float(size)
+    state["vol_entry_fill_price"] = 0.0
+    state["vol_entry_fill_ts"] = 0.0
     return {
-        "success": False,
-        "error": open_result.get("error", "Limit order failed"),
-        "orders_placed": 0,
-        "placed_notional_usd": 0.0,
+        "success": True,
+        "done": False,
+        "action": "opened_limit_mid",
+        "orders_placed": 1,
+        "placed_notional_usd": round(size * mid, 4),
+        "entry_digest": open_result.get("digest"),
+        "direction": direction.upper(),
+        "session_realized_pnl_usd": round(session_pnl, 6),
         "volume_done_usd": round(volume_done, 4),
-        "fees_paid": round(fees_paid, 6),
     }

@@ -826,6 +826,11 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", availabl
     if strategy_id != "dn":
         rows.insert(3, [InlineKeyboardButton("🎛️ Custom Asset", callback_data=f"strategy:custom:{strategy_id}:0")])
     if strategy_id == "vol":
+        rows[4] = [
+            InlineKeyboardButton(f"🚀 Long {selected}", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),
+            InlineKeyboardButton(f"🚀 Short {selected}", callback_data=f"strategy:start:{strategy_id}:{selected}:short"),
+        ]
+    if strategy_id == "vol":
         rows.append([InlineKeyboardButton("🏆 Points Impact", callback_data="points:view")])
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
