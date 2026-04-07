@@ -383,7 +383,7 @@ AGENT_TOOLS = [
                 "properties": {
                     "product": {
                         "type": "string",
-                        "description": "Asset symbol (BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX)"
+                        "description": "Asset symbol (BTC, ETH, SOL, XRP, BNB, LINK, DOGE)"
                     }
                 },
                 "required": ["product"]
@@ -397,14 +397,14 @@ AGENT_TOOLS = [
             "description": (
                 "Get LIVE current price for a crypto asset from Nado DEX. "
                 "Use when user asks about current price, how much something costs, or price of any asset. "
-                "Supports: BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX."
+                "Supports: BTC, ETH, SOL, XRP, BNB, LINK, DOGE."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "product": {
                         "type": "string",
-                        "description": "Asset symbol (BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX)"
+                        "description": "Asset symbol (BTC, ETH, SOL, XRP, BNB, LINK, DOGE)"
                     }
                 },
                 "required": ["product"]
@@ -620,7 +620,7 @@ PERSONALITY — THIS IS WHO YOU ARE:
 - Be direct — answer first, then elaborate if needed. Don't hedge everything with disclaimers.
 - Make jokes when the moment is right. If someone asks about a coin that's down 90%, you can acknowledge the pain with humor.
 - You can roast bad takes gently, hype good trades, and have genuine opinions.
-- For trading ideas, casually mention: "you could try: long BTC 0.01 5x market" — Nado supports BTC, ETH, SOL, XRP, BNB, LINK, DOGE, AVAX (perps up to 20x).
+- For trading ideas, casually mention: "you could try: long BTC 0.01 5x market" — Nado lists many perps; max leverage varies by market (see Nado app).
 
 ANSWERING RULES:
 1. Answer the question DIRECTLY first, then add color/details.

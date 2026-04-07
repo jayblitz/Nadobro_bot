@@ -238,7 +238,6 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 - BNB-PERP (Binance Coin) — up to 20x leverage
 - LINK-PERP (Chainlink) — up to 20x leverage
 - DOGE-PERP (Dogecoin) — up to 20x leverage
-- AVAX-PERP (Avalanche) — up to 20x leverage
 
 ### Spot Markets
 - wETH (Wrapped Ethereum)

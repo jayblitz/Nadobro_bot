@@ -15,6 +15,7 @@ from miniapp_api.config import (
 )
 from miniapp_api.dependencies import AuthUser, UserClient
 from miniapp_api.models.schemas import AllPricesResponse, PriceResponse, ProductInfo
+from src.nadobro.market_categories import get_market_category
 from src.nadobro.services.async_utils import run_blocking
 
 logger = logging.getLogger(__name__)
@@ -22,11 +23,41 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _normalize_product_name(name: str) -> str:
+    raw = str(name or "").upper().strip()
+    if not raw:
+        return raw
+    if raw.endswith("-PERP"):
+        return raw[:-5]
+    if "_" in raw:
+        raw = raw.split("_")[0]
+    return raw
+
+
 @router.get("/products", response_model=list[ProductInfo])
-async def list_products(user: AuthUser):
+async def list_products(user: AuthUser, client: UserClient):
     """Return all available perpetual products for the user's network."""
     network = user.network
     names = await run_blocking(get_perp_products, network)
+    live_names: set[str] = set()
+    try:
+        # Keep only products currently returned by live market prices.
+        all_prices = await run_blocking(client.get_all_market_prices)
+        for pid_key in (all_prices or {}).keys():
+            try:
+                pid = int(pid_key) if isinstance(pid_key, str) else pid_key
+            except (ValueError, TypeError):
+                continue
+            resolved = get_product_name(pid, network=network)
+            norm = _normalize_product_name(resolved)
+            if norm:
+                live_names.add(norm)
+    except Exception as exc:
+        logger.warning("Live product filtering unavailable: %s", exc)
+
+    if live_names:
+        names = [n for n in names if _normalize_product_name(n) in live_names]
+
     result = []
     for name in names:
         pid = get_product_id(name, network=network)
@@ -38,6 +69,7 @@ async def list_products(user: AuthUser):
             type="perp",
             max_leverage=get_product_max_leverage(name, network=network),
             isolated_only=is_product_isolated_only(name, network=network),
+            category=get_market_category(name),
         ))
     return result
 
@@ -70,7 +102,7 @@ async def get_all_prices(client: UserClient, user: AuthUser):
             pid = int(pid_key) if isinstance(pid_key, str) else pid_key
         except (ValueError, TypeError):
             continue
-        name = get_product_name(pid, network=user.network)
+        name = _normalize_product_name(get_product_name(pid, network=user.network))
         if isinstance(pdata, dict):
             mid = pdata.get("mid")
             bid = pdata.get("bid")

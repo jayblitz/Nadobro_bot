@@ -14,20 +14,10 @@ import type {
   QuotesResponse,
 } from "@/api/types";
 import TpSlFields, { type TpSlInputMode } from "@/components/trade/TpSlFields";
+import AssetAvatar from "@/components/common/AssetAvatar";
 
 const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 type Interval = (typeof INTERVALS)[number];
-
-const TOKEN_COLORS: Record<string, string> = {
-  BTC: "#F7931A",
-  ETH: "#627EEA",
-  SOL: "#9945FF",
-  XRP: "#23292F",
-  BNB: "#F3BA2F",
-  LINK: "#2A5ADA",
-  DOGE: "#C2A633",
-  AVAX: "#E84142",
-};
 
 function formatPrice(n: number | null | undefined, product?: string): string {
   if (n == null) return "--";
@@ -254,12 +244,7 @@ export default function ProductDetail() {
           </svg>
         </button>
         <div className="flex items-center gap-2">
-          <div
-            className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
-            style={{ backgroundColor: TOKEN_COLORS[productName] ?? "#5288c1" }}
-          >
-            {productName.slice(0, 2)}
-          </div>
+          <AssetAvatar symbol={productName} size={28} textClassName="text-[10px]" />
           <div>
             <span className="text-base font-bold text-white">{productName}-PERP</span>
             {productInfo && (

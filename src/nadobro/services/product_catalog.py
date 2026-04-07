@@ -52,6 +52,32 @@ def _normalize_symbol(raw_symbol: str, product_id: int) -> tuple[str, str]:
     return base, f"{base}-PERP"
 
 
+def _is_live_trading_status(value) -> bool:
+    """Return True when symbol trading status is live/tradable."""
+    status = str(value or "").strip().lower()
+    if not status:
+        # If status is missing, keep backward-compatible behavior.
+        return True
+    return status in {"live", "trading", "tradable", "active", "enabled"}
+
+
+def _derive_max_leverage_from_weight_x18(weight_x18) -> Optional[int]:
+    """Derive max leverage from initial asset weight: lev = 1 / (1 - w)."""
+    try:
+        w = float(int(weight_x18)) / 1e18
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or w >= 1:
+        return None
+    try:
+        lev = 1.0 / (1.0 - w)
+    except ZeroDivisionError:
+        return None
+    if lev <= 0:
+        return None
+    return max(1, int(round(lev)))
+
+
 def _build_static_catalog() -> dict:
     perps: dict[str, dict] = {}
     by_id: dict[int, str] = {}
@@ -77,6 +103,23 @@ def _build_static_catalog() -> dict:
         aliases[norm_symbol.lower()] = key
         aliases[f"{key.lower()}-perp"] = key
     return {"perps": perps, "by_id": by_id, "aliases": aliases}
+
+
+def _rebuild_perp_indexes(perps: dict[str, dict]) -> tuple[dict[int, str], dict[str, str]]:
+    """Rebuild by_id and aliases from a perps map."""
+    by_id: dict[int, str] = {}
+    aliases: dict[str, str] = {}
+    for key, row in perps.items():
+        try:
+            pid = int(row.get("id"))
+        except (TypeError, ValueError):
+            continue
+        by_id[pid] = key
+        norm_symbol = str(row.get("symbol") or f"{key}-PERP")
+        aliases[key.lower()] = key
+        aliases[norm_symbol.lower()] = key
+        aliases[f"{key.lower()}-perp"] = key
+    return by_id, aliases
 
 
 def _fetch_all_products(network: str, client=None) -> list[dict]:
@@ -166,6 +209,9 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
             pid = int(row.get("product_id"))
         except (TypeError, ValueError):
             continue
+        # Filter out symbols that are listed but not currently tradable/live.
+        if not _is_live_trading_status(row.get("trading_status")):
+            continue
         product_row = rows_by_id.get(pid, {})
         book_info = row.get("book_info") or {}
         raw_symbol = (
@@ -181,6 +227,12 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
             base = by_id[pid]
             norm_symbol = perps[base]["symbol"]
         product_book = product_row.get("book_info") or {}
+        derived_max_lev = (
+            _derive_max_leverage_from_weight_x18(row.get("long_weight_initial_x18"))
+            or _derive_max_leverage_from_weight_x18(product_row.get("long_weight_initial_x18"))
+            or _derive_max_leverage_from_weight_x18(book_info.get("long_weight_initial_x18"))
+            or _derive_max_leverage_from_weight_x18(product_book.get("long_weight_initial_x18"))
+        )
         max_lev = (
             row.get("max_leverage")
             or row.get("max_leverage_x")
@@ -188,6 +240,7 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
             or product_row.get("max_leverage")
             or product_row.get("max_leverage_x")
             or product_book.get("max_leverage")
+            or derived_max_lev
             or PRODUCT_MAX_LEVERAGE.get(base, _DYNAMIC_DEFAULT_MAX_LEVERAGE)
         )
         try:
@@ -216,6 +269,14 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
         aliases[key.lower()] = key
         aliases[norm_symbol.lower()] = key
         aliases[f"{key.lower()}-perp"] = key
+
+    # When Nado returns all_products, drop static-only perps not present on-chain (stale config).
+    if raw_products and rows_by_id:
+        allowed_ids = set(rows_by_id.keys())
+        stale = [k for k, v in perps.items() if int(v.get("id", -1)) not in allowed_ids]
+        for k in stale:
+            del perps[k]
+        by_id, aliases = _rebuild_perp_indexes(perps)
 
     return {"perps": perps, "by_id": by_id, "aliases": aliases}
 
