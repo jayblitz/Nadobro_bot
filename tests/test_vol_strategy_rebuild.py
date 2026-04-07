@@ -30,16 +30,20 @@ class _VolClient:
 
 
 class VolStrategyRebuildTests(unittest.TestCase):
-    def test_vol_idle_places_limit_mid_with_fixed_margin(self):
+    def test_vol_idle_places_market_entry_with_fixed_margin(self):
         state = {"product": "BTC", "vol_direction": "long", "tp_pct": 1.0, "sl_pct": 1.0}
         client = _VolClient(mid=100.0)
         with patch.object(volume_bot, "get_product_id", return_value=2), patch.object(
-            volume_bot, "execute_limit_order", return_value={"success": True, "digest": "d1"}
+            volume_bot,
+            "execute_market_order",
+            return_value={"success": True, "digest": "d1", "price": 100.1, "size": 1.0},
         ):
             result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
         self.assertTrue(result.get("success"))
-        self.assertEqual(result.get("action"), "opened_limit_mid")
-        self.assertEqual(state.get("vol_phase"), "pending_fill")
+        self.assertEqual(result.get("action"), "opened_market_wait_close")
+        self.assertEqual(state.get("vol_phase"), "filled_wait_close")
+        self.assertAlmostEqual(float(state.get("vol_entry_fill_price") or 0), 100.1)
+        self.assertGreater(float(state.get("vol_entry_fill_ts") or 0), 0)
         self.assertEqual(state.get("leverage"), 1.0)
         self.assertEqual(state.get("fixed_margin_usd"), 100.0)
 

@@ -4,7 +4,7 @@ import time
 
 from src.nadobro.config import EST_FEE_RATE, get_product_id
 from src.nadobro.services.nado_archive import query_order_by_digest
-from src.nadobro.services.trade_service import execute_limit_order, execute_market_order
+from src.nadobro.services.trade_service import execute_market_order
 from src.nadobro.services.user_service import get_user_readonly_client
 
 logger = logging.getLogger(__name__)
@@ -248,33 +248,36 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     # phase == idle
     size = max(fixed_margin / mid, MIN_SIZE)
     is_long = direction == "long"
-    open_result = execute_limit_order(
+    open_result = execute_market_order(
         telegram_id,
         product,
         size,
-        mid,
         is_long=is_long,
         leverage=FIXED_LEVERAGE,
+        slippage_pct=slippage_pct,
         enforce_rate_limit=False,
         source="vol",
         strategy_session_id=state.get("strategy_session_id"),
     )
     if not open_result.get("success"):
-        return {"success": False, "error": open_result.get("error", "Limit order failed"), "orders_placed": 0, "placed_notional_usd": 0.0}
+        return {"success": False, "error": open_result.get("error", "Market entry failed"), "orders_placed": 0, "placed_notional_usd": 0.0}
 
-    state["vol_phase"] = "pending_fill"
+    entry_price = float(open_result.get("price") or mid)
+    entry_size = max(float(open_result.get("size") or size or 0.0), MIN_SIZE)
+    state["vol_phase"] = "filled_wait_close"
     state["vol_entry_digest"] = open_result.get("digest")
-    state["vol_entry_size"] = float(size)
-    state["vol_entry_fill_price"] = 0.0
-    state["vol_entry_fill_ts"] = 0.0
+    state["vol_entry_size"] = entry_size
+    state["vol_entry_fill_price"] = entry_price
+    state["vol_entry_fill_ts"] = now_ts
     return {
         "success": True,
         "done": False,
-        "action": "opened_limit_mid",
+        "action": "opened_market_wait_close",
         "orders_placed": 1,
-        "placed_notional_usd": round(size * mid, 4),
+        "placed_notional_usd": round(entry_size * entry_price, 4),
         "entry_digest": open_result.get("digest"),
         "direction": direction.upper(),
+        "entry_price": entry_price,
         "session_realized_pnl_usd": round(session_pnl, 6),
         "volume_done_usd": round(volume_done, 4),
     }

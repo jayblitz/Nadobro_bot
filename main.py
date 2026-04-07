@@ -15,12 +15,23 @@ class _TokenRedactFilter(logging.Filter):
     _ADDR_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 
     def _redact(self, val):
+        # Keep original arg types whenever possible so %-style log formatting
+        # (e.g. `%d`) keeps working for numeric arguments.
+        if isinstance(val, str):
+            s = val
+            if self._BOT_TOKEN_RE.search(s):
+                s = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", s)
+            if self._ADDR_RE.search(s):
+                s = self._ADDR_RE.sub("0x<REDACTED_ADDR>", s)
+            return s
+
         s = str(val)
-        if self._BOT_TOKEN_RE.search(s):
-            s = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", s)
-        if self._ADDR_RE.search(s):
-            s = self._ADDR_RE.sub("0x<REDACTED_ADDR>", s)
-        return s
+        redacted = s
+        if self._BOT_TOKEN_RE.search(redacted):
+            redacted = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", redacted)
+        if self._ADDR_RE.search(redacted):
+            redacted = self._ADDR_RE.sub("0x<REDACTED_ADDR>", redacted)
+        return redacted if redacted != s else val
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
