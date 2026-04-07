@@ -41,7 +41,13 @@ For Fly.io deployment instructions, see `deploy.md`.
 
 ## Telegram Mini App
 
-The repo includes `miniapp_web/` (Vite + React) and `miniapp_api/` (FastAPI) for a Telegram Web App: trading UI, portfolio, and **Speak with Bro** (Gemini Live) voice. Production Docker builds the SPA and serves it with **nginx** alongside the bot webhook and API (see `deploy.md`).
+The repo includes `miniapp_web/` (Vite + React) and `miniapp_api/` (FastAPI) for a Telegram Web App: trading UI, portfolio, and **Speak with Bro** (Gemini Live) voice.
+
+Mini App is currently archived in production while bot stability is prioritized:
+
+- Bot deploy runs in bot-only mode.
+- `BOT_DISABLE_MINIAPP=true` disables Mini App buttons in Telegram UI.
+- Mini App code remains in-repo for future re-enable.
 
 - Set `MINIAPP_URL` to your public HTTPS origin (e.g. `https://<app>.fly.dev/`).
 - Set `GEMINI_API_KEY` for voice.

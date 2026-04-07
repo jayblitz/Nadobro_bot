@@ -38,7 +38,8 @@ fly secrets set \
   OPENAI_API_KEY="your-openai-api-key" \
   SESSION_SECRET="your-session-secret" \
   NADO_BUILDER_ID="your-builder-id" \
-  NADO_BUILDER_FEE_RATE="10"
+  NADO_BUILDER_FEE_RATE="10" \
+  BOT_DISABLE_MINIAPP="true"
 ```
 
 Builder routing safety:
@@ -115,8 +116,8 @@ fly scale count 1   # Ensure 1 machine is running
 - Check that the connection string uses port 5432
 
 **Health check failures:**
-- The bot exposes a health endpoint on port 8080 (configured via PORT env var)
-- Fly.io uses this to verify the app is running
+- In the current bot-only deploy profile, nginx serves `GET /health` on port 8080.
+- Fly.io uses this endpoint to verify the app is running.
 
 **Changing regions:**
 - Edit `primary_region` in `fly.toml` and redeploy
@@ -136,30 +137,12 @@ Current production runtime uses Telegram webhook mode.
 2. Use idempotency keys on jobs to avoid duplicate execution.
 3. Scale ingress and worker capacity independently.
 
-## Telegram Mini App (same Fly app)
+## Telegram Mini App (archived for now)
 
-The Docker image serves three processes behind **nginx** on `PORT` (8080):
+Mini App code is retained in this repository (`miniapp_web/`, `miniapp_api/`) but is intentionally disabled in the bot-first deploy profile.
 
-1. **Static SPA** — `miniapp_web/dist` at `/`
-2. **Mini App API** — FastAPI + uvicorn on `127.0.0.1:8081`; proxied at `/api/` and `/ws/`
-3. **Telegram webhook** — python-telegram-bot on `127.0.0.1:8082`; proxied at `POST /telegram/webhook`
+- `BOT_DISABLE_MINIAPP=true` hides Mini App entry points in Telegram UI, even if `MINIAPP_URL` is still set.
+- nginx keeps webhook ingress at `POST /telegram/webhook` and serves bot health at `GET /health`.
+- Requests to `/`, `/api/`, and `/ws/` return `410 miniapp_archived` in this profile.
 
-Set:
-
-```bash
-fly secrets set \
-  MINIAPP_URL="https://YOUR_APP.fly.dev/" \
-  GEMINI_API_KEY="..." \
-  TELEGRAM_WEBHOOK_URL="https://YOUR_APP.fly.dev/telegram/webhook" \
-  TELEGRAM_WEBHOOK_PATH="/telegram/webhook" \
-  TELEGRAM_TRANSPORT="webhook"
-```
-
-- `MINIAPP_URL` — HTTPS URL of the Mini App (same origin as the SPA). Used for the **Menu** Web App button and the home card **Mini App** button. Must match what you configure in [@BotFather](https://t.me/BotFather) for the Web App URL.
-- `GEMINI_API_KEY` — **Speak with Bro** uses the **Gemini Live API** through your backend: the browser opens a WebSocket to `/ws/voice`, and the API connects to Google with this key (key stays on the server). Create a key in [Google AI Studio](https://aistudio.google.com/apikey) with the Generative Language API enabled. If voice fails with “API Key not found”, the secret is missing, mistyped, or revoked — `fly secrets list` does not show values; set again with `fly secrets set GEMINI_API_KEY="..."`. Alternatively `GOOGLE_API_KEY` is read as a fallback (same value).
-- `GEMINI_MODEL` — optional. Defaults to **`gemini-3.1-flash-live-preview`** (see `miniapp_api/config.py`). Override if Google renames the Live model, e.g. `fly secrets set GEMINI_MODEL="gemini-3.1-flash-live-preview"`.
-- `TELEGRAM_WEBHOOK_PORT` is set to `8082` in the image so nginx keeps `PORT`/`8080` for public ingress; do not override unless you know what you are doing.
-
-Health check: Fly should use `GET /health` (proxied to the Mini App API).
-
-**BotFather:** Set the Mini App URL to your Fly HTTPS origin (e.g. `https://YOUR_APP.fly.dev/`).
+When resuming Mini App work, re-enable its deploy path deliberately instead of removing this archive guard by accident.

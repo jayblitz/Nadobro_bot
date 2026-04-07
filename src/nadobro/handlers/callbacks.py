@@ -2144,6 +2144,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
 
     est_spread_pnl = est_daily_volume * (spread_bp / 10000.0) * EST_FILL_EFFICIENCY
     est_funding = 0.0
+    mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
     if strategy_id == "dn":
         est_funding = abs(funding_rate) * notional * 3
     if strategy_id == "vol":
@@ -2162,7 +2163,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             "Simple fixed-direction volume loop\\.\n\n"
             "📊 *Settings*\n"
             f"Pair *{escape_md(product)}\\-PERP* · Mid *{escape_md(mid_str)}* · Mode *{escape_md(network.upper())}*\n"
-            "Fixed margin *$100* · Fixed leverage *1x* · Entry *Limit @ mid*\n"
+            "Fixed margin *$100* · Fixed leverage *1x* · Entry *Market*\n"
             f"Direction *{escape_md(direction)}* · Exit *Market close after 60s from fill*\n"
             f"Session TP/SL *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}* \\(±{escape_md(f'${max_gain:,.2f}')} / {escape_md(f'${max_loss:,.2f}')}\\)\n\n"
             "📈 *Analytics*\n"
@@ -2176,7 +2177,6 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     est_net = est_spread_pnl + est_funding - est_fees
 
     margin_flag = "✅" if available_margin >= required_margin else "⚠️"
-    mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
     funding_str = f"{funding_rate:.6f}"
     net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
     status_dot = "🟢" if est_net >= 0 else "🟠"
