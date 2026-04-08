@@ -13,10 +13,11 @@ from src.nadobro.strategies import volume_bot
 
 
 class _VolClient:
-    def __init__(self, mid=100.0, open_orders=None, positions=None, network="mainnet"):
+    def __init__(self, mid=100.0, open_orders=None, positions=None, network="mainnet", balance=1000.0):
         self._mid = mid
         self._open_orders = open_orders or []
         self._positions = positions or []
+        self._balance = float(balance)
         self.network = network
 
     def get_market_price(self, _product_id):
@@ -28,24 +29,27 @@ class _VolClient:
     def get_all_positions(self):
         return list(self._positions)
 
+    def get_balance(self):
+        return {"balances": {0: self._balance}}
+
 
 class VolStrategyRebuildTests(unittest.TestCase):
-    def test_vol_idle_places_market_entry_with_fixed_margin(self):
+    def test_vol_idle_places_limit_entry_with_fixed_margin(self):
         state = {"product": "BTC", "vol_direction": "long", "tp_pct": 1.0, "sl_pct": 1.0}
         client = _VolClient(mid=100.0)
         with patch.object(volume_bot, "get_product_id", return_value=2), patch.object(
             volume_bot,
-            "execute_market_order",
+            "execute_limit_order",
             return_value={"success": True, "digest": "d1", "price": 100.1, "size": 1.0},
         ):
             result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
         self.assertTrue(result.get("success"))
-        self.assertEqual(result.get("action"), "opened_market_wait_close")
+        self.assertEqual(result.get("action"), "opened_limit_wait_fill")
         self.assertEqual(result.get("vol_order_attempts"), 1)
         self.assertEqual(result.get("vol_order_failures"), 0)
-        self.assertEqual(state.get("vol_phase"), "filled_wait_close")
+        self.assertEqual(state.get("vol_phase"), "pending_fill")
         self.assertAlmostEqual(float(state.get("vol_entry_fill_price") or 0), 100.1)
-        self.assertGreater(float(state.get("vol_entry_fill_ts") or 0), 0)
+        self.assertEqual(float(state.get("vol_entry_fill_ts") or 0), 0.0)
         self.assertEqual(state.get("leverage"), 1.0)
         self.assertEqual(state.get("fixed_margin_usd"), 100.0)
 
@@ -82,7 +86,7 @@ class VolStrategyRebuildTests(unittest.TestCase):
         self.assertEqual(state.get("vol_phase"), "filled_wait_close")
         self.assertGreater(float(state.get("vol_entry_fill_ts") or 0), 0)
 
-    def test_vol_close_after_60s_and_stop_on_session_tp(self):
+    def test_vol_close_after_60s_places_limit_close_then_waits_fill(self):
         state = {
             "product": "BTC",
             "vol_phase": "filled_wait_close",
@@ -100,9 +104,31 @@ class VolStrategyRebuildTests(unittest.TestCase):
             positions=[{"product_id": 2, "amount": 1.0, "side": "LONG"}],
         )
         with patch.object(volume_bot, "get_product_id", return_value=2), patch.object(
-            volume_bot, "execute_market_order", return_value={"success": True, "digest": "d-close", "price": 101.0}
-        ), patch.object(
-            volume_bot, "query_order_by_digest", return_value={"realized_pnl": 1.2, "fee": 0.0}
+            volume_bot, "execute_limit_order", return_value={"success": True, "digest": "d-close", "price": 99.9}
+        ):
+            result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
+        self.assertTrue(result.get("success"))
+        self.assertFalse(result.get("done"))
+        self.assertEqual(result.get("action"), "placed_limit_close_wait_fill")
+        self.assertEqual(state.get("vol_phase"), "pending_close_fill")
+        self.assertEqual(state.get("vol_close_digest"), "d-close")
+
+    def test_vol_pending_close_fill_realizes_and_stops_on_tp(self):
+        state = {
+            "product": "BTC",
+            "vol_phase": "pending_close_fill",
+            "vol_direction": "long",
+            "vol_entry_fill_price": 100.0,
+            "vol_entry_size": 1.0,
+            "vol_close_digest": "d-close",
+            "vol_close_size": 1.0,
+            "tp_pct": 1.0,
+            "sl_pct": 1.0,
+            "session_realized_pnl_usd": 1.2,
+        }
+        client = _VolClient(mid=101.0, open_orders=[], positions=[])
+        with patch.object(volume_bot, "get_product_id", return_value=2), patch.object(
+            volume_bot, "query_order_by_digest", return_value={"fill_price": 101.0, "realized_pnl": 1.2, "fee": 0.0}
         ):
             result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
         self.assertTrue(result.get("success"))

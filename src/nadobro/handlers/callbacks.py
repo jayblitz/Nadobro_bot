@@ -2163,7 +2163,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             "Simple fixed-direction volume loop\\.\n\n"
             "📊 *Settings*\n"
             f"Pair *{escape_md(product)}\\-PERP* · Mid *{escape_md(mid_str)}* · Mode *{escape_md(network.upper())}*\n"
-            "Fixed margin *$100* · Fixed leverage *1x* · Entry *Market*\n"
+            "Fixed margin *$100* · Fixed leverage *1x* · Entry/Close *Limit*\n"
             f"Direction *{escape_md(direction)}* · Exit *Market close after 60s from fill*\n"
             f"Session TP/SL *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}* \\(±{escape_md(f'${max_gain:,.2f}')} / {escape_md(f'${max_loss:,.2f}')}\\)\n\n"
             "📈 *Analytics*\n"

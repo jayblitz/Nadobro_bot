@@ -42,7 +42,7 @@ class StrategyPreviewCallbackTests(unittest.TestCase):
             },
         )
 
-    def test_vol_preview_renders_with_mid_and_market_entry_text(self):
+    def test_vol_preview_renders_with_mid_and_limit_entry_text(self):
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
         with patch.object(callbacks, "get_user_settings", return_value=self._settings()), patch.object(
             callbacks, "get_user_readonly_client", return_value=_PreviewClient(mid=123.45, balance=200.0)
@@ -53,7 +53,7 @@ class StrategyPreviewCallbackTests(unittest.TestCase):
         ):
             text = callbacks._build_strategy_preview_text(telegram_id=1, strategy_id="vol", product="BTC")
         self.assertIn("Volume Bot Dashboard", text)
-        self.assertIn("Entry *Market*", text)
+        self.assertIn("Entry/Close *Limit*", text)
         self.assertIn("Mode *MAINNET*", text)
 
     def test_vol_preview_renders_without_client(self):
