@@ -1,5 +1,7 @@
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 from src.nadobro.models.database import (
     TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
@@ -22,6 +24,25 @@ from src.nadobro.services.nado_archive import query_order_by_digest
 from src.nadobro.services.nado_tooling_service import get_account_snapshot
 
 logger = logging.getLogger(__name__)
+_submit_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="nadobro-submit")
+
+
+def _order_submit_timeout_seconds() -> float:
+    raw = (os.environ.get("NADO_ORDER_SUBMIT_TIMEOUT_SECONDS") or "25").strip()
+    try:
+        val = float(raw)
+    except Exception:
+        return 25.0
+    return max(5.0, val)
+
+
+def _submit_with_timeout(func, *args, timeout_s: float, **kwargs):
+    fut = _submit_pool.submit(func, *args, **kwargs)
+    try:
+        return True, fut.result(timeout=timeout_s)
+    except FutureTimeoutError:
+        fut.cancel()
+        return False, f"Order submit timed out after {timeout_s:.0f}s"
 
 
 def _trade_ts_display(val) -> str:
@@ -288,14 +309,31 @@ def execute_market_order(
     except Exception:
         pass
 
-    result = client.place_market_order(
+    submit_timeout = _order_submit_timeout_seconds()
+    submit_ok, submit_result = _submit_with_timeout(
+        client.place_market_order,
         product_id,
         size,
         is_buy=is_long,
         slippage_pct=slippage_pct,
         isolated_only=isolated_only,
         isolated_margin=isolated_margin,
+        timeout_s=submit_timeout,
     )
+    if not submit_ok:
+        try:
+            update_trade(
+                trade_id,
+                {
+                    "status": TradeStatus.FAILED.value,
+                    "error_message": str(submit_result),
+                },
+                network=network,
+            )
+        except Exception:
+            pass
+        return {"success": False, "error": str(submit_result)}
+    result = submit_result
 
     if result["success"]:
         digest = result.get("digest", "")
@@ -488,7 +526,29 @@ def execute_spot_market_order(
     if not trade_id:
         return {"success": False, "error": "Failed to record spot trade."}
 
-    result = client.place_market_order(spot_product_id, size, is_buy=is_buy, slippage_pct=slippage_pct)
+    submit_timeout = _order_submit_timeout_seconds()
+    submit_ok, submit_result = _submit_with_timeout(
+        client.place_market_order,
+        spot_product_id,
+        size,
+        is_buy=is_buy,
+        slippage_pct=slippage_pct,
+        timeout_s=submit_timeout,
+    )
+    if not submit_ok:
+        try:
+            update_trade(
+                trade_id,
+                {
+                    "status": TradeStatus.FAILED.value,
+                    "error_message": str(submit_result),
+                },
+                network=network,
+            )
+        except Exception:
+            pass
+        return {"success": False, "error": str(submit_result)}
+    result = submit_result
     if result.get("success"):
         digest = result.get("digest", "")
         fill_data = _resolve_fill_data(client, digest, network)

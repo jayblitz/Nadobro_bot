@@ -7,6 +7,7 @@ import psycopg2.extras
 logger = logging.getLogger(__name__)
 
 _pool = None
+_pool_pid = None
 _DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
 _DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "12"))
 
@@ -49,7 +50,16 @@ def _resolve_host_ipv4(url: str) -> str:
 
 
 def get_pool():
-    global _pool
+    global _pool, _pool_pid
+    current_pid = os.getpid()
+    if _pool is not None and _pool_pid is not None and _pool_pid != current_pid:
+        try:
+            _pool.closeall()
+        except Exception:
+            pass
+        _pool = None
+        _pool_pid = None
+
     if _pool is None:
         url = os.environ.get("SUPABASE_DATABASE_URL") or os.environ.get("DATABASE_URL")
         if not url:
@@ -59,6 +69,7 @@ def get_pool():
         if db_label == "Supabase":
             url = _resolve_host_ipv4(url)
         _pool = psycopg2.pool.ThreadedConnectionPool(_DB_POOL_MIN, _DB_POOL_MAX, url)
+        _pool_pid = current_pid
         logger.info("PostgreSQL connection pool initialized (%s) min=%s max=%s", db_label, _DB_POOL_MIN, _DB_POOL_MAX)
     return _pool
 

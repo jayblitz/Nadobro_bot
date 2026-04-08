@@ -61,6 +61,20 @@ def _strategy_cycle_timeout_seconds() -> float | None:
     return v
 
 
+def _vol_use_multiprocess() -> bool:
+    raw = (os.environ.get("NADO_VOL_USE_MULTIPROCESS") or "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _vol_call_timeout_seconds() -> float:
+    raw = (os.environ.get("NADO_VOL_CALL_TIMEOUT_SECONDS") or "12").strip()
+    try:
+        val = float(raw)
+    except Exception:
+        return 12.0
+    return max(3.0, val)
+
+
 MAX_OPEN_ORDERS_PER_PRODUCT = 6
 STRATEGY_ERROR_ALERT_STREAK = 3
 
@@ -82,6 +96,7 @@ _job_stats: dict[str, int] = {
     "vol_overlap_skips": 0,
 }
 _process_worker_mode = False
+_CYCLE_SKIP_MARKERS = frozenset({"maintenance_pause", "skipped_interval"})
 
 
 def _normalize_strategy_id(strategy: str) -> str:
@@ -224,6 +239,15 @@ def _format_cycle_failure_error(strategy: str, result: dict) -> str:
     category = _categorize_runtime_error(raw)
     action = str(result.get("action") or "cycle")
     return f"{strategy.upper()}[{action}/{category}]: {raw}"[:300]
+
+
+def _cycle_result_label(ok: bool, error_msg: str | None) -> str:
+    if not ok:
+        return "error"
+    marker = str(error_msg or "").strip().lower()
+    if marker in _CYCLE_SKIP_MARKERS:
+        return "skipped"
+    return "ok"
 
 
 def set_bot_app(app):
@@ -1010,31 +1034,73 @@ async def handle_strategy_job(payload: dict):
                     qsz,
                 )
 
-                if is_multiprocess_enabled():
+                strategy = str(state.get("strategy") or "").lower().strip()
+                use_multiprocess = is_multiprocess_enabled() and (strategy != "vol" or _vol_use_multiprocess())
+                if use_multiprocess:
                     strategy = str(state.get("strategy") or "")
                     worker_group = strategy_worker_group(strategy)
                     state["worker_group"] = worker_group
                     state["last_dispatch_ts"] = time.time()
                     _save_state(telegram_id, network, state)
-                    delegated = await submit_cycle_job(
-                        {
-                            "telegram_id": telegram_id,
-                            "network": network,
-                            "strategy": strategy,
-                            "worker_group": worker_group,
-                        }
-                    )
-                    ok = bool(delegated.get("ok", True))
-                    error_msg = delegated.get("error")
-                    refreshed = _load_state(telegram_id, network)
-                    refreshed["worker_group"] = worker_group
-                    refreshed["worker_last_heartbeat"] = float(delegated.get("completed_at") or time.time())
-                    refreshed["last_cycle_ms"] = float(delegated.get("elapsed_ms") or 0.0)
-                    refreshed["last_cycle_result"] = "ok" if ok else "error"
-                    refreshed["worker_pid"] = delegated.get("worker_pid")
-                    _save_state(telegram_id, network, refreshed)
+                    timeout_sec = _strategy_cycle_timeout_seconds() or 180.0
+                    if str(strategy).lower().strip() == "vol":
+                        timeout_sec = min(timeout_sec, 45.0)
+                    delegated: dict = {}
+                    delegated_timed_out = False
+                    try:
+                        delegated = await asyncio.wait_for(
+                            submit_cycle_job(
+                                {
+                                    "telegram_id": telegram_id,
+                                    "network": network,
+                                    "strategy": strategy,
+                                    "worker_group": worker_group,
+                                }
+                            ),
+                            timeout=timeout_sec,
+                        )
+                    except asyncio.TimeoutError:
+                        delegated_timed_out = True
+                        _job_stats["cycle_timeouts"] += 1
+                        logger.error(
+                            "Delegated strategy cycle timeout user=%s network=%s strategy=%s timeout=%.0fs; falling back to local run",
+                            telegram_id,
+                            network,
+                            strategy,
+                            timeout_sec,
+                        )
+
+                    if delegated_timed_out:
+                        try:
+                            ok, error_msg = await asyncio.wait_for(
+                                _run_cycle(telegram_id, network, state),
+                                timeout=timeout_sec,
+                            )
+                        except asyncio.TimeoutError:
+                            _job_stats["cycle_timeouts"] += 1
+                            ok = False
+                            error_msg = f"Strategy cycle timed out after {timeout_sec:.0f}s (delegated + local fallback)"
+                        refreshed = _load_state(telegram_id, network)
+                        refreshed["worker_group"] = worker_group
+                        refreshed["worker_last_heartbeat"] = time.time()
+                        refreshed["last_cycle_ms"] = (time.perf_counter() - cycle_started) * 1000.0
+                        refreshed["last_cycle_result"] = _cycle_result_label(ok, error_msg)
+                        _save_state(telegram_id, network, refreshed)
+                    else:
+                        ok = bool(delegated.get("ok", True))
+                        error_msg = delegated.get("error")
+                        refreshed = _load_state(telegram_id, network)
+                        refreshed["worker_group"] = worker_group
+                        refreshed["worker_last_heartbeat"] = float(delegated.get("completed_at") or time.time())
+                        refreshed["last_cycle_ms"] = float(delegated.get("elapsed_ms") or 0.0)
+                        refreshed["last_cycle_result"] = _cycle_result_label(ok, error_msg)
+                        refreshed["worker_pid"] = delegated.get("worker_pid")
+                        _save_state(telegram_id, network, refreshed)
                 else:
                     timeout_sec = _strategy_cycle_timeout_seconds()
+                    strategy = str(state.get("strategy") or "").lower().strip()
+                    if timeout_sec and strategy == "vol":
+                        timeout_sec = min(timeout_sec, 45.0)
                     try:
                         if timeout_sec:
                             ok, error_msg = await asyncio.wait_for(
@@ -1060,16 +1126,17 @@ async def handle_strategy_job(payload: dict):
                     hb_state = _load_state(telegram_id, network)
                     hb_state["worker_last_heartbeat"] = time.time()
                     hb_state["last_cycle_ms"] = (time.perf_counter() - cycle_started) * 1000.0
-                    hb_state["last_cycle_result"] = "ok" if ok else "error"
+                    hb_state["last_cycle_result"] = _cycle_result_label(ok, error_msg)
                     _save_state(telegram_id, network, hb_state)
                 if ok:
                     _job_stats["cycles_ok"] += 1
-                    refreshed = _load_state(telegram_id, network)
-                    if refreshed.get("error_streak") or refreshed.get("last_error"):
-                        refreshed["error_streak"] = 0
-                        refreshed["last_error"] = None
-                        refreshed["last_error_category"] = ""
-                        _save_state(telegram_id, network, refreshed)
+                    if _cycle_result_label(ok, error_msg) == "ok":
+                        refreshed = _load_state(telegram_id, network)
+                        if refreshed.get("error_streak") or refreshed.get("last_error"):
+                            refreshed["error_streak"] = 0
+                            refreshed["last_error"] = None
+                            refreshed["last_error_category"] = ""
+                            _save_state(telegram_id, network, refreshed)
                 else:
                     _job_stats["cycles_failed"] += 1
                     await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
@@ -1204,7 +1271,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 )
         else:
             _save_state(telegram_id, network, state)
-        return True, None
+        return True, "maintenance_pause"
     user = await run_blocking(get_user, telegram_id)
     if not user:
         _finalize_session(state, stop_reason="user_deleted")
@@ -1226,7 +1293,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     last_run = _safe_last_run_ts(state.get("last_run_ts"))
     interval = int(state.get("interval_seconds") or 60)
     if last_run > 0 and time.time() - last_run < interval:
-        return True, None
+        return True, "skipped_interval"
 
     product = state.get("product", "BTC")
     strategy = _normalize_strategy_id(state.get("strategy"))
@@ -1331,7 +1398,16 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         raise RuntimeError("Wallet client unavailable")
 
     with timed_metric("runtime.market_price.fetch"):
-        mp = await run_blocking(client.get_market_price, product_id)
+        if strategy == "vol":
+            try:
+                mp = await asyncio.wait_for(
+                    run_blocking(client.get_market_price, product_id),
+                    timeout=_vol_call_timeout_seconds(),
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError("VOL market price call timed out")
+        else:
+            mp = await run_blocking(client.get_market_price, product_id)
     mid = float(mp.get("mid") or 0.0)
     if mid <= 0:
         raise RuntimeError("Could not fetch market price")
@@ -1402,14 +1478,36 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             return True, None
 
     with timed_metric("runtime.open_orders.fetch"):
-        open_orders = await run_blocking(client.get_open_orders, product_id)
+        if strategy == "vol":
+            try:
+                open_orders = await asyncio.wait_for(
+                    run_blocking(client.get_open_orders, product_id),
+                    timeout=_vol_call_timeout_seconds(),
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError("VOL open-orders call timed out")
+        else:
+            open_orders = await run_blocking(client.get_open_orders, product_id)
 
     with timed_metric(f"runtime.strategy.dispatch.{strategy}"):
-        result = await run_blocking(
-            _dispatch_strategy,
-            strategy, telegram_id, network, state,
-            client, mid, product_id, product, open_orders,
-        )
+        if strategy == "vol":
+            try:
+                result = await asyncio.wait_for(
+                    run_blocking(
+                        _dispatch_strategy,
+                        strategy, telegram_id, network, state,
+                        client, mid, product_id, product, open_orders,
+                    ),
+                    timeout=max(_vol_call_timeout_seconds(), 20.0),
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError("VOL strategy dispatch timed out")
+        else:
+            result = await run_blocking(
+                _dispatch_strategy,
+                strategy, telegram_id, network, state,
+                client, mid, product_id, product, open_orders,
+            )
 
     if strategy == "rgrid" and result.get("action") == "grid_stop_loss_hit":
         _finalize_session(state, stop_reason="grid_sl_hit")

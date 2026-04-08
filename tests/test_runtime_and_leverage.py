@@ -15,6 +15,7 @@ from src.nadobro.i18n import get_active_language, language_context
 from src.nadobro.services import bot_runtime
 from src.nadobro.services import execution_queue
 from src.nadobro.services import runtime_supervisor
+from src.nadobro.services import trade_service
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
 from src.nadobro.services.trade_service import _place_take_profit_order
@@ -397,6 +398,22 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertEqual(runtime_supervisor.strategy_worker_group("dn"), "dn")
         self.assertEqual(runtime_supervisor.strategy_worker_group("vol"), "vol")
         self.assertEqual(runtime_supervisor.strategy_worker_group("bro"), "bro")
+
+    def test_cycle_result_label_marks_skip(self):
+        self.assertEqual(bot_runtime._cycle_result_label(True, "skipped_interval"), "skipped")
+        self.assertEqual(bot_runtime._cycle_result_label(True, "maintenance_pause"), "skipped")
+        self.assertEqual(bot_runtime._cycle_result_label(True, None), "ok")
+        self.assertEqual(bot_runtime._cycle_result_label(False, "boom"), "error")
+
+    def test_submit_with_timeout_returns_timeout_error(self):
+        def _slow():
+            import time as _t
+            _t.sleep(0.2)
+            return {"success": True}
+
+        ok, result = trade_service._submit_with_timeout(_slow, timeout_s=0.01)
+        self.assertFalse(ok)
+        self.assertIn("timed out", str(result).lower())
 
     def test_dn_wait_mode_stays_idle_on_unfavorable_funding(self):
         class FakeClient:
