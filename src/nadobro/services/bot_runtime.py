@@ -15,6 +15,7 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     "grid_sell_exposure_price", "grid_drift_from_anchor_pct", "grid_reset_active",
     "grid_reset_side", "grid_last_cycle_pnl_usd", "dn_last_funding_rate", "dn_unfavorable_count",
     "dn_mode", "order_observability",
+    "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
 })
 
 from src.nadobro.config import (
@@ -32,7 +33,12 @@ from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
 from src.nadobro.services.trade_service import close_all_positions, close_delta_neutral_legs
-from src.nadobro.services.user_service import get_user_nado_client, get_user_readonly_client, get_user
+from src.nadobro.services.user_service import (
+    get_user_nado_client,
+    get_user_readonly_client,
+    get_user,
+    run_strategy_start_preflight,
+)
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, record_metric
 from src.nadobro.services.execution_queue import enqueue_strategy
@@ -71,6 +77,9 @@ _job_stats: dict[str, int] = {
     "coalesced_ticks": 0,
     "deferred_cycles": 0,
     "cycle_timeouts": 0,
+    "vol_coalesced_ticks": 0,
+    "vol_deferred_cycles": 0,
+    "vol_overlap_skips": 0,
 }
 _process_worker_mode = False
 
@@ -177,6 +186,46 @@ def _update_order_observability(state: dict, result: dict) -> None:
     state["order_observability"] = obs
 
 
+def _categorize_runtime_error(error_msg: str) -> str:
+    msg = str(error_msg or "").lower()
+    if not msg or msg == "none":
+        return "unknown"
+    if "wallet not initialized" in msg or "wallet client unavailable" in msg:
+        return "wallet_not_initialized"
+    if "wallet not linked" in msg:
+        return "wallet_not_linked"
+    if "builder routing misconfigured" in msg:
+        return "builder_misconfigured"
+    if "market price" in msg:
+        return "market_data"
+    if "timed out" in msg:
+        return "timeout"
+    if "network mismatch" in msg or "mode switched" in msg:
+        return "network_mismatch"
+    return "execution"
+
+
+def _merge_vol_order_counters(state: dict, result: dict) -> None:
+    attempts = int(result.get("vol_order_attempts") or 0)
+    failures = int(result.get("vol_order_failures") or 0)
+    if attempts > 0:
+        state["vol_order_attempts"] = int(state.get("vol_order_attempts") or 0) + attempts
+        state["last_order_ts"] = time.time()
+    if failures > 0:
+        state["vol_order_failures"] = int(state.get("vol_order_failures") or 0) + failures
+    last_order_error = str(result.get("last_order_error") or "").strip()
+    if last_order_error:
+        state["last_order_error"] = last_order_error[:220]
+        state["last_error_category"] = _categorize_runtime_error(last_order_error)
+
+
+def _format_cycle_failure_error(strategy: str, result: dict) -> str:
+    raw = str(result.get("error") or "unknown").strip()
+    category = _categorize_runtime_error(raw)
+    action = str(result.get("action") or "cycle")
+    return f"{strategy.upper()}[{action}/{category}]: {raw}"[:300]
+
+
 def set_bot_app(app):
     global _bot_app, _runtime_loop
     _bot_app = app
@@ -219,6 +268,11 @@ def _default_state() -> dict:
         "last_cycle_ms": 0.0,
         "last_cycle_result": "",
         "worker_pid": None,
+        "last_error_category": "",
+        "vol_order_attempts": 0,
+        "vol_order_failures": 0,
+        "last_order_error": "",
+        "last_order_ts": 0.0,
     }
 
 
@@ -444,6 +498,9 @@ def start_user_bot(
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
     if float(leverage or 0) < 1:
         return False, "Leverage must be at least 1x."
+    preflight_ok, preflight_msg = run_strategy_start_preflight(telegram_id, product, network)
+    if not preflight_ok:
+        return False, preflight_msg
 
     _mark_previous_sessions_superseded(telegram_id, network)
     _, strat_cfg = get_strategy_settings(telegram_id, strategy)
@@ -679,6 +736,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "started_at": state.get("started_at"),
         "runs": state.get("runs", 0),
         "last_error": state.get("last_error"),
+        "last_error_category": state.get("last_error_category") or "",
         "last_action": state.get("last_action"),
         "last_action_detail": state.get("last_action_detail"),
         "last_run_ts": last_run,
@@ -719,6 +777,10 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "strategy_session_id": state.get("strategy_session_id"),
         "running_sessions": running_sessions,
         "order_observability": state.get("order_observability") or {},
+        "vol_order_attempts": int(state.get("vol_order_attempts") or 0),
+        "vol_order_failures": int(state.get("vol_order_failures") or 0),
+        "last_order_error": state.get("last_order_error") or "",
+        "last_order_ts": float(state.get("last_order_ts") or 0.0),
         "runtime_diagnostics": get_runtime_diagnostics(),
     }
 
@@ -860,9 +922,20 @@ async def _bot_loop(telegram_id: int, network: str):
                 await asyncio.sleep(sleep_s)
                 continue
             try:
+                strategy = str(state.get("strategy") or "").lower().strip()
+                lock = _job_locks.get(_task_key(telegram_id, network))
+                if strategy == "vol" and lock and lock.locked():
+                    _job_stats["vol_overlap_skips"] += 1
+                    logger.info(
+                        "Vol tick skipped while prior cycle still running user=%s network=%s",
+                        telegram_id,
+                        network,
+                    )
+                    await asyncio.sleep(min(float(RUNTIME_TICK_SECONDS), max(1.0, interval / 2.0)))
+                    continue
                 now_bucket = int(time.time() / max(1, RUNTIME_TICK_SECONDS))
                 enqueued = await enqueue_strategy(
-                    {"telegram_id": telegram_id, "network": network},
+                    {"telegram_id": telegram_id, "network": network, "strategy": strategy},
                     dedupe_key=f"{telegram_id}:{network}:{now_bucket}",
                 )
                 if not enqueued:
@@ -889,9 +962,20 @@ async def handle_strategy_job(payload: dict):
     key = _task_key(telegram_id, network)
     lock = _job_locks.setdefault(key, asyncio.Lock())
     if lock.locked():
+        payload_strategy = str(payload.get("strategy") or "").lower().strip()
+        if payload_strategy == "vol" and key in _job_pending_payloads:
+            _job_stats["vol_overlap_skips"] += 1
+            logger.info(
+                "Dropping extra overlapping vol tick user=%s network=%s pending_already_set",
+                telegram_id,
+                network,
+            )
+            return
         _job_pending_payloads[key] = payload
         _job_coalesce_counts[key] = int(_job_coalesce_counts.get(key, 0)) + 1
         _job_stats["coalesced_ticks"] += 1
+        if payload_strategy == "vol":
+            _job_stats["vol_coalesced_ticks"] += 1
         logger.info(
             "Coalescing overlapping strategy cycle for user %s on %s (pending=%s)",
             telegram_id,
@@ -984,6 +1068,7 @@ async def handle_strategy_job(payload: dict):
                     if refreshed.get("error_streak") or refreshed.get("last_error"):
                         refreshed["error_streak"] = 0
                         refreshed["last_error"] = None
+                        refreshed["last_error_category"] = ""
                         _save_state(telegram_id, network, refreshed)
                 else:
                     _job_stats["cycles_failed"] += 1
@@ -991,7 +1076,8 @@ async def handle_strategy_job(payload: dict):
             except Exception as e:
                 _job_stats["cycles_failed"] += 1
                 logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
-                await _mark_cycle_error(telegram_id, network, str(e))
+                strategy_name = str(state.get("strategy") or "strategy").upper()
+                await _mark_cycle_error(telegram_id, network, f"{strategy_name}[cycle/crash]: {str(e)[:220]}")
             finally:
                 elapsed_ms = (time.perf_counter() - cycle_started) * 1000.0
                 record_metric("runtime.strategy_cycle.total", elapsed_ms)
@@ -1007,6 +1093,9 @@ async def handle_strategy_job(payload: dict):
             if not pending_payload:
                 break
             _job_stats["deferred_cycles"] += 1
+            strategy_for_pending = str((pending_payload or {}).get("strategy") or state.get("strategy") or "").lower().strip()
+            if strategy_for_pending == "vol":
+                _job_stats["vol_deferred_cycles"] += 1
             logger.info(
                 "Running deferred coalesced strategy cycle for user %s on %s (%s coalesced tick(s))",
                 telegram_id,
@@ -1020,6 +1109,7 @@ async def _mark_cycle_error(telegram_id: int, network: str, error_msg: str):
     if not state.get("running"):
         return
     state["last_error"] = str(error_msg)[:300]
+    state["last_error_category"] = _categorize_runtime_error(error_msg)
     streak = int(state.get("error_streak") or 0) + 1
     state["error_streak"] = streak
     _save_state(telegram_id, network, state)
@@ -1405,8 +1495,10 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     state["last_run_ts"] = time.time()
     state["runs"] = prev_runs + 1
     state["last_error"] = result.get("error")
+    state["last_error_category"] = _categorize_runtime_error(result.get("error")) if result.get("error") else ""
     state["last_action"] = result.get("action", "cycle")
     state["last_action_detail"] = str(result.get("detail", ""))[:200]
+    _merge_vol_order_counters(state, result)
     _update_order_observability(state, result)
     _save_state(telegram_id, network, state)
     drift_seconds = max(0.0, state["last_run_ts"] - last_run - interval) if last_run > 0 else 0.0
@@ -1461,6 +1553,6 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             pass
 
     if not result.get("success", True):
-        error_msg = str(result.get("error", "unknown"))[:300]
+        error_msg = _format_cycle_failure_error(strategy, result)
         return False, error_msg
     return True, None

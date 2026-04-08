@@ -16,6 +16,9 @@ _stats: dict[str, int] = {
     "strategy_enqueued": 0,
     "strategy_deduped": 0,
     "strategy_dropped": 0,
+    "vol_strategy_enqueued": 0,
+    "vol_strategy_deduped": 0,
+    "vol_strategy_dropped": 0,
     "alert_enqueued": 0,
     "alert_deduped": 0,
     "alert_dropped": 0,
@@ -52,18 +55,26 @@ def _dedupe_ok(dedupe_key: str) -> bool:
 
 
 async def enqueue_strategy(payload: dict[str, Any], dedupe_key: str) -> bool:
+    strategy = str((payload or {}).get("strategy") or "").lower().strip()
+    is_vol = strategy == "vol"
     if not any((not t.done()) and (t.get_name() or "").startswith("strategy-") for t in _workers):
         logger.warning("No active strategy queue workers detected; restarting workers")
         start_workers(_strategy_worker_target, _alert_worker_target)
     if not _dedupe_ok(f"strategy:{dedupe_key}"):
         _stats["strategy_deduped"] += 1
+        if is_vol:
+            _stats["vol_strategy_deduped"] += 1
         return False
     try:
         _strategy_queue.put_nowait(payload)
         _stats["strategy_enqueued"] += 1
+        if is_vol:
+            _stats["vol_strategy_enqueued"] += 1
         return True
     except asyncio.QueueFull:
         _stats["strategy_dropped"] += 1
+        if is_vol:
+            _stats["vol_strategy_dropped"] += 1
         logger.warning("strategy queue full; dropping job key=%s", dedupe_key)
         return False
 

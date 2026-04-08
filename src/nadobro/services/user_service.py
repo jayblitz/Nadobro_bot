@@ -8,6 +8,7 @@ from src.nadobro.models.database import UserRow, NetworkMode
 from src.nadobro.db import query_one, query_all, execute, query_count
 from src.nadobro.services.nado_client import get_nado_client, NadoClient, clear_client_cache
 from src.nadobro.i18n import get_active_language, localize_text
+from src.nadobro.config import get_nado_builder_routing_config, get_product_id
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,34 @@ def get_runtime_wallet_readiness(telegram_id: int, verify_signer: bool = True) -
         except Exception as e:
             payload["signer_verification"] = {"verified": False, "error": str(e)}
     return payload
+
+
+def run_strategy_start_preflight(telegram_id: int, product: str, network: str) -> tuple[bool, str]:
+    ready, message = ensure_active_wallet_ready(telegram_id)
+    if not ready:
+        return False, message
+
+    signing_client = get_user_nado_client(telegram_id, network=network)
+    if not signing_client:
+        return False, "Wallet signing client unavailable for active mode. Re-link signer in Wallet settings."
+
+    try:
+        get_nado_builder_routing_config()
+    except ValueError as e:
+        return False, f"Builder routing misconfigured: {e}"
+
+    product_id = get_product_id(str(product).upper(), network=network)
+    if product_id is None:
+        return False, f"Unknown product '{product}'."
+    try:
+        mp = signing_client.get_market_price(product_id)
+        mid = float((mp or {}).get("mid") or 0.0)
+    except Exception as e:
+        return False, f"Could not fetch market price for {str(product).upper()} ({network}): {e}"
+    if mid <= 0:
+        return False, f"Could not fetch market price for {str(product).upper()} ({network})."
+
+    return True, ""
 
 
 def update_trade_stats(telegram_id: int, volume_usd: float):

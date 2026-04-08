@@ -10,7 +10,7 @@ install_test_stubs()
 
 from src.nadobro.handlers.intent_handlers import _enrich_trade_payload
 from src.nadobro.handlers.intent_parser import parse_interaction_intent, parse_position_management_intent
-from src.nadobro.handlers import callbacks, home_card
+from src.nadobro.handlers import callbacks, home_card, formatters
 from src.nadobro.i18n import get_active_language, language_context
 from src.nadobro.services import bot_runtime
 from src.nadobro.services import execution_queue
@@ -35,7 +35,10 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             def get_all_positions(self):
                 raise RuntimeError("boom")
 
-        with patch.object(home_card, "get_user_readonly_client", return_value=FailingClient()):
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
+        with patch.object(home_card, "get_user", return_value=fake_user), patch.object(
+            home_card, "get_user_readonly_client", return_value=FailingClient()
+        ):
             text, reply_markup = home_card.build_portfolio_view(telegram_id=7)
 
         self.assertIn("Portfolio refresh is temporarily unavailable", text)
@@ -133,6 +136,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
         with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
             bot_runtime, "get_strategy_settings", return_value=("mainnet", {})
+        ), patch.object(
+            bot_runtime, "run_strategy_start_preflight", return_value=(True, "")
         ), patch.object(bot_runtime, "_save_state"), patch.object(bot_runtime, "_ensure_task"):
             ok, msg = bot_runtime.start_user_bot(
                 telegram_id=1,
@@ -143,6 +148,21 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertIn("GRID bot started on BTC-PERP", msg)
+
+    def test_start_user_bot_blocks_when_preflight_fails(self):
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
+        with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
+            bot_runtime, "run_strategy_start_preflight", return_value=(False, "Wallet not linked")
+        ):
+            ok, msg = bot_runtime.start_user_bot(
+                telegram_id=1,
+                strategy="vol",
+                product="BTC",
+                leverage=1,
+                slippage_pct=1,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(msg, "Wallet not linked")
 
     def test_stop_all_user_bots_closes_each_running_network(self):
         telegram_id = 42
@@ -459,6 +479,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network_name))
             with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
                 bot_runtime, "get_strategy_settings", return_value=(network_name, {})
+            ), patch.object(
+                bot_runtime, "run_strategy_start_preflight", return_value=(True, "")
             ), patch.object(bot_runtime, "_save_state", side_effect=_save_state_stub), patch.object(
                 bot_runtime, "_ensure_task"
             ):
@@ -476,6 +498,96 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
         _run_for_network("mainnet")
         _run_for_network("testnet")
+
+    def test_handle_strategy_job_vol_overlap_drops_extra_pending_tick(self):
+        telegram_id = 77
+        network = "mainnet"
+        key = f"{telegram_id}:{network}"
+        old_locks = dict(bot_runtime._job_locks)
+        old_pending = dict(bot_runtime._job_pending_payloads)
+        old_coalesced = dict(bot_runtime._job_coalesce_counts)
+        old_stats = dict(bot_runtime._job_stats)
+        lock = asyncio.Lock()
+
+        async def _run():
+            await lock.acquire()
+            bot_runtime._job_locks[key] = lock
+            bot_runtime._job_pending_payloads[key] = {"telegram_id": telegram_id, "network": network, "strategy": "vol"}
+            await bot_runtime.handle_strategy_job({"telegram_id": telegram_id, "network": network, "strategy": "vol"})
+
+        try:
+            asyncio.run(_run())
+            self.assertEqual(bot_runtime._job_pending_payloads[key]["strategy"], "vol")
+            self.assertEqual(int(bot_runtime._job_coalesce_counts.get(key, 0)), 0)
+            self.assertGreaterEqual(int(bot_runtime._job_stats.get("vol_overlap_skips", 0)), 1)
+        finally:
+            bot_runtime._job_locks = old_locks
+            bot_runtime._job_pending_payloads = old_pending
+            bot_runtime._job_coalesce_counts = old_coalesced
+            bot_runtime._job_stats = old_stats
+
+    def test_enqueue_strategy_tracks_vol_stats(self):
+        old_stats = dict(execution_queue._stats)
+        old_workers = list(execution_queue._workers)
+        old_seen = dict(execution_queue._dedupe_seen)
+
+        class _Worker:
+            def done(self):
+                return False
+
+            def get_name(self):
+                return "strategy-0"
+
+        async def _run():
+            execution_queue._stats.update({k: 0 for k in execution_queue._stats.keys()})
+            execution_queue._workers = [_Worker()]
+            execution_queue._dedupe_seen.clear()
+            enqueued_first = await execution_queue.enqueue_strategy(
+                {"telegram_id": 1, "network": "mainnet", "strategy": "vol"},
+                dedupe_key="dup-key",
+            )
+            enqueued_second = await execution_queue.enqueue_strategy(
+                {"telegram_id": 1, "network": "mainnet", "strategy": "vol"},
+                dedupe_key="dup-key",
+            )
+            return enqueued_first, enqueued_second
+
+        try:
+            first, second = asyncio.run(_run())
+            self.assertTrue(first)
+            self.assertFalse(second)
+            self.assertEqual(int(execution_queue._stats.get("vol_strategy_enqueued") or 0), 1)
+            self.assertEqual(int(execution_queue._stats.get("vol_strategy_deduped") or 0), 1)
+        finally:
+            execution_queue._stats = old_stats
+            execution_queue._workers = old_workers
+            execution_queue._dedupe_seen = old_seen
+
+    def test_fmt_status_overview_surfaces_cycle_and_order_reason(self):
+        status = {
+            "running": True,
+            "strategy": "vol",
+            "product": "BTC",
+            "notional_usd": 100,
+            "runs": 3,
+            "interval_seconds": 10,
+            "started_at": "2026-01-01T00:00:00",
+            "next_cycle_in": 0,
+            "last_cycle_result": "error",
+            "last_error": "VOL[opened_market_wait_close/execution]: order rejected",
+            "last_error_category": "execution",
+            "error_streak": 4,
+            "runtime_diagnostics": {"queue": {"strategy_qsize": 0, "strategy_qmax": 500}, "pending_coalesced_ticks": 0},
+            "order_observability": {"orders_placed": 0, "orders_filled": 0, "orders_cancelled": 0, "cycles": 3, "zero_order_cycles": 3, "last_reason": "order rejected"},
+            "vol_order_attempts": 2,
+            "vol_order_failures": 2,
+            "last_order_error": "builder unavailable",
+        }
+        onboarding = {"onboarding_complete": True, "network": "mainnet", "has_key": True, "funded": True}
+        text = formatters.fmt_status_overview(status, onboarding)
+        self.assertIn("Last cycle", text)
+        self.assertIn("Error class", text)
+        self.assertIn("Last order error", text)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,8 @@ class VolStrategyRebuildTests(unittest.TestCase):
             result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
         self.assertTrue(result.get("success"))
         self.assertEqual(result.get("action"), "opened_market_wait_close")
+        self.assertEqual(result.get("vol_order_attempts"), 1)
+        self.assertEqual(result.get("vol_order_failures"), 0)
         self.assertEqual(state.get("vol_phase"), "filled_wait_close")
         self.assertAlmostEqual(float(state.get("vol_entry_fill_price") or 0), 100.1)
         self.assertGreater(float(state.get("vol_entry_fill_ts") or 0), 0)

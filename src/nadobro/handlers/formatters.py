@@ -1036,6 +1036,10 @@ def fmt_status_overview(status: dict, onboarding: dict):
             if detail:
                 action_text += f" — {detail[:100]}"
             lines.append(f"{_loc('Last:')} {escape_md(action_text)}")
+        last_cycle_result = str(status.get("last_cycle_result") or "").strip().lower()
+        if last_cycle_result:
+            cycle_badge = "✅" if last_cycle_result == "ok" else "❌"
+            lines.append(f"{cycle_badge} {_loc('Last cycle')}: *{escape_md(last_cycle_result.upper())}*")
 
         if status.get("is_paused"):
             lines.append(f"⚠️ *{_loc('PAUSED')}*: {escape_md(str(status.get('pause_reason') or _loc('Unknown')))}")
@@ -1047,6 +1051,9 @@ def fmt_status_overview(status: dict, onboarding: dict):
             lines.append(f"⚠️ {escape_md(str(error_streak))} {_loc('errors in a row')}")
         if status.get("last_error"):
             lines.append(f"{_loc('Note:')} {escape_md(str(status.get('last_error'))[:160])}")
+            err_cat = str(status.get("last_error_category") or "").strip()
+            if err_cat:
+                lines.append(f"{_loc('Error class')}: *{escape_md(err_cat)}*")
 
         worker_group = status.get("worker_group")
         if worker_group:
@@ -1085,6 +1092,20 @@ def fmt_status_overview(status: dict, onboarding: dict):
                 lines.append(
                     f"{_loc('Orderless cycles')}: *{escape_md(str(obs_zero))}/{escape_md(str(obs_cycles))}*"
                 )
+            obs_last_reason = str(order_obs.get("last_reason") or "").strip()
+            if obs_last_reason:
+                lines.append(f"{_loc('Last reason')}: {escape_md(obs_last_reason[:160])}")
+        if strategy == "VOL":
+            vol_attempts = int(status.get("vol_order_attempts") or 0)
+            vol_failures = int(status.get("vol_order_failures") or 0)
+            if vol_attempts > 0:
+                lines.append(
+                    f"{_loc('Vol order attempts')}: *{escape_md(str(vol_attempts))}* · "
+                    f"{_loc('failures')}: *{escape_md(str(vol_failures))}*"
+                )
+            last_order_error = str(status.get("last_order_error") or "").strip()
+            if last_order_error:
+                lines.append(f"{_loc('Last order error')}: {escape_md(last_order_error[:160])}")
 
         if strategy == "DN":
             dn_mode = status.get("dn_mode") or "enter_anyway"

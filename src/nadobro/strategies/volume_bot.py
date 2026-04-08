@@ -169,6 +169,15 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         pos_size = abs(float(pos.get("amount", 0.0) or 0.0))
         pos_side = str(pos.get("side", "") or "").upper()
         close_is_long = pos_side == "SHORT"
+        logger.info(
+            "VOL close order attempt user=%s network=%s product=%s phase=%s side=%s size=%.8f",
+            telegram_id,
+            network,
+            product,
+            phase,
+            pos_side or "?",
+            pos_size,
+        )
         close_result = execute_market_order(
             telegram_id,
             product,
@@ -181,7 +190,32 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             strategy_session_id=state.get("strategy_session_id"),
         )
         if not close_result.get("success"):
-            return {"success": False, "error": close_result.get("error", "Market close failed"), "orders_placed": 0, "placed_notional_usd": 0.0}
+            close_error = str(close_result.get("error") or "Market close failed")
+            logger.warning(
+                "VOL close order failed user=%s network=%s product=%s phase=%s error=%s",
+                telegram_id,
+                network,
+                product,
+                phase,
+                close_error[:200],
+            )
+            return {
+                "success": False,
+                "error": close_error,
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "vol_order_attempts": 1,
+                "vol_order_failures": 1,
+                "last_order_error": close_error,
+            }
+        logger.info(
+            "VOL close order result user=%s network=%s product=%s success=%s digest=%s",
+            telegram_id,
+            network,
+            product,
+            bool(close_result.get("success")),
+            str(close_result.get("digest") or "")[:32],
+        )
 
         close_price = float(close_result.get("price") or mid)
         close_digest = str(close_result.get("digest") or "")
@@ -206,6 +240,12 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_entry_fill_ts"] = 0.0
         state["vol_entry_fill_price"] = 0.0
         state["vol_entry_size"] = 0.0
+        logger.info(
+            "VOL state transition user=%s network=%s product=%s from=filled_wait_close to=idle",
+            telegram_id,
+            network,
+            product,
+        )
 
         if tp_usd > 0 and session_pnl >= tp_usd:
             state["running"] = False
@@ -216,6 +256,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "action": "closed_and_session_tp_hit",
                 "orders_placed": 1,
                 "placed_notional_usd": round(traded_notional, 4),
+                "vol_order_attempts": 1,
+                "vol_order_failures": 0,
                 "session_realized_pnl_usd": round(session_pnl, 6),
                 "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
@@ -229,6 +271,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "action": "closed_and_session_sl_hit",
                 "orders_placed": 1,
                 "placed_notional_usd": round(traded_notional, 4),
+                "vol_order_attempts": 1,
+                "vol_order_failures": 0,
                 "session_realized_pnl_usd": round(session_pnl, 6),
                 "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
@@ -240,6 +284,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             "action": "closed_reloop",
             "orders_placed": 1,
             "placed_notional_usd": round(traded_notional, 4),
+            "vol_order_attempts": 1,
+            "vol_order_failures": 0,
             "session_realized_pnl_usd": round(session_pnl, 6),
             "cycle_realized_pnl_usd": round(cycle_pnl, 6),
             "volume_done_usd": round(volume_done, 4),
@@ -248,6 +294,15 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     # phase == idle
     size = max(fixed_margin / mid, MIN_SIZE)
     is_long = direction == "long"
+    logger.info(
+        "VOL entry order attempt user=%s network=%s product=%s phase=%s direction=%s size=%.8f",
+        telegram_id,
+        network,
+        product,
+        phase,
+        direction,
+        size,
+    )
     open_result = execute_market_order(
         telegram_id,
         product,
@@ -260,7 +315,32 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         strategy_session_id=state.get("strategy_session_id"),
     )
     if not open_result.get("success"):
-        return {"success": False, "error": open_result.get("error", "Market entry failed"), "orders_placed": 0, "placed_notional_usd": 0.0}
+        open_error = str(open_result.get("error") or "Market entry failed")
+        logger.warning(
+            "VOL entry order failed user=%s network=%s product=%s phase=%s error=%s",
+            telegram_id,
+            network,
+            product,
+            phase,
+            open_error[:200],
+        )
+        return {
+            "success": False,
+            "error": open_error,
+            "orders_placed": 0,
+            "placed_notional_usd": 0.0,
+            "vol_order_attempts": 1,
+            "vol_order_failures": 1,
+            "last_order_error": open_error,
+        }
+    logger.info(
+        "VOL entry order result user=%s network=%s product=%s success=%s digest=%s",
+        telegram_id,
+        network,
+        product,
+        bool(open_result.get("success")),
+        str(open_result.get("digest") or "")[:32],
+    )
 
     entry_price = float(open_result.get("price") or mid)
     entry_size = max(float(open_result.get("size") or size or 0.0), MIN_SIZE)
@@ -269,12 +349,20 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     state["vol_entry_size"] = entry_size
     state["vol_entry_fill_price"] = entry_price
     state["vol_entry_fill_ts"] = now_ts
+    logger.info(
+        "VOL state transition user=%s network=%s product=%s from=idle to=filled_wait_close",
+        telegram_id,
+        network,
+        product,
+    )
     return {
         "success": True,
         "done": False,
         "action": "opened_market_wait_close",
         "orders_placed": 1,
         "placed_notional_usd": round(entry_size * entry_price, 4),
+        "vol_order_attempts": 1,
+        "vol_order_failures": 0,
         "entry_digest": open_result.get("digest"),
         "direction": direction.upper(),
         "entry_price": entry_price,
