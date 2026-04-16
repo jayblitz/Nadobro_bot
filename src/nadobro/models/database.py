@@ -1,10 +1,15 @@
 import enum
 import json
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional, TypeAlias
 
 from psycopg2 import sql as pgsql
 from src.nadobro.db import query_one, query_all, execute, execute_returning, query_count
+
+# JSON-compatible values for bot_state (serialized with json.dumps unless value is str).
+JsonSerializable: TypeAlias = (
+    str | int | float | bool | None | list["JsonSerializable"] | dict[str, "JsonSerializable"]
+)
 
 
 class NetworkMode(enum.Enum):
@@ -75,7 +80,7 @@ def get_bot_state(key: str) -> Optional[dict]:
         return None
 
 
-def set_bot_state(key: str, value: Any):
+def set_bot_state(key: str, value: JsonSerializable):
     payload = json.dumps(value) if not isinstance(value, str) else value
     now = datetime.utcnow().isoformat()
     execute(

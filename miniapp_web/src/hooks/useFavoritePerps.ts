@@ -6,13 +6,13 @@ function loadFavorites(): Set<string> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const arr = JSON.parse(raw) as unknown;
+      const arr: unknown = JSON.parse(raw);
       if (Array.isArray(arr)) {
         return new Set(arr.filter((x): x is string => typeof x === "string"));
       }
     }
-  } catch {
-    /* ignore */
+  } catch (e) {
+    console.warn("nadobro:favoritePerps load failed", e);
   }
   return new Set();
 }
@@ -23,8 +23,8 @@ export function useFavoritePerps() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify([...favorites]));
-    } catch {
-      /* ignore */
+    } catch (e) {
+      console.warn("nadobro:favoritePerps save failed", e);
     }
   }, [favorites]);
 

@@ -14,19 +14,10 @@ import type {
   QuotesResponse,
   CryptoQuote,
   AllPricesResponse,
+  HomeCategoryTabId,
 } from "@/api/types";
 
-type CategoryTabId =
-  | "all"
-  | "perps"
-  | "spot"
-  | "memes"
-  | "defi"
-  | "chains"
-  | "commodities"
-  | "favorites";
-
-const CATEGORY_TABS: { id: CategoryTabId; label: string }[] = [
+const CATEGORY_TABS: { id: HomeCategoryTabId; label: string }[] = [
   { id: "all", label: "All assets" },
   { id: "perps", label: "Perps" },
   { id: "spot", label: "Spot" },
@@ -50,14 +41,14 @@ function formatChange(n: number | null | undefined): string {
   return `${sign}${n.toFixed(2)}%`;
 }
 
-function formatFunding(n: number | null | undefined): string {
+function formatFundingRate(n: number | null | undefined): string {
   if (n == null) return "--";
   return `${(n * 100).toFixed(4)}%`;
 }
 
 function filterByCategory(
   products: ProductInfo[],
-  tab: CategoryTabId,
+  tab: HomeCategoryTabId,
   favorites: Set<string>,
 ): ProductInfo[] {
   if (tab === "all") return products;
@@ -75,9 +66,8 @@ export default function Home() {
   const { products, prices, setProducts, updatePrices, selectProduct } = useMarketStore();
   const { portfolio, setPortfolio } = useAccountStore();
   const { favorites, toggle, isFavorite } = useFavoritePerps();
-  const [categoryTab, setCategoryTab] = useState<CategoryTabId>("all");
+  const [categoryTab, setCategoryTab] = useState<HomeCategoryTabId>("all");
 
-  // Fetch products
   const { data: productsData, isPending: productsLoading } = useQuery({
     queryKey: ["products"],
     queryFn: () => api.get<ProductInfo[]>("/api/products"),
@@ -88,7 +78,6 @@ export default function Home() {
     if (productsData) setProducts(productsData);
   }, [productsData, setProducts]);
 
-  // Fetch prices every 5s
   const { data: pricesData } = useQuery({
     queryKey: ["prices"],
     queryFn: () => api.get<AllPricesResponse>("/api/prices"),
@@ -99,7 +88,6 @@ export default function Home() {
     if (pricesData?.prices) updatePrices(pricesData.prices);
   }, [pricesData, updatePrices]);
 
-  // Fetch 24h changes + funding rates from Nado Indexer
   const { data: quotesData } = useQuery({
     queryKey: ["quotes"],
     queryFn: () => api.get<QuotesResponse>("/api/quotes"),
@@ -107,7 +95,6 @@ export default function Home() {
     refetchInterval: 30_000,
   });
 
-  // Fetch portfolio
   const { data: portfolioData } = useQuery({
     queryKey: ["portfolio"],
     queryFn: () => api.get<PortfolioSummary>("/api/portfolio"),
@@ -142,12 +129,10 @@ export default function Home() {
 
   return (
     <div className="flex-1 flex flex-col overflow-y-auto hide-scrollbar pb-2">
-      {/* Header */}
       <div className="px-4 pt-4 pb-2">
         <h1 className="text-xl font-bold text-white">Perpetuals</h1>
       </div>
 
-      {/* Open positions card */}
       {positions.length > 0 && (
         <div className="mx-4 mb-4 bg-white/5 rounded-2xl overflow-hidden">
           <div className="flex items-center justify-between px-4 pt-3 pb-2">
@@ -215,7 +200,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* Portfolio summary bar */}
       {portfolio && (
         <div className="flex gap-3 mx-4 mb-4">
           <div className="flex-1 bg-white/5 rounded-xl px-3 py-2.5">
@@ -245,7 +229,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* Category tabs */}
       <div className="mb-2 pl-4">
         <div className="flex gap-2 overflow-x-auto hide-scrollbar pb-1 pr-4">
           {CATEGORY_TABS.map((tab) => {
@@ -357,7 +340,7 @@ export default function Home() {
                   </span>
                   {quote?.funding_rate != null && (
                     <span className="text-[10px] text-tg-hint">
-                      F: {formatFunding(quote.funding_rate)}
+                      F: {formatFundingRate(quote.funding_rate)}
                     </span>
                   )}
                 </div>

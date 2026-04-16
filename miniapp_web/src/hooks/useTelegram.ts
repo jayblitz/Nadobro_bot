@@ -1,30 +1,7 @@
-import { useEffect, useCallback } from "react";
+import { useEffect } from "react";
 import { getWebApp } from "@/lib/telegram";
 
-/**
- * Hook providing the Telegram WebApp instance and common helpers.
- * Returns `null` for `webApp` when running outside Telegram.
- */
-export function useTelegram() {
-  const webApp = getWebApp();
-
-  const showBackButton = useCallback(
-    (onBack: () => void) => {
-      if (!webApp) return;
-      webApp.BackButton.show();
-      webApp.BackButton.onClick(onBack);
-      return () => {
-        webApp.BackButton.offClick(onBack);
-        webApp.BackButton.hide();
-      };
-    },
-    [webApp],
-  );
-
-  return { webApp, showBackButton };
-}
-
-/** Track Telegram viewport height and update the CSS variable. */
+/** Syncs `--tg-viewport-height` from `viewportStableHeight`. */
 export function useViewportHeight() {
   useEffect(() => {
     const wa = getWebApp();
@@ -39,7 +16,6 @@ export function useViewportHeight() {
 
     update();
 
-    // The SDK fires a viewportChanged event; listen via resize as fallback.
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }, []);

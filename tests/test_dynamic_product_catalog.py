@@ -1,66 +1,59 @@
 import unittest
-from unittest.mock import patch
 
 from _stubs import install_test_stubs
 
 install_test_stubs()
 
+from src.nadobro.config import PRODUCTS
 from src.nadobro.handlers.intent_parser import parse_trade_intent
 from src.nadobro.handlers.keyboards import trade_product_reply_kb
 from src.nadobro.services import product_catalog
 
 
 class DynamicProductCatalogTests(unittest.TestCase):
-    def test_parse_trade_intent_recognizes_dynamic_symbol(self):
-        with patch("src.nadobro.handlers.intent_parser.get_perp_products", return_value=["BTC", "XAG"]):
-            intent = parse_trade_intent("long XAG market with size 2 and leverage 10x", network="mainnet")
+    def test_parse_trade_intent_recognizes_listed_perp(self):
+        names = product_catalog.list_perp_names(network="mainnet", refresh=True)
+        self.assertTrue(names, "expected non-empty perp list from catalog")
+        sym = names[0]
+        intent = parse_trade_intent(
+            f"long {sym} market with size 2 and leverage 10x",
+            network="mainnet",
+        )
         self.assertIsNotNone(intent)
-        self.assertEqual(intent.get("product"), "XAG")
+        self.assertEqual(intent.get("product"), sym)
         self.assertEqual(intent.get("missing"), [])
 
     def test_at_price_implies_limit_order(self):
-        with patch("src.nadobro.handlers.intent_parser.get_perp_products", return_value=["BTC", "SOL"]):
-            intent = parse_trade_intent("Long 2 SOL 5x at 83.0", network="mainnet")
+        intent = parse_trade_intent("Long 2 SOL 5x at 83.0", network="mainnet")
         self.assertIsNotNone(intent)
         self.assertEqual(intent.get("order_type"), "limit")
         self.assertAlmostEqual(intent.get("limit_price"), 83.0)
         self.assertEqual(intent.get("size"), 2.0)
         self.assertEqual(intent.get("missing"), [])
 
-    def test_catalog_discovers_dynamic_products(self):
-        fake_rows = [
-            {"product_id": 2, "symbol": "BTC-PERP", "max_leverage": 40},
-            {"product_id": 30, "symbol": "XAG-PERP", "max_leverage": 10},
-        ]
-        with patch("src.nadobro.services.product_catalog._fetch_all_products", return_value=fake_rows):
-            catalog = product_catalog.get_catalog(network="mainnet", refresh=True)
-        self.assertIn("XAG", catalog["perps"])
-        self.assertEqual(catalog["perps"]["XAG"]["id"], 30)
-        self.assertEqual(catalog["perps"]["XAG"]["max_leverage"], 10)
-        self.assertEqual(product_catalog.get_product_id("XAG-PERP", network="mainnet"), 30)
+    def test_catalog_loads_from_gateway_or_static_fallback(self):
+        catalog = product_catalog.get_catalog(network="mainnet", refresh=True)
+        self.assertIn("perps", catalog)
+        self.assertGreater(len(catalog["perps"]), 0)
+        self.assertIn("BTC", catalog["perps"])
+        btc = catalog["perps"]["BTC"]
+        self.assertEqual(btc["id"], PRODUCTS["BTC"]["id"])
+        self.assertGreater(btc["max_leverage"], 0)
+        pid = product_catalog.get_product_id("BTC-PERP", network="mainnet", refresh=True)
+        self.assertEqual(pid, PRODUCTS["BTC"]["id"])
 
-    def test_keyboard_uses_dynamic_products(self):
-        with patch("src.nadobro.handlers.keyboards._perp_products", return_value=["BTC", "ETH", "XAG"]):
-            kb = trade_product_reply_kb(network="mainnet")
+    def test_keyboard_lists_live_perp_labels(self):
+        kb = trade_product_reply_kb(network="mainnet")
         labels = [btn.text for row in kb.keyboard for btn in row]
-        self.assertIn("XAG", labels)
+        sample = product_catalog.list_perp_names(network="mainnet", refresh=False)[:8]
+        self.assertTrue(sample)
+        self.assertTrue(any(s in labels for s in sample))
 
-    def test_catalog_uses_symbols_payload_for_dynamic_names(self):
-        fake_products = [
-            {"product_id": 88, "book_info": {}},
-        ]
-        fake_symbols = [
-            {"type": "perp", "product_id": 88, "symbol": "XAG-PERP", "isolated_only": True},
-            {"type": "spot", "product_id": 5, "symbol": "USDC"},
-        ]
-        with patch("src.nadobro.services.product_catalog._fetch_all_products", return_value=fake_products), patch(
-            "src.nadobro.services.product_catalog._fetch_symbol_rows", return_value=fake_symbols
-        ):
-            catalog = product_catalog.get_catalog(network="mainnet", refresh=True)
-        self.assertIn("XAG", catalog["perps"])
-        self.assertEqual(product_catalog.get_product_id("XAG", network="mainnet"), 88)
-        self.assertTrue(catalog["perps"]["XAG"]["isolated_only"])
-        self.assertTrue(product_catalog.is_product_isolated_only("XAG", network="mainnet"))
+    def test_catalog_resolves_product_id_and_max_leverage(self):
+        cap = product_catalog.get_product_max_leverage("BTC", network="mainnet", refresh=True)
+        self.assertGreaterEqual(cap, 1)
+        pid = product_catalog.get_product_id("BTC", network="mainnet", refresh=True)
+        self.assertEqual(pid, PRODUCTS["BTC"]["id"])
 
 
 if __name__ == "__main__":

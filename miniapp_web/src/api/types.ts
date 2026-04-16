@@ -1,5 +1,32 @@
 /** API response types — mirrors miniapp_api/models/schemas.py */
 
+/** Perp order / strategy direction — matches `^(long|short)$` on order and strategy requests in schemas.py */
+export type OrderSide = "long" | "short";
+
+/** Runtime strategy ids — matches `StrategyStartRequest.strategy` in schemas.py */
+const STRATEGY_IDS = ["grid", "rgrid", "dn", "vol", "bro"] as const;
+export type StrategyId = (typeof STRATEGY_IDS)[number];
+
+/** Intervals accepted by `GET /api/products/{product}/candles` — see `miniapp_api/candle_intervals.py` */
+const CANDLE_INTERVALS = ["1m", "5m", "15m", "1h", "2h", "4h", "1d", "1w"] as const;
+type CandleInterval = (typeof CANDLE_INTERVALS)[number];
+
+/** Chart selector on product detail; subset of candle API intervals */
+export const PRODUCT_CHART_INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const satisfies ReadonlyArray<CandleInterval>;
+export type ProductChartInterval = (typeof PRODUCT_CHART_INTERVALS)[number];
+
+/** Tab/filter labels for `ProductInfo.category` (API may return other strings). */
+type ProductCategoryFilter =
+  | "perps"
+  | "spot"
+  | "memes"
+  | "defi"
+  | "chains"
+  | "commodities";
+
+/** Home asset list tabs — API categories plus UI-only `all` / `favorites` */
+export type HomeCategoryTabId = "all" | "favorites" | ProductCategoryFilter;
+
 export interface UserResponse {
   telegram_id: number;
   username: string;
@@ -74,38 +101,7 @@ export interface PortfolioSummary {
   open_orders_count: number;
 }
 
-export interface TradeHistoryItem {
-  id: number;
-  product_name: string;
-  side: string;
-  size: number;
-  price: number | null;
-  leverage: number;
-  status: string;
-  pnl: number | null;
-  fees: number;
-  created_at: string | null;
-  filled_at: string | null;
-}
-
-export interface ParseIntentResponse {
-  intent: string | null;
-  product: string | null;
-  side: string | null;
-  size_usd: number | null;
-  price: number | null;
-  leverage: number | null;
-  raw: Record<string, unknown> | null;
-}
-
-export interface OkResponse {
-  ok: boolean;
-  message: string;
-}
-
-// --- Candles ---
-
-export interface Candle {
+interface Candle {
   time: number;
   open: number;
   high: number;
@@ -118,8 +114,6 @@ export interface CandleResponse {
   candles: Candle[];
   error?: string;
 }
-
-// --- Nado Market Quotes ---
 
 export interface CryptoQuote {
   price: number | null;
@@ -137,8 +131,6 @@ export interface QuotesResponse {
   quotes: Record<string, CryptoQuote>;
   error?: string;
 }
-
-// --- Strategies (bot runtime) ---
 
 export interface StrategyBotStatus {
   network: string;
@@ -161,13 +153,16 @@ export interface StrategyActionResponse {
   message?: string;
 }
 
-// --- Voice ---
+export interface VoiceTradeToolArgs {
+  side?: string;
+  product?: string;
+  size_usd?: number;
+}
 
-export interface VoiceMessage {
-  type: "auth" | "audio" | "text" | "end";
-  init_data?: string;
-  data?: string;
-  text?: string;
+export interface VoiceTradeToolResult {
+  status?: string;
+  fill_price?: number;
+  error?: unknown;
 }
 
 export interface VoiceServerMessage {

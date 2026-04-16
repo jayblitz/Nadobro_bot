@@ -1,7 +1,7 @@
 import re
 from typing import Optional
 
-from src.nadobro.config import get_perp_products
+from src.nadobro.config import PRODUCTS, get_perp_products
 
 TRADE_KEYWORDS = ("buy", "sell", "long", "short", "market", "limit")
 
@@ -11,6 +11,13 @@ def _extract_product(text_lower: str, network: str = "mainnet", client=None) -> 
         checks = (symbol.lower(), f"{symbol.lower()}-perp")
         if any(token and re.search(rf"\b{re.escape(token)}\b", text_lower) for token in checks):
             return symbol
+    # Live catalog lists can omit static perps; fall back to PRODUCTS so NL closes still resolve.
+    for name, info in sorted(PRODUCTS.items(), key=lambda kv: -len(kv[0])):
+        if info.get("type") != "perp":
+            continue
+        token = (name or "").strip().lower()
+        if token and re.search(rf"\b{re.escape(token)}\b", text_lower):
+            return name.strip()
     return None
 
 

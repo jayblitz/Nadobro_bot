@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import quote
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -37,6 +37,17 @@ from src.nadobro.config import MIN_TRADE_SIZE_USD
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class _PendingTrade(TypedDict):
+    product: str
+    side: str
+    size_usd: float
+    leverage: float
+
+
+class VoiceSession(TypedDict):
+    pending_trade: _PendingTrade | None
 
 # Session timeout: 5 minutes of silence
 _SESSION_TIMEOUT = 300
@@ -179,7 +190,7 @@ async def _execute_function(
     args: dict,
     telegram_id: int,
     network: str,
-    session: dict[str, Any],
+    session: VoiceSession,
 ) -> dict[str, Any]:
     """Execute a Gemini function call against real services."""
     try:
@@ -416,7 +427,7 @@ async def voice_ws(ws: WebSocket):
 
     username = tg_user.first_name or tg_user.username or "Bro"
 
-    session: dict[str, Any] = {"pending_trade": None}
+    session: VoiceSession = {"pending_trade": None}
 
     # Step 2: Connect to Gemini Live API BEFORE auth_ok so the client does not show
     # a greeting when the upstream connection will fail (e.g. invalid API key on Fly).

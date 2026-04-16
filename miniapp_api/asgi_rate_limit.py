@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 from starlette.responses import JSONResponse
 
 from src.nadobro.services.async_utils import run_blocking
 
 from miniapp_api.ip_utils import client_ip_from_scope
 from miniapp_api.rate_limit import check_rate_limit
+
+logger = logging.getLogger(__name__)
 
 
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -42,6 +46,10 @@ class RateLimitMiddleware:
         try:
             allowed = await run_blocking(check_rate_limit, ip)
         except Exception:
+            logger.exception(
+                "miniapp rate limit middleware failed; allowing request ip=%s",
+                ip,
+            )
             allowed = True
         if not allowed:
             resp = JSONResponse(

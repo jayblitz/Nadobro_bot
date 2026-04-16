@@ -37,13 +37,10 @@ async def lifespan(app: FastAPI):
 
     logger.info("Initialising database pool...")
     get_pool()
-    try:
-        from miniapp_api.rate_limit import ensure_rate_limit_table
+    from miniapp_api.rate_limit import ensure_rate_limit_table
 
-        ensure_rate_limit_table()
-        logger.info("miniapp_rate_limit table ready")
-    except Exception:
-        logger.exception("Could not ensure miniapp_rate_limit table (rate limiting may fail)")
+    ensure_rate_limit_table()
+    logger.info("miniapp_rate_limit table ready")
     logger.info("Mini App API ready")
 
     yield

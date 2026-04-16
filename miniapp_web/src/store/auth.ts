@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api } from "@/api/client";
+import { api, getApiErrorMessage } from "@/api/client";
 import type { UserResponse } from "@/api/types";
 
 interface AuthState {
@@ -23,7 +23,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     } catch (err) {
       set({
         loading: false,
-        error: err instanceof Error ? err.message : "Auth failed",
+        error: getApiErrorMessage(err),
       });
     }
   },

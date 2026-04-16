@@ -27,7 +27,7 @@ async def store_event(
         if options:
             try:
                 options_json = json.dumps([str(x) for x in options if str(x).strip()])
-            except Exception:
+            except (TypeError, ValueError):
                 options_json = None
 
         cursor_id = await conn.fetchval(
@@ -80,7 +80,7 @@ async def poll_events(cursor: Optional[str] = None, limit: int = 25) -> dict:
                 parsed = json.loads(raw_options)
                 if isinstance(parsed, list):
                     options = [str(x) for x in parsed if str(x).strip()]
-            except Exception:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 options = None
 
         event_item = {

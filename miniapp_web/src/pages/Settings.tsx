@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useAuthStore } from "@/store/auth";
-import { api } from "@/api/client";
+import { api, getApiErrorMessage } from "@/api/client";
 import { hapticSuccess, hapticError } from "@/lib/haptics";
 import { clsx } from "clsx";
 
@@ -25,9 +25,9 @@ export default function Settings() {
       await api.post("/api/me/network", { network });
       hapticSuccess();
       await fetchUser();
-    } catch {
+    } catch (err) {
       hapticError();
-      setError("Failed to switch network.");
+      setError(getApiErrorMessage(err));
     } finally {
       setBusy(null);
     }
@@ -40,9 +40,9 @@ export default function Settings() {
       await api.patch("/api/me/settings", { language: lang });
       hapticSuccess();
       await fetchUser();
-    } catch {
+    } catch (err) {
       hapticError();
-      setError("Failed to change language.");
+      setError(getApiErrorMessage(err));
     } finally {
       setBusy(null);
     }
@@ -60,7 +60,6 @@ export default function Settings() {
         </div>
       )}
 
-      {/* Wallet info */}
       <section className="bg-white/5 rounded-xl p-4 mb-4">
         <div className="text-[11px] text-tg-hint mb-1">Wallet</div>
         <div className="text-sm text-white font-mono break-all">
@@ -68,7 +67,6 @@ export default function Settings() {
         </div>
       </section>
 
-      {/* Network toggle */}
       <section className="bg-white/5 rounded-xl p-4 mb-4">
         <div className="text-[11px] text-tg-hint mb-3">Network</div>
         <div className="flex rounded-xl overflow-hidden bg-black/30">
@@ -92,7 +90,6 @@ export default function Settings() {
         </div>
       </section>
 
-      {/* Language */}
       <section className="bg-white/5 rounded-xl p-4 mb-4">
         <div className="text-[11px] text-tg-hint mb-3">Language</div>
         <div className="grid grid-cols-3 gap-2">
@@ -114,7 +111,6 @@ export default function Settings() {
         </div>
       </section>
 
-      {/* Stats */}
       <section className="bg-white/5 rounded-xl p-4">
         <div className="text-[11px] text-tg-hint mb-2">Account Stats</div>
         <div className="flex justify-between text-sm">

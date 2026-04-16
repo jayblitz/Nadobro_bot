@@ -1,9 +1,4 @@
-/**
- * HTTP client for the Mini App API.
- *
- * Automatically attaches the Telegram `initData` as an auth header
- * (`Authorization: tma <initData>`).
- */
+/** Mini App API client; sends `Authorization: tma <initData>` when `initData` exists. */
 
 import { getInitData } from "@/lib/telegram";
 
@@ -17,6 +12,20 @@ class ApiError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+/** Human-readable message from fetch/JSON/API errors (for UI). */
+export function getApiErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    const b = err.body;
+    if (b && typeof b === "object" && "detail" in b) {
+      const d = (b as { detail: unknown }).detail;
+      if (typeof d === "string") return d;
+    }
+    return err.message;
+  }
+  if (err instanceof Error) return err.message;
+  return "Something went wrong";
 }
 
 async function request<T>(
@@ -39,7 +48,18 @@ async function request<T>(
     body: body != null ? JSON.stringify(body) : undefined,
   });
 
-  const json = await res.json().catch(() => null);
+  const text = await res.text();
+  let json: unknown = null;
+  if (text.trim()) {
+    try {
+      json = JSON.parse(text) as unknown;
+    } catch {
+      throw new ApiError(res.status, {
+        detail: "Server returned non-JSON response",
+        raw: text.slice(0, 500),
+      });
+    }
+  }
 
   if (!res.ok) {
     throw new ApiError(res.status, json);

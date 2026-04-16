@@ -3,14 +3,15 @@ import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import { api } from "@/api/client";
 import { hapticImpact, hapticSuccess, hapticError } from "@/lib/haptics";
-import type { ProductInfo, TradeResponse } from "@/api/types";
+import type { OrderSide, ProductInfo, TradeResponse } from "@/api/types";
 import { useMarketStore } from "@/store/market";
 import { Link } from "react-router-dom";
 import TpSlFields, { type TpSlInputMode } from "@/components/trade/TpSlFields";
+import { formatPrice, formatTradeFillSummary, formatUsdFixed } from "@/lib/format";
 
 export default function Trade() {
   const { selectedProduct, selectProduct, prices } = useMarketStore();
-  const [side, setSide] = useState<"long" | "short">("long");
+  const [side, setSide] = useState<OrderSide>("long");
   const [sizeUsd, setSizeUsd] = useState("");
   const [leverage, setLeverage] = useState(5);
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
@@ -24,7 +25,6 @@ export default function Trade() {
   const [slPrice, setSlPrice] = useState("");
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Auto-dismiss trade result after 4 seconds.
   useEffect(() => {
     if (lastResult) {
       clearTimeout(dismissTimer.current);
@@ -89,7 +89,6 @@ export default function Trade() {
 
   return (
     <div className="flex-1 flex flex-col overflow-y-auto hide-scrollbar">
-      {/* Product selector */}
       <div className="flex gap-2 px-4 py-3 overflow-x-auto hide-scrollbar">
         {(products ?? []).map((p) => (
           <button
@@ -107,12 +106,9 @@ export default function Trade() {
         ))}
       </div>
 
-      {/* Price display */}
       <div className="px-4 pb-3">
         <div className="text-3xl font-bold text-white tabular-nums">
-          {currentPrice != null
-            ? `$${currentPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-            : "--"}
+          {formatPrice(currentPrice, selectedProduct)}
         </div>
         <div className="text-xs text-tg-hint mt-0.5">{selectedProduct}-PERP</div>
       </div>
@@ -131,9 +127,7 @@ export default function Trade() {
         </div>
       )}
 
-      {/* Order form */}
       <div className="px-4 flex-1 flex flex-col gap-3">
-        {/* Side toggle */}
         <div className="flex rounded-xl overflow-hidden bg-white/5">
           {(["long", "short"] as const).map((s) => (
             <button
@@ -153,7 +147,6 @@ export default function Trade() {
           ))}
         </div>
 
-        {/* Order type tabs */}
         <div className="flex gap-2">
           {(["market", "limit"] as const).map((t) => (
             <button
@@ -169,7 +162,6 @@ export default function Trade() {
           ))}
         </div>
 
-        {/* Size input */}
         <div className="bg-white/5 rounded-xl px-4 py-3">
           <label className="text-[11px] text-tg-hint block mb-1">Size (USD)</label>
           <input
@@ -187,7 +179,6 @@ export default function Trade() {
           />
         </div>
 
-        {/* Limit price (conditional) */}
         {orderType === "limit" && (
           <div className="bg-white/5 rounded-xl px-4 py-3">
             <label className="text-[11px] text-tg-hint block mb-1">Limit Price</label>
@@ -202,7 +193,6 @@ export default function Trade() {
           </div>
         )}
 
-        {/* Leverage slider */}
         <div className="bg-white/5 rounded-xl px-4 py-3">
           <div className="flex justify-between mb-2">
             <span className="text-[11px] text-tg-hint">Leverage</span>
@@ -238,17 +228,15 @@ export default function Trade() {
           />
         )}
 
-        {/* Order preview */}
         {sizeUsd && Number(sizeUsd) > 0 && (
           <div className="flex justify-between text-xs text-tg-hint px-1">
             <span>Est. margin</span>
             <span className="text-white">
-              ${(Number(sizeUsd) / leverage).toFixed(2)}
+              {formatUsdFixed(Number(sizeUsd) / leverage, 2)}
             </span>
           </div>
         )}
 
-        {/* Result toast */}
         {lastResult && (
           <div
             className={clsx(
@@ -256,14 +244,11 @@ export default function Trade() {
               lastResult.ok ? "bg-long/20 text-long" : "bg-short/20 text-short",
             )}
           >
-            {lastResult.ok
-              ? `Filled ${lastResult.side} ${lastResult.product} @ $${lastResult.fill_price?.toLocaleString() ?? "--"}`
-              : lastResult.error}
+            {lastResult.ok ? formatTradeFillSummary(lastResult) : lastResult.error}
           </div>
         )}
       </div>
 
-      {/* Submit button */}
       <div className="px-4 pb-4 pt-3">
         <button
           onClick={submit}

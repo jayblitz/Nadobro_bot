@@ -361,8 +361,6 @@ async def _handle_nav(query, data, telegram_id, context=None):
 async def _handle_trade(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
-    user = get_user(telegram_id)
-    network = user.network_mode.value if user else "mainnet"
     if not is_new_onboarding_complete(telegram_id):
         await _edit_loc(query,
             "⚠️ Complete setup first (language + accept terms).",
@@ -373,6 +371,8 @@ async def _handle_trade(query, data, telegram_id, context):
             ]),
         )
         return
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
     wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
     if action in ("long", "short", "limit_long", "limit_short") and not wallet_ready:
         await _edit_loc(query,

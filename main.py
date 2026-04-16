@@ -446,7 +446,7 @@ async def run_bot():
 
     stop_event = asyncio.Event()
 
-    def handle_signal(sig, frame):
+    def handle_signal(sig, _frame):
         logger.info(f"Received signal {sig}, shutting down...")
         stop_event.set()
 

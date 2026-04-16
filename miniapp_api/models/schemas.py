@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -107,7 +107,7 @@ class ParseIntentResponse(BaseModel):
     size_usd: Optional[float] = None
     price: Optional[float] = None
     leverage: Optional[float] = None
-    raw: Optional[dict[str, Any]] = None
+    raw: Optional[dict[str, object]] = None
 
 
 # ---------------------------------------------------------------------------

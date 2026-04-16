@@ -16,11 +16,14 @@ We also enforce an expiry window (``auth_date`` must be within the last 24 h).
 import hashlib
 import hmac
 import json
+import logging
 import time
 from typing import Optional
 from urllib.parse import parse_qs, unquote
 
 from miniapp_api.config import TELEGRAM_TOKEN
+
+logger = logging.getLogger(__name__)
 
 # Maximum age (seconds) of a valid initData payload.
 _MAX_AUTH_AGE = 86_400  # 24 hours
@@ -111,5 +114,6 @@ def parse_init_data_unsafe(init_data: str) -> Optional[TelegramUser]:
         if not user_json:
             return None
         return TelegramUser(json.loads(unquote(user_json)))
-    except Exception:
+    except (json.JSONDecodeError, TypeError, KeyError, ValueError, IndexError) as exc:
+        logger.debug("parse_init_data_unsafe failed: %s", exc)
         return None

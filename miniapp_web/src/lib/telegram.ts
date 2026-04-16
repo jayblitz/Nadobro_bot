@@ -1,11 +1,6 @@
-/**
- * Telegram WebApp SDK type declarations and helpers.
- *
- * The SDK is loaded via <script> tag in index.html, exposing
- * `window.Telegram.WebApp`.
- */
+/** Types and helpers for `window.Telegram.WebApp` (script in index.html). */
 
-export interface TelegramWebApp {
+interface TelegramWebApp {
   initData: string;
   initDataUnsafe: {
     user?: {
@@ -88,7 +83,6 @@ export function signalReady(): void {
   if (wa) {
     wa.ready();
     wa.expand();
-    // Use theme-derived bg color; fall back to our dark default.
     const bgColor = wa.themeParams.bg_color || "#0f1923";
     wa.setHeaderColor(bgColor);
     wa.setBackgroundColor(bgColor);

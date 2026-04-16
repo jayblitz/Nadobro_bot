@@ -70,7 +70,6 @@ export default function BottomTabs() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  // Hide tabs on product detail page
   if (location.pathname.startsWith("/product/")) return null;
 
   return (

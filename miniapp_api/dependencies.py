@@ -58,7 +58,7 @@ class CurrentUser:
             import json
             try:
                 settings = json.loads(settings)
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
                 settings = {}
         return bool(settings.get("tos_accepted", False))
 

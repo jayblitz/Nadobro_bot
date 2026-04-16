@@ -2,10 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import { api, ApiError } from "@/api/client";
-import type { ProductInfo, StrategyActionResponse, StrategyBotStatus } from "@/api/types";
+import type {
+  OrderSide,
+  ProductInfo,
+  StrategyActionResponse,
+  StrategyBotStatus,
+  StrategyId,
+} from "@/api/types";
 import { hapticImpact } from "@/lib/haptics";
-
-type StrategyId = "grid" | "rgrid" | "dn" | "vol" | "bro";
 
 interface StrategyCard {
   type: StrategyId;
@@ -53,7 +57,7 @@ export default function Strategies() {
   const [product, setProduct] = useState("BTC");
   const [leverage, setLeverage] = useState(3);
   const [slippage, setSlippage] = useState(1);
-  const [volDirection, setVolDirection] = useState<"long" | "short">("long");
+  const [volDirection, setVolDirection] = useState<OrderSide>("long");
   const [formError, setFormError] = useState<string | null>(null);
 
   const { data: products } = useQuery({
@@ -128,8 +132,8 @@ export default function Strategies() {
   });
 
   const running = status?.running === true;
-  const activeStrategy = status?.strategy as string | undefined;
-  const activeProduct = status?.product as string | undefined;
+  const activeStrategy = status?.strategy ?? undefined;
+  const activeProduct = status?.product ?? undefined;
 
   const maxLev = useMemo(() => {
     const p = products?.find((x) => x.name === product);
@@ -252,7 +256,7 @@ export default function Strategies() {
             <label className="text-[11px] text-tg-hint block mb-1">Direction</label>
             <select
               value={volDirection}
-              onChange={(e) => setVolDirection(e.target.value as "long" | "short")}
+              onChange={(e) => setVolDirection(e.target.value as OrderSide)}
               className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
             >
               <option value="long">Long</option>

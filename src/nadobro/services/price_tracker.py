@@ -216,7 +216,7 @@ def compute_volatility(product: str, window: int = 20) -> Optional[float]:
     return math.sqrt(variance) * 100.0
 
 
-def get_signal_summary(product: str, timeframe_minutes: int = 60) -> Optional[str]:
+def get_signal_summary(product: str) -> Optional[str]:
     rsi = compute_rsi(product)
     if rsi is None:
         return None
@@ -282,7 +282,7 @@ def get_full_technicals(product: str) -> dict:
         "change_15m": compute_price_change(product, 15),
         "change_1h": compute_price_change(product, 60),
         "change_4h": compute_price_change(product, 240),
-        "signal_1h": get_signal_summary(product, 60),
+        "signal_1h": get_signal_summary(product),
     }
 
     spread_history = [p.get("spread_bp", 0) for p in get_history(product, limit=20)]

@@ -13,7 +13,7 @@ interface TpSlFieldsProps {
   onSlPct: (v: string) => void;
   onTpPrice: (v: string) => void;
   onSlPrice: (v: string) => void;
-  /** Only market orders use TP/SL in the API today */
+  /** When set, TP/SL fields are inactive (e.g. limit orders). */
   disabled?: boolean;
 }
 

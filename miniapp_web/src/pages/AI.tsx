@@ -2,7 +2,18 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { clsx } from "clsx";
 import { getInitData } from "@/lib/telegram";
 import { hapticImpact, hapticSuccess, hapticError } from "@/lib/haptics";
-import type { VoiceServerMessage } from "@/api/types";
+import type {
+  VoiceServerMessage,
+  VoiceTradeToolArgs,
+  VoiceTradeToolResult,
+} from "@/api/types";
+
+interface LocalAudioCapture {
+  stream: MediaStream;
+  audioCtx: AudioContext;
+  processor: ScriptProcessorNode;
+  source: MediaStreamAudioSourceNode;
+}
 
 const WS_BASE =
   import.meta.env.VITE_WS_URL ??
@@ -25,7 +36,7 @@ export default function AI() {
   const [, setUsername] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaRecorderRef = useRef<LocalAudioCapture | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioNextStartRef = useRef(0);
   const pendingMicRef = useRef(false);
@@ -92,7 +103,7 @@ export default function AI() {
       source.connect(processor);
       processor.connect(audioCtx.destination);
 
-      mediaRecorderRef.current = { stream, audioCtx, processor, source } as unknown as MediaRecorder;
+      mediaRecorderRef.current = { stream, audioCtx, processor, source };
       setListening(true);
       hapticImpact("medium");
     } catch (err) {
@@ -198,14 +209,16 @@ export default function AI() {
 
         case "function_call":
           if (msg.name && msg.result) {
-            const status = (msg.result as Record<string, unknown>).status;
+            const toolResult = msg.result as VoiceTradeToolResult;
+            const toolArgs = (msg.args ?? {}) as VoiceTradeToolArgs;
+            const status = toolResult.status;
             const resultText =
               status === "filled"
-                ? `Trade executed: ${(msg.args as Record<string, unknown>)?.side} ${(msg.args as Record<string, unknown>)?.product} $${(msg.args as Record<string, unknown>)?.size_usd} @ ${(msg.result as Record<string, unknown>).fill_price}`
+                ? `Trade executed: ${toolArgs.side} ${toolArgs.product} $${toolArgs.size_usd} @ ${toolResult.fill_price}`
                 : status === "closed"
-                  ? `Position closed: ${(msg.args as Record<string, unknown>)?.product}`
+                  ? `Position closed: ${toolArgs.product}`
                   : status === "error" || status === "failed"
-                    ? `Error: ${(msg.result as Record<string, unknown>).error}`
+                    ? `Error: ${String(toolResult.error ?? "")}`
                     : JSON.stringify(msg.result);
             addMessage({
               role: "system",
@@ -251,9 +264,7 @@ export default function AI() {
         if (wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify({ type: "end" }));
         }
-      } catch {
-        /* ignore */
-      }
+      } catch {}
       wsRef.current.close();
       wsRef.current = null;
     }

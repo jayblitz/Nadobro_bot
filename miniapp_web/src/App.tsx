@@ -22,7 +22,6 @@ export default function App() {
 
   useViewportHeight();
 
-  // Signal readiness to Telegram and fetch the user once on mount.
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
@@ -30,7 +29,6 @@ export default function App() {
     fetchUser();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Determine onboarding state once user loads.
   useEffect(() => {
     if (user) {
       setOnboarded(user.tos_accepted);

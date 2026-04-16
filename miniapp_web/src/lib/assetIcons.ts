@@ -1,10 +1,7 @@
-/** Remote asset icons (crypto) + fallback colors for initials. */
-
 const CRYPTO_ICON_CDN =
   "https://cdn.jsdelivr.net/npm/cryptocurrency-icons@0.18.1/svg/color";
 
-/** Fallback circle colors when an icon URL is unavailable. */
-export const ASSET_FALLBACK_COLORS: Record<string, string> = {
+const ASSET_FALLBACK_COLORS: Record<string, string> = {
   BTC: "#F7931A",
   ETH: "#627EEA",
   SOL: "#9945FF",

@@ -23,7 +23,7 @@ def record_snapshot(telegram_id: int, total_equity: float) -> None:
     if raw:
         try:
             history = json.loads(raw)
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError):
             history = []
     ts = time.time()
     history.append({"ts": ts, "equity": float(total_equity)})
@@ -39,7 +39,7 @@ def get_1d_7d_changes(telegram_id: int) -> tuple[Optional[float], Optional[float
         return None, None
     try:
         history = json.loads(raw)
-    except Exception:
+    except (json.JSONDecodeError, TypeError, ValueError):
         return None, None
     if not history:
         return None, None
@@ -82,6 +82,6 @@ def get_history_for_csv(telegram_id: int, limit: int = 200) -> list[dict]:
         return []
     try:
         history = json.loads(raw)
-    except Exception:
+    except (json.JSONDecodeError, TypeError, ValueError):
         return []
     return history[-limit:]

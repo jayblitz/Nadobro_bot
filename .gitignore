@@ -64,6 +64,11 @@ relay/*.session-journal
 relay/.relay_auth_token_generated
 relay/.fly-bootstrap.env
 .claude/
+.DS_Store
+
+# Marketing / Next.js site (local installs)
+nadobro_site/node_modules/
+nadobro_site/.next/
 
 # Telegram Mini App frontend (built in Docker)
 miniapp_web/node_modules/

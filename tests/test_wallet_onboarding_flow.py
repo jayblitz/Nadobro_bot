@@ -1,4 +1,5 @@
 import asyncio
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -55,16 +56,29 @@ class WalletOnboardingFlowTests(unittest.TestCase):
         self.assertTrue(calls)
         self.assertIn("let's get it", calls[0][0].lower())
 
+    @unittest.skipUnless(
+        os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DATABASE_URL"),
+        "PostgreSQL required (set DATABASE_URL or SUPABASE_DATABASE_URL)",
+    )
     def test_trade_callback_shows_wallet_error_when_wallet_missing(self):
+        tid = 9_888_776_655
+        from src.nadobro.db import execute
+        from src.nadobro.services.onboarding_service import set_new_onboarding_tos_accepted
+        from src.nadobro.services.user_service import get_or_create_user
+
         query = SimpleNamespace(edit_message_text=AsyncMock())
         context = SimpleNamespace(user_data={})
-
-        with patch.object(callbacks, "is_new_onboarding_complete", return_value=True), patch.object(
-            callbacks, "ensure_active_wallet_ready", return_value=(False, "Wallet not linked")
-        ):
-            asyncio.run(callbacks._handle_trade(query, "trade:long", 1, context))
+        try:
+            get_or_create_user(tid, username="pytest_wallet_flow")
+            set_new_onboarding_tos_accepted(tid)
+            asyncio.run(callbacks._handle_trade(query, "trade:long", tid, context))
+        finally:
+            execute("DELETE FROM bot_state WHERE key = %s", (f"onboarding_v2:{tid}",))
+            execute("DELETE FROM users WHERE telegram_id = %s", (tid,))
 
         query.edit_message_text.assert_awaited()
+        text = (query.edit_message_text.call_args[0][0] if query.edit_message_text.call_args else "") or ""
+        self.assertIn("Wallet", text)
 
     def test_nav_main_clears_pending_multi_step_state(self):
         query = SimpleNamespace(edit_message_text=AsyncMock())

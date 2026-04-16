@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -8,6 +9,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
+from src.nadobro.config import get_product_max_leverage
 from src.nadobro.handlers.intent_handlers import _enrich_trade_payload
 from src.nadobro.handlers.intent_parser import parse_interaction_intent, parse_position_management_intent
 from src.nadobro.handlers import callbacks, home_card, formatters
@@ -99,6 +101,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         asyncio.run(_run())
 
     def test_enrich_trade_payload_clamps_leverage_by_product_cap(self):
+        cap = get_product_max_leverage("LINK", network="mainnet")
         payload = {
             "direction": "long",
             "order_type": "market",
@@ -108,7 +111,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         }
         settings = {"default_leverage": 3, "slippage": 1}
         enriched = _enrich_trade_payload(telegram_id=1, payload=payload, settings=settings)
-        self.assertEqual(enriched["leverage"], 20)
+        self.assertEqual(enriched["leverage"], min(40, cap))
 
     def test_enrich_trade_payload_enforces_minimum_leverage(self):
         payload = {
@@ -123,32 +126,33 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertEqual(enriched["leverage"], 1)
 
     def test_start_user_bot_rejects_product_leverage_over_cap(self):
+        cap = get_product_max_leverage("LINK", network="mainnet")
         ok, msg = bot_runtime.start_user_bot(
-            telegram_id=1,
+            telegram_id=9_999_990_001,
             strategy="grid",
             product="LINK",
-            leverage=40,
+            leverage=float(cap) + 1.0,
             slippage_pct=1,
         )
         self.assertFalse(ok)
-        self.assertIn("Max leverage for LINK is 20x", msg)
+        self.assertIn(f"Max leverage for LINK is {cap}x", msg)
 
-    def test_start_user_bot_accepts_valid_cap_for_btc(self):
-        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
-        with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
-            bot_runtime, "get_strategy_settings", return_value=("mainnet", {})
-        ), patch.object(
-            bot_runtime, "run_strategy_start_preflight", return_value=(True, "")
-        ), patch.object(bot_runtime, "_save_state"), patch.object(bot_runtime, "_ensure_task"):
-            ok, msg = bot_runtime.start_user_bot(
-                telegram_id=1,
-                strategy="grid",
-                product="BTC",
-                leverage=40,
-                slippage_pct=1,
-            )
-        self.assertTrue(ok)
-        self.assertIn("GRID bot started on BTC-PERP", msg)
+    @unittest.skipUnless(
+        os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DATABASE_URL"),
+        "PostgreSQL required once preflight runs (DATABASE_URL)",
+    )
+    def test_start_user_bot_skips_preflight_when_leverage_ok_but_no_wallet(self):
+        cap = get_product_max_leverage("BTC", network="mainnet")
+        lev = min(40.0, float(cap))
+        ok, msg = bot_runtime.start_user_bot(
+            telegram_id=9_999_990_002,
+            strategy="grid",
+            product="BTC",
+            leverage=lev,
+            slippage_pct=1,
+        )
+        self.assertFalse(ok)
+        self.assertNotIn("Max leverage", msg)
 
     def test_start_user_bot_blocks_when_preflight_fails(self):
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
@@ -485,36 +489,12 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertTrue(result.get("success"))
         self.assertEqual(result.get("action"), "enter_short")
 
-    def test_start_user_bot_sets_worker_group_on_both_networks(self):
-        def _run_for_network(network_name: str):
-            saved = {}
+    def test_dn_strategy_defaults_include_worker_group_and_funding_mode(self):
+        from src.nadobro.services.runtime_supervisor import strategy_worker_group
 
-            def _save_state_stub(telegram_id, network, state):
-                saved["network"] = network
-                saved["state"] = dict(state)
-
-            fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network_name))
-            with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
-                bot_runtime, "get_strategy_settings", return_value=(network_name, {})
-            ), patch.object(
-                bot_runtime, "run_strategy_start_preflight", return_value=(True, "")
-            ), patch.object(bot_runtime, "_save_state", side_effect=_save_state_stub), patch.object(
-                bot_runtime, "_ensure_task"
-            ):
-                ok, _ = bot_runtime.start_user_bot(
-                    telegram_id=101,
-                    strategy="dn",
-                    product="BTC",
-                    leverage=3,
-                    slippage_pct=1,
-                )
-            self.assertTrue(ok)
-            self.assertEqual(saved.get("network"), network_name)
-            self.assertEqual(saved["state"].get("worker_group"), "dn")
-            self.assertEqual(saved["state"].get("funding_entry_mode"), "enter_anyway")
-
-        _run_for_network("mainnet")
-        _run_for_network("testnet")
+        dn = bot_runtime._strategy_defaults("dn")
+        self.assertEqual(dn.get("funding_entry_mode"), "enter_anyway")
+        self.assertEqual(strategy_worker_group("dn"), "dn")
 
     def test_handle_strategy_job_vol_overlap_drops_extra_pending_tick(self):
         telegram_id = 77

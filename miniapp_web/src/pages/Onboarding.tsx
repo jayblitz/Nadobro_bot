@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { hapticImpact, hapticSuccess } from "@/lib/haptics";
-import { api } from "@/api/client";
+import { api, getApiErrorMessage } from "@/api/client";
 import { useAuthStore } from "@/store/auth";
 
 const DOCS_URL = "https://nadobro.gitbook.io/docs";
@@ -179,8 +179,8 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
         hapticSuccess();
         await fetchUser();
         onComplete();
-      } catch {
-        setError("Failed to save. Please try again.");
+      } catch (err) {
+        setError(getApiErrorMessage(err));
         hapticImpact("heavy");
       } finally {
         setSubmitting(false);

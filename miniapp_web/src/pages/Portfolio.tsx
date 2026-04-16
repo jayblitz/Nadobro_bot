@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import { api } from "@/api/client";
 import type { PortfolioSummary } from "@/api/types";
+import { formatUsdFixed } from "@/lib/format";
 import { useAccountStore } from "@/store/account";
 import { useAuthStore } from "@/store/auth";
 
@@ -10,11 +11,6 @@ type OverviewTab = "overview" | "margin" | "history";
 type AccountSubTab = "account" | "pnl" | "volume";
 type Timeframe = "24h" | "7d" | "30d";
 
-function fmtUsd(n: number, digits = 2) {
-  return `$${n.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}`;
-}
-
-/** Decorative gradient area (no historical equity API yet). */
 function EquitySparkline() {
   return (
     <div className="relative h-36 w-full rounded-xl overflow-hidden bg-[#0a0a0a] border border-white/[0.06]">
@@ -45,7 +41,7 @@ function EquitySparkline() {
         />
       </svg>
       <p className="absolute bottom-2 left-3 text-[10px] text-white/35">
-        Illustrative — live equity history coming soon
+        Illustrative (not live data)
       </p>
     </div>
   );
@@ -106,7 +102,6 @@ export default function Portfolio() {
 
   return (
     <div className="flex-1 overflow-y-auto hide-scrollbar bg-black text-white">
-      {/* Header */}
       <div className="px-4 pt-4 pb-2 border-b border-white/[0.06]">
         <h1 className="text-lg font-semibold tracking-tight">Portfolio</h1>
         <p className="text-[11px] text-white/45 mt-0.5">
@@ -115,7 +110,6 @@ export default function Portfolio() {
         </p>
       </div>
 
-      {/* Overview tabs */}
       <div className="flex gap-1 px-4 pt-3 pb-2">
         {(
           [
@@ -140,17 +134,16 @@ export default function Portfolio() {
 
       {overviewTab === "overview" && (
         <>
-          {/* Key metric cards — Nado-style three column */}
           <div className="grid grid-cols-1 gap-2 px-4 sm:grid-cols-3">
             <div className="rounded-xl bg-white/[0.04] border border-white/[0.06] p-4">
               <div className="text-[11px] text-white/45 uppercase tracking-wide">Total equity</div>
-              <div className="text-2xl font-semibold tabular-nums mt-1">{fmtUsd(data.equity)}</div>
+              <div className="text-2xl font-semibold tabular-nums mt-1">{formatUsdFixed(data.equity)}</div>
               <div className="text-[11px] text-white/35 mt-1">24h PnL —</div>
             </div>
             <div className="rounded-xl bg-white/[0.04] border border-white/[0.06] p-4">
               <div className="text-[11px] text-white/45 uppercase tracking-wide">Volume</div>
               <div className="text-xl font-semibold tabular-nums mt-1">
-                {fmtUsd(data.total_volume_usd, 0)}
+                {formatUsdFixed(data.total_volume_usd, 0)}
               </div>
               <div className="text-[11px] text-white/35 mt-1">
                 Fee tier {data.fee_tier_display}
@@ -159,13 +152,12 @@ export default function Portfolio() {
             <div className="rounded-xl bg-white/[0.04] border border-white/[0.06] p-4">
               <div className="text-[11px] text-white/45 uppercase tracking-wide">NLP balance</div>
               <div className="text-xl font-semibold tabular-nums mt-1">
-                {fmtUsd(data.nlp_balance_usd)}
+                {formatUsdFixed(data.nlp_balance_usd)}
               </div>
               <div className="text-[11px] text-white/35 mt-1">APR —</div>
             </div>
           </div>
 
-          {/* Account / PnL / Volume + timeframe */}
           <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-5 pb-2">
             <div className="flex gap-1">
               {(
@@ -200,29 +192,28 @@ export default function Portfolio() {
           </div>
 
           <div className="px-4 pb-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {/* Left: stats */}
             <div className="space-y-0 rounded-xl border border-white/[0.06] overflow-hidden bg-white/[0.02]">
               <div className="flex justify-between px-4 py-3 border-b border-white/[0.06]">
                 <span className="text-[13px] text-white/50">Balance</span>
-                <span className="text-sm font-medium tabular-nums">{fmtUsd(data.balance_usd)}</span>
+                <span className="text-sm font-medium tabular-nums">{formatUsdFixed(data.balance_usd)}</span>
               </div>
               <div className="flex justify-between px-4 py-3 border-b border-white/[0.06]">
                 <span className="text-[13px] text-white/50">Unrealized perp PnL</span>
                 <span className={clsx("text-sm font-medium tabular-nums", pnlColor)}>
                   {data.total_unrealized_pnl >= 0 ? "+" : ""}
-                  {fmtUsd(data.total_unrealized_pnl)}
+                  {formatUsdFixed(data.total_unrealized_pnl)}
                 </span>
               </div>
               <div className="flex justify-between px-4 py-3 border-b border-white/[0.06]">
                 <span className="text-[13px] text-white/50">Unrealized spot PnL</span>
                 <span className={clsx("text-sm font-medium tabular-nums", spotPnlColor)}>
                   {data.unrealized_spot_pnl >= 0 ? "+" : ""}
-                  {fmtUsd(data.unrealized_spot_pnl)}
+                  {formatUsdFixed(data.unrealized_spot_pnl)}
                 </span>
               </div>
               <div className="flex justify-between px-4 py-3 border-b border-white/[0.06]">
                 <span className="text-[13px] text-white/50">Available margin</span>
-                <span className="text-sm font-medium tabular-nums">{fmtUsd(data.available_balance)}</span>
+                <span className="text-sm font-medium tabular-nums">{formatUsdFixed(data.available_balance)}</span>
               </div>
               <div className="px-4 py-3">
                 <div className="flex justify-between items-center mb-2">
@@ -248,7 +239,6 @@ export default function Portfolio() {
               </div>
             </div>
 
-            {/* Right: chart placeholder */}
             <div className="flex flex-col gap-2">
               <EquitySparkline />
               <p className="text-[10px] text-white/35 text-center">
@@ -263,7 +253,7 @@ export default function Portfolio() {
         <div className="px-4 py-4 space-y-3">
           <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
             <div className="text-[11px] text-white/45 uppercase">Margin used (est.)</div>
-            <div className="text-2xl font-semibold mt-1 tabular-nums">{fmtUsd(data.total_margin_used)}</div>
+            <div className="text-2xl font-semibold mt-1 tabular-nums">{formatUsdFixed(data.total_margin_used)}</div>
           </div>
           <p className="text-xs text-white/40 leading-relaxed">
             Margin is estimated from position notionals and leverage stored when your opening order was recorded
@@ -274,12 +264,10 @@ export default function Portfolio() {
 
       {overviewTab === "history" && (
         <div className="px-4 py-8 text-center text-sm text-white/45">
-          Use the bot or future mini-app history for full fills and funding — this tab is reserved for a
-          detailed ledger.
+          Order and funding history is available in the Telegram bot.
         </div>
       )}
 
-      {/* Positions list */}
       <div className="px-4 pb-8 pt-2 border-t border-white/[0.06]">
         <h2 className="text-xs font-semibold text-white/45 uppercase tracking-wide mb-3">
           Open positions ({data.positions.length})

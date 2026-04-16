@@ -3,29 +3,28 @@ import { useParams, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import { createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from "lightweight-charts";
-import { api } from "@/api/client";
+import { api, getApiErrorMessage } from "@/api/client";
 import { hapticImpact, hapticSuccess, hapticError } from "@/lib/haptics";
 import { useMarketStore } from "@/store/market";
-import type {
-  CandleResponse,
-  PriceResponse,
-  ProductInfo,
-  TradeResponse,
-  QuotesResponse,
+import {
+  PRODUCT_CHART_INTERVALS,
+  type CandleResponse,
+  type OrderSide,
+  type PriceResponse,
+  type ProductChartInterval,
+  type ProductInfo,
+  type TradeResponse,
+  type QuotesResponse,
 } from "@/api/types";
 import TpSlFields, { type TpSlInputMode } from "@/components/trade/TpSlFields";
 import AssetAvatar from "@/components/common/AssetAvatar";
-
-const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
-type Interval = (typeof INTERVALS)[number];
-
-function formatPrice(n: number | null | undefined, product?: string): string {
-  if (n == null) return "--";
-  const decimals = product === "DOGE" || product === "XRP" ? 4 : 2;
-  return n >= 1000
-    ? `$${n.toLocaleString(undefined, { maximumFractionDigits: decimals })}`
-    : `$${n.toFixed(decimals)}`;
-}
+import {
+  formatFundingRate,
+  formatPrice,
+  formatSignedPct2,
+  formatTradeFillSummary,
+  formatUsdFixed,
+} from "@/lib/format";
 
 export default function ProductDetail() {
   const { product } = useParams<{ product: string }>();
@@ -35,8 +34,8 @@ export default function ProductDetail() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
 
-  const [interval, setInterval_] = useState<Interval>("1h");
-  const [side, setSide] = useState<"long" | "short">("long");
+  const [interval, setInterval_] = useState<ProductChartInterval>("1h");
+  const [side, setSide] = useState<OrderSide>("long");
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [sizeUsd, setSizeUsd] = useState("");
   const [limitPrice, setLimitPrice] = useState("");
@@ -59,7 +58,6 @@ export default function ProductDetail() {
   );
   const maxLev = productInfo?.max_leverage ?? 20;
 
-  // 24h change
   const { data: quotesData } = useQuery({
     queryKey: ["quotes"],
     queryFn: () => api.get<QuotesResponse>("/api/quotes"),
@@ -69,7 +67,6 @@ export default function ProductDetail() {
   const change24h = quoteInfo?.change_24h;
   const fundingRate = quoteInfo?.funding_rate;
 
-  // Auto-dismiss trade result
   useEffect(() => {
     if (lastResult) {
       clearTimeout(dismissTimer.current);
@@ -78,7 +75,6 @@ export default function ProductDetail() {
     return () => clearTimeout(dismissTimer.current);
   }, [lastResult]);
 
-  // Fetch candles
   const { data: candleData } = useQuery({
     queryKey: ["candles", productName, interval],
     queryFn: () =>
@@ -89,7 +85,6 @@ export default function ProductDetail() {
     refetchInterval: interval === "1m" ? 30_000 : 120_000,
   });
 
-  // Create chart
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
@@ -152,7 +147,6 @@ export default function ProductDetail() {
     };
   }, [productName]);
 
-  // Update candle data
   useEffect(() => {
     if (candleData?.candles && candleSeriesRef.current) {
       candleSeriesRef.current.setData(
@@ -165,7 +159,6 @@ export default function ProductDetail() {
     }
   }, [candleData]);
 
-  // Submit order
   const submit = useCallback(async () => {
     if (!sizeUsd || Number(sizeUsd) <= 0) return;
     setSubmitting(true);
@@ -205,9 +198,9 @@ export default function ProductDetail() {
       } else {
         hapticError();
       }
-    } catch {
+    } catch (err) {
       hapticError();
-      setLastResult({ ok: false, error: "Network error" });
+      setLastResult({ ok: false, error: getApiErrorMessage(err) });
     } finally {
       setSubmitting(false);
     }
@@ -227,7 +220,6 @@ export default function ProductDetail() {
 
   return (
     <div className="flex-1 flex flex-col overflow-y-auto hide-scrollbar">
-      {/* Top bar */}
       <div className="flex items-center gap-3 px-4 pt-3 pb-2">
         <button
           onClick={() => navigate(-1)}
@@ -256,7 +248,6 @@ export default function ProductDetail() {
         </div>
       </div>
 
-      {/* Price + change */}
       <div className="px-4 pb-2">
         <div className="text-3xl font-bold text-white tabular-nums">
           {formatPrice(currentPrice, productName)}
@@ -271,21 +262,21 @@ export default function ProductDetail() {
                 : "text-short",
           )}
         >
-          {change24h != null
-            ? `${change24h >= 0 ? "+" : ""}${change24h.toFixed(2)}%`
-            : ""}
+          {change24h != null ? formatSignedPct2(change24h) : ""}
           <span className="text-tg-hint ml-1 text-xs">24h</span>
         </span>
         {fundingRate != null && (
           <span className="text-xs text-tg-hint ml-3">
-            Funding: <span className={clsx(fundingRate >= 0 ? "text-long" : "text-short")}>{(fundingRate * 100).toFixed(4)}%</span>
+            Funding:{" "}
+            <span className={clsx(fundingRate >= 0 ? "text-long" : "text-short")}>
+              {formatFundingRate(fundingRate)}
+            </span>
           </span>
         )}
       </div>
 
-      {/* Interval selector */}
       <div className="flex gap-1 px-4 mb-2">
-        {INTERVALS.map((iv) => (
+        {PRODUCT_CHART_INTERVALS.map((iv) => (
           <button
             key={iv}
             onClick={() => setInterval_(iv)}
@@ -301,10 +292,8 @@ export default function ProductDetail() {
         ))}
       </div>
 
-      {/* Chart */}
       <div ref={chartContainerRef} className="mx-4 rounded-xl overflow-hidden bg-white/[0.02] mb-4" />
 
-      {/* Result toast */}
       {lastResult && (
         <div
           className={clsx(
@@ -312,13 +301,10 @@ export default function ProductDetail() {
             lastResult.ok ? "bg-long/20 text-long" : "bg-short/20 text-short",
           )}
         >
-          {lastResult.ok
-            ? `Filled ${lastResult.side} ${lastResult.product} @ $${lastResult.fill_price?.toLocaleString() ?? "--"}`
-            : lastResult.error}
+          {lastResult.ok ? formatTradeFillSummary(lastResult) : lastResult.error}
         </div>
       )}
 
-      {/* Order form toggle */}
       {!showOrderForm ? (
         <div className="flex gap-3 px-4 mt-auto pb-4">
           <button
@@ -343,9 +329,7 @@ export default function ProductDetail() {
           </button>
         </div>
       ) : (
-        /* Expanded order form */
         <div className="px-4 pb-4 flex flex-col gap-3">
-          {/* Side toggle */}
           <div className="flex rounded-xl overflow-hidden bg-white/5">
             {(["long", "short"] as const).map((s) => (
               <button
@@ -365,7 +349,6 @@ export default function ProductDetail() {
             ))}
           </div>
 
-          {/* Order type tabs */}
           <div className="flex gap-2">
             {(["market", "limit"] as const).map((t) => (
               <button
@@ -381,7 +364,6 @@ export default function ProductDetail() {
             ))}
           </div>
 
-          {/* Size input */}
           <div className="bg-white/5 rounded-xl px-4 py-3">
             <label className="text-[11px] text-tg-hint block mb-1">
               Size (USD)
@@ -401,7 +383,6 @@ export default function ProductDetail() {
             />
           </div>
 
-          {/* Limit price */}
           {orderType === "limit" && (
             <div className="bg-white/5 rounded-xl px-4 py-3">
               <label className="text-[11px] text-tg-hint block mb-1">
@@ -418,7 +399,6 @@ export default function ProductDetail() {
             </div>
           )}
 
-          {/* Leverage slider */}
           <div className="bg-white/5 rounded-xl px-4 py-3">
             <div className="flex justify-between mb-2">
               <span className="text-[11px] text-tg-hint">Leverage</span>
@@ -454,17 +434,15 @@ export default function ProductDetail() {
             />
           )}
 
-          {/* Est. margin */}
           {sizeUsd && Number(sizeUsd) > 0 && (
             <div className="flex justify-between text-xs text-tg-hint px-1">
               <span>Est. margin</span>
               <span className="text-white">
-                ${(Number(sizeUsd) / leverage).toFixed(2)}
+                {formatUsdFixed(Number(sizeUsd) / leverage, 2)}
               </span>
             </div>
           )}
 
-          {/* Buttons */}
           <div className="flex gap-3">
             <button
               onClick={() => setShowOrderForm(false)}
