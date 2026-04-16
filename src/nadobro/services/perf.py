@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_SAMPLES = 400
 _metrics: dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_SAMPLES))
+_counters: dict[str, int] = defaultdict(int)
 _lock = threading.Lock()
 
 
@@ -20,6 +21,22 @@ def record_metric(metric: str, value_ms: float) -> None:
         return
     with _lock:
         _metrics[metric].append(val)
+
+
+def increment_counter(counter: str, value: int = 1) -> None:
+    try:
+        delta = int(value)
+    except (TypeError, ValueError):
+        return
+    if delta <= 0:
+        return
+    with _lock:
+        _counters[counter] += delta
+
+
+def counters_snapshot() -> dict[str, int]:
+    with _lock:
+        return dict(_counters)
 
 
 @contextmanager
@@ -64,7 +81,13 @@ def snapshot() -> dict[str, dict]:
 
 def summary_lines(top_n: int = 8) -> list[str]:
     snap = snapshot()
+    ctrs = counters_snapshot()
+    counter_lines = [
+        f"{name}: count={count}" for name, count in sorted(ctrs.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    ]
     if not snap:
+        if counter_lines:
+            return counter_lines
         return ["No performance samples yet."]
     ranked = sorted(snap.items(), key=lambda kv: kv[1]["p95_ms"], reverse=True)
     lines = []
@@ -73,6 +96,7 @@ def summary_lines(top_n: int = 8) -> list[str]:
             f"{metric}: p50={data['p50_ms']}ms p95={data['p95_ms']}ms "
             f"avg={data['avg_ms']}ms n={data['count']}"
         )
+    lines.extend(counter_lines)
     return lines
 
 

@@ -49,6 +49,8 @@ from src.nadobro.services.points_service import (
     request_points_refresh,
     relay_user_reply_to_lowiqpts,
 )
+from src.nadobro.services.managed_agent_state import is_managed_agent_enabled
+from src.nadobro.services.managed_agent_service import handle_managed_agent_turn
 
 
 async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
@@ -78,7 +80,7 @@ from src.nadobro.handlers.intent_handlers import (
 )
 from src.nadobro.handlers.intent_parser import parse_interaction_intent
 from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.perf import timed_metric, log_slow
+from src.nadobro.services.perf import timed_metric, log_slow, increment_counter
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +450,9 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
         return
 
     if await _handle_interaction_intent_message(update, context, telegram_id, text):
+        return
+
+    if await _handle_managed_agent_message(update, context, telegram_id, username, text):
         return
 
     await _handle_nado_question(update, context, text)
@@ -1611,6 +1616,29 @@ async def _handle_nado_question(update, context, question):
                 await typing_task
             except Exception:
                 pass
+
+
+async def _handle_managed_agent_message(update, context, telegram_id, username, text):
+    if not is_managed_agent_enabled(telegram_id):
+        return False
+
+    increment_counter("managed_agent.turn.received")
+    with timed_metric("managed_agent.turn"):
+        result = await handle_managed_agent_turn(
+            telegram_id=telegram_id,
+            text=text,
+            username=username,
+        )
+    if not result.get("handled"):
+        increment_counter("managed_agent.turn.unhandled")
+        return False
+
+    increment_counter("managed_agent.turn.handled")
+    route = str(result.get("route") or "unknown")
+    increment_counter(f"managed_agent.route.{route}")
+    reply_markup = persistent_menu_kb() if result.get("show_menu") else None
+    await _reply_loc(update.message, result.get("response", "Done."), reply_markup=reply_markup)
+    return True
 
 
 async def _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
