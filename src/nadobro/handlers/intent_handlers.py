@@ -10,6 +10,7 @@ from src.nadobro.i18n import localize_text, get_active_language
 from src.nadobro.handlers.formatters import (
     escape_md,
     build_trade_preview_text,
+    fmt_close_all_confirm,
     fmt_bracket_result,
     fmt_limit_close_result,
     humanize_exchange_error,
@@ -360,8 +361,7 @@ async def handle_position_management_intent(update, context: CallbackContext, te
         context.user_data["pending_text_close_all"] = True
         try:
             await update.message.reply_text(
-                "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?\n\n"
-                "Type `confirm` to execute or `cancel` to discard\\.",
+                fmt_close_all_confirm() + "\n\nType `confirm` to execute or `cancel` to discard\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=confirm_close_all_kb(),
             )

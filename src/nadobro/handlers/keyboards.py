@@ -174,11 +174,11 @@ def status_kb():
 def portfolio_kb(has_positions: bool = False):
     rows = [
         [
-            InlineKeyboardButton("📌 Positions", callback_data="pos:view"),
-            InlineKeyboardButton("📜 History", callback_data="portfolio:history"),
+            InlineKeyboardButton("📌 Open Positions", callback_data="pos:view"),
+            InlineKeyboardButton("📜 Trade History", callback_data="portfolio:history"),
         ],
         [
-            InlineKeyboardButton("📊 Analytics", callback_data="portfolio:analytics"),
+            InlineKeyboardButton("📊 Performance", callback_data="portfolio:analytics"),
             InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
         ],
     ]
@@ -198,8 +198,8 @@ def portfolio_history_kb(page: int = 0, has_more: bool = False):
     if nav_row:
         rows.append(nav_row)
     rows.append([
-        InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
-        InlineKeyboardButton("📊 Analytics", callback_data="portfolio:analytics"),
+        InlineKeyboardButton("📁 Back to Portfolio", callback_data="portfolio:view"),
+        InlineKeyboardButton("📊 View Performance", callback_data="portfolio:analytics"),
     ])
     rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
@@ -208,8 +208,8 @@ def portfolio_history_kb(page: int = 0, has_more: bool = False):
 def portfolio_analytics_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
-            InlineKeyboardButton("📜 History", callback_data="portfolio:history"),
+            InlineKeyboardButton("📁 Back to Portfolio", callback_data="portfolio:view"),
+            InlineKeyboardButton("📜 View History", callback_data="portfolio:history"),
         ],
         [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
     ])
@@ -330,7 +330,7 @@ def trade_card_direction_kb(session_id: str):
             InlineKeyboardButton("🔴 Short", callback_data=trade_card_cb(session_id, "direction", "short")),
         ],
         [
-            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+            InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
             InlineKeyboardButton("❌ Cancel", callback_data=trade_card_cb(session_id, "cancel")),
         ],
     ])
@@ -344,7 +344,7 @@ def trade_card_order_type_kb(session_id: str):
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
-            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+            InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
         ],
     ])
 
@@ -361,7 +361,7 @@ def trade_card_product_kb(session_id: str, network: str = "mainnet"):
         rows.append(row)
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
-        InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+        InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -380,7 +380,7 @@ def trade_card_leverage_kb(session_id: str, product: str = "BTC"):
         rows.append(row)
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
-        InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+        InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -409,7 +409,7 @@ def trade_card_limit_price_input_kb(session_id: str):
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
-            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+            InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
         ],
     ])
 
@@ -422,7 +422,7 @@ def trade_card_tpsl_kb(session_id: str):
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
-            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+            InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
         ],
     ])
 
@@ -438,7 +438,7 @@ def trade_card_tpsl_edit_kb(session_id: str):
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
-            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+            InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
         ],
     ])
 
@@ -447,7 +447,7 @@ def trade_card_text_input_kb(session_id: str):
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
-            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+            InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
         ],
     ])
 
@@ -460,7 +460,7 @@ def trade_card_confirm_kb(session_id: str):
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
-            InlineKeyboardButton("🏠 Back Home", callback_data=trade_card_cb(session_id, "home")),
+            InlineKeyboardButton("🏠 Home", callback_data=trade_card_cb(session_id, "home")),
         ],
     ])
 
@@ -563,8 +563,8 @@ def wallet_kb_not_linked():
 def alerts_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔔 Set Alert", callback_data="alert:set"),
-            InlineKeyboardButton("📋 My Alerts", callback_data="alert:view"),
+            InlineKeyboardButton("🔔 Create Alert", callback_data="alert:set"),
+            InlineKeyboardButton("📋 Active Alerts", callback_data="alert:view"),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data="nav:main"),
@@ -633,7 +633,7 @@ def settings_kb(leverage=1, slippage=1):
             InlineKeyboardButton("🌐 Language", callback_data="settings:language_menu"),
         ],
         [
-            InlineKeyboardButton(f"⚡ Default Leverage: {leverage}x", callback_data="settings:leverage_menu"),
+            InlineKeyboardButton(f"⚡ Leverage: {leverage}x", callback_data="settings:leverage_menu"),
         ],
         [
             InlineKeyboardButton(f"📊 Slippage: {slippage}%", callback_data="settings:slippage_menu"),
@@ -778,7 +778,12 @@ def points_followup_options_kb(options: list[str]):
     return InlineKeyboardMarkup(rows)
 
 
-def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", available_products: list[str] | None = None):
+def strategy_action_kb(
+    strategy_id: str,
+    selected_product: str = "BTC",
+    available_products: list[str] | None = None,
+    is_running: bool = False,
+):
     if strategy_id == "dn":
         products = ["BTC", "ETH"]
     else:
@@ -800,38 +805,31 @@ def strategy_action_kb(strategy_id: str, selected_product: str = "BTC", availabl
     ]
     rows = [
         [
-            InlineKeyboardButton("✅ Arm Strategy", callback_data=f"strategy:activate:{strategy_id}"),
-            InlineKeyboardButton("⚙️ Tune Risk", callback_data="settings:risk_menu"),
-        ],
-        [
-            InlineKeyboardButton("🧩 Edit Parameters", callback_data=f"strategy:config:{strategy_id}"),
-        ],
-        [
-            *pair_buttons,
-        ],
-        [
             InlineKeyboardButton(
-                f"🚀 Launch {selected}",
+                f"🚀 Start {selected}",
                 callback_data=f"strategy:start:{strategy_id}:{selected}",
             ),
         ],
+        [*pair_buttons],
         [
-            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data=f"strategy:preview:{strategy_id}"),
-        ],
-        [
-            InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status"),
-            InlineKeyboardButton("🛑 Stop Runtime", callback_data="strategy:stop"),
+            InlineKeyboardButton("🎯 Choose Asset", callback_data=f"strategy:custom:{strategy_id}:0"),
+            InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}"),
         ],
     ]
     if strategy_id != "dn":
-        rows.insert(3, [InlineKeyboardButton("🎛️ Custom Asset", callback_data=f"strategy:custom:{strategy_id}:0")])
+        pass
+    else:
+        rows[2] = [InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}")]
     if strategy_id == "vol":
-        rows[4] = [
-            InlineKeyboardButton(f"🚀 Long {selected}", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),
-            InlineKeyboardButton(f"🚀 Short {selected}", callback_data=f"strategy:start:{strategy_id}:{selected}:short"),
+        rows[0] = [
+            InlineKeyboardButton(f"🚀 Start Long", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),
+            InlineKeyboardButton(f"🚀 Start Short", callback_data=f"strategy:start:{strategy_id}:{selected}:short"),
         ]
-    if strategy_id == "vol":
-        rows.append([InlineKeyboardButton("🏆 Points Impact", callback_data="points:view")])
+    if is_running:
+        rows.append([
+            InlineKeyboardButton("📊 Runtime", callback_data="strategy:status"),
+            InlineKeyboardButton("🛑 Stop", callback_data="strategy:stop"),
+        ])
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
         InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
@@ -882,61 +880,90 @@ def strategy_product_picker_kb(
     return InlineKeyboardMarkup(rows)
 
 
-def bro_action_kb():
-    return InlineKeyboardMarkup([
+def bro_action_kb(is_running: bool = False):
+    rows = [
+        [InlineKeyboardButton("🚀 Start Alpha Agent", callback_data="strategy:start:bro:MULTI")],
         [
-            InlineKeyboardButton("🚀 Launch Bro Mode", callback_data="strategy:start:bro:MULTI"),
-        ],
-        [
-            InlineKeyboardButton("⚙️ Configure", callback_data="bro:config"),
-            InlineKeyboardButton("📊 Status", callback_data="bro:status"),
-        ],
-        [
-            InlineKeyboardButton("🧠 Why?", callback_data="bro:explain"),
+            InlineKeyboardButton("⚙️ Advanced", callback_data="bro:config"),
             InlineKeyboardButton("📋 Game Plan", callback_data="bro:gameplan"),
         ],
+        [InlineKeyboardButton("🐺 HOWL Report", callback_data="bro:howl")],
+    ]
+    if is_running:
+        rows.append([
+            InlineKeyboardButton("📊 Runtime", callback_data="strategy:status"),
+            InlineKeyboardButton("🛑 Stop", callback_data="strategy:stop"),
+        ])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def bro_config_menu_kb():
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🐺 HOWL Report", callback_data="bro:howl"),
+            InlineKeyboardButton("😎 Preset", callback_data="bro:config_section:preset"),
+            InlineKeyboardButton("🛡 Risk", callback_data="bro:config_section:risk"),
         ],
         [
-            InlineKeyboardButton("📡 Runtime Status", callback_data="strategy:status"),
-            InlineKeyboardButton("🛑 Stop Runtime", callback_data="strategy:stop"),
+            InlineKeyboardButton("📊 Exits", callback_data="bro:config_section:exits"),
         ],
         [
-            InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("◀ Back", callback_data="strategy:preview:bro"),
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
         ],
     ])
 
 
-def bro_config_kb():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("😎 Chill Bro", callback_data="bro:profile:chill"),
-            InlineKeyboardButton("🤙 Normal Bro", callback_data="bro:profile:normal"),
-            InlineKeyboardButton("🔥 Degen Bro", callback_data="bro:profile:degen"),
-        ],
-        [
-            InlineKeyboardButton("💰 Budget", callback_data="bro:set:budget_usd"),
-            InlineKeyboardButton("⚡ Risk Level", callback_data="bro:set:risk_level"),
-        ],
-        [
-            InlineKeyboardButton("🎯 Confidence", callback_data="bro:set:min_confidence"),
-            InlineKeyboardButton("📐 Max Leverage", callback_data="bro:set:leverage_cap"),
-        ],
-        [
-            InlineKeyboardButton("📊 TP/SL", callback_data="bro:set:tp_sl"),
-            InlineKeyboardButton("🔢 Max Positions", callback_data="bro:set:max_positions"),
-        ],
-        [
-            InlineKeyboardButton("Conservative", callback_data="bro:risk:conservative"),
-            InlineKeyboardButton("Balanced", callback_data="bro:risk:balanced"),
-            InlineKeyboardButton("Aggressive", callback_data="bro:risk:aggressive"),
-        ],
-        [
-            InlineKeyboardButton("◀ Back", callback_data="strategy:preview:bro"),
-        ],
-    ])
+def bro_config_section_kb(section: str):
+    if section == "preset":
+        rows = [
+            [
+                InlineKeyboardButton("😎 Chill", callback_data="bro:profile:chill"),
+                InlineKeyboardButton("🤙 Normal", callback_data="bro:profile:normal"),
+                InlineKeyboardButton("🔥 Degen", callback_data="bro:profile:degen"),
+            ],
+        ]
+    elif section == "risk":
+        rows = [
+            [
+                InlineKeyboardButton("Conservative", callback_data="bro:risk:conservative"),
+                InlineKeyboardButton("Balanced", callback_data="bro:risk:balanced"),
+                InlineKeyboardButton("Aggressive", callback_data="bro:risk:aggressive"),
+            ],
+            [
+                InlineKeyboardButton("💰 Budget", callback_data="bro:set:budget_usd"),
+                InlineKeyboardButton("🎯 Confidence", callback_data="bro:set:min_confidence"),
+            ],
+            [
+                InlineKeyboardButton("📐 Max Leverage", callback_data="bro:set:leverage_cap"),
+                InlineKeyboardButton("🔢 Max Positions", callback_data="bro:set:max_positions"),
+            ],
+            [
+                InlineKeyboardButton("⚡ Risk Style", callback_data="bro:config_section:risk_style"),
+            ],
+        ]
+    elif section == "risk_style":
+        rows = [
+            [
+                InlineKeyboardButton("Conservative", callback_data="bro:set_text:risk_level:conservative"),
+                InlineKeyboardButton("Balanced", callback_data="bro:set_text:risk_level:balanced"),
+            ],
+            [
+                InlineKeyboardButton("Aggressive", callback_data="bro:set_text:risk_level:aggressive"),
+            ],
+        ]
+    else:
+        rows = [
+            [
+                InlineKeyboardButton("📊 TP / SL", callback_data="bro:set:tp_sl"),
+            ],
+        ]
+
+    rows.append([InlineKeyboardButton("◀ Back", callback_data="bro:config")])
+    return InlineKeyboardMarkup(rows)
 
 
 def howl_approval_kb(suggestion_count: int):

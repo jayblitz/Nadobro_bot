@@ -7,7 +7,14 @@ from src.nadobro.i18n import language_context, get_user_language, localize_text,
 from src.nadobro.services.user_service import get_or_create_user, get_user
 
 INTRO_VIDEO_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "intro_video.mov")
-from src.nadobro.handlers.formatters import escape_md, fmt_help, fmt_status_overview, fmt_ops_overview
+from src.nadobro.handlers.formatters import (
+    fmt_dashboard_home,
+    fmt_help,
+    fmt_ops_overview,
+    fmt_revoke_card,
+    fmt_status_overview,
+    fmt_stop_all_result,
+)
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb,
     onboarding_language_kb,
@@ -47,11 +54,6 @@ We generate a secure 1CT signing key for your account. Your main wallet keys are
 
 Ready?"""
 
-DASHBOARD_MSG = """🤖 Nadobro Command Center online.
-
-Open a module below to trade, review portfolio and points, manage strategies, and adjust risk settings."""
-
-
 async def cmd_start(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     username = update.effective_user.username
@@ -88,14 +90,19 @@ async def cmd_start(update: Update, context: CallbackContext):
             await _send_dashboard_card(update, context, telegram_id)
             return
         await update.message.reply_text(
-            localize_text(DASHBOARD_MSG, lang),
+            localize_text(fmt_dashboard_home(), lang),
+            parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(persistent_menu_kb(), lang),
         )
 
 
 async def _send_dashboard_card(update: Update, context: CallbackContext, telegram_id: int):
     lang = get_active_language()
-    await update.message.reply_text(localize_text(DASHBOARD_MSG, lang), reply_markup=localize_markup(home_card_kb(), lang))
+    await update.message.reply_text(
+        localize_text(fmt_dashboard_home(), lang),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=localize_markup(home_card_kb(), lang),
+    )
 
 
 async def cmd_help(update: Update, context: CallbackContext):
@@ -169,10 +176,10 @@ async def cmd_stop_all(update: Update, context: CallbackContext):
     with language_context(get_user_language(telegram_id)):
         lang = get_active_language()
         ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
-        prefix = "🛑" if ok else "⚠️"
         close_msg = localize_text("To close open positions, use the Positions menu.", lang)
         await update.message.reply_text(
-            f"{prefix} {msg}\n\n{close_msg}",
+            localize_text(fmt_stop_all_result(ok, msg, close_msg), lang),
+            parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(persistent_menu_kb(), lang),
         )
 
@@ -181,13 +188,10 @@ async def cmd_revoke(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     with language_context(get_user_language(telegram_id)):
         lang = get_active_language()
-        msg = localize_text(
-            "🔄 *Revoke 1CT Key (Nado)*\n\n"
-            "1. Open Nado → Settings\n"
-            "2. 1-Click Trading → Advanced 1CT\n"
-            "3. Disable the toggle and save\n\n"
-            "Your main wallet and funds stay safe. You can link again anytime via Wallet.", lang
+        await update.message.reply_text(
+            localize_text(fmt_revoke_card(), lang),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=localize_markup(persistent_menu_kb(), lang),
         )
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=localize_markup(persistent_menu_kb(), lang))
 
 

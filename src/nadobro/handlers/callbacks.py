@@ -7,9 +7,11 @@ from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
 from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language, _ACTIVE_LANG
 from src.nadobro.handlers.formatters import (
-    escape_md, fmt_positions,
+    escape_md, fmt_alert_menu_intro, fmt_alert_product_prompt, fmt_alert_target_prompt,
+    fmt_close_all_confirm, fmt_dashboard_home, fmt_mode_view, fmt_positions,
     fmt_trade_preview, fmt_trade_result,
-    fmt_wallet_info, fmt_alerts, fmt_portfolio,
+    fmt_wallet_balance_card, fmt_wallet_balance_error, fmt_wallet_connect_card,
+    fmt_wallet_info, fmt_alerts, fmt_portfolio, fmt_wallet_revoke_steps_card,
     fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard,
     fmt_trade_history, fmt_analytics,
 )
@@ -227,13 +229,15 @@ We generate a secure 1CT signing key for your account. Your main wallet keys are
 
 Ready?"""
 
-_ONB_DASHBOARD_MSG = """🚀 You're all set! Pick a module below to trade, review portfolio and points, or launch automation."""
-
-
 async def _handle_onb_new(query, data, telegram_id, context):
     if data == "onb:accept_tos":
         set_new_onboarding_tos_accepted(telegram_id)
-        await _edit_loc(query, _ONB_DASHBOARD_MSG, reply_markup=home_card_kb())
+        await _edit_loc(
+            query,
+            fmt_dashboard_home(),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=home_card_kb(),
+        )
         return
     if data.startswith("onb:lang:"):
         parts = data.split(":")
@@ -616,7 +620,7 @@ async def _handle_positions(query, data, telegram_id, context):
 
     elif action == "close_all":
         await _edit_loc(query, 
-            "⚠️ *Close All Orders*\n\nAre you sure?",
+            fmt_close_all_confirm(),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
         )
@@ -629,6 +633,10 @@ async def _handle_positions(query, data, telegram_id, context):
 async def _handle_portfolio(query, data, telegram_id):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "view"
+    user = get_user(telegram_id)
+    mode_label = None
+    if user:
+        mode_label = user.network_mode.value.upper()
 
     if action == "history":
         try:
@@ -638,7 +646,7 @@ async def _handle_portfolio(query, data, telegram_id):
         PAGE_SIZE = 10
         trades = await run_blocking(get_trade_history, telegram_id, limit=500)
         has_more = len(trades) > (page + 1) * PAGE_SIZE
-        msg = fmt_trade_history(trades, page=page, page_size=PAGE_SIZE)
+        msg = fmt_trade_history(trades, page=page, page_size=PAGE_SIZE, mode_label=mode_label)
         try:
             await _edit_loc(query,
                 msg,
@@ -657,7 +665,7 @@ async def _handle_portfolio(query, data, telegram_id):
         except Exception as e:
             logger.warning("portfolio_analytics_failed user=%s err=%s", telegram_id, e)
             stats = {}
-        msg = fmt_analytics(stats)
+        msg = fmt_analytics(stats, mode_label=mode_label)
         try:
             await _edit_loc(query,
                 msg,
@@ -737,17 +745,7 @@ async def _handle_wallet(query, data, telegram_id, context):
             context.user_data["wallet_flow"] = "awaiting_main_address"
             context.user_data["wallet_linked_signer_pk"] = pk_hex
             context.user_data["wallet_linked_signer_address"] = account.address
-            msg = (
-                "👛 *Wallet Connect*\n\n"
-                "*Step 1:* Go to https://app.nado.xyz → connect wallet → deposit ≥ $5 USDT0\n\n"
-                "*Step 2:* Go to Settings → 1-Click Trading → Advanced 1CT\n\n"
-                "*Step 3:* Paste this key into the *1CT Private Key* field:\n\n"
-                f"`{pk_hex}`\n\n"
-                "*Step 4:* Enable the toggle, click *Save*, and confirm the transaction in your wallet (1 USDT0 fee)\n\n"
-                "Once saved, reply here with your *main wallet address* (0x...).\n\n"
-                "_This key is for trading only — it cannot withdraw your funds._"
-            )
-            await _edit_loc(query, msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
+            await _edit_loc(query, fmt_wallet_connect_card(pk_hex), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=wallet_kb_not_linked())
             return
         msg = fmt_wallet_info(info)
         await _edit_loc(query, 
@@ -759,27 +757,20 @@ async def _handle_wallet(query, data, telegram_id, context):
         client = get_user_readonly_client(telegram_id)
         if not client:
             await _edit_loc(query, 
-                "💰 Link your wallet first to check balance.",
+                fmt_wallet_balance_error(),
+                parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=wallet_kb(),
             )
             return
         try:
             bal = client.get_balance()
             usdt = (bal.get("balances") or {}).get(0, 0) or (bal.get("balances") or {}).get("0", 0)
-            msg = f"💰 Balance: ${float(usdt or 0):,.2f} USDT0"
+            msg = fmt_wallet_balance_card(float(usdt or 0))
         except Exception:
-            msg = "Could not fetch balance. Try again."
-        await _edit_loc(query, msg, reply_markup=wallet_kb())
+            msg = fmt_wallet_balance_error()
+        await _edit_loc(query, msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=wallet_kb())
     elif action == "revoke_steps":
-        revoke_msg = (
-            "🔄 *Revoke 1CT Key (Nado)*\n\n"
-            "1. Open Nado → Settings\n"
-            "2. 1-Click Trading → Advanced 1CT\n"
-            "3. Disable the toggle and save\n\n"
-            "Your main wallet and funds stay safe. You can link again anytime via Wallet.\n\n"
-            "⚠️ Tap below to also reset the bot's stored key so you can re-link a new one."
-        )
-        await _edit_loc(query, revoke_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_revoke_confirm_kb())
+        await _edit_loc(query, fmt_wallet_revoke_steps_card(), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=wallet_revoke_confirm_kb())
     elif action == "revoke_confirm":
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "testnet"
@@ -915,14 +906,14 @@ async def _handle_alert(query, data, telegram_id, context):
 
     if action == "menu":
         await _edit_loc(query, 
-            "🔔 *Alert Engine*\n\nManage your trigger alerts\\.",
+            fmt_alert_menu_intro(),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=alerts_kb(),
         )
 
     elif action == "set":
         await _edit_loc(query, 
-            "🔔 *Set Alert*\n\nSelect a product:",
+            fmt_alert_product_prompt(),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=alert_product_kb(network=network),
         )
@@ -931,11 +922,9 @@ async def _handle_alert(query, data, telegram_id, context):
         product = parts[2]
         context.user_data["pending_alert"] = {"product": product}
         await _edit_loc(query,
-            "🔔 *Alert for {product}\\-PERP*\n\n{choose_type}",
+            fmt_alert_condition_prompt(product),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=alert_condition_kb(product),
-            product=escape_md(product),
-            choose_type=localize_text("Choose alert condition:", get_active_language()),
         )
 
     elif action == "cond" and len(parts) >= 4:
@@ -959,13 +948,9 @@ async def _handle_alert(query, data, telegram_id, context):
         else:
             example = localize_text("Example: `100000` (price in USD)", _lang)
         await _edit_loc(query,
-            "🔔 *{product}\\-PERP* — *{label}*\n\n{enter_value}\n{example}",
+            fmt_alert_target_prompt(product, label, example),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=back_kb(),
-            product=escape_md(product),
-            label=escape_md(label),
-            enter_value=localize_text("Enter target value:", _lang),
-            example=example,
         )
 
     elif action == "view":
@@ -1017,13 +1002,13 @@ async def _handle_settings(query, data, telegram_id, context):
 
     elif action == "leverage_menu":
         await _edit_loc(query, 
-            "⚡ *Leverage Control*",
+            "⚡ *Default Leverage*\n\nChoose the leverage Nadobro should prefill for manual trades\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_leverage_kb(),
         )
     elif action == "risk_menu":
         await _edit_loc(query, 
-            "🛡 *Choose Risk Profile*\n\n"
+            "🛡 *Risk Profile*\n\n"
             "This presets leverage and slippage so trades are faster and more consistent\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=risk_profile_kb(),
@@ -1037,7 +1022,7 @@ async def _handle_settings(query, data, telegram_id, context):
         msg = fmt_settings(user_settings)
         slip = user_settings.get("slippage", 1)
         await _edit_loc(query, 
-            "✅ Default leverage set to {lev}x\n\n{settings}",
+            "✅ *Default leverage updated*\n\n{settings}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(lev, slip),
             lev=escape_md(str(lev)),
@@ -1046,7 +1031,7 @@ async def _handle_settings(query, data, telegram_id, context):
 
     elif action == "slippage_menu":
         await _edit_loc(query, 
-            "📊 *Slippage Control*",
+            "📊 *Slippage*\n\nChoose the default slippage tolerance used for manual trades\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_slippage_kb(),
         )
@@ -1068,7 +1053,7 @@ async def _handle_settings(query, data, telegram_id, context):
         user = get_user(telegram_id)
         current = (getattr(user, "language", None) or lang).lower()
         await _edit_loc(query,
-            "✅ Language updated to *{lang}*\\.",
+            "✅ *Language updated* to *{lang}*\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             lang=escape_md(lang.upper()),
             reply_markup=settings_language_kb(current),
@@ -1082,7 +1067,7 @@ async def _handle_settings(query, data, telegram_id, context):
         msg = fmt_settings(user_settings)
         lev = user_settings.get("default_leverage", 1)
         await _edit_loc(query, 
-            "✅ Slippage set to {slip}%\n\n{settings}",
+            "✅ *Slippage updated*\n\n{settings}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(lev, slip),
             slip=escape_md(str(slip)),
@@ -1111,7 +1096,7 @@ async def _handle_settings(query, data, telegram_id, context):
         context.user_data["settings"] = saved
         msg = fmt_settings(chosen)
         await _edit_loc(query, 
-            "✅ Risk profile set to *{profile}*\n\n{settings}",
+            "✅ *Risk profile updated* — *{profile}*\n\n{settings}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(chosen["default_leverage"], chosen["slippage"]),
             profile=escape_md(profile.upper()),
@@ -1132,10 +1117,12 @@ async def _handle_strategy(query, data, context, telegram_id):
             from src.nadobro.handlers.keyboards import bro_action_kb
             with timed_metric("cb.strategy.preview.bro"):
                 preview_text = await run_blocking(_build_bro_preview_text, telegram_id)
+            bot_status = get_user_bot_status(telegram_id) or {}
+            is_running = bool(bot_status.get("running") and bot_status.get("strategy") == "bro")
             await _edit_loc(query, 
                 preview_text,
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=bro_action_kb(),
+                reply_markup=bro_action_kb(is_running=is_running),
             )
             return
         user = get_user(telegram_id)
@@ -1147,10 +1134,20 @@ async def _handle_strategy(query, data, context, telegram_id):
             context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
         with timed_metric("cb.strategy.preview"):
             preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
+        bot_status = get_user_bot_status(telegram_id) or {}
+        is_running = bool(
+            bot_status.get("running")
+            and str(bot_status.get("strategy") or "").lower() == strategy_id
+        )
         await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=strategy_action_kb(strategy_id, selected_product, list(available_pairs)),
+            reply_markup=strategy_action_kb(
+                strategy_id,
+                selected_product,
+                list(available_pairs),
+                is_running=is_running,
+            ),
         )
     elif action == "custom" and len(parts) >= 4:
         strategy_id = parts[2]
@@ -1192,20 +1189,47 @@ async def _handle_strategy(query, data, context, telegram_id):
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
         with timed_metric("cb.strategy.preview"):
             preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
+        bot_status = get_user_bot_status(telegram_id) or {}
+        is_running = bool(
+            bot_status.get("running")
+            and str(bot_status.get("strategy") or "").lower() == strategy_id
+        )
         await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=strategy_action_kb(strategy_id, selected_product, list(allowed_pairs)),
+            reply_markup=strategy_action_kb(
+                strategy_id,
+                selected_product,
+                list(allowed_pairs),
+                is_running=is_running,
+            ),
         )
     elif action == "config":
         if strategy_id not in supported:
             return
         network, settings = get_user_settings(telegram_id)
         conf = settings.get("strategies", {}).get(strategy_id, {})
+        context.user_data.pop(f"strategy_config_section:{strategy_id}", None)
         await _edit_loc(query, 
-            _fmt_strategy_config_text(strategy_id, conf, network),
+            _strategy_config_menu_text(strategy_id, conf, network),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=_strategy_config_kb(strategy_id),
+            reply_markup=_strategy_config_menu_kb(strategy_id),
+        )
+    elif action == "config_section" and len(parts) >= 4:
+        section = parts[3]
+        if strategy_id not in supported:
+            return
+        valid_sections = {name for name, _label in _strategy_config_sections(strategy_id)}
+        if section not in valid_sections:
+            return
+        context.user_data[f"strategy_config_section:{strategy_id}"] = section
+        network, settings = get_user_settings(telegram_id)
+        conf = settings.get("strategies", {}).get(strategy_id, {})
+        await _edit_loc(
+            query,
+            _strategy_config_section_text(strategy_id, conf, network, section),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_strategy_config_section_kb(strategy_id, section),
         )
     elif action == "set" and len(parts) >= 5:
         strategy_id = parts[2]
@@ -1279,10 +1303,12 @@ async def _handle_strategy(query, data, context, telegram_id):
 
         network, settings = update_user_settings(telegram_id, _mutate)
         conf = settings.get("strategies", {}).get(strategy_id, {})
+        section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
+        context.user_data[f"strategy_config_section:{strategy_id}"] = section
         await _edit_loc(query, 
-            _fmt_strategy_config_text(strategy_id, conf, network),
+            _strategy_config_section_text(strategy_id, conf, network, section),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=_strategy_config_kb(strategy_id),
+            reply_markup=_strategy_config_section_kb(strategy_id, section),
         )
     elif action == "set_text" and len(parts) >= 5:
         strategy_id = parts[2]
@@ -1306,10 +1332,12 @@ async def _handle_strategy(query, data, context, telegram_id):
 
         network, settings = update_user_settings(telegram_id, _mutate)
         conf = settings.get("strategies", {}).get(strategy_id, {})
+        section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
+        context.user_data[f"strategy_config_section:{strategy_id}"] = section
         await _edit_loc(query, 
-            _fmt_strategy_config_text(strategy_id, conf, network),
+            _strategy_config_section_text(strategy_id, conf, network, section),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=_strategy_config_kb(strategy_id),
+            reply_markup=_strategy_config_section_kb(strategy_id, section),
         )
     elif action == "input" and len(parts) >= 4:
         strategy_id = parts[2]
@@ -1328,9 +1356,12 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         if field not in allowed_inputs:
             return
+        section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
+        context.user_data[f"strategy_config_section:{strategy_id}"] = section
         context.user_data["pending_strategy_input"] = {
             "strategy": strategy_id,
             "field": field,
+            "section": section,
         }
         help_text = {
             "notional_usd": "Enter margin in USD \\(example: `150`\\)",
@@ -1362,7 +1393,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             f"{help_text.get(field, 'Enter value')}\n\n"
             "Your next message will be used as this value\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb("strategy_hub"),
+            reply_markup=back_kb(f"strategy:config_section:{strategy_id}:{section}"),
         )
     elif action == "activate":
         context.user_data["active_setup"] = strategy_id
@@ -1451,9 +1482,9 @@ async def _handle_bro(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else ""
 
     if action == "config":
-        from src.nadobro.handlers.keyboards import bro_config_kb
         network, settings = get_user_settings(telegram_id)
         conf = settings.get("strategies", {}).get("bro", {})
+        context.user_data.pop("bro_config_section", None)
         b_budget = float(conf.get("budget_usd", 500))
         b_risk = conf.get("risk_level", "balanced").upper()
         b_conf_val = float(conf.get("min_confidence", 0.65))
@@ -1465,18 +1496,57 @@ async def _handle_bro(query, data, telegram_id, context):
         b_profile = conf.get("bro_profile", "normal").upper()
         profile_emoji = {"CHILL": "😎", "NORMAL": "🤙", "DEGEN": "🔥"}.get(b_profile, "🤙")
         text = (
-            f"⚙️ *Bro Mode Configuration*\n\n"
-            f"Profile: {profile_emoji} *{escape_md(b_profile)}*\n"
-            f"Budget: *{escape_md(f'${b_budget:,.0f}')}*\n"
-            f"Risk Level: *{escape_md(b_risk)}*\n"
-            f"Min Confidence: *{escape_md(f'{b_conf_val:.0%}')}*\n"
-            f"Max Leverage: *{escape_md(f'{b_lev}x')}*\n"
-            f"TP/SL: *{escape_md(f'{b_tp:.1f}%/{b_sl:.1f}%')}*\n"
-            f"Max Positions: *{escape_md(str(b_maxp))}*\n"
-            f"Max Loss: *{escape_md(f'{b_maxl:.0f}%')}*\n\n"
-            "Pick a Bro profile, or tap a parameter to fine\\-tune\\."
+            "⚙️ *Alpha Agent · Advanced*\n\n"
+            f"Preset: {profile_emoji} *{escape_md(b_profile)}*\n"
+            f"Budget: *{escape_md(f'${b_budget:,.0f}')}* \\| Risk style: *{escape_md(b_risk)}*\n"
+            f"Confidence: *{escape_md(f'{b_conf_val:.0%}')}* \\| Max leverage: *{escape_md(f'{b_lev}x')}*\n"
+            f"TP/SL: *{escape_md(f'{b_tp:.1f}%/{b_sl:.1f}%')}* \\| Max positions: *{escape_md(str(b_maxp))}*\n"
+            f"Max loss: *{escape_md(f'{b_maxl:.0f}%')}*\n\n"
+            "Choose one section below to keep setup simple\\."
         )
-        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_config_kb())
+        from src.nadobro.handlers.keyboards import bro_config_menu_kb
+        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_config_menu_kb())
+
+    elif action == "config_section" and len(parts) >= 3:
+        from src.nadobro.handlers.keyboards import bro_config_section_kb
+        section = parts[2]
+        if section not in {"preset", "risk", "exits", "risk_style"}:
+            return
+        context.user_data["bro_config_section"] = section
+        _network, settings = get_user_settings(telegram_id)
+        conf = settings.get("strategies", {}).get("bro", {})
+        if section == "preset":
+            text = (
+                "⚙️ *Alpha Agent · Preset*\n\n"
+                "Pick a personality preset to apply a ready-made risk profile\\."
+            )
+        elif section == "risk_style":
+            text = (
+                "⚙️ *Alpha Agent · Risk Style*\n\n"
+                f"Current style: *{escape_md(str(conf.get('risk_level', 'balanced')).upper())}*\n\n"
+                "Choose how aggressive the AI should trade\\."
+            )
+        elif section == "risk":
+            budget_str = f"${float(conf.get('budget_usd', 500)):,.0f}"
+            confidence_str = f"{float(conf.get('min_confidence', 0.65)):.0%}"
+            max_leverage_str = f"{int(conf.get('leverage_cap', 5))}x"
+            max_positions_str = str(int(conf.get("max_positions", 3)))
+            text = (
+                "⚙️ *Alpha Agent · Risk*\n\n"
+                f"Budget: *{escape_md(budget_str)}* \\| "
+                f"Confidence: *{escape_md(confidence_str)}*\n"
+                f"Max leverage: *{escape_md(max_leverage_str)}* \\| "
+                f"Max positions: *{escape_md(max_positions_str)}*\n\n"
+                "Tune the core risk controls here\\."
+            )
+        else:
+            tp_sl_str = f"{float(conf.get('tp_pct', 2.0)):.1f}% / {float(conf.get('sl_pct', 1.5)):.1f}%"
+            text = (
+                "⚙️ *Alpha Agent · Exits*\n\n"
+                f"Current TP/SL: *{escape_md(tp_sl_str)}*\n\n"
+                "Set how Alpha Agent locks profit and cuts risk\\."
+            )
+        await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_config_section_kb(section))
 
     elif action == "risk" and len(parts) >= 3:
         profile = parts[2]
@@ -1493,14 +1563,15 @@ async def _handle_bro(query, data, telegram_id, context):
             bro = strategies.setdefault("bro", {})
             bro.update(chosen)
         update_user_settings(telegram_id, _mutate)
-        from src.nadobro.handlers.keyboards import bro_config_kb
+        from src.nadobro.handlers.keyboards import bro_config_section_kb
+        context.user_data["bro_config_section"] = "risk"
         await _edit_loc(query, 
             f"✅ Bro Mode risk set to *{escape_md(profile.upper())}*\n\n"
             f"Leverage cap: {chosen['leverage_cap']}x \\| Confidence: {chosen['min_confidence']:.0%}\n"
             f"TP/SL: {chosen['tp_pct']:.1f}%/{chosen['sl_pct']:.1f}%\n"
             f"Max positions: {chosen['max_positions']}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=bro_config_kb(),
+            reply_markup=bro_config_section_kb("risk"),
         )
 
     elif action == "set" and len(parts) >= 3:
@@ -1509,14 +1580,19 @@ async def _handle_bro(query, data, telegram_id, context):
         if field not in allowed:
             return
         if field == "tp_sl":
-            context.user_data["pending_bro_input"] = {"field": "tp_sl"}
+            context.user_data["pending_bro_input"] = {"field": "tp_sl", "section": "exits"}
+            context.user_data["bro_config_section"] = "exits"
             await _edit_loc(query, 
                 "✏️ *Set TP/SL*\n\nEnter as `TP,SL` \\(example: `2.0,1.5`\\)",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb("strategy:preview:bro"),
+                reply_markup=back_kb("bro:config_section:exits"),
             )
         else:
-            context.user_data["pending_bro_input"] = {"field": field}
+            section = "risk"
+            if field == "risk_level":
+                section = "risk_style"
+            context.user_data["pending_bro_input"] = {"field": field, "section": section}
+            context.user_data["bro_config_section"] = section
             hints = {
                 "budget_usd": "Enter budget in USD \\(example: `500`\\)",
                 "min_confidence": "Enter min confidence 0\\-1 \\(example: `0.65`\\)",
@@ -1527,8 +1603,25 @@ async def _handle_bro(query, data, telegram_id, context):
             await _edit_loc(query, 
                 f"✏️ *Set {escape_md(field)}*\n\n{hints.get(field, 'Enter value')}",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=back_kb("strategy:preview:bro"),
+                reply_markup=back_kb(f"bro:config_section:{section}"),
             )
+
+    elif action == "set_text" and len(parts) >= 4:
+        field = parts[2]
+        raw_value = parts[3]
+        if field != "risk_level" or raw_value not in {"conservative", "balanced", "aggressive"}:
+            return
+        context.user_data["bro_config_section"] = "risk_style"
+        def _mutate(s):
+            s.setdefault("strategies", {}).setdefault("bro", {})["risk_level"] = raw_value
+        update_user_settings(telegram_id, _mutate)
+        from src.nadobro.handlers.keyboards import bro_config_section_kb
+        await _edit_loc(
+            query,
+            f"✅ Risk style set to *{escape_md(raw_value.upper())}*",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=bro_config_section_kb("risk_style"),
+        )
 
     elif action == "status":
         from src.nadobro.services.bot_runtime import get_user_bot_status
@@ -1587,7 +1680,8 @@ async def _handle_bro(query, data, telegram_id, context):
             bro["max_loss_pct"] = profile_data["max_loss_pct"]
 
         update_user_settings(telegram_id, _mutate)
-        from src.nadobro.handlers.keyboards import bro_config_kb
+        from src.nadobro.handlers.keyboards import bro_config_section_kb
+        context.user_data["bro_config_section"] = "preset"
         await _edit_loc(query,
             f"{emoji_map.get(profile, '🤙')} *Bro Profile: {escape_md(profile.upper())}*\n\n"
             f"_{escape_md(profile_data['description'])}_\n\n"
@@ -1595,7 +1689,7 @@ async def _handle_bro(query, data, telegram_id, context):
             f"TP/SL: {profile_data['tp_pct']:.1f}%/{profile_data['sl_pct']:.1f}%\n"
             f"Max positions: {profile_data['max_positions']} \\| Max loss: {profile_data['max_loss_pct']}%",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=bro_config_kb(),
+            reply_markup=bro_config_section_kb("preset"),
         )
 
     elif action == "explain":
@@ -1862,170 +1956,375 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
     return base + extra + "Use presets or set custom values below\\."
 
 
-def _strategy_config_kb(strategy: str):
-    if strategy == "vol":
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Direction LONG", callback_data="strategy:set_text:vol:vol_direction:long"),
-                InlineKeyboardButton("Direction SHORT", callback_data="strategy:set_text:vol:vol_direction:short"),
-            ],
-            [
-                InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:vol:tp_pct:0.5"),
-                InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:vol:tp_pct:1.0"),
-                InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:vol:tp_pct:2.0"),
-            ],
-            [
-                InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:vol:sl_pct:0.5"),
-                InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:vol:sl_pct:1.0"),
-                InlineKeyboardButton("SL 2.0%", callback_data="strategy:set:vol:sl_pct:2.0"),
-            ],
-            [
-                InlineKeyboardButton("Custom TP", callback_data="strategy:input:vol:tp_pct"),
-                InlineKeyboardButton("Custom SL", callback_data="strategy:input:vol:sl_pct"),
-            ],
-            [
-                InlineKeyboardButton("◀ Back", callback_data="strategy:preview:vol"),
-                InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-            ],
-        ])
+def _strategy_config_default_section(strategy: str) -> str:
+    return "direction" if strategy == "vol" else "setup"
 
-    rows = [
-        [
-            InlineKeyboardButton("Margin $50", callback_data=f"strategy:set:{strategy}:notional_usd:50"),
-            InlineKeyboardButton("Margin $100", callback_data=f"strategy:set:{strategy}:notional_usd:100"),
-            InlineKeyboardButton("Margin $250", callback_data=f"strategy:set:{strategy}:notional_usd:250"),
-        ],
-        [
-            InlineKeyboardButton("Custom margin", callback_data=f"strategy:input:{strategy}:notional_usd"),
-        ],
-        [
-            InlineKeyboardButton("Spread 2bp", callback_data=f"strategy:set:{strategy}:spread_bp:2"),
-            InlineKeyboardButton("Spread 5bp", callback_data=f"strategy:set:{strategy}:spread_bp:5"),
-            InlineKeyboardButton("Spread 10bp", callback_data=f"strategy:set:{strategy}:spread_bp:10"),
-        ],
-        [
-            InlineKeyboardButton("Custom Spread", callback_data=f"strategy:input:{strategy}:spread_bp"),
-        ],
-        [
-            InlineKeyboardButton("30s", callback_data=f"strategy:set:{strategy}:interval_seconds:30"),
-            InlineKeyboardButton("60s", callback_data=f"strategy:set:{strategy}:interval_seconds:60"),
-            InlineKeyboardButton("120s", callback_data=f"strategy:set:{strategy}:interval_seconds:120"),
-        ],
-        [
-            InlineKeyboardButton("Custom Interval", callback_data=f"strategy:input:{strategy}:interval_seconds"),
-        ],
-        [
-            InlineKeyboardButton("TP 0.5%", callback_data=f"strategy:set:{strategy}:tp_pct:0.5"),
-            InlineKeyboardButton("TP 1.0%", callback_data=f"strategy:set:{strategy}:tp_pct:1.0"),
-            InlineKeyboardButton("TP 2.0%", callback_data=f"strategy:set:{strategy}:tp_pct:2.0"),
-        ],
-        [
-            InlineKeyboardButton("SL 0.25%", callback_data=f"strategy:set:{strategy}:sl_pct:0.25"),
-            InlineKeyboardButton("SL 0.5%", callback_data=f"strategy:set:{strategy}:sl_pct:0.5"),
-            InlineKeyboardButton("SL 1.0%", callback_data=f"strategy:set:{strategy}:sl_pct:1.0"),
-        ],
-        [
-            InlineKeyboardButton("Custom TP", callback_data=f"strategy:input:{strategy}:tp_pct"),
-            InlineKeyboardButton("Custom SL", callback_data=f"strategy:input:{strategy}:sl_pct"),
-        ],
-    ]
-    if strategy == "rgrid":
-        rows.extend([
-            [
-                InlineKeyboardButton("Levels 3", callback_data=f"strategy:set:{strategy}:levels:3"),
-                InlineKeyboardButton("Levels 5", callback_data=f"strategy:set:{strategy}:levels:5"),
-                InlineKeyboardButton("Levels 7", callback_data=f"strategy:set:{strategy}:levels:7"),
-            ],
-            [
-                InlineKeyboardButton("Spread 5bp", callback_data=f"strategy:set:{strategy}:rgrid_spread_bp:5"),
-                InlineKeyboardButton("Spread 10bp", callback_data=f"strategy:set:{strategy}:rgrid_spread_bp:10"),
-                InlineKeyboardButton("Spread 20bp", callback_data=f"strategy:set:{strategy}:rgrid_spread_bp:20"),
-            ],
-            [
-                InlineKeyboardButton("Custom Levels", callback_data=f"strategy:input:{strategy}:levels"),
-                InlineKeyboardButton("Custom Spread", callback_data=f"strategy:input:{strategy}:rgrid_spread_bp"),
-            ],
-            [
-                InlineKeyboardButton("PnL SL 0.5%", callback_data=f"strategy:set:{strategy}:rgrid_stop_loss_pct:0.5"),
-                InlineKeyboardButton("PnL SL 1.0%", callback_data=f"strategy:set:{strategy}:rgrid_stop_loss_pct:1.0"),
-                InlineKeyboardButton("PnL TP 1.5%", callback_data=f"strategy:set:{strategy}:rgrid_take_profit_pct:1.5"),
-            ],
-            [
-                InlineKeyboardButton("Reset 0.8%", callback_data=f"strategy:set:{strategy}:rgrid_reset_threshold_pct:0.8"),
-                InlineKeyboardButton("Reset 1.5%", callback_data=f"strategy:set:{strategy}:rgrid_reset_threshold_pct:1.5"),
-                InlineKeyboardButton("Timeout 120s", callback_data=f"strategy:set:{strategy}:rgrid_reset_timeout_seconds:120"),
-            ],
-            [
-                InlineKeyboardButton("Custom PnL SL", callback_data=f"strategy:input:{strategy}:rgrid_stop_loss_pct"),
-                InlineKeyboardButton("Custom PnL TP", callback_data=f"strategy:input:{strategy}:rgrid_take_profit_pct"),
-                InlineKeyboardButton("Custom Reset", callback_data=f"strategy:input:{strategy}:rgrid_reset_threshold_pct"),
-            ],
-            [
-                InlineKeyboardButton("Discretion 0.06", callback_data=f"strategy:set:{strategy}:rgrid_discretion:0.06"),
-                InlineKeyboardButton("Custom Discretion", callback_data=f"strategy:input:{strategy}:rgrid_discretion"),
-            ],
-        ])
+
+def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
+    if strategy == "vol":
+        return [("direction", "🎯 Direction"), ("risk", "🛡 TP / SL")]
     if strategy == "grid":
-        rows.extend([
-            [
-                InlineKeyboardButton("Threshold 8bp", callback_data=f"strategy:set:{strategy}:threshold_bp:8"),
-                InlineKeyboardButton("Threshold 12bp", callback_data=f"strategy:set:{strategy}:threshold_bp:12"),
-                InlineKeyboardButton("Threshold 20bp", callback_data=f"strategy:set:{strategy}:threshold_bp:20"),
-            ],
-            [
-                InlineKeyboardButton("Close 20bp", callback_data=f"strategy:set:{strategy}:close_offset_bp:20"),
-                InlineKeyboardButton("Close 30bp", callback_data=f"strategy:set:{strategy}:close_offset_bp:30"),
-            ],
-            [
-                InlineKeyboardButton("Custom Threshold", callback_data=f"strategy:input:{strategy}:threshold_bp"),
-                InlineKeyboardButton("Custom Close", callback_data=f"strategy:input:{strategy}:close_offset_bp"),
-            ],
-            [
-                InlineKeyboardButton("Ref MID", callback_data=f"strategy:set_text:{strategy}:reference_mode:mid"),
-                InlineKeyboardButton("Ref EMA Fast", callback_data=f"strategy:set_text:{strategy}:reference_mode:ema_fast"),
-                InlineKeyboardButton("Ref EMA Slow", callback_data=f"strategy:set_text:{strategy}:reference_mode:ema_slow"),
-            ],
-            [
-                InlineKeyboardButton("Bias Neutral", callback_data=f"strategy:set_text:{strategy}:directional_bias:neutral"),
-                InlineKeyboardButton("Bias Long", callback_data=f"strategy:set_text:{strategy}:directional_bias:long_bias"),
-                InlineKeyboardButton("Bias Short", callback_data=f"strategy:set_text:{strategy}:directional_bias:short_bias"),
-            ],
-            [
-                InlineKeyboardButton("Cycle $50", callback_data=f"strategy:set:{strategy}:cycle_notional_usd:50"),
-                InlineKeyboardButton("Cycle $100", callback_data=f"strategy:set:{strategy}:cycle_notional_usd:100"),
-                InlineKeyboardButton("Cycle $250", callback_data=f"strategy:set:{strategy}:cycle_notional_usd:250"),
-            ],
-            [
-                InlineKeyboardButton("Inv Limit $30", callback_data=f"strategy:set:{strategy}:inventory_soft_limit_usd:30"),
-                InlineKeyboardButton("Inv Limit $60", callback_data=f"strategy:set:{strategy}:inventory_soft_limit_usd:60"),
-                InlineKeyboardButton("Inv Limit $120", callback_data=f"strategy:set:{strategy}:inventory_soft_limit_usd:120"),
-            ],
-            [
-                InlineKeyboardButton("Custom Cycle", callback_data=f"strategy:input:{strategy}:cycle_notional_usd"),
-                InlineKeyboardButton("Custom Inv Limit", callback_data=f"strategy:input:{strategy}:inventory_soft_limit_usd"),
-            ],
-            [
-                InlineKeyboardButton("TTL 60s", callback_data=f"strategy:set:{strategy}:quote_ttl_seconds:60"),
-                InlineKeyboardButton("TTL 90s", callback_data=f"strategy:set:{strategy}:quote_ttl_seconds:90"),
-                InlineKeyboardButton("TTL 120s", callback_data=f"strategy:set:{strategy}:quote_ttl_seconds:120"),
-            ],
-            [
-                InlineKeyboardButton("Spread Min 2bp", callback_data=f"strategy:set:{strategy}:min_spread_bp:2"),
-                InlineKeyboardButton("Spread Max 20bp", callback_data=f"strategy:set:{strategy}:max_spread_bp:20"),
-            ],
-            [
-                InlineKeyboardButton("Custom TTL", callback_data=f"strategy:input:{strategy}:quote_ttl_seconds"),
-                InlineKeyboardButton("Custom Session Cap", callback_data=f"strategy:input:{strategy}:session_notional_cap_usd"),
-            ],
-        ])
+        return [("setup", "⚙️ Core"), ("execution", "🧠 Execution"), ("risk", "🛡 Risk")]
+    if strategy == "rgrid":
+        return [("setup", "⚙️ Core"), ("risk", "🛡 Risk"), ("reset", "🔄 Reset")]
     if strategy == "dn":
-        rows.extend([
-            [
-                InlineKeyboardButton("Auto-Close ON", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:1"),
-                InlineKeyboardButton("Auto-Close OFF", callback_data=f"strategy:set:{strategy}:auto_close_on_maintenance:0"),
-            ],
-        ])
+        return [("setup", "⚙️ Core"), ("safety", "🛡 Safety")]
+    return [("setup", "⚙️ Core")]
+
+
+def _strategy_section_for_field(strategy: str, field: str) -> str:
+    if strategy == "vol":
+        return "direction" if field == "vol_direction" else "risk"
+    if strategy == "grid":
+        if field in {"threshold_bp", "close_offset_bp", "reference_mode", "directional_bias"}:
+            return "execution"
+        if field in {"cycle_notional_usd", "inventory_soft_limit_usd", "quote_ttl_seconds", "session_notional_cap_usd", "min_spread_bp", "max_spread_bp", "vol_sensitivity"}:
+            return "risk"
+        return "setup"
+    if strategy == "rgrid":
+        if field in {"rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion"}:
+            return "reset"
+        if field in {"rgrid_stop_loss_pct", "rgrid_take_profit_pct"}:
+            return "risk"
+        return "setup"
+    if strategy == "dn":
+        return "safety" if field == "auto_close_on_maintenance" else "setup"
+    return "setup"
+
+
+def _strategy_config_menu_text(strategy: str, conf: dict, network: str) -> str:
+    titles = {
+        "grid": "GRID",
+        "rgrid": "Reverse GRID",
+        "dn": "Mirror Delta Neutral",
+        "vol": "Volume Bot",
+    }
+    return (
+        f"⚙️ *{escape_md(titles.get(strategy, strategy.upper()))} Advanced*\n\n"
+        f"Mode: *{escape_md(network.upper())}*\n\n"
+        "Choose one section below to edit\\. This keeps the setup clean and focused\\."
+    )
+
+
+def _strategy_config_menu_kb(strategy: str):
+    rows = []
+    section_buttons = [
+        InlineKeyboardButton(label, callback_data=f"strategy:config_section:{strategy}:{section}")
+        for section, label in _strategy_config_sections(strategy)
+    ]
+    for i in range(0, len(section_buttons), 2):
+        rows.append(section_buttons[i:i + 2])
     rows.append([InlineKeyboardButton("◀ Back", callback_data=f"strategy:preview:{strategy}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _strategy_config_section_text(strategy: str, conf: dict, network: str, section: str) -> str:
+    if strategy == "vol":
+        direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
+        tp_pct = float(conf.get("tp_pct", 1.0))
+        sl_pct = float(conf.get("sl_pct", 1.0))
+        if section == "direction":
+            return (
+                "⚙️ *Volume Bot · Direction*\n\n"
+                f"Mode: *{escape_md(network.upper())}*\n"
+                f"Current direction: *{escape_md(direction)}*\n\n"
+                "Pick the side you want the volume loop to favor\\."
+            )
+        return (
+            "⚙️ *Volume Bot · TP / SL*\n\n"
+            f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n\n"
+            "Choose quick presets or set custom values\\."
+        )
+
+    notional = float(conf.get("notional_usd", 100.0))
+    spread_bp = float(conf.get("spread_bp", 5.0))
+    interval_seconds = int(conf.get("interval_seconds", 60))
+    tp_pct = float(conf.get("tp_pct", 1.0))
+    sl_pct = float(conf.get("sl_pct", 0.5))
+
+    if strategy == "grid":
+        if section == "execution":
+            threshold_str = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
+            close_offset_str = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
+            ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
+            bias = str(conf.get("directional_bias", "neutral")).upper()
+            return (
+                "⚙️ *GRID · Execution*\n\n"
+                f"Threshold: *{escape_md(threshold_str)}* \\| "
+                f"Close offset: *{escape_md(close_offset_str)}*\n"
+                f"Reference: *{escape_md(ref_mode)}* \\| "
+                f"Bias: *{escape_md(bias)}*\n\n"
+                "Tune how quotes react to the market\\."
+            )
+        if section == "risk":
+            cycle_budget = f"${float(conf.get('cycle_notional_usd', notional)):,.0f}"
+            inventory_limit = f"${float(conf.get('inventory_soft_limit_usd', notional * 0.6)):,.0f}"
+            ttl_str = f"{int(conf.get('quote_ttl_seconds', 90))}s"
+            session_cap_value = float(conf.get("session_notional_cap_usd", 0) or 0)
+            session_cap = f"${session_cap_value:,.0f}" if session_cap_value > 0 else "OFF"
+            return (
+                "⚙️ *GRID · Risk*\n\n"
+                f"TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n"
+                f"Cycle budget: *{escape_md(cycle_budget)}* \\| "
+                f"Inventory limit: *{escape_md(inventory_limit)}*\n"
+                f"TTL: *{escape_md(ttl_str)}* \\| "
+                f"Session cap: *{escape_md(session_cap)}*\n\n"
+                "Control downside and pacing here\\."
+            )
+        return (
+            "⚙️ *GRID · Core*\n\n"
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n\n"
+            "Set the main loop size and cadence\\."
+        )
+
+    if strategy == "rgrid":
+        if section == "risk":
+            pnl_sl = f"{float(conf.get('rgrid_stop_loss_pct', sl_pct)):.2f}%"
+            pnl_tp = f"{float(conf.get('rgrid_take_profit_pct', tp_pct)):.2f}%"
+            return (
+                "⚙️ *Reverse GRID · Risk*\n\n"
+                f"PnL stop: *{escape_md(pnl_sl)}* \\| "
+                f"PnL take profit: *{escape_md(pnl_tp)}*\n\n"
+                "Set when the strategy should cut or lock gains\\."
+            )
+        if section == "reset":
+            reset_threshold = f"{float(conf.get('rgrid_reset_threshold_pct', 1.0)):.2f}%"
+            reset_timeout = f"{int(conf.get('rgrid_reset_timeout_seconds', 120))}s"
+            discretion = f"{float(conf.get('rgrid_discretion', 0.06)):.2f}"
+            return (
+                "⚙️ *Reverse GRID · Reset*\n\n"
+                f"Reset threshold: *{escape_md(reset_threshold)}* \\| "
+                f"Timeout: *{escape_md(reset_timeout)}*\n"
+                f"Discretion: *{escape_md(discretion)}*\n\n"
+                "Use these only if you want tighter re-anchoring\\."
+            )
+        levels = str(int(conf.get("levels", 4)))
+        rgrid_spread = f"{float(conf.get('rgrid_spread_bp', spread_bp)):.1f} bp"
+        return (
+            "⚙️ *Reverse GRID · Core*\n\n"
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"Levels: *{escape_md(levels)}* \\| Spread: *{escape_md(rgrid_spread)}*\n\n"
+            "Set the basic breakout loop here\\."
+        )
+
+    if strategy == "dn":
+        if section == "safety":
+            auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
+            return (
+                "⚙️ *Mirror Delta Neutral · Safety*\n\n"
+                f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+                "This decides whether DN exits automatically during maintenance windows\\."
+            )
+        return (
+            "⚙️ *Mirror Delta Neutral · Core*\n\n"
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n\n"
+            "Keep this simple and hedge-focused\\."
+        )
+
+    return _fmt_strategy_config_text(strategy, conf, network)
+
+
+def _strategy_config_section_kb(strategy: str, section: str):
+    if strategy == "vol":
+        if section == "direction":
+            rows = [[
+                InlineKeyboardButton("LONG", callback_data="strategy:set_text:vol:vol_direction:long"),
+                InlineKeyboardButton("SHORT", callback_data="strategy:set_text:vol:vol_direction:short"),
+            ]]
+        else:
+            rows = [
+                [
+                    InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:vol:tp_pct:0.5"),
+                    InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:vol:tp_pct:1.0"),
+                    InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:vol:tp_pct:2.0"),
+                ],
+                [
+                    InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:vol:sl_pct:0.5"),
+                    InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:vol:sl_pct:1.0"),
+                    InlineKeyboardButton("SL 2.0%", callback_data="strategy:set:vol:sl_pct:2.0"),
+                ],
+                [
+                    InlineKeyboardButton("Custom TP", callback_data="strategy:input:vol:tp_pct"),
+                    InlineKeyboardButton("Custom SL", callback_data="strategy:input:vol:sl_pct"),
+                ],
+            ]
+        rows.append([InlineKeyboardButton("◀ Back", callback_data="strategy:config:vol")])
+        return InlineKeyboardMarkup(rows)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if strategy == "grid":
+        if section == "setup":
+            rows = [
+                [
+                    InlineKeyboardButton("Margin $50", callback_data="strategy:set:grid:notional_usd:50"),
+                    InlineKeyboardButton("Margin $100", callback_data="strategy:set:grid:notional_usd:100"),
+                    InlineKeyboardButton("Margin $250", callback_data="strategy:set:grid:notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("Spread 2bp", callback_data="strategy:set:grid:spread_bp:2"),
+                    InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:grid:spread_bp:5"),
+                    InlineKeyboardButton("Spread 10bp", callback_data="strategy:set:grid:spread_bp:10"),
+                ],
+                [
+                    InlineKeyboardButton("30s", callback_data="strategy:set:grid:interval_seconds:30"),
+                    InlineKeyboardButton("60s", callback_data="strategy:set:grid:interval_seconds:60"),
+                    InlineKeyboardButton("120s", callback_data="strategy:set:grid:interval_seconds:120"),
+                ],
+                [InlineKeyboardButton("Custom Margin", callback_data="strategy:input:grid:notional_usd")],
+            ]
+        elif section == "execution":
+            rows = [
+                [
+                    InlineKeyboardButton("Threshold 8bp", callback_data="strategy:set:grid:threshold_bp:8"),
+                    InlineKeyboardButton("12bp", callback_data="strategy:set:grid:threshold_bp:12"),
+                    InlineKeyboardButton("20bp", callback_data="strategy:set:grid:threshold_bp:20"),
+                ],
+                [
+                    InlineKeyboardButton("Close 20bp", callback_data="strategy:set:grid:close_offset_bp:20"),
+                    InlineKeyboardButton("30bp", callback_data="strategy:set:grid:close_offset_bp:30"),
+                ],
+                [
+                    InlineKeyboardButton("Ref MID", callback_data="strategy:set_text:grid:reference_mode:mid"),
+                    InlineKeyboardButton("EMA Fast", callback_data="strategy:set_text:grid:reference_mode:ema_fast"),
+                    InlineKeyboardButton("EMA Slow", callback_data="strategy:set_text:grid:reference_mode:ema_slow"),
+                ],
+                [
+                    InlineKeyboardButton("Bias Neutral", callback_data="strategy:set_text:grid:directional_bias:neutral"),
+                    InlineKeyboardButton("Bias Long", callback_data="strategy:set_text:grid:directional_bias:long_bias"),
+                    InlineKeyboardButton("Bias Short", callback_data="strategy:set_text:grid:directional_bias:short_bias"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Threshold", callback_data="strategy:input:grid:threshold_bp"),
+                    InlineKeyboardButton("Custom Close", callback_data="strategy:input:grid:close_offset_bp"),
+                ],
+            ]
+        else:
+            rows = [
+                [
+                    InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:grid:tp_pct:0.5"),
+                    InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:grid:tp_pct:1.0"),
+                    InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:grid:tp_pct:2.0"),
+                ],
+                [
+                    InlineKeyboardButton("SL 0.25%", callback_data="strategy:set:grid:sl_pct:0.25"),
+                    InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:grid:sl_pct:0.5"),
+                    InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:grid:sl_pct:1.0"),
+                ],
+                [
+                    InlineKeyboardButton("Cycle $50", callback_data="strategy:set:grid:cycle_notional_usd:50"),
+                    InlineKeyboardButton("Cycle $100", callback_data="strategy:set:grid:cycle_notional_usd:100"),
+                    InlineKeyboardButton("Cycle $250", callback_data="strategy:set:grid:cycle_notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("Inv $30", callback_data="strategy:set:grid:inventory_soft_limit_usd:30"),
+                    InlineKeyboardButton("Inv $60", callback_data="strategy:set:grid:inventory_soft_limit_usd:60"),
+                    InlineKeyboardButton("TTL 90s", callback_data="strategy:set:grid:quote_ttl_seconds:90"),
+                ],
+                [
+                    InlineKeyboardButton("Custom TP", callback_data="strategy:input:grid:tp_pct"),
+                    InlineKeyboardButton("Custom SL", callback_data="strategy:input:grid:sl_pct"),
+                ],
+                [
+                    InlineKeyboardButton("Session Cap", callback_data="strategy:input:grid:session_notional_cap_usd"),
+                ],
+            ]
+    elif strategy == "rgrid":
+        if section == "setup":
+            rows = [
+                [
+                    InlineKeyboardButton("Margin $50", callback_data="strategy:set:rgrid:notional_usd:50"),
+                    InlineKeyboardButton("Margin $100", callback_data="strategy:set:rgrid:notional_usd:100"),
+                    InlineKeyboardButton("Margin $250", callback_data="strategy:set:rgrid:notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("Levels 3", callback_data="strategy:set:rgrid:levels:3"),
+                    InlineKeyboardButton("Levels 5", callback_data="strategy:set:rgrid:levels:5"),
+                    InlineKeyboardButton("Levels 7", callback_data="strategy:set:rgrid:levels:7"),
+                ],
+                [
+                    InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:rgrid:rgrid_spread_bp:5"),
+                    InlineKeyboardButton("10bp", callback_data="strategy:set:rgrid:rgrid_spread_bp:10"),
+                    InlineKeyboardButton("20bp", callback_data="strategy:set:rgrid:rgrid_spread_bp:20"),
+                ],
+                [
+                    InlineKeyboardButton("60s", callback_data="strategy:set:rgrid:interval_seconds:60"),
+                    InlineKeyboardButton("120s", callback_data="strategy:set:rgrid:interval_seconds:120"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Levels", callback_data="strategy:input:rgrid:levels"),
+                    InlineKeyboardButton("Custom Spread", callback_data="strategy:input:rgrid:rgrid_spread_bp"),
+                ],
+            ]
+        elif section == "risk":
+            rows = [
+                [
+                    InlineKeyboardButton("PnL SL 0.5%", callback_data="strategy:set:rgrid:rgrid_stop_loss_pct:0.5"),
+                    InlineKeyboardButton("1.0%", callback_data="strategy:set:rgrid:rgrid_stop_loss_pct:1.0"),
+                ],
+                [
+                    InlineKeyboardButton("PnL TP 1.5%", callback_data="strategy:set:rgrid:rgrid_take_profit_pct:1.5"),
+                    InlineKeyboardButton("2.0%", callback_data="strategy:set:rgrid:rgrid_take_profit_pct:2.0"),
+                ],
+                [
+                    InlineKeyboardButton("Custom PnL SL", callback_data="strategy:input:rgrid:rgrid_stop_loss_pct"),
+                    InlineKeyboardButton("Custom PnL TP", callback_data="strategy:input:rgrid:rgrid_take_profit_pct"),
+                ],
+            ]
+        else:
+            rows = [
+                [
+                    InlineKeyboardButton("Reset 0.8%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:0.8"),
+                    InlineKeyboardButton("1.5%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:1.5"),
+                ],
+                [
+                    InlineKeyboardButton("Timeout 120s", callback_data="strategy:set:rgrid:rgrid_reset_timeout_seconds:120"),
+                    InlineKeyboardButton("300s", callback_data="strategy:set:rgrid:rgrid_reset_timeout_seconds:300"),
+                ],
+                [
+                    InlineKeyboardButton("Disc 0.06", callback_data="strategy:set:rgrid:rgrid_discretion:0.06"),
+                    InlineKeyboardButton("Disc 0.10", callback_data="strategy:set:rgrid:rgrid_discretion:0.10"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Reset", callback_data="strategy:input:rgrid:rgrid_reset_threshold_pct"),
+                    InlineKeyboardButton("Custom Disc", callback_data="strategy:input:rgrid:rgrid_discretion"),
+                ],
+            ]
+    elif strategy == "dn":
+        if section == "setup":
+            rows = [
+                [
+                    InlineKeyboardButton("Margin $50", callback_data="strategy:set:dn:notional_usd:50"),
+                    InlineKeyboardButton("Margin $100", callback_data="strategy:set:dn:notional_usd:100"),
+                    InlineKeyboardButton("Margin $250", callback_data="strategy:set:dn:notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("30s", callback_data="strategy:set:dn:interval_seconds:30"),
+                    InlineKeyboardButton("60s", callback_data="strategy:set:dn:interval_seconds:60"),
+                    InlineKeyboardButton("120s", callback_data="strategy:set:dn:interval_seconds:120"),
+                ],
+                [
+                    InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:dn:tp_pct:0.5"),
+                    InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:dn:tp_pct:1.0"),
+                    InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:dn:tp_pct:2.0"),
+                ],
+                [
+                    InlineKeyboardButton("SL 0.25%", callback_data="strategy:set:dn:sl_pct:0.25"),
+                    InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:dn:sl_pct:0.5"),
+                    InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:dn:sl_pct:1.0"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Margin", callback_data="strategy:input:dn:notional_usd"),
+                    InlineKeyboardButton("Custom Interval", callback_data="strategy:input:dn:interval_seconds"),
+                ],
+            ]
+        else:
+            rows = [[
+                InlineKeyboardButton("Auto-Close ON", callback_data="strategy:set:dn:auto_close_on_maintenance:1"),
+                InlineKeyboardButton("Auto-Close OFF", callback_data="strategy:set:dn:auto_close_on_maintenance:0"),
+            ]]
+
+    rows.append([InlineKeyboardButton("◀ Back", callback_data=f"strategy:config:{strategy}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2065,22 +2364,18 @@ def _build_bro_preview_text(telegram_id: int) -> str:
     margin_flag = "✅" if available_margin >= budget * 0.2 else "⚠️"
 
     return (
-        f"🧠 *Bro Mode — AI Quant Agent*\n"
-        f"Status: {escape_md(status_emoji)}\n"
-        f"Autonomous LLM\\-powered trading agent that scans markets,\n"
-        f"analyzes technicals \\+ sentiment, and executes trades\\.\n\n"
-        f"📊 *Configuration*\n"
+        "🧠 *Alpha Agent*\n"
+        f"Status: {escape_md(status_emoji)}\n\n"
+        "Autonomous market scanner with Grok reasoning, sentiment, and trade execution guardrails\\.\n\n"
+        "*Quick setup*\n"
         f"Budget: *{escape_md(f'${budget:,.0f}')}* \\| Risk: {escape_md(risk_emoji)} *{escape_md(risk_level.upper())}*\n"
         f"Assets: *{escape_md(products_str)}*\n"
-        f"Max Positions: *{escape_md(str(max_positions))}* \\| Max Leverage: *{escape_md(f'{leverage_cap}x')}*\n"
-        f"TP/SL: *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}* \\| Min Confidence: *{escape_md(f'{min_confidence:.0%}')}*\n"
-        f"Cycle: *{escape_md(f'{cycle_seconds}s')}* \\| Max Loss: *{escape_md(f'{max_loss:.0f}%')}*\n\n"
-        f"📈 *Account*\n"
-        f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}*\n"
-        f"Mode: *{escape_md(network.upper())}*\n\n"
-        f"Data: Prices \\+ Technicals \\+ Funding \\+ CMC \\+ Twitter Sentiment\n"
-        f"Engine: Grok\\-3 full power\n\n"
-        "Configure, check status, or launch below\\."
+        f"Max positions: *{escape_md(str(max_positions))}* \\| Max leverage: *{escape_md(f'{leverage_cap}x')}*\n"
+        f"TP/SL: *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}* \\| Min confidence: *{escape_md(f'{min_confidence:.0%}')}*\n\n"
+        "*Account*\n"
+        f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* \\| Mode: *{escape_md(network.upper())}*\n"
+        f"Cycle: *{escape_md(f'{cycle_seconds}s')}* \\| Max loss: *{escape_md(f'{max_loss:.0f}%')}*\n\n"
+        "Start now, or open *Configure* only if you want deeper control\\."
     )
 
 
@@ -2240,21 +2535,17 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
         )
     return (
-        f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))} Dashboard*\n"
+        f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))}*\n"
         f"Status: {status_dot} *READY*\n"
         f"{escape_md(selected_explainer)}\n\n"
-        f"📊 *Settings*\n"
-        f"Pair *{escape_md(product)}\\-PERP* · Mid *{escape_md(mid_str)}* · Mode *{escape_md(network.upper())}*\n"
-        f"Margin *{escape_md(f'${notional:,.0f}')}* · Per cycle *{escape_md(f'${cycle_notional:,.0f}')}* · "
-        f"Spread *{escape_md(f'{spread_bp:.0f}bp')}* · Every *{escape_md(f'{interval_seconds}s')}*\n"
-        f"Leverage *{escape_md(f'{leverage:.0f}x')}* · Slippage *{escape_md(f'{slippage:.1f}%')}* · "
-        f"{'PnL SL *' + escape_md(f'{max_loss_pct:.1f}%') + '*' if strategy_id == 'rgrid' else 'TP/SL *' + escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%') + '*'}"
+        "*Quick setup*\n"
+        f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}* \\| Mode: *{escape_md(network.upper())}*\n"
+        f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.0f}bp')}* \\| Every: *{escape_md(f'{interval_seconds}s')}*\n"
+        f"Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| "
+        f"{'PnL stop *' + escape_md(f'{max_loss_pct:.1f}%') + '*' if strategy_id == 'rgrid' else 'TP/SL *' + escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%') + '*'}\n"
+        f"Need now: {margin_flag} *{escape_md(f'${required_margin:,.2f}')}* required \\| Balance: *{escape_md(f'${available_margin:,.2f}')}*"
         f"{extra_cfg}\n\n"
-        f"📈 *Analytics*\n"
-        f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *{escape_md(f'${required_margin:,.2f}')}* required\n"
-        f"Est\\. Daily Volume: *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
-        f"Max Loss: *{escape_md(f'${max_loss:,.2f}')}* \\| Net Estimate: *{escape_md(net_str)}*\n\n"
-        "Tune risk, edit parameters, or launch below\\."
+        "_Start fast, or open Advanced for deeper tuning\\._"
     )
 
 

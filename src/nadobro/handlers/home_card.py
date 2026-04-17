@@ -8,6 +8,9 @@ from telegram.ext import CallbackContext
 from src.nadobro.i18n import localize_text, localize_markup, get_active_language
 from src.nadobro.handlers.formatters import (
     escape_md,
+    fmt_alert_menu_intro,
+    fmt_mode_view,
+    md2_rule,
     fmt_positions,
     fmt_settings,
     fmt_wallet_info,
@@ -66,11 +69,14 @@ def build_home_card_text(telegram_id: int) -> str:
         pass
 
     return (
-        "🤖 *Nadobro Command Center*\n\n"
-        f"Mode: *{escape_md(network_label)}*\n"
-        f"Balance: *{escape_md(balance_str)}*\n\n"
-        "Use this control panel to trade, review your portfolio and points, launch strategies, and adjust risk settings\\.\n"
-        "Use chat for AI Q\\&A, support questions, and plain\\-language trade commands\\."
+        "🤖 *Nadobro Command Center*\n"
+        f"{md2_rule()}\n\n"
+        f"*Execution mode*\n{escape_md(network_label)}\n\n"
+        f"*Wallet balance \\(USDT\\)*\n{escape_md(balance_str)}\n\n"
+        f"{md2_rule()}\n\n"
+        "*Shortcuts*\n"
+        "Tap the buttons below for Trade, Portfolio, Strategies, Points, Alerts, and Settings\\.\n\n"
+        "_Chat here for AI Q\\&A and plain\\-language trades\\._"
     )
 
 
@@ -278,12 +284,7 @@ async def _edit_or_send_card(
 def _view_mode_text(telegram_id: int):
     user = get_user(telegram_id)
     current_network = user.network_mode.value if user else "testnet"
-    network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
-    lang = get_active_language()
-    header = localize_text("🌐 *Execution Mode Control*\n\nCurrent Mode:", lang)
-    switch_label = localize_text("Switch mode below:", lang)
-    text = f"{header} *{escape_md(network_label)}*\n\n{switch_label}"
-    return text, mode_kb(current_network)
+    return fmt_mode_view(current_network), mode_kb(current_network)
 
 
 def _view_strategy_text():
@@ -312,7 +313,7 @@ def _view_points_text(telegram_id: int):
 
 
 def _view_alerts_text():
-    return localize_text("🔔 *Alert Engine*\n\nManage your trigger alerts\\.", get_active_language()), alerts_kb()
+    return fmt_alert_menu_intro(), alerts_kb()
 
 
 def _view_settings_text(telegram_id: int):

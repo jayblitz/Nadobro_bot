@@ -200,19 +200,21 @@ def fmt_price(price, product="BTC"):
 
 def fmt_positions(positions, prices=None, mode_label: str | None = None):
     if not positions:
-        header = [_loc("📋 *Open Positions*")]
+        header = [_loc("📋 *Open Positions*"), md2_rule()]
         if mode_label:
             header.append(f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}")
         return "\n".join(header) + "\n\n" + _loc("No open positions\\.")
 
     lines = [
         _loc("📋 *Open Positions*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        md2_rule(),
         "",
     ]
     if mode_label:
         lines.append(f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}")
         lines.append("")
+    lines.append(f"📌 *{_loc('Total')}:* {escape_md(str(len(positions)))}")
+    lines.append("")
     any_estimated_pnl = False
 
     for i, p in enumerate(positions, 1):
@@ -230,12 +232,6 @@ def fmt_positions(positions, prices=None, mode_label: str | None = None):
             current = float(prices[base].get("mid", 0) or 0)
 
         mark_str = f"${fmt_price(current, base)}" if current else "—"
-        lines.append(
-            f"  • {_loc('Entry price')}: {escape_md(f'${entry:,.2f}')}"
-        )
-        lines.append(
-            f"  • {_loc('Current price')}: {escape_md(mark_str)}"
-        )
 
         pnl = None
         if current:
@@ -245,33 +241,36 @@ def fmt_positions(positions, prices=None, mode_label: str | None = None):
                 any_estimated_pnl = True
             pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
             pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-            lines.append(
-                f"  • {_loc('uPnL')}: {pnl_emoji} {escape_md(pnl_str)}"
-            )
         else:
-            lines.append(f"  • {_loc('uPnL')}: —")
+            pnl_emoji = ""
+            pnl_str = "—"
 
         liq_raw = p.get("liquidation_price")
         if liq_raw is not None:
             try:
                 liq_v = float(liq_raw)
                 if liq_v > 0:
-                    lines.append(
-                        f"  • {_loc('Liquidation price')}: {escape_md(f'${fmt_price(liq_v, base)}')}"
-                    )
+                    liq_str = f"${fmt_price(liq_v, base)}"
                 else:
-                    lines.append(f"  • {_loc('Liquidation price')}: —")
+                    liq_str = "—"
             except Exception:
-                lines.append(f"  • {_loc('Liquidation price')}: —")
+                liq_str = "—"
         else:
-            lines.append(f"  • {_loc('Liquidation price')}: —")
+            liq_str = "—"
 
+        lines.append(f"{side_emoji} *{escape_md(side)}* {escape_md(pname)}")
         lines.append(
-            f"  • {_loc('Position size')}: {escape_md(f'{amount:.4f}')} {escape_md(base)}"
+            f"{_loc('Size')}: *{escape_md(f'{amount:.4f}')} {escape_md(base)}* \\| "
+            f"{_loc('uPnL')}: {pnl_emoji} *{escape_md(pnl_str)}*"
         )
-        lines.append("")
+        lines.append(
+            f"{_loc('Entry')}: {escape_md(f'${entry:,.2f}')} \\| "
+            f"{_loc('Mark')}: {escape_md(mark_str)} \\| "
+            f"{_loc('Liq')}: {escape_md(liq_str)}"
+        )
+        if i < len(positions):
+            lines.extend(["", md2_rule(22), ""])
 
-    lines.append(f"{_loc('Total')}: {escape_md(str(len(positions)))} {_loc('position(s)')}")
     if any_estimated_pnl:
         lines.append("")
         lines.append(
@@ -486,7 +485,7 @@ def fmt_limit_close_result(result: dict) -> str:
 
 def fmt_wallet_info(wallet_info):
     if not wallet_info:
-        return _loc("💼 *Wallet Vault*") + "\n\n" + _loc("Wallet not found\\. Use /start first\\.")
+        return _loc("💼 *Wallet Vault*") + "\n" + md2_rule() + "\n\n" + _loc("Wallet not found\\. Use /start first\\.")
 
     net = wallet_info.get("network", "testnet")
     net_emoji = "🧪" if net == "testnet" else "🌐"
@@ -494,28 +493,26 @@ def fmt_wallet_info(wallet_info):
 
     lines = [
         _loc("💼 *Wallet Vault*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        md2_rule(),
         "",
         f"📊 *{_loc('Network:')}* {net_emoji} {escape_md(net.upper())}",
     ]
 
     addr = wallet_info.get("active_address")
     if addr:
-        lines.append("")
-        lines.append(f"📋 *{_loc('Main Wallet:')}*")
+        lines.extend(["", f"*{_loc('Main Wallet')}*"])
         lines.append(f"`{escape_md(addr)}`")
     else:
-        lines.append("")
+        lines.extend(["", f"*{_loc('Main Wallet')}*"])
         lines.append(f"📋 *{_loc('Main Wallet:')}* {_loc('Not set')}")
 
     if signer_linked:
-        lines.append("")
-        lines.append(f"🔐 *{_loc('1CT Address')}:*")
+        lines.extend(["", f"*{_loc('Linked Signer')}*"])
         lines.append(f"`{escape_md(wallet_info['linked_signer_address'])}`")
 
     verification = wallet_info.get("signer_verification")
     if verification:
-        lines.append("")
+        lines.extend(["", f"*{_loc('Verification')}*"])
         if verification.get("error"):
             lines.append(f"⚠️ *{_loc('Signer Check')}:* {escape_md(_loc('Could not verify') + ' — ' + str(verification['error'])[:60])}")
         elif verification.get("verified"):
@@ -531,42 +528,111 @@ def fmt_wallet_info(wallet_info):
             lines.append(f"❌ *{_loc('Signer Check')}:* {_loc('No signer linked on exchange')}")
             lines.append(escape_md(_loc("→ Go to Nado Settings → 1-Click Trading → Advanced 1CT → paste bot's key → enable and save.")))
     elif signer_linked:
-        lines.append("")
+        lines.extend(["", f"*{_loc('Verification')}*"])
         lines.append(f"🔗 *{_loc('1CT Signer')}:* {escape_md(_loc('LINKED (not verified)'))}")
     else:
-        lines.append("")
+        lines.extend(["", f"*{_loc('Verification')}*"])
         lines.append(f"🔗 *{_loc('1CT Signer')}:* {escape_md(_loc('NOT LINKED'))}")
 
-    lines.append("")
-    lines.append(_loc("Use the 👛 Wallet button to link or revoke your 1CT key\\."))
+    lines.extend(["", "_Use Wallet actions below to view balance, link, or revoke your trading signer\\._"])
 
     return "\n".join(lines)
 
 
 def fmt_alerts(alerts):
     if not alerts:
-        return _loc("🔔 *Alert Engine*") + "\n\n" + _loc("No active alerts\\. Use Set Alert to create one\\.")
+        return (
+            _loc("🔔 *Alert Engine*")
+            + "\n"
+            + md2_rule()
+            + "\n\n"
+            + _loc("No active alerts\\.")
+            + "\n\n"
+            + _loc("Use *Set Alert* to create a new trigger for price, funding, or PnL\\.")
+        )
 
     lines = [
         _loc("🔔 *Alert Engine*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        md2_rule(),
+        "",
+        f"📌 *{_loc('Active alerts')}:* {escape_md(str(len(alerts)))}",
         "",
     ]
 
-    for a in alerts:
+    for idx, a in enumerate(alerts, start=1):
         condition = str(a.get("condition") or "")
         target = float(a.get("target") or 0)
         if condition.startswith("funding"):
             target_str = f"{target:,.4f}%"
         else:
             target_str = f"${target:,.2f}"
+        lines.append(f"🔔 *{escape_md(a['product'])}* \\| {escape_md(condition.replace('_', ' ').title())}")
         lines.append(
-            f"\\#{escape_md(str(a['id']))} {escape_md(a['product'])} "
-            f"{escape_md(condition)} {escape_md(target_str)} "
-            f"\\({escape_md(a.get('network', 'mainnet'))}\\)"
+            f"{_loc('Target')}: *{escape_md(target_str)}* \\| "
+            f"{_loc('ID')}: *\\#{escape_md(str(a['id']))}* \\| "
+            f"{_loc('Mode')}: *{escape_md(str(a.get('network', 'mainnet')).upper())}*"
         )
+        if idx < len(alerts):
+            lines.extend(["", md2_rule(20), ""])
 
     return "\n".join(lines)
+
+
+def fmt_alert_menu_intro() -> str:
+    return (
+        "🔔 *Alert Engine*\n"
+        f"{md2_rule()}\n\n"
+        "*What you can do*\n"
+        "• Create price alerts\n"
+        "• Watch funding thresholds\n"
+        "• Track PnL triggers\n\n"
+        "_Pick an action below\\._"
+    )
+
+
+def fmt_alert_product_prompt() -> str:
+    return (
+        "🔔 *Create Alert*\n"
+        f"{md2_rule()}\n\n"
+        "Choose the asset you want to monitor\\."
+    )
+
+
+def fmt_alert_condition_prompt(product: str) -> str:
+    return (
+        f"🔔 *{escape_md(product)}\\-PERP Alert*\n"
+        f"{md2_rule()}\n\n"
+        "Choose the trigger type below\\."
+    )
+
+
+def fmt_alert_target_prompt(product: str, label: str, example: str) -> str:
+    return (
+        f"🔔 *{escape_md(product)}\\-PERP*\n"
+        f"{md2_rule()}\n\n"
+        f"*Trigger:* {escape_md(label)}\n\n"
+        "Enter the target value in chat\\.\n"
+        f"{example}"
+    )
+
+
+def fmt_mode_view(current_network: str) -> str:
+    network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
+    return (
+        "🌐 *Execution Mode*\n"
+        f"{md2_rule()}\n\n"
+        f"*Current mode:* {escape_md(network_label)}\n\n"
+        "Choose where Nadobro should trade and read account state\\."
+    )
+
+
+def fmt_close_all_confirm() -> str:
+    return (
+        "⚠️ *Close All Positions*\n"
+        f"{md2_rule()}\n\n"
+        "This will try to close every open position for the active mode\\.\n\n"
+        "_Only continue if you want a full exit\\._"
+    )
 
 
 
@@ -643,7 +709,7 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
 
     lines = [
         _loc("📁 *Portfolio Deck*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        md2_rule(),
         "",
     ]
     if mode_label:
@@ -652,9 +718,10 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
             "",
         ])
     lines.extend([
-        f"📌 *{_loc('Open Positions:')}* {escape_md(str(len(positions or [])))}",
+        f"*{_loc('Snapshot')}*",
+        f"📌 *{_loc('Open Positions:')}* {escape_md(str(len(positions or [])))} \\| "
         f"📬 *{_loc('Open Orders:')}* {escape_md(str(len(open_orders)))}",
-        f"💎 *{_loc('Position Value:')}* {escape_md(f'${position_value:,.2f}')}",
+        f"💎 *{_loc('Position Value:')}* {escape_md(f'${position_value:,.2f}')} \\| "
         f"{upnl_emoji} *{_loc('Unrealized PnL:')}* {escape_md(upnl_str)}",
     ])
 
@@ -666,10 +733,13 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
         rpnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
         lines.extend([
             "",
+            md2_rule(22),
+            "",
             f"*{_loc('Bot Trading Stats')}*",
-            f"💰 *{_loc('Volume:')}* {escape_md(f'${total_volume:,.2f}')}",
+            f"💰 *{_loc('Volume:')}* {escape_md(f'${total_volume:,.2f}')} \\| "
             f"{rpnl_emoji} *{_loc('Realized PnL:')}* {escape_md(rpnl_str)}",
-            f"🏆 *{_loc('Win Rate:')}* {escape_md(f'{win_rate:.1f}%')} \\| {_loc('Trades:')} {escape_md(str(total_trades))}",
+            f"🏆 *{_loc('Win Rate:')}* {escape_md(f'{win_rate:.1f}%')} \\| "
+            f"{_loc('Trades:')} {escape_md(str(total_trades))}",
         ])
 
     lines.extend(["", f"*{_loc('Open Orders')}*"])
@@ -691,11 +761,14 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
             if requested_size > 0 and filled_size > 0:
                 fill_progress = f" \\| {_loc('Filled')}: {escape_md(f'{filled_size:.4f}/{requested_size:.4f}')}"
             lines.append(
-                f"• {escape_md(o_type)} \\| {escape_md(side)} \\| {escape_md(product)} \\| "
-                f"{_loc('Size')}: {escape_md(f'{size:.4f}')} \\| {_loc('Limit')}: {escape_md(limit_price_str)}"
+                f"• *{escape_md(product)}* \\| {escape_md(side)} {escape_md(o_type)}"
             )
             lines.append(
-                f"  {_loc('Status')}: *{escape_md(status)}*{fill_progress} \\| {_loc('Created')}: {escape_md(created if created else '—')}"
+                f"  {_loc('Size')}: {escape_md(f'{size:.4f}')} \\| {_loc('Limit')}: {escape_md(limit_price_str)}"
+            )
+            lines.append(
+                f"  {_loc('Status')}: *{escape_md(status)}*{fill_progress} \\| "
+                f"{_loc('Created')}: {escape_md(created if created else '—')}"
             )
         if len(open_orders) > 5:
             lines.append(f"• \\.\\.\\. {_loc('and')} {escape_md(str(len(open_orders) - 5))} {_loc('more')}")
@@ -725,7 +798,8 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
                 pnl_text = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
 
         lines.append(
-            f"• {escape_md(side)} {escape_md(f'{amount:.4f}')} {escape_md(pname)} \\| {_loc('PnL')}: {escape_md(pnl_text)}"
+            f"• *{escape_md(pname)}* \\| {escape_md(side)} {escape_md(f'{amount:.4f}')} \\| "
+            f"{_loc('PnL')}: {escape_md(pnl_text)}"
         )
 
     if len(positions) > 5:
@@ -739,7 +813,7 @@ def fmt_trade_history(trades, page=0, page_size=10, mode_label: str | None = Non
 
     lines = [
         _loc("📜 *Trade History*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        md2_rule(),
     ]
     if mode_label:
         lines.extend(["", f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}"])
@@ -750,10 +824,17 @@ def fmt_trade_history(trades, page=0, page_size=10, mode_label: str | None = Non
         return "\n".join(lines)
 
     total = len(trades)
-    lines.append(f"*{_loc('Showing')}* {escape_md(str(start + 1))}\\-{escape_md(str(min(start + page_size, total)))} {_loc('of')} {escape_md(str(total))}")
-    lines.append("")
+    current_page = page + 1
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    lines.extend([
+        "",
+        f"*{_loc('Overview')}*",
+        f"{_loc('Showing')}: *{escape_md(str(start + 1))}*\\-*{escape_md(str(min(start + page_size, total)))}* {_loc('of')} *{escape_md(str(total))}*",
+        f"{_loc('Page')}: *{escape_md(str(current_page))}* {_loc('of')} *{escape_md(str(total_pages))}*",
+        "",
+    ])
 
-    for t in page_trades:
+    for idx, t in enumerate(page_trades, start=start + 1):
         product = t.get("product", "???")
         side = (t.get("side") or "???").upper()
         side_emoji = "🟢" if side == "LONG" else "🔴"
@@ -771,10 +852,15 @@ def fmt_trade_history(trades, page=0, page_size=10, mode_label: str | None = Non
             pnl_val = float(pnl)
             pnl_str = f"+${pnl_val:,.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):,.2f}"
 
-        lines.append(f"{side_emoji} *{escape_md(side)}* {escape_md(product)} \\| {escape_md(status)}")
-        lines.append(f"   {_loc('Entry:')} {escape_md(price_str)} → {_loc('Exit:')} {escape_md(close_str)}")
-        lines.append(f"   {_loc('PnL:')} {escape_md(pnl_str)} \\| {escape_md(created)}")
-        lines.append("")
+        lines.append(f"{side_emoji} *{escape_md(product)}* \\| *{escape_md(side)}* \\| {escape_md(status)}")
+        lines.append(
+            f"{_loc('Trade')}: *\\#{escape_md(str(idx))}* \\| "
+            f"{_loc('PnL')}: *{escape_md(pnl_str)}* \\| "
+            f"{escape_md(created if created else '—')}"
+        )
+        lines.append(f"{_loc('Entry:')} {escape_md(price_str)} → {_loc('Exit:')} {escape_md(close_str)}")
+        if idx < min(start + page_size, total):
+            lines.extend(["", md2_rule(20), ""])
 
     return "\n".join(lines)
 
@@ -782,7 +868,7 @@ def fmt_trade_history(trades, page=0, page_size=10, mode_label: str | None = Non
 def fmt_analytics(stats, mode_label: str | None = None):
     lines = [
         _loc("📊 *Trading Analytics*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        md2_rule(),
         "",
     ]
     if mode_label:
@@ -808,18 +894,24 @@ def fmt_analytics(stats, mode_label: str | None = None):
     avg_trade = total_volume / max(filled + closed, 1)
 
     lines.extend([
-        f"*{_loc('Performance')}*",
-        f"{pnl_emoji} *{_loc('Total PnL:')}* {escape_md(pnl_str)}",
+        f"*{_loc('Overview')}*",
+        f"{pnl_emoji} *{_loc('Total PnL:')}* {escape_md(pnl_str)} \\| "
         f"🏆 *{_loc('Win Rate:')}* {escape_md(f'{win_rate:.1f}%')}",
+        f"📋 *{_loc('Total Trades:')}* {escape_md(str(total_trades))} \\| "
         f"✅ *{_loc('Wins:')}* {escape_md(str(wins))} \\| ❌ *{_loc('Losses:')}* {escape_md(str(losses))}",
         "",
+        md2_rule(22),
+        "",
         f"*{_loc('Volume')}*",
-        f"💰 *{_loc('Total Volume:')}* {escape_md(f'${total_volume:,.2f}')}",
+        f"💰 *{_loc('Total Volume:')}* {escape_md(f'${total_volume:,.2f}')} \\| "
         f"📏 *{_loc('Avg Trade Size:')}* {escape_md(f'${avg_trade:,.2f}')}",
         "",
-        f"*{_loc('Trades')}*",
-        f"📋 *{_loc('Total:')}* {escape_md(str(total_trades))}",
-        f"✅ *{_loc('Filled:')}* {escape_md(str(filled))} \\| 🔒 *{_loc('Closed:')}* {escape_md(str(closed))} \\| ❌ *{_loc('Failed:')}* {escape_md(str(failed))}",
+        md2_rule(22),
+        "",
+        f"*{_loc('Outcomes')}*",
+        f"✅ *{_loc('Filled:')}* {escape_md(str(filled))} \\| "
+        f"🔒 *{_loc('Closed:')}* {escape_md(str(closed))} \\| "
+        f"❌ *{_loc('Failed:')}* {escape_md(str(failed))}",
     ])
 
     # Per-product breakdown if available
@@ -836,19 +928,159 @@ def fmt_analytics(stats, mode_label: str | None = None):
     return "\n".join(lines)
 
 
+def md2_rule(width: int = 30) -> str:
+    """Horizontal rule for Telegram MarkdownV2 (escaped, safe)."""
+    w = max(12, min(int(width), 40))
+    return escape_md("━" * w)
+
+
+def fmt_dashboard_home() -> str:
+    """Home dashboard banner after /start (MarkdownV2)."""
+    return (
+        "🤖 *Nadobro Command Center*\n"
+        f"{md2_rule()}\n\n"
+        "*Status:* online ✅\n\n"
+        "*Next step*\n"
+        "Use the reply keyboard below to open modules\\.\n\n"
+        "*What you can do*\n"
+        "• 💼 Wallet Vault — balances \\& linked signer\n"
+        "• 🤖 Trade Console — perp orders\n"
+        "• 🧠 Strategy Lab — automation\n"
+        "• 📁 Portfolio Deck — positions \\& PnL\n"
+        "• 🏆 Points \\& Market Radar\n"
+        "• 🔔 Alert Engine — price \\& funding triggers\n"
+        "• ⚙️ Control Panel — leverage \\& slippage\n\n"
+        "_Chat here for AI Q\\&A and plain\\-language trades\\._"
+    )
+
+
+def fmt_stop_all_result(ok: bool, backend_msg: str, hint: str) -> str:
+    """Stop\\_all command reply (MarkdownV2)."""
+    icon = "🛑" if ok else "⚠️"
+    title = "All strategies stopped" if ok else "Stop strategies"
+    return (
+        f"{icon} *{escape_md(title)}*\n"
+        f"{md2_rule()}\n\n"
+        f"{escape_md(backend_msg)}\n\n"
+        f"_{escape_md(hint)}_"
+    )
+
+
+def fmt_revoke_card() -> str:
+    """1CT revoke steps (MarkdownV2)."""
+    return (
+        "🔄 *Revoke 1CT Key \\(Nado\\)*\n"
+        f"{md2_rule()}\n\n"
+        "1\\. Open Nado → Settings\n"
+        "2\\. 1\\-Click Trading → Advanced 1CT\n"
+        "3\\. Disable the toggle and save\n\n"
+        "_Your main wallet stays safe\\. Re\\-link anytime via Wallet\\._"
+    )
+
+
+def fmt_managed_agent_enabled() -> str:
+    return (
+        "🧠 *Managed AI mode* — *ON*\n"
+        f"{md2_rule()}\n\n"
+        "Hey boss — talk naturally in chat\\.\n"
+        "I route *analysis* to the backend brain and *strategies* through the normal safety checks\\.\n\n"
+        "_Tip:_ `/agent\\_status` anytime\\."
+    )
+
+
+def fmt_managed_agent_disabled() -> str:
+    return (
+        "🧠 *Managed AI mode* — *OFF*\n"
+        f"{md2_rule()}\n\n"
+        "Back to standard Nadobro chat routing\\.\n\n"
+        "_Turn on anytime:_ `/agent\\_on`"
+    )
+
+
+def fmt_managed_agent_globally_disabled() -> str:
+    return (
+        "🧠 *Managed AI mode*\n"
+        f"{md2_rule()}\n\n"
+        "⚠️ *Globally disabled* by ops right now\\.\n"
+        "Try again later, boss\\."
+    )
+
+
+def fmt_managed_agent_status(effective_on: bool, global_enabled: bool, updated_at: str) -> str:
+    eff = "ON ✅" if effective_on else "OFF"
+    glob = "ENABLED ✅" if global_enabled else "DISABLED ⛔️"
+    return (
+        "🧠 *Managed AI — Status*\n"
+        f"{md2_rule()}\n\n"
+        f"*Effective mode:* {escape_md(eff)}\n"
+        f"*Global ops switch:* {escape_md(glob)}\n"
+        f"*Last update:* {escape_md(updated_at)}"
+    )
+
+
 def fmt_settings(user_data):
     leverage = user_data.get("default_leverage", 1)
     slippage = user_data.get("slippage", 1)
+    risk_profile = str(user_data.get("risk_profile", "balanced")).upper()
 
     lines = [
         _loc("⚙️ *Control Panel*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        md2_rule(),
         "",
+        f"🛡 *{_loc('Risk Profile')}:* {escape_md(risk_profile)}",
         f"⚡ *{_loc('Default Leverage')}:* {escape_md(f'{leverage}x')}",
         f"📊 *{_loc('Slippage')}:* {escape_md(f'{slippage}%')}",
+        "",
+        _loc("_Use the buttons below to change language, leverage, slippage, or risk preset\\._"),
     ]
 
     return "\n".join(lines)
+
+
+def fmt_wallet_connect_card(pk_hex: str) -> str:
+    return (
+        "👛 *Wallet Connect*\n"
+        f"{md2_rule()}\n\n"
+        "*Step 1*\n"
+        "Open https://app\\.nado\\.xyz, connect your wallet, and deposit at least $5 USDT0\\.\n\n"
+        "*Step 2*\n"
+        "Go to *Settings → 1\\-Click Trading → Advanced 1CT*\\.\n\n"
+        "*Step 3*\n"
+        "Paste this trading key into the *1CT Private Key* field:\n\n"
+        f"`{escape_md(pk_hex)}`\n\n"
+        "*Step 4*\n"
+        "Enable the toggle, save, and confirm the wallet transaction\\.\n\n"
+        "*Final step*\n"
+        "Reply here with your main wallet address \\(`0x...`\\)\\.\n\n"
+        "_This signer is for trading only and cannot withdraw funds\\._"
+    )
+
+
+def fmt_wallet_balance_card(amount: float) -> str:
+    return (
+        "💰 *Wallet Balance*\n"
+        f"{md2_rule()}\n\n"
+        f"*Available USDT0:* {escape_md(f'${amount:,.2f}')}"
+    )
+
+
+def fmt_wallet_balance_error() -> str:
+    return (
+        "💰 *Wallet Balance*\n"
+        f"{md2_rule()}\n\n"
+        "⚠️ Could not fetch balance right now\\. Try again shortly\\."
+    )
+
+
+def fmt_wallet_revoke_steps_card() -> str:
+    return (
+        "🔄 *Revoke 1CT Key*\n"
+        f"{md2_rule()}\n\n"
+        "1\\. Open Nado → Settings\n"
+        "2\\. 1\\-Click Trading → Advanced 1CT\n"
+        "3\\. Disable the toggle and save\n\n"
+        "_You can also reset Nadobro's stored signer below if you want to link a new key\\._"
+    )
 
 
 def fmt_help():
@@ -863,6 +1095,9 @@ def fmt_help():
         "/ops \\- View order flow and runtime diagnostics\n"
         "/revoke \\- Show 1CT signer revoke steps\n"
         "/stop\\_all \\- Stop all running strategy loops\n"
+        "/agent\\_on \\- Enable managed AI chat mode \\(bro tone \\+ guarded routing\\)\n"
+        "/agent\\_off \\- Disable managed AI chat mode\n"
+        "/agent\\_status \\- Show managed AI and ops switch status\n"
         "\n"
         "*Core Modules:*\n"
         "\n"
@@ -957,13 +1192,11 @@ def fmt_status_overview(status: dict, onboarding: dict):
     key_ready = onboarding.get("has_key")
     funded = onboarding.get("funded")
 
-    lines = [
-        _loc("📡 *Status*"),
-        f"{_loc('Network:')} *{escape_md(mode)}*",
-    ]
+    lines = [_loc("📡 *Status*"), md2_rule(), f"{_loc('Network:')} *{escape_md(mode)}*"]
 
     if not complete:
         step = onboarding.get("missing_step") or "unknown"
+        lines.extend(["", f"*{_loc('Setup')}*"])
         lines.append(f"{_loc('Setup:')} *{_loc('IN PROGRESS')}* — {escape_md(step.replace('_', ' ').title())}")
         if not key_ready:
             lines.append(f"{_loc('Key:')} *{_loc('NOT SET')}* — {_loc('use /onboard to continue')}")
@@ -992,6 +1225,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
         lines.append("")
 
     if not running:
+        lines.extend(["", f"*{_loc('Runtime')}*"])
         lines.append(f"{_loc('Strategy:')} *{_loc('OFF')}*")
         last_action = status.get("last_action")
         if last_action:
@@ -1008,6 +1242,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
         next_in = status.get("next_cycle_in", 0)
 
         state_label = _loc('PAUSED') if global_pause_active else _loc('ON')
+        lines.extend(["", f"*{_loc('Runtime')}*"])
         lines.append(f"{_loc('Strategy:')} *{escape_md(strategy)}* · {state_label}")
         if product != "MULTI":
             lines.append(f"{_loc('Pair:')} *{escape_md(product)}\\-PERP*")
@@ -1056,22 +1291,24 @@ def fmt_status_overview(status: dict, onboarding: dict):
                 lines.append(f"{_loc('Error class')}: *{escape_md(err_cat)}*")
 
         worker_group = status.get("worker_group")
-        if worker_group:
-            heartbeat = _fmt_age_seconds(float(status.get("worker_last_heartbeat") or 0.0))
-            cycle_ms = float(status.get("last_cycle_ms") or 0.0)
-            lines.append(
-                f"{_loc('Worker')}: *{escape_md(str(worker_group).upper())}* · "
-                f"{_loc('Last cycle')}: *{escape_md(heartbeat)}* · "
-                f"{escape_md(f'{cycle_ms:.0f}ms')}"
-            )
         runtime_diag = status.get("runtime_diagnostics") or {}
         queue_diag = runtime_diag.get("queue") or {}
         strategy_qsize = int(queue_diag.get("strategy_qsize") or 0)
         strategy_qmax = int(queue_diag.get("strategy_qmax") or 0)
         pending_ticks = int(runtime_diag.get("pending_coalesced_ticks") or 0)
+        if worker_group or strategy_qmax > 0 or pending_ticks > 0:
+            lines.extend(["", f"*{_loc('Health')}*"])
+        if worker_group:
+            heartbeat = _fmt_age_seconds(float(status.get("worker_last_heartbeat") or 0.0))
+            cycle_ms = float(status.get("last_cycle_ms") or 0.0)
+            lines.append(
+                f"{_loc('Worker')}: *{escape_md(str(worker_group).upper())}* \\| "
+                f"{_loc('Heartbeat')}: *{escape_md(heartbeat)}* \\| "
+                f"{_loc('Cycle')}: *{escape_md(f'{cycle_ms:.0f}ms')}*"
+            )
         if strategy_qmax > 0 or pending_ticks > 0:
             lines.append(
-                f"{_loc('Queue')}: *{escape_md(str(strategy_qsize))}/{escape_md(str(strategy_qmax))}* · "
+                f"{_loc('Queue')}: *{escape_md(str(strategy_qsize))}/{escape_md(str(strategy_qmax))}* \\| "
                 f"{_loc('coalesced')}: *{escape_md(str(pending_ticks))}*"
             )
 
@@ -1080,27 +1317,20 @@ def fmt_status_overview(status: dict, onboarding: dict):
             obs_placed = int(order_obs.get("orders_placed") or 0)
             obs_filled = int(order_obs.get("orders_filled") or 0)
             obs_cancelled = int(order_obs.get("orders_cancelled") or 0)
-            obs_cycles = int(order_obs.get("cycles") or 0)
-            obs_zero = int(order_obs.get("zero_order_cycles") or 0)
             lines.append(
-                f"{_loc('Order Flow')}: "
-                f"{_loc('placed')} *{escape_md(str(obs_placed))}* · "
-                f"{_loc('filled')} *{escape_md(str(obs_filled))}* · "
+                f"{_loc('Orders')}: {_loc('placed')} *{escape_md(str(obs_placed))}* \\| "
+                f"{_loc('filled')} *{escape_md(str(obs_filled))}* \\| "
                 f"{_loc('cancelled')} *{escape_md(str(obs_cancelled))}*"
             )
-            if obs_cycles > 0:
-                lines.append(
-                    f"{_loc('Orderless cycles')}: *{escape_md(str(obs_zero))}/{escape_md(str(obs_cycles))}*"
-                )
             obs_last_reason = str(order_obs.get("last_reason") or "").strip()
             if obs_last_reason:
-                lines.append(f"{_loc('Last reason')}: {escape_md(obs_last_reason[:160])}")
+                lines.append(f"{_loc('Last reason')}: {escape_md(obs_last_reason[:120])}")
         if strategy == "VOL":
             vol_attempts = int(status.get("vol_order_attempts") or 0)
             vol_failures = int(status.get("vol_order_failures") or 0)
             if vol_attempts > 0:
                 lines.append(
-                    f"{_loc('Vol order attempts')}: *{escape_md(str(vol_attempts))}* · "
+                    f"{_loc('Vol order attempts')}: *{escape_md(str(vol_attempts))}* \\| "
                     f"{_loc('failures')}: *{escape_md(str(vol_failures))}*"
                 )
             last_order_error = str(status.get("last_order_error") or "").strip()
@@ -1122,7 +1352,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
             trade_count = bro_state.get("trade_count", 0)
             total_pnl = bro_state.get("total_pnl", 0.0)
             active = len(bro_state.get("active_positions", []))
-            lines.append("")
+            lines.extend(["", "*Alpha Agent*"])
             lines.append(f"{_loc('Trades:')} *{escape_md(str(trade_count))}* \\| {_loc('Open Positions:')} *{escape_md(str(active))}*")
             pnl_sign = "+" if total_pnl >= 0 else ""
             lines.append(f"{_loc('Session PnL:')} *{escape_md(f'{pnl_sign}${total_pnl:,.2f}')}*")
@@ -1149,8 +1379,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
             reset_timeout = int(float(status.get("rgrid_reset_timeout_seconds") or 0.0))
             discretion = float(status.get("rgrid_discretion") or 0.0)
             pnl_sign = "+" if cycle_pnl >= 0 else ""
-            lines.append("")
-            lines.append("*Reverse GRID Telemetry*")
+            lines.extend(["", "*Reverse GRID Telemetry*"])
             lines.append(
                 f"Anchor: *{escape_md(f'{anchor:,.6f}') if anchor > 0 else 'n/a'}* \\| "
                 f"Drift: *{escape_md(f'{drift_pct:.3f}%')}*"
@@ -1185,16 +1414,17 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
 
     lines = [
         "🧪 *Ops Snapshot*",
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        f"{_loc('Strategy')}: *{escape_md(strategy)}* · {('PAUSED' if global_pause_active else ('ON' if running else 'OFF'))}",
+        md2_rule(),
+        f"{_loc('Strategy')}: *{escape_md(strategy)}* \\| {('PAUSED' if global_pause_active else ('ON' if running else 'OFF'))}",
     ]
 
     if global_pause_active:
         lines.append(f"⚠️ {_loc('Global trading pause is active. Strategy execution is suspended.')}")
 
+    lines.extend(["", f"*{_loc('Queue & Workers')}*"])
     lines.append(
         f"{_loc('Queue')}: *{escape_md(str(int(queue_diag.get('strategy_qsize') or 0)))}*"
-        f"/{escape_md(str(int(queue_diag.get('strategy_qmax') or 0)))} · "
+        f"/{escape_md(str(int(queue_diag.get('strategy_qmax') or 0)))} \\| "
         f"{_loc('coalesced')}: *{escape_md(str(int(runtime_diag.get('pending_coalesced_ticks') or 0)))}*"
     )
 
@@ -1225,42 +1455,64 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
     alert_workers_running = int(queue_diag.get("alert_workers_running") or 0)
     alert_workers_target = int(queue_diag.get("alert_workers_target") or 0)
     lines.append(
-        f"{_loc('Workers')}: strategy *{escape_md(str(strategy_workers_running))}/{escape_md(str(strategy_workers_target))}* · "
+        f"{_loc('Workers')}: strategy *{escape_md(str(strategy_workers_running))}/{escape_md(str(strategy_workers_target))}* \\| "
         f"alert *{escape_md(str(alert_workers_running))}/{escape_md(str(alert_workers_target))}*"
     )
     lines.append(
-        f"{_loc('Queue stats')}: enq *{escape_md(str(int(queue_stats.get('strategy_enqueued') or 0)))}* · "
-        f"dedup *{escape_md(str(int(queue_stats.get('strategy_deduped') or 0)))}* · "
+        f"{_loc('Queue traffic')}: enq *{escape_md(str(int(queue_stats.get('strategy_enqueued') or 0)))}* \\| "
+        f"dedup *{escape_md(str(int(queue_stats.get('strategy_deduped') or 0)))}* \\| "
         f"drop *{escape_md(str(int(queue_stats.get('strategy_dropped') or 0)))}*"
     )
 
+    if order_obs:
+        lines.extend(["", f"*{_loc('Order Flow')}*"])
+    if order_obs:
+        cycles_ok = int(order_obs.get("ok_cycles") or 0)
+        cycles_failed = int(order_obs.get("failed_cycles") or 0)
+        cycles_zero = int(order_obs.get("zero_order_cycles") or 0)
+        lines.append(
+            f"{_loc('Orders')}: {_loc('placed')} *{escape_md(str(int(order_obs.get('orders_placed') or 0)))}* \\| "
+            f"{_loc('filled')} *{escape_md(str(int(order_obs.get('orders_filled') or 0)))}* \\| "
+            f"{_loc('cancelled')} *{escape_md(str(int(order_obs.get('orders_cancelled') or 0)))}*"
+        )
+        lines.append(
+            f"{_loc('Cycles')}: *{escape_md(str(cycles_ok))}* ok \\| "
+            f"*{escape_md(str(cycles_failed))}* failed \\| "
+            f"*{escape_md(str(cycles_zero))}* orderless"
+        )
+        last_reason = str(order_obs.get("last_reason") or "").strip()
+        if last_reason:
+            lines.append(f"{_loc('Last reason')}: {escape_md(last_reason[:120])}")
+
     perf = ops.get("perf") or {}
+    renv = ops.get("runtime_env") or {}
+    snap = ops.get("account_snapshot") or {}
+    if perf or renv or snap or cycle_timeouts > 0:
+        lines.extend(["", "*Diagnostics*"])
     if perf:
         lines.append(
-            f"{_loc('Perf')}: active *{escape_md(str(int(perf.get('active_timers') or 0)))}* · "
+            f"{_loc('Performance')}: active *{escape_md(str(int(perf.get('active_timers') or 0)))}* \\| "
             f"totals *{escape_md(str(int(perf.get('total_records') or 0)))}*"
         )
 
-    renv = ops.get("runtime_env") or {}
     if renv:
         lines.append(
-            f"{_loc('Runtime env')}: mode *{escape_md(str(renv.get('NADO_RUNTIME_MODE')))}* · "
-            f"workers *{escape_md(str(renv.get('NADO_STRATEGY_WORKERS')))}* · "
+            f"{_loc('Runtime settings')}: mode *{escape_md(str(renv.get('NADO_RUNTIME_MODE')))}* \\| "
+            f"workers *{escape_md(str(renv.get('NADO_STRATEGY_WORKERS')))}* \\| "
             f"cycle cap *{escape_md(str(renv.get('NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS')))}s*"
         )
 
-    snap = ops.get("account_snapshot") or {}
     if snap:
         if snap.get("success"):
             lines.append(
-                f"{_loc('SDK snapshot')}: pos *{escape_md(str(int(snap.get('positions_count') or 0)))}* · "
-                f"orders *{escape_md(str(int(snap.get('open_orders_count') or 0)))}* · "
+                f"{_loc('Account snapshot')}: pos *{escape_md(str(int(snap.get('positions_count') or 0)))}* \\| "
+                f"orders *{escape_md(str(int(snap.get('open_orders_count') or 0)))}* \\| "
                 f"src *{escape_md(str(snap.get('source') or ''))}*"
             )
         else:
             err = str(snap.get("error") or "").strip()[:120]
             lines.append(
-                f"{_loc('SDK snapshot')}: *{_loc('unavailable')}*"
+                f"{_loc('Account snapshot')}: *{_loc('unavailable')}*"
                 + (f" — {escape_md(err)}" if err else "")
             )
 

@@ -23,6 +23,7 @@ from src.nadobro.config import get_product_id, get_product_max_leverage, get_per
 from src.nadobro.handlers.formatters import (
     escape_md, format_ai_response, fmt_positions, fmt_trade_preview, fmt_strategy_update,
     fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, build_trade_preview_text,
+    fmt_alert_menu_intro, fmt_close_all_confirm, fmt_mode_view,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
@@ -532,11 +533,8 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "nav:mode":
         user = get_user(telegram_id)
         current_network = user.network_mode.value if user else "testnet"
-        network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
-        header = localize_text("🌐 *Execution Mode Control*\n\nCurrent Mode:", lang)
-        switch_label = localize_text("Switch mode below:", lang)
         await _reply_loc(update.message, 
-            f"{header} *{escape_md(network_label)}*\n\n{switch_label}",
+            fmt_mode_view(current_network),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(mode_kb(current_network), lang),
         )
@@ -616,7 +614,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "alert:menu":
         await _reply_loc(update.message, 
-            localize_text("🔔 *Alert Engine*\n\nManage your trigger alerts\\.", lang),
+            fmt_alert_menu_intro(),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(alerts_kb(), lang),
         )
@@ -1346,6 +1344,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
 
     strategy = pending.get("strategy")
     field = pending.get("field")
+    section = pending.get("section")
     supported = ("grid", "rgrid", "dn", "vol")
     supported_fields = (
         "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
@@ -1419,11 +1418,14 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     network, settings = update_user_settings(telegram_id, _mutate)
     conf = settings.get("strategies", {}).get(strategy, {})
     context.user_data.pop("pending_strategy_input", None)
+    continue_callback = f"strategy:config:{strategy}"
+    if section:
+        continue_callback = f"strategy:config_section:{strategy}:{section}"
     await _reply_loc(update.message, 
         fmt_strategy_update(strategy, network, conf),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚙️ Continue Editing", callback_data=f"strategy:config:{strategy}")],
+            [InlineKeyboardButton("⚙️ Continue Editing", callback_data=continue_callback)],
             [InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub")],
         ]),
     )
@@ -1436,6 +1438,7 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
         return False
 
     field = pending.get("field")
+    section = pending.get("section")
     context.user_data.pop("pending_bro_input", None)
 
     if field == "tp_sl":
@@ -1457,9 +1460,13 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
             bro["tp_pct"] = tp
             bro["sl_pct"] = sl
         update_user_settings(telegram_id, _mutate)
+        continue_callback = "strategy:preview:bro"
+        if section:
+            continue_callback = f"bro:config_section:{section}"
         await _reply_loc(update.message, 
             f"✅ Bro Mode TP/SL set to {tp:.1f}%/{sl:.1f}%",
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Continue Editing", callback_data=continue_callback)],
                 [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
             ]),
         )
@@ -1473,9 +1480,13 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
         def _mutate(s):
             s.setdefault("strategies", {}).setdefault("bro", {})["risk_level"] = val
         update_user_settings(telegram_id, _mutate)
+        continue_callback = "strategy:preview:bro"
+        if section:
+            continue_callback = f"bro:config_section:{section}"
         await _reply_loc(update.message, 
             f"✅ Bro Mode risk set to {val.upper()}",
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Continue Editing", callback_data=continue_callback)],
                 [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
             ]),
         )
@@ -1502,9 +1513,13 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
             bro = s.setdefault("strategies", {}).setdefault("bro", {})
             bro[field] = int(value) if field in int_fields else value
         update_user_settings(telegram_id, _mutate)
+        continue_callback = "strategy:preview:bro"
+        if section:
+            continue_callback = f"bro:config_section:{section}"
         await _reply_loc(update.message, 
             f"✅ Bro Mode {field} set to {value}",
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Continue Editing", callback_data=continue_callback)],
                 [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
             ]),
         )
@@ -1637,7 +1652,17 @@ async def _handle_managed_agent_message(update, context, telegram_id, username, 
     route = str(result.get("route") or "unknown")
     increment_counter(f"managed_agent.route.{route}")
     reply_markup = persistent_menu_kb() if result.get("show_menu") else None
-    await _reply_loc(update.message, result.get("response", "Done."), reply_markup=reply_markup)
+    raw = (result.get("response") or "").strip() or "Done."
+    formatted = format_ai_response(raw)
+    try:
+        await _reply_loc(
+            update.message,
+            formatted,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        await _reply_loc(update.message, escape_md(raw), reply_markup=reply_markup)
     return True
 
 
@@ -1694,8 +1719,7 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
     if action == "close_all":
         context.user_data[PENDING_TEXT_CLOSE_ALL_KEY] = True
         await _reply_loc(update.message, 
-            "⚠️ *Close All Positions*\n\nAre you sure you want to close ALL open orders?\n\n"
-            "Type `confirm` to execute or `cancel` to discard\\.",
+            fmt_close_all_confirm() + "\n\nType `confirm` to execute or `cancel` to discard\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
         )
