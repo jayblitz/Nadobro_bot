@@ -1484,6 +1484,15 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
             yield delta.content
 
 
+def _build_x_context_via_tool(question: str) -> tuple[str, list[str]]:
+    """Fetch X context via the direct X tool path (X API first, Grok fallback)."""
+    try:
+        return _execute_x_search(question)
+    except Exception as e:
+        logger.warning("X context tool failed: %s", e)
+        return "", []
+
+
 def _is_points_distribution_question(question: str) -> bool:
     q = _normalize_question(question)
     points_signals = [
@@ -1671,12 +1680,23 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
     _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
-    # Direct Grok X streaming only when Grok is available; otherwise agent
-    # pipeline handles X questions via _execute_x_search() -> X API fallback.
-    use_x_prompt = is_x_question and xai_client is not None
+    # Prefer the direct X tool path (X API first, then Grok fallback) for
+    # real X questions. This avoids generic OpenAI-only answers when xAI
+    # credentials exist but do not have permission for the selected model.
+    use_x_prompt = is_x_question and xai_client is not None and not _x_api_ready
 
     gathered_context = ""
-    if use_x_prompt:
+    if is_x_question and _x_api_ready:
+        gathered_context, used_sources = _build_x_context_via_tool(question)
+        if not gathered_context.strip():
+            gathered_context = "[X/TWITTER RESULTS]\nNo recent X results found."
+        system = SYNTHESIZER_SYSTEM_PROMPT.format(
+            current_date=current_date,
+            user_name=display_name,
+            context=gathered_context[:14000],
+            language_instruction=lang_instruction,
+        )
+    elif use_x_prompt:
         is_nado_x = _is_nado_x_question(question)
         if is_nado_x:
             system = X_TWITTER_NADO_PROMPT.format(
@@ -1890,12 +1910,23 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
     _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
-    # Direct Grok X streaming only when Grok is available; otherwise agent
-    # pipeline handles X questions via _execute_x_search() -> X API fallback.
-    use_x_prompt = is_x_question and xai_client is not None
+    # Prefer the direct X tool path (X API first, then Grok fallback) for
+    # real X questions. This avoids generic answers when xAI credentials exist
+    # but the selected support model is not permitted.
+    use_x_prompt = is_x_question and xai_client is not None and not _x_api_ready2
 
     gathered_context = ""
-    if use_x_prompt:
+    if is_x_question and _x_api_ready2:
+        gathered_context, used_sources = _build_x_context_via_tool(question)
+        if not gathered_context.strip():
+            gathered_context = "[X/TWITTER RESULTS]\nNo recent X results found."
+        system = SYNTHESIZER_SYSTEM_PROMPT.format(
+            current_date=current_date,
+            user_name=display_name,
+            context=gathered_context[:14000],
+            language_instruction=lang_instruction,
+        )
+    elif use_x_prompt:
         is_nado_x = _is_nado_x_question(question)
         if is_nado_x:
             system = X_TWITTER_NADO_PROMPT.format(
