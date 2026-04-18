@@ -11,7 +11,7 @@ from telegram.ext import CallbackContext
 from src.nadobro.config import DUAL_MODE_CARD_FLOW, get_product_id, get_product_max_leverage
 from src.nadobro.i18n import localize_text, localize_markup, get_active_language
 from src.nadobro.handlers.formatters import escape_md, fmt_trade_preview, fmt_trade_result
-from src.nadobro.handlers.home_card import _plain_text_fallback
+from src.nadobro.handlers.render_utils import plain_text_fallback
 
 
 def _loc(text: str) -> str:
@@ -336,7 +336,7 @@ async def open_trade_card_from_message(
             if "Can't parse entities" not in str(e):
                 raise
             message = await update.message.reply_text(
-                _plain_text_fallback(localize_text(_build_trade_card_text(session), lang)),
+                plain_text_fallback(localize_text(_build_trade_card_text(session), lang)),
                 reply_markup=localize_markup(_card_keyboard(session), lang),
             )
         session["origin_chat_id"] = chat_id

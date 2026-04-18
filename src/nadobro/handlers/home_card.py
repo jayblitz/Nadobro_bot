@@ -6,6 +6,7 @@ from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 
 from src.nadobro.i18n import localize_text, localize_markup, get_active_language
+from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.formatters import (
     escape_md,
     fmt_alert_menu_intro,
@@ -41,16 +42,6 @@ logger = logging.getLogger(__name__)
 
 HOME_CARD_KEY = "home_card_message"
 KEYBOARD_REMOVED_KEY = "dual_mode_keyboard_removed"
-
-
-def _plain_text_fallback(text: str) -> str:
-    # Best-effort fallback for MarkdownV2 parsing failures.
-    plain = (text or "").replace("\\", "")
-    plain = plain.replace("**", "")
-    plain = plain.replace("*", "")
-    plain = plain.replace("`", "")
-    plain = plain.replace("_", "")
-    return plain
 
 
 def build_home_card_text(telegram_id: int) -> str:
@@ -226,7 +217,7 @@ async def _edit_or_send_card(
             if "Can't parse entities" not in str(e):
                 raise
             msg = await user_message.reply_text(
-                _plain_text_fallback(text),
+                plain_text_fallback(text),
                 reply_markup=reply_markup,
             )
         _remember_home_card(context, chat_id, msg.message_id)
@@ -255,7 +246,7 @@ async def _edit_or_send_card(
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
-                        text=_plain_text_fallback(text),
+                        text=plain_text_fallback(text),
                         reply_markup=reply_markup,
                     )
                     return
@@ -280,7 +271,7 @@ async def _edit_or_send_card(
             raise
         message = await context.bot.send_message(
             chat_id=chat_id,
-            text=_plain_text_fallback(text),
+            text=plain_text_fallback(text),
             reply_markup=reply_markup,
         )
     _remember_home_card(context, chat_id, message.message_id)

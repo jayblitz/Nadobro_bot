@@ -4,6 +4,7 @@ from telegram import Update
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
 from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language
+from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.services.user_service import get_or_create_user, get_user
 
 INTRO_VIDEO_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "intro_video.mov")
@@ -138,10 +139,8 @@ async def cmd_status(update: Update, context: CallbackContext):
                 reply_markup=reply_markup,
             )
         except Exception:
-            from src.nadobro.handlers.home_card import _plain_text_fallback
-
             await update.message.reply_text(
-                _plain_text_fallback(localized),
+                plain_text_fallback(localized),
                 reply_markup=reply_markup,
             )
 
@@ -163,10 +162,8 @@ async def cmd_ops(update: Update, context: CallbackContext):
                 reply_markup=reply_markup,
             )
         except Exception:
-            from src.nadobro.handlers.home_card import _plain_text_fallback
-
             await update.message.reply_text(
-                _plain_text_fallback(localized),
+                plain_text_fallback(localized),
                 reply_markup=reply_markup,
             )
 

@@ -42,8 +42,8 @@ from src.nadobro.handlers.home_card import (
     build_portfolio_view,
     build_positions_view,
     open_home_card_view_from_message,
-    _plain_text_fallback,
 )
+from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
@@ -80,7 +80,7 @@ async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
         logger.warning("messages._reply_loc markdown parse fallback triggered: %s", e)
         fallback_kwargs = dict(kwargs)
         fallback_kwargs.pop("parse_mode", None)
-        return await message.reply_text(_plain_text_fallback(localized), **fallback_kwargs)
+        return await message.reply_text(plain_text_fallback(localized), **fallback_kwargs)
 
 
 from src.nadobro.handlers.intent_handlers import (

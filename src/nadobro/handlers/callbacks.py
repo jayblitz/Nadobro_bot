@@ -29,8 +29,8 @@ from src.nadobro.handlers.keyboards import (
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback
+from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.home_card import (
-    _plain_text_fallback,
     build_home_card_text_async,
     build_portfolio_view,
     build_positions_view,
@@ -95,7 +95,7 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
             fallback_kwargs = dict(kwargs)
             fallback_kwargs.pop("parse_mode", None)
             try:
-                return await query.edit_message_text(_plain_text_fallback(localized), **fallback_kwargs)
+                return await query.edit_message_text(plain_text_fallback(localized), **fallback_kwargs)
             except BadRequest as e2:
                 if "Message is not modified" in str(e2):
                     return
@@ -715,11 +715,9 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
             if "Message is not modified" in str(e):
                 return
             if "Can't parse entities" in str(e):
-                from src.nadobro.handlers.home_card import _plain_text_fallback
-
                 try:
                     await query.edit_message_text(
-                        _plain_text_fallback(localized),
+                        plain_text_fallback(localized),
                         reply_markup=localize_markup(status_kb(), lang),
                     )
                 except BadRequest as e2:

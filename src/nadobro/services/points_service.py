@@ -10,7 +10,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 from src.nadobro.handlers.formatters import fmt_points_dashboard
-from src.nadobro.handlers.home_card import _plain_text_fallback
+from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.keyboards import points_followup_options_kb, points_scope_kb
 from src.nadobro.services.lowiq_relay_client import (
     close_session as relay_close_session,
@@ -500,7 +500,7 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
         logger.warning("Points dashboard MarkdownV2 failed; sending plain text: %s", e)
         await bot_app.bot.send_message(
             chat_id=chat_id,
-            text=_plain_text_fallback(dash_text),
+            text=plain_text_fallback(dash_text),
             reply_markup=points_scope_kb("week"),
         )
 
