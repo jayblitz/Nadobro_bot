@@ -16,7 +16,7 @@ MM_DEFAULT_LEVELS = 2
 GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
 GRID_MIN_SPREAD_BP = 8.0
-DEFAULT_MIN_ORDER_NOTIONAL_USD = 10.0
+DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
 
 
@@ -230,6 +230,8 @@ def _compute_grid_prices(
     strategy: str,
     net_units: float = 0.0,
     mid_price: float | None = None,
+    best_bid: float | None = None,
+    best_ask: float | None = None,
     soft_reset_side: str | None = None,
     min_range_pct: float = 1.0,
     max_range_pct: float = 1.0,
@@ -250,9 +252,14 @@ def _compute_grid_prices(
             if soft_reset_side and mid_price and mid_price > 0:
                 reset_nudge = (0.1 * lvl) / 10000.0
                 if soft_reset_side == "buy":
-                    buy_price = mid_price * (1.0 + reset_nudge)
+                    buy_price = float(best_bid or (mid_price * (1.0 - reset_nudge)))
                 elif soft_reset_side == "sell":
-                    sell_price = mid_price * (1.0 - reset_nudge)
+                    sell_price = float(best_ask or (mid_price * (1.0 + reset_nudge)))
+
+            if best_bid and best_bid > 0:
+                buy_price = min(buy_price, float(best_bid))
+            if best_ask and best_ask > 0:
+                sell_price = max(sell_price, float(best_ask))
 
             lvl = i + 1
             orders.append({"price": buy_price, "is_long": True, "level": lvl})
@@ -265,9 +272,13 @@ def _compute_grid_prices(
         if soft_reset_side and mid_price and mid_price > 0:
             reset_nudge = (0.1 * i) / 10000.0
             if soft_reset_side == "buy":
-                buy_price = mid_price * (1.0 - reset_nudge)
+                buy_price = float(best_bid or (mid_price * (1.0 - reset_nudge)))
             elif soft_reset_side == "sell":
-                sell_price = mid_price * (1.0 + reset_nudge)
+                sell_price = float(best_ask or (mid_price * (1.0 + reset_nudge)))
+        if best_bid and best_bid > 0:
+            buy_price = min(buy_price, float(best_bid))
+        if best_ask and best_ask > 0:
+            sell_price = max(sell_price, float(best_ask))
         orders.append({"price": buy_price, "is_long": True, "level": i})
         orders.append({"price": sell_price, "is_long": False, "level": i})
     return orders
@@ -485,11 +496,13 @@ def run_cycle(
                 "cumulative_pnl": mm_cumulative_pnl,
             }
 
+    mp = client.get_market_price(product_id) or {}
     if mid <= 0:
-        mp = client.get_market_price(product_id)
         mid = float(mp.get("mid") or 0.0)
     if mid <= 0:
         return {"success": False, "error": "Could not fetch market price", "orders_placed": 0}
+    best_bid = float(mp.get("bid") or 0.0)
+    best_ask = float(mp.get("ask") or 0.0)
 
     if open_orders is None:
         open_orders = client.get_open_orders(product_id)
@@ -513,7 +526,8 @@ def run_cycle(
     min_spread_bp = max(0.5, float(state.get("min_spread_bp") or MM_MIN_SPREAD_BP))
     max_spread_bp = max(min_spread_bp, float(state.get("max_spread_bp") or 30.0))
     inv_soft_limit_usd = max(1.0, float(state.get("inventory_soft_limit_usd") or (notional * 0.60)))
-    cycle_notional = max(0.0, float(state.get("cycle_notional_usd") or notional))
+    cycle_notional_cfg = max(0.0, float(state.get("cycle_notional_usd") or notional))
+    cycle_notional = max(cycle_notional_cfg, notional * max(1.0, leverage))
     session_cap_notional = max(0.0, float(state.get("session_notional_cap_usd") or 0.0))
     carry_notional = max(0.0, float(state.get("mm_notional_carry_usd") or 0.0))
     session_done = max(0.0, float(state.get("mm_session_notional_done_usd") or 0.0))
@@ -847,6 +861,8 @@ def run_cycle(
         strategy=strategy,
         net_units=net_units,
         mid_price=mid,
+        best_bid=best_bid,
+        best_ask=best_ask,
         soft_reset_side=soft_reset_side,
         min_range_pct=min_range_pct,
         max_range_pct=max_range_pct,

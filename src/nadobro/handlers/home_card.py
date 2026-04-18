@@ -45,7 +45,12 @@ KEYBOARD_REMOVED_KEY = "dual_mode_keyboard_removed"
 
 def _plain_text_fallback(text: str) -> str:
     # Best-effort fallback for MarkdownV2 parsing failures.
-    return (text or "").replace("\\", "")
+    plain = (text or "").replace("\\", "")
+    plain = plain.replace("**", "")
+    plain = plain.replace("*", "")
+    plain = plain.replace("`", "")
+    plain = plain.replace("_", "")
+    return plain
 
 
 def build_home_card_text(telegram_id: int) -> str:

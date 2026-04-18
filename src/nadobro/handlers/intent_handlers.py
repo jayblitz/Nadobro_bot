@@ -15,6 +15,7 @@ from src.nadobro.handlers.formatters import (
     fmt_limit_close_result,
     humanize_exchange_error,
 )
+from src.nadobro.handlers.home_card import _plain_text_fallback
 from src.nadobro.handlers.intent_parser import parse_trade_intent, parse_position_management_intent
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.onboarding_service import get_resume_step
@@ -48,7 +49,7 @@ async def _reply_md_safe(message, text: str) -> None:
         if "Can't parse entities" not in str(e):
             raise
         logger.warning("intent_handlers: markdown parse fallback triggered: %s", e)
-        await message.reply_text(str(text).replace("\\", ""))
+        await message.reply_text(_plain_text_fallback(text))
 
 
 def _auto_execute_requested(text: str) -> bool:

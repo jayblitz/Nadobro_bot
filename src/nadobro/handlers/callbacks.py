@@ -1447,7 +1447,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         settings = _get_user_settings(telegram_id, context)
         from src.nadobro.handlers.messages import execute_action_directly
-        strategy_leverage = 1 if strategy_id in ("vol", "grid") else settings.get("default_leverage", 3)
+        strategy_leverage = 1 if strategy_id == "vol" else settings.get("default_leverage", 3)
         if strategy_id == "dn":
             strategy_leverage = max(1, min(float(strategy_leverage), 5))
         await execute_action_directly(query, context, telegram_id, {
@@ -2176,7 +2176,10 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("60s", callback_data="strategy:set:grid:interval_seconds:60"),
                     InlineKeyboardButton("120s", callback_data="strategy:set:grid:interval_seconds:120"),
                 ],
-                [InlineKeyboardButton("Custom Margin", callback_data="strategy:input:grid:notional_usd")],
+                [
+                    InlineKeyboardButton("Custom Margin", callback_data="strategy:input:grid:notional_usd"),
+                    InlineKeyboardButton("Custom Interval", callback_data="strategy:input:grid:interval_seconds"),
+                ],
             ]
         elif section == "execution":
             rows = [
@@ -2268,6 +2271,10 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("Custom Levels", callback_data="strategy:input:rgrid:levels"),
                     InlineKeyboardButton("Custom Spread", callback_data="strategy:input:rgrid:rgrid_spread_bp"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Margin", callback_data="strategy:input:rgrid:notional_usd"),
+                    InlineKeyboardButton("Custom Interval", callback_data="strategy:input:rgrid:interval_seconds"),
                 ],
             ]
         elif section == "risk":
@@ -2402,8 +2409,8 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     }
     network, settings = get_user_settings(telegram_id)
     conf = settings.get("strategies", {}).get(strategy_id, {})
-    notional = float(conf.get("notional_usd", 100.0))
-    cycle_notional = float(conf.get("cycle_notional_usd", notional))
+    margin_usd = float(conf.get("notional_usd", 100.0))
+    cycle_notional_cfg = float(conf.get("cycle_notional_usd", margin_usd))
     session_cap = float(conf.get("session_notional_cap_usd", 0) or 0)
     spread_bp = float(conf.get("spread_bp", 5.0))
     if strategy_id == "rgrid":
@@ -2411,7 +2418,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
-    leverage = 1.0 if strategy_id in ("vol", "grid") else float(settings.get("default_leverage", 3))
+    leverage = 1.0 if strategy_id == "vol" else float(settings.get("default_leverage", 3))
     if strategy_id == "dn":
         leverage = max(1.0, min(leverage, 5.0))
     slippage = float(settings.get("slippage", 1))
@@ -2443,8 +2450,13 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
 
     bot_status = get_user_bot_status(telegram_id) or {}
 
-    required_margin = cycle_notional / leverage if leverage > 0 else cycle_notional
-    inventory_soft_limit = float(conf.get("inventory_soft_limit_usd", notional * 0.6))
+    cycle_notional = (
+        max(cycle_notional_cfg, margin_usd * max(1.0, leverage))
+        if strategy_id in ("grid", "rgrid")
+        else cycle_notional_cfg
+    )
+    required_margin = margin_usd if strategy_id in ("grid", "rgrid") else (cycle_notional / leverage if leverage > 0 else cycle_notional)
+    inventory_soft_limit = float(conf.get("inventory_soft_limit_usd", margin_usd * 0.6))
     recommended_buffer = max(5.0, required_margin * 0.20)
     recommended_available = required_margin + (inventory_soft_limit / max(leverage, 1.0)) + recommended_buffer
     cycles_per_day = 86400 / max(interval_seconds, 10)
@@ -2458,7 +2470,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     est_funding = 0.0
     mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
     if strategy_id == "dn":
-        est_funding = abs(funding_rate) * notional * 3
+        est_funding = abs(funding_rate) * margin_usd * 3
     if strategy_id == "vol":
         est_daily_volume = 0.0
         # One round trip per minute after fills => approx 1440 loops/day max.
@@ -2521,6 +2533,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             f" · Cycle PnL {pnl_sign}${cycle_pnl:,.2f}"
         )
         extra_cfg = (
+            f"\nMargin *{escape_md(f'${margin_usd:,.0f}')}* → Effective notional *{escape_md(f'${cycle_notional:,.0f}')}*"
             f"\nReverse Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
             f"Spread mode: *{escape_md(spread_mode)}*"
             f"\nPnL SL/TP: *{escape_md(f'{max_loss_pct:.2f}% / {grid_tp:.2f}%')}* of margin \\| "
@@ -2541,6 +2554,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         extra_cfg = (
             f"\nPassive only *POST_ONLY* \\| Requote threshold *{escape_md(threshold)}*"
             f"\nQuote around ref *{escape_md(ref_mode)}* · Spread band *{escape_md(spread_band)}*"
+            f"\nMargin *{escape_md(f'${margin_usd:,.0f}')}* → Effective notional *{escape_md(f'${cycle_notional:,.0f}')}*"
             f"\nPer\\-cycle budget *{escape_md(f'${cycle_notional:,.0f}')}* · Cap *{escape_md(cap_str)}*"
             f"\nInventory soft limit *{escape_md(f'${inventory_soft_limit:,.0f}')}*"
             f"\nSoft reset *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}* before hard stop"
@@ -2567,7 +2581,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"{escape_md(selected_explainer)}\n\n"
         "*Quick setup*\n"
         f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}* \\| Mode: *{escape_md(network.upper())}*\n"
-        f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.0f}bp')}* \\| Every: *{escape_md(f'{interval_seconds}s')}*\n"
+        f"Margin: *{escape_md(f'${margin_usd:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.0f}bp')}* \\| Every: *{escape_md(f'{interval_seconds}s')}*\n"
         f"Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| "
         f"{'PnL stop *' + escape_md(f'{max_loss_pct:.1f}%') + '*' if strategy_id == 'rgrid' else 'TP/SL *' + escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%') + '*'}\n"
         f"Need now: {margin_flag} *{escape_md(f'${required_margin:,.2f}')}* required \\| Balance: *{escape_md(f'${available_margin:,.2f}')}*"
@@ -2611,12 +2625,11 @@ async def _delete_message_later(query, chat_id: int, message_id: int, delay_seco
 async def _handle_copy(query, data, context, telegram_id):
     from src.nadobro.services.copy_service import (
         get_available_traders, get_user_copies, start_copy, stop_copy,
-        pause_copy, resume_copy, get_trader_stats,
+        pause_copy, resume_copy, get_trader_stats, get_trader_preview,
     )
     from src.nadobro.services.admin_service import (
         add_copy_trader, remove_copy_trader, list_copy_traders,
     )
-    from src.nadobro.services.hl_client import get_hl_client
 
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
@@ -2660,13 +2673,13 @@ async def _handle_copy(query, data, context, telegram_id):
             await _edit_loc(query, "⚠️ Trader not found\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
             return
 
-        hl_client = get_hl_client()
-        equity = await hl_client.get_account_equity(trader["wallet"])
-        equity_str = f"${equity:,.0f}" if equity else "N/A"
+        user = get_user(telegram_id)
+        trader_network = user.network_mode.value if user else "mainnet"
+        preview = await run_blocking(get_trader_preview, trader_id, trader_network)
+        equity = float(preview.get("equity_usd") or 0.0)
+        equity_str = f"${equity:,.0f}" if equity > 0 else "N/A"
         curated = " ⭐ Curated" if trader.get("is_curated") else ""
-
-        positions = await hl_client.get_open_positions(trader["wallet"])
-        open_count = len(positions) if positions else 0
+        open_count = int(preview.get("open_positions") or 0)
 
         stats = await run_blocking(get_trader_stats, trader_id)
         vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "N/A"
@@ -2704,7 +2717,7 @@ async def _handle_copy(query, data, context, telegram_id):
         setup["budget_usd"] = float(parts[2])
         setup["step"] = "risk"
         await _edit_loc(query,
-            "⚖️ *Set Risk Factor*\n\nBudget: *${budget}*\n\nRisk factor scales your position size relative to the trader\\. 1x \\= match proportionally\\.",
+            "⚖️ *Set Risk Factor*\n\nBudget: *${budget}*\n\nRisk factor scales the per\\-trade budget slice inside your total copy allocation\\. Higher values copy more aggressively\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=copy_risk_kb(),
             budget=f"{setup['budget_usd']:.0f}",

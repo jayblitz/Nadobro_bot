@@ -522,13 +522,15 @@ def _run_mm_start_guard(telegram_id: int, network: str, product: str, leverage: 
             f"Detected {len(open_orders)} open order(s)."
         )
 
-    cycle_notional = float(state.get("cycle_notional_usd") or state.get("notional_usd") or 0.0)
+    margin_usd = float(state.get("notional_usd") or 0.0)
+    cycle_notional_cfg = float(state.get("cycle_notional_usd") or margin_usd or 0.0)
+    cycle_notional = max(cycle_notional_cfg, margin_usd * max(1.0, leverage))
     inventory_soft_limit = float(
         state.get("inventory_soft_limit_usd")
-        or (float(state.get("notional_usd") or cycle_notional or 0.0) * 0.60)
+        or (margin_usd * 0.60)
     )
     lev = max(1.0, float(leverage or 1.0))
-    required_margin = cycle_notional / lev if cycle_notional > 0 else 0.0
+    required_margin = margin_usd if margin_usd > 0 else (cycle_notional / lev if cycle_notional > 0 else 0.0)
     rebalance_buffer = inventory_soft_limit / lev if inventory_soft_limit > 0 else 0.0
     safety_buffer = max(5.0, required_margin * 0.20)
     recommended_available = required_margin + rebalance_buffer + safety_buffer
@@ -674,12 +676,14 @@ def start_user_bot(
         )
     if strategy in ("grid", "rgrid"):
         spread_key = "rgrid_spread_bp" if strategy == "rgrid" else "spread_bp"
-        cycle_notional = float(state.get("cycle_notional_usd") or state.get("notional_usd") or 0.0)
+        margin_usd = float(state.get("notional_usd") or 0.0)
+        cycle_notional_cfg = float(state.get("cycle_notional_usd") or margin_usd or 0.0)
+        cycle_notional = max(cycle_notional_cfg, margin_usd * max(1.0, float(state.get("leverage") or 1.0)))
         spread_bp = float(state.get(spread_key) or state.get("spread_bp") or 0.0)
         return (
             True,
             f"{_strategy_display_name(strategy)} bot started on {product.upper()}-PERP ({network}) "
-            f"| Maker-only quotes | Budget ${cycle_notional:,.0f} / cycle | Spread {spread_bp:.0f}bp",
+            f"| Maker-only quotes | Margin ${margin_usd:,.0f} | Notional ${cycle_notional:,.0f} / cycle | Spread {spread_bp:.0f}bp",
         )
     return (
         True,

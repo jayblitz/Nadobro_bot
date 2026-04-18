@@ -152,7 +152,7 @@ def get_copy_exposure(telegram_id: int) -> float:
     try:
         from src.nadobro.services.copy_service import get_user_copies
         mirrors = get_user_copies(telegram_id)
-        return sum(float(m.get("budget_usd", 0)) for m in mirrors)
+        return sum(float(m.get("total_allocated_usd", m.get("budget_usd", 0)) or 0.0) for m in mirrors)
     except Exception as e:
         logger.debug("Could not fetch copy exposure: %s", e)
         return 0.0

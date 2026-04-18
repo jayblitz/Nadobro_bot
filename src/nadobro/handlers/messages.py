@@ -42,6 +42,7 @@ from src.nadobro.handlers.home_card import (
     build_portfolio_view,
     build_positions_view,
     open_home_card_view_from_message,
+    _plain_text_fallback,
 )
 from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.handlers.formatters import fmt_points_dashboard
@@ -71,7 +72,15 @@ async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
         kwargs["parse_mode"] = parse_mode
     if reply_markup is not None:
         kwargs["reply_markup"] = localize_markup(reply_markup, lang)
-    return await message.reply_text(localized, **kwargs)
+    try:
+        return await message.reply_text(localized, **kwargs)
+    except BadRequest as e:
+        if "Can't parse entities" not in str(e) or kwargs.get("parse_mode") != ParseMode.MARKDOWN_V2:
+            raise
+        logger.warning("messages._reply_loc markdown parse fallback triggered: %s", e)
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("parse_mode", None)
+        return await message.reply_text(_plain_text_fallback(localized), **fallback_kwargs)
 
 
 from src.nadobro.handlers.intent_handlers import (
@@ -262,18 +271,16 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         from src.nadobro.services.copy_service import start_copy
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        # Map legacy setup fields to the v2 copy mirror model.
-        margin_per_trade = max(5.0, min(5000.0, budget_usd * max(risk_factor, 0.1)))
+        # Risk factor scales the per-trade budget slice inside the user's total allocation.
+        margin_per_trade = max(5.0, min(5000.0, budget_usd, budget_usd * max(risk_factor, 0.1)))
         start_kwargs = {
             "network": network,
             "margin_per_trade": margin_per_trade,
             "max_leverage": max_leverage,
             "total_allocated_usd": budget_usd,
         }
-        if cumulative_stop_loss_pct is not None:
-            start_kwargs["cumulative_stop_loss_pct"] = float(cumulative_stop_loss_pct)
-        if cumulative_take_profit_pct is not None:
-            start_kwargs["cumulative_take_profit_pct"] = float(cumulative_take_profit_pct)
+        start_kwargs["cumulative_stop_loss_pct"] = float(cumulative_stop_loss_pct or 0.0)
+        start_kwargs["cumulative_take_profit_pct"] = float(cumulative_take_profit_pct or 0.0)
         ok, msg = await run_blocking(start_copy, telegram_id, trader_id, **start_kwargs)
         if ok:
             reply = f"🔁 {escape_md(msg)}"

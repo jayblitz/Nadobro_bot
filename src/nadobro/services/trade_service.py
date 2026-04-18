@@ -400,6 +400,7 @@ def execute_market_order(
     sl_price: float = None,
     source: str = "manual",
     strategy_session_id: int = None,
+    reduce_only: bool = False,
     **kwargs,
 ) -> dict:
     builder_route = _builder_route_payload()
@@ -469,6 +470,7 @@ def execute_market_order(
         slippage_pct=slippage_pct,
         isolated_only=isolated_only,
         isolated_margin=isolated_margin,
+        reduce_only=bool(reduce_only),
         timeout_s=submit_timeout,
     )
     if not submit_ok:
@@ -559,6 +561,7 @@ def execute_market_order(
             "price": exec_px,
             "digest": result.get("digest"),
             "network": user.network_mode.value,
+            "trade_id": trade_id,
         }
         if exec_fee is not None and float(exec_fee or 0) >= 0:
             payload["fee"] = float(exec_fee or 0)
