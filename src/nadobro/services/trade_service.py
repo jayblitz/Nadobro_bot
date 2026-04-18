@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from src.nadobro.models.database import (
     TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
     get_last_trade_for_rate_limit, insert_trade, update_trade, get_trades_by_user,
-    find_open_trade, insert_fill_sync,
+    find_open_trade, insert_fill_sync, get_trade_by_id,
 )
 from src.nadobro.config import (
     get_product_id,
@@ -105,12 +105,14 @@ def _enqueue_fill_sync(trade_id: int, network: str, user_id: int, client, digest
 def _build_fill_update(fill_data: dict | None, mid_price: float = 0.0) -> dict:
     """Build trade update dict from fill data, with market-mid fallback."""
     if fill_data and fill_data.get("fill_price", 0) > 0:
+        total_fee = float(fill_data.get("fee", 0) or 0.0) + float(fill_data.get("builder_fee", 0) or 0.0)
         update = {
             "fill_price": fill_data["fill_price"],
             "price": fill_data["fill_price"],
             "fill_size": fill_data.get("fill_size", 0),
-            "fill_fee": fill_data.get("fee", 0),
-            "fees": fill_data.get("fee", 0),
+            "fill_fee": total_fee,
+            "builder_fee": float(fill_data.get("builder_fee", 0) or 0.0),
+            "fees": total_fee,
             "realized_pnl": fill_data.get("realized_pnl", 0),
             "is_taker": fill_data.get("is_taker", False),
         }
@@ -118,6 +120,155 @@ def _build_fill_update(fill_data: dict | None, mid_price: float = 0.0) -> dict:
             update["slippage_bps"] = abs(fill_data["fill_price"] - mid_price) / mid_price * 10000
         return update
     return {"price": mid_price} if mid_price > 0 else {}
+
+
+def _is_close_order_type(order_type: str | None) -> bool:
+    return "CLOSE" in str(order_type or "").upper()
+
+
+def _parse_trade_event_ts(raw) -> datetime | None:
+    if not raw:
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _normalize_trade_side(raw: str | None) -> str:
+    side = str(raw or "").strip().upper()
+    if side in ("BUY", "LONG"):
+        return "LONG"
+    if side in ("SELL", "SHORT"):
+        return "SHORT"
+    return side or "UNKNOWN"
+
+
+def _trade_total_fee_value(trade: dict) -> float:
+    if not isinstance(trade, dict):
+        return 0.0
+    explicit = trade.get("fees")
+    if explicit is not None:
+        try:
+            return float(explicit or 0.0)
+        except Exception:
+            pass
+    return float(trade.get("fill_fee") or 0.0) + float(trade.get("builder_fee") or 0.0)
+
+
+def _trade_notional_usd(trade: dict) -> float:
+    size = float(trade.get("fill_size") or trade.get("size") or 0.0)
+    price = float(trade.get("fill_price") or trade.get("price") or 0.0)
+    return max(0.0, size * price)
+
+
+def _is_close_trade_row(trade: dict) -> bool:
+    if not isinstance(trade, dict):
+        return False
+    if trade.get("open_trade_id"):
+        return True
+    if _is_close_order_type(trade.get("order_type")):
+        return True
+    if str(trade.get("source") or "").strip().lower() == "vol":
+        realized = float(trade.get("realized_pnl") or trade.get("pnl") or 0.0)
+        if abs(realized) > 1e-12:
+            return True
+    return False
+
+
+def _trade_event_time_for_windows(trade: dict) -> datetime | None:
+    return (
+        _parse_trade_event_ts(trade.get("filled_at"))
+        or _parse_trade_event_ts(trade.get("closed_at"))
+        or _parse_trade_event_ts(trade.get("created_at"))
+    )
+
+
+def _build_logical_trade_rows(trades: list[dict]) -> list[dict]:
+    logical_rows: list[dict] = []
+    logical_index_by_open_trade_id: dict[int, int] = {}
+    unmatched_by_product: dict[str, list[int]] = {}
+
+    def _product_key(row: dict) -> str:
+        return str(row.get("product_name") or row.get("product") or "").upper()
+
+    def _row_ts(row: dict) -> tuple[int, str]:
+        dt = _trade_event_time_for_windows(row)
+        return (int(dt.timestamp()) if dt else 0, str(row.get("created_at") or ""))
+
+    for row in sorted(trades or [], key=_row_ts):
+        product_key = _product_key(row)
+        normalized_side = _normalize_trade_side(row.get("side"))
+        unmatched_candidates = unmatched_by_product.get(product_key, [])
+        vol_pair_candidate = (
+            str(row.get("source") or "").strip().lower() == "vol"
+            and any(_normalize_trade_side(logical_rows[idx].get("side")) != normalized_side for idx in unmatched_candidates)
+        )
+        if _is_close_trade_row(row) or vol_pair_candidate:
+            close_price = row.get("close_price") or row.get("fill_price") or row.get("price")
+            close_dt = row.get("closed_at") or row.get("filled_at") or row.get("created_at")
+            linked_index = None
+            linked_open_trade_id = row.get("open_trade_id")
+            if linked_open_trade_id:
+                linked_index = logical_index_by_open_trade_id.get(int(linked_open_trade_id))
+            if linked_index is None:
+                for idx in reversed(unmatched_candidates):
+                    base = logical_rows[idx]
+                    if _normalize_trade_side(base.get("side")) != normalized_side:
+                        linked_index = idx
+                        break
+            if linked_index is not None:
+                base = logical_rows[linked_index]
+                base["close_price"] = close_price or base.get("close_price")
+                base["closed_at"] = close_dt or base.get("closed_at")
+                base["status"] = TradeStatus.CLOSED.value
+                if (base.get("pnl") is None or abs(float(base.get("pnl") or 0.0)) <= 1e-12):
+                    close_pnl = row.get("pnl")
+                    if close_pnl is None:
+                        close_pnl = row.get("realized_pnl")
+                    if close_pnl is not None:
+                        base["pnl"] = close_pnl
+                base["fees"] = float(base.get("fees") or 0.0) + _trade_total_fee_value(row)
+                base["funding_paid"] = float(base.get("funding_paid") or 0.0) + float(row.get("funding_paid") or 0.0)
+                unmatched = unmatched_by_product.get(product_key, [])
+                if linked_index in unmatched:
+                    unmatched.remove(linked_index)
+                continue
+
+        logical_row = {
+            "id": row.get("id"),
+            "product": row.get("product_name"),
+            "type": row.get("order_type"),
+            "side": normalized_side,
+            "size": float(row.get("fill_size") or row.get("size") or 0.0),
+            "price": row.get("fill_price") or row.get("price"),
+            "leverage": float(row.get("leverage") or 1),
+            "status": row.get("status"),
+            "pnl": row.get("pnl") if row.get("pnl") is not None else row.get("realized_pnl"),
+            "close_price": row.get("close_price"),
+            "network": row.get("network"),
+            "created_at": _trade_ts_display(row.get("created_at")),
+            "closed_at": _trade_ts_display(row.get("closed_at")),
+            "filled_at": _trade_ts_display(row.get("filled_at")),
+            "digest": row.get("order_digest"),
+            "fees": _trade_total_fee_value(row),
+            "funding_paid": float(row.get("funding_paid") or 0.0),
+            "is_taker": row.get("is_taker"),
+            "open_trade_id": row.get("open_trade_id"),
+        }
+        logical_rows.append(logical_row)
+        new_idx = len(logical_rows) - 1
+        if not _is_close_trade_row(row) and str(row.get("status") or "").lower() != TradeStatus.CLOSED.value:
+            try:
+                logical_index_by_open_trade_id[int(row.get("id"))] = new_idx
+            except Exception:
+                pass
+            unmatched_by_product.setdefault(product_key, []).append(new_idx)
+
+    logical_rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    return logical_rows
 
 
 def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[str]]:
@@ -598,6 +749,8 @@ def execute_limit_order(
     strategy_session_id: int = None,
     reduce_only: bool = False,
     post_only: bool = False,
+    order_type_override: str | None = None,
+    open_trade_id: int | None = None,
     **kwargs,
 ) -> dict:
     builder_route = _builder_route_payload()
@@ -621,11 +774,20 @@ def execute_limit_order(
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
+    resolved_order_type = str(order_type_override or OrderTypeEnum.LIMIT.value)
+    linked_open_trade_id = int(open_trade_id) if open_trade_id else None
+    if linked_open_trade_id is None and bool(reduce_only):
+        linked_open = find_open_trade(telegram_id, product_id, network=network)
+        if linked_open:
+            linked_open_trade_id = int(linked_open.get("id"))
+        if resolved_order_type == OrderTypeEnum.LIMIT.value:
+            resolved_order_type = "LIMIT_CLOSE"
+
     limit_trade_data = {
         "user_id": telegram_id,
         "product_id": product_id,
         "product_name": get_product_name(product_id, network=network),
-        "order_type": OrderTypeEnum.LIMIT.value,
+        "order_type": resolved_order_type,
         "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
         "size": size,
         "price": price,
@@ -636,6 +798,8 @@ def execute_limit_order(
     }
     if strategy_session_id:
         limit_trade_data["strategy_session_id"] = strategy_session_id
+    if linked_open_trade_id:
+        limit_trade_data["open_trade_id"] = linked_open_trade_id
     trade_id = insert_trade(limit_trade_data, network=network)
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
@@ -687,6 +851,7 @@ def execute_limit_order(
             "network": network,
             "type": "LIMIT",
             "status": TradeStatus.PENDING.value,
+            "trade_id": trade_id,
             "message": "Limit order accepted and recorded as pending until execution.",
         }
 
@@ -954,6 +1119,7 @@ def limit_close_position(
 
     # Record close trade in DB and enqueue for fill sync
     try:
+        linked_open_trade = find_open_trade(telegram_id, product_id, network=network)
         trade_id = insert_trade({
             "user_id": telegram_id,
             "product_id": product_id,
@@ -966,6 +1132,7 @@ def limit_close_position(
             "status": TradeStatus.PENDING.value,
             "order_digest": digest,
             "source": "manual",
+            "open_trade_id": int(linked_open_trade.get("id")) if linked_open_trade else None,
         }, network=network)
         if trade_id and digest:
             _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
@@ -1058,6 +1225,12 @@ def _record_close_in_db(
     fill_price: float = None,
     network: str | None = None,
     fill_data: dict | None = None,
+    close_trade_id: int | None = None,
+    open_trade_id: int | None = None,
+    source: str = "manual",
+    order_type: str = "MARKET_CLOSE",
+    order_digest: str | None = None,
+    strategy_session_id: int | None = None,
 ):
     try:
         user = get_user(telegram_id)
@@ -1066,11 +1239,13 @@ def _record_close_in_db(
         # Determine close price: prefer archive fill_data > fill_price param > market mid
         close_price = 0.0
         close_fee = 0.0
+        close_builder_fee = 0.0
         archive_pnl = None  # Authoritative PnL from exchange
 
         if fill_data and fill_data.get("fill_price", 0) > 0:
             close_price = fill_data["fill_price"]
-            close_fee = fill_data.get("fee", 0)
+            close_fee = float(fill_data.get("fee", 0) or 0.0)
+            close_builder_fee = float(fill_data.get("builder_fee", 0) or 0.0)
             if fill_data.get("realized_pnl", 0) != 0:
                 archive_pnl = fill_data["realized_pnl"]
         elif fill_price and fill_price > 0:
@@ -1082,7 +1257,11 @@ def _record_close_in_db(
             except Exception:
                 pass
 
-        open_trade = find_open_trade(telegram_id, product_id, network=selected_network)
+        open_trade = None
+        if open_trade_id:
+            open_trade = get_trade_by_id(int(open_trade_id), network=selected_network)
+        if not open_trade:
+            open_trade = find_open_trade(telegram_id, product_id, network=selected_network)
         is_full_close = close_size >= pos_size
 
         if open_trade:
@@ -1101,20 +1280,16 @@ def _record_close_in_db(
                     pnl = 0.0
                 # Subtract fees from PnL for net profit
                 open_fee = float(open_trade.get("fill_fee") or open_trade.get("fees") or 0)
-                pnl = pnl - open_fee - close_fee
+                pnl = pnl - open_fee - close_fee - close_builder_fee
             else:
                 pnl = 0.0
 
             update_data = {
                 "close_price": close_price,
                 "pnl": round(pnl, 4),
+                "realized_pnl": fill_data.get("realized_pnl", pnl) if fill_data else round(pnl, 4),
             }
             if fill_data:
-                update_data["fill_price"] = close_price
-                update_data["fill_fee"] = close_fee
-                update_data["fees"] = close_fee
-                update_data["fill_size"] = fill_data.get("fill_size", 0)
-                update_data["realized_pnl"] = fill_data.get("realized_pnl", 0)
                 update_data["is_taker"] = fill_data.get("is_taker", False)
 
             if is_full_close:
@@ -1134,37 +1309,155 @@ def _record_close_in_db(
                     open_trade["id"], open_side, get_product_name(product_id),
                     close_size, pos_size, open_price, close_price, pnl,
                 )
+
+            close_trade_data = {
+                "user_id": telegram_id,
+                "product_id": product_id,
+                "product_name": get_product_name(product_id, network=selected_network),
+                "order_type": str(order_type or "MARKET_CLOSE"),
+                "side": side,
+                "size": close_size,
+                "price": close_price,
+                "leverage": float(open_trade.get("leverage") or 1.0),
+                "status": TradeStatus.CLOSED.value,
+                "order_digest": order_digest,
+                "close_price": close_price,
+                "closed_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.utcnow().isoformat(),
+                "filled_at": datetime.utcnow().isoformat(),
+                "source": source,
+                "open_trade_id": int(open_trade.get("id")),
+            }
+            if strategy_session_id or open_trade.get("strategy_session_id"):
+                close_trade_data["strategy_session_id"] = int(strategy_session_id or open_trade.get("strategy_session_id"))
+            if fill_data:
+                close_trade_data["fill_price"] = close_price
+                close_trade_data["fill_fee"] = close_fee + close_builder_fee
+                close_trade_data["builder_fee"] = close_builder_fee
+                close_trade_data["fees"] = close_fee + close_builder_fee
+                close_trade_data["fill_size"] = fill_data.get("fill_size", 0)
+                close_trade_data["realized_pnl"] = fill_data.get("realized_pnl", 0)
+                close_trade_data["is_taker"] = fill_data.get("is_taker", False)
+            if close_trade_id:
+                close_trade_update = {
+                    "status": TradeStatus.CLOSED.value,
+                    "order_digest": order_digest,
+                    "price": close_price,
+                    "filled_at": close_trade_data.get("filled_at"),
+                    "close_price": close_price,
+                    "closed_at": close_trade_data.get("closed_at"),
+                    "fill_price": close_trade_data.get("fill_price"),
+                    "fill_size": close_trade_data.get("fill_size"),
+                    "fill_fee": close_trade_data.get("fill_fee"),
+                    "builder_fee": close_trade_data.get("builder_fee"),
+                    "fees": close_trade_data.get("fees"),
+                    "source": source,
+                    "strategy_session_id": close_trade_data.get("strategy_session_id"),
+                    "open_trade_id": int(open_trade.get("id")),
+                    "realized_pnl": close_trade_data.get("realized_pnl"),
+                    "is_taker": close_trade_data.get("is_taker"),
+                }
+                update_trade(int(close_trade_id), close_trade_update, network=selected_network)
+            else:
+                insert_trade(close_trade_data, network=selected_network)
+            try:
+                update_trade_stats(telegram_id, close_size * close_price)
+            except Exception:
+                pass
         else:
             close_trade_data = {
                 "user_id": telegram_id,
                 "product_id": product_id,
                 "product_name": get_product_name(product_id),
-                "order_type": "market",
+                "order_type": str(order_type or "MARKET_CLOSE"),
                 "side": side,
                 "size": close_size,
                 "price": close_price,
                 "leverage": 1.0,
                 "status": TradeStatus.CLOSED.value,
+                "order_digest": order_digest,
                 "close_price": close_price,
                 "closed_at": datetime.utcnow().isoformat(),
                 "created_at": datetime.utcnow().isoformat(),
                 "filled_at": datetime.utcnow().isoformat(),
+                "source": source,
             }
             if fill_data:
                 close_trade_data["fill_price"] = close_price
-                close_trade_data["fill_fee"] = close_fee
-                close_trade_data["fees"] = close_fee
+                close_trade_data["fill_fee"] = close_fee + close_builder_fee
+                close_trade_data["builder_fee"] = close_builder_fee
+                close_trade_data["fees"] = close_fee + close_builder_fee
                 close_trade_data["fill_size"] = fill_data.get("fill_size", 0)
                 close_trade_data["realized_pnl"] = fill_data.get("realized_pnl", 0)
                 close_trade_data["pnl"] = round(archive_pnl, 4) if archive_pnl is not None else 0.0
                 close_trade_data["is_taker"] = fill_data.get("is_taker", False)
-            insert_trade(close_trade_data, network=selected_network)
+            if strategy_session_id:
+                close_trade_data["strategy_session_id"] = int(strategy_session_id)
+            if close_trade_id:
+                close_trade_update = {
+                    "status": TradeStatus.CLOSED.value,
+                    "order_digest": order_digest,
+                    "price": close_price,
+                    "filled_at": close_trade_data.get("filled_at"),
+                    "close_price": close_price,
+                    "closed_at": close_trade_data.get("closed_at"),
+                    "fill_price": close_trade_data.get("fill_price"),
+                    "fill_size": close_trade_data.get("fill_size"),
+                    "fill_fee": close_trade_data.get("fill_fee"),
+                    "builder_fee": close_trade_data.get("builder_fee"),
+                    "fees": close_trade_data.get("fees"),
+                    "source": source,
+                    "strategy_session_id": close_trade_data.get("strategy_session_id"),
+                    "realized_pnl": close_trade_data.get("realized_pnl"),
+                    "pnl": close_trade_data.get("pnl"),
+                    "is_taker": close_trade_data.get("is_taker"),
+                }
+                update_trade(int(close_trade_id), close_trade_update, network=selected_network)
+            else:
+                insert_trade(close_trade_data, network=selected_network)
+            try:
+                update_trade_stats(telegram_id, close_size * close_price)
+            except Exception:
+                pass
             logger.info(
                 "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f fee=%.4f",
-                side, get_product_name(product_id, network=selected_network), close_size, close_price, close_fee,
+                side, get_product_name(product_id, network=selected_network), close_size, close_price, close_fee + close_builder_fee,
             )
     except Exception as e:
         logger.warning("Failed to record close in DB: %s", e)
+
+
+def reconcile_close_trade_fill(trade_id: int, network: str, fill_data: dict) -> None:
+    trade_row = get_trade_by_id(int(trade_id), network=network)
+    if not trade_row:
+        return
+    if not (_is_close_order_type(trade_row.get("order_type")) or trade_row.get("open_trade_id")):
+        return
+    telegram_id = int(trade_row.get("user_id"))
+    product_id = int(trade_row.get("product_id"))
+    close_size = abs(float(trade_row.get("size") or fill_data.get("fill_size") or 0.0))
+    linked_open_trade = get_trade_by_id(int(trade_row.get("open_trade_id")), network=network) if trade_row.get("open_trade_id") else None
+    linked_open_size = abs(float((linked_open_trade or {}).get("size") or close_size or 0.0))
+    client = get_user_nado_client(telegram_id, network=network) or get_user_readonly_client(telegram_id, network=network)
+    if not client or close_size <= 0:
+        return
+    _record_close_in_db(
+        telegram_id=telegram_id,
+        product_id=product_id,
+        close_size=close_size,
+        pos_size=linked_open_size,
+        side=str(trade_row.get("side") or ""),
+        client=client,
+        fill_price=float(fill_data.get("fill_price") or 0.0),
+        network=network,
+        fill_data=fill_data,
+        close_trade_id=int(trade_id),
+        open_trade_id=trade_row.get("open_trade_id"),
+        source=str(trade_row.get("source") or "manual"),
+        order_type=str(trade_row.get("order_type") or "MARKET_CLOSE"),
+        order_digest=str(trade_row.get("order_digest") or ""),
+        strategy_session_id=trade_row.get("strategy_session_id"),
+    )
 
 
 def close_position(
@@ -1480,32 +1773,11 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
 def get_trade_history(telegram_id: int, limit: int = 20) -> list:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
-    trades = get_trades_by_user(telegram_id, limit=limit, network=network)
-    result = []
-    for t in trades:
-        pnl_value = t.get("pnl")
-        if pnl_value is None:
-            pnl_value = t.get("realized_pnl")
-        entry = {
-            "id": t.get("id"),
-            "product": t.get("product_name"),
-            "type": t.get("order_type"),
-            "side": t.get("side"),
-            "size": t.get("size"),
-            "price": t.get("fill_price") or t.get("price"),
-            "leverage": float(t.get("leverage") or 1),
-            "status": t.get("status"),
-            "pnl": pnl_value,
-            "close_price": t.get("close_price"),
-            "network": network,
-            "created_at": _trade_ts_display(t.get("created_at")),
-            "closed_at": _trade_ts_display(t.get("closed_at")),
-            "digest": t.get("order_digest"),
-            "fees": t.get("fees"),
-            "is_taker": t.get("is_taker"),
-        }
-        result.append(entry)
-    return result
+    trades = get_trades_by_user(telegram_id, limit=None, network=network)
+    logical_rows = _build_logical_trade_rows(trades)
+    for row in logical_rows:
+        row["network"] = network
+    return logical_rows[: max(1, int(limit or 20))]
 
 
 def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]:
@@ -1577,14 +1849,15 @@ def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]
 def get_trade_analytics(telegram_id: int) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
-    trades = get_trades_by_user(telegram_id, limit=500, network=network)
+    trades = get_trades_by_user(telegram_id, limit=None, network=network)
     if not trades:
         return {"total_trades": 0}
-    total = len(trades)
-    filled = [t for t in trades if t.get("status") == TradeStatus.FILLED.value]
-    closed = [t for t in trades if t.get("status") == TradeStatus.CLOSED.value]
+    logical_trades = _build_logical_trade_rows(trades)
+    total = len(logical_trades)
+    filled = [t for t in logical_trades if str(t.get("status") or "").lower() == TradeStatus.FILLED.value]
+    closed = [t for t in logical_trades if str(t.get("status") or "").lower() == TradeStatus.CLOSED.value]
     failed = [t for t in trades if t.get("status") == TradeStatus.FAILED.value]
-    completed = filled + closed
+    completed = closed
     def _realized_pnl(trade: dict):
         value = trade.get("pnl")
         if value is None:
@@ -1597,14 +1870,34 @@ def get_trade_analytics(telegram_id: int) -> dict:
     wins = len([t for t in decisive_pnl_trades if float(_realized_pnl(t)) > 0])
     losses = len([t for t in decisive_pnl_trades if float(_realized_pnl(t)) < 0])
     win_rate = (wins / len(decisive_pnl_trades) * 100) if decisive_pnl_trades else 0
-    total_volume = sum(
-        float(t.get("fill_size") or t.get("size") or 0) * float(t.get("fill_price") or t.get("price") or 0)
-        for t in completed
-    )
+    now = datetime.utcnow()
+    volume_windows = {"24h": 0.0, "7d": 0.0, "30d": 0.0, "all": 0.0}
+    total_fees = 0.0
+    total_funding = 0.0
+    for trade in trades:
+        status = str(trade.get("status") or "").lower()
+        if status not in (TradeStatus.FILLED.value, TradeStatus.CLOSED.value, TradeStatus.PARTIALLY_FILLED.value):
+            continue
+        notional = _trade_notional_usd(trade)
+        fee_value = _trade_total_fee_value(trade)
+        funding_value = float(trade.get("funding_paid") or 0.0)
+        event_ts = _trade_event_time_for_windows(trade)
+        volume_windows["all"] += notional
+        total_fees += fee_value
+        total_funding += funding_value
+        if event_ts:
+            age = now - event_ts.replace(tzinfo=None) if event_ts.tzinfo else now - event_ts
+            if age <= timedelta(days=1):
+                volume_windows["24h"] += notional
+            if age <= timedelta(days=7):
+                volume_windows["7d"] += notional
+            if age <= timedelta(days=30):
+                volume_windows["30d"] += notional
+    total_volume = volume_windows["all"]
 
     by_product = {}
     for t in pnl_trades:
-        product = (t.get("product_name") or "Unknown").replace("-PERP", "")
+        product = (t.get("product") or t.get("product_name") or "Unknown").replace("-PERP", "")
         if product not in by_product:
             by_product[product] = {"pnl": 0.0, "count": 0}
         by_product[product]["pnl"] += float(_realized_pnl(t))
@@ -1621,6 +1914,9 @@ def get_trade_analytics(telegram_id: int) -> dict:
         "wins": wins,
         "losses": losses,
         "total_volume": total_volume,
+        "volume_windows": {k: round(v, 4) for k, v in volume_windows.items()},
+        "total_fees": round(total_fees, 6),
+        "total_funding": round(total_funding, 6),
         "by_product": by_product,
     }
 

@@ -727,7 +727,13 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
 
     if total_trades > 0:
         total_volume = float(stats.get("total_volume", 0) or 0)
+        volume_windows = stats.get("volume_windows") or {}
+        volume_24h = float(volume_windows.get("24h", total_volume) or 0.0)
+        volume_7d = float(volume_windows.get("7d", total_volume) or 0.0)
+        volume_30d = float(volume_windows.get("30d", total_volume) or 0.0)
         total_pnl = float(stats.get("total_pnl", 0) or 0)
+        total_fees = float(stats.get("total_fees", 0) or 0.0)
+        total_funding = float(stats.get("total_funding", 0) or 0.0)
         win_rate = float(stats.get("win_rate", 0) or 0)
         rpnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
         rpnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
@@ -736,7 +742,10 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
             md2_rule(22),
             "",
             f"*{_loc('Bot Trading Stats')}*",
-            f"💰 *{_loc('Volume:')}* {escape_md(f'${total_volume:,.2f}')} \\| "
+            f"💰 *{_loc('Volume:')}* 24h {escape_md(f'${volume_24h:,.2f}')} \\| 7d {escape_md(f'${volume_7d:,.2f}')}",
+            f"📆 30d {escape_md(f'${volume_30d:,.2f}')} \\| All {escape_md(f'${total_volume:,.2f}')}",
+            f"💸 *{_loc('Fees:')}* {escape_md(f'${total_fees:,.2f}')} \\| "
+            f"🌀 *{_loc('Funding:')}* {escape_md(f'${total_funding:,.2f}')}",
             f"{rpnl_emoji} *{_loc('Realized PnL:')}* {escape_md(rpnl_str)}",
             f"🏆 *{_loc('Win Rate:')}* {escape_md(f'{win_rate:.1f}%')} \\| "
             f"{_loc('Trades:')} {escape_md(str(total_trades))}",
@@ -887,6 +896,12 @@ def fmt_analytics(stats, mode_label: str | None = None):
     win_rate = float(stats.get("win_rate", 0) or 0)
     total_pnl = float(stats.get("total_pnl", 0) or 0)
     total_volume = float(stats.get("total_volume", 0) or 0)
+    volume_windows = stats.get("volume_windows") or {}
+    volume_24h = float(volume_windows.get("24h", total_volume) or 0.0)
+    volume_7d = float(volume_windows.get("7d", total_volume) or 0.0)
+    volume_30d = float(volume_windows.get("30d", total_volume) or 0.0)
+    total_fees = float(stats.get("total_fees", 0) or 0.0)
+    total_funding = float(stats.get("total_funding", 0) or 0.0)
 
     pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
     pnl_str = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
@@ -903,8 +918,12 @@ def fmt_analytics(stats, mode_label: str | None = None):
         md2_rule(22),
         "",
         f"*{_loc('Volume')}*",
+        f"💰 *24h:* {escape_md(f'${volume_24h:,.2f}')} \\| *7d:* {escape_md(f'${volume_7d:,.2f}')}",
+        f"📆 *30d:* {escape_md(f'${volume_30d:,.2f}')} \\| *{_loc('All')}:* {escape_md(f'${total_volume:,.2f}')}",
         f"💰 *{_loc('Total Volume:')}* {escape_md(f'${total_volume:,.2f}')} \\| "
         f"📏 *{_loc('Avg Trade Size:')}* {escape_md(f'${avg_trade:,.2f}')}",
+        f"💸 *{_loc('Fees:')}* {escape_md(f'${total_fees:,.2f}')} \\| "
+        f"🌀 *{_loc('Funding:')}* {escape_md(f'${total_funding:,.2f}')}",
         "",
         md2_rule(22),
         "",

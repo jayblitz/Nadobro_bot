@@ -377,7 +377,9 @@ async def sync_pending_fills():
             increment_session_metrics,
             get_trade_by_id,
         )
-        from src.nadobro.services.nado_archive import query_order_by_digest
+        from src.nadobro.services.nado_archive import query_order_by_digest, query_orders_by_subaccount
+        from src.nadobro.services.trade_service import reconcile_close_trade_fill
+        from src.nadobro.services.user_service import update_trade_stats
 
         pending = await run_blocking(get_pending_fill_syncs, 50)
         if not pending:
@@ -436,6 +438,24 @@ async def sync_pending_fills():
                                     str(o.get("digest")) == digest for o in open_orders
                                 )
                                 if not digest_still_open:
+                                    recent_orders = await run_blocking(
+                                        query_orders_by_subaccount,
+                                        network,
+                                        entry["subaccount_hex"],
+                                        [product_id],
+                                        100,
+                                        None,
+                                    )
+                                    archive_hit = next(
+                                        (o for o in (recent_orders or []) if str(o.get("digest") or "") == digest and o.get("is_filled")),
+                                        None,
+                                    )
+                                    if archive_hit:
+                                        fill_data = archive_hit
+                                        digest_still_open = True
+                                if not digest_still_open:
+                                    if attempts < 20:
+                                        continue
                                     await run_blocking(
                                         update_trade, trade_id,
                                         {"status": "cancelled"}, network,
@@ -459,13 +479,19 @@ async def sync_pending_fills():
                 is_partial = _is_partial_fill(requested_size, filled_size)
 
                 # Fill resolved — update trade. Keep queue pending for partial fills.
+                total_fee = float(fill_data.get("fee", 0) or 0.0) + float(fill_data.get("builder_fee", 0) or 0.0)
+                is_close_trade = (
+                    "CLOSE" in str((trade_row or {}).get("order_type") or "").upper()
+                    or bool((trade_row or {}).get("open_trade_id"))
+                )
                 update_data = {
-                    "status": "partially_filled" if is_partial else "filled",
+                    "status": "partially_filled" if is_partial else ("closed" if is_close_trade else "filled"),
                     "fill_price": fill_data["fill_price"],
                     "price": fill_data["fill_price"],
                     "fill_size": fill_data.get("fill_size"),
-                    "fill_fee": fill_data.get("fee", 0),
-                    "fees": fill_data.get("fee", 0),
+                    "fill_fee": total_fee,
+                    "builder_fee": float(fill_data.get("builder_fee", 0) or 0.0),
+                    "fees": total_fee,
                     "realized_pnl": fill_data.get("realized_pnl", 0),
                     "is_taker": fill_data.get("is_taker"),
                 }
@@ -479,6 +505,19 @@ async def sync_pending_fills():
                         pass
 
                 await run_blocking(update_trade, trade_id, update_data, network)
+                previous_fill_size = abs(float((trade_row or {}).get("fill_size") or 0.0))
+                current_fill_size = abs(float(fill_data.get("fill_size") or 0.0))
+                delta_fill_size = max(0.0, current_fill_size - previous_fill_size)
+                if delta_fill_size > 0:
+                    try:
+                        await run_blocking(update_trade_stats, int(entry["user_id"]), delta_fill_size * float(fill_data.get("fill_price") or 0.0))
+                    except Exception:
+                        pass
+                if not is_partial and is_close_trade:
+                    try:
+                        await run_blocking(reconcile_close_trade_fill, trade_id, network, fill_data)
+                    except Exception:
+                        logger.warning("Close-trade reconciliation failed for trade %s", trade_id)
                 if is_partial:
                     digest_still_open = True
                     try:

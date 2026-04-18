@@ -102,8 +102,8 @@ _TRADE_INSERT_ALLOWED_COLS = frozenset({
     "size", "price", "leverage", "status", "order_digest", "pnl",
     "fees", "error_message", "created_at", "filled_at",
     "close_price", "closed_at",
-    "fill_price", "fill_size", "fill_fee", "slippage_bps",
-    "source", "strategy_session_id", "realized_pnl", "is_taker",
+    "fill_price", "fill_size", "fill_fee", "builder_fee", "slippage_bps",
+    "source", "strategy_session_id", "open_trade_id", "realized_pnl", "is_taker",
     "funding_paid",
 })
 
@@ -128,8 +128,8 @@ def insert_trade(data: dict, network: str = "mainnet") -> Optional[int]:
 _TRADE_UPDATE_ALLOWED_COLS = frozenset({
     "status", "order_digest", "price", "filled_at", "error_message",
     "pnl", "fees", "close_price", "closed_at",
-    "fill_price", "fill_size", "fill_fee", "slippage_bps",
-    "source", "strategy_session_id", "realized_pnl", "is_taker",
+    "fill_price", "fill_size", "fill_fee", "builder_fee", "slippage_bps",
+    "source", "strategy_session_id", "open_trade_id", "realized_pnl", "is_taker",
     "funding_paid",
 })
 
@@ -160,13 +160,28 @@ def get_last_trade_for_rate_limit(telegram_id: int, network: str = "mainnet") ->
 def find_open_trade(telegram_id: int, product_id: int, network: str = "mainnet") -> Optional[dict]:
     table = _trades_table(network)
     return query_one(
-        f"SELECT * FROM {table} WHERE user_id = %s AND product_id = %s AND status = 'filled' ORDER BY created_at DESC LIMIT 1",
+        f"""
+        SELECT *
+        FROM {table}
+        WHERE user_id = %s
+          AND product_id = %s
+          AND status IN ('filled', 'partially_filled')
+          AND COALESCE(open_trade_id, 0) = 0
+          AND order_type NOT ILIKE '%%close%%'
+        ORDER BY COALESCE(filled_at, created_at) DESC
+        LIMIT 1
+        """,
         (telegram_id, product_id),
     )
 
 
-def get_trades_by_user(telegram_id: int, limit: int = 50, network: str = "mainnet") -> list:
+def get_trades_by_user(telegram_id: int, limit: int | None = 50, network: str = "mainnet") -> list:
     table = _trades_table(network)
+    if limit is None or int(limit) <= 0:
+        return query_all(
+            f"SELECT * FROM {table} WHERE user_id = %s ORDER BY created_at DESC",
+            (telegram_id,),
+        )
     return query_all(
         f"SELECT * FROM {table} WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
         (telegram_id, limit),

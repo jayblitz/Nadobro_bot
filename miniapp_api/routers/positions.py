@@ -151,6 +151,8 @@ async def list_positions(client: UserClient, user: AuthUser):
 @router.get("/portfolio", response_model=PortfolioSummary)
 async def get_portfolio(client: UserClient, user: AuthUser):
     """Get portfolio summary: equity, balance, positions, margin (estimated)."""
+    from src.nadobro.services.trade_service import get_trade_analytics
+
     positions = await run_blocking(client.get_all_positions) or []
     balance = await run_blocking(client.get_balance) or {}
 
@@ -184,6 +186,8 @@ async def get_portfolio(client: UserClient, user: AuthUser):
         open_orders = await run_blocking(client.get_all_open_orders, False) or []
     except Exception as e:
         logger.warning("get_all_open_orders failed: %s", e)
+    analytics = await run_blocking(get_trade_analytics, user.telegram_id) or {}
+    total_volume_usd = float((analytics.get("volume_windows") or {}).get("all") or analytics.get("total_volume") or 0.0)
 
     return PortfolioSummary(
         equity=equity,
@@ -193,7 +197,7 @@ async def get_portfolio(client: UserClient, user: AuthUser):
         unrealized_spot_pnl=0.0,
         total_margin_used=total_margin_used,
         margin_utilization=margin_util,
-        total_volume_usd=float(user.total_volume_usd or 0),
+        total_volume_usd=total_volume_usd,
         fee_tier_display="—",
         nlp_balance_usd=0.0,
         positions=pos_responses,
@@ -275,12 +279,13 @@ async def trade_history(user: AuthUser, limit: int = 20):
             side=r.get("side", ""),
             size=r.get("size", 0),
             price=r.get("price"),
+            close_price=r.get("close_price"),
             leverage=r.get("leverage", 1.0),
             status=r.get("status", ""),
             pnl=r.get("pnl"),
             fees=r.get("fees", 0),
             created_at=r.get("created_at"),
-            filled_at=r.get("closed_at"),  # trade_service returns closed_at, not filled_at
+            filled_at=r.get("filled_at") or r.get("closed_at"),
         )
         for r in (rows or [])
     ]

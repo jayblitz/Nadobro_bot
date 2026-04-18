@@ -157,6 +157,7 @@ class TradeHistoryItem(BaseModel):
     side: str
     size: float
     price: Optional[float] = None
+    close_price: Optional[float] = None
     leverage: float = 1.0
     status: str = "pending"
     pnl: Optional[float] = None
