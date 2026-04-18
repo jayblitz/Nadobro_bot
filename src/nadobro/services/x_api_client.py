@@ -108,6 +108,7 @@ def search_recent_tweets(
             username = author.get("username", "unknown")
             tweets.append({
                 "id": t["id"],
+                "conversation_id": t.get("conversation_id", ""),
                 "text": t.get("text", ""),
                 "author_username": username,
                 "author_name": author.get("name", username),

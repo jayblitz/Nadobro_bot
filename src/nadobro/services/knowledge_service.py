@@ -729,11 +729,145 @@ def _extract_x_topic(question: str) -> str:
         r"^\s*(what(?:'s| is)\s+)?(happening|trending|new|latest)\s+(on\s+)?(x|twitter)\s+(for|about)\s+",
         r"^\s*what\s+is\s+(x|twitter)\s+saying\s+about\s+",
         r"^\s*show\s+me\s+(x|twitter)\s+(posts|tweets|discussion)\s+(for|about)\s+",
+        r"^\s*(what(?:'s| is)\s+)?(trending|new|latest)\s+(on\s+)?ct\s*(for|about)?\s*",
+        r"^\s*what\s+is\s+ct\s+saying\s+about\s+",
     ]
     for pat in patterns:
         cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?.!,:;-")
     return cleaned or raw
+
+
+def _is_broad_ct_question(question: str) -> bool:
+    q = _normalize_question(question)
+    return any(sig in q for sig in (
+        "what is trending on ct",
+        "what's trending on ct",
+        "trending on ct",
+        "latest from ct",
+        "what is ct saying",
+        "what's ct saying",
+        "crypto twitter",
+        "ct saying",
+    ))
+
+
+def _should_search_nado_accounts(question: str, is_nado_q: bool, is_points_q: bool) -> bool:
+    if is_nado_q or is_points_q:
+        return True
+    q = _normalize_question(question)
+    nado_edge_signals = (
+        "multiplier", "multipliers", "points", "rewards", "listing", "listings",
+        "stock token", "stock tokens", "aapl", "tsla", "nvda", "spy", "qqq",
+        "edge", "promotion", "campaign", "templars", "season",
+    )
+    return any(sig in q for sig in nado_edge_signals)
+
+
+def _tweet_relevance_terms(question: str) -> set[str]:
+    q = _normalize_question(question)
+    tokens = {
+        t for t in re.split(r"[^a-zA-Z0-9]+", q)
+        if len(t) >= 3 and t not in {"what", "from", "about", "there", "like", "tweet", "tweets"}
+    }
+    if "multiplier" in q or "multipliers" in q:
+        tokens.update({"multiplier", "multipliers", "4x", "2x", "3x", "points"})
+    if "points" in q or "reward" in q:
+        tokens.update({"points", "rewards", "season", "epoch"})
+    if "listing" in q or "listed" in q:
+        tokens.update({"listing", "listed", "launch"})
+    if any(sym in q for sym in ("aapl", "tsla", "nvda", "spy", "qqq")):
+        tokens.update({"stocks", "stock", "aapl", "tsla", "nvda", "spy", "qqq"})
+    return tokens
+
+
+def _score_tweet_for_query(tweet: dict, question: str) -> float:
+    text = _normalize_question(tweet.get("text", ""))
+    if not text:
+        return 0.0
+
+    tokens = _tweet_relevance_terms(question)
+    score = 0.0
+    for token in tokens:
+        if token in text:
+            score += 3.0
+    if "multiplier" in text or re.search(r"\b\d+x\b", text):
+        score += 2.0
+    if "points" in text:
+        score += 1.5
+    if "aapl" in text or "tsla" in text or "stock" in text:
+        score += 1.5
+
+    metrics = tweet.get("metrics", {}) or {}
+    score += min(float(metrics.get("like_count", 0) or 0) / 1000.0, 1.0)
+    score += min(float(metrics.get("retweet_count", 0) or 0) / 500.0, 1.0)
+
+    created_at = str(tweet.get("created_at") or "")
+    if created_at:
+        try:
+            dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            age_hours = max(0.0, (datetime.utcnow() - dt.replace(tzinfo=None)).total_seconds() / 3600.0)
+            score += max(0.0, 2.0 - min(age_hours / 72.0, 2.0))
+        except Exception:
+            pass
+    return score
+
+
+def _rank_tweets_for_query(tweets: list[dict], question: str, max_tweets: int = 8) -> list[dict]:
+    ranked = sorted(
+        tweets,
+        key=lambda t: _score_tweet_for_query(t, question),
+        reverse=True,
+    )
+    top = [t for t in ranked if _score_tweet_for_query(t, question) > 0][:max_tweets]
+    return top or ranked[:max_tweets]
+
+
+def _build_broad_x_api_query(question: str) -> str:
+    topic = _extract_x_topic(question) or question
+    topic_norm = _normalize_question(topic)
+    if _is_broad_ct_question(question) or topic_norm in {"ct", "crypto twitter", "crypto", "trending"}:
+        return "(bitcoin OR btc OR ethereum OR eth OR sol OR crypto OR altcoin) lang:en"
+    return topic
+
+
+def _expand_thread_for_ranked_tweets(tweets: list[dict], question: str, max_tweets: int = 8) -> list[dict]:
+    """If the best tweet is part of a thread, include relevant sibling tweets too."""
+    if not tweets:
+        return []
+
+    ranked = sorted(
+        tweets,
+        key=lambda t: _score_tweet_for_query(t, question),
+        reverse=True,
+    )
+    top = ranked[0]
+    conversation_id = str(top.get("conversation_id") or top.get("id") or "").strip()
+    if not conversation_id:
+        return _rank_tweets_for_query(tweets, question, max_tweets=max_tweets)
+
+    thread = [
+        t for t in tweets
+        if str(t.get("conversation_id") or t.get("id") or "").strip() == conversation_id
+    ]
+
+    def _created_key(tweet: dict) -> str:
+        return str(tweet.get("created_at") or "")
+
+    thread = sorted(thread, key=_created_key)
+    thread_ids = {str(t.get("id")) for t in thread}
+
+    ranked_non_thread = [
+        t for t in ranked
+        if str(t.get("id")) not in thread_ids and _score_tweet_for_query(t, question) > 0
+    ]
+
+    merged = thread[:max_tweets]
+    for tweet in ranked_non_thread:
+        if len(merged) >= max_tweets:
+            break
+        merged.append(tweet)
+    return merged
 
 
 def _pick_sources_for_question(question: str, context_text: str = "") -> list[str]:
@@ -762,7 +896,7 @@ def _pick_sources_for_question(question: str, context_text: str = "") -> list[st
 
 
 def _execute_x_search(query: str) -> tuple[str, list[str]]:
-    """Search X/Twitter — uses X API v2 first, then Grok fallback."""
+    """Search X/Twitter — prefers X API v2, with deterministic fallback text."""
     now = datetime.utcnow()
     is_points_q = _is_points_distribution_question(query)
     is_nado_q = _is_nado_x_question(query)
@@ -773,7 +907,7 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
     if x_api_result is not None:
         return x_api_result
 
-    # ── Fallback to Grok's built-in X search ──
+    # ── Deterministic fallback text if X API could not return useful data ──
     return _x_search_via_grok(query, is_nado_q, is_points_q, weekday, now)
 
 
@@ -791,17 +925,25 @@ def _x_search_via_api(query: str, is_nado_q: bool, is_points_q: bool):
         return None
 
     # Fetch tweets
-    if is_nado_q or is_points_q:
-        tweets = get_nado_tweets(max_results=20, hours_back=168)
+    search_nado_accounts = _should_search_nado_accounts(query, is_nado_q, is_points_q)
+    if search_nado_accounts:
+        tweets = get_nado_tweets(max_results=80, hours_back=336)
+        tweets = _expand_thread_for_ranked_tweets(tweets, query, max_tweets=8)
     else:
-        topic = _extract_x_topic(query) or query
-        tweets = search_topic_tweets(topic, max_results=15, hours_back=168)
+        topic_query = _build_broad_x_api_query(query)
+        tweets = search_topic_tweets(topic_query, max_results=25, hours_back=96)
+        tweets = _rank_tweets_for_query(tweets, query, max_tweets=8)
+        if not tweets:
+            # Fuzzy fallback: scan recent Nado tweets and rank locally in case
+            # the user's remembered wording does not match exact X search terms.
+            tweets = get_nado_tweets(max_results=80, hours_back=336)
+            tweets = _expand_thread_for_ranked_tweets(tweets, query, max_tweets=8)
 
     if not tweets:
         # If Grok is unavailable, return a deterministic no-results response
         # instead of falling through to an unavailable fallback path.
         if _get_xai_client() is None:
-            if is_nado_q or is_points_q:
+            if search_nado_accounts:
                 return "[X/TWITTER RESULTS] No recent tweets found from @nadoHQ or @inkonchain.", [
                     OFFICIAL_SOURCES["x_nado"],
                     OFFICIAL_SOURCES["x_ink"],
@@ -809,9 +951,9 @@ def _x_search_via_api(query: str, is_nado_q: bool, is_points_q: bool):
             return "[X/TWITTER RESULTS] No recent tweets found for that topic.", ["https://x.com"]
         return None  # Fall back to Grok when available
 
-    formatted = format_tweets_for_context(tweets, max_tweets=10)
+    formatted = format_tweets_for_context(tweets, max_tweets=8)
 
-    if is_nado_q:
+    if search_nado_accounts:
         sources = [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]]
     else:
         sources = ["https://x.com"]
@@ -825,104 +967,27 @@ def _x_search_via_api(query: str, is_nado_q: bool, is_points_q: bool):
 
 
 def _x_search_via_grok(query: str, is_nado_q: bool, is_points_q: bool, weekday: str, now: datetime) -> tuple[str, list[str]]:
-    """Fallback: search X via Grok's built-in X search."""
-    client = _get_xai_client()
-    if not client:
-        if is_points_q:
-            points_note = "Points for this week likely haven't been distributed yet." if weekday != "Friday" else "It's Friday — check @nadoHQ for updates!"
-            return (
-                f"[X/TWITTER RESULTS — POINTS DISTRIBUTION]\n"
-                f"Could not search X right now. Based on Nado's schedule, points are distributed every Friday. "
-                f"Today is {weekday}. {points_note}",
-                [OFFICIAL_SOURCES["x_nado"]],
-            )
-        return "[X SEARCH] X search not available — neither X API nor xAI configured.", []
-
-    if is_points_q:
-        search_query = "Nado points distributed rewards epoch weekly"
-        system_content = (
-            f"Today is {now.strftime('%Y-%m-%d')} ({weekday}). "
-            "Search X for the most recent posts from @nadoHQ about points distribution, "
-            "weekly epoch rewards, or points being distributed to users. "
-            "Look for any announcement about points being distributed THIS week. "
-            "If you find a distribution announcement, report it with dates. "
-            "If you find NO recent points distribution announcement for this week, "
-            "explicitly say 'No points distribution announcement found for this week.' "
-            f"Focus on tweets from {now.year}."
-        )
-    else:
-        topic = _extract_x_topic(query)
-        search_query = topic or query
-        if is_nado_q:
-            system_content = (
-                f"Today is {now.strftime('%Y-%m-%d')}. "
-                "Search X for the most recent posts from @nadoHQ and @inkonchain. "
-                "Return the actual tweet content verbatim with dates. "
-                f"Focus on tweets from {now.year}."
-            )
-        else:
-            system_content = (
-                f"Today is {now.strftime('%Y-%m-%d')}. "
-                f"Search X broadly for this topic: '{search_query}'. "
-                "Return only the most relevant and recent findings with account handles when possible. "
-                "Rank findings by relevance and recency. "
-                "Use this format:\n"
-                "Here is what is trending on X about <topic>:\n"
-                "- @handle: key point\n"
-                "- @handle: key point\n"
-                "- @handle: key point\n"
-                "Quick take: <one short synthesis line>\n"
-                f"Focus on posts from {now.year}."
-            )
-
-    try:
-        response = client.chat.completions.create(
-            model=XAI_X_SEARCH_MODEL,
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": search_query},
-            ],
-            max_tokens=800,
-            temperature=0.1,
-            extra_body={"search_parameters": _pick_x_search_params(search_query)},
-        )
-        content = response.choices[0].message.content
-        if content and content.strip():
-            if is_points_q:
-                no_distro = any(phrase in content.lower() for phrase in [
-                    "no points distribution", "no recent", "not found", "no announcement",
-                    "couldn't find", "could not find", "no results",
-                ])
-                if no_distro:
-                    return (
-                        f"[X/TWITTER RESULTS — POINTS DISTRIBUTION]\n"
-                        f"No points distribution announcement found for this week on @nadoHQ.\n"
-                        f"Today is {weekday}. Nado points are typically distributed every Friday.\n"
-                        f"{'Points for the week have not been distributed yet. Check back on Friday!' if weekday != 'Friday' else 'It is Friday — points may still be distributed later today. Keep an eye on @nadoHQ!'}\n\n"
-                        f"Raw search results:\n{content.strip()}",
-                        [OFFICIAL_SOURCES["x_nado"]],
-                    )
-                return (
-                    f"[X/TWITTER RESULTS — POINTS DISTRIBUTION]\n{content.strip()}\n\n"
-                    f"Note: Nado distributes points every Friday in weekly epochs.",
-                    [OFFICIAL_SOURCES["x_nado"]],
-                )
-            return (
-                f"[X/TWITTER RESULTS — @nadoHQ & @inkonchain]\n{content.strip()}",
-                [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]],
-            )
-    except Exception as e:
-        logger.warning(f"Grok X search failed: {e}")
-
+    """Deterministic fallback text after X API retrieval attempts."""
     if is_points_q:
         points_note = "Points for this week likely haven't been distributed yet." if weekday != "Friday" else "It's Friday — check @nadoHQ for updates!"
         return (
             f"[X/TWITTER RESULTS — POINTS DISTRIBUTION]\n"
-            f"Could not search X right now. Based on Nado's schedule, points are distributed every Friday. "
+            f"Live X fallback is unavailable right now. Based on Nado's schedule, points are distributed every Friday. "
             f"Today is {weekday}. {points_note}",
             [OFFICIAL_SOURCES["x_nado"]],
         )
-    return "[X SEARCH] No results found.", []
+    if is_nado_q:
+        return (
+            "[X/TWITTER RESULTS]\n"
+            "Direct X search did not return a relevant recent post from @nadoHQ or @inkonchain right now.\n"
+            "Please try a more specific keyword like `AAPL`, `TSLA`, `multiplier`, or `points`.",
+            [OFFICIAL_SOURCES["x_nado"], OFFICIAL_SOURCES["x_ink"]],
+        )
+    return (
+        "[X/TWITTER RESULTS]\n"
+        "Live X search fallback is unavailable and no direct X API results were found for that topic.",
+        ["https://x.com"],
+    )
 
 
 def _get_user_network(telegram_id: int) -> str:
