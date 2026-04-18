@@ -1328,11 +1328,41 @@ def fmt_status_overview(status: dict, onboarding: dict):
         if strategy == "VOL":
             vol_attempts = int(status.get("vol_order_attempts") or 0)
             vol_failures = int(status.get("vol_order_failures") or 0)
+            volume_done = float(status.get("volume_done_usd") or 0.0)
+            volume_remaining = float(status.get("volume_remaining_usd") or 0.0)
+            target_volume = float(status.get("target_volume_usd") or 0.0)
+            session_realized = float(status.get("session_realized_pnl_usd") or 0.0)
+            vol_phase = str(status.get("vol_phase") or "").strip() or "idle"
+            last_order_digest = str(status.get("vol_last_order_digest") or "").strip()
+            entry_digest = str(status.get("vol_entry_digest") or "").strip()
+            close_digest = str(status.get("vol_close_digest") or "").strip()
+            progress_pct = (volume_done / target_volume * 100.0) if target_volume > 0 else 0.0
+            lines.extend(["", "*Volume Progress*"])
+            lines.append(
+                f"{_loc('Done')}: *{escape_md(f'${volume_done:,.2f}')}* \\| "
+                f"{_loc('Remaining')}: *{escape_md(f'${volume_remaining:,.2f}')}*"
+            )
+            if target_volume > 0:
+                lines.append(
+                    f"{_loc('Target')}: *{escape_md(f'${target_volume:,.2f}')}* \\| "
+                    f"{_loc('Progress')}: *{escape_md(f'{progress_pct:.1f}%')}*"
+                )
+            pnl_sign = "+" if session_realized >= 0 else "-"
+            lines.append(
+                f"{_loc('Session PnL')}: *{escape_md(f'{pnl_sign}${abs(session_realized):,.2f}')}* \\| "
+                f"{_loc('Phase')}: *{escape_md(vol_phase)}*"
+            )
             if vol_attempts > 0:
                 lines.append(
                     f"{_loc('Vol order attempts')}: *{escape_md(str(vol_attempts))}* \\| "
                     f"{_loc('failures')}: *{escape_md(str(vol_failures))}*"
                 )
+            if last_order_digest:
+                lines.append(f"{_loc('Last order ID')}: `{escape_md(last_order_digest[:18])}`")
+            if entry_digest:
+                lines.append(f"{_loc('Entry order ID')}: `{escape_md(entry_digest[:18])}`")
+            if close_digest:
+                lines.append(f"{_loc('Close order ID')}: `{escape_md(close_digest[:18])}`")
             last_order_error = str(status.get("last_order_error") or "").strip()
             if last_order_error:
                 lines.append(f"{_loc('Last order error')}: {escape_md(last_order_error[:160])}")

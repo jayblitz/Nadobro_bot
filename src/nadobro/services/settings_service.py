@@ -45,6 +45,7 @@ def _default_strategy_settings() -> dict:
         "vol": {
             "notional_usd": 100.0,
             "fixed_margin_usd": 100.0,
+            "target_volume_usd": 10000.0,
             "interval_seconds": 10,
             "tp_pct": 1.0,
             "sl_pct": 1.0,

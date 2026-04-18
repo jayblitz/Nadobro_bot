@@ -371,6 +371,7 @@ def _strategy_defaults(strategy: str) -> dict:
         "vol": {
             "notional_usd": 100.0,
             "fixed_margin_usd": 100.0,
+            "target_volume_usd": 10000.0,
             "leverage": 1.0,
             "interval_seconds": 10,
             "vol_direction": "long",
@@ -445,7 +446,7 @@ def _finalize_session(state: dict, stop_reason: str = "stopped"):
         return
     try:
         update_strategy_session(int(session_id), {
-            "status": "completed" if stop_reason in ("tp_hit", "target_reached") else "stopped",
+            "status": "completed" if stop_reason in ("tp_hit", "target_reached", "target_volume_hit") else "stopped",
             "stopped_at": datetime.utcnow().isoformat(),
             "stop_reason": str(stop_reason)[:200],
         })
@@ -805,6 +806,16 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "vol_order_failures": int(state.get("vol_order_failures") or 0),
         "last_order_error": state.get("last_order_error") or "",
         "last_order_ts": float(state.get("last_order_ts") or 0.0),
+        "target_volume_usd": float(state.get("target_volume_usd") or 0.0),
+        "volume_done_usd": float(state.get("volume_done_usd") or 0.0),
+        "volume_remaining_usd": float(state.get("volume_remaining_usd") or 0.0),
+        "session_realized_pnl_usd": float(state.get("session_realized_pnl_usd") or 0.0),
+        "vol_phase": state.get("vol_phase") or "",
+        "vol_last_order_digest": state.get("vol_last_order_digest") or "",
+        "vol_last_order_kind": state.get("vol_last_order_kind") or "",
+        "vol_entry_digest": state.get("vol_entry_digest") or "",
+        "vol_close_digest": state.get("vol_close_digest") or "",
+        "vol_effective_margin_usd": float(state.get("vol_effective_margin_usd") or 0.0),
         "runtime_diagnostics": get_runtime_diagnostics(),
     }
 
@@ -1561,11 +1572,11 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
         return True, None
-    if strategy == "vol" and result.get("done") and str(result.get("stop_reason") or "") in ("tp_hit", "sl_hit"):
+    if strategy == "vol" and result.get("done") and str(result.get("stop_reason") or "") in ("tp_hit", "sl_hit", "target_volume_hit"):
         stop_reason = str(result.get("stop_reason"))
         _finalize_session(state, stop_reason=stop_reason)
         state["running"] = False
-        state["last_error"] = None if stop_reason == "tp_hit" else (
+        state["last_error"] = None if stop_reason in ("tp_hit", "target_volume_hit") else (
             result.get("error")
             or f"Stopped by session SL ({float(state.get('session_realized_pnl_usd') or 0.0):.4f} USD)."
         )
@@ -1577,7 +1588,11 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 "✅ Volume strategy stopped on {product}-PERP ({network}) - {reason}.",
                 product=product,
                 network=network,
-                reason="session TP hit" if stop_reason == "tp_hit" else "session SL hit",
+                reason=(
+                    "session TP hit" if stop_reason == "tp_hit"
+                    else "target volume hit" if stop_reason == "target_volume_hit"
+                    else "session SL hit"
+                ),
             )
         else:
             await _notify(

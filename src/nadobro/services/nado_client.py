@@ -1629,12 +1629,13 @@ class NadoClient:
         isolated_only: bool = False,
         isolated_margin: Optional[float] = None,
         reduce_only: bool = False,
+        post_only: bool = False,
     ) -> dict:
         return self.place_order(
             product_id,
             size,
             price,
-            order_type="default",
+            order_type="post_only" if post_only else "default",
             is_buy=is_buy,
             isolated_only=isolated_only,
             isolated_margin=isolated_margin,

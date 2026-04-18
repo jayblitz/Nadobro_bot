@@ -597,6 +597,7 @@ def execute_limit_order(
     source: str = "manual",
     strategy_session_id: int = None,
     reduce_only: bool = False,
+    post_only: bool = False,
     **kwargs,
 ) -> dict:
     builder_route = _builder_route_payload()
@@ -649,6 +650,7 @@ def execute_limit_order(
         price,
         is_buy=is_long,
         reduce_only=bool(reduce_only),
+        post_only=bool(post_only),
         isolated_only=isolated_only,
         isolated_margin=isolated_margin,
     )
@@ -1480,20 +1482,26 @@ def get_trade_history(telegram_id: int, limit: int = 20) -> list:
     trades = get_trades_by_user(telegram_id, limit=limit, network=network)
     result = []
     for t in trades:
+        pnl_value = t.get("pnl")
+        if pnl_value is None:
+            pnl_value = t.get("realized_pnl")
         entry = {
             "id": t.get("id"),
             "product": t.get("product_name"),
             "type": t.get("order_type"),
             "side": t.get("side"),
             "size": t.get("size"),
-            "price": t.get("price"),
+            "price": t.get("fill_price") or t.get("price"),
             "leverage": float(t.get("leverage") or 1),
             "status": t.get("status"),
-            "pnl": t.get("pnl"),
+            "pnl": pnl_value,
             "close_price": t.get("close_price"),
             "network": network,
             "created_at": _trade_ts_display(t.get("created_at")),
             "closed_at": _trade_ts_display(t.get("closed_at")),
+            "digest": t.get("order_digest"),
+            "fees": t.get("fees"),
+            "is_taker": t.get("is_taker"),
         }
         result.append(entry)
     return result
@@ -1576,19 +1584,29 @@ def get_trade_analytics(telegram_id: int) -> dict:
     closed = [t for t in trades if t.get("status") == TradeStatus.CLOSED.value]
     failed = [t for t in trades if t.get("status") == TradeStatus.FAILED.value]
     completed = filled + closed
-    pnl_trades = [t for t in completed if t.get("pnl") is not None]
-    total_pnl = sum(float(t["pnl"]) for t in pnl_trades) if pnl_trades else 0
-    wins = len([t for t in pnl_trades if float(t["pnl"]) > 0])
-    losses = len([t for t in pnl_trades if float(t["pnl"]) <= 0])
-    win_rate = (wins / len(pnl_trades) * 100) if pnl_trades else 0
-    total_volume = sum(float(t.get("size") or 0) * float(t.get("price") or 0) for t in completed)
+    def _realized_pnl(trade: dict):
+        value = trade.get("pnl")
+        if value is None:
+            value = trade.get("realized_pnl")
+        return value
+
+    pnl_trades = [t for t in completed if _realized_pnl(t) is not None]
+    total_pnl = sum(float(_realized_pnl(t)) for t in pnl_trades) if pnl_trades else 0
+    decisive_pnl_trades = [t for t in pnl_trades if abs(float(_realized_pnl(t))) > 1e-12]
+    wins = len([t for t in decisive_pnl_trades if float(_realized_pnl(t)) > 0])
+    losses = len([t for t in decisive_pnl_trades if float(_realized_pnl(t)) < 0])
+    win_rate = (wins / len(decisive_pnl_trades) * 100) if decisive_pnl_trades else 0
+    total_volume = sum(
+        float(t.get("fill_size") or t.get("size") or 0) * float(t.get("fill_price") or t.get("price") or 0)
+        for t in completed
+    )
 
     by_product = {}
     for t in pnl_trades:
         product = (t.get("product_name") or "Unknown").replace("-PERP", "")
         if product not in by_product:
             by_product[product] = {"pnl": 0.0, "count": 0}
-        by_product[product]["pnl"] += float(t["pnl"])
+        by_product[product]["pnl"] += float(_realized_pnl(t))
         by_product[product]["count"] += 1
     by_product = dict(sorted(by_product.items(), key=lambda x: abs(x[1]["pnl"]), reverse=True))
 

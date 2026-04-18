@@ -281,6 +281,11 @@ async def _notify_limit_order_filled_once(trade_row: dict, network: str):
     try:
         from src.nadobro.models.database import get_bot_state, set_bot_state
 
+        source = str((trade_row or {}).get("source") or "").strip().lower()
+        strategy_session_id = trade_row.get("strategy_session_id")
+        if source in {"vol", "grid", "rgrid", "dn", "bro"} or strategy_session_id:
+            return
+
         trade_id = int(trade_row.get("id"))
         dedupe_key = f"limit_fill_notified:{network}:{trade_id}"
         if get_bot_state(dedupe_key):
@@ -326,6 +331,11 @@ async def _notify_limit_order_cancelled_once(
         return
     try:
         from src.nadobro.models.database import get_bot_state, set_bot_state
+
+        source = str((trade_row or {}).get("source") or "").strip().lower()
+        strategy_session_id = trade_row.get("strategy_session_id")
+        if source in {"vol", "grid", "rgrid", "dn", "bro"} or strategy_session_id:
+            return
 
         trade_id = int(trade_row.get("id"))
         dedupe_key = f"limit_cancel_notified:{network}:{trade_id}"

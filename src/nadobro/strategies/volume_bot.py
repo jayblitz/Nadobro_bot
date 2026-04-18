@@ -14,6 +14,7 @@ FIXED_LEVERAGE = 1.0
 CLOSE_AFTER_SECONDS = 60.0
 MIN_SIZE = 0.0001
 MIN_EFFECTIVE_MARGIN_USD = 10.0
+DEFAULT_TARGET_VOLUME_USD = 10000.0
 
 
 def _normalize_direction(raw: str) -> str:
@@ -54,11 +55,13 @@ def _available_quote_balance(client) -> float:
         return 0.0
 
 
-def _aggressive_limit_price(mid: float, is_buy: bool, slippage_pct: float) -> float:
-    slip = max(0.1, float(slippage_pct or 0.0)) / 100.0
+def _maker_limit_price(book: dict, is_buy: bool) -> float:
+    bid = float(book.get("bid") or 0.0)
+    ask = float(book.get("ask") or 0.0)
+    mid = float(book.get("mid") or 0.0)
     if is_buy:
-        return mid * (1.0 + slip)
-    return mid * (1.0 - slip)
+        return bid if bid > 0 else mid
+    return ask if ask > 0 else mid
 
 
 def get_fee_pnl_preview(telegram_id: int, product: str, target_volume_usd: float) -> dict:
@@ -90,11 +93,12 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     fixed_margin = float(state.get("fixed_margin_usd") or FIXED_MARGIN_USD)
     state["fixed_margin_usd"] = FIXED_MARGIN_USD
     state["leverage"] = FIXED_LEVERAGE
-    slippage_pct = float(state.get("slippage_pct") or 1.0)
     available_quote = _available_quote_balance(client)
     effective_margin = min(fixed_margin, max(0.0, available_quote * 0.90)) if available_quote > 0 else fixed_margin
     if effective_margin > 0:
         state["vol_effective_margin_usd"] = round(effective_margin, 4)
+    target_volume = float(state.get("target_volume_usd") or DEFAULT_TARGET_VOLUME_USD)
+    state["target_volume_usd"] = round(target_volume, 4)
 
     product_id = get_product_id(product, network=network)
     if product_id is None:
@@ -165,10 +169,13 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_entry_fill_ts"] = now_ts
         state["vol_entry_fill_price"] = entry_price
         state["vol_entry_size"] = entry_size
+        state["vol_last_order_digest"] = entry_digest
+        state["vol_last_order_kind"] = "entry_filled"
         return {
             "success": True,
             "done": False,
             "action": "entry_filled_wait_close",
+            "detail": f"Entry filled #{entry_digest[:10]} at ${entry_price:,.2f}",
             "orders_placed": 0,
             "placed_notional_usd": round(entry_size * entry_price, 4),
         }
@@ -204,6 +211,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         volume_done += traded_notional
         session_pnl += cycle_pnl
         state["volume_done_usd"] = round(volume_done, 4)
+        state["volume_remaining_usd"] = round(max(0.0, target_volume - volume_done), 4)
         state["session_realized_pnl_usd"] = round(session_pnl, 6)
         state["vol_phase"] = "idle"
         state["vol_entry_digest"] = None
@@ -212,6 +220,26 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_entry_size"] = 0.0
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
+        state["vol_last_order_digest"] = close_digest
+        state["vol_last_order_kind"] = "close_filled"
+
+        if target_volume > 0 and volume_done >= target_volume:
+            state["running"] = False
+            return {
+                "success": True,
+                "done": True,
+                "stop_reason": "target_volume_hit",
+                "action": "target_volume_hit",
+                "detail": f"Target volume reached with order #{close_digest[:10]}",
+                "orders_placed": 0,
+                "placed_notional_usd": round(traded_notional, 4),
+                "vol_order_attempts": 0,
+                "vol_order_failures": 0,
+                "session_realized_pnl_usd": round(session_pnl, 6),
+                "cycle_realized_pnl_usd": round(cycle_pnl, 6),
+                "volume_done_usd": round(volume_done, 4),
+                "volume_remaining_usd": 0.0,
+            }
 
         if tp_usd > 0 and session_pnl >= tp_usd:
             state["running"] = False
@@ -220,6 +248,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "done": True,
                 "stop_reason": "tp_hit",
                 "action": "closed_limit_and_session_tp_hit",
+                "detail": f"TP hit after close #{close_digest[:10]}",
                 "orders_placed": 0,
                 "placed_notional_usd": round(traded_notional, 4),
                 "vol_order_attempts": 0,
@@ -227,6 +256,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "session_realized_pnl_usd": round(session_pnl, 6),
                 "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
+                "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
             }
         if sl_usd > 0 and session_pnl <= -sl_usd:
             state["running"] = False
@@ -235,6 +265,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "done": True,
                 "stop_reason": "sl_hit",
                 "action": "closed_limit_and_session_sl_hit",
+                "detail": f"SL hit after close #{close_digest[:10]}",
                 "orders_placed": 0,
                 "placed_notional_usd": round(traded_notional, 4),
                 "vol_order_attempts": 0,
@@ -242,11 +273,13 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "session_realized_pnl_usd": round(session_pnl, 6),
                 "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
+                "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
             }
         return {
             "success": True,
             "done": False,
             "action": "limit_close_filled_reloop",
+            "detail": f"Close filled #{close_digest[:10]} · cycle PnL ${cycle_pnl:,.2f}",
             "orders_placed": 0,
             "placed_notional_usd": round(traded_notional, 4),
             "vol_order_attempts": 0,
@@ -254,6 +287,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             "session_realized_pnl_usd": round(session_pnl, 6),
             "cycle_realized_pnl_usd": round(cycle_pnl, 6),
             "volume_done_usd": round(volume_done, 4),
+            "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
         }
 
     if phase == "filled_wait_close":
@@ -282,7 +316,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             pos_side or "?",
             pos_size,
         )
-        close_limit = _aggressive_limit_price(mid, is_buy=close_is_long, slippage_pct=slippage_pct)
+        close_limit = _maker_limit_price(mp, is_buy=close_is_long)
         close_result = execute_limit_order(
             telegram_id,
             product,
@@ -292,6 +326,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             leverage=FIXED_LEVERAGE,
             reduce_only=True,
             enforce_rate_limit=False,
+            post_only=True,
             source="vol",
             strategy_session_id=state.get("strategy_session_id"),
         )
@@ -326,6 +361,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_phase"] = "pending_close_fill"
         state["vol_close_digest"] = close_result.get("digest")
         state["vol_close_size"] = float(pos_size or 0.0)
+        state["vol_last_order_digest"] = str(close_result.get("digest") or "")
+        state["vol_last_order_kind"] = "close_posted"
         logger.info(
             "VOL state transition user=%s network=%s product=%s from=filled_wait_close to=pending_close_fill",
             telegram_id,
@@ -336,6 +373,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             "success": True,
             "done": False,
             "action": "placed_limit_close_wait_fill",
+            "detail": f"Maker close posted #{str(close_result.get('digest') or '')[:10]} at ${close_limit:,.2f}",
             "orders_placed": 1,
             "placed_notional_usd": round(pos_size * close_limit, 4),
             "vol_order_attempts": 1,
@@ -359,7 +397,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         }
     size = max(effective_margin / mid, MIN_SIZE)
     is_long = direction == "long"
-    entry_limit = _aggressive_limit_price(mid, is_buy=is_long, slippage_pct=slippage_pct)
+    entry_limit = _maker_limit_price(mp, is_buy=is_long)
     logger.info(
         "VOL entry order attempt user=%s network=%s product=%s phase=%s direction=%s size=%.8f limit=%.8f effective_margin=%.2f",
         telegram_id,
@@ -379,6 +417,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         is_long=is_long,
         leverage=FIXED_LEVERAGE,
         enforce_rate_limit=False,
+        post_only=True,
         source="vol",
         strategy_session_id=state.get("strategy_session_id"),
     )
@@ -417,6 +456,9 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     state["vol_entry_size"] = entry_size
     state["vol_entry_fill_price"] = entry_price
     state["vol_entry_fill_ts"] = 0.0
+    state["vol_last_order_digest"] = str(open_result.get("digest") or "")
+    state["vol_last_order_kind"] = "entry_posted"
+    state["volume_remaining_usd"] = round(max(0.0, target_volume - volume_done), 4)
     logger.info(
         "VOL state transition user=%s network=%s product=%s from=idle to=pending_fill",
         telegram_id,
@@ -427,6 +469,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         "success": True,
         "done": False,
         "action": "opened_limit_wait_fill",
+        "detail": f"Maker entry posted #{str(open_result.get('digest') or '')[:10]} at ${entry_limit:,.2f}",
         "orders_placed": 1,
         "placed_notional_usd": round(entry_size * entry_price, 4),
         "vol_order_attempts": 1,
@@ -436,4 +479,5 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         "entry_price": entry_price,
         "session_realized_pnl_usd": round(session_pnl, 6),
         "volume_done_usd": round(volume_done, 4),
+        "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
     }
