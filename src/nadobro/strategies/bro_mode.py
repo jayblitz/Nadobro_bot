@@ -158,6 +158,15 @@ def run_cycle(
             bro_state["llm_pause_until"] = time.time() + BRO_CYCLE_SECONDS * LLM_FAIL_PAUSE_CYCLES
         return {"success": False, "error": f"LLM decision failed: {str(e)[:100]}"}
 
+    if (
+        decision.get("action") == "hold"
+        and any(
+            marker in str(decision.get("reasoning", "")).lower()
+            for marker in ("llm client not available", "llm error", "failed to parse llm")
+        )
+    ):
+        decision = _fallback_bro_decision(snapshot, positions, min_confidence, max_leverage)
+
     action = decision.get("action", "hold")
 
     bro_state["last_decision"] = {
@@ -255,6 +264,137 @@ def _init_bro_state() -> dict:
         "last_decision": None,
         "started_at": datetime.utcnow().isoformat(),
     }
+
+
+def _score_bro_asset(asset: dict) -> tuple[int, int, list[str]]:
+    bull = 0
+    bear = 0
+    signals: list[str] = []
+
+    signal_1h = str(asset.get("signal_1h") or "").lower()
+    if any(token in signal_1h for token in ("bull", "buy", "long", "uptrend")):
+        bull += 2
+        signals.append("bullish_1h_signal")
+    if any(token in signal_1h for token in ("bear", "sell", "short", "downtrend")):
+        bear += 2
+        signals.append("bearish_1h_signal")
+
+    ema_9 = float(asset.get("ema_9") or 0.0)
+    ema_21 = float(asset.get("ema_21") or 0.0)
+    ema_50 = float(asset.get("ema_50") or 0.0)
+    if ema_9 > ema_21 > ema_50 > 0:
+        bull += 2
+        signals.append("ema_stack_bullish")
+    elif ema_9 < ema_21 < ema_50 and ema_9 > 0:
+        bear += 2
+        signals.append("ema_stack_bearish")
+
+    ch_1h = float(asset.get("change_1h") or 0.0)
+    ch_4h = float(asset.get("change_4h") or 0.0)
+    if ch_1h > 0 and ch_4h > 0:
+        bull += 1
+        signals.append("positive_momentum")
+    elif ch_1h < 0 and ch_4h < 0:
+        bear += 1
+        signals.append("negative_momentum")
+
+    rsi = asset.get("rsi_14")
+    if rsi is not None:
+        rsi = float(rsi)
+        if 52.0 <= rsi <= 68.0:
+            bull += 1
+            signals.append("rsi_supports_long")
+        elif 32.0 <= rsi <= 48.0:
+            bear += 1
+            signals.append("rsi_supports_short")
+
+    funding_rate = asset.get("funding_rate")
+    if funding_rate is not None:
+        funding_rate = float(funding_rate)
+        if funding_rate > 0:
+            bear += 1
+            signals.append("positive_funding_favors_short")
+        elif funding_rate < 0:
+            bull += 1
+            signals.append("negative_funding_favors_long")
+
+    regime = str(asset.get("regime") or "").lower()
+    if regime == "trending_up":
+        bull += 1
+        signals.append("regime_trending_up")
+    elif regime == "trending_down":
+        bear += 1
+        signals.append("regime_trending_down")
+
+    return bull, bear, signals
+
+
+def _fallback_bro_decision(snapshot: dict, positions: list[dict], min_confidence: float, max_leverage: int) -> dict:
+    assets = snapshot.get("assets", []) or []
+    assets_by_product = {str(asset.get("product") or "").upper(): asset for asset in assets}
+
+    for pos in positions or []:
+        product = _normalize_product_symbol(pos.get("product", ""))
+        asset = assets_by_product.get(product)
+        if not asset:
+            continue
+        bull, bear, signals = _score_bro_asset(asset)
+        pos_side = str(pos.get("side") or "").lower()
+        if pos_side == "long" and bear >= 3 and bear > bull:
+            return {
+                "action": "close",
+                "product": product,
+                "close_product": product,
+                "confidence": min(0.55 + (0.08 * bear), 0.85),
+                "reasoning": f"Fallback close: bearish reversal signals detected for {product}.",
+                "signals": signals[:6],
+            }
+        if pos_side == "short" and bull >= 3 and bull > bear:
+            return {
+                "action": "close",
+                "product": product,
+                "close_product": product,
+                "confidence": min(0.55 + (0.08 * bull), 0.85),
+                "reasoning": f"Fallback close: bullish reversal signals detected for {product}.",
+                "signals": signals[:6],
+            }
+
+    open_products = {_normalize_product_symbol(p.get("product", "")) for p in positions or []}
+    best_decision = {
+        "action": "hold",
+        "reasoning": "Fallback model found no high-conviction setup.",
+        "confidence": 0.0,
+    }
+    best_score = 0
+    for asset in assets:
+        product = _normalize_product_symbol(asset.get("product", ""))
+        if not product or product in open_products:
+            continue
+        regime = str(asset.get("regime") or "").lower()
+        if regime in {"high_vol_chop", "news_spike"}:
+            continue
+        bull, bear, signals = _score_bro_asset(asset)
+        score = max(bull, bear)
+        if score < 3:
+            continue
+        confidence = min(0.55 + (0.08 * score), 0.88)
+        if confidence < min_confidence or score < best_score:
+            continue
+        best_score = score
+        best_decision = {
+            "action": "open_long" if bull >= bear else "open_short",
+            "product": product,
+            "confidence": confidence,
+            "leverage": min(max_leverage, 3 if score < 5 else 4),
+            "size_pct": 0.25 if score < 5 else 0.35,
+            "tp_pct": 1.5 if score < 5 else 2.0,
+            "sl_pct": 0.8 if score < 5 else 1.0,
+            "reasoning": f"Fallback setup: {product} has aligned directional signals.",
+            "signals": signals[:6],
+            "expected_pnl_pct": min(4.0, 0.8 * score),
+            "risk_score": 0.35 if regime.startswith("trending") else 0.5,
+        }
+    return best_decision
 
 
 def _handle_open(

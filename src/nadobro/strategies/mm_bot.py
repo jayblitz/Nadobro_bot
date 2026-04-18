@@ -262,6 +262,12 @@ def _compute_grid_prices(
         offset = half_spread * i
         buy_price = reference_price * (1.0 - offset)
         sell_price = reference_price * (1.0 + offset)
+        if soft_reset_side and mid_price and mid_price > 0:
+            reset_nudge = (0.1 * i) / 10000.0
+            if soft_reset_side == "buy":
+                buy_price = mid_price * (1.0 - reset_nudge)
+            elif soft_reset_side == "sell":
+                sell_price = mid_price * (1.0 + reset_nudge)
         orders.append({"price": buy_price, "is_long": True, "level": i})
         orders.append({"price": sell_price, "is_long": False, "level": i})
     return orders
@@ -637,76 +643,93 @@ def run_cycle(
     cancelled_digests = set(str(d) for d in (state.get("mm_recently_cancelled_digests") or []))
     executed_quotes = _reconcile_executed_quotes(state, network, open_orders, cancelled_digests)
     state["mm_recently_cancelled_digests"] = []
-    if strategy == "rgrid" and executed_quotes:
+    if executed_quotes:
         for q in executed_quotes:
             _append_grid_exposure_fill(state, q)
-
+    grid_anchor_price = float(state.get("grid_anchor_price") or 0.0)
+    discretion = _clamp(float(state.get("rgrid_discretion") or state.get("grid_discretion") or 0.06), 0.01, 0.5)
+    recent_fraction = _clamp(discretion * 2.0, 0.02, 0.5)
+    buy_exposure = _rolling_vwap_recent_fraction(state.get("grid_buy_fills") or [], recent_fraction)
+    sell_exposure = _rolling_vwap_recent_fraction(state.get("grid_sell_fills") or [], recent_fraction)
+    if buy_exposure > 0 and sell_exposure > 0:
+        grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
+    elif buy_exposure > 0:
+        grid_anchor_price = buy_exposure
+    elif sell_exposure > 0:
+        grid_anchor_price = sell_exposure
+    if grid_anchor_price <= 0:
+        grid_anchor_price = float(state.get("grid_last_fill_price") or 0.0)
+    if grid_anchor_price <= 0:
+        grid_anchor_price = reference_price
+    if executed_quotes:
+        last_exec = executed_quotes[-1]
+        exec_price = float(last_exec.get("price") or 0.0)
+        if exec_price > 0:
+            state["grid_last_fill_price"] = exec_price
+            grid_anchor_price = exec_price
+    elif float(state.get("grid_last_fill_price") or 0.0) <= 0 and grid_anchor_price > 0:
+        state["grid_last_fill_price"] = grid_anchor_price
+    state["grid_prev_net_units"] = net_units
+    state["grid_anchor_price"] = grid_anchor_price
+    state["grid_buy_exposure_price"] = round(buy_exposure, 8) if buy_exposure > 0 else 0.0
+    state["grid_sell_exposure_price"] = round(sell_exposure, 8) if sell_exposure > 0 else 0.0
     if strategy == "rgrid":
-        grid_anchor_price = float(state.get("grid_anchor_price") or 0.0)
-        discretion = _clamp(float(state.get("rgrid_discretion") or state.get("grid_discretion") or 0.06), 0.01, 0.5)
-        recent_fraction = _clamp(discretion * 2.0, 0.02, 0.5)
-        buy_exposure = _rolling_vwap_recent_fraction(state.get("grid_buy_fills") or [], recent_fraction)
-        sell_exposure = _rolling_vwap_recent_fraction(state.get("grid_sell_fills") or [], recent_fraction)
-        if buy_exposure > 0 and sell_exposure > 0:
-            grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
-        elif buy_exposure > 0:
-            grid_anchor_price = buy_exposure
-        elif sell_exposure > 0:
-            grid_anchor_price = sell_exposure
-        if grid_anchor_price <= 0:
-            grid_anchor_price = float(state.get("grid_last_fill_price") or 0.0)
-        if grid_anchor_price <= 0:
-            grid_anchor_price = reference_price
-        if executed_quotes:
-            last_exec = executed_quotes[-1]
-            exec_price = float(last_exec.get("price") or 0.0)
-            if exec_price > 0:
-                state["grid_last_fill_price"] = exec_price
-                grid_anchor_price = exec_price
-        elif float(state.get("grid_last_fill_price") or 0.0) <= 0 and grid_anchor_price > 0:
-            state["grid_last_fill_price"] = grid_anchor_price
-        state["grid_prev_net_units"] = net_units
-        state["grid_anchor_price"] = grid_anchor_price
-        state["grid_buy_exposure_price"] = round(buy_exposure, 8) if buy_exposure > 0 else 0.0
-        state["grid_sell_exposure_price"] = round(sell_exposure, 8) if sell_exposure > 0 else 0.0
         reference_price = grid_anchor_price
 
-        pnl_stop_pct = max(0.0, float(state.get("rgrid_stop_loss_pct") or state.get("grid_stop_loss_pct") or state.get("sl_pct") or 0.0))
-        pnl_take_pct = max(0.0, float(state.get("rgrid_take_profit_pct") or state.get("grid_take_profit_pct") or state.get("tp_pct") or 0.0))
-        max_loss_usd = (pnl_stop_pct / 100.0) * max(0.0, notional)
-        max_profit_usd = (pnl_take_pct / 100.0) * max(0.0, notional)
-        grid_cycle_pnl = _compute_grid_cycle_pnl_usd(positions, product_id)
-        state["grid_last_cycle_pnl_usd"] = round(grid_cycle_pnl, 6)
-        if max_loss_usd > 0 and grid_cycle_pnl <= (-max_loss_usd):
-            return {
-                "success": True,
-                "orders_placed": 0,
-                "orders_cancelled": 0,
-                "action": "grid_stop_loss_hit",
-                "detail": (
-                    f"Grid PnL stop-loss hit: pnl ${grid_cycle_pnl:,.2f} <= -${max_loss_usd:,.2f} "
-                    f"({pnl_stop_pct:.2f}% of margin)"
-                ),
-                "grid_cycle_pnl_usd": grid_cycle_pnl,
-                "grid_max_loss_usd": max_loss_usd,
-                "reference_price": reference_price,
-                "spread_bp": dynamic_spread_bp,
-            }
-        if max_profit_usd > 0 and grid_cycle_pnl >= max_profit_usd:
-            return {
-                "success": True,
-                "orders_placed": 0,
-                "orders_cancelled": 0,
-                "action": "grid_take_profit_hit",
-                "detail": (
-                    f"Reverse GRID take-profit hit: pnl ${grid_cycle_pnl:,.2f} >= ${max_profit_usd:,.2f} "
-                    f"({pnl_take_pct:.2f}% of margin)"
-                ),
-                "grid_cycle_pnl_usd": grid_cycle_pnl,
-                "grid_take_profit_usd": max_profit_usd,
-                "reference_price": reference_price,
-                "spread_bp": dynamic_spread_bp,
-            }
+    pnl_stop_pct = max(
+        0.0,
+        float(
+            state.get("rgrid_stop_loss_pct") if strategy == "rgrid"
+            else state.get("grid_stop_loss_pct")
+            or state.get("sl_pct")
+            or 0.0
+        ),
+    )
+    pnl_take_pct = max(
+        0.0,
+        float(
+            state.get("rgrid_take_profit_pct") if strategy == "rgrid"
+            else state.get("grid_take_profit_pct")
+            or state.get("tp_pct")
+            or 0.0
+        ),
+    )
+    max_loss_usd = (pnl_stop_pct / 100.0) * max(0.0, notional)
+    max_profit_usd = (pnl_take_pct / 100.0) * max(0.0, notional)
+    grid_cycle_pnl = _compute_grid_cycle_pnl_usd(positions, product_id)
+    state["grid_last_cycle_pnl_usd"] = round(grid_cycle_pnl, 6)
+    if max_loss_usd > 0 and grid_cycle_pnl <= (-max_loss_usd):
+        return {
+            "success": True,
+            "orders_placed": 0,
+            "orders_cancelled": 0,
+            "action": "grid_stop_loss_hit",
+            "detail": (
+                f"{'Reverse GRID' if strategy == 'rgrid' else 'GRID'} PnL stop-loss hit: "
+                f"pnl ${grid_cycle_pnl:,.2f} <= -${max_loss_usd:,.2f} "
+                f"({pnl_stop_pct:.2f}% of margin)"
+            ),
+            "grid_cycle_pnl_usd": grid_cycle_pnl,
+            "grid_max_loss_usd": max_loss_usd,
+            "reference_price": reference_price,
+            "spread_bp": dynamic_spread_bp,
+        }
+    if max_profit_usd > 0 and grid_cycle_pnl >= max_profit_usd:
+        return {
+            "success": True,
+            "orders_placed": 0,
+            "orders_cancelled": 0,
+            "action": "grid_take_profit_hit",
+            "detail": (
+                f"{'Reverse GRID' if strategy == 'rgrid' else 'GRID'} take-profit hit: "
+                f"pnl ${grid_cycle_pnl:,.2f} >= ${max_profit_usd:,.2f} "
+                f"({pnl_take_pct:.2f}% of margin)"
+            ),
+            "grid_cycle_pnl_usd": grid_cycle_pnl,
+            "grid_take_profit_usd": max_profit_usd,
+            "reference_price": reference_price,
+            "spread_bp": dynamic_spread_bp,
+        }
 
     buy_mult, sell_mult, pause_flatten_only, pause_reason = _resolve_side_multipliers(
         directional_bias, net_units, inv_soft_limit_usd, mid
@@ -764,11 +787,22 @@ def run_cycle(
             existing_prices.append(p)
 
     soft_reset_side = None
-    if strategy == "rgrid":
-        reset_threshold_pct = max(0.0, float(state.get("rgrid_reset_threshold_pct") or state.get("grid_reset_threshold_pct") or 0.0))
+    if strategy in ("grid", "rgrid"):
+        reset_threshold_pct = max(
+            0.0,
+            float(
+                state.get("rgrid_reset_threshold_pct") if strategy == "rgrid"
+                else state.get("grid_reset_threshold_pct")
+                or 0.0
+            ),
+        )
         reset_timeout_s = max(
             GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS,
-            int(state.get("rgrid_reset_timeout_seconds") or state.get("grid_reset_timeout_seconds") or 120),
+            int(
+                state.get("rgrid_reset_timeout_seconds") if strategy == "rgrid"
+                else state.get("grid_reset_timeout_seconds")
+                or 120
+            ),
         )
         reset_active = bool(state.get("grid_reset_active"))
         reset_started = float(state.get("grid_reset_started_ts") or 0.0)
@@ -777,21 +811,16 @@ def run_cycle(
         if reference_price > 0:
             drift_from_anchor_pct = abs(mid - reference_price) / reference_price * 100.0
         state["grid_drift_from_anchor_pct"] = round(drift_from_anchor_pct, 6)
-        grid_cycle_pnl = float(state.get("grid_last_cycle_pnl_usd") or 0.0)
-        favorable_trend_up = mid > reference_price
-        favorable_trend_down = mid < reference_price
-        if grid_cycle_pnl > 0 and reset_threshold_pct > 0 and reference_price > 0:
-            if favorable_trend_up and ((mid - reference_price) / reference_price * 100.0 >= reset_threshold_pct):
+        if reset_threshold_pct > 0 and reference_price > 0 and inv_usd > 0:
+            if net_units > 0 and ((reference_price - mid) / reference_price * 100.0 >= reset_threshold_pct):
                 reset_active = True
                 if not reset_started:
                     reset_started = now_ts
-                # Trend is up; move opposite leg (sell) toward market to lock profit.
                 soft_reset_side = "sell"
-            elif favorable_trend_down and ((reference_price - mid) / reference_price * 100.0 >= reset_threshold_pct):
+            elif net_units < 0 and ((mid - reference_price) / reference_price * 100.0 >= reset_threshold_pct):
                 reset_active = True
                 if not reset_started:
                     reset_started = now_ts
-                # Trend is down; move opposite leg (buy) toward market to lock profit.
                 soft_reset_side = "buy"
 
         if reset_active and not soft_reset_side:
@@ -801,7 +830,7 @@ def run_cycle(
 
         if reset_active:
             timed_out = bool(reset_started and (now_ts - reset_started) >= reset_timeout_s)
-            rebalanced = abs(net_units) <= 1e-9
+            rebalanced = inv_usd <= max(1.0, inv_soft_limit_usd * 0.20)
             if timed_out or rebalanced:
                 reset_active = False
                 reset_started = 0.0
@@ -895,6 +924,7 @@ def run_cycle(
             is_long=order_spec["is_long"],
             leverage=leverage,
             enforce_rate_limit=False,
+            post_only=True,
             source=strategy,
             strategy_session_id=state.get("strategy_session_id"),
             reduce_only=bool(pause_flatten_only and abs(net_units) > 0),
@@ -982,9 +1012,9 @@ def run_cycle(
         "inventory_skew_usd": inv_usd,
         "pause_reason": state.get("mm_pause_reason") or None,
         "errors": errors if errors else None,
-        "grid_reset_active": bool(state.get("grid_reset_active", False)) if strategy == "rgrid" else None,
-        "grid_reset_side": state.get("grid_reset_side") if strategy == "rgrid" else None,
-        "grid_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd") if strategy == "rgrid" else None,
+        "grid_reset_active": bool(state.get("grid_reset_active", False)) if strategy in ("grid", "rgrid") else None,
+        "grid_reset_side": state.get("grid_reset_side") if strategy in ("grid", "rgrid") else None,
+        "grid_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd") if strategy in ("grid", "rgrid") else None,
     }
 
     # Update cumulative PnL tracking

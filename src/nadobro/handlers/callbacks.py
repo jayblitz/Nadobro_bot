@@ -1244,6 +1244,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
             "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
             "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
+            "grid_reset_threshold_pct", "grid_reset_timeout_seconds",
             "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
             "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
             "auto_close_on_maintenance", "is_long_bias",
@@ -1263,7 +1264,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "levels": (1, 20),
             "min_range_pct": (0.1, 20),
             "max_range_pct": (0.1, 40),
-            "threshold_bp": (1, 500),
+            "threshold_bp": (0, 500),
             "close_offset_bp": (1, 1000),
             "cycle_notional_usd": (1, 1000000),
             "session_notional_cap_usd": (0, 10000000),
@@ -1272,6 +1273,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "min_spread_bp": (0.1, 200),
             "max_spread_bp": (0.1, 500),
             "vol_sensitivity": (0.0, 1.0),
+            "grid_reset_threshold_pct": (0.05, 20),
+            "grid_reset_timeout_seconds": (15, 86400),
             "rgrid_spread_bp": (0.1, 200),
             "rgrid_stop_loss_pct": (0.05, 100),
             "rgrid_take_profit_pct": (0.05, 200),
@@ -1372,7 +1375,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "levels": "Enter grid levels \\(example: `4`\\)",
             "min_range_pct": "Enter min range % \\(example: `1\\.0`\\)",
             "max_range_pct": "Enter max range % \\(example: `2\\.0`\\)",
-            "threshold_bp": "Enter threshold in bps \\(example: `12`\\)",
+            "threshold_bp": "Enter threshold in bps \\(example: `0` to disable, or `12`\\)",
             "close_offset_bp": "Enter close offset in bps \\(example: `25`\\)",
             "cycle_notional_usd": "Enter per\\-cycle budget in USD \\(usually same as margin\\)",
             "session_notional_cap_usd": "Enter optional session cap in USD \\(example: `5000`, or `0` to disable\\)",
@@ -1381,6 +1384,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "min_spread_bp": "Enter minimum spread in bps \\(example: `2`\\)",
             "max_spread_bp": "Enter maximum spread in bps \\(example: `20`\\)",
             "vol_sensitivity": "Enter volatility sensitivity \\(example: `0\\.02`\\)",
+            "grid_reset_threshold_pct": "Enter GRID reset threshold % \\(example: `0\\.8`\\)",
+            "grid_reset_timeout_seconds": "Enter GRID reset timeout seconds \\(example: `120`\\)",
             "rgrid_spread_bp": "Enter RGRID spread in bps \\(example: `10`\\)",
             "rgrid_stop_loss_pct": "Enter RGRID PnL stop loss % of margin \\(example: `0\\.8`\\)",
             "rgrid_take_profit_pct": "Enter RGRID PnL take profit % of margin \\(example: `1\\.2`\\)",
@@ -2222,11 +2227,20 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("TTL 90s", callback_data="strategy:set:grid:quote_ttl_seconds:90"),
                 ],
                 [
+                    InlineKeyboardButton("Reset 0.8%", callback_data="strategy:set:grid:grid_reset_threshold_pct:0.8"),
+                    InlineKeyboardButton("1.5%", callback_data="strategy:set:grid:grid_reset_threshold_pct:1.5"),
+                ],
+                [
+                    InlineKeyboardButton("Reset 120s", callback_data="strategy:set:grid:grid_reset_timeout_seconds:120"),
+                    InlineKeyboardButton("300s", callback_data="strategy:set:grid:grid_reset_timeout_seconds:300"),
+                ],
+                [
                     InlineKeyboardButton("Custom TP", callback_data="strategy:input:grid:tp_pct"),
                     InlineKeyboardButton("Custom SL", callback_data="strategy:input:grid:sl_pct"),
                 ],
                 [
                     InlineKeyboardButton("Session Cap", callback_data="strategy:input:grid:session_notional_cap_usd"),
+                    InlineKeyboardButton("Custom Reset", callback_data="strategy:input:grid:grid_reset_threshold_pct"),
                 ],
             ]
     elif strategy == "rgrid":
@@ -2430,6 +2444,9 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     bot_status = get_user_bot_status(telegram_id) or {}
 
     required_margin = cycle_notional / leverage if leverage > 0 else cycle_notional
+    inventory_soft_limit = float(conf.get("inventory_soft_limit_usd", notional * 0.6))
+    recommended_buffer = max(5.0, required_margin * 0.20)
+    recommended_available = required_margin + (inventory_soft_limit / max(leverage, 1.0)) + recommended_buffer
     cycles_per_day = 86400 / max(interval_seconds, 10)
     est_daily_volume = cycle_notional * 2.0 * cycles_per_day
 
@@ -2512,16 +2529,26 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             f"\nTelemetry: *{escape_md(telem)}*"
         )
     elif strategy_id == "grid":
-        threshold = f"{float(conf.get('threshold_bp', 12.0)):.0f}bp"
+        threshold_value = float(conf.get("threshold_bp", 0.0))
+        threshold = "OFF" if threshold_value <= 0 else f"{threshold_value:.0f}bp"
         ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
         min_spread = float(conf.get("min_spread_bp", 2.0))
         max_spread = float(conf.get("max_spread_bp", 20.0))
+        reset_threshold = float(conf.get("grid_reset_threshold_pct", 0.8))
+        reset_timeout = int(conf.get("grid_reset_timeout_seconds", 120))
         cap_str = f"${session_cap:,.0f}" if session_cap > 0 else "OFF"
         spread_band = f"{min_spread:.0f}\\-{max_spread:.0f}bp"
         extra_cfg = (
-            f"\nQuote when price moves *{escape_md(threshold)}*+ from ref · "
-            f"Ref *{escape_md(ref_mode)}* · Spread band *{escape_md(spread_band)}*"
+            f"\nPassive only *POST_ONLY* \\| Requote threshold *{escape_md(threshold)}*"
+            f"\nQuote around ref *{escape_md(ref_mode)}* · Spread band *{escape_md(spread_band)}*"
             f"\nPer\\-cycle budget *{escape_md(f'${cycle_notional:,.0f}')}* · Cap *{escape_md(cap_str)}*"
+            f"\nInventory soft limit *{escape_md(f'${inventory_soft_limit:,.0f}')}*"
+            f"\nSoft reset *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}* before hard stop"
+        )
+    if strategy_id in ("grid", "rgrid"):
+        extra_cfg += (
+            f"\nRecommended available margin *{escape_md(f'${recommended_available:,.2f}')}*"
+            f" \\(trade ${escape_md(f'{required_margin:,.2f}')} + buffer ${escape_md(f'{recommended_available - required_margin:,.2f}')}\\)"
         )
     elif strategy_id == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"

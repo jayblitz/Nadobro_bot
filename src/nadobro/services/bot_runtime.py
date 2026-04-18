@@ -66,6 +66,19 @@ def _vol_use_multiprocess() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _strategy_use_multiprocess(strategy: str) -> bool:
+    strategy_key = str(strategy or "").lower().strip()
+    specific = (os.environ.get(f"NADO_{strategy_key.upper()}_USE_MULTIPROCESS") or "").strip().lower()
+    if specific in ("1", "true", "yes", "on"):
+        return True
+    if specific in ("0", "false", "no", "off"):
+        return False
+    if strategy_key == "vol":
+        return _vol_use_multiprocess()
+    raw = (os.environ.get("NADO_USE_MULTIPROCESS_STRATEGIES") or "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def _vol_call_timeout_seconds() -> float:
     raw = (os.environ.get("NADO_VOL_CALL_TIMEOUT_SECONDS") or "12").strip()
     try:
@@ -114,9 +127,6 @@ def _migrate_state_strategy(state: dict) -> dict:
     sid = str(state.get("strategy") or "").lower().strip()
     if sid == "mm":
         state["strategy"] = "grid"
-        state["strategy_id_v2"] = 1
-    elif sid == "grid" and int(state.get("strategy_id_v2") or 0) < 1:
-        state["strategy"] = "rgrid"
         state["strategy_id_v2"] = 1
     elif sid in ("grid", "rgrid", "dn", "vol", "bro"):
         state["strategy_id_v2"] = int(state.get("strategy_id_v2") or 1)
@@ -196,7 +206,13 @@ def _update_order_observability(state: dict, result: dict) -> None:
     obs["orders_filled"] = int(obs.get("orders_filled", 0) or 0) + orders_filled
     obs["orders_cancelled"] = int(obs.get("orders_cancelled", 0) or 0) + orders_cancelled
     obs["last_action"] = str(result.get("action") or "")
-    obs["last_reason"] = str(result.get("reason") or result.get("detail") or result.get("error") or "")[:200]
+    obs["last_reason"] = str(
+        result.get("reason")
+        or result.get("detail")
+        or result.get("error")
+        or result.get("order_error")
+        or ""
+    )[:200]
     obs["last_ts"] = time.time()
     state["order_observability"] = obs
 
@@ -235,7 +251,7 @@ def _merge_vol_order_counters(state: dict, result: dict) -> None:
 
 
 def _format_cycle_failure_error(strategy: str, result: dict) -> str:
-    raw = str(result.get("error") or "unknown").strip()
+    raw = str(result.get("error") or result.get("order_error") or "unknown").strip()
     category = _categorize_runtime_error(raw)
     action = str(result.get("action") or "cycle")
     return f"{strategy.upper()}[{action}/{category}]: {raw}"[:300]
@@ -454,6 +470,81 @@ def _finalize_session(state: dict, stop_reason: str = "stopped"):
         logger.warning("Failed to finalize session #%s: %s", session_id, e)
 
 
+def _available_quote_balance_for_network(client) -> float:
+    try:
+        bal = client.get_balance() or {}
+        balances = bal.get("balances", {}) or {}
+        return float(balances.get(0, balances.get("0", 0.0)) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _active_position_size_for_product(client, product_id: int) -> float:
+    try:
+        for pos in client.get_all_positions() or []:
+            if int(pos.get("product_id", -1)) != int(product_id):
+                continue
+            signed_amount = float(pos.get("signed_amount", 0) or 0.0)
+            amount = abs(float(pos.get("amount", 0) or 0.0))
+            size = abs(signed_amount) if abs(signed_amount) > 0 else amount
+            if size > 1e-9:
+                return size
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _run_mm_start_guard(telegram_id: int, network: str, product: str, leverage: float, state: dict) -> tuple[bool, str]:
+    client = get_user_readonly_client(telegram_id, network=network) or get_user_nado_client(telegram_id, network=network)
+    if not client:
+        return False, "Could not initialize market-maker account checks. Please retry."
+
+    product_id = get_product_id(product, network=network, client=client)
+    if product_id is None:
+        return False, f"Unknown product '{product}'."
+
+    existing_position = _active_position_size_for_product(client, product_id)
+    if existing_position > 0:
+        return (
+            False,
+            f"Close your existing {product.upper()}-PERP position before starting the MM bot. "
+            f"Detected open size {existing_position:.6f}."
+        )
+
+    try:
+        open_orders = client.get_open_orders(product_id) or []
+    except Exception:
+        open_orders = []
+    if open_orders:
+        return (
+            False,
+            f"Cancel existing {product.upper()}-PERP open orders before starting the MM bot. "
+            f"Detected {len(open_orders)} open order(s)."
+        )
+
+    cycle_notional = float(state.get("cycle_notional_usd") or state.get("notional_usd") or 0.0)
+    inventory_soft_limit = float(
+        state.get("inventory_soft_limit_usd")
+        or (float(state.get("notional_usd") or cycle_notional or 0.0) * 0.60)
+    )
+    lev = max(1.0, float(leverage or 1.0))
+    required_margin = cycle_notional / lev if cycle_notional > 0 else 0.0
+    rebalance_buffer = inventory_soft_limit / lev if inventory_soft_limit > 0 else 0.0
+    safety_buffer = max(5.0, required_margin * 0.20)
+    recommended_available = required_margin + rebalance_buffer + safety_buffer
+    available_quote = _available_quote_balance_for_network(client)
+    if available_quote + 1e-9 < recommended_available:
+        return (
+            False,
+            f"Insufficient margin buffer for MM on {product.upper()}-PERP. "
+            f"Available ${available_quote:,.2f}, recommended about ${recommended_available:,.2f} "
+            f"(trade margin ${required_margin:,.2f} + rebalance buffer ${rebalance_buffer:,.2f} + safety ${safety_buffer:,.2f}). "
+            f"Reduce margin or deposit more funds."
+        )
+
+    return True, ""
+
+
 def start_user_bot(
     telegram_id: int,
     strategy: str,
@@ -547,6 +638,10 @@ def start_user_bot(
             "runs": 0,
         }
     )
+    if strategy in ("grid", "rgrid"):
+        mm_ok, mm_msg = _run_mm_start_guard(telegram_id, network, product.upper(), float(state.get("leverage") or leverage or 1.0), state)
+        if not mm_ok:
+            return False, mm_msg
     if strategy == "vol":
         direction = str(kwargs.get("direction") or strat_cfg.get("vol_direction") or "long").strip().lower()
         direction = "short" if direction == "short" else "long"
@@ -576,6 +671,15 @@ def start_user_bot(
             True,
             f"VOL bot started on {product.upper()}-PERP ({network}) "
             f"| Direction {direction} | Margin $100 @ 1x | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
+        )
+    if strategy in ("grid", "rgrid"):
+        spread_key = "rgrid_spread_bp" if strategy == "rgrid" else "spread_bp"
+        cycle_notional = float(state.get("cycle_notional_usd") or state.get("notional_usd") or 0.0)
+        spread_bp = float(state.get(spread_key) or state.get("spread_bp") or 0.0)
+        return (
+            True,
+            f"{_strategy_display_name(strategy)} bot started on {product.upper()}-PERP ({network}) "
+            f"| Maker-only quotes | Budget ${cycle_notional:,.0f} / cycle | Spread {spread_bp:.0f}bp",
         )
     return (
         True,
@@ -1046,7 +1150,7 @@ async def handle_strategy_job(payload: dict):
                 )
 
                 strategy = str(state.get("strategy") or "").lower().strip()
-                use_multiprocess = is_multiprocess_enabled() and (strategy != "vol" or _vol_use_multiprocess())
+                use_multiprocess = is_multiprocess_enabled() and _strategy_use_multiprocess(strategy)
                 if use_multiprocess:
                     strategy = str(state.get("strategy") or "")
                     worker_group = strategy_worker_group(strategy)
@@ -1316,6 +1420,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             client = await run_blocking(get_user_readonly_client, telegram_id)
         if not client:
             raise RuntimeError("Wallet client unavailable")
+        if hasattr(client, "network") and client.network != network:
+            raise RuntimeError(f"Network mismatch: expected {network}, got {client.network}")
         with timed_metric("runtime.strategy.dispatch.bro"):
             result = await run_blocking(
                 _dispatch_strategy,
@@ -1328,9 +1434,10 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         bro_detail = result.get("detail", "")
         bro_confidence = result.get("confidence", 0)
         state["runs"] = prev_runs + 1
-        state["last_error"] = result.get("error")
+        state["last_error"] = result.get("error") or result.get("order_error")
         state["last_action"] = bro_action
         state["last_action_detail"] = bro_detail[:200] if bro_detail else ""
+        _update_order_observability(state, result)
         _save_state(telegram_id, network, state)
         if prev_runs == 0 or bro_action in ("open_long", "open_short", "close", "emergency_flatten", "blocked"):
             if bro_action == "hold":
@@ -1388,12 +1495,13 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                     orders_placed=orders,
                     orders_filled=filled,
                     pnl=float(result.get("pnl", 0) or 0),
+                    volume=float(result.get("placed_notional_usd", 0) or 0),
                 )
             except Exception:
                 pass
 
         if not result.get("success", True):
-            return False, str(result.get("error", "unknown"))[:300]
+            return False, str(result.get("error") or result.get("order_error") or "unknown")[:300]
         return True, None
 
     product_id = get_product_id(product, network=network)
@@ -1429,7 +1537,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
-    if strategy not in ("rgrid", "dn", "vol"):
+    if strategy not in ("grid", "rgrid", "dn", "vol"):
         move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
         sl_pct = float(state.get("sl_pct") or 0.0)
         tp_pct = float(state.get("tp_pct") or 0.0)
@@ -1520,55 +1628,63 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 client, mid, product_id, product, open_orders,
             )
 
-    if strategy == "rgrid" and result.get("action") == "grid_stop_loss_hit":
+    if strategy in ("grid", "rgrid") and result.get("action") == "grid_stop_loss_hit":
         _finalize_session(state, stop_reason="grid_sl_hit")
         state["running"] = False
-        state["last_error"] = result.get("detail") or "GRID stop-loss triggered."
+        strategy_label = _strategy_display_name(strategy)
+        state["last_error"] = result.get("detail") or f"{strategy_label} stop-loss triggered."
         _save_state(telegram_id, network, state)
         close_res = await run_blocking(close_all_positions, telegram_id, network)
         if close_res.get("success"):
             await _notify(
                 telegram_id,
-                "🛑 GRID stopped on {product}-PERP ({network}) - PnL stop-loss triggered.\n{detail}",
+                "🛑 {strategy} stopped on {product}-PERP ({network}) - PnL stop-loss triggered.\n{detail}",
+                strategy=strategy_label,
                 product=product, network=network, detail=(result.get("detail") or "")[:180],
             )
         else:
             logger.warning(
-                "GRID PnL stop close_all_positions failed for user %s on %s: %s",
+                "%s PnL stop close_all_positions failed for user %s on %s: %s",
+                strategy_label,
                 telegram_id,
                 network,
                 close_res.get("error", "unknown"),
             )
             await _notify(
                 telegram_id,
-                "⚠️ GRID PnL stop-loss triggered on {product}-PERP ({network}), "
+                "⚠️ {strategy} PnL stop-loss triggered on {product}-PERP ({network}), "
                 "but cleanup failed. Error: {error}",
+                strategy=strategy_label,
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
         return True, None
-    if strategy == "rgrid" and result.get("action") == "grid_take_profit_hit":
+    if strategy in ("grid", "rgrid") and result.get("action") == "grid_take_profit_hit":
         _finalize_session(state, stop_reason="tp_hit")
         state["running"] = False
+        strategy_label = _strategy_display_name(strategy)
         state["last_error"] = None
         _save_state(telegram_id, network, state)
         close_res = await run_blocking(close_all_positions, telegram_id, network)
         if close_res.get("success"):
             await _notify(
                 telegram_id,
-                "✅ Reverse GRID completed on {product}-PERP ({network}) - PnL take-profit triggered.\n{detail}",
+                "✅ {strategy} completed on {product}-PERP ({network}) - PnL take-profit triggered.\n{detail}",
+                strategy=strategy_label,
                 product=product, network=network, detail=(result.get("detail") or "")[:180],
             )
         else:
             logger.warning(
-                "Reverse GRID PnL take-profit close_all_positions failed for user %s on %s: %s",
+                "%s PnL take-profit close_all_positions failed for user %s on %s: %s",
+                strategy_label,
                 telegram_id,
                 network,
                 close_res.get("error", "unknown"),
             )
             await _notify(
                 telegram_id,
-                "⚠️ Reverse GRID PnL take-profit triggered on {product}-PERP ({network}), "
+                "⚠️ {strategy} PnL take-profit triggered on {product}-PERP ({network}), "
                 "but cleanup failed. Error: {error}",
+                strategy=strategy_label,
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
         return True, None
@@ -1607,8 +1723,9 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     prev_runs = int(state.get("runs") or 0)
     state["last_run_ts"] = time.time()
     state["runs"] = prev_runs + 1
-    state["last_error"] = result.get("error")
-    state["last_error_category"] = _categorize_runtime_error(result.get("error")) if result.get("error") else ""
+    cycle_error = result.get("error") or result.get("order_error")
+    state["last_error"] = cycle_error
+    state["last_error_category"] = _categorize_runtime_error(cycle_error) if cycle_error else ""
     state["last_action"] = result.get("action", "cycle")
     state["last_action_detail"] = str(result.get("detail", ""))[:200]
     _merge_vol_order_counters(state, result)

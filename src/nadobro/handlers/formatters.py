@@ -1388,14 +1388,14 @@ def fmt_status_overview(status: dict, onboarding: dict):
             lines.append(f"{_loc('Session PnL:')} *{escape_md(f'{pnl_sign}${total_pnl:,.2f}')}*")
 
         maker_fill_ratio = status.get("maker_fill_ratio")
-        if strategy == "MM" and maker_fill_ratio is not None:
+        if strategy in ("GRID", "RGRID") and maker_fill_ratio is not None:
             cancellation_ratio = status.get("cancellation_ratio")
             lines.append(
                 f"{_loc('Quotes')}: "
                 f"{escape_md(f'{float(maker_fill_ratio) * 100:.0f}%')} {_loc('fills')} · "
                 f"{escape_md(f'{float(cancellation_ratio or 0) * 100:.0f}%')} {_loc('cancels')}"
             )
-        if strategy == "RGRID":
+        if strategy in ("GRID", "RGRID"):
             anchor = float(status.get("rgrid_anchor_price") or 0.0)
             buy_exp = float(status.get("rgrid_buy_exposure_price") or 0.0)
             sell_exp = float(status.get("rgrid_sell_exposure_price") or 0.0)
@@ -1409,7 +1409,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
             reset_timeout = int(float(status.get("rgrid_reset_timeout_seconds") or 0.0))
             discretion = float(status.get("rgrid_discretion") or 0.0)
             pnl_sign = "+" if cycle_pnl >= 0 else ""
-            lines.extend(["", "*Reverse GRID Telemetry*"])
+            lines.extend(["", "*Reverse GRID Telemetry*" if strategy == "RGRID" else "*GRID Telemetry*"])
             lines.append(
                 f"Anchor: *{escape_md(f'{anchor:,.6f}') if anchor > 0 else 'n/a'}* \\| "
                 f"Drift: *{escape_md(f'{drift_pct:.3f}%')}*"
@@ -1424,11 +1424,19 @@ def fmt_status_overview(status: dict, onboarding: dict):
                 f"Threshold *{escape_md(f'{reset_threshold:.2f}%')}* \\| "
                 f"Timeout *{escape_md(f'{reset_timeout}s' if reset_timeout > 0 else 'n/a')}*"
             )
-            lines.append(
-                f"PnL Cycle: *{escape_md(f'{pnl_sign}${cycle_pnl:,.2f}')}* \\| "
-                f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}* \\| "
-                f"Discretion: *{escape_md(f'{discretion:.2f}')}*"
-            )
+            if strategy == "RGRID":
+                lines.append(
+                    f"PnL Cycle: *{escape_md(f'{pnl_sign}${cycle_pnl:,.2f}')}* \\| "
+                    f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}* \\| "
+                    f"Discretion: *{escape_md(f'{discretion:.2f}')}*"
+                )
+            else:
+                grid_tp = float(status.get("tp_pct") or 0.0)
+                grid_sl = float(status.get("sl_pct") or 0.0)
+                lines.append(
+                    f"PnL Cycle: *{escape_md(f'{pnl_sign}${cycle_pnl:,.2f}')}* \\| "
+                    f"Session TP/SL: *{escape_md(f'{grid_tp:.2f}%/{grid_sl:.2f}%')}*"
+                )
 
     return "\n".join(lines)
 

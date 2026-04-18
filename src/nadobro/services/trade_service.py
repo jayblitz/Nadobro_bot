@@ -1207,6 +1207,7 @@ def close_position(
     close_size = min(pos_size, float(size)) if size else pos_size
     full_close_requested = size is None or close_size >= pos_size
     close_side = "short" if signed_amount > 0 else "long"
+    close_slippage_pct = max(0.1, float(kwargs.get("slippage_pct") or 1.0))
 
     remaining_size = close_size
     attempts = 0
@@ -1229,7 +1230,7 @@ def close_position(
             product_id,
             this_close_size,
             is_buy=is_buy,
-            slippage_pct=1.0,
+            slippage_pct=close_slippage_pct,
             reduce_only=True,
         )
         if not r.get("success"):
