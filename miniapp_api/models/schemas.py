@@ -89,6 +89,7 @@ class TradeResponse(BaseModel):
     ok: bool
     trade_id: Optional[int] = None
     digest: Optional[str] = None
+    price: Optional[float] = None
     fill_price: Optional[float] = None
     size: Optional[float] = None
     side: Optional[str] = None

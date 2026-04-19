@@ -472,7 +472,8 @@ async def sync_pending_fills():
                                     continue
                         except Exception:
                             pass
-                    continue
+                    if not fill_data or not fill_data.get("is_filled"):
+                        continue
 
                 requested_size = abs(float((trade_row or {}).get("size") or 0))
                 filled_size = abs(float(fill_data.get("fill_size") or 0))
@@ -510,9 +511,37 @@ async def sync_pending_fills():
                 delta_fill_size = max(0.0, current_fill_size - previous_fill_size)
                 if delta_fill_size > 0:
                     try:
-                        await run_blocking(update_trade_stats, int(entry["user_id"]), delta_fill_size * float(fill_data.get("fill_price") or 0.0))
+                        await run_blocking(
+                            update_trade_stats,
+                            int(entry["user_id"]),
+                            delta_fill_size * float(fill_data.get("fill_price") or 0.0),
+                            False,
+                        )
                     except Exception:
                         pass
+                    session_id = int((trade_row or {}).get("strategy_session_id") or 0)
+                    if session_id > 0:
+                        try:
+                            previous_fees = float((trade_row or {}).get("fees") or 0.0)
+                            current_fees = float(total_fee or 0.0)
+                            fee_delta = max(0.0, current_fees - previous_fees)
+                            previous_pnl = float((trade_row or {}).get("realized_pnl") or 0.0)
+                            current_pnl = float(fill_data.get("realized_pnl") or 0.0)
+                            pnl_delta = current_pnl - previous_pnl
+                            await run_blocking(
+                                increment_session_metrics,
+                                session_id,
+                                0,
+                                0,
+                                1 if previous_fill_size <= 0 else 0,
+                                0,
+                                pnl_delta,
+                                fee_delta,
+                                delta_fill_size * float(fill_data.get("fill_price") or 0.0),
+                                0.0,
+                            )
+                        except Exception:
+                            pass
                 if not is_partial and is_close_trade:
                     try:
                         await run_blocking(reconcile_close_trade_fill, trade_id, network, fill_data)

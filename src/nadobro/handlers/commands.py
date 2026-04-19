@@ -48,7 +48,7 @@ Pick your language:"""
 
 WELCOME_CARD_MSG = """🔥 You're in!
 
-By tapping **"Let's Get It"** you accept the Terms of Use & Privacy Policy.
+By tapping *"Let's Get It"* you accept the Terms of Use & Privacy Policy.
 
 🔐 How it works:
 We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.

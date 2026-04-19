@@ -28,8 +28,9 @@ from src.nadobro.handlers.keyboards import (
     copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
 )
-from src.nadobro.handlers.trade_card import handle_trade_card_callback
+from src.nadobro.handlers.trade_card import handle_trade_card_callback, open_trade_card_from_callback
 from src.nadobro.handlers.render_utils import plain_text_fallback
+from src.nadobro.handlers.wallet_view import build_wallet_view_payload
 from src.nadobro.handlers.home_card import (
     build_home_card_text_async,
     build_portfolio_view,
@@ -222,7 +223,7 @@ Pick your language:"""
 
 _ONB_WELCOME_CARD = """🔥 You're in!
 
-By tapping **"Let's Get It"** you accept the Terms of Use & Privacy Policy.
+By tapping *"Let's Get It"* you accept the Terms of Use & Privacy Policy.
 
 🔐 How it works:
 We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
@@ -328,6 +329,19 @@ async def _handle_nav(query, data, telegram_id, context=None):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )
+    elif target == "trade" and context is not None:
+        if not is_new_onboarding_complete(telegram_id):
+            await _edit_loc(query,
+                "⚠️ Complete setup first (language + accept terms).",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
+                    [InlineKeyboardButton("Exit", callback_data="nav:main")],
+                ]),
+            )
+            return
+        if await open_trade_card_from_callback(query, context, telegram_id):
+            return
     elif target == "ask_nado" and context is not None:
         context.user_data["pending_question"] = True
         await _edit_loc(query,
@@ -561,6 +575,16 @@ async def _handle_exec_trade(query, data, telegram_id, context):
             reply_markup=back_kb(),
         )
         return
+    if not is_new_onboarding_complete(telegram_id):
+        await _edit_loc(query,
+            "⚠️ Complete setup first (language + accept terms).",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
+                [InlineKeyboardButton("Exit", callback_data="nav:main")],
+            ]),
+        )
+        return
 
     action = pending.get("action", "long")
     product = pending.get("product", "BTC")
@@ -763,23 +787,11 @@ async def _handle_wallet(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else "view"
 
     if action == "view":
-        info = get_user_wallet_info(telegram_id, verify_signer=True)
-        if not info or not info.get("linked_signer_address"):
-            from eth_account import Account
-            account = Account.create()
-            pk_hex = account.key.hex()
-            if not pk_hex.startswith("0x"):
-                pk_hex = "0x" + pk_hex
-            context.user_data["wallet_flow"] = "awaiting_main_address"
-            context.user_data["wallet_linked_signer_pk"] = pk_hex
-            context.user_data["wallet_linked_signer_address"] = account.address
-            await _edit_loc(query, fmt_wallet_connect_card(pk_hex), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=wallet_kb_not_linked())
-            return
-        msg = fmt_wallet_info(info)
+        msg, kb = build_wallet_view_payload(telegram_id, context=context, verify_signer=True)
         await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=wallet_kb(),
+            reply_markup=kb,
         )
     elif action == "balance":
         client = get_user_readonly_client(telegram_id)
@@ -2836,9 +2848,19 @@ async def _handle_copy(query, data, context, telegram_id):
         )
 
     elif action == "confirm":
-        setup = context.user_data.pop("copy_setup", None)
+        setup = context.user_data.get("copy_setup")
         if not setup:
             await _edit_loc(query, "⚠️ No setup to confirm\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+        if not is_new_onboarding_complete(telegram_id):
+            await _edit_loc(query,
+                "⚠️ Complete setup first (language + accept terms).",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
+                    [InlineKeyboardButton("Exit", callback_data="nav:main")],
+                ]),
+            )
             return
 
         wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
@@ -2849,6 +2871,7 @@ async def _handle_copy(query, data, context, telegram_id):
                 reply_markup=back_kb(),
             )
             return
+        context.user_data.pop("copy_setup", None)
 
         from src.nadobro.handlers.messages import execute_action_directly
         action_data = {

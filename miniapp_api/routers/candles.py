@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory cache: (product, granularity) -> (expires_at, data)
-_cache: dict[tuple[str, int], tuple[float, list]] = {}
+# In-memory cache: (network, product, granularity) -> (expires_at, data)
+_cache: dict[tuple[str, str, int], tuple[float, list]] = {}
 
 
 @router.get("/products/{product}/candles")
@@ -43,7 +43,7 @@ async def get_candles(
         return {"candles": [], "error": f"Unknown product: {product}"}
 
     # Check cache
-    cache_key = (product_upper, granularity)
+    cache_key = (str(user.network), product_upper, granularity)
     now = time.time()
     cached = _cache.get(cache_key)
     if cached and cached[0] > now:

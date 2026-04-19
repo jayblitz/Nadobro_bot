@@ -16,7 +16,7 @@ from src.nadobro.services.alert_service import create_alert
 from src.nadobro.services.knowledge_service import answer_nado_question, stream_nado_answer
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.bot_runtime import start_user_bot
-from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness
+from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness, is_new_onboarding_complete
 from src.nadobro.services.crypto import encrypt_with_server_key
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id, get_product_max_leverage, get_perp_products
@@ -45,6 +45,7 @@ from src.nadobro.handlers.home_card import (
 )
 from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.state_reset import clear_pending_user_state
+from src.nadobro.handlers.wallet_view import build_wallet_view_payload
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
     get_points_dashboard,
@@ -500,6 +501,16 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
 
     if callback_data == "nav:trade":
         clear_pending_user_state(context)
+        if not is_new_onboarding_complete(telegram_id):
+            await _reply_loc(update.message,
+                "⚠️ Complete setup first (language + accept terms).",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
+                    [InlineKeyboardButton("Exit", callback_data="nav:main")],
+                ]),
+            )
+            return
         if is_trade_card_mode_enabled():
             await open_trade_card_from_message(
                 update,
@@ -560,12 +571,11 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "wallet:view":
         await update.message.chat.send_action(ChatAction.TYPING)
         with timed_metric("msg.wallet.view"):
-            info = await run_blocking(get_user_wallet_info, telegram_id)
-        msg = fmt_wallet_info(info)
+            msg, reply_markup = await run_blocking(build_wallet_view_payload, telegram_id, context, True)
         await _reply_loc(update.message, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(wallet_kb(), lang),
+            reply_markup=localize_markup(reply_markup, lang),
         )
         return
 

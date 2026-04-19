@@ -3,7 +3,7 @@ import time
 import uuid
 from typing import Optional
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
@@ -33,7 +33,7 @@ from src.nadobro.handlers.keyboards import (
 )
 from src.nadobro.handlers.home_card import build_home_card_text_async
 from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.services.onboarding_service import get_resume_step
+from src.nadobro.services.onboarding_service import get_resume_step, is_new_onboarding_complete
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
@@ -312,19 +312,14 @@ async def open_trade_card_from_message(
     chat_id = update.effective_chat.id
 
     if prefer_reply_to_message:
-        if not session:
-            user = get_user(telegram_id)
-            network = user.network_mode.value if user else "mainnet"
-            session = {
-                "session_id": _new_session_id(),
-                "state": "direction",
-                "origin_chat_id": chat_id,
-                "network": network,
-            }
-        else:
-            user = get_user(telegram_id)
-            network = user.network_mode.value if user else "mainnet"
-            session["network"] = network
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        session = {
+            "session_id": _new_session_id(),
+            "state": "direction",
+            "origin_chat_id": chat_id,
+            "network": network,
+        }
         lang = get_active_language()
         try:
             message = await update.message.reply_text(
@@ -442,6 +437,16 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
         return False
 
     if data == "card:trade:start":
+        if not is_new_onboarding_complete(telegram_id):
+            await _edit_message_safely(
+                query,
+                "⚠️ Complete setup first (language + accept terms).",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
+                    [InlineKeyboardButton("Exit", callback_data="nav:main")],
+                ]),
+            )
+            return True
         return await open_trade_card_from_callback(query, context, telegram_id)
 
     parts = data.split(":")
@@ -463,6 +468,11 @@ async def handle_trade_card_callback(update: Update, context: CallbackContext, t
             telegram_id,
             session.get("session_id"),
             session_id,
+        )
+        await _edit_message_safely(
+            query,
+            "⌛ This trade panel is outdated\\. Open a new guided trade to continue\\.",
+            home_card_kb(),
         )
         return True
 

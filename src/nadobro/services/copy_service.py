@@ -502,6 +502,13 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     user = await run_blocking(get_user, user_id)
     user_network = user.network_mode.value if user else network
     if user_network != network:
+        closed_count, total_pnl, _, errors = await run_blocking(
+            _flatten_mirror_positions,
+            mirror_id,
+            user_id,
+            str(network),
+            "network_mismatch",
+        )
         await run_blocking(
             auto_stop_mirror,
             mirror_id,
@@ -509,9 +516,13 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         )
         await _notify_user(
             user_id,
-            f"⚠️ Copy mirror stopped\n"
-            f"Your active mode changed to {user_network.upper()}, but this mirror was configured for {network.upper()}.\n"
-            f"Restart the mirror on the active network if needed."
+            (
+                f"⚠️ Copy mirror stopped\n"
+                f"Your active mode changed to {user_network.upper()}, but this mirror was configured for {network.upper()}.\n"
+                + (f"Closed {closed_count} copied position(s) for ${total_pnl:+,.2f}.\n" if closed_count > 0 else "")
+                + (f"Cleanup errors: {'; '.join(errors[:2])}\n" if errors else "")
+                + "Restart the mirror on the active network if needed."
+            )
         )
         return
 
@@ -519,21 +530,43 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     if total_allocated > 0:
         pnl_pct = (cumulative_pnl / total_allocated) * 100
         if cumulative_stop_loss_pct > 0 and cumulative_pnl < 0 and abs(pnl_pct) >= cumulative_stop_loss_pct:
+            closed_count, total_pnl, _, errors = await run_blocking(
+                _flatten_mirror_positions,
+                mirror_id,
+                user_id,
+                str(network),
+                "auto_stop_loss",
+            )
             await run_blocking(auto_stop_mirror, mirror_id, f"Cumulative stop loss hit: {pnl_pct:.1f}%")
             await _notify_user(
                 user_id,
-                f"🛑 Copy Trading Auto-Stopped\n"
-                f"Cumulative loss hit {abs(pnl_pct):.1f}% (limit: {cumulative_stop_loss_pct}%)\n"
-                f"P&L: ${cumulative_pnl:,.2f} / ${total_allocated:,.0f} allocated"
+                (
+                    f"🛑 Copy Trading Auto-Stopped\n"
+                    f"Cumulative loss hit {abs(pnl_pct):.1f}% (limit: {cumulative_stop_loss_pct}%)\n"
+                    f"P&L: ${cumulative_pnl:,.2f} / ${total_allocated:,.0f} allocated\n"
+                    + (f"Closed {closed_count} copied position(s) for ${total_pnl:+,.2f}.\n" if closed_count > 0 else "")
+                    + (f"Cleanup errors: {'; '.join(errors[:2])}" if errors else "")
+                )
             )
             return
         if cumulative_take_profit_pct > 0 and cumulative_pnl > 0 and pnl_pct >= cumulative_take_profit_pct:
+            closed_count, total_pnl, _, errors = await run_blocking(
+                _flatten_mirror_positions,
+                mirror_id,
+                user_id,
+                str(network),
+                "auto_take_profit",
+            )
             await run_blocking(auto_stop_mirror, mirror_id, f"Cumulative take profit hit: {pnl_pct:.1f}%")
             await _notify_user(
                 user_id,
-                f"🎯 Copy Trading Auto-Stopped — Target Hit!\n"
-                f"Cumulative profit hit {pnl_pct:.1f}% (target: {cumulative_take_profit_pct}%)\n"
-                f"P&L: +${cumulative_pnl:,.2f} / ${total_allocated:,.0f} allocated"
+                (
+                    f"🎯 Copy Trading Auto-Stopped — Target Hit!\n"
+                    f"Cumulative profit hit {pnl_pct:.1f}% (target: {cumulative_take_profit_pct}%)\n"
+                    f"P&L: +${cumulative_pnl:,.2f} / ${total_allocated:,.0f} allocated\n"
+                    + (f"Closed {closed_count} copied position(s) for ${total_pnl:+,.2f}.\n" if closed_count > 0 else "")
+                    + (f"Cleanup errors: {'; '.join(errors[:2])}" if errors else "")
+                )
             )
             return
 
@@ -564,6 +597,9 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     reduce_only=True,
                     source="copy",
                 )
+                if not result.get("success"):
+                    logger.warning("Failed to close copy position %s: %s", cp["id"], result.get("error", "close failed"))
+                    continue
                 close_digest = str(result.get("digest") or "")
                 fill_data = await run_blocking(query_order_by_digest, network, close_digest, 2.0, 0.25) if close_digest else None
                 pnl = float((fill_data or {}).get("realized_pnl", result.get("pnl", 0)) or 0.0)
@@ -599,6 +635,9 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                         reduce_only=True,
                         source="copy",
                     )
+                    if not close_res.get("success"):
+                        logger.error("Failed to flip copy position %s: %s", existing["id"], close_res.get("error", "close failed"))
+                        continue
                     close_digest = str(close_res.get("digest") or "")
                     fill_data = await run_blocking(query_order_by_digest, network, close_digest, 2.0, 0.25) if close_digest else None
                     pnl = float((fill_data or {}).get("realized_pnl", close_res.get("pnl", 0)) or 0.0)

@@ -47,6 +47,23 @@ def _normalize_question(question: str) -> str:
     return re.sub(r"\s+", " ", (question or "").strip().lower())
 
 
+def _question_for_routing(question: str) -> str:
+    raw = str(question or "")
+    marker = "User message:\n"
+    if marker in raw:
+        return raw.split(marker, 1)[1].strip()
+    return raw
+
+
+def _signal_present(question: str, signal: str) -> bool:
+    q = _normalize_question(_question_for_routing(question))
+    sig = _normalize_question(signal)
+    if not q or not sig:
+        return False
+    pattern = r"\b" + r"\s+".join(re.escape(part) for part in sig.split()) + r"\b"
+    return bool(re.search(pattern, q))
+
+
 def _is_ink_question(text: str) -> bool:
     q = _normalize_question(text)
     ink_signals = (
@@ -755,7 +772,7 @@ def _is_broad_ct_question(question: str) -> bool:
 def _should_search_nado_accounts(question: str, is_nado_q: bool, is_points_q: bool) -> bool:
     if is_nado_q or is_points_q:
         return True
-    q = _normalize_question(question)
+    q = _normalize_question(_question_for_routing(question))
     nado_edge_signals = (
         "multiplier", "multipliers", "points", "rewards", "listing", "listings",
         "stock token", "stock tokens", "aapl", "tsla", "nvda", "spy", "qqq",
@@ -1511,7 +1528,7 @@ def _run_agent_pipeline(question: str, provider: str, network: str = "mainnet") 
 
 
 def _filter_official_sources(sources: list[str]) -> list[str]:
-    allowed = set(OFFICIAL_SOURCES.values()) | {"https://coinmarketcap.com"}
+    allowed = set(OFFICIAL_SOURCES.values()) | {"https://coinmarketcap.com", "https://x.com"}
     filtered = [s for s in sources if s in allowed]
     return filtered[:3]
 
@@ -1595,11 +1612,10 @@ def _is_x_twitter_question(question: str) -> bool:
 
 
 def _is_nado_x_question(question: str) -> bool:
-    q = _normalize_question(question)
     nado_signals = ["nado", "nadohq", "inkonchain", "ink l2", "nado dex"]
     if _is_points_distribution_question(question):
         return True
-    return any(sig in q for sig in nado_signals)
+    return any(_signal_present(question, sig) for sig in nado_signals)
 
 
 def _pick_x_search_params(question: str) -> dict:
@@ -1619,20 +1635,19 @@ def _is_price_question(question: str) -> bool:
 
 
 def _is_nado_specific_question(question: str) -> bool:
-    q = _normalize_question(question)
     nado_signals = (
-        "nado", "ink l2", "inkonchain", "nadobro", "nado dex",
+        "nado", "ink l2", "inkonchain", "nado dex",
         "fee", "fees", "margin", "leverage", "liquidation", "deposit", "withdraw",
         "wallet", "funding", "unified margin", "nlp", "vault",
         "points", "rewards", "referral", "invite code", "season",
         "templars", "nft", "templar", "subaccount",
         "1-click", "1ct", "linked signer", "how to trade on nado",
     )
-    return any(sig in q for sig in nado_signals)
+    return any(_signal_present(question, sig) for sig in nado_signals)
 
 
 def _should_skip_router(question: str) -> bool:
-    q = _normalize_question(question)
+    q = _normalize_question(_question_for_routing(question))
     if not q:
         return True
     if _is_price_question(q) or _is_sentiment_question(q) or _is_x_twitter_question(q):

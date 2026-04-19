@@ -336,17 +336,34 @@ def _compute_grid_cycle_pnl_usd(positions: list, product_id: int) -> float:
     for p in positions:
         if int(p.get("product_id", -1)) != product_id:
             continue
-        # Avoid double counting when exchanges expose overlapping pnl fields.
+        # Prefer venue-reported total/net PnL, but do not let a zero net value hide
+        # meaningful unrealized or realized PnL carried in separate fields.
         selected = None
-        for key in ("net_pnl", "unrealized_pnl", "pnl", "realized_pnl"):
-            v = p.get(key)
-            if v is None:
-                continue
-            try:
-                selected = float(v)
-                break
-            except (TypeError, ValueError):
-                continue
+        try:
+            net_pnl = p.get("net_pnl")
+            if net_pnl is not None:
+                net_value = float(net_pnl)
+                if abs(net_value) > 1e-12:
+                    selected = net_value
+                else:
+                    unrealized = p.get("unrealized_pnl")
+                    realized = p.get("realized_pnl")
+                    if unrealized is not None or realized is not None:
+                        selected = float(unrealized or 0.0) + float(realized or 0.0)
+                    else:
+                        selected = net_value
+        except (TypeError, ValueError):
+            selected = None
+        if selected is None:
+            for key in ("unrealized_pnl", "pnl", "realized_pnl"):
+                v = p.get(key)
+                if v is None:
+                    continue
+                try:
+                    selected = float(v)
+                    break
+                except (TypeError, ValueError):
+                    continue
         if selected is not None:
             total += selected
     return total
@@ -592,6 +609,7 @@ def run_cycle(
         return {
             "success": True,
             "done": True,
+            "action": "session_cap_reached",
             "orders_placed": 0,
             "orders_cancelled": 0,
             "reason": "session notional cap reached",

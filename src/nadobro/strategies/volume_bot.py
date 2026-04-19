@@ -91,7 +91,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     state["direction"] = direction
 
     fixed_margin = float(state.get("fixed_margin_usd") or FIXED_MARGIN_USD)
-    state["fixed_margin_usd"] = FIXED_MARGIN_USD
+    state["fixed_margin_usd"] = round(fixed_margin, 4)
     state["leverage"] = FIXED_LEVERAGE
     available_quote = _available_quote_balance(client)
     effective_margin = min(fixed_margin, max(0.0, available_quote * 0.90)) if available_quote > 0 else fixed_margin

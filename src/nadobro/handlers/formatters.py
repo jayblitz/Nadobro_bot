@@ -489,7 +489,7 @@ def fmt_wallet_info(wallet_info):
 
     net = wallet_info.get("network", "testnet")
     net_emoji = "🧪" if net == "testnet" else "🌐"
-    signer_linked = bool(wallet_info.get("linked_signer_address"))
+    signer_linked = bool(wallet_info.get("is_linked"))
 
     lines = [
         _loc("💼 *Wallet Vault*"),
@@ -1252,8 +1252,17 @@ def fmt_status_overview(status: dict, onboarding: dict):
             lines.append(f"{_loc('Funding:')} *{_loc('NEEDED')}* — {_loc('deposit to your wallet')}")
         return "\n".join(lines)
 
+    readiness_lines = []
+    if not key_ready or not funded:
+        readiness_lines.extend(["", f"*{_loc('Trading Readiness')}*"])
+        if not key_ready:
+            readiness_lines.append(f"{_loc('Wallet')}: *{_loc('NOT LINKED')}* — {_loc('open Wallet to connect your 1CT signer')}")
+        if key_ready and not funded:
+            readiness_lines.append(f"{_loc('Funding')}: *{_loc('NEEDED')}* — {_loc('deposit to your wallet')}")
+
     if not running:
         lines.extend(["", f"*{_loc('Runtime')}*"])
+        lines.extend(readiness_lines)
         lines.append(f"{_loc('Strategy:')} *{_loc('OFF')}*")
         last_action = status.get("last_action")
         if last_action:
@@ -1308,6 +1317,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
         f"*{escape_md(strategy)} · {escape_md(product_label)}*",
         f"{_loc('Status')}: *{escape_md(state_label)}* \\| {runtime_summary}",
     ])
+    lines.extend(readiness_lines)
 
     margin = status.get("notional_usd")
     cyc = status.get("cycle_notional_usd")

@@ -62,13 +62,15 @@ def search_recent_tweets(
     if not token:
         return []
 
+    capped_hours_back = max(1, min(int(hours_back or 168), 168))
+
     # Check cache
-    cache_key = f"{query}:{max_results}:{hours_back}"
+    cache_key = f"{query}:{max_results}:{capped_hours_back}"
     cached = _tweet_cache.get(cache_key)
     if cached and (time.time() - cached["ts"]) < TWEET_CACHE_TTL:
         return cached["tweets"]
 
-    start_time = (datetime.utcnow() - timedelta(hours=hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_time = (datetime.utcnow() - timedelta(hours=capped_hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     params = {
         "query": query,

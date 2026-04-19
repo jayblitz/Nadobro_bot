@@ -31,6 +31,7 @@ from src.nadobro.handlers.keyboards import (
     portfolio_kb,
     persistent_menu_kb,
 )
+from src.nadobro.handlers.wallet_view import build_wallet_view_payload
 from src.nadobro.services.trade_service import get_trade_analytics, get_open_limit_orders
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
@@ -291,8 +292,7 @@ def _view_strategy_text():
 
 
 def _view_wallet_text(telegram_id: int):
-    info = get_user_wallet_info(telegram_id)
-    return fmt_wallet_info(info), wallet_kb()
+    return build_wallet_view_payload(telegram_id, context=None, verify_signer=True)
 
 
 def _view_positions_text(telegram_id: int):
@@ -343,6 +343,10 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
 
 
 async def open_home_card_view_from_message(update, context: CallbackContext, telegram_id: int, callback_data: str):
+    if callback_data == "wallet:view":
+        text, kb = await run_blocking(build_wallet_view_payload, telegram_id, context, True)
+        await _edit_or_send_card(update, context, text, kb, prefer_reply_to_message=True)
+        return
     text, kb = await resolve_home_view(callback_data, telegram_id)
     await _edit_or_send_card(update, context, text, kb, prefer_reply_to_message=True)
 

@@ -83,18 +83,19 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     if not user:
         return False, _loc("User not found. Use /start first.")
 
-    execute("UPDATE users SET network_mode = %s WHERE telegram_id = %s", (network, telegram_id))
-    clear_client_cache()
-    _readonly_cache.clear()
-    invalidate_user_cache(telegram_id)
-
-    # Stop all active strategies before network switch
+    # Stop all active strategies before changing the active mode so teardown
+    # runs against the old network state instead of racing the new one.
     try:
         from src.nadobro.services.bot_runtime import stop_all_strategies_for_user
         stop_all_strategies_for_user(telegram_id)
         logger.info("Stopped all strategies for user %s due to network switch", telegram_id)
     except Exception as e:
         logger.warning("Failed to stop strategies on network switch for %s: %s", telegram_id, e)
+
+    execute("UPDATE users SET network_mode = %s WHERE telegram_id = %s", (network, telegram_id))
+    clear_client_cache()
+    _readonly_cache.clear()
+    invalidate_user_cache(telegram_id)
 
     addr = user.main_address
     if addr:
@@ -134,6 +135,10 @@ _readonly_cache: dict[str, NadoClient] = {}
 _READONLY_CACHE_TTL = 60
 
 
+def _is_wallet_fully_linked(user: Optional[UserRow]) -> bool:
+    return bool(user and user.linked_signer_address and user.encrypted_linked_signer_pk)
+
+
 def get_user_readonly_client(telegram_id: int, network: str | None = None) -> Optional[NadoClient]:
     user = get_user(telegram_id)
     if not user or not user.main_address:
@@ -153,13 +158,14 @@ def get_user_wallet_info(telegram_id: int, verify_signer: bool = False) -> Optio
     if not user:
         return None
     network = user.network_mode.value
-    linked = bool(user.linked_signer_address and user.encrypted_linked_signer_pk)
+    linked = _is_wallet_fully_linked(user)
     info = {
         "testnet_address": user.main_address,
         "mainnet_address": user.main_address,
         "network": network,
         "active_address": user.main_address,
         "linked_signer_address": user.linked_signer_address,
+        "is_linked": linked,
         "testnet_ready": linked,
         "mainnet_ready": linked,
         "signer_verification": None,
@@ -205,7 +211,7 @@ def has_mode_private_key(telegram_id: int, network: str) -> bool:
     user = get_user(telegram_id)
     if not user:
         return False
-    return bool(user.linked_signer_address and user.encrypted_linked_signer_pk)
+    return _is_wallet_fully_linked(user)
 
 
 def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
@@ -227,6 +233,18 @@ def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
                 )
     if user.salt:
         return False, "Your wallet key uses an old format. Please unlink and re-link your wallet."
+    if user.linked_signer_address and user.main_address:
+        try:
+            readonly = get_user_readonly_client(telegram_id, network=user.network_mode.value)
+            if readonly:
+                check = readonly.verify_linked_signer(user.linked_signer_address)
+                if not check.get("error") and not check.get("verified"):
+                    return (
+                        False,
+                        _loc("Linked signer on Nado does not match the bot key. Open Wallet and re-link your 1CT signer."),
+                    )
+        except Exception:
+            pass
     return True, ""
 
 
@@ -254,6 +272,10 @@ def get_runtime_wallet_readiness(telegram_id: int, verify_signer: bool = True) -
                 payload["signer_verification"] = ro.verify_linked_signer(user.linked_signer_address)
         except Exception as e:
             payload["signer_verification"] = {"verified": False, "error": str(e)}
+    signer_check = payload.get("signer_verification") or {}
+    if verify_signer and signer_check and not signer_check.get("error") and not signer_check.get("verified"):
+        payload["ready"] = False
+        payload["message"] = _loc("Linked signer on Nado does not match the bot key. Open Wallet and re-link your 1CT signer.")
     return payload
 
 
@@ -285,17 +307,18 @@ def run_strategy_start_preflight(telegram_id: int, product: str, network: str) -
     return True, ""
 
 
-def update_trade_stats(telegram_id: int, volume_usd: float):
+def update_trade_stats(telegram_id: int, volume_usd: float, increment_trade_count: bool = True):
     row = query_one(
         "SELECT total_trades, total_volume_usd FROM users WHERE telegram_id = %s",
         (telegram_id,),
     )
     if not row:
         return
+    next_total_trades = int(row.get("total_trades") or 0) + (1 if increment_trade_count else 0)
     execute(
         "UPDATE users SET total_trades = %s, total_volume_usd = %s, last_trade_at = %s WHERE telegram_id = %s",
         (
-            int(row.get("total_trades") or 0) + 1,
+            next_total_trades,
             float(row.get("total_volume_usd") or 0) + volume_usd,
             datetime.utcnow().isoformat(),
             telegram_id,

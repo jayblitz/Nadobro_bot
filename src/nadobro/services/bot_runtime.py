@@ -1713,6 +1713,57 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
         return True, None
+    if strategy in ("grid", "rgrid") and result.get("action") == "circuit_breaker":
+        _finalize_session(state, stop_reason="circuit_breaker")
+        state["running"] = False
+        strategy_label = _strategy_display_name(strategy)
+        state["last_error"] = result.get("error") or f"{strategy_label} circuit breaker triggered."
+        _save_state(telegram_id, network, state)
+        close_res = await run_blocking(close_all_positions, telegram_id, network)
+        if close_res.get("success"):
+            await _notify(
+                telegram_id,
+                "🛑 {strategy} stopped on {product}-PERP ({network}) - risk circuit breaker triggered.\n{detail}",
+                strategy=strategy_label,
+                product=product,
+                network=network,
+                detail=(result.get("error") or "")[:180],
+            )
+        else:
+            await _notify(
+                telegram_id,
+                "⚠️ {strategy} circuit breaker triggered on {product}-PERP ({network}), but cleanup failed. Error: {error}",
+                strategy=strategy_label,
+                product=product,
+                network=network,
+                error=close_res.get("error", "unknown"),
+            )
+        return True, None
+    if strategy in ("grid", "rgrid") and result.get("done") and str(result.get("reason") or "") == "session notional cap reached":
+        _finalize_session(state, stop_reason="session_cap_hit")
+        state["running"] = False
+        strategy_label = _strategy_display_name(strategy)
+        state["last_error"] = None
+        _save_state(telegram_id, network, state)
+        close_res = await run_blocking(close_all_positions, telegram_id, network)
+        if close_res.get("success"):
+            await _notify(
+                telegram_id,
+                "✅ {strategy} stopped on {product}-PERP ({network}) - session volume cap reached.",
+                strategy=strategy_label,
+                product=product,
+                network=network,
+            )
+        else:
+            await _notify(
+                telegram_id,
+                "⚠️ {strategy} hit its session cap on {product}-PERP ({network}), but cleanup failed. Error: {error}",
+                strategy=strategy_label,
+                product=product,
+                network=network,
+                error=close_res.get("error", "unknown"),
+            )
+        return True, None
     if strategy == "vol" and result.get("done") and str(result.get("stop_reason") or "") in ("tp_hit", "sl_hit", "target_volume_hit"):
         stop_reason = str(result.get("stop_reason"))
         _finalize_session(state, stop_reason=stop_reason)
