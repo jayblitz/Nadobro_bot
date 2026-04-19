@@ -161,14 +161,16 @@ def home_card_kb():
     return InlineKeyboardMarkup(rows)
 
 
-def status_kb():
-    """Inline actions for /status (matches Portfolio Deck refresh pattern)."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 Refresh", callback_data="status:refresh"),
-        ],
-        [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
-    ])
+def status_kb(is_running: bool = False, strategy_label: str | None = None):
+    """Inline actions for /status with strategy-aware stop control."""
+    rows = [[InlineKeyboardButton("🔄 Refresh", callback_data="status:refresh")]]
+    if is_running:
+        stop_label = "🛑 Stop Strategy"
+        if strategy_label:
+            stop_label = f"🛑 Stop {str(strategy_label).upper()}"
+        rows.append([InlineKeyboardButton(stop_label[:32], callback_data="status:stop")])
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
 
 
 def portfolio_kb(has_positions: bool = False):

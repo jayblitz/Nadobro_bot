@@ -32,7 +32,11 @@ from src.nadobro.models.database import (
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
-from src.nadobro.services.trade_service import close_all_positions, close_delta_neutral_legs
+from src.nadobro.services.trade_service import (
+    close_all_positions,
+    close_delta_neutral_legs,
+    get_trade_analytics,
+)
 from src.nadobro.services.user_service import (
     get_user_nado_client,
     get_user_readonly_client,
@@ -854,6 +858,14 @@ def get_user_bot_status(telegram_id: int) -> dict:
     except Exception:
         pass
 
+    session_analytics = {"total_trades": 0}
+    strategy_session_id = state.get("strategy_session_id")
+    if strategy_session_id:
+        try:
+            session_analytics = get_trade_analytics(telegram_id, strategy_session_id=int(strategy_session_id))
+        except Exception:
+            session_analytics = {"total_trades": 0}
+
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -908,9 +920,17 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "rgrid_reset_timeout_seconds": state.get("rgrid_reset_timeout_seconds") or state.get("grid_reset_timeout_seconds"),
         "rgrid_discretion": state.get("rgrid_discretion") or state.get("grid_discretion"),
         "other_running_networks": other_running_networks,
-        "strategy_session_id": state.get("strategy_session_id"),
+        "strategy_session_id": strategy_session_id,
         "running_sessions": running_sessions,
         "order_observability": state.get("order_observability") or {},
+        "session_trade_count": int(session_analytics.get("total_trades") or 0),
+        "session_filled_trades": int(session_analytics.get("filled") or 0),
+        "session_closed_trades": int(session_analytics.get("closed") or 0),
+        "session_failed_trades": int(session_analytics.get("failed") or 0),
+        "session_volume_usd": float(session_analytics.get("total_volume") or 0.0),
+        "session_fees_usd": float(session_analytics.get("total_fees") or 0.0),
+        "session_funding_usd": float(session_analytics.get("total_funding") or 0.0),
+        "session_analytics_pnl_usd": float(session_analytics.get("total_pnl") or 0.0),
         "vol_order_attempts": int(state.get("vol_order_attempts") or 0),
         "vol_order_failures": int(state.get("vol_order_failures") or 0),
         "last_order_error": state.get("last_order_error") or "",

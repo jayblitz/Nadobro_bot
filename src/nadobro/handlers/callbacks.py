@@ -64,7 +64,7 @@ from src.nadobro.services.onboarding_service import (
 )
 from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS, get_perp_products
 from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.perf import timed_metric, log_slow, summary_lines
+from src.nadobro.services.perf import timed_metric, log_slow
 
 logger = logging.getLogger(__name__)
 
@@ -697,6 +697,24 @@ async def _handle_portfolio(query, data, telegram_id):
 async def _handle_status_callback(query, data: str, telegram_id: int):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "refresh"
+    if action == "stop":
+        ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
+        status = await run_blocking(get_user_bot_status, telegram_id)
+        onboarding = await run_blocking(evaluate_readiness, telegram_id)
+        text = fmt_status_overview(status, onboarding)
+        prefix = "🛑" if ok else "⚠️"
+        text += f"\n\n{prefix} {escape_md(msg)}"
+        with language_context(get_user_language(telegram_id)):
+            await _edit_loc(
+                query,
+                text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=status_kb(
+                    is_running=bool(status.get("running")),
+                    strategy_label=str(status.get("strategy") or "").upper() or None,
+                ),
+            )
+        return
     if action != "refresh":
         return
     with language_context(get_user_language(telegram_id)):
@@ -709,7 +727,13 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
             await query.edit_message_text(
                 localized,
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=localize_markup(status_kb(), lang),
+                reply_markup=localize_markup(
+                    status_kb(
+                        is_running=bool(status.get("running")),
+                        strategy_label=str(status.get("strategy") or "").upper() or None,
+                    ),
+                    lang,
+                ),
             )
         except BadRequest as e:
             if "Message is not modified" in str(e):
@@ -718,7 +742,13 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
                 try:
                     await query.edit_message_text(
                         plain_text_fallback(localized),
-                        reply_markup=localize_markup(status_kb(), lang),
+                        reply_markup=localize_markup(
+                            status_kb(
+                                is_running=bool(status.get("running")),
+                                strategy_label=str(status.get("strategy") or "").upper() or None,
+                            ),
+                            lang,
+                        ),
                     )
                 except BadRequest as e2:
                     if "Message is not modified" in str(e2):
@@ -1460,23 +1490,28 @@ async def _handle_strategy(query, data, context, telegram_id):
         st = get_user_bot_status(telegram_id)
         readiness = evaluate_readiness(telegram_id)
         text = fmt_status_overview(st, readiness)
-        if st.get("last_error"):
-            text += f"\nLast error: {escape_md(str(st.get('last_error')))}"
-        perf_lines = summary_lines(top_n=5)
-        if perf_lines:
-            text += "\n\n*Perf Snapshot*"
-            for line in perf_lines:
-                text += f"\n• {escape_md(line)}"
         await _edit_loc(query, 
             text,
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=status_kb(
+                is_running=bool(st.get("running")),
+                strategy_label=str(st.get("strategy") or "").upper() or None,
+            ),
         )
     elif action == "stop":
         ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
+        st = get_user_bot_status(telegram_id)
+        readiness = evaluate_readiness(telegram_id)
+        text = fmt_status_overview(st, readiness)
         prefix = "🛑" if ok else "⚠️"
+        text += f"\n\n{prefix} {escape_md(msg)}"
         await _edit_loc(query, 
-            f"{prefix} {escape_md(msg)}",
+            text,
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=status_kb(
+                is_running=bool(st.get("running")),
+                strategy_label=str(st.get("strategy") or "").upper() or None,
+            ),
         )
 
 

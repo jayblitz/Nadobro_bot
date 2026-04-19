@@ -1214,6 +1214,25 @@ def _fmt_progress_bar(done: float, total: float, width: int = 12) -> str:
     return "[" + ("#" * filled) + ("." * (width - filled)) + "]"
 
 
+def _fmt_compact_usd(value: float | int | None) -> str:
+    amount = float(value or 0.0)
+    abs_amount = abs(amount)
+    if abs_amount >= 1_000_000:
+        return f"${amount / 1_000_000:.2f}M"
+    if abs_amount >= 1_000:
+        return f"${amount / 1_000:.2f}K"
+    return f"${amount:,.2f}"
+
+
+def _fmt_signed_usd(value: float | int | None) -> str:
+    amount = float(value or 0.0)
+    if amount > 0:
+        return f"+{_fmt_compact_usd(amount)}"
+    if amount < 0:
+        return f"-{_fmt_compact_usd(abs(amount))}"
+    return "$0.00"
+
+
 def fmt_status_overview(status: dict, onboarding: dict):
     running = status.get("running")
     complete = onboarding.get("onboarding_complete")
@@ -1231,27 +1250,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
             lines.append(f"{_loc('Key:')} *{_loc('NOT SET')}* — {_loc('use /onboard to continue')}")
         elif not funded:
             lines.append(f"{_loc('Funding:')} *{_loc('NEEDED')}* — {_loc('deposit to your wallet')}")
-    lines.append("")
-    other_running = status.get("other_running_networks") or []
-    if other_running:
-        lines.append(
-            f"⚠️ {_loc('Other running network(s)')}: *{escape_md(', '.join(str(n).upper() for n in other_running))}*"
-        )
-        lines.append("")
-
-    rs = status.get("running_sessions") or []
-    if len(rs) > 1:
-        lines.append(f"📋 *{_loc('Active sessions (database)')}*")
-        for s in rs[:6]:
-            st = str(s.get("strategy") or "").upper()
-            pn = str(s.get("product_name") or "?").replace("-PERP", "")
-            sid = s.get("id")
-            tc = int(s.get("total_cycles") or 0)
-            lines.append(
-                f"• *{escape_md(st)}* · *{escape_md(pn)}* · \\#{escape_md(str(sid))} · "
-                f"{_loc('DB cycles')} *{escape_md(str(tc))}*"
-            )
-        lines.append("")
+        return "\n".join(lines)
 
     if not running:
         lines.extend(["", f"*{_loc('Runtime')}*"])
@@ -1261,219 +1260,175 @@ def fmt_status_overview(status: dict, onboarding: dict):
             lines.append(f"{_loc('Last:')} {escape_md(_fmt_action_label(last_action))}")
         if status.get("last_error"):
             lines.append(f"{_loc('Note:')} {escape_md(str(status.get('last_error'))[:120])}")
-    else:
-        strategy = (status.get("strategy") or "").upper()
-        product = str(status.get("product", "BTC"))
-        global_pause_active = bool(status.get("global_pause_active"))
-        runs = status.get("runs", 0)
-        interval = status.get("interval_seconds", 0)
-        uptime = _fmt_uptime(status.get("started_at"))
-        next_in = status.get("next_cycle_in", 0)
+        return "\n".join(lines)
 
-        state_label = _loc('PAUSED') if global_pause_active else _loc('ON')
+    strategy = (status.get("strategy") or "").upper()
+    product = str(status.get("product") or "BTC").upper()
+    product_label = "MULTI" if product == "MULTI" else f"{product}-PERP"
+    global_pause_active = bool(status.get("global_pause_active"))
+    locally_paused = bool(status.get("is_paused"))
+    runs = int(status.get("runs") or 0)
+    interval = int(status.get("interval_seconds") or 0)
+    uptime = _fmt_uptime(status.get("started_at"))
+    next_in = int(status.get("next_cycle_in") or 0)
+    spread_bp = float(status.get("spread_bp") or 0.0)
+    order_obs = status.get("order_observability") or {}
+    obs_placed = int(order_obs.get("orders_placed") or 0)
+    obs_filled = int(order_obs.get("orders_filled") or 0)
+    obs_cancelled = int(order_obs.get("orders_cancelled") or 0)
+    fill_pct = (obs_filled / obs_placed * 100.0) if obs_placed > 0 else 0.0
+
+    session_volume = float(status.get("session_volume_usd") or 0.0)
+    if strategy == "VOL" and session_volume <= 0:
+        session_volume = float(status.get("volume_done_usd") or 0.0)
+    if strategy in ("GRID", "RGRID") and session_volume <= 0:
+        session_volume = float(status.get("session_notional_done_usd") or 0.0)
+    session_fees = float(status.get("session_fees_usd") or 0.0)
+    session_funding = float(status.get("session_funding_usd") or 0.0)
+
+    session_pnl = float(status.get("session_analytics_pnl_usd") or 0.0)
+    if strategy == "VOL":
+        session_pnl = float(status.get("session_realized_pnl_usd") or session_pnl)
+    elif strategy in ("GRID", "RGRID"):
+        session_pnl = float(status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
+    elif strategy == "BRO":
+        session_pnl = float((status.get("bro_state") or {}).get("total_pnl") or session_pnl)
+
+    cost_per_million = (session_fees / session_volume * 1_000_000.0) if session_volume > 0 else 0.0
+    state_label = "PAUSED" if (global_pause_active or locally_paused) else "LIVE"
+    last_cycle_result = str(status.get("last_cycle_result") or "").strip().lower()
+    runtime_summary = f"{_loc('Uptime')} *{escape_md(uptime)}* \\| {_loc('Cycles')} *{escape_md(str(runs))}*"
+    if next_in > 0:
+        runtime_summary += f" \\| {_loc('Next')} *{escape_md(str(next_in))}s*"
+    elif interval > 0:
+        runtime_summary += f" \\| {_loc('Every')} *{escape_md(str(interval))}s*"
+
+    lines.extend([
+        "",
+        f"*{escape_md(strategy)} · {escape_md(product_label)}*",
+        f"{_loc('Status')}: *{escape_md(state_label)}* \\| {runtime_summary}",
+    ])
+
+    margin = status.get("notional_usd")
+    cyc = status.get("cycle_notional_usd")
+    if margin is not None:
+        margin_text = f"{_loc('Margin')}: *{escape_md(_fmt_compact_usd(float(margin)))}*"
+        if cyc is not None:
+            margin_text += f" \\| {_loc('Per cycle')}: *{escape_md(_fmt_compact_usd(float(cyc)))}*"
+        lines.append(margin_text)
+
+    lines.extend(["", f"*{_loc('Trading Summary')}*"])
+    lines.append(
+        f"{_loc('Volume')}: *{escape_md(_fmt_compact_usd(session_volume))}* \\| "
+        f"{_loc('Fees')}: *{escape_md(_fmt_compact_usd(session_fees))}*"
+    )
+    lines.append(
+        f"{_loc('PnL')}: *{escape_md(_fmt_signed_usd(session_pnl))}* \\| "
+        f"{_loc('Filled')}: *{escape_md(f'{fill_pct:.0f}%')}*"
+    )
+    lines.append(
+        f"{_loc('Cost / $1M')}: *{escape_md(_fmt_compact_usd(cost_per_million))}* \\| "
+        f"{_loc('Spread')}: *{escape_md(f'{spread_bp:.0f}bp')}*"
+    )
+    if session_funding:
+        lines.append(f"{_loc('Funding')}: *{escape_md(_fmt_signed_usd(session_funding))}*")
+
+    if strategy == "VOL":
+        volume_done = float(status.get("volume_done_usd") or 0.0)
+        volume_remaining = float(status.get("volume_remaining_usd") or 0.0)
+        target_volume = float(status.get("target_volume_usd") or 0.0)
+        progress_pct = (volume_done / target_volume * 100.0) if target_volume > 0 else 0.0
+        vol_phase = str(status.get("vol_phase") or "").strip() or "idle"
+        lines.extend(["", "*Volume Progress*"])
+        lines.append(
+            f"{_loc('Done')}: *{escape_md(_fmt_compact_usd(volume_done))}* \\| "
+            f"{_loc('Remaining')}: *{escape_md(_fmt_compact_usd(volume_remaining))}*"
+        )
+        if target_volume > 0:
+            lines.append(
+                f"{_loc('Bar')}: `{escape_md(_fmt_progress_bar(volume_done, target_volume))}` \\| "
+                f"{_loc('Progress')}: *{escape_md(f'{progress_pct:.1f}%')}*"
+            )
+            lines.append(f"{_loc('Target')}: *{escape_md(_fmt_compact_usd(target_volume))}*")
+        lines.append(f"{_loc('Phase')}: *{escape_md(vol_phase)}*")
+
+    pause_reason = str(status.get("pause_reason") or "").strip()
+    if global_pause_active:
+        lines.append("")
+        lines.append(f"⚠️ *{_loc('Paused')}*: {escape_md(_loc('Global trading pause is active. Strategy execution is suspended.'))}")
+    elif locally_paused and pause_reason:
+        lines.append("")
+        lines.append(f"⚠️ *{_loc('Paused')}*: {escape_md(pause_reason)}")
+
+    if last_cycle_result:
+        cycle_badge = "✅" if last_cycle_result == "ok" else "❌"
+        lines.append(f"{cycle_badge} {_loc('Last cycle')}: *{escape_md(last_cycle_result.upper())}*")
+
+    if status.get("last_error"):
+        lines.append(f"{_loc('Note')}: {escape_md(str(status.get('last_error'))[:160])}")
+
+    heartbeat = _fmt_age_seconds(float(status.get("worker_last_heartbeat") or 0.0))
+    cycle_ms = float(status.get("last_cycle_ms") or 0.0)
+    if obs_placed or runs or cycle_ms > 0:
         lines.extend(["", f"*{_loc('Runtime')}*"])
-        lines.append(f"{_loc('Strategy:')} *{escape_md(strategy)}* · {state_label}")
-        if product != "MULTI":
-            lines.append(f"{_loc('Pair:')} *{escape_md(product)}\\-PERP*")
-        else:
-            lines.append(f"{_loc('Mode:')} *Multi*")
-        margin = status.get("notional_usd")
-        if margin is not None and strategy in ("MM", "GRID", "DN", "VOL"):
-            cyc = status.get("cycle_notional_usd")
-            if cyc is not None and strategy == "MM":
-                lines.append(
-                    f"{_loc('Margin')}: *{escape_md(f'${float(margin):,.0f}')}* \\| "
-                    f"{_loc('Per cycle')}: *{escape_md(f'${float(cyc):,.0f}')}*"
-                )
-            else:
-                lines.append(f"{_loc('Margin')}: *{escape_md(f'${float(margin):,.0f}')}*")
-        lines.append(f"{_loc('Uptime')} *{escape_md(uptime)}* · {_loc('Cycles')} *{escape_md(str(runs))}*")
-        if next_in > 0:
-            lines.append(f"{_loc('Next in')}: *{escape_md(str(next_in))}s*")
-        else:
-            lines.append(f"{_loc('Every')}: *{escape_md(str(interval))}s*")
+        lines.append(
+            f"{_loc('Orders')}: {_loc('placed')} *{escape_md(str(obs_placed))}* \\| "
+            f"{_loc('filled')} *{escape_md(str(obs_filled))}* \\| "
+            f"{_loc('cancelled')} *{escape_md(str(obs_cancelled))}*"
+        )
+        lines.append(
+            f"{_loc('Loop')}: *{escape_md(str(runs))}* \\| "
+            f"{_loc('Cycle')}: *{escape_md(f'{cycle_ms:.0f}ms')}* \\| "
+            f"{_loc('Heartbeat')}: *{escape_md(heartbeat)}*"
+        )
 
-        last_action = status.get("last_action")
-        if last_action:
-            detail = status.get("last_action_detail") or ""
-            action_text = _fmt_action_label(last_action)
-            if detail:
-                action_text += f" — {detail[:100]}"
-            lines.append(f"{_loc('Last:')} {escape_md(action_text)}")
-        last_cycle_result = str(status.get("last_cycle_result") or "").strip().lower()
-        if last_cycle_result:
-            cycle_badge = "✅" if last_cycle_result == "ok" else "❌"
-            lines.append(f"{cycle_badge} {_loc('Last cycle')}: *{escape_md(last_cycle_result.upper())}*")
+    if strategy == "DN":
+        dn_mode = status.get("dn_mode") or "enter_anyway"
+        dn_fr = float(status.get("dn_last_funding_rate") or 0.0)
+        dn_unf = int(status.get("dn_unfavorable_count") or 0)
+        lines.extend(["", "*Delta Neutral*"])
+        lines.append(
+            f"{_loc('Funding Mode')}: *{escape_md(str(dn_mode).upper())}* \\| "
+            f"{_loc('Funding')}: *{escape_md(f'{dn_fr:.6f}')}*"
+        )
+        lines.append(f"{_loc('Unfavorable Cycles')}: *{escape_md(str(dn_unf))}*")
 
-        if status.get("is_paused"):
-            lines.append(f"⚠️ *{_loc('PAUSED')}*: {escape_md(str(status.get('pause_reason') or _loc('Unknown')))}")
-        if global_pause_active:
-            lines.append(f"⚠️ *{_loc('PAUSED')}*: {escape_md(_loc('Global trading pause is active. Strategy execution is suspended.'))}")
+    bro_state = status.get("bro_state") or {}
+    if strategy == "BRO" and bro_state:
+        trade_count = int(bro_state.get("trade_count", 0) or 0)
+        active = len(bro_state.get("active_positions", []))
+        lines.extend(["", "*Alpha Agent*"])
+        lines.append(f"{_loc('Trades')}: *{escape_md(str(trade_count))}* \\| {_loc('Open Positions')}: *{escape_md(str(active))}*")
 
-        error_streak = status.get("error_streak", 0)
-        if error_streak >= 3:
-            lines.append(f"⚠️ {escape_md(str(error_streak))} {_loc('errors in a row')}")
-        if status.get("last_error"):
-            lines.append(f"{_loc('Note:')} {escape_md(str(status.get('last_error'))[:160])}")
-            err_cat = str(status.get("last_error_category") or "").strip()
-            if err_cat:
-                lines.append(f"{_loc('Error class')}: *{escape_md(err_cat)}*")
-
-        worker_group = status.get("worker_group")
-        runtime_diag = status.get("runtime_diagnostics") or {}
-        queue_diag = runtime_diag.get("queue") or {}
-        strategy_qsize = int(queue_diag.get("strategy_qsize") or 0)
-        strategy_qmax = int(queue_diag.get("strategy_qmax") or 0)
-        pending_ticks = int(runtime_diag.get("pending_coalesced_ticks") or 0)
-        if worker_group or strategy_qmax > 0 or pending_ticks > 0:
-            lines.extend(["", f"*{_loc('Health')}*"])
-        if worker_group:
-            heartbeat = _fmt_age_seconds(float(status.get("worker_last_heartbeat") or 0.0))
-            cycle_ms = float(status.get("last_cycle_ms") or 0.0)
-            lines.append(
-                f"{_loc('Worker')}: *{escape_md(str(worker_group).upper())}* \\| "
-                f"{_loc('Heartbeat')}: *{escape_md(heartbeat)}* \\| "
-                f"{_loc('Cycle')}: *{escape_md(f'{cycle_ms:.0f}ms')}*"
-            )
-        if strategy_qmax > 0 or pending_ticks > 0:
-            lines.append(
-                f"{_loc('Queue')}: *{escape_md(str(strategy_qsize))}/{escape_md(str(strategy_qmax))}* \\| "
-                f"{_loc('coalesced')}: *{escape_md(str(pending_ticks))}*"
-            )
-
-        order_obs = status.get("order_observability") or {}
-        if order_obs:
-            obs_placed = int(order_obs.get("orders_placed") or 0)
-            obs_filled = int(order_obs.get("orders_filled") or 0)
-            obs_cancelled = int(order_obs.get("orders_cancelled") or 0)
-            lines.append(
-                f"{_loc('Orders')}: {_loc('placed')} *{escape_md(str(obs_placed))}* \\| "
-                f"{_loc('filled')} *{escape_md(str(obs_filled))}* \\| "
-                f"{_loc('cancelled')} *{escape_md(str(obs_cancelled))}*"
-            )
-            obs_last_reason = str(order_obs.get("last_reason") or "").strip()
-            if obs_last_reason:
-                lines.append(f"{_loc('Last reason')}: {escape_md(obs_last_reason[:120])}")
-        if strategy == "VOL":
-            vol_attempts = int(status.get("vol_order_attempts") or 0)
-            vol_failures = int(status.get("vol_order_failures") or 0)
-            volume_done = float(status.get("volume_done_usd") or 0.0)
-            volume_remaining = float(status.get("volume_remaining_usd") or 0.0)
-            target_volume = float(status.get("target_volume_usd") or 0.0)
-            session_realized = float(status.get("session_realized_pnl_usd") or 0.0)
-            vol_phase = str(status.get("vol_phase") or "").strip() or "idle"
-            last_order_digest = str(status.get("vol_last_order_digest") or "").strip()
-            entry_digest = str(status.get("vol_entry_digest") or "").strip()
-            close_digest = str(status.get("vol_close_digest") or "").strip()
-            progress_pct = (volume_done / target_volume * 100.0) if target_volume > 0 else 0.0
-            lines.extend(["", "*Volume Progress*"])
-            lines.append(
-                f"{_loc('Done')}: *{escape_md(f'${volume_done:,.2f}')}* \\| "
-                f"{_loc('Remaining')}: *{escape_md(f'${volume_remaining:,.2f}')}*"
-            )
-            if target_volume > 0:
-                lines.append(
-                    f"{_loc('Bar')}: `{escape_md(_fmt_progress_bar(volume_done, target_volume))}`"
-                )
-                lines.append(
-                    f"{_loc('Target')}: *{escape_md(f'${target_volume:,.2f}')}* \\| "
-                    f"{_loc('Progress')}: *{escape_md(f'{progress_pct:.1f}%')}*"
-                )
-            pnl_sign = "+" if session_realized >= 0 else "-"
-            lines.append(
-                f"{_loc('Session PnL')}: *{escape_md(f'{pnl_sign}${abs(session_realized):,.2f}')}* \\| "
-                f"{_loc('Phase')}: *{escape_md(vol_phase)}*"
-            )
-            if vol_attempts > 0:
-                lines.append(
-                    f"{_loc('Vol order attempts')}: *{escape_md(str(vol_attempts))}* \\| "
-                    f"{_loc('failures')}: *{escape_md(str(vol_failures))}*"
-                )
-            if last_order_digest:
-                lines.append(f"{_loc('Last order ID')}: `{escape_md(last_order_digest[:18])}`")
-            if entry_digest:
-                lines.append(f"{_loc('Entry order ID')}: `{escape_md(entry_digest[:18])}`")
-            if close_digest:
-                lines.append(f"{_loc('Close order ID')}: `{escape_md(close_digest[:18])}`")
-            last_order_error = str(status.get("last_order_error") or "").strip()
-            if last_order_error:
-                lines.append(f"{_loc('Last order error')}: {escape_md(last_order_error[:160])}")
-
-        if strategy == "DN":
-            dn_mode = status.get("dn_mode") or "enter_anyway"
-            dn_fr = float(status.get("dn_last_funding_rate") or 0.0)
-            dn_unf = int(status.get("dn_unfavorable_count") or 0)
-            lines.append(
-                f"{_loc('Funding Mode')}: *{escape_md(str(dn_mode).upper())}* \\| "
-                f"{_loc('Funding')}: *{escape_md(f'{dn_fr:.6f}')}*"
-            )
-            lines.append(f"{_loc('Unfavorable Cycles')}: *{escape_md(str(dn_unf))}*")
-
-        bro_state = status.get("bro_state") or {}
-        if strategy == "BRO" and bro_state:
-            trade_count = bro_state.get("trade_count", 0)
-            total_pnl = bro_state.get("total_pnl", 0.0)
-            active = len(bro_state.get("active_positions", []))
-            lines.extend(["", "*Alpha Agent*"])
-            lines.append(f"{_loc('Trades:')} *{escape_md(str(trade_count))}* \\| {_loc('Open Positions:')} *{escape_md(str(active))}*")
-            pnl_sign = "+" if total_pnl >= 0 else ""
-            lines.append(f"{_loc('Session PnL:')} *{escape_md(f'{pnl_sign}${total_pnl:,.2f}')}*")
-
-        maker_fill_ratio = status.get("maker_fill_ratio")
-        if strategy in ("GRID", "RGRID") and maker_fill_ratio is not None:
-            cancellation_ratio = status.get("cancellation_ratio")
-            lines.append(
-                f"{_loc('Quotes')}: "
-                f"{escape_md(f'{float(maker_fill_ratio) * 100:.0f}%')} {_loc('fills')} · "
-                f"{escape_md(f'{float(cancellation_ratio or 0) * 100:.0f}%')} {_loc('cancels')}"
-            )
-        if strategy in ("GRID", "RGRID"):
-            anchor = float(status.get("rgrid_anchor_price") or 0.0)
-            buy_exp = float(status.get("rgrid_buy_exposure_price") or 0.0)
-            sell_exp = float(status.get("rgrid_sell_exposure_price") or 0.0)
-            drift_pct = float(status.get("rgrid_drift_from_anchor_pct") or 0.0)
-            reset_active = bool(status.get("rgrid_reset_active"))
-            reset_side = str(status.get("rgrid_reset_side") or "none").upper()
-            cycle_pnl = float(status.get("rgrid_last_cycle_pnl_usd") or 0.0)
-            sl_pct = float(status.get("rgrid_stop_loss_pct") or 0.0)
-            tp_pct = float(status.get("rgrid_take_profit_pct") or 0.0)
-            reset_threshold = float(status.get("rgrid_reset_threshold_pct") or 0.0)
-            reset_timeout = int(float(status.get("rgrid_reset_timeout_seconds") or 0.0))
-            discretion = float(status.get("rgrid_discretion") or 0.0)
-            inventory_source = str(status.get("inventory_source") or "").strip().lower()
-            pnl_sign = "+" if cycle_pnl >= 0 else ""
-            lines.extend(["", "*Reverse GRID Telemetry*" if strategy == "RGRID" else "*GRID Telemetry*"])
-            lines.append(
-                f"Anchor: *{escape_md(f'{anchor:,.6f}') if anchor > 0 else 'n/a'}* \\| "
-                f"Drift: *{escape_md(f'{drift_pct:.3f}%')}*"
-            )
-            lines.append(
-                f"Exposure VWAP: Buy *{escape_md(f'{buy_exp:,.6f}') if buy_exp > 0 else 'n/a'}* · "
-                f"Sell *{escape_md(f'{sell_exp:,.6f}') if sell_exp > 0 else 'n/a'}*"
-            )
-            lines.append(
-                f"Soft Reset: *{escape_md('ON' if reset_active else 'OFF')}* \\| "
-                f"Side *{escape_md(reset_side)}* \\| "
-                f"Threshold *{escape_md(f'{reset_threshold:.2f}%')}* \\| "
-                f"Timeout *{escape_md(f'{reset_timeout}s' if reset_timeout > 0 else 'n/a')}*"
-            )
-            if strategy == "RGRID":
-                lines.append(
-                    f"PnL Cycle: *{escape_md(f'{pnl_sign}${cycle_pnl:,.2f}')}* \\| "
-                    f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}* \\| "
-                    f"Discretion: *{escape_md(f'{discretion:.2f}')}*"
-                )
-            if inventory_source and inventory_source != "exchange":
-                lines.append(
-                    f"{_loc('Inventory source')}: *{escape_md(inventory_source.upper())}*"
-                )
-            else:
-                grid_tp = float(status.get("tp_pct") or 0.0)
-                grid_sl = float(status.get("sl_pct") or 0.0)
-                lines.append(
-                    f"PnL Cycle: *{escape_md(f'{pnl_sign}${cycle_pnl:,.2f}')}* \\| "
-                    f"Session TP/SL: *{escape_md(f'{grid_tp:.2f}%/{grid_sl:.2f}%')}*"
-                )
+    if strategy in ("GRID", "RGRID"):
+        anchor = float(status.get("rgrid_anchor_price") or 0.0)
+        buy_exp = float(status.get("rgrid_buy_exposure_price") or 0.0)
+        sell_exp = float(status.get("rgrid_sell_exposure_price") or 0.0)
+        drift_pct = float(status.get("rgrid_drift_from_anchor_pct") or 0.0)
+        reset_active = bool(status.get("rgrid_reset_active"))
+        reset_side = str(status.get("rgrid_reset_side") or "none").upper()
+        sl_pct = float(status.get("rgrid_stop_loss_pct") or 0.0)
+        tp_pct = float(status.get("rgrid_take_profit_pct") or 0.0)
+        discretion = float(status.get("rgrid_discretion") or 0.0)
+        inventory_source = str(status.get("inventory_source") or "").strip().lower()
+        lines.extend(["", "*Reverse GRID*" if strategy == "RGRID" else "*GRID*"])
+        lines.append(
+            f"{_loc('Anchor')}: *{escape_md(f'{anchor:,.2f}') if anchor > 0 else 'n/a'}* \\| "
+            f"{_loc('Drift')}: *{escape_md(f'{drift_pct:.3f}%')}*"
+        )
+        lines.append(
+            f"{_loc('Buy VWAP')}: *{escape_md(f'{buy_exp:,.2f}') if buy_exp > 0 else 'n/a'}* \\| "
+            f"{_loc('Sell VWAP')}: *{escape_md(f'{sell_exp:,.2f}') if sell_exp > 0 else 'n/a'}*"
+        )
+        lines.append(
+            f"{_loc('Soft Reset')}: *{escape_md('ON' if reset_active else 'OFF')}* \\| "
+            f"{_loc('Side')}: *{escape_md(reset_side)}* \\| "
+            f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}*"
+        )
+        if strategy == "RGRID":
+            lines.append(f"{_loc('Discretion')}: *{escape_md(f'{discretion:.2f}')}*")
+        if inventory_source and inventory_source != "exchange":
+            lines.append(f"{_loc('Inventory source')}: *{escape_md(inventory_source.upper())}*")
 
     return "\n".join(lines)
 

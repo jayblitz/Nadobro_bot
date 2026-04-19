@@ -129,7 +129,13 @@ async def cmd_status(update: Update, context: CallbackContext):
 
         lang = get_active_language()
         localized = localize_text(text, lang)
-        reply_markup = localize_markup(status_kb(), lang)
+        reply_markup = localize_markup(
+            status_kb(
+                is_running=bool(status.get("running")),
+                strategy_label=str(status.get("strategy") or "").upper() or None,
+            ),
+            lang,
+        )
         # Always send a visible reply so /status works even when the home card is off-screen
         # or edit-in-place fails (webhook / concurrent updates).
         try:
@@ -154,7 +160,13 @@ async def cmd_ops(update: Update, context: CallbackContext):
 
         lang = get_active_language()
         localized = localize_text(text, lang)
-        reply_markup = localize_markup(status_kb(), lang)
+        reply_markup = localize_markup(
+            status_kb(
+                is_running=bool(status.get("running")),
+                strategy_label=str(status.get("strategy") or "").upper() or None,
+            ),
+            lang,
+        )
         try:
             await update.message.reply_text(
                 localized,

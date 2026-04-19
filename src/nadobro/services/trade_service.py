@@ -1849,10 +1849,26 @@ def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]
     return rows
 
 
-def get_trade_analytics(telegram_id: int) -> dict:
+def get_trade_analytics(telegram_id: int, strategy_session_id: int | None = None) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
     trades = get_trades_by_user(telegram_id, limit=None, network=network)
+    if strategy_session_id is not None:
+        try:
+            target_session_id = int(strategy_session_id)
+        except (TypeError, ValueError):
+            target_session_id = None
+        if target_session_id is not None:
+            filtered_trades = []
+            for t in trades:
+                try:
+                    if int(t.get("strategy_session_id") or 0) == target_session_id:
+                        filtered_trades.append(t)
+                except (TypeError, ValueError):
+                    continue
+            trades = [
+                t for t in filtered_trades
+            ]
     if not trades:
         return {"total_trades": 0}
     logical_trades = _build_logical_trade_rows(trades)
