@@ -403,6 +403,37 @@ def _rolling_vwap_recent_fraction(fills: list, fraction: float) -> float:
     return acc_notional / acc_size
 
 
+def _estimate_net_units_from_fill_history(state: dict) -> float:
+    buy_total = 0.0
+    sell_total = 0.0
+    for fill in state.get("grid_buy_fills") or []:
+        try:
+            buy_total += max(0.0, float(fill.get("size") or 0.0))
+        except Exception:
+            continue
+    for fill in state.get("grid_sell_fills") or []:
+        try:
+            sell_total += max(0.0, float(fill.get("size") or 0.0))
+        except Exception:
+            continue
+    return buy_total - sell_total
+
+
+def _reprice_post_only_quote(client, product_id: int, is_long: bool, fallback_price: float) -> float:
+    try:
+        mp = client.get_market_price(product_id) or {}
+        bid = float(mp.get("bid") or 0.0)
+        ask = float(mp.get("ask") or 0.0)
+        nudge = 0.00002  # 0.2 bp inside the safe side of book
+        if is_long and bid > 0:
+            return bid * (1.0 - nudge)
+        if (not is_long) and ask > 0:
+            return ask * (1.0 + nudge)
+    except Exception:
+        pass
+    return float(fallback_price or 0.0)
+
+
 def _reconcile_executed_quotes(
     state: dict,
     network: str,
@@ -645,13 +676,21 @@ def run_cycle(
 
     # Position-aware risk guardrails.
     positions = client.get_all_positions() or []
+    live_position_rows = []
     net_units = 0.0
     for p in positions:
         if int(p.get("product_id", -1)) != product_id:
             continue
         amt = abs(float(p.get("amount", 0) or 0))
         side = str(p.get("side", "") or "").upper()
+        if amt <= 0 or side not in {"LONG", "SHORT"}:
+            continue
+        live_position_rows.append(p)
         net_units += amt if side == "LONG" else -amt
+    inventory_source = "exchange"
+    if not live_position_rows:
+        net_units = _estimate_net_units_from_fill_history(state)
+        inventory_source = "fills" if abs(net_units) > 0 else "none"
     inv_usd = abs(net_units) * mid
 
     cancelled_digests = set(str(d) for d in (state.get("mm_recently_cancelled_digests") or []))
@@ -943,8 +982,42 @@ def run_cycle(
             post_only=True,
             source=strategy,
             strategy_session_id=state.get("strategy_session_id"),
-            reduce_only=bool(pause_flatten_only and abs(net_units) > 0),
+            reduce_only=bool(
+                pause_flatten_only
+                and abs(net_units) > 0
+                and inventory_source == "exchange"
+            ),
         )
+        if not result.get("success"):
+            err_text = str(result.get("error") or "").lower()
+            if "post-only" in err_text and "crosses the book" in err_text:
+                retry_price = _reprice_post_only_quote(
+                    client,
+                    product_id,
+                    bool(order_spec["is_long"]),
+                    order_price,
+                )
+                retry_tol = max(abs(order_price) * 1e-6, 1e-9)
+                if retry_price > 0 and abs(retry_price - order_price) > retry_tol:
+                    result = execute_limit_order(
+                        telegram_id,
+                        product,
+                        size_to_use,
+                        retry_price,
+                        is_long=order_spec["is_long"],
+                        leverage=leverage,
+                        enforce_rate_limit=False,
+                        post_only=True,
+                        source=strategy,
+                        strategy_session_id=state.get("strategy_session_id"),
+                        reduce_only=bool(
+                            pause_flatten_only
+                            and abs(net_units) > 0
+                            and inventory_source == "exchange"
+                        ),
+                    )
+                    if result.get("success"):
+                        order_price = retry_price
 
         if result.get("success"):
             orders_placed += 1
@@ -988,6 +1061,7 @@ def run_cycle(
     state["mm_notional_carry_usd"] = min(unspent_notional, cycle_notional * 3.0)
     state["mm_last_cycle_notional_usd"] = round(placed_notional_usd, 6)
     state["mm_last_inventory_skew_usd"] = round(inv_usd, 6)
+    state["mm_last_inventory_source"] = inventory_source
     state["mm_last_ref_price"] = round(reference_price, 8)
     state["mm_last_spread_bp"] = round(dynamic_spread_bp, 4)
     state["mm_last_metrics"] = {
@@ -996,6 +1070,7 @@ def run_cycle(
         "avg_quote_distance_bp": round(avg_quote_distance_bp, 3),
         "quote_refresh_rate": round(quote_refresh_rate, 4),
         "inventory_skew_usd": round(inv_usd, 4),
+        "inventory_source": inventory_source,
         "estimated_fills": int(est_fills),
         "open_orders_before": int(pre_cancel_open_count),
         "open_orders_after": int(final_open_count),
@@ -1026,6 +1101,7 @@ def run_cycle(
         "avg_quote_distance_bp": avg_quote_distance_bp,
         "quote_refresh_rate": quote_refresh_rate,
         "inventory_skew_usd": inv_usd,
+        "inventory_source": inventory_source,
         "pause_reason": state.get("mm_pause_reason") or None,
         "errors": errors if errors else None,
         "grid_reset_active": bool(state.get("grid_reset_active", False)) if strategy in ("grid", "rgrid") else None,

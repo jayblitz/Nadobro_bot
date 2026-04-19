@@ -1204,6 +1204,16 @@ def _fmt_age_seconds(ts: float) -> str:
         return "—"
 
 
+def _fmt_progress_bar(done: float, total: float, width: int = 12) -> str:
+    total_v = max(0.0, float(total or 0.0))
+    done_v = max(0.0, float(done or 0.0))
+    if total_v <= 0:
+        return "[............]"
+    pct = min(1.0, done_v / total_v)
+    filled = max(0, min(width, int(round(pct * width))))
+    return "[" + ("#" * filled) + ("." * (width - filled)) + "]"
+
+
 def fmt_status_overview(status: dict, onboarding: dict):
     running = status.get("running")
     complete = onboarding.get("onboarding_complete")
@@ -1363,6 +1373,9 @@ def fmt_status_overview(status: dict, onboarding: dict):
             )
             if target_volume > 0:
                 lines.append(
+                    f"{_loc('Bar')}: `{escape_md(_fmt_progress_bar(volume_done, target_volume))}`"
+                )
+                lines.append(
                     f"{_loc('Target')}: *{escape_md(f'${target_volume:,.2f}')}* \\| "
                     f"{_loc('Progress')}: *{escape_md(f'{progress_pct:.1f}%')}*"
                 )
@@ -1427,6 +1440,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
             reset_threshold = float(status.get("rgrid_reset_threshold_pct") or 0.0)
             reset_timeout = int(float(status.get("rgrid_reset_timeout_seconds") or 0.0))
             discretion = float(status.get("rgrid_discretion") or 0.0)
+            inventory_source = str(status.get("inventory_source") or "").strip().lower()
             pnl_sign = "+" if cycle_pnl >= 0 else ""
             lines.extend(["", "*Reverse GRID Telemetry*" if strategy == "RGRID" else "*GRID Telemetry*"])
             lines.append(
@@ -1448,6 +1462,10 @@ def fmt_status_overview(status: dict, onboarding: dict):
                     f"PnL Cycle: *{escape_md(f'{pnl_sign}${cycle_pnl:,.2f}')}* \\| "
                     f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}* \\| "
                     f"Discretion: *{escape_md(f'{discretion:.2f}')}*"
+                )
+            if inventory_source and inventory_source != "exchange":
+                lines.append(
+                    f"{_loc('Inventory source')}: *{escape_md(inventory_source.upper())}*"
                 )
             else:
                 grid_tp = float(status.get("tp_pct") or 0.0)

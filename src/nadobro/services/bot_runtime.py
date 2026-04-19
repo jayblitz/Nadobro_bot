@@ -883,6 +883,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "avg_quote_distance_bp": (state.get("mm_last_metrics") or {}).get("avg_quote_distance_bp"),
         "quote_refresh_rate": (state.get("mm_last_metrics") or {}).get("quote_refresh_rate"),
         "inventory_skew_usd": (state.get("mm_last_metrics") or {}).get("inventory_skew_usd"),
+        "inventory_source": (state.get("mm_last_metrics") or {}).get("inventory_source") or state.get("mm_last_inventory_source"),
         "session_notional_done_usd": (state.get("mm_last_metrics") or {}).get("session_notional_done_usd"),
         "worker_group": state.get("worker_group"),
         "worker_last_heartbeat": float(state.get("worker_last_heartbeat") or 0.0),

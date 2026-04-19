@@ -937,28 +937,15 @@ class NadoClient:
                 (self.subaccount_hex or "")[:22],
             )
 
-        # Fallback to open orders for backward compatibility.
+        # Do not infer positions from open orders. Open orders are not exposure and
+        # using them as positions causes downstream strategy logic (inventory caps,
+        # reduce-only exits) to behave incorrectly.
         fallback_key = (self.network, str(self.subaccount_hex or ""))
         cached = _positions_fallback_cache.get(fallback_key)
         if cached and (time.time() - float(cached.get("ts", 0))) < _POSITIONS_FALLBACK_TTL:
             return list(cached.get("data") or [])
 
         positions = []
-        products = list(get_perp_products(network=self.network, client=self) or [])
-        max_products = max(1, _POSITIONS_FALLBACK_MAX_PRODUCTS)
-        if len(products) > max_products:
-            logger.warning(
-                "get_all_positions fallback truncating product scan %s -> %s to reduce REST load",
-                len(products),
-                max_products,
-            )
-            products = products[:max_products]
-        for name in products:
-            pid = get_product_id(name, network=self.network, client=self)
-            if pid is None:
-                continue
-            orders = self.get_open_orders(pid)
-            positions.extend(orders)
         _positions_fallback_cache[fallback_key] = {"data": positions, "ts": time.time()}
         return positions
 
