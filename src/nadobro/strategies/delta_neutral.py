@@ -2,7 +2,7 @@
 Delta Neutral — funding rate farming strategy.
 
 Holistic DN flow on Nado:
-1) Buy spot (BTC/ETH) on Nado Spot.
+1) Buy spot on Nado Spot.
 2) Short the same asset on perp with 1x-5x leverage.
 3) Keep both legs size-matched and collect favorable funding.
 4) Exit both legs after persistent unfavorable funding.
@@ -14,6 +14,21 @@ logger = logging.getLogger(__name__)
 MIN_FAVORABLE_FUNDING = 0.000001
 UNFAVORABLE_EXIT_CYCLES = 5
 POSITION_SIZE_TOLERANCE = 0.10
+
+
+def _xstock_exchange_rate(pair: dict) -> float | None:
+    """Wrapped Backed spot uses exchange_rate_x18 (underlying per 1 wrapped token). See Nado xStocks docs."""
+    raw = (pair or {}).get("exchange_rate_x18")
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    r = val / 1e18
+    if r <= 0:
+        return None
+    return r
 
 
 def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
@@ -41,19 +56,27 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     product_id = kwargs.get("product_id")
     product = kwargs.get("product", state.get("product", "BTC"))
 
-    # DN strategy only supports assets with spot pairs (BTC, ETH)
-    if product not in ("BTC", "ETH"):
-        return {"success": False, "error": f"{product} is not supported for Delta Neutral. Only BTC and ETH have spot pairs on Nado."}
-
     if not client or mid <= 0 or product_id is None:
         return {"success": False, "error": "Missing client, price, or product_id"}
 
-    from src.nadobro.config import get_spot_product_id
+    from src.nadobro.config import get_dn_pair
     from src.nadobro.services.trade_service import (
         close_delta_neutral_legs,
         execute_market_order,
         execute_spot_market_order,
     )
+    pair = get_dn_pair(product, network=network, client=client)
+    if not pair:
+        return {"success": False, "error": f"{product} is not supported for Delta Neutral."}
+    product = str(pair.get("product") or product).upper()
+    product_id = int(pair.get("perp_product_id") or product_id)
+    spot_product_id = pair.get("spot_product_id")
+    if spot_product_id is None:
+        return {"success": False, "error": f"{product} spot is not supported for Delta Neutral."}
+    spot_product_id = int(spot_product_id)
+    spot_symbol = str(pair.get("spot_symbol") or product).upper()
+    can_add_exposure = bool(pair.get("entry_allowed", True))
+    entry_block_reason = str(pair.get("entry_block_reason") or "DN entry is currently blocked for this market.")
 
     notional = float(state.get("notional_usd") or 100.0)
     leverage = float(state.get("leverage") or 3.0)
@@ -61,10 +84,10 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     state["leverage"] = leverage
     if notional <= 0:
         return {"success": False, "error": "Invalid notional_usd; must be > 0"}
-    target_size = notional / mid
-    spot_product_id = get_spot_product_id(product)
-    if spot_product_id is None:
-        return {"success": False, "error": f"{product} spot is not supported for Delta Neutral."}
+    # Perp leg size in contract/share units; spot xStocks leg is wrapped-token units when exchange_rate applies.
+    target_perp_size = notional / mid
+    xrate = _xstock_exchange_rate(pair)
+    target_spot_wrapped = target_perp_size / xrate if xrate else target_perp_size
 
     fr_data = client.get_funding_rate(product_id) or {}
     funding_rate = float(fr_data.get("funding_rate", 0) or 0)
@@ -96,11 +119,16 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     result = {
         "success": True,
         "action": "hold",
+        "product": product,
+        "spot_symbol": spot_symbol,
         "funding_rate": funding_rate,
         "funding_entry_mode": funding_entry_mode,
         "position_size": current_size,
         "position_side": current_side,
         "spot_size": spot_size,
+        "target_perp_size": target_perp_size,
+        "target_spot_wrapped": target_spot_wrapped,
+        "xstock_exchange_rate": xrate,
         "total_funding_earned": total_funding,
         "unfavorable_cycles": unfavorable_count,
     }
@@ -123,6 +151,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 slippage_pct=float(state.get("slippage_pct") or 1.0),
                 source="dn",
                 strategy_session_id=state.get("strategy_session_id"),
+                pair=pair,
             )
             close_result = close_bundle.get("perp") or {"success": True}
             spot_close_result = close_bundle.get("spot") or {"success": True}
@@ -160,31 +189,45 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     if funding_favorable:
         state["dn_unfavorable_count"] = 0
 
-    # Keep spot leg aligned to target size.
-    spot_size_diff = abs(spot_size - target_size)
-    if target_size > 0 and (spot_size_diff / target_size > POSITION_SIZE_TOLERANCE):
-        if spot_size < target_size:
-            buy_size = target_size - spot_size
-            logger.info("DN user %s: increasing spot by %.6f %s", telegram_id, buy_size, product)
-            spot_adjust = execute_spot_market_order(
-                telegram_id,
-                product,
-                buy_size,
-                is_buy=True,
-                enforce_rate_limit=False,
-                slippage_pct=float(state.get("slippage_pct") or 1.0),
-                source="dn",
-                strategy_session_id=state.get("strategy_session_id"),
-            )
-            result["action"] = "spot_buy"
-            result["spot_adjust_result"] = spot_adjust.get("success", False)
-            if not spot_adjust.get("success"):
-                result["success"] = False
-                result["order_error"] = spot_adjust.get("error", "Spot buy adjust failed")
+    if not can_add_exposure and current_size <= 0 and spot_size <= 0:
+        result["action"] = "wait_market_hours"
+        result["detail"] = entry_block_reason
+        return result
+
+    # Keep spot leg aligned to target (wrapped token amount for xStocks).
+    spot_size_diff = abs(spot_size - target_spot_wrapped)
+    if target_spot_wrapped > 0 and (spot_size_diff / target_spot_wrapped > POSITION_SIZE_TOLERANCE):
+        if spot_size < target_spot_wrapped:
+            if can_add_exposure:
+                buy_size = target_spot_wrapped - spot_size
+                logger.info("DN user %s: increasing spot by %.6f %s", telegram_id, buy_size, spot_symbol)
+                spot_adjust = execute_spot_market_order(
+                    telegram_id,
+                    product,
+                    buy_size,
+                    is_buy=True,
+                    enforce_rate_limit=False,
+                    slippage_pct=float(state.get("slippage_pct") or 1.0),
+                    source="dn",
+                    strategy_session_id=state.get("strategy_session_id"),
+                    network=network,
+                    spot_product_id=spot_product_id,
+                    spot_symbol=spot_symbol,
+                    asset_label=spot_symbol,
+                )
+                result["action"] = "spot_buy"
+                result["spot_adjust_result"] = spot_adjust.get("success", False)
+                if not spot_adjust.get("success"):
+                    result["success"] = False
+                    result["order_error"] = spot_adjust.get("error", "Spot buy adjust failed")
+                    return result
+            else:
+                result["action"] = "wait_market_hours"
+                result["detail"] = entry_block_reason
                 return result
         else:
-            sell_size = spot_size - target_size
-            logger.info("DN user %s: reducing spot by %.6f %s", telegram_id, sell_size, product)
+            sell_size = spot_size - target_spot_wrapped
+            logger.info("DN user %s: reducing spot by %.6f %s", telegram_id, sell_size, spot_symbol)
             spot_adjust = execute_spot_market_order(
                 telegram_id,
                 product,
@@ -194,6 +237,10 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 slippage_pct=float(state.get("slippage_pct") or 1.0),
                 source="dn",
                 strategy_session_id=state.get("strategy_session_id"),
+                network=network,
+                spot_product_id=spot_product_id,
+                spot_symbol=spot_symbol,
+                asset_label=spot_symbol,
             )
             result["action"] = "spot_sell"
             result["spot_adjust_result"] = spot_adjust.get("success", False)
@@ -209,29 +256,33 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         result["funding_earned_this_cycle"] = est_funding_this_cycle
         result["total_funding_earned"] = total_funding
 
-        size_diff = abs(current_size - target_size)
-        if target_size > 0 and (size_diff / target_size > POSITION_SIZE_TOLERANCE):
-            if current_size < target_size:
-                add_size = target_size - current_size
-                logger.info("DN user %s: increasing short by %.6f", telegram_id, add_size)
-                adj_result = execute_market_order(
-                    telegram_id,
-                    product,
-                    add_size,
-                    is_long=False,
-                    leverage=leverage,
-                    slippage_pct=float(state.get("slippage_pct") or 1.0),
-                    enforce_rate_limit=False,
-                    source="dn",
-                    strategy_session_id=state.get("strategy_session_id"),
-                )
-                result["action"] = "adjust_increase"
-                result["adjust_result"] = adj_result.get("success", False)
-                if not adj_result.get("success"):
-                    result["success"] = False
-                    result["order_error"] = adj_result.get("error", "Adjust increase failed")
+        size_diff = abs(current_size - target_perp_size)
+        if target_perp_size > 0 and (size_diff / target_perp_size > POSITION_SIZE_TOLERANCE):
+            if current_size < target_perp_size:
+                if can_add_exposure:
+                    add_size = target_perp_size - current_size
+                    logger.info("DN user %s: increasing short by %.6f", telegram_id, add_size)
+                    adj_result = execute_market_order(
+                        telegram_id,
+                        product,
+                        add_size,
+                        is_long=False,
+                        leverage=leverage,
+                        slippage_pct=float(state.get("slippage_pct") or 1.0),
+                        enforce_rate_limit=False,
+                        source="dn",
+                        strategy_session_id=state.get("strategy_session_id"),
+                    )
+                    result["action"] = "adjust_increase"
+                    result["adjust_result"] = adj_result.get("success", False)
+                    if not adj_result.get("success"):
+                        result["success"] = False
+                        result["order_error"] = adj_result.get("error", "Adjust increase failed")
+                else:
+                    result["action"] = "hold"
+                    result["detail"] = entry_block_reason
             else:
-                reduce_size = current_size - target_size
+                reduce_size = current_size - target_perp_size
                 logger.info("DN user %s: reducing short by %.6f", telegram_id, reduce_size)
                 adj_result = execute_market_order(
                     telegram_id,
@@ -279,12 +330,16 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
 
     logger.info(
         "DN user %s: opening short position, size=%.6f, funding_rate=%.8f",
-        telegram_id, target_size, funding_rate,
+        telegram_id, target_perp_size, funding_rate,
     )
+    if not can_add_exposure:
+        result["action"] = "wait_market_hours"
+        result["detail"] = entry_block_reason
+        return result
     order_result = execute_market_order(
         telegram_id,
         product,
-        target_size,
+        target_perp_size,
         is_long=False,
         leverage=leverage,
         slippage_pct=float(state.get("slippage_pct") or 1.0),

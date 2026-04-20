@@ -77,8 +77,33 @@ def get_product_name(product_id: int, network: str = None, client=None) -> str:
     return f"ID:{product_id}"
 
 
-def get_spot_product_id(name: str) -> Optional[int]:
+def get_spot_product_id(name: str, network: str = None, client=None) -> Optional[int]:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import get_spot_product_id as _catalog_spot_product_id
+
+        pid = _catalog_spot_product_id(name, network=network_name)
+        if pid is not None:
+            return pid
+    except Exception:
+        pass
     return SPOT_PRODUCT_IDS.get((name or "").upper().strip())
+
+
+def get_spot_metadata(name: str, network: str = None) -> dict:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import get_spot_metadata as _catalog_spot_metadata
+
+        metadata = _catalog_spot_metadata(name, network=network_name)
+        if metadata:
+            return metadata
+    except Exception:
+        pass
+    spot_pid = SPOT_PRODUCT_IDS.get((name or "").upper().strip())
+    if spot_pid is None:
+        return {}
+    return {"id": int(spot_pid), "symbol": str(name or "").upper().strip()}
 
 RATE_LIMIT_SECONDS = 5
 MAX_LEVERAGE = 50
@@ -120,6 +145,50 @@ def get_perp_products(network: str = None, client=None) -> list[str]:
     except Exception:
         pass
     return [name for name, info in PRODUCTS.items() if info.get("type") == "perp"]
+
+
+def get_dn_pair(product: str, network: str = None, client=None) -> dict:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import get_dn_pair as _catalog_dn_pair
+
+        pair = _catalog_dn_pair(product, network=network_name, client=client)
+        if pair:
+            return pair
+    except Exception:
+        pass
+    spot_pid = get_spot_product_id(product, network=network_name, client=client)
+    perp_pid = get_product_id(product, network=network_name, client=client)
+    if spot_pid is None or perp_pid is None:
+        return {}
+    product_key = (product or "").upper().replace("-PERP", "").strip()
+    return {
+        "product": product_key,
+        "underlying_key": product_key,
+        "perp_product_id": int(perp_pid),
+        "perp_symbol": get_product_name(perp_pid, network=network_name, client=client),
+        "spot_product_id": int(spot_pid),
+        "spot_symbol": product_key,
+        "spot_trading_status": "live",
+        "perp_trading_status": "live",
+        "spot_market_hours": None,
+        "perp_market_hours": None,
+        "entry_allowed": True,
+        "entry_block_reason": "",
+    }
+
+
+def get_dn_products(network: str = None, client=None) -> list[str]:
+    network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import list_dn_product_names as _catalog_dn_products
+
+        products = _catalog_dn_products(network=network_name, client=client)
+        if products:
+            return products
+    except Exception:
+        pass
+    return [name for name in ("BTC", "ETH") if get_spot_product_id(name, network=network_name, client=client) is not None]
 
 
 def is_product_isolated_only(product: str, network: str = None, client=None) -> bool:

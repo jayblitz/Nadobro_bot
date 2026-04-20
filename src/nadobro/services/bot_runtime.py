@@ -19,6 +19,8 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
 })
 
 from src.nadobro.config import (
+    get_dn_pair,
+    get_dn_products,
     get_product_id,
     get_product_max_leverage,
     get_spot_product_id,
@@ -606,11 +608,18 @@ def start_user_bot(
         _ensure_task(telegram_id, network)
         return True, "Bro Mode activated 🧠"
 
-    product_id = get_product_id(product, network=network)
+    dn_pair = get_dn_pair(product, network=network) if strategy == "dn" else {}
+    product_id = int(dn_pair.get("perp_product_id")) if dn_pair.get("perp_product_id") is not None else get_product_id(product, network=network)
     if product_id is None:
         return False, f"Unknown product '{product}'."
-    if strategy == "dn" and get_spot_product_id(product) is None:
-        return False, f"Delta Neutral currently supports assets with Nado Spot markets (BTC, ETH)."
+    if strategy == "dn" and not dn_pair:
+        supported_products = ", ".join(get_dn_products(network=network) or ["BTC", "ETH"])
+        return False, (
+            "Delta Neutral currently supports assets with both Nado spot and perp markets. "
+            f"Available now: {supported_products}."
+        )
+    if strategy == "dn" and not bool(dn_pair.get("entry_allowed", True)):
+        return False, str(dn_pair.get("entry_block_reason") or f"{product.upper()} is not currently tradable for Delta Neutral.")
     max_leverage = get_product_max_leverage(product, network=network)
     if strategy == "dn":
         max_leverage = min(max_leverage, 5)
@@ -668,7 +677,8 @@ def start_user_bot(
     if strategy == "dn":
         return (
             True,
-            f"DN bot started with {product.upper()} spot long + {product.upper()}-PERP short ({network}) "
+            f"DN bot started with {str(dn_pair.get('spot_symbol') or product.upper())} spot long + "
+            f"{str(dn_pair.get('perp_symbol') or f'{product.upper()}-PERP')} short ({network}) "
             f"| TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}% | Leverage {state.get('leverage')}x",
         )
     if strategy == "vol":
@@ -1529,7 +1539,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             return False, str(result.get("error") or result.get("order_error") or "unknown")[:300]
         return True, None
 
-    product_id = get_product_id(product, network=network)
+    dn_pair = get_dn_pair(product, network=network, client=None) if strategy == "dn" else {}
+    product_id = int(dn_pair.get("perp_product_id")) if dn_pair.get("perp_product_id") is not None else get_product_id(product, network=network)
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")
 

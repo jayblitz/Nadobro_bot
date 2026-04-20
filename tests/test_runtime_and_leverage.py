@@ -437,7 +437,18 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             "funding_entry_mode": "wait",
             "slippage_pct": 1.0,
         }
-        with patch("src.nadobro.config.get_spot_product_id", return_value=1001):
+        with patch(
+            "src.nadobro.config.get_dn_pair",
+            return_value={
+                "product": "BTC",
+                "perp_product_id": 1,
+                "perp_symbol": "BTC-PERP",
+                "spot_product_id": 1001,
+                "spot_symbol": "KBTC",
+                "entry_allowed": True,
+                "entry_block_reason": "",
+            },
+        ):
             result = delta_neutral.run_cycle(
                 telegram_id=1,
                 network="testnet",
@@ -451,6 +462,118 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertTrue(result.get("success"))
         self.assertEqual(result.get("action"), "wait_unfavorable")
 
+    def test_dn_xstock_spot_buy_uses_wrapped_target_size(self):
+        """xStocks: perp size is share-equivalent; spot book is wrapped tokens (amount / exchange_rate)."""
+
+        class FakeClient:
+            def get_funding_rate(self, _product_id):
+                return {"funding_rate": 0.0002}
+
+            def get_all_positions(self):
+                return [{"product_id": 200, "amount": -1.0, "side": "SHORT"}]
+
+            def get_balance(self):
+                return {"balances": {50: 0.0}}
+
+        state = {
+            "product": "NVDA",
+            "notional_usd": 105.0,
+            "leverage": 2.0,
+            "funding_entry_mode": "enter_anyway",
+            "slippage_pct": 1.0,
+        }
+        captured = {}
+
+        def _spot_exec(*args, **kwargs):
+            captured["size"] = args[2]
+            return {"success": True}
+
+        with patch(
+            "src.nadobro.config.get_dn_pair",
+            return_value={
+                "product": "NVDA",
+                "perp_product_id": 200,
+                "perp_symbol": "NVDA-PERP",
+                "spot_product_id": 50,
+                "spot_symbol": "WBNVDA",
+                "exchange_rate_x18": "1050000000000000000",
+                "entry_allowed": True,
+                "entry_block_reason": "",
+            },
+        ), patch(
+            "src.nadobro.services.trade_service.execute_spot_market_order",
+            side_effect=_spot_exec,
+        ), patch(
+            "src.nadobro.services.trade_service.execute_market_order",
+            return_value={"success": True},
+        ):
+            delta_neutral.run_cycle(
+                telegram_id=1,
+                network="testnet",
+                state=state,
+                client=FakeClient(),
+                mid=100.0,
+                product_id=200,
+                product="NVDA",
+                open_orders=[],
+            )
+        # target_perp = 105/100 = 1.05 shares; wrapped = 1.05 / 1.05 = 1.0 token
+        self.assertAlmostEqual(captured.get("size", 0.0), 1.0, places=6)
+
+    def test_dn_entry_blocked_returns_wait_when_spot_leg_needed(self):
+        """If spot must increase but entry is not allowed, do not fall through to perp orders."""
+
+        class FakeClient:
+            def get_funding_rate(self, _product_id):
+                return {"funding_rate": 0.0002}
+
+            def get_all_positions(self):
+                return []
+
+            def get_balance(self):
+                return {"balances": {50: 0.0}}
+
+        state = {
+            "product": "NVDA",
+            "notional_usd": 100.0,
+            "leverage": 2.0,
+            "funding_entry_mode": "enter_anyway",
+            "slippage_pct": 1.0,
+        }
+
+        with patch(
+            "src.nadobro.config.get_dn_pair",
+            return_value={
+                "product": "NVDA",
+                "perp_product_id": 200,
+                "perp_symbol": "NVDA-PERP",
+                "spot_product_id": 50,
+                "spot_symbol": "WBNVDA",
+                "exchange_rate_x18": "1000000000000000000",
+                "entry_allowed": False,
+                "entry_block_reason": "Spot market is currently closed.",
+            },
+        ), patch(
+            "src.nadobro.services.trade_service.execute_spot_market_order",
+        ) as spot_mock, patch(
+            "src.nadobro.services.trade_service.execute_market_order",
+        ) as perp_mock:
+            result = delta_neutral.run_cycle(
+                telegram_id=1,
+                network="testnet",
+                state=state,
+                client=FakeClient(),
+                mid=100.0,
+                product_id=200,
+                product="NVDA",
+                open_orders=[],
+            )
+        self.assertTrue(result.get("success"))
+        self.assertEqual(result.get("action"), "wait_market_hours")
+        self.assertIn("closed", (result.get("detail") or "").lower())
+        spot_mock.assert_not_called()
+        perp_mock.assert_not_called()
+
     def test_dn_enter_anyway_opens_short_on_unfavorable_funding(self):
         class FakeClient:
             def get_funding_rate(self, _product_id):
@@ -463,13 +586,24 @@ class RuntimeAndLeverageTests(unittest.TestCase):
                 return {"balances": {1001: 0.0}}
 
         state = {
-            "product": "BTC",
+            "product": "WBSPYX",
             "notional_usd": 100.0,
             "leverage": 2.0,
             "funding_entry_mode": "enter_anyway",
             "slippage_pct": 1.0,
         }
-        with patch("src.nadobro.config.get_spot_product_id", return_value=1001), patch(
+        with patch(
+            "src.nadobro.config.get_dn_pair",
+            return_value={
+                "product": "WBSPYX",
+                "perp_product_id": 117,
+                "perp_symbol": "WBSPYX-PERP",
+                "spot_product_id": 1001,
+                "spot_symbol": "WBSPYX",
+                "entry_allowed": True,
+                "entry_block_reason": "",
+            },
+        ), patch(
             "src.nadobro.services.trade_service.execute_spot_market_order",
             return_value={"success": True},
         ), patch(
@@ -482,12 +616,35 @@ class RuntimeAndLeverageTests(unittest.TestCase):
                 state=state,
                 client=FakeClient(),
                 mid=50000.0,
-                product_id=1,
-                product="BTC",
+                product_id=117,
+                product="WBSPYX",
                 open_orders=[],
             )
         self.assertTrue(result.get("success"))
         self.assertEqual(result.get("action"), "enter_short")
+
+    def test_start_user_bot_rejects_dn_pair_when_entry_blocked(self):
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="testnet"))
+        with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
+            bot_runtime,
+            "get_dn_pair",
+            return_value={
+                "product": "WBSPYX",
+                "perp_product_id": 117,
+                "spot_product_id": 118,
+                "entry_allowed": False,
+                "entry_block_reason": "Spot market is currently closed.",
+            },
+        ):
+            ok, msg = bot_runtime.start_user_bot(
+                telegram_id=1,
+                strategy="dn",
+                product="WBSPYX",
+                leverage=2,
+                slippage_pct=1,
+            )
+        self.assertFalse(ok)
+        self.assertIn("currently closed", msg)
 
     def test_dn_strategy_defaults_include_worker_group_and_funding_mode(self):
         from src.nadobro.services.runtime_supervisor import strategy_worker_group

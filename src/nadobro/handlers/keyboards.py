@@ -787,11 +787,11 @@ def strategy_action_kb(
     is_running: bool = False,
 ):
     if strategy_id == "dn":
-        products = ["BTC", "ETH"]
+        products = [p.upper() for p in (available_products or ["BTC", "ETH"])]
     else:
         products = [p.upper() for p in (available_products or _perp_products() or ["BTC", "ETH", "SOL"])]
     if not products:
-        products = ["BTC", "ETH", "SOL"]
+        products = ["BTC", "ETH"] if strategy_id == "dn" else ["BTC", "ETH", "SOL"]
     selected = str(selected_product or products[0]).upper()
     if selected not in products:
         selected = products[0]
@@ -818,10 +818,6 @@ def strategy_action_kb(
         ],
         [*pair_buttons],
     ]
-    if strategy_id != "dn":
-        pass
-    else:
-        rows[2] = [InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}")]
     if strategy_id == "vol":
         rows[0] = [
             InlineKeyboardButton("▶ Start Long", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),

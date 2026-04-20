@@ -46,6 +46,7 @@ export interface ProductInfo {
   type: string;
   max_leverage: number;
   isolated_only: boolean;
+  dn_eligible: boolean;
   /** Nado-style tab: perps | spot | memes | defi | chains | commodities */
   category: string;
 }

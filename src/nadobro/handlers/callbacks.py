@@ -63,11 +63,25 @@ from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
     get_new_onboarding_state,
 )
-from src.nadobro.config import get_product_name, get_product_id, get_product_max_leverage, PRODUCTS, get_perp_products
+from src.nadobro.config import (
+    PRODUCTS,
+    get_dn_pair,
+    get_dn_products,
+    get_perp_products,
+    get_product_id,
+    get_product_max_leverage,
+    get_product_name,
+)
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow
 
 logger = logging.getLogger(__name__)
+
+
+def _strategy_available_products(strategy_id: str, network: str) -> tuple[str, ...]:
+    if str(strategy_id or "").lower().strip() == "dn":
+        return tuple(get_dn_products(network=network) or ("BTC", "ETH"))
+    return tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
 
 
 async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
@@ -1167,7 +1181,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        available_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+        available_pairs = _strategy_available_products(strategy_id, network)
         selected_product = str(context.user_data.get(f"strategy_pair:{strategy_id}", available_pairs[0]) or available_pairs[0]).upper()
         if selected_product not in available_pairs:
             selected_product = available_pairs[0]
@@ -1193,15 +1207,13 @@ async def _handle_strategy(query, data, context, telegram_id):
         strategy_id = parts[2]
         if strategy_id not in supported:
             return
-        if strategy_id == "dn":
-            return
         try:
             page = int(parts[3])
         except (TypeError, ValueError):
             page = 0
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        available_pairs = tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+        available_pairs = _strategy_available_products(strategy_id, network)
         selected_product = str(context.user_data.get(f"strategy_pair:{strategy_id}", available_pairs[0]) or available_pairs[0]).upper()
         if selected_product not in available_pairs:
             selected_product = available_pairs[0]
@@ -1223,7 +1235,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        allowed_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+        allowed_pairs = _strategy_available_products(strategy_id, network)
         if selected_product not in allowed_pairs:
             return
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
@@ -1457,7 +1469,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        available_pairs = ("BTC", "ETH") if strategy_id == "dn" else tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+        available_pairs = _strategy_available_products(strategy_id, network)
         allowed_pairs = set(available_pairs)
         if product not in allowed_pairs:
             await _edit_loc(
@@ -2506,6 +2518,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     mid = 0.0
     funding_rate = 0.0
     client = get_user_readonly_client(telegram_id)
+    dn_pair = get_dn_pair(product, network=network, client=client) if strategy_id == "dn" else {}
     if client:
         try:
             bal = client.get_balance()
@@ -2706,11 +2719,18 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
     funding_mode = str(conf.get("funding_entry_mode", "enter_anyway")).strip().lower()
     mode_label = "ENTER ANYWAY" if funding_mode == "enter_anyway" else "WAIT FAVORABLE"
+    dn_spot_symbol = str(dn_pair.get("spot_symbol") or product).upper()
+    dn_perp_symbol = str(dn_pair.get("perp_symbol") or f"{product}-PERP").upper()
+    dn_market_label = f"{dn_spot_symbol} spot / {dn_perp_symbol}"
     warning = ""
     if not wallet_ready:
         warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
     elif available_margin < required_margin:
         warning = f"⚠️ Add margin before starting \\(need {escape_md(_fmt_usd(required_margin))}\\)\\."
+    elif strategy_id == "dn" and dn_pair and not bool(dn_pair.get("entry_allowed", True)):
+        warning = f"⚠️ {escape_md(str(dn_pair.get('entry_block_reason') or 'This DN pair is not currently tradable.'))}"
+    elif strategy_id == "dn" and not dn_pair:
+        warning = "⚠️ This DN pair is not currently available\\."
     return (
         "🪞 *Mirror Delta Neutral Dashboard*\n"
         f"Strategy Status: {status_emoji} *{status_label}*\n\n"
@@ -2724,7 +2744,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         f"• Wallet: `{escape_md(wallet_short)}`\n"
         f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
         "⚙️ *Current Settings*\n"
-        f"• Market: *{escape_md(product)}*\n"
+        f"• Market: *{escape_md(dn_market_label)}*\n"
         f"• Size: *{escape_md(_fmt_usd(margin_usd))}*\n"
         f"• Funding Leverage: *{escape_md(f'{leverage:.0f}x')}*\n"
         f"• Funding Entry: *{escape_md(mode_label)}*\n"

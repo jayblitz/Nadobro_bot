@@ -7,6 +7,7 @@ from fastapi import APIRouter
 
 from miniapp_api.config import (
     PRODUCTS,
+    get_dn_products,
     get_perp_products,
     get_product_id,
     get_product_max_leverage,
@@ -39,6 +40,7 @@ async def list_products(user: AuthUser, client: UserClient):
     """Return all available perpetual products for the user's network."""
     network = user.network
     names = await run_blocking(get_perp_products, network)
+    dn_eligible = set(await run_blocking(get_dn_products, network))
     live_names: set[str] = set()
     try:
         # Keep only products currently returned by live market prices.
@@ -69,6 +71,7 @@ async def list_products(user: AuthUser, client: UserClient):
             type="perp",
             max_leverage=get_product_max_leverage(name, network=network),
             isolated_only=is_product_isolated_only(name, network=network),
+            dn_eligible=name in dn_eligible,
             category=get_market_category(name),
         ))
     return result

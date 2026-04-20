@@ -49,22 +49,71 @@ class StrategyPreviewCallbackTests(unittest.TestCase):
         ), patch.object(callbacks, "get_user", return_value=fake_user), patch.object(
             callbacks, "get_product_id", return_value=2
         ), patch.object(
-            callbacks, "get_user_bot_status", return_value={}
-        ):
-            text = callbacks._build_strategy_preview_text(telegram_id=1, strategy_id="vol", product="BTC")
-        self.assertIn("Volume Bot Dashboard", text)
-        self.assertIn("Entry/Close *Limit*", text)
-        self.assertIn("Mode *MAINNET*", text)
-
-    def test_vol_preview_renders_without_client(self):
-        with patch.object(callbacks, "get_user_settings", return_value=self._settings()), patch.object(
-            callbacks, "get_user_readonly_client", return_value=None
+            callbacks, "ensure_active_wallet_ready", return_value=(True, "")
+        ), patch.object(
+            callbacks, "get_user_wallet_info", return_value={"active_address": "0x1234567890abcdef1234"}
         ), patch.object(
             callbacks, "get_user_bot_status", return_value={}
         ):
             text = callbacks._build_strategy_preview_text(telegram_id=1, strategy_id="vol", product="BTC")
         self.assertIn("Volume Bot Dashboard", text)
-        self.assertIn("Mid *N/A*", text)
+        self.assertIn("Direction: *LONG*", text)
+        self.assertIn("Wallet:", text)
+
+    def test_vol_preview_renders_without_client(self):
+        with patch.object(callbacks, "get_user_settings", return_value=self._settings()), patch.object(
+            callbacks, "get_user_readonly_client", return_value=None
+        ), patch.object(
+            callbacks, "ensure_active_wallet_ready", return_value=(False, "setup")
+        ), patch.object(
+            callbacks, "get_user_wallet_info", return_value={}
+        ), patch.object(
+            callbacks, "get_user_bot_status", return_value={}
+        ):
+            text = callbacks._build_strategy_preview_text(telegram_id=1, strategy_id="vol", product="BTC")
+        self.assertIn("Volume Bot Dashboard", text)
+        self.assertIn("Wallet: `N/A`", text)
+
+    def test_dn_preview_uses_dynamic_pair_symbols(self):
+        dn_settings = (
+            "testnet",
+            {
+                "default_leverage": 3,
+                "strategies": {
+                    "dn": {
+                        "notional_usd": 50.0,
+                        "funding_entry_mode": "enter_anyway",
+                        "interval_seconds": 90,
+                        "auto_close_on_maintenance": 1,
+                    }
+                },
+            },
+        )
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="testnet"))
+        with patch.object(callbacks, "get_user_settings", return_value=dn_settings), patch.object(
+            callbacks, "get_user_readonly_client", return_value=_PreviewClient(mid=123.45, balance=200.0)
+        ), patch.object(callbacks, "get_user", return_value=fake_user), patch.object(
+            callbacks, "get_product_id", return_value=117
+        ), patch.object(
+            callbacks, "ensure_active_wallet_ready", return_value=(True, "")
+        ), patch.object(
+            callbacks, "get_user_wallet_info", return_value={"active_address": "0x1234567890abcdef1234"}
+        ), patch.object(
+            callbacks,
+            "get_dn_pair",
+            return_value={
+                "product": "WBSPYX",
+                "spot_symbol": "WBSPYX",
+                "perp_symbol": "WBSPYX-PERP",
+                "entry_allowed": True,
+                "entry_block_reason": "",
+            },
+        ), patch.object(
+            callbacks, "get_user_bot_status", return_value={}
+        ):
+            text = callbacks._build_strategy_preview_text(telegram_id=1, strategy_id="dn", product="WBSPYX")
+        self.assertIn("Mirror Delta Neutral Dashboard", text)
+        self.assertIn("WBSPYX spot / WBSPYX\\-PERP", text)
 
 
 if __name__ == "__main__":

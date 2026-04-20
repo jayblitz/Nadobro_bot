@@ -9,8 +9,10 @@ from src.nadobro.models.database import (
     find_open_trade, insert_fill_sync, get_trade_by_id,
 )
 from src.nadobro.config import (
+    get_dn_pair,
     get_product_id,
     get_spot_product_id,
+    get_spot_metadata,
     get_product_name,
     get_product_max_leverage,
     get_perp_products,
@@ -604,15 +606,24 @@ def execute_spot_market_order(
     slippage_pct: float = 1.0,
     source: str = "manual",
     strategy_session_id: int = None,
+    network: str | None = None,
+    spot_product_id: int | None = None,
+    spot_symbol: str | None = None,
+    asset_label: str | None = None,
 ) -> dict:
     builder_route = _builder_route_payload()
     if builder_route.get("error"):
         return {"success": False, "error": builder_route["error"]}
 
     asset = (asset or "").upper().strip()
-    spot_product_id = get_spot_product_id(asset)
+    user = get_user(telegram_id)
+    selected_network = str(network or (user.network_mode.value if user else "mainnet"))
+    spot_meta = get_spot_metadata(asset, network=selected_network)
+    spot_product_id = int(spot_product_id) if spot_product_id is not None else get_spot_product_id(asset, network=selected_network)
     if spot_product_id is None:
         return {"success": False, "error": f"{asset} spot is not supported for this strategy."}
+    display_asset = str(asset_label or spot_symbol or spot_meta.get("symbol") or asset).upper()
+    spot_symbol = str(spot_symbol or spot_meta.get("symbol") or display_asset).upper()
     if size <= 0:
         return {"success": False, "error": "Spot size must be positive."}
 
@@ -620,14 +631,14 @@ def execute_spot_market_order(
     if not wallet_ok:
         return {"success": False, "error": wallet_msg}
 
-    readonly = get_user_readonly_client(telegram_id)
+    readonly = get_user_readonly_client(telegram_id, network=selected_network)
     if not readonly:
         return {"success": False, "error": "Could not initialize client. Please try again."}
 
     spot_price = readonly.get_market_price(spot_product_id)
     mid = float(spot_price.get("mid") or 0.0)
     if mid <= 0:
-        return {"success": False, "error": f"Could not fetch {asset} spot price."}
+        return {"success": False, "error": f"Could not fetch {display_asset} spot price."}
     notional = size * mid
     if notional < MIN_TRADE_SIZE_USD:
         return {"success": False, "error": f"Minimum trade size is ${MIN_TRADE_SIZE_USD}."}
@@ -640,7 +651,7 @@ def execute_spot_market_order(
         return {
             "success": False,
             "error": (
-                f"Insufficient USDT0 for {asset} spot buy.\n"
+                f"Insufficient USDT0 for {display_asset} spot buy.\n"
                 f"Required: ~${notional:,.2f}\n"
                 f"Available: ${usdt_balance:,.2f}"
             ),
@@ -649,29 +660,26 @@ def execute_spot_market_order(
         return {
             "success": False,
             "error": (
-                f"Insufficient {asset} spot balance to sell.\n"
+                f"Insufficient {display_asset} spot balance to sell.\n"
                 f"Required: {size:,.6f}\n"
                 f"Available: {spot_balance:,.6f}"
             ),
         }
 
     if enforce_rate_limit:
-        user_obj = get_user(telegram_id)
-        net = user_obj.network_mode.value if user_obj else "mainnet"
-        allowed, msg = check_rate_limit(telegram_id, network=net)
+        allowed, msg = check_rate_limit(telegram_id, network=selected_network)
         if not allowed:
             return {"success": False, "error": msg}
 
-    client = get_user_nado_client(telegram_id)
-    user = get_user(telegram_id)
+    client = get_user_nado_client(telegram_id, network=selected_network)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
-    network = user.network_mode.value
+    network = selected_network
 
     spot_trade_data = {
         "user_id": telegram_id,
         "product_id": spot_product_id,
-        "product_name": f"{asset}-SPOT",
+        "product_name": spot_symbol,
         "order_type": OrderTypeEnum.MARKET.value,
         "side": OrderSide.LONG.value if is_buy else OrderSide.SHORT.value,
         "size": size,
@@ -736,7 +744,8 @@ def execute_spot_market_order(
         return {
             "success": True,
             "side": "BUY" if is_buy else "SELL",
-            "asset": asset,
+            "asset": display_asset,
+            "spot_symbol": spot_symbol,
             "size": size,
             "price": post_px,
             "product_id": spot_product_id,
@@ -1602,6 +1611,7 @@ def close_delta_neutral_legs(
     slippage_pct: float = 1.0,
     source: str = "dn",
     strategy_session_id: int | None = None,
+    pair: dict | None = None,
 ) -> dict:
     asset = str(asset or "").upper().replace("-PERP", "").strip()
     if not asset:
@@ -1614,10 +1624,14 @@ def close_delta_neutral_legs(
     readonly = get_user_readonly_client(telegram_id, network=selected_network)
     if not readonly:
         return {"success": False, "error": "Readonly client unavailable for DN close."}
+    dn_pair = dict(pair or get_dn_pair(asset, network=selected_network) or {})
+    perp_product = str(dn_pair.get("product") or asset).upper()
+    spot_product_id = dn_pair.get("spot_product_id")
+    spot_symbol = str(dn_pair.get("spot_symbol") or asset).upper()
 
     perp_result: dict = {"success": True, "skipped": True}
     try:
-        close_result = close_position(telegram_id, asset, network=selected_network)
+        close_result = close_position(telegram_id, perp_product, network=selected_network)
         if close_result.get("success") or "No open positions" in str(close_result.get("error") or ""):
             perp_result = close_result if close_result.get("success") else {"success": True, "skipped": True}
         else:
@@ -1627,7 +1641,8 @@ def close_delta_neutral_legs(
 
     spot_result: dict = {"success": True, "skipped": True, "spot_size": 0.0}
     try:
-        spot_product_id = get_spot_product_id(asset)
+        if spot_product_id is None:
+            spot_product_id = get_spot_product_id(asset, network=selected_network)
         if spot_product_id is not None:
             balance = readonly.get_balance() or {}
             balances = balance.get("balances", {}) or {}
@@ -1643,6 +1658,10 @@ def close_delta_neutral_legs(
                     slippage_pct=slippage_pct,
                     source=source,
                     strategy_session_id=strategy_session_id,
+                    network=selected_network,
+                    spot_product_id=int(spot_product_id),
+                    spot_symbol=spot_symbol,
+                    asset_label=spot_symbol,
                 )
     except Exception as e:
         spot_result = {"success": False, "error": str(e)}

@@ -34,7 +34,8 @@ const STRATEGIES: StrategyCard[] = [
   {
     type: "dn",
     name: "Delta Neutral",
-    description: "Funding rate farming — spot long + perp short hedge.",
+    description:
+      "Funding rate farming — spot long + perp short (majors and listed equities such as NVDA, AAPL, TSLA when Nado lists the pair).",
     color: "from-teal-500/20 to-transparent",
   },
   {
@@ -71,11 +72,18 @@ export default function Strategies() {
     return list.length ? list : ["BTC", "ETH", "SOL"];
   }, [products]);
 
+  const dnNames = useMemo(() => {
+    const list = products?.filter((p) => p.type === "perp" && p.dn_eligible).map((p) => p.name) ?? [];
+    return list.length ? list : ["BTC", "ETH"];
+  }, [products]);
+
+  const selectableProducts = selected === "dn" ? dnNames : perpNames;
+
   useEffect(() => {
-    if (perpNames.length && !perpNames.includes(product)) {
-      setProduct(perpNames[0]!);
+    if (selectableProducts.length && !selectableProducts.includes(product)) {
+      setProduct(selectableProducts[0]!);
     }
-  }, [perpNames, product]);
+  }, [product, selectableProducts]);
 
   const {
     data: status,
@@ -242,7 +250,7 @@ export default function Strategies() {
               }}
               className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
             >
-              {perpNames.map((n) => (
+              {selectableProducts.map((n) => (
                 <option key={n} value={n}>
                   {n}
                 </option>

@@ -11,6 +11,12 @@ from src.nadobro.services import product_catalog
 
 
 class DynamicProductCatalogTests(unittest.TestCase):
+    def test_dn_underlying_key_maps_xstock_wrapped_symbol(self):
+        self.assertEqual(product_catalog._dn_underlying_key("wbNVDA"), "NVDA")
+        self.assertEqual(product_catalog._dn_underlying_key("wbAAPL"), "AAPL")
+        # Wrapped synthetic ticker keeps legacy WB…X stripping (e.g. SPY perp leg).
+        self.assertEqual(product_catalog._dn_underlying_key("WBSPYX"), "SPY")
+
     def test_parse_trade_intent_recognizes_listed_perp(self):
         names = product_catalog.list_perp_names(network="mainnet", refresh=True)
         self.assertTrue(names, "expected non-empty perp list from catalog")
