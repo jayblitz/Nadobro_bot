@@ -13,11 +13,20 @@ from src.nadobro.strategies import volume_bot
 
 
 class _VolClient:
-    def __init__(self, mid=100.0, open_orders=None, positions=None, network="mainnet", balance=1000.0):
+    def __init__(
+        self,
+        mid=100.0,
+        open_orders=None,
+        positions=None,
+        network="mainnet",
+        balance=1000.0,
+        spot_base_by_id=None,
+    ):
         self._mid = mid
         self._open_orders = open_orders or []
         self._positions = positions or []
         self._balance = float(balance)
+        self._spot_base = dict(spot_base_by_id or {})
         self.network = network
 
     def get_market_price(self, _product_id):
@@ -30,7 +39,11 @@ class _VolClient:
         return list(self._positions)
 
     def get_balance(self):
-        return {"balances": {0: self._balance}}
+        b = {0: self._balance}
+        for k, v in self._spot_base.items():
+            b[k] = v
+            b[str(k)] = v
+        return {"balances": b}
 
 
 class VolStrategyRebuildTests(unittest.TestCase):
@@ -186,6 +199,47 @@ class VolStrategyRebuildTests(unittest.TestCase):
         self.assertTrue(finalize_mock.called)
         self.assertTrue(close_mock.called)
         self.assertTrue(any(s.get("running") is False for s in saved_states))
+
+    def test_vol_spot_idle_places_spot_buy_limit(self):
+        state = {
+            "product": "KBTC",
+            "vol_market": "spot",
+            "vol_direction": "long",
+            "tp_pct": 1.0,
+            "sl_pct": 1.0,
+        }
+        client = _VolClient(mid=100_000.0)
+        with patch.object(volume_bot, "list_volume_spot_product_names", return_value=["KBTC"]), patch.object(
+            volume_bot, "get_spot_product_id", return_value=42
+        ), patch.object(
+            volume_bot, "get_spot_metadata", return_value={"symbol": "KBTC", "id": 42}
+        ), patch.object(
+            volume_bot,
+            "execute_spot_limit_order",
+            return_value={"success": True, "digest": "s1", "price": 99900.0, "size": 0.001},
+        ):
+            result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
+        self.assertTrue(result.get("success"))
+        self.assertEqual(result.get("action"), "opened_limit_wait_fill")
+        self.assertEqual(state.get("vol_phase"), "pending_fill")
+        self.assertEqual(state.get("vol_market"), "spot")
+
+    def test_vol_spot_pending_fill_detects_balance_fill(self):
+        state = {
+            "product": "KBTC",
+            "vol_market": "spot",
+            "vol_phase": "pending_fill",
+            "vol_entry_digest": "d-open",
+            "vol_entry_size": 1.0,
+        }
+        client = _VolClient(open_orders=[], spot_base_by_id={42: 1.0})
+        with patch.object(volume_bot, "list_volume_spot_product_names", return_value=["KBTC"]), patch.object(
+            volume_bot, "get_spot_product_id", return_value=42
+        ), patch.object(volume_bot, "get_spot_metadata", return_value={"symbol": "KBTC"}):
+            result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
+        self.assertTrue(result.get("success"))
+        self.assertEqual(result.get("action"), "entry_filled_wait_close")
+        self.assertEqual(state.get("vol_phase"), "filled_wait_close")
 
 
 if __name__ == "__main__":

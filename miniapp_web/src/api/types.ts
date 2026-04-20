@@ -3,6 +3,14 @@
 /** Perp order / strategy direction — matches `^(long|short)$` on order and strategy requests in schemas.py */
 export type OrderSide = "long" | "short";
 
+/** Volume strategy venue — matches `StrategyStartRequest.vol_market` in schemas.py */
+export type VolMarket = "perp" | "spot";
+
+/** GET /api/strategies/volume-spot-products */
+export interface VolumeSpotProductsResponse {
+  names: string[];
+}
+
 /** Runtime strategy ids — matches `StrategyStartRequest.strategy` in schemas.py */
 const STRATEGY_IDS = ["grid", "rgrid", "dn", "vol", "bro"] as const;
 export type StrategyId = (typeof STRATEGY_IDS)[number];
@@ -139,6 +147,8 @@ export interface StrategyBotStatus {
   global_pause_active?: boolean;
   strategy?: string | null;
   product?: string | null;
+  /** Volume bot only: perp vs KBTC/WETH/USDC spot loop */
+  vol_market?: string | null;
   runs?: number;
   last_error?: string | null;
   started_at?: string | null;

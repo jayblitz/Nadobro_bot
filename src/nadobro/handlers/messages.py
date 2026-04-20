@@ -300,6 +300,12 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         leverage = float(action_data.get("leverage", 3))
         slippage_pct = float(action_data.get("slippage_pct", 1))
         direction = str(action_data.get("direction") or "long")
+        start_kwargs = {
+            "direction": direction,
+        }
+        if str(strategy or "").lower() == "vol":
+            vm = str(action_data.get("vol_market") or "perp").strip().lower()
+            start_kwargs["vol_market"] = vm if vm in ("perp", "spot") else "perp"
         ok, msg = await run_blocking(
             start_user_bot,
             telegram_id,
@@ -307,7 +313,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             product=product,
             leverage=leverage,
             slippage_pct=slippage_pct,
-            direction=direction,
+            **start_kwargs,
         )
         if ok:
             reply = f"🚀 {escape_md(msg)}\n\nUse /status to monitor live loop health\\."

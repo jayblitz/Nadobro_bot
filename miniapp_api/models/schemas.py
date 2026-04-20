@@ -178,6 +178,7 @@ class StrategyStartRequest(BaseModel):
     leverage: float = Field(default=3.0, ge=1)
     slippage_pct: float = Field(default=1.0, ge=0, le=100)
     direction: str = Field(default="long", pattern=r"^(long|short)$")
+    vol_market: str = Field(default="perp", pattern=r"^(perp|spot)$")
 
 
 class StrategyActionResponse(BaseModel):

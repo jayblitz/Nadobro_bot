@@ -71,6 +71,9 @@ from src.nadobro.config import (
     get_product_id,
     get_product_max_leverage,
     get_product_name,
+    get_spot_product_id,
+    list_volume_spot_product_names,
+    normalize_volume_spot_symbol,
 )
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow
@@ -78,10 +81,19 @@ from src.nadobro.services.perf import timed_metric, log_slow
 logger = logging.getLogger(__name__)
 
 
-def _strategy_available_products(strategy_id: str, network: str) -> tuple[str, ...]:
-    if str(strategy_id or "").lower().strip() == "dn":
+def _strategy_available_products(strategy_id: str, network: str, vol_market: str | None = None) -> tuple[str, ...]:
+    sid = str(strategy_id or "").lower().strip()
+    if sid == "dn":
         return tuple(get_dn_products(network=network) or ("BTC", "ETH"))
+    if sid == "vol" and str(vol_market or "perp").strip().lower() == "spot":
+        names = list_volume_spot_product_names(network=network)
+        return tuple(names) if names else tuple()
     return tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+
+
+def _vol_market_pref(context) -> str:
+    m = str(context.user_data.get("vol_market:vol") or "perp").strip().lower()
+    return m if m in ("perp", "spot") else "perp"
 
 
 async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
@@ -1164,6 +1176,25 @@ async def _handle_strategy(query, data, context, telegram_id):
     action = parts[1] if len(parts) > 1 else ""
     strategy_id = parts[2] if len(parts) > 2 else ""
 
+    if action == "volmarket" and len(parts) >= 4:
+        sid = parts[2]
+        market = str(parts[3] or "perp").strip().lower()
+        if sid != "vol" or market not in ("perp", "spot"):
+            return
+        context.user_data["vol_market:vol"] = market
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        if market == "spot":
+            names = list_volume_spot_product_names(network=network)
+            if names:
+                context.user_data["strategy_pair:vol"] = names[0]
+        else:
+            perps = tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
+            if perps:
+                context.user_data["strategy_pair:vol"] = perps[0]
+        await _handle_strategy(query, f"strategy:preview:{sid}", context, telegram_id)
+        return
+
     if action == "preview":
         if strategy_id not in supported:
             return
@@ -1181,18 +1212,36 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        available_pairs = _strategy_available_products(strategy_id, network)
+        vm = _vol_market_pref(context) if strategy_id == "vol" else None
+        available_pairs = _strategy_available_products(strategy_id, network, vm)
+        if strategy_id == "vol" and vm == "spot" and not available_pairs:
+            await _edit_loc(
+                query,
+                "⚠️ *Volume Spot*\n\nNo KBTC/WETH/USDC spot books resolved on this network\\. "
+                "Switch to mainnet or pick **Perp**\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=strategy_action_kb("vol", "BTC", ["BTC"], vol_market=vm),
+            )
+            return
         selected_product = str(context.user_data.get(f"strategy_pair:{strategy_id}", available_pairs[0]) or available_pairs[0]).upper()
         if selected_product not in available_pairs:
             selected_product = available_pairs[0]
             context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
+        vkb_prev = _vol_market_pref(context) if strategy_id == "vol" else None
         with timed_metric("cb.strategy.preview"):
-            preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
+            preview_text = await run_blocking(
+                _build_strategy_preview_text,
+                telegram_id,
+                strategy_id,
+                selected_product,
+                vkb_prev,
+            )
         bot_status = get_user_bot_status(telegram_id) or {}
         is_running = bool(
             bot_status.get("running")
             and str(bot_status.get("strategy") or "").lower() == strategy_id
         )
+        vkb = _vol_market_pref(context) if strategy_id == "vol" else "perp"
         await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -1201,6 +1250,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 selected_product,
                 list(available_pairs),
                 is_running=is_running,
+                vol_market=vkb,
             ),
         )
     elif action == "custom" and len(parts) >= 4:
@@ -1213,7 +1263,11 @@ async def _handle_strategy(query, data, context, telegram_id):
             page = 0
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        available_pairs = _strategy_available_products(strategy_id, network)
+        vm = _vol_market_pref(context) if strategy_id == "vol" else None
+        available_pairs = _strategy_available_products(strategy_id, network, vm)
+        if not available_pairs:
+            await _edit_loc(query, "⚠️ No assets available for this mode\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
         selected_product = str(context.user_data.get(f"strategy_pair:{strategy_id}", available_pairs[0]) or available_pairs[0]).upper()
         if selected_product not in available_pairs:
             selected_product = available_pairs[0]
@@ -1235,17 +1289,26 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        allowed_pairs = _strategy_available_products(strategy_id, network)
+        vm = _vol_market_pref(context) if strategy_id == "vol" else None
+        allowed_pairs = _strategy_available_products(strategy_id, network, vm)
         if selected_product not in allowed_pairs:
             return
         context.user_data[f"strategy_pair:{strategy_id}"] = selected_product
+        vkb_pair = _vol_market_pref(context) if strategy_id == "vol" else None
         with timed_metric("cb.strategy.preview"):
-            preview_text = await run_blocking(_build_strategy_preview_text, telegram_id, strategy_id, selected_product)
+            preview_text = await run_blocking(
+                _build_strategy_preview_text,
+                telegram_id,
+                strategy_id,
+                selected_product,
+                vkb_pair,
+            )
         bot_status = get_user_bot_status(telegram_id) or {}
         is_running = bool(
             bot_status.get("running")
             and str(bot_status.get("strategy") or "").lower() == strategy_id
         )
+        vkb = _vol_market_pref(context) if strategy_id == "vol" else "perp"
         await _edit_loc(query, 
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -1254,6 +1317,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 selected_product,
                 list(allowed_pairs),
                 is_running=is_running,
+                vol_market=vkb,
             ),
         )
     elif action == "config":
@@ -1469,14 +1533,21 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        available_pairs = _strategy_available_products(strategy_id, network)
+        vm = _vol_market_pref(context) if strategy_id == "vol" else None
+        available_pairs = _strategy_available_products(strategy_id, network, vm)
         allowed_pairs = set(available_pairs)
         if product not in allowed_pairs:
+            vkb_err = _vol_market_pref(context) if strategy_id == "vol" else "perp"
             await _edit_loc(
                 query,
                 f"⚠️ {escape_md(product)} is not currently available on {escape_md(network)}\\.\nPlease pick another asset\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=strategy_action_kb(strategy_id, available_pairs[0], list(available_pairs)),
+                reply_markup=strategy_action_kb(
+                    strategy_id,
+                    available_pairs[0],
+                    list(available_pairs),
+                    vol_market=vkb_err,
+                ),
             )
             return
         if not is_new_onboarding_complete(telegram_id):
@@ -1502,14 +1573,20 @@ async def _handle_strategy(query, data, context, telegram_id):
         strategy_leverage = 1 if strategy_id == "vol" else settings.get("default_leverage", 3)
         if strategy_id == "dn":
             strategy_leverage = max(1, min(float(strategy_leverage), 5))
-        await execute_action_directly(query, context, telegram_id, {
+        vol_m = _vol_market_pref(context) if strategy_id == "vol" else "perp"
+        if strategy_id == "vol" and vol_m == "spot":
+            start_direction = "long"
+        start_payload = {
             "type": "start_strategy",
             "strategy": strategy_id,
             "product": product,
             "leverage": strategy_leverage,
             "slippage_pct": settings.get("slippage", 1),
             "direction": start_direction,
-        })
+        }
+        if strategy_id == "vol":
+            start_payload["vol_market"] = vol_m
+        await execute_action_directly(query, context, telegram_id, start_payload)
     elif action == "status":
         st = get_user_bot_status(telegram_id)
         readiness = evaluate_readiness(telegram_id)
@@ -2490,7 +2567,12 @@ def _build_bro_preview_text(telegram_id: int) -> str:
     )
 
 
-def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: str) -> str:
+def _build_strategy_preview_text(
+    telegram_id: int,
+    strategy_id: str,
+    product: str,
+    vol_market: str | None = None,
+) -> str:
     names = {
         "grid": "GRID",
         "rgrid": "Reverse GRID",
@@ -2531,12 +2613,20 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         try:
             user = get_user(telegram_id)
             network = user.network_mode.value if user else "mainnet"
-            pid = get_product_id(product, network=network, client=client)
+            vm_prev = str(vol_market or "perp").strip().lower() if strategy_id == "vol" else "perp"
+            if strategy_id == "vol" and vm_prev == "spot":
+                sym = normalize_volume_spot_symbol(product)
+                pid = get_spot_product_id(sym, network=network, client=client)
+            else:
+                pid = get_product_id(product, network=network, client=client)
             if pid is not None:
                 mp = client.get_market_price(pid)
                 mid = float(mp.get("mid", 0) or 0.0)
-                fr = client.get_funding_rate(pid) or {}
-                funding_rate = float(fr.get("funding_rate", 0) or 0.0)
+                if strategy_id == "vol" and vm_prev == "spot":
+                    funding_rate = 0.0
+                else:
+                    fr = client.get_funding_rate(pid) or {}
+                    funding_rate = float(fr.get("funding_rate", 0) or 0.0)
         except Exception:
             pass
 
@@ -2545,6 +2635,10 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         str(bot_status.get("strategy") or "").lower() == strategy_id
         and str(bot_status.get("product") or "").upper() == str(product or "").upper()
     )
+    if strategy_id == "vol":
+        vm_prev = str(vol_market or "perp").strip().lower()
+        st_vm = str(bot_status.get("vol_market") or "perp").strip().lower()
+        active_same_strategy = active_same_strategy and st_vm == vm_prev
     if active_same_strategy and bool(bot_status.get("running")):
         status_emoji = "⏸️" if bool(bot_status.get("is_paused")) else "🟢"
         status_label = "PAUSED" if bool(bot_status.get("is_paused")) else "LIVE"
@@ -2586,7 +2680,20 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         volume_remaining = float(bot_status.get("volume_remaining_usd") or max(0.0, target_volume - volume_done))
         session_fees = float(bot_status.get("session_fees_usd") or session_fees)
         session_pnl = float(bot_status.get("session_realized_pnl_usd") or session_pnl)
-        direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
+        vm_dash = str(vol_market or "perp").strip().lower()
+        if vm_dash not in ("perp", "spot"):
+            vm_dash = "perp"
+        if vm_dash == "spot":
+            direction_label = "Round-trip (buy → sell)"
+            market_label = f"{str(product).upper()} SPOT"
+            how_it_works = (
+                "Post\\-only spot buy at the bid, wait for fill, wait for the close timer, "
+                "then post\\-only sell at the ask\\. Session TP/SL apply to realized PnL\\."
+            )
+        else:
+            direction_label = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
+            market_label = f"{str(product).upper()}-PERP"
+            how_it_works = "Places maker-only entry and exit orders to build volume while enforcing session TP/SL\\."
         phase = str(bot_status.get("vol_phase") or "idle").upper()
         warning = ""
         if not wallet_ready:
@@ -2601,9 +2708,9 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             f"• Wallet: `{escape_md(wallet_short)}`\n"
             f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
             "⚙️ *Configuration*\n"
-            f"• Market: *{escape_md(product)}\\-PERP*\n"
+            f"• Market: *{escape_md(market_label)}*\n"
             f"• Size: *{escape_md(_fmt_usd(fixed_margin))}*\n"
-            f"• Direction: *{escape_md(direction)}*\n"
+            f"• Direction: *{escape_md(direction_label)}*\n"
             f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
             f"• TP/SL: *{escape_md(f'{tp_pct:.1f}% / {sl_pct:.1f}%')}*\n\n"
             "📊 *Statistics*\n"
@@ -2614,7 +2721,7 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n"
             f"• Phase: *{escape_md(phase)}*\n\n"
             "ℹ️ *How it works*\n"
-            "Places maker-only entry and exit orders to build volume while enforcing session TP/SL\\."
+            f"{how_it_works}"
             + (f"\n\n{warning}" if warning else "")
         )
 

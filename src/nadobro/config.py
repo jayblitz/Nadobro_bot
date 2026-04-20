@@ -178,6 +178,38 @@ def get_dn_pair(product: str, network: str = None, client=None) -> dict:
     }
 
 
+# Volume strategy spot mode: Nado spot symbols (kBTC/wETH/USDC map here). Listed order is UI order.
+VOLUME_SPOT_SYMBOLS: tuple[str, ...] = ("KBTC", "WETH", "USDC")
+
+
+def normalize_volume_spot_symbol(name: str) -> str:
+    """Map user/miniapp input to canonical VOLUME_SPOT_SYMBOLS key."""
+    raw = (name or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower().replace(" ", "").replace("-", "")
+    if low in ("kbtc",):
+        return "KBTC"
+    if low in ("weth",):
+        return "WETH"
+    if low in ("usdc",):
+        return "USDC"
+    up = raw.upper()
+    if up in VOLUME_SPOT_SYMBOLS:
+        return up
+    return up
+
+
+def list_volume_spot_product_names(network: str = None, client=None) -> list[str]:
+    """Symbols from VOLUME_SPOT_SYMBOLS that resolve to a spot product id on this network."""
+    network_name = str(network or _default_catalog_network())
+    out: list[str] = []
+    for sym in VOLUME_SPOT_SYMBOLS:
+        if get_spot_product_id(sym, network=network_name, client=client) is not None:
+            out.append(sym)
+    return out
+
+
 def get_dn_products(network: str = None, client=None) -> list[str]:
     network_name = str(network or _default_catalog_network())
     try:

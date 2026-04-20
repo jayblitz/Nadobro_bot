@@ -279,7 +279,12 @@ def get_runtime_wallet_readiness(telegram_id: int, verify_signer: bool = True) -
     return payload
 
 
-def run_strategy_start_preflight(telegram_id: int, product: str, network: str) -> tuple[bool, str]:
+def run_strategy_start_preflight(
+    telegram_id: int,
+    product: str,
+    network: str,
+    vol_market: str = "perp",
+) -> tuple[bool, str]:
     ready, message = ensure_active_wallet_ready(telegram_id)
     if not ready:
         return False, message
@@ -293,11 +298,20 @@ def run_strategy_start_preflight(telegram_id: int, product: str, network: str) -
     except ValueError as e:
         return False, f"Builder routing misconfigured: {e}"
 
-    product_id = get_product_id(str(product).upper(), network=network)
-    if product_id is None:
-        return False, f"Unknown product '{product}'."
+    vm = str(vol_market or "perp").strip().lower()
+    if vm == "spot":
+        from src.nadobro.config import get_spot_product_id, normalize_volume_spot_symbol
+
+        sym = normalize_volume_spot_symbol(str(product or "").strip())
+        product_id = get_spot_product_id(sym, network=network)
+        if product_id is None:
+            return False, f"Unknown spot product '{sym}' on {network}."
+    else:
+        product_id = get_product_id(str(product).upper(), network=network)
+        if product_id is None:
+            return False, f"Unknown product '{product}'."
     try:
-        mp = signing_client.get_market_price(product_id)
+        mp = signing_client.get_market_price(int(product_id))
         mid = float((mp or {}).get("mid") or 0.0)
     except Exception as e:
         return False, f"Could not fetch market price for {str(product).upper()} ({network}): {e}"

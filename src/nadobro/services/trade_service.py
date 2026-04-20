@@ -760,6 +760,239 @@ def execute_spot_market_order(
     return result
 
 
+def validate_spot_limit_order(
+    telegram_id: int,
+    spot_product_id: int,
+    size: float,
+    price: float,
+    is_buy: bool,
+    network: str,
+    enforce_rate_limit: bool = True,
+) -> tuple[bool, str]:
+    if size <= 0 or price <= 0:
+        return False, "Spot limit size and price must be positive."
+    wallet_ok, wallet_msg = ensure_active_wallet_ready(telegram_id)
+    if not wallet_ok:
+        return False, wallet_msg
+    client = get_user_readonly_client(telegram_id, network=network)
+    if not client:
+        return False, "Could not initialize client. Please try again."
+    try:
+        mp = client.get_market_price(int(spot_product_id))
+    except Exception as e:
+        logger.warning("validate_spot_limit_order: get_market_price failed: %s", e)
+        return False, "Could not fetch spot market price."
+    mid = float((mp or {}).get("mid") or 0.0)
+    if mid <= 0:
+        return False, "Could not fetch spot market price."
+    notional = float(size) * float(price)
+    if notional < MIN_TRADE_SIZE_USD:
+        return False, f"Minimum trade size is ${MIN_TRADE_SIZE_USD}."
+    balance = client.get_balance() or {}
+    balances = balance.get("balances", {}) or {}
+    usdt_balance = float(balances.get(0, balances.get("0", 0)) or 0.0)
+    spot_balance = float(balances.get(spot_product_id, balances.get(str(spot_product_id), 0)) or 0.0)
+    if is_buy and notional > usdt_balance * 0.98:
+        return (
+            False,
+            f"Insufficient USDT0 for spot limit buy.\nRequired: ~${notional:,.2f}\nAvailable: ${usdt_balance:,.2f}",
+        )
+    if (not is_buy) and size > spot_balance * 0.999:
+        return (
+            False,
+            f"Insufficient spot base balance to sell.\nRequired: {size:,.8f}\nAvailable: {spot_balance:,.8f}",
+        )
+    if enforce_rate_limit:
+        allowed, msg = check_rate_limit(telegram_id, network=network)
+        if not allowed:
+            return False, msg
+    return True, ""
+
+
+def execute_spot_limit_order(
+    telegram_id: int,
+    asset: str,
+    size: float,
+    price: float,
+    is_buy: bool,
+    enforce_rate_limit: bool = True,
+    post_only: bool = False,
+    reduce_only: bool = False,
+    source: str = "manual",
+    strategy_session_id: int = None,
+    network: str | None = None,
+    spot_product_id: int | None = None,
+    spot_symbol: str | None = None,
+    asset_label: str | None = None,
+    order_type_override: str | None = None,
+    open_trade_id: int | None = None,
+) -> dict:
+    """Place a limit order on a Nado spot book (same engine path as perp limits)."""
+    builder_route = _builder_route_payload()
+    if builder_route.get("error"):
+        return {"success": False, "error": builder_route["error"]}
+
+    asset = (asset or "").upper().strip()
+    user = get_user(telegram_id)
+    selected_network = str(network or (user.network_mode.value if user else "mainnet"))
+    spot_meta = get_spot_metadata(asset, network=selected_network)
+    spot_product_id = int(spot_product_id) if spot_product_id is not None else get_spot_product_id(asset, network=selected_network)
+    if spot_product_id is None:
+        return {"success": False, "error": f"{asset} spot is not supported."}
+    display_asset = str(asset_label or spot_symbol or spot_meta.get("symbol") or asset).upper()
+    spot_symbol = str(spot_symbol or spot_meta.get("symbol") or display_asset).upper()
+
+    valid, msg = validate_spot_limit_order(
+        telegram_id,
+        spot_product_id,
+        size,
+        price,
+        is_buy,
+        selected_network,
+        enforce_rate_limit=enforce_rate_limit,
+    )
+    if not valid:
+        return {"success": False, "error": msg}
+
+    client = get_user_nado_client(telegram_id, network=selected_network)
+    if not client:
+        return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
+    network = selected_network
+
+    resolved_order_type = str(order_type_override or OrderTypeEnum.LIMIT.value)
+    linked_open_trade_id = int(open_trade_id) if open_trade_id else None
+    if linked_open_trade_id is None and bool(reduce_only):
+        linked_open = find_open_trade(telegram_id, spot_product_id, network=network)
+        if linked_open:
+            linked_open_trade_id = int(linked_open.get("id"))
+        if resolved_order_type == OrderTypeEnum.LIMIT.value:
+            resolved_order_type = "LIMIT_CLOSE"
+
+    limit_trade_data = {
+        "user_id": telegram_id,
+        "product_id": spot_product_id,
+        "product_name": spot_symbol,
+        "order_type": resolved_order_type,
+        "side": OrderSide.LONG.value if is_buy else OrderSide.SHORT.value,
+        "size": size,
+        "price": price,
+        "leverage": 1.0,
+        "status": TradeStatus.PENDING.value,
+        "created_at": datetime.utcnow().isoformat(),
+        "source": source,
+    }
+    if strategy_session_id:
+        limit_trade_data["strategy_session_id"] = strategy_session_id
+    if linked_open_trade_id:
+        limit_trade_data["open_trade_id"] = linked_open_trade_id
+    trade_id = insert_trade(limit_trade_data, network=network)
+    if not trade_id:
+        return {"success": False, "error": "Failed to record trade."}
+
+    result = client.place_limit_order(
+        spot_product_id,
+        float(size),
+        float(price),
+        is_buy=is_buy,
+        reduce_only=bool(reduce_only),
+        post_only=bool(post_only),
+        isolated_only=False,
+        isolated_margin=None,
+    )
+
+    if result.get("success"):
+        digest = result.get("digest", "")
+        try:
+            update_trade(
+                trade_id,
+                {
+                    "status": TradeStatus.PENDING.value,
+                    "order_digest": digest,
+                },
+                network=network,
+            )
+            _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, spot_product_id)
+        except Exception as e:
+            logger.error("Post-spot-limit-order processing failed for trade %s: %s", trade_id, e)
+    else:
+        try:
+            update_trade(
+                trade_id,
+                {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")},
+                network=network,
+            )
+        except Exception as e:
+            logger.error("Failed to update spot limit trade %s: %s", trade_id, e)
+
+    if result.get("success"):
+        return {
+            "success": True,
+            "side": "BUY" if is_buy else "SELL",
+            "size": size,
+            "product": spot_symbol,
+            "spot_symbol": spot_symbol,
+            "price": price,
+            "digest": result.get("digest"),
+            "network": network,
+            "type": "LIMIT",
+            "status": TradeStatus.PENDING.value,
+            "trade_id": trade_id,
+            "message": "Spot limit order accepted and recorded as pending until execution.",
+        }
+    return result
+
+
+def stop_volume_spot_cleanup(
+    telegram_id: int,
+    spot_product_id: int,
+    spot_symbol: str,
+    network: str | None = None,
+    slippage_pct: float = 1.0,
+    strategy_session_id: int | None = None,
+) -> dict:
+    """Cancel resting spot orders for one product and market-sell remaining base (Volume spot stop)."""
+    user = get_user(telegram_id)
+    selected_network = str(network or (user.network_mode.value if user else "mainnet"))
+    client = get_user_nado_client(telegram_id, network=selected_network)
+    if not client:
+        return {"success": False, "error": "Wallet not initialized or key migration required."}
+    cancelled, order_errors = _cancel_open_orders_for_product(client, int(spot_product_id))
+    readonly = get_user_readonly_client(telegram_id, network=selected_network)
+    base = 0.0
+    if readonly:
+        bal = readonly.get_balance() or {}
+        balances = bal.get("balances", {}) or {}
+        base = float(balances.get(int(spot_product_id), balances.get(str(spot_product_id), 0)) or 0.0)
+    spot_res: dict = {"success": True, "skipped": True}
+    if base > 1e-12:
+        spot_res = execute_spot_market_order(
+            telegram_id,
+            spot_symbol,
+            base,
+            is_buy=False,
+            enforce_rate_limit=False,
+            slippage_pct=float(slippage_pct or 1.0),
+            source="vol_stop",
+            strategy_session_id=strategy_session_id,
+            network=selected_network,
+            spot_product_id=int(spot_product_id),
+            spot_symbol=str(spot_symbol).upper(),
+            asset_label=str(spot_symbol).upper(),
+        )
+    hard_errors: list[str] = []
+    if order_errors:
+        hard_errors.extend(order_errors)
+    if base > 1e-12 and not spot_res.get("success"):
+        hard_errors.append(str(spot_res.get("error") or "Spot flatten failed"))
+    return {
+        "success": len(hard_errors) == 0,
+        "cancelled_orders": cancelled,
+        "order_errors": order_errors or None,
+        "spot_flatten": spot_res,
+        "errors": hard_errors or None,
+    }
+
+
 def execute_limit_order(
     telegram_id: int,
     product: str,

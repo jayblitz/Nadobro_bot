@@ -16,6 +16,7 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     "grid_reset_side", "grid_last_cycle_pnl_usd", "dn_last_funding_rate", "dn_unfavorable_count",
     "dn_mode", "order_observability",
     "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
+    "vol_market",
 })
 
 from src.nadobro.config import (
@@ -24,7 +25,10 @@ from src.nadobro.config import (
     get_product_id,
     get_product_max_leverage,
     get_spot_product_id,
+    get_spot_metadata,
     get_perp_products,
+    list_volume_spot_product_names,
+    normalize_volume_spot_symbol,
 )
 from src.nadobro.models.database import (
     get_bot_state_raw, set_bot_state,
@@ -38,6 +42,7 @@ from src.nadobro.services.trade_service import (
     close_all_positions,
     close_delta_neutral_legs,
     get_trade_analytics,
+    stop_volume_spot_cleanup,
 )
 from src.nadobro.services.user_service import (
     get_user_nado_client,
@@ -608,8 +613,29 @@ def start_user_bot(
         _ensure_task(telegram_id, network)
         return True, "Bro Mode activated 🧠"
 
+    vol_market_kw = "perp"
+    if strategy == "vol":
+        vol_market_kw = str(kwargs.get("vol_market") or "perp").strip().lower()
+        if vol_market_kw not in ("perp", "spot"):
+            vol_market_kw = "perp"
+        if vol_market_kw == "spot":
+            product = normalize_volume_spot_symbol(str(product or "").strip())
+            allowed_vol_spot = list_volume_spot_product_names(network=network)
+            if product not in allowed_vol_spot:
+                return False, (
+                    f"Volume spot supports only {', '.join(allowed_vol_spot) or 'no resolved spot pairs'} on {network}."
+                )
+            dir_spot = str(kwargs.get("direction") or "long").strip().lower()
+            if dir_spot == "short":
+                return False, "Volume spot mode is buy-then-sell only (direction must be long)."
+
     dn_pair = get_dn_pair(product, network=network) if strategy == "dn" else {}
-    product_id = int(dn_pair.get("perp_product_id")) if dn_pair.get("perp_product_id") is not None else get_product_id(product, network=network)
+    if strategy == "dn":
+        product_id = int(dn_pair.get("perp_product_id")) if dn_pair.get("perp_product_id") is not None else None
+    elif strategy == "vol" and vol_market_kw == "spot":
+        product_id = get_spot_product_id(product, network=network)
+    else:
+        product_id = get_product_id(product, network=network)
     if product_id is None:
         return False, f"Unknown product '{product}'."
     if strategy == "dn" and not dn_pair:
@@ -620,16 +646,21 @@ def start_user_bot(
         )
     if strategy == "dn" and not bool(dn_pair.get("entry_allowed", True)):
         return False, str(dn_pair.get("entry_block_reason") or f"{product.upper()} is not currently tradable for Delta Neutral.")
-    max_leverage = get_product_max_leverage(product, network=network)
-    if strategy == "dn":
-        max_leverage = min(max_leverage, 5)
-    if strategy == "vol":
+    if strategy == "vol" and vol_market_kw == "spot":
         max_leverage = 1
+    else:
+        max_leverage = get_product_max_leverage(product, network=network)
+        if strategy == "dn":
+            max_leverage = min(max_leverage, 5)
+        if strategy == "vol":
+            max_leverage = 1
     if float(leverage or 0) > max_leverage:
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
     if float(leverage or 0) < 1:
         return False, "Leverage must be at least 1x."
-    preflight_ok, preflight_msg = run_strategy_start_preflight(telegram_id, product, network)
+    preflight_ok, preflight_msg = run_strategy_start_preflight(
+        telegram_id, product, network, vol_market=vol_market_kw if strategy == "vol" else "perp"
+    )
     if not preflight_ok:
         return False, preflight_msg
 
@@ -643,7 +674,7 @@ def start_user_bot(
             "running": True,
             "strategy": strategy,
             "strategy_id_v2": 1,
-            "product": product.upper(),
+            "product": (product if (strategy == "vol" and vol_market_kw == "spot") else str(product).upper()),
             "leverage": 1.0 if strategy == "vol" else float(leverage or 3.0),
             "slippage_pct": float(slippage_pct or 1.0),
             "reference_price": 0.0,
@@ -658,10 +689,15 @@ def start_user_bot(
         if not mm_ok:
             return False, mm_msg
     if strategy == "vol":
-        direction = str(kwargs.get("direction") or strat_cfg.get("vol_direction") or "long").strip().lower()
-        direction = "short" if direction == "short" else "long"
-        state["vol_direction"] = direction
-        state["direction"] = direction
+        state["vol_market"] = vol_market_kw
+        if vol_market_kw == "spot":
+            state["vol_direction"] = "long"
+            state["direction"] = "long"
+        else:
+            direction = str(kwargs.get("direction") or strat_cfg.get("vol_direction") or "long").strip().lower()
+            direction = "short" if direction == "short" else "long"
+            state["vol_direction"] = direction
+            state["direction"] = direction
         state["fixed_margin_usd"] = 100.0
         state["notional_usd"] = 100.0
         state["vol_phase"] = "idle"
@@ -669,7 +705,13 @@ def start_user_bot(
     from src.nadobro.services.runtime_supervisor import strategy_worker_group
 
     state["worker_group"] = strategy_worker_group(strategy)
-    session_id = _create_session(telegram_id, strategy, product.upper(), network, state)
+    session_id = _create_session(
+        telegram_id,
+        strategy,
+        (product if (strategy == "vol" and vol_market_kw == "spot") else str(product).upper()),
+        network,
+        state,
+    )
     if session_id:
         state["strategy_session_id"] = session_id
     _save_state(telegram_id, network, state)
@@ -683,9 +725,15 @@ def start_user_bot(
         )
     if strategy == "vol":
         direction = str(state.get("vol_direction") or "long").upper()
+        if str(state.get("vol_market") or "perp") == "spot":
+            return (
+                True,
+                f"VOL spot bot started on {str(product).upper()} spot ({network}) "
+                f"| Buy/sell limit loop | Margin $100 @ 1x | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
+            )
         return (
             True,
-            f"VOL bot started on {product.upper()}-PERP ({network}) "
+            f"VOL bot started on {str(product).upper()}-PERP ({network}) "
             f"| Direction {direction} | Margin $100 @ 1x | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
         )
     if strategy in ("grid", "rgrid"):
@@ -772,6 +820,21 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
                 slippage_pct=float(state.get("slippage_pct") or 1.0),
                 strategy_session_id=state.get("strategy_session_id"),
             )
+        elif strategy == "vol" and str(state.get("vol_market") or "perp") == "spot":
+            prod = normalize_volume_spot_symbol(str(state.get("product") or ""))
+            spot_pid = get_spot_product_id(prod, network=network)
+            if spot_pid is None:
+                close_res = {"success": True, "skipped": True}
+            else:
+                sym = str((get_spot_metadata(prod, network=network) or {}).get("symbol") or prod).upper()
+                close_res = stop_volume_spot_cleanup(
+                    telegram_id,
+                    int(spot_pid),
+                    sym,
+                    network=network,
+                    slippage_pct=float(state.get("slippage_pct") or 1.0),
+                    strategy_session_id=state.get("strategy_session_id"),
+                )
         else:
             close_res = close_all_positions(telegram_id, network=network)
         if not close_res.get("success"):
@@ -814,6 +877,21 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
                         slippage_pct=float(state.get("slippage_pct") or 1.0),
                         strategy_session_id=state.get("strategy_session_id"),
                     )
+                elif strategy == "vol" and str(state.get("vol_market") or "perp") == "spot":
+                    prod = normalize_volume_spot_symbol(str(state.get("product") or ""))
+                    spot_pid = get_spot_product_id(prod, network=network)
+                    if spot_pid is None:
+                        close_res = {"success": True}
+                    else:
+                        sym = str((get_spot_metadata(prod, network=network) or {}).get("symbol") or prod).upper()
+                        close_res = stop_volume_spot_cleanup(
+                            telegram_id,
+                            int(spot_pid),
+                            sym,
+                            network=network,
+                            slippage_pct=float(state.get("slippage_pct") or 1.0),
+                            strategy_session_id=state.get("strategy_session_id"),
+                        )
                 else:
                     close_res = close_all_positions(telegram_id, network=network)
                 if not close_res.get("success"):
@@ -882,6 +960,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "global_pause_active": global_pause_active,
         "strategy": state.get("strategy"),
         "product": state.get("product"),
+        "vol_market": state.get("vol_market") or "perp",
         "notional_usd": state.get("notional_usd"),
         "cycle_notional_usd": state.get("cycle_notional_usd"),
         "spread_bp": state.get("spread_bp"),
@@ -1540,7 +1619,11 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         return True, None
 
     dn_pair = get_dn_pair(product, network=network, client=None) if strategy == "dn" else {}
-    product_id = int(dn_pair.get("perp_product_id")) if dn_pair.get("perp_product_id") is not None else get_product_id(product, network=network)
+    if strategy == "vol" and str(state.get("vol_market") or "perp") == "spot":
+        prod = normalize_volume_spot_symbol(str(product or ""))
+        product_id = get_spot_product_id(prod, network=network)
+    else:
+        product_id = int(dn_pair.get("perp_product_id")) if dn_pair.get("perp_product_id") is not None else get_product_id(product, network=network)
     if product_id is None:
         raise RuntimeError(f"Invalid product '{product}'")
 

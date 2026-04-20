@@ -785,6 +785,7 @@ def strategy_action_kb(
     selected_product: str = "BTC",
     available_products: list[str] | None = None,
     is_running: bool = False,
+    vol_market: str = "perp",
 ):
     if strategy_id == "dn":
         products = [p.upper() for p in (available_products or ["BTC", "ETH"])]
@@ -805,23 +806,54 @@ def strategy_action_kb(
         )
         for product in featured[:3]
     ]
-    rows = [
-        [
-            InlineKeyboardButton(
-                f"▶ Start {strategy_id.upper()}",
-                callback_data=f"strategy:start:{strategy_id}:{selected}",
-            ),
-        ],
-        [
-            InlineKeyboardButton("🎯 Choose Asset", callback_data=f"strategy:custom:{strategy_id}:0"),
-            InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}"),
-        ],
-        [*pair_buttons],
-    ]
     if strategy_id == "vol":
-        rows[0] = [
-            InlineKeyboardButton("▶ Start Long", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),
-            InlineKeyboardButton("▶ Start Short", callback_data=f"strategy:start:{strategy_id}:{selected}:short"),
+        vm = str(vol_market or "perp").strip().lower()
+        if vm not in ("perp", "spot"):
+            vm = "perp"
+        if vm == "perp":
+            start_row = [
+                InlineKeyboardButton("▶ Start Long", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),
+                InlineKeyboardButton("▶ Start Short", callback_data=f"strategy:start:{strategy_id}:{selected}:short"),
+            ]
+        else:
+            start_row = [
+                InlineKeyboardButton(
+                    f"▶ Start {strategy_id.upper()}",
+                    callback_data=f"strategy:start:{strategy_id}:{selected}",
+                ),
+            ]
+        market_row = [
+            InlineKeyboardButton(
+                ("✅ " if vm == "perp" else "") + "Perp",
+                callback_data="strategy:volmarket:vol:perp",
+            ),
+            InlineKeyboardButton(
+                ("✅ " if vm == "spot" else "") + "Spot",
+                callback_data="strategy:volmarket:vol:spot",
+            ),
+        ]
+        rows = [
+            start_row,
+            market_row,
+            [
+                InlineKeyboardButton("🎯 Choose Asset", callback_data=f"strategy:custom:{strategy_id}:0"),
+                InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}"),
+            ],
+            [*pair_buttons],
+        ]
+    else:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    f"▶ Start {strategy_id.upper()}",
+                    callback_data=f"strategy:start:{strategy_id}:{selected}",
+                ),
+            ],
+            [
+                InlineKeyboardButton("🎯 Choose Asset", callback_data=f"strategy:custom:{strategy_id}:0"),
+                InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}"),
+            ],
+            [*pair_buttons],
         ]
     if is_running:
         rows.insert(0, [

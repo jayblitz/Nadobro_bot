@@ -55,7 +55,9 @@ class StrategyPreviewCallbackTests(unittest.TestCase):
         ), patch.object(
             callbacks, "get_user_bot_status", return_value={}
         ):
-            text = callbacks._build_strategy_preview_text(telegram_id=1, strategy_id="vol", product="BTC")
+            text = callbacks._build_strategy_preview_text(
+                telegram_id=1, strategy_id="vol", product="BTC", vol_market="perp"
+            )
         self.assertIn("Volume Bot Dashboard", text)
         self.assertIn("Direction: *LONG*", text)
         self.assertIn("Wallet:", text)
@@ -70,9 +72,30 @@ class StrategyPreviewCallbackTests(unittest.TestCase):
         ), patch.object(
             callbacks, "get_user_bot_status", return_value={}
         ):
-            text = callbacks._build_strategy_preview_text(telegram_id=1, strategy_id="vol", product="BTC")
+            text = callbacks._build_strategy_preview_text(
+                telegram_id=1, strategy_id="vol", product="BTC", vol_market=None
+            )
         self.assertIn("Volume Bot Dashboard", text)
         self.assertIn("Wallet: `N/A`", text)
+
+    def test_vol_preview_spot_shows_round_trip_and_spot_label(self):
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
+        with patch.object(callbacks, "get_user_settings", return_value=self._settings()), patch.object(
+            callbacks, "get_user_readonly_client", return_value=_PreviewClient(mid=50000.0, balance=500.0)
+        ), patch.object(callbacks, "get_user", return_value=fake_user), patch.object(
+            callbacks, "get_spot_product_id", return_value=77
+        ), patch.object(
+            callbacks, "ensure_active_wallet_ready", return_value=(True, "")
+        ), patch.object(
+            callbacks, "get_user_wallet_info", return_value={"active_address": "0x1234567890abcdef1234"}
+        ), patch.object(
+            callbacks, "get_user_bot_status", return_value={}
+        ):
+            text = callbacks._build_strategy_preview_text(
+                telegram_id=1, strategy_id="vol", product="KBTC", vol_market="spot"
+            )
+        self.assertIn("KBTC SPOT", text)
+        self.assertIn("buy → sell", text)
 
     def test_dn_preview_uses_dynamic_pair_symbols(self):
         dn_settings = (

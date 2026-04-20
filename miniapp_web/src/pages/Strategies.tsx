@@ -8,6 +8,8 @@ import type {
   StrategyActionResponse,
   StrategyBotStatus,
   StrategyId,
+  VolMarket,
+  VolumeSpotProductsResponse,
 } from "@/api/types";
 import { hapticImpact } from "@/lib/haptics";
 
@@ -59,6 +61,7 @@ export default function Strategies() {
   const [leverage, setLeverage] = useState(3);
   const [slippage, setSlippage] = useState(1);
   const [volDirection, setVolDirection] = useState<OrderSide>("long");
+  const [volMarket, setVolMarket] = useState<VolMarket>("perp");
   const [formError, setFormError] = useState<string | null>(null);
 
   const { data: products } = useQuery({
@@ -77,7 +80,20 @@ export default function Strategies() {
     return list.length ? list : ["BTC", "ETH"];
   }, [products]);
 
-  const selectableProducts = selected === "dn" ? dnNames : perpNames;
+  const { data: volSpotProducts } = useQuery({
+    queryKey: ["strategies", "volume-spot-products"],
+    queryFn: () => api.get<VolumeSpotProductsResponse>("/api/strategies/volume-spot-products"),
+    enabled: selected === "vol",
+    staleTime: 60_000,
+  });
+
+  const volSpotNames = volSpotProducts?.names ?? [];
+
+  const selectableProducts = useMemo(() => {
+    if (selected === "dn") return dnNames;
+    if (selected === "vol" && volMarket === "spot") return volSpotNames;
+    return perpNames;
+  }, [selected, volMarket, dnNames, perpNames, volSpotNames]);
 
   useEffect(() => {
     if (selectableProducts.length && !selectableProducts.includes(product)) {
@@ -103,7 +119,8 @@ export default function Strategies() {
         product: selected === "bro" ? "MULTI" : product,
         leverage: selected === "vol" ? 1 : leverage,
         slippage_pct: slippage,
-        direction: selected === "vol" ? volDirection : "long",
+        direction: selected === "vol" && volMarket === "spot" ? "long" : selected === "vol" ? volDirection : "long",
+        ...(selected === "vol" ? { vol_market: volMarket } : {}),
       }),
     onSuccess: () => {
       setFormError(null);
@@ -179,6 +196,7 @@ export default function Strategies() {
                 {" "}
                 · {activeStrategy}
                 {activeProduct && activeProduct !== "MULTI" ? ` · ${activeProduct}` : ""}
+                {activeStrategy === "vol" && status?.vol_market === "spot" ? " · spot" : ""}
               </span>
             )}
           </div>
@@ -239,6 +257,37 @@ export default function Strategies() {
           </select>
         </div>
 
+        {selected === "vol" && (
+          <div>
+            <label className="text-[11px] text-tg-hint block mb-1">Volume market</label>
+            <div className="flex gap-2">
+              {(["perp", "spot"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => {
+                    setVolMarket(m);
+                    hapticImpact("light");
+                  }}
+                  className={clsx(
+                    "flex-1 py-2 rounded-lg text-xs font-medium border",
+                    volMarket === m
+                      ? "border-tg-button bg-tg-button/20 text-white"
+                      : "border-white/10 bg-black/20 text-tg-hint",
+                  )}
+                >
+                  {m === "perp" ? "Perp" : "Spot (KBTC/WETH/USDC)"}
+                </button>
+              ))}
+            </div>
+            {volMarket === "spot" && volSpotNames.length === 0 && (
+              <p className="text-[11px] text-amber-300 mt-2">
+                No volume spot symbols resolved on this network. Try another network or use Perp.
+              </p>
+            )}
+          </div>
+        )}
+
         {selected !== "bro" && (
           <div>
             <label className="text-[11px] text-tg-hint block mb-1">Product</label>
@@ -248,18 +297,23 @@ export default function Strategies() {
                 setProduct(e.target.value);
                 hapticImpact("light");
               }}
-              className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+              disabled={selected === "vol" && volMarket === "spot" && selectableProducts.length === 0}
+              className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-40"
             >
-              {selectableProducts.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
+              {selectableProducts.length === 0 ? (
+                <option value="">—</option>
+              ) : (
+                selectableProducts.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))
+              )}
             </select>
           </div>
         )}
 
-        {selected === "vol" && (
+        {selected === "vol" && volMarket === "perp" && (
           <div>
             <label className="text-[11px] text-tg-hint block mb-1">Direction</label>
             <select
@@ -302,7 +356,11 @@ export default function Strategies() {
 
         <button
           type="button"
-          disabled={running || startMutation.isPending}
+          disabled={
+            running ||
+            startMutation.isPending ||
+            (selected === "vol" && volMarket === "spot" && volSpotNames.length === 0)
+          }
           onClick={() => {
             hapticImpact("medium");
             startMutation.mutate();
