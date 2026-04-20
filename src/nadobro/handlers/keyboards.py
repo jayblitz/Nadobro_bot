@@ -808,15 +808,15 @@ def strategy_action_kb(
     rows = [
         [
             InlineKeyboardButton(
-                f"🚀 Start {selected}",
+                f"▶ Start {strategy_id.upper()}",
                 callback_data=f"strategy:start:{strategy_id}:{selected}",
             ),
         ],
-        [*pair_buttons],
         [
             InlineKeyboardButton("🎯 Choose Asset", callback_data=f"strategy:custom:{strategy_id}:0"),
             InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}"),
         ],
+        [*pair_buttons],
     ]
     if strategy_id != "dn":
         pass
@@ -824,13 +824,13 @@ def strategy_action_kb(
         rows[2] = [InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}")]
     if strategy_id == "vol":
         rows[0] = [
-            InlineKeyboardButton(f"🚀 Start Long", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),
-            InlineKeyboardButton(f"🚀 Start Short", callback_data=f"strategy:start:{strategy_id}:{selected}:short"),
+            InlineKeyboardButton("▶ Start Long", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),
+            InlineKeyboardButton("▶ Start Short", callback_data=f"strategy:start:{strategy_id}:{selected}:short"),
         ]
     if is_running:
-        rows.append([
-            InlineKeyboardButton("📊 Runtime", callback_data="strategy:status"),
-            InlineKeyboardButton("🛑 Stop", callback_data="strategy:stop"),
+        rows.insert(0, [
+            InlineKeyboardButton("🔄 Refresh", callback_data="strategy:status"),
+            InlineKeyboardButton(f"🛑 Stop {strategy_id.upper()[:8]}", callback_data="strategy:stop"),
         ])
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
@@ -884,7 +884,7 @@ def strategy_product_picker_kb(
 
 def bro_action_kb(is_running: bool = False):
     rows = [
-        [InlineKeyboardButton("🚀 Start Alpha Agent", callback_data="strategy:start:bro:MULTI")],
+        [InlineKeyboardButton("▶ Start Alpha Agent", callback_data="strategy:start:bro:MULTI")],
         [
             InlineKeyboardButton("⚙️ Advanced", callback_data="bro:config"),
             InlineKeyboardButton("📋 Game Plan", callback_data="bro:gameplan"),
@@ -892,9 +892,9 @@ def bro_action_kb(is_running: bool = False):
         [InlineKeyboardButton("🐺 HOWL Report", callback_data="bro:howl")],
     ]
     if is_running:
-        rows.append([
-            InlineKeyboardButton("📊 Runtime", callback_data="strategy:status"),
-            InlineKeyboardButton("🛑 Stop", callback_data="strategy:stop"),
+        rows.insert(0, [
+            InlineKeyboardButton("🔄 Refresh", callback_data="strategy:status"),
+            InlineKeyboardButton("🛑 Stop BRO", callback_data="strategy:stop"),
         ])
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),

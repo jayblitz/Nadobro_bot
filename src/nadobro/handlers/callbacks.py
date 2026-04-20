@@ -2422,26 +2422,59 @@ def _build_bro_preview_text(telegram_id: int) -> str:
 
     from src.nadobro.services.bot_runtime import get_user_bot_status
     bot_status = get_user_bot_status(telegram_id)
-    is_running = bot_status.get("running") and bot_status.get("strategy") == "bro"
-    status_emoji = "🟢 RUNNING" if is_running else "⚪ READY"
+    is_running = bool(bot_status.get("running") and bot_status.get("strategy") == "bro")
+    if is_running:
+        status_emoji = "⏸️" if bool(bot_status.get("is_paused")) else "🟢"
+        status_label = "PAUSED" if bool(bot_status.get("is_paused")) else "LIVE"
+    else:
+        status_emoji = "🟠"
+        status_label = "READY"
+
+    wallet_ready, _wallet_msg = ensure_active_wallet_ready(telegram_id)
+    wallet_info = get_user_wallet_info(telegram_id, verify_signer=False) or {}
+    wallet_addr = str(wallet_info.get("active_address") or "")
+    wallet_short = "N/A"
+    if wallet_addr:
+        wallet_short = f"{wallet_addr[:6]}...{wallet_addr[-4:]}" if len(wallet_addr) >= 10 else wallet_addr
+    account_status = "✅ Connected" if wallet_ready else "⚠️ Setup Needed"
 
     risk_emoji = {"conservative": "🛡️", "balanced": "⚖️", "aggressive": "🔥"}.get(risk_level, "⚖️")
     products_str = ", ".join(products)
-    margin_flag = "✅" if available_margin >= budget * 0.2 else "⚠️"
+    session_volume = float(bot_status.get("session_volume_usd") or 0.0)
+    session_pnl = float((bot_status.get("bro_state") or {}).get("total_pnl") or 0.0)
+    trade_count = int((bot_status.get("bro_state") or {}).get("trade_count") or 0)
+    active_positions = len((bot_status.get("bro_state") or {}).get("active_positions") or [])
+    warning = ""
+    if not wallet_ready:
+        warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
+    elif available_margin < budget * 0.2:
+        warning = f"⚠️ Keep at least {escape_md(f'${budget * 0.2:,.2f}')} available for BRO allocations\\."
 
     return (
-        "🧠 *Alpha Agent*\n"
-        f"Status: {escape_md(status_emoji)}\n\n"
-        "Autonomous market scanner with Grok reasoning, sentiment, and trade execution guardrails\\.\n\n"
-        "*Quick setup*\n"
-        f"Budget: *{escape_md(f'${budget:,.0f}')}* \\| Risk: {escape_md(risk_emoji)} *{escape_md(risk_level.upper())}*\n"
-        f"Assets: *{escape_md(products_str)}*\n"
-        f"Max positions: *{escape_md(str(max_positions))}* \\| Max leverage: *{escape_md(f'{leverage_cap}x')}*\n"
-        f"TP/SL: *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}* \\| Min confidence: *{escape_md(f'{min_confidence:.0%}')}*\n\n"
-        "*Account*\n"
-        f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* \\| Mode: *{escape_md(network.upper())}*\n"
-        f"Cycle: *{escape_md(f'{cycle_seconds}s')}* \\| Max loss: *{escape_md(f'{max_loss:.0f}%')}*\n\n"
-        "Start now, or open *Configure* only if you want deeper control\\."
+        "🧠 *Alpha Agent Dashboard*\n"
+        f"Status: {status_emoji} *{escape_md(status_label)}*\n\n"
+        "🔑 *Account*\n"
+        f"• Status: *{escape_md(account_status)}*\n"
+        f"• Wallet: `{escape_md(wallet_short)}`\n"
+        f"• Balance: *{escape_md(f'${available_margin:,.2f}')}*\n\n"
+        "⚙️ *Configuration*\n"
+        f"• Budget: *{escape_md(f'${budget:,.0f}')}*\n"
+        f"• Risk: {escape_md(risk_emoji)} *{escape_md(risk_level.upper())}*\n"
+        f"• Assets: *{escape_md(products_str)}*\n"
+        f"• Max Positions: *{escape_md(str(max_positions))}*\n"
+        f"• Max Leverage: *{escape_md(f'{leverage_cap}x')}*\n"
+        f"• TP/SL: *{escape_md(f'{tp_pct:.1f}% / {sl_pct:.1f}%')}*\n"
+        f"• Min Confidence: *{escape_md(f'{min_confidence:.0%}')}*\n"
+        f"• Cycle: *{escape_md(f'{cycle_seconds}s')}*\n"
+        f"• Max Loss: *{escape_md(f'{max_loss:.0f}%')}*\n\n"
+        "📊 *Statistics*\n"
+        f"• Total Volume: *{escape_md(f'${session_volume:,.2f}')}*\n"
+        f"• Trades: *{escape_md(str(trade_count))}*\n"
+        f"• Open Positions: *{escape_md(str(active_positions))}*\n"
+        f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n\n"
+        "ℹ️ *How it works*\n"
+        "Scans supported markets, scores setups with AI and sentiment, then opens only high-confidence trades under risk guardrails\\."
+        + (f"\n\n{warning}" if warning else "")
     )
 
 
@@ -2456,7 +2489,6 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     conf = settings.get("strategies", {}).get(strategy_id, {})
     margin_usd = float(conf.get("notional_usd", 100.0))
     cycle_notional_cfg = float(conf.get("cycle_notional_usd", margin_usd))
-    session_cap = float(conf.get("session_notional_cap_usd", 0) or 0)
     spread_bp = float(conf.get("spread_bp", 5.0))
     if strategy_id == "rgrid":
         spread_bp = float(conf.get("rgrid_spread_bp", conf.get("grid_spread_bp", spread_bp)))
@@ -2466,7 +2498,9 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     leverage = 1.0 if strategy_id == "vol" else float(settings.get("default_leverage", 3))
     if strategy_id == "dn":
         leverage = max(1.0, min(leverage, 5.0))
-    slippage = float(settings.get("slippage", 1))
+
+    def _fmt_usd(value: float) -> str:
+        return f"${value:,.2f}"
 
     available_margin = 0.0
     mid = 0.0
@@ -2476,9 +2510,9 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
         try:
             bal = client.get_balance()
             if bal and bal.get("exists"):
-                available_margin = float((bal.get("balances", {}) or {}).get(0, 0) or 0)
+                available_margin = float((bal.get("balances", {}) or {}).get(0, 0) or 0.0)
                 if available_margin == 0:
-                    available_margin = float((bal.get("balances", {}) or {}).get("0", 0) or 0)
+                    available_margin = float((bal.get("balances", {}) or {}).get("0", 0) or 0.0)
         except Exception:
             pass
         try:
@@ -2487,13 +2521,34 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
             pid = get_product_id(product, network=network, client=client)
             if pid is not None:
                 mp = client.get_market_price(pid)
-                mid = float(mp.get("mid", 0) or 0)
+                mid = float(mp.get("mid", 0) or 0.0)
                 fr = client.get_funding_rate(pid) or {}
-                funding_rate = float(fr.get("funding_rate", 0) or 0)
+                funding_rate = float(fr.get("funding_rate", 0) or 0.0)
         except Exception:
             pass
 
     bot_status = get_user_bot_status(telegram_id) or {}
+    active_same_strategy = (
+        str(bot_status.get("strategy") or "").lower() == strategy_id
+        and str(bot_status.get("product") or "").upper() == str(product or "").upper()
+    )
+    if active_same_strategy and bool(bot_status.get("running")):
+        status_emoji = "⏸️" if bool(bot_status.get("is_paused")) else "🟢"
+        status_label = "PAUSED" if bool(bot_status.get("is_paused")) else "LIVE"
+    elif active_same_strategy:
+        status_emoji = "⚪"
+        status_label = "STOPPED"
+    else:
+        status_emoji = "🟠"
+        status_label = "READY"
+
+    wallet_ready, _wallet_msg = ensure_active_wallet_ready(telegram_id)
+    wallet_info = get_user_wallet_info(telegram_id, verify_signer=False) or {}
+    wallet_addr = str(wallet_info.get("active_address") or "")
+    wallet_short = "N/A"
+    if wallet_addr:
+        wallet_short = f"{wallet_addr[:6]}...{wallet_addr[-4:]}" if len(wallet_addr) >= 10 else wallet_addr
+    account_status = "✅ Connected" if wallet_ready else "⚠️ Setup Needed"
 
     cycle_notional = (
         max(cycle_notional_cfg, margin_usd * max(1.0, leverage))
@@ -2504,134 +2559,181 @@ def _build_strategy_preview_text(telegram_id: int, strategy_id: str, product: st
     inventory_soft_limit = float(conf.get("inventory_soft_limit_usd", margin_usd * 0.6))
     recommended_buffer = max(5.0, required_margin * 0.20)
     recommended_available = required_margin + (inventory_soft_limit / max(leverage, 1.0)) + recommended_buffer
+    mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
+
+    trades_count = int(bot_status.get("session_trade_count") or 0)
+    session_volume = float(bot_status.get("session_volume_usd") or 0.0)
+    session_fees = float(bot_status.get("session_fees_usd") or 0.0)
+    session_pnl = float(bot_status.get("session_analytics_pnl_usd") or 0.0)
+
+    if strategy_id == "vol":
+        fixed_margin = float(conf.get("fixed_margin_usd") or 100.0)
+        target_volume = float(conf.get("target_volume_usd") or 10000.0)
+        volume_done = float(bot_status.get("volume_done_usd") or 0.0)
+        volume_remaining = float(bot_status.get("volume_remaining_usd") or max(0.0, target_volume - volume_done))
+        session_fees = float(bot_status.get("session_fees_usd") or session_fees)
+        session_pnl = float(bot_status.get("session_realized_pnl_usd") or session_pnl)
+        direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
+        phase = str(bot_status.get("vol_phase") or "idle").upper()
+        warning = ""
+        if not wallet_ready:
+            warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
+        elif available_margin < fixed_margin:
+            warning = f"⚠️ Add margin before starting \\(need {escape_md(_fmt_usd(fixed_margin))}\\)\\."
+        return (
+            "🔁 *Volume Bot Dashboard*\n"
+            f"Status: {status_emoji} *{status_label}*\n\n"
+            "🔑 *Account*\n"
+            f"• Status: *{escape_md(account_status)}*\n"
+            f"• Wallet: `{escape_md(wallet_short)}`\n"
+            f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
+            "⚙️ *Configuration*\n"
+            f"• Market: *{escape_md(product)}\\-PERP*\n"
+            f"• Size: *{escape_md(_fmt_usd(fixed_margin))}*\n"
+            f"• Direction: *{escape_md(direction)}*\n"
+            f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"• TP/SL: *{escape_md(f'{tp_pct:.1f}% / {sl_pct:.1f}%')}*\n\n"
+            "📊 *Statistics*\n"
+            f"• Target Volume: *{escape_md(_fmt_usd(target_volume))}*\n"
+            f"• Done: *{escape_md(_fmt_usd(volume_done))}*\n"
+            f"• Remaining: *{escape_md(_fmt_usd(volume_remaining))}*\n"
+            f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
+            f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n"
+            f"• Phase: *{escape_md(phase)}*\n\n"
+            "ℹ️ *How it works*\n"
+            "Places maker-only entry and exit orders to build volume while enforcing session TP/SL\\."
+            + (f"\n\n{warning}" if warning else "")
+        )
+
+    if strategy_id == "grid":
+        levels = int(conf.get("levels", 2) or 2)
+        min_spread = float(conf.get("min_spread_bp", 2.0))
+        max_spread = float(conf.get("max_spread_bp", 20.0))
+        reset_threshold = float(conf.get("grid_reset_threshold_pct", 0.8))
+        reset_timeout = int(conf.get("grid_reset_timeout_seconds", 120))
+        session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
+        warning = ""
+        if not wallet_ready:
+            warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
+        elif available_margin < required_margin:
+            warning = (
+                f"⚠️ Recommended available margin {escape_md(_fmt_usd(recommended_available))} "
+                f"\\(trade {escape_md(_fmt_usd(required_margin))} + buffer {escape_md(_fmt_usd(recommended_available - required_margin))}\\)\\."
+            )
+        return (
+            "📊 *GRID Dashboard*\n"
+            f"Status: {status_emoji} *{status_label}*\n\n"
+            "🔑 *Account*\n"
+            f"• Status: *{escape_md(account_status)}*\n"
+            f"• Wallet: `{escape_md(wallet_short)}`\n"
+            f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
+            "⚙️ *Configuration*\n"
+            f"• Market: *{escape_md(product)}\\-PERP*\n"
+            f"• Margin: *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Levels: *{escape_md(str(levels))}*\n"
+            f"• Spread: *{escape_md(f'{min_spread:.0f}bp - {max_spread:.0f}bp')}*\n"
+            f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"• Leverage: *{escape_md(f'{leverage:.0f}x')}*\n"
+            f"• Reset: *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}*\n"
+            f"• TP/SL: *{escape_md(f'{tp_pct:.1f}% / {sl_pct:.1f}%')}*\n\n"
+            "📊 *Statistics*\n"
+            f"• Total Volume: *{escape_md(_fmt_usd(session_volume))}*\n"
+            f"• Total Trades: *{escape_md(str(trades_count))}*\n"
+            f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
+            f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n"
+            f"• Effective Notional: *{escape_md(_fmt_usd(cycle_notional))}*\n\n"
+            "ℹ️ *How it works*\n"
+            "Places maker-only bids and asks around the market to harvest spread\\."
+            + (f"\n\n{warning}" if warning else "")
+        )
+
+    if strategy_id == "rgrid":
+        levels = int(conf.get("levels", 4) or 4)
+        grid_tp = float(conf.get("rgrid_take_profit_pct", conf.get("grid_take_profit_pct", tp_pct)))
+        max_loss_pct = float(conf.get("rgrid_stop_loss_pct", conf.get("grid_stop_loss_pct", sl_pct)))
+        discretion = float(conf.get("rgrid_discretion", conf.get("grid_discretion", 0.06)))
+        reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 1.0)))
+        reset_timeout = int(conf.get("rgrid_reset_timeout_seconds", conf.get("grid_reset_timeout_seconds", 120)))
+        session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
+        session_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
+        warning = ""
+        if not wallet_ready:
+            warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
+        elif available_margin < required_margin:
+            warning = (
+                f"⚠️ Recommended available margin {escape_md(_fmt_usd(recommended_available))} "
+                f"\\(trade {escape_md(_fmt_usd(required_margin))} + buffer {escape_md(_fmt_usd(recommended_available - required_margin))}\\)\\."
+            )
+        return (
+            "🧮 *Reverse GRID Dashboard*\n"
+            f"Status: {status_emoji} *{status_label}*\n\n"
+            "🔑 *Account*\n"
+            f"• Status: *{escape_md(account_status)}*\n"
+            f"• Wallet: `{escape_md(wallet_short)}`\n"
+            f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
+            "⚙️ *Configuration*\n"
+            f"• Market: *{escape_md(product)}\\-PERP*\n"
+            f"• Margin: *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Levels: *{escape_md(str(levels))}*\n"
+            f"• Spread: *{escape_md(f'{spread_bp:.0f}bp')}*\n"
+            f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"• Leverage: *{escape_md(f'{leverage:.0f}x')}*\n"
+            f"• Reset: *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}*\n"
+            f"• Discretion: *{escape_md(f'{discretion:.2f}')}*\n"
+            f"• PnL SL/TP: *{escape_md(f'{max_loss_pct:.2f}% / {grid_tp:.2f}%')}*\n\n"
+            "📊 *Statistics*\n"
+            f"• Total Volume: *{escape_md(_fmt_usd(session_volume))}*\n"
+            f"• Total Trades: *{escape_md(str(trades_count))}*\n"
+            f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
+            f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n"
+            f"• Effective Notional: *{escape_md(_fmt_usd(cycle_notional))}*\n\n"
+            "ℹ️ *How it works*\n"
+            "Anchors to exposure and places buy above / sell below to capture continuation\\."
+            + (f"\n\n{warning}" if warning else "")
+        )
+
     cycles_per_day = 86400 / max(interval_seconds, 10)
     est_daily_volume = cycle_notional * 2.0 * cycles_per_day
 
     # Conservative fee estimate using builder fee (2 bps) + maker fee proxy (1 bp).
     from src.nadobro.config import EST_FEE_RATE, EST_FILL_EFFICIENCY
     est_fees = est_daily_volume * EST_FEE_RATE
-
     est_spread_pnl = est_daily_volume * (spread_bp / 10000.0) * EST_FILL_EFFICIENCY
-    est_funding = 0.0
-    mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
-    if strategy_id == "dn":
-        est_funding = abs(funding_rate) * margin_usd * 3
-    if strategy_id == "vol":
-        est_daily_volume = 0.0
-        # One round trip per minute after fills => approx 1440 loops/day max.
-        if mid > 0:
-            est_daily_volume = 100.0 * 2.0 * 1440.0
-        est_fees = est_daily_volume * EST_FEE_RATE
-        max_loss = 100.0 * (sl_pct / 100.0)
-        max_gain = 100.0 * (tp_pct / 100.0)
-        direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
-        margin_flag = "✅" if available_margin >= 100.0 else "⚠️"
-        return (
-            "🤖 *Volume Bot Dashboard*\n"
-            "Status: 🟢 *READY*\n"
-            "Simple fixed-direction volume loop\\.\n\n"
-            "📊 *Settings*\n"
-            f"Pair *{escape_md(product)}\\-PERP* · Mid *{escape_md(mid_str)}* · Mode *{escape_md(network.upper())}*\n"
-            "Fixed margin *$100* · Fixed leverage *1x* · Entry/Close *Limit*\n"
-            f"Direction *{escape_md(direction)}* · Exit *Market close after 60s from fill*\n"
-            f"Session TP/SL *{escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%')}* \\(±{escape_md(f'${max_gain:,.2f}')} / {escape_md(f'${max_loss:,.2f}')}\\)\n\n"
-            "📈 *Analytics*\n"
-            f"Margin: {margin_flag} *{escape_md(f'${available_margin:,.2f}')}* / *$100.00* required\n"
-            f"Est\\. Daily Volume \\(max cadence\\): *{escape_md(f'${est_daily_volume:,.2f}')}*\n"
-            f"Est\\. Daily Fees: *{escape_md(f'${est_fees:,.2f}')}*\n\n"
-            "Tune direction/TP/SL, then launch LONG or SHORT\\."
-        )
-    max_loss_pct = float(conf.get("rgrid_stop_loss_pct", conf.get("grid_stop_loss_pct", sl_pct))) if strategy_id == "rgrid" else sl_pct
-    max_loss = required_margin * (max_loss_pct / 100.0)
+    est_funding = abs(funding_rate) * margin_usd * 3 if strategy_id == "dn" else 0.0
     est_net = est_spread_pnl + est_funding - est_fees
-
-    margin_flag = "✅" if available_margin >= required_margin else "⚠️"
-    funding_str = f"{funding_rate:.6f}"
-    net_str = f"+${est_net:,.2f}" if est_net >= 0 else f"-${abs(est_net):,.2f}"
     status_dot = "🟢" if est_net >= 0 else "🟠"
-    how_it_works = {
-        "grid": "Classic spread market maker around reference price.",
-        "rgrid": "Reverse GRID anchors to exposure VWAP average and places buy above / sell below anchor to capture trending continuation\\.",
-        "dn": "Buys Nado Spot and shorts same perp to farm funding with reduced directional exposure\\.",
-        "vol": "Balanced two\\-sided flow with risk caps for consistent volume\\.",
-    }
-    selected_explainer = how_it_works.get(strategy_id, "Automates trade cycles with configured risk controls\\.")
-    extra_cfg = ""
-    if strategy_id == "rgrid":
-        grid_tp = float(conf.get("rgrid_take_profit_pct", conf.get("grid_take_profit_pct", tp_pct)))
-        discretion = float(conf.get("rgrid_discretion", conf.get("grid_discretion", 0.06)))
-        reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 1.0)))
-        reset_timeout = int(conf.get("rgrid_reset_timeout_seconds", conf.get("grid_reset_timeout_seconds", 120)))
-        spread_mode = "Reverse breakout"
-        anchor = float(bot_status.get("rgrid_anchor_price") or 0.0)
-        drift_pct = float(bot_status.get("rgrid_drift_from_anchor_pct") or 0.0)
-        reset_active = bool(bot_status.get("rgrid_reset_active"))
-        cycle_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or 0.0)
-        pnl_sign = "+" if cycle_pnl >= 0 else ""
-        telem = (
-            f"Anchor {anchor:,.2f}" if anchor > 0 else "Anchor n/a"
-        ) + (
-            f" · Drift {drift_pct:.2f}%"
-        ) + (
-            f" · Reset {'ON' if reset_active else 'OFF'}"
-        ) + (
-            f" · Cycle PnL {pnl_sign}${cycle_pnl:,.2f}"
-        )
-        extra_cfg = (
-            f"\nMargin *{escape_md(f'${margin_usd:,.0f}')}* → Effective notional *{escape_md(f'${cycle_notional:,.0f}')}*"
-            f"\nReverse Levels: *{escape_md(str(int(conf.get('levels', 4))))}* \\| "
-            f"Spread mode: *{escape_md(spread_mode)}*"
-            f"\nPnL SL/TP: *{escape_md(f'{max_loss_pct:.2f}% / {grid_tp:.2f}%')}* of margin \\| "
-            f"Reset: *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}*"
-            f"\nDiscretion: *{escape_md(f'{discretion:.2f}')}*"
-            f"\nTelemetry: *{escape_md(telem)}*"
-        )
-    elif strategy_id == "grid":
-        threshold_value = float(conf.get("threshold_bp", 0.0))
-        threshold = "OFF" if threshold_value <= 0 else f"{threshold_value:.0f}bp"
-        ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
-        min_spread = float(conf.get("min_spread_bp", 2.0))
-        max_spread = float(conf.get("max_spread_bp", 20.0))
-        reset_threshold = float(conf.get("grid_reset_threshold_pct", 0.8))
-        reset_timeout = int(conf.get("grid_reset_timeout_seconds", 120))
-        cap_str = f"${session_cap:,.0f}" if session_cap > 0 else "OFF"
-        spread_band = f"{min_spread:.0f}\\-{max_spread:.0f}bp"
-        extra_cfg = (
-            f"\nPassive only *POST_ONLY* \\| Requote threshold *{escape_md(threshold)}*"
-            f"\nQuote around ref *{escape_md(ref_mode)}* · Spread band *{escape_md(spread_band)}*"
-            f"\nMargin *{escape_md(f'${margin_usd:,.0f}')}* → Effective notional *{escape_md(f'${cycle_notional:,.0f}')}*"
-            f"\nPer\\-cycle budget *{escape_md(f'${cycle_notional:,.0f}')}* · Cap *{escape_md(cap_str)}*"
-            f"\nInventory soft limit *{escape_md(f'${inventory_soft_limit:,.0f}')}*"
-            f"\nSoft reset *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}* before hard stop"
-        )
-    if strategy_id in ("grid", "rgrid"):
-        extra_cfg += (
-            f"\nRecommended available margin *{escape_md(f'${recommended_available:,.2f}')}*"
-            f" \\(trade ${escape_md(f'{required_margin:,.2f}')} + buffer ${escape_md(f'{recommended_available - required_margin:,.2f}')}\\)"
-        )
-    elif strategy_id == "dn":
-        auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
-        funding_mode = str(conf.get("funding_entry_mode", "enter_anyway")).strip().lower()
-        mode_label = "ENTER ANYWAY" if funding_mode == "enter_anyway" else "WAIT FAVORABLE"
-        funding_bias = "FAVORABLE" if funding_rate > 0.000001 else "UNFAVORABLE"
-        extra_cfg = (
-            f"\nHedge Leg: *{escape_md(product)}\\-SPOT long + {escape_md(product)}\\-PERP short*"
-            f"\nFunding Leverage: *{escape_md(f'{leverage:.0f}x')}* \\(1x to 5x\\)"
-            f"\nFunding Entry: *{escape_md(mode_label)}* \\| Funding Now: *{escape_md(funding_bias)}*"
-            f"\nAuto-close on maintenance: *{escape_md(auto_close)}*"
-        )
+    funding_bias = "FAVORABLE" if funding_rate > 0.000001 else "UNFAVORABLE"
+    auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
+    funding_mode = str(conf.get("funding_entry_mode", "enter_anyway")).strip().lower()
+    mode_label = "ENTER ANYWAY" if funding_mode == "enter_anyway" else "WAIT FAVORABLE"
+    warning = ""
+    if not wallet_ready:
+        warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
+    elif available_margin < required_margin:
+        warning = f"⚠️ Add margin before starting \\(need {escape_md(_fmt_usd(required_margin))}\\)\\."
     return (
-        f"🤖 *{escape_md(names.get(strategy_id, strategy_id.upper()))}*\n"
-        f"Status: {status_dot} *READY*\n"
-        f"{escape_md(selected_explainer)}\n\n"
-        "*Quick setup*\n"
-        f"Pair: *{escape_md(product)}\\-PERP* \\| Mid: *{escape_md(mid_str)}* \\| Mode: *{escape_md(network.upper())}*\n"
-        f"Margin: *{escape_md(f'${margin_usd:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.0f}bp')}* \\| Every: *{escape_md(f'{interval_seconds}s')}*\n"
-        f"Leverage: *{escape_md(f'{leverage:.0f}x')}* \\| "
-        f"{'PnL stop *' + escape_md(f'{max_loss_pct:.1f}%') + '*' if strategy_id == 'rgrid' else 'TP/SL *' + escape_md(f'{tp_pct:.1f}%/{sl_pct:.1f}%') + '*'}\n"
-        f"Need now: {margin_flag} *{escape_md(f'${required_margin:,.2f}')}* required \\| Balance: *{escape_md(f'${available_margin:,.2f}')}*"
-        f"{extra_cfg}\n\n"
-        "_Start fast, or open Advanced for deeper tuning\\._"
+        "🪞 *Mirror Delta Neutral Dashboard*\n"
+        f"Strategy Status: {status_emoji} *{status_label}*\n\n"
+        "📊 *Your Stats*\n"
+        f"• Volume Traded: *{escape_md(_fmt_usd(session_volume))}*\n"
+        f"• Positions Created: *{escape_md(str(trades_count))}*\n"
+        f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
+        f"• Funding: *{escape_md(f'{funding_rate:.6f}')}*\n\n"
+        "🔑 *Exchange Account*\n"
+        f"• Status: *{escape_md(account_status)}*\n"
+        f"• Wallet: `{escape_md(wallet_short)}`\n"
+        f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
+        "⚙️ *Current Settings*\n"
+        f"• Market: *{escape_md(product)}*\n"
+        f"• Size: *{escape_md(_fmt_usd(margin_usd))}*\n"
+        f"• Funding Leverage: *{escape_md(f'{leverage:.0f}x')}*\n"
+        f"• Funding Entry: *{escape_md(mode_label)}*\n"
+        f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
+        f"• Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+        "ℹ️ *How it works*\n"
+        "Opens LONG on Nado spot and SHORT on the same perp to farm funding while staying delta neutral\\.\n"
+        f"Funding now: *{escape_md(funding_bias)}* \\| Est\\. Daily Fees: *{escape_md(_fmt_usd(est_fees))}*"
+        + (f"\n\n{warning}" if warning else "")
     )
 
 
