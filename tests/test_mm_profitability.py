@@ -215,9 +215,10 @@ class MmProfitabilityTests(unittest.TestCase):
             "grid_anchor_price": 100.0,
             "grid_prev_net_units": 0.2,
         }
+        # Long inventory: soft reset arms when spot falls below anchor by >= threshold (here 1%).
         client = _FakeClient(
-            mid=102.0,
-            positions=[{"product_id": 2, "amount": 0.2, "side": "LONG", "unrealized_pnl": 1.0}],
+            mid=98.0,
+            positions=[{"product_id": 2, "amount": 0.2, "side": "LONG", "unrealized_pnl": -1.0}],
         )
         sell_quotes = []
 
@@ -227,14 +228,14 @@ class MmProfitabilityTests(unittest.TestCase):
             return {"success": True, "digest": f"d{len(sell_quotes)}"}
 
         with patch.object(mm_bot, "execute_limit_order", side_effect=_ok_order):
-            result = mm_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client, mid=102.0, open_orders=[])
+            result = mm_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client, mid=98.0, open_orders=[])
 
         self.assertTrue(result["success"])
         self.assertTrue(state.get("grid_reset_active"))
         self.assertEqual(state.get("grid_reset_side"), "sell")
         self.assertTrue(sell_quotes)
         for q in sell_quotes:
-            self.assertLessEqual(q, 102.0)
+            self.assertLessEqual(q, 98.02)
 
     def test_grid_pnl_stop_loss_triggers_action(self):
         state = {

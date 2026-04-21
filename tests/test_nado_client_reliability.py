@@ -215,6 +215,42 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertIn(444, net)
         self.assertAlmostEqual(float(net[444]["signed_amount"]), -6.0, places=6)
 
+    def test_normalize_net_positions_splits_isolated_subaccounts(self):
+        net = _normalize_net_positions(
+            [
+                {
+                    "product_id": 1,
+                    "product_name": "AAPL-PERP",
+                    "signed_amount": 0.5,
+                    "amount": 0.5,
+                    "side": "LONG",
+                    "price": 200.0,
+                    "subaccount": "0xiso1",
+                },
+                {
+                    "product_id": 1,
+                    "product_name": "AAPL-PERP",
+                    "signed_amount": 0.2,
+                    "amount": 0.2,
+                    "side": "LONG",
+                    "price": 199.0,
+                    "subaccount": "0xiso2",
+                },
+            ]
+        )
+        self.assertIn(1, net)
+        self.assertIn("legs", net[1])
+        self.assertEqual(len(net[1]["legs"]), 2)
+
+    def test_isolated_subaccounts_response_parsing(self):
+        from src.nadobro.services.nado_archive import _isolated_subaccounts_list_from_response
+
+        rows = _isolated_subaccounts_list_from_response(
+            {"isolated_subaccounts": [{"isolated_subaccount": "0xabc", "product_id": 9}]}
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].get("product_id"), 9)
+
     def test_archive_unwraps_orders_under_data(self):
         from src.nadobro.services.nado_archive import _orders_list_from_archive_response
 

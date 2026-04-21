@@ -117,6 +117,47 @@ def _matches_list_from_archive_response(result) -> list:
     return []
 
 
+def _isolated_subaccounts_list_from_response(result) -> list:
+    """Normalize archive POST bodies for isolated_subaccounts queries."""
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    if not isinstance(result, dict):
+        return []
+    rows = result.get("isolated_subaccounts") or result.get("isolatedSubaccounts")
+    if isinstance(rows, list):
+        return rows
+    data = result.get("data")
+    if isinstance(data, dict):
+        inner = data.get("isolated_subaccounts") or data.get("isolatedSubaccounts")
+        if isinstance(inner, list):
+            return inner
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def query_isolated_subaccounts_for_parent(
+    network: str,
+    parent_subaccount_hex: str,
+    limit: int = 100,
+) -> list[dict]:
+    """
+    Isolated margin positions live on child subaccounts. List those linked to the
+    default (parent) subaccount.
+
+    https://docs.nado.xyz/developer-resources/api/archive-indexer/isolated-subaccounts
+    """
+    parent = (parent_subaccount_hex or "").strip()
+    if not parent:
+        return []
+    url = archive_url_for_network(network)
+    payload = {"isolated_subaccounts": {"subaccount": parent, "limit": min(max(1, int(limit)), 500)}}
+    result = _post(url, payload)
+    return _isolated_subaccounts_list_from_response(result) or []
+
+
 def _pick(d: dict, *keys, default=0):
     for k in keys:
         if k in d and d[k] is not None:

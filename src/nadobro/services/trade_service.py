@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 from src.nadobro.models.database import (
@@ -23,6 +24,7 @@ from src.nadobro.config import (
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 from src.nadobro.services.nado_archive import query_order_by_digest
+from src.nadobro.services.product_catalog import is_product_id_isolated_only
 from src.nadobro.services.nado_tooling_service import get_account_snapshot
 
 logger = logging.getLogger(__name__)
@@ -273,11 +275,59 @@ def _build_logical_trade_rows(trades: list[dict]) -> list[dict]:
     return logical_rows
 
 
-def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[str]]:
+def _order_sender_params(client, network: str) -> list[str | None]:
+    """
+    Subaccounts that may hold perp orders: None = default subaccount, else isolated child hex.
+    """
+    from src.nadobro.services.nado_archive import query_isolated_subaccounts_for_parent
+
+    out: list[str | None] = [None]
+    try:
+        for row in query_isolated_subaccounts_for_parent(network, client.subaccount_hex or "") or []:
+            if not isinstance(row, dict):
+                continue
+            iso = (row.get("isolated_subaccount") or row.get("isolatedSubaccount") or "").strip()
+            if iso:
+                out.append(iso)
+    except Exception as e:
+        logger.debug("order_sender_params isolated list failed: %s", e)
+    return out
+
+
+def _net_abs_for_subaccount(positions: list, product_id: int, subaccount: str | None) -> tuple[float, int]:
+    """Residual size and direction (+1 long / -1 short) for product_id on a margin subaccount."""
+    hint = (subaccount or "").strip().lower()
+    for p in positions or []:
+        try:
+            if int(p.get("product_id", -1)) != int(product_id):
+                continue
+        except Exception:
+            continue
+        sk = _position_subaccount_key(p)
+        if hint:
+            if sk != hint:
+                continue
+        else:
+            if sk:
+                continue
+        sa = float(p.get("signed_amount") or 0)
+        if sa == 0.0:
+            amt = float(p.get("amount", 0) or 0)
+            side = str(p.get("side", "") or "").upper()
+            sa = amt if side == "LONG" else (-amt if side == "SHORT" else 0.0)
+        if abs(sa) <= 0:
+            continue
+        return abs(float(sa)), (1 if sa > 0 else -1)
+    return 0.0, 0
+
+
+def _cancel_open_orders_for_product(
+    client, product_id: int, sender: str | None = None
+) -> tuple[int, list[str]]:
     cancelled = 0
     errors: list[str] = []
     try:
-        open_orders = client.get_open_orders(product_id) or []
+        open_orders = client.get_open_orders(product_id, sender=sender) or []
     except Exception as e:
         return 0, [f"{get_product_name(product_id)}: open-orders lookup failed ({e})"]
     for order in open_orders:
@@ -285,7 +335,7 @@ def _cancel_open_orders_for_product(client, product_id: int) -> tuple[int, list[
         if not digest:
             continue
         try:
-            r = client.cancel_order(product_id, digest)
+            r = client.cancel_order(product_id, digest, sender=sender)
             if r.get("success"):
                 cancelled += 1
             else:
@@ -1225,13 +1275,18 @@ def apply_tp_sl_to_open_position(
     if not product_pos:
         return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
 
-    signed_amount = float(product_pos.get("signed_amount", 0) or 0)
+    legs = _iter_position_legs(product_pos)
+    if not legs:
+        return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
+    leg0 = legs[0]
+    signed_amount = float(leg0.get("signed_amount", 0) or 0)
     pos_size = abs(signed_amount)
     if pos_size <= 0:
         return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
 
     is_long = signed_amount > 0
     product_name = get_product_name(product_id, network=network)
+    sender_leg = leg0.get("subaccount")
 
     isolated_only = is_product_isolated_only(product, network=network, client=client)
     isolated_margin = None
@@ -1259,6 +1314,7 @@ def apply_tp_sl_to_open_position(
             isolated_only=isolated_only,
             isolated_margin=isolated_margin,
             reduce_only=True,
+            sender=sender_leg,
         )
         if tp_res.get("success"):
             any_ok = True
@@ -1341,7 +1397,11 @@ def limit_close_position(
     if not product_pos:
         return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
 
-    signed_amount = float(product_pos.get("signed_amount", 0) or 0)
+    legs = _iter_position_legs(product_pos)
+    if not legs:
+        return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
+    leg0 = legs[0]
+    signed_amount = float(leg0.get("signed_amount", 0) or 0)
     pos_size = abs(signed_amount)
     if pos_size <= 0:
         return {"success": False, "error": f"No open position on {get_product_name(product_id, network=network)}."}
@@ -1353,6 +1413,7 @@ def limit_close_position(
         return {"success": False, "error": "Invalid close size."}
 
     product_name = get_product_name(product_id, network=network)
+    sender_leg = leg0.get("subaccount")
     isolated_only = is_product_isolated_only(product, network=network, client=client)
     isolated_margin = None
     if isolated_only:
@@ -1369,6 +1430,7 @@ def limit_close_position(
         isolated_only=isolated_only,
         isolated_margin=isolated_margin,
         reduce_only=True,
+        sender=sender_leg,
     )
     if not r.get("success"):
         return {"success": False, "error": r.get("error", "Limit close failed.")}
@@ -1409,22 +1471,39 @@ def limit_close_position(
     }
 
 
+def _position_subaccount_key(p: dict) -> str:
+    s = (p.get("subaccount") or p.get("sender_subaccount") or "").strip()
+    return s.lower() if s else ""
+
+
+def _iter_position_legs(entry: dict | None) -> list[dict]:
+    """Expand a normalized position entry into one or more close legs (per margin subaccount)."""
+    if not entry:
+        return []
+    legs = entry.get("legs")
+    if isinstance(legs, list) and legs:
+        return legs
+    return [entry]
+
+
 def _normalize_net_positions(positions: list) -> dict[int, dict]:
     """
-    Build net position by product with de-dup protection.
+    Build net position by product (and margin subaccount) with de-dup protection.
 
-    Some client payloads can include duplicated entries for the same product from
-    different source lists. We fingerprint rows and collapse to a net signed size
-    so close actions execute exactly once per product.
+    Isolated margin uses child subaccounts; rows include ``subaccount`` so we do not
+    merge distinct subaccounts into one net. Multiple subaccounts for the same
+    product_id produce a ``legs`` list for sequential closes.
     """
-    seen_rows = set()
-    net_by_product: dict[int, dict] = {}
+    seen_rows: dict[tuple[int, str], set] = defaultdict(set)
+    bucket_net: dict[tuple[int, str], dict] = {}
 
     for p in positions or []:
         try:
             pid = int(p.get("product_id", -1))
             if pid < 0:
                 continue
+            sub_key = _position_subaccount_key(p)
+            bkey = (pid, sub_key)
             signed_amount_raw = p.get("signed_amount", None)
             signed_amount = float(signed_amount_raw) if signed_amount_raw is not None else 0.0
             side = str(p.get("side", "") or "").upper()
@@ -1435,22 +1514,52 @@ def _normalize_net_positions(positions: list) -> dict[int, dict]:
                 continue
             if side not in ("LONG", "SHORT"):
                 side = "LONG" if (signed_amount if signed_amount != 0 else amount) > 0 else "SHORT"
-            # Fingerprint rounded values to suppress near-identical duplicates.
-            fp = (pid, side, round(amount, 12), round(float(p.get("price", 0) or 0), 8))
-            if fp in seen_rows:
+            fp = (pid, sub_key, side, round(amount, 12), round(float(p.get("price", 0) or 0), 8))
+            if fp in seen_rows[bkey]:
                 continue
-            seen_rows.add(fp)
+            seen_rows[bkey].add(fp)
 
             signed = signed_amount if signed_amount != 0 else (amount if side == "LONG" else -amount)
-            current = net_by_product.get(
-                pid,
+            current = bucket_net.get(
+                bkey,
                 {"product_name": p.get("product_name", get_product_name(pid)), "signed_amount": 0.0},
             )
             current["signed_amount"] = float(current.get("signed_amount", 0.0)) + signed
-            net_by_product[pid] = current
+            bucket_net[bkey] = current
         except Exception:
             continue
 
+    by_pid: dict[int, list[dict]] = defaultdict(list)
+    for (pid, sub_key), row in bucket_net.items():
+        sa = float(row.get("signed_amount", 0.0) or 0.0)
+        if abs(sa) <= 0:
+            continue
+        by_pid[pid].append(
+            {
+                "signed_amount": sa,
+                "product_name": row.get("product_name", get_product_name(pid)),
+                "subaccount": sub_key if sub_key else None,
+            }
+        )
+
+    net_by_product: dict[int, dict] = {}
+    for pid, legs in by_pid.items():
+        if not legs:
+            continue
+        if len(legs) == 1:
+            leg = legs[0]
+            net_by_product[pid] = {
+                "signed_amount": float(leg["signed_amount"]),
+                "product_name": leg.get("product_name", get_product_name(pid)),
+                "subaccount": leg.get("subaccount"),
+            }
+        else:
+            total = sum(float(x["signed_amount"]) for x in legs)
+            net_by_product[pid] = {
+                "signed_amount": total,
+                "product_name": legs[0].get("product_name", get_product_name(pid)),
+                "legs": legs,
+            }
     return net_by_product
 
 
@@ -1741,7 +1850,13 @@ def close_position(
     client = get_user_nado_client(telegram_id, network=selected_network)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
-    cancelled_orders, order_errors = _cancel_open_orders_for_product(client, product_id)
+
+    cancelled_orders = 0
+    order_errors: list[str] = []
+    for snd in _order_sender_params(client, selected_network):
+        c_count, c_errs = _cancel_open_orders_for_product(client, product_id, sender=snd)
+        cancelled_orders += c_count
+        order_errors.extend(c_errs)
 
     net_positions = _normalize_net_positions(client.get_all_positions() or [])
     product_pos = net_positions.get(product_id)
@@ -1763,55 +1878,82 @@ def close_position(
 
     close_size = min(pos_size, float(size)) if size else pos_size
     full_close_requested = size is None or close_size >= pos_size
-    close_side = "short" if signed_amount > 0 else "long"
     close_slippage_pct = max(0.1, float(kwargs.get("slippage_pct") or 1.0))
 
-    remaining_size = close_size
-    attempts = 0
-    while remaining_size > 0 and attempts < 3:
-        attempts += 1
-        # Refresh side before each close attempt in case position flips between retries.
-        latest_positions = _normalize_net_positions(client.get_all_positions() or [])
-        latest_pos = latest_positions.get(product_id)
-        if not latest_pos:
-            remaining_size = 0.0
+    from src.nadobro.services.settings_service import get_user_settings
+
+    _, settings = get_user_settings(telegram_id)
+    leverage = max(1.0, float(settings.get("default_leverage", 3) or 3))
+
+    legs = _iter_position_legs(product_pos)
+    budget = float(close_size)
+    total_filled = 0.0
+
+    for leg in legs:
+        if budget <= 0:
             break
-        latest_signed = float(latest_pos.get("signed_amount", 0) or 0)
-        latest_abs = abs(latest_signed)
-        if latest_abs <= 0:
-            remaining_size = 0.0
-            break
-        is_buy = latest_signed < 0
-        this_close_size = min(remaining_size, latest_abs)
-        r = client.place_market_order(
-            product_id,
-            this_close_size,
-            is_buy=is_buy,
-            slippage_pct=close_slippage_pct,
-            reduce_only=True,
-        )
-        if not r.get("success"):
-            return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
-        # Resolve actual fill data from Nado archive
-        close_digest = r.get("digest", "")
-        close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
-        fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, product_id)
-        _record_close_in_db(
-            telegram_id,
-            product_id,
-            this_close_size,
-            pos_size,
-            close_side,
-            client,
-            fill_price=fill_price,
-            network=selected_network,
-            fill_data=close_fill_data,
-        )
-        remaining_size -= this_close_size
+        sub_hint = leg.get("subaccount")
+        leg_cap = abs(float(leg.get("signed_amount", 0) or 0))
+        if leg_cap <= 0:
+            continue
+        leg_budget = min(budget, leg_cap)
+        leg_remaining = leg_budget
+        close_side = "short" if float(leg.get("signed_amount", 0) or 0) > 0 else "long"
+
+        attempts = 0
+        while leg_remaining > 0 and attempts < 3:
+            attempts += 1
+            raw_positions = client.get_all_positions() or []
+            latest_abs, dir_sign = _net_abs_for_subaccount(raw_positions, product_id, sub_hint)
+            if latest_abs <= 0:
+                leg_remaining = 0.0
+                break
+            is_buy = dir_sign < 0
+            this_close_size = min(leg_remaining, latest_abs)
+
+            iso_only = is_product_id_isolated_only(product_id, network=selected_network, client=client)
+            iso_margin = None
+            if iso_only:
+                mp = client.get_market_price(product_id)
+                mid = float(mp.get("mid", 0) or 0)
+                if mid > 0:
+                    iso_margin = (float(this_close_size) * mid) / leverage
+
+            r = client.place_market_order(
+                product_id,
+                this_close_size,
+                is_buy=is_buy,
+                slippage_pct=close_slippage_pct,
+                reduce_only=True,
+                isolated_only=iso_only,
+                isolated_margin=iso_margin,
+                sender=sub_hint,
+            )
+            if not r.get("success"):
+                return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
+            close_digest = r.get("digest", "")
+            close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
+            fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, product_id)
+            _record_close_in_db(
+                telegram_id,
+                product_id,
+                this_close_size,
+                pos_size,
+                close_side,
+                client,
+                fill_price=fill_price,
+                network=selected_network,
+                fill_data=close_fill_data,
+            )
+            leg_remaining -= this_close_size
+            budget -= this_close_size
+            total_filled += this_close_size
 
     post_positions = _normalize_net_positions(client.get_all_positions() or [])
     post_pos = post_positions.get(product_id)
-    post_open_orders = client.get_open_orders(product_id) or []
+    post_open_orders = 0
+    for snd in _order_sender_params(client, selected_network):
+        post_open_orders += len(client.get_open_orders(product_id, sender=snd) or [])
     if full_close_requested:
         still_open = bool(post_pos and abs(float(post_pos.get("signed_amount", 0) or 0)) > 0)
         if still_open or post_open_orders:
@@ -1819,7 +1961,7 @@ def close_position(
             if still_open:
                 detail.append("position still open")
             if post_open_orders:
-                detail.append(f"{len(post_open_orders)} open orders remain")
+                detail.append(f"{post_open_orders} open orders remain")
             return {
                 "success": False,
                 "error": f"Close verification failed for {product}: {', '.join(detail)}.",
@@ -1827,7 +1969,7 @@ def close_position(
 
     payload = {
         "success": True,
-        "cancelled": close_size,
+        "cancelled": total_filled if total_filled > 0 else close_size,
         "product": get_product_name(product_id, network=selected_network),
     }
     if cancelled_orders:
@@ -1927,15 +2069,16 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
 
     cancelled_orders = 0
     order_errors = []
-    # Always cancel stale open orders first so strategy stop leaves no resting orders.
-    for product_name in get_perp_products(network=selected_network, client=client):
-        pid = get_product_id(product_name, network=selected_network, client=client)
-        if pid is None:
-            continue
-        c_count, c_errors = _cancel_open_orders_for_product(client, pid)
-        cancelled_orders += c_count
-        if c_errors:
-            order_errors.extend(c_errors)
+    # Cancel on default + isolated margin subaccounts (orders rest on the same sender as quotes).
+    for snd in _order_sender_params(client, selected_network):
+        for product_name in get_perp_products(network=selected_network, client=client):
+            pid = get_product_id(product_name, network=selected_network, client=client)
+            if pid is None:
+                continue
+            c_count, c_errors = _cancel_open_orders_for_product(client, pid, sender=snd)
+            cancelled_orders += c_count
+            if c_errors:
+                order_errors.extend(c_errors)
 
     net_positions = _normalize_net_positions(client.get_all_positions() or [])
     if not net_positions:
@@ -1960,49 +2103,66 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
             "products": [],
         }
 
+    from src.nadobro.services.settings_service import get_user_settings
+
+    _, settings = get_user_settings(telegram_id)
+    leverage = max(1.0, float(settings.get("default_leverage", 3) or 3))
+
     cancelled = 0.0
     errors = []
     products_closed = set()
     for pid, p in net_positions.items():
-        try:
-            signed_amount = float(p.get("signed_amount", 0) or 0)
-            pos_size = abs(signed_amount)
-            if pos_size <= 0:
-                continue
-            is_buy = signed_amount < 0
-            r = client.place_market_order(
-                pid,
-                pos_size,
-                is_buy=is_buy,
-                slippage_pct=1.0,
-                reduce_only=True,
-            )
-            if r["success"]:
-                cancelled += pos_size
-                product_name = p.get("product_name", get_product_name(pid, network=selected_network))
-                products_closed.add(product_name)
-                close_side = "short" if signed_amount > 0 else "long"
-                close_digest = r.get("digest", "")
-                close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
-                fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, pid)
-                _record_close_in_db(
-                    telegram_id,
+        for leg in _iter_position_legs(p):
+            try:
+                signed_amount = float(leg.get("signed_amount", 0) or 0)
+                pos_size = abs(signed_amount)
+                if pos_size <= 0:
+                    continue
+                is_buy = signed_amount < 0
+                sub_hint = leg.get("subaccount")
+                iso_only = is_product_id_isolated_only(pid, network=selected_network, client=client)
+                iso_margin = None
+                if iso_only:
+                    mp = client.get_market_price(pid)
+                    mid = float(mp.get("mid", 0) or 0)
+                    if mid > 0:
+                        iso_margin = (float(pos_size) * mid) / leverage
+                r = client.place_market_order(
                     pid,
                     pos_size,
-                    pos_size,
-                    close_side,
-                    client,
-                    fill_price=fill_price,
-                    network=selected_network,
-                    fill_data=close_fill_data,
+                    is_buy=is_buy,
+                    slippage_pct=1.0,
+                    reduce_only=True,
+                    isolated_only=iso_only,
+                    isolated_margin=iso_margin,
+                    sender=sub_hint,
                 )
-            else:
-                errors.append(
-                    f"{p.get('product_name', get_product_name(pid, network=selected_network))}: "
-                    f"{r.get('error', 'unknown')}"
-                )
-        except Exception as e:
-            errors.append(f"{p.get('product_name', 'unknown')}: {str(e)}")
+                if r["success"]:
+                    cancelled += pos_size
+                    product_name = leg.get("product_name", p.get("product_name", get_product_name(pid, network=selected_network)))
+                    products_closed.add(product_name)
+                    close_side = "short" if signed_amount > 0 else "long"
+                    close_digest = r.get("digest", "")
+                    close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
+                    fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, pid)
+                    _record_close_in_db(
+                        telegram_id,
+                        pid,
+                        pos_size,
+                        pos_size,
+                        close_side,
+                        client,
+                        fill_price=fill_price,
+                        network=selected_network,
+                        fill_data=close_fill_data,
+                    )
+                else:
+                    errors.append(
+                        f"{leg.get('product_name', get_product_name(pid, network=selected_network))}: "
+                        f"{r.get('error', 'unknown')}"
+                    )
+            except Exception as e:
+                errors.append(f"{leg.get('product_name', 'unknown')}: {str(e)}")
 
     if cancelled == 0 and errors:
         all_errors = list(errors)
@@ -2028,14 +2188,15 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
             + ", ".join(get_product_name(pid, network=selected_network) for pid in post_positions.keys())
         )
     remaining_orders = 0
-    for product_name in get_perp_products(network=selected_network, client=client):
-        pid = get_product_id(product_name, network=selected_network, client=client)
-        if pid is None:
-            continue
-        try:
-            remaining_orders += len(client.get_open_orders(pid) or [])
-        except Exception:
-            continue
+    for snd in _order_sender_params(client, selected_network):
+        for product_name in get_perp_products(network=selected_network, client=client):
+            pid = get_product_id(product_name, network=selected_network, client=client)
+            if pid is None:
+                continue
+            try:
+                remaining_orders += len(client.get_open_orders(pid, sender=snd) or [])
+            except Exception:
+                continue
     if remaining_orders > 0:
         result["success"] = False
         existing_error = result.get("error", "")

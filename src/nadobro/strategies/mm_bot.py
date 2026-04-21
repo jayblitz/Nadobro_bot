@@ -599,6 +599,13 @@ def run_cycle(
         else:
             # Legacy fallback: map old range pct to bps scale.
             spread_bp = float(state.get("max_range_pct") or state.get("min_range_pct") or GRID_MIN_SPREAD_BP * 2.0) * 100.0
+        # Maker PnL needs spread wide enough to beat fees + adverse selection; very tight bps looks
+        # profitable on volume but bleeds on taker/queue losses.
+        if spread_bp != 0:
+            sign = 1.0 if spread_bp > 0 else -1.0
+            spread_bp = sign * max(abs(float(spread_bp)), GRID_MIN_SPREAD_BP)
+        else:
+            spread_bp = float(GRID_MIN_SPREAD_BP)
     else:
         levels = max(1, int(state.get("levels", MM_DEFAULT_LEVELS)))
         spread_bp = max(spread_bp, MM_MIN_SPREAD_BP)
@@ -750,8 +757,9 @@ def run_cycle(
     pnl_stop_pct = max(
         0.0,
         float(
-            state.get("rgrid_stop_loss_pct") if strategy == "rgrid"
-            else state.get("grid_stop_loss_pct")
+            (
+                state.get("rgrid_stop_loss_pct") if strategy == "rgrid" else state.get("grid_stop_loss_pct")
+            )
             or state.get("sl_pct")
             or 0.0
         ),
@@ -759,8 +767,9 @@ def run_cycle(
     pnl_take_pct = max(
         0.0,
         float(
-            state.get("rgrid_take_profit_pct") if strategy == "rgrid"
-            else state.get("grid_take_profit_pct")
+            (
+                state.get("rgrid_take_profit_pct") if strategy == "rgrid" else state.get("grid_take_profit_pct")
+            )
             or state.get("tp_pct")
             or 0.0
         ),
@@ -862,16 +871,18 @@ def run_cycle(
         reset_threshold_pct = max(
             0.0,
             float(
-                state.get("rgrid_reset_threshold_pct") if strategy == "rgrid"
-                else state.get("grid_reset_threshold_pct")
+                (
+                    state.get("rgrid_reset_threshold_pct") if strategy == "rgrid" else state.get("grid_reset_threshold_pct")
+                )
                 or 0.0
             ),
         )
         reset_timeout_s = max(
             GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS,
             int(
-                state.get("rgrid_reset_timeout_seconds") if strategy == "rgrid"
-                else state.get("grid_reset_timeout_seconds")
+                (
+                    state.get("rgrid_reset_timeout_seconds") if strategy == "rgrid" else state.get("grid_reset_timeout_seconds")
+                )
                 or 120
             ),
         )

@@ -358,8 +358,9 @@ class NadoClient:
 
         return {"exists": False, "balances": {}}
 
-    def get_open_orders(self, product_id: int, refresh: bool = False) -> list:
-        cache_key = (self.network, str(self.subaccount_hex or ""), int(product_id))
+    def get_open_orders(self, product_id: int, refresh: bool = False, sender: Optional[str] = None) -> list:
+        eff_sender = (sender or "").strip() or self.subaccount_hex
+        cache_key = (self.network, str(eff_sender or ""), int(product_id))
         if not refresh:
             cached = _open_orders_cache.get(cache_key)
             if cached and (time.time() - float(cached.get("ts", 0))) < _OPEN_ORDERS_CACHE_TTL:
@@ -367,7 +368,7 @@ class NadoClient:
         if self._initialized and self.client:
             try:
                 from nado_protocol.utils.math import from_x18
-                orders_data = self.client.context.engine_client.get_subaccount_open_orders(product_id, self.subaccount_hex)
+                orders_data = self.client.context.engine_client.get_subaccount_open_orders(product_id, eff_sender)
                 orders = []
                 for o in orders_data.orders:
                     amount = from_x18(int(o.amount))
@@ -388,7 +389,7 @@ class NadoClient:
             # Read-only/runtime clients rely on REST, so keep parity with SDK path.
             data = self._query_rest(
                 "subaccount_orders",
-                {"sender": self.subaccount_hex, "product_id": product_id},
+                {"sender": eff_sender, "product_id": product_id},
             ) or {}
             if data.get("status") == "success":
                 payload = data.get("data", {}) or {}
@@ -894,25 +895,29 @@ class NadoClient:
                 positions.append(pos)
         return positions
 
-    def get_all_positions(self) -> list:
-        # Prefer true perp positions from subaccount info.
+    def _positions_for_subaccount_hex(self, subaccount_hex: str, *, allow_empty_cache_fallback: bool) -> list:
+        """
+        Perp positions for a single subaccount (default or isolated margin child).
+        """
+        subaccount_hex = (subaccount_hex or "").strip()
+
         subaccount_info_succeeded = False
         if self._initialized and self.client:
             try:
-                info = self.client.context.engine_client.get_subaccount_info(self.subaccount_hex)
+                info = self.client.context.engine_client.get_subaccount_info(subaccount_hex)
                 subaccount_info_succeeded = True
                 sdk_positions = self._extract_positions_from_sdk_info(info)
                 if sdk_positions:
                     return sdk_positions
                 logger.info(
                     "SDK subaccount_info returned no parseable positions; trying REST (subaccount=%s)",
-                    (self.subaccount_hex or "")[:22],
+                    subaccount_hex[:22],
                 )
             except Exception as e:
-                logger.warning(f"SDK get_all_positions via subaccount_info failed: {e}")
+                logger.warning("SDK positions for subaccount failed: %s", e)
 
         try:
-            data = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
+            data = self._query_rest("subaccount_info", {"subaccount": subaccount_hex}) or {}
             if data.get("status") == "success":
                 subaccount_info_succeeded = True
                 payload = data.get("data", {}) or {}
@@ -926,21 +931,18 @@ class NadoClient:
                 if rest_positions:
                     return rest_positions
         except Exception as e:
-            logger.warning(f"REST get_all_positions via subaccount_info failed: {e}")
+            logger.warning("REST positions for subaccount failed: %s", e)
 
-        # If subaccount_info read succeeded but both SDK and REST parsers returned empty,
-        # still try the per-product scan. Newer products (e.g. catalog-only perps) sometimes
-        # use response shapes we do not yet parse, while open orders / engine state still show exposure.
         if subaccount_info_succeeded:
             logger.info(
-                "Subaccount info succeeded but zero positions parsed; attempting per-product fallback (subaccount=%s)",
-                (self.subaccount_hex or "")[:22],
+                "Subaccount info succeeded but zero positions parsed (subaccount=%s)",
+                subaccount_hex[:22],
             )
 
-        # Do not infer positions from open orders. Open orders are not exposure and
-        # using them as positions causes downstream strategy logic (inventory caps,
-        # reduce-only exits) to behave incorrectly.
-        fallback_key = (self.network, str(self.subaccount_hex or ""))
+        if not allow_empty_cache_fallback:
+            return []
+
+        fallback_key = (self.network, str(subaccount_hex))
         cached = _positions_fallback_cache.get(fallback_key)
         if cached and (time.time() - float(cached.get("ts", 0))) < _POSITIONS_FALLBACK_TTL:
             return list(cached.get("data") or [])
@@ -948,6 +950,37 @@ class NadoClient:
         positions = []
         _positions_fallback_cache[fallback_key] = {"data": positions, "ts": time.time()}
         return positions
+
+    def get_all_positions(self) -> list:
+        # Default (cross / main) subaccount.
+        main = self._positions_for_subaccount_hex(
+            self.subaccount_hex or "",
+            allow_empty_cache_fallback=True,
+        )
+        merged = list(main)
+
+        # Isolated margin: each market uses a dedicated child subaccount; balances do not
+        # appear on the parent subaccount_info.perp_balances list.
+        try:
+            from src.nadobro.services.nado_archive import query_isolated_subaccounts_for_parent
+
+            rows = query_isolated_subaccounts_for_parent(self.network, self.subaccount_hex or "") or []
+            seen_iso: set[str] = set()
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                iso = (row.get("isolated_subaccount") or row.get("isolatedSubaccount") or "").strip()
+                if not iso or iso in seen_iso:
+                    continue
+                seen_iso.add(iso)
+                iso_positions = self._positions_for_subaccount_hex(iso, allow_empty_cache_fallback=False)
+                for p in iso_positions:
+                    p["subaccount"] = iso
+                merged.extend(iso_positions)
+        except Exception as e:
+            logger.warning("get_all_positions isolated merge failed: %s", e)
+
+        return merged
 
     def verify_linked_signer(self, expected_signer_address: str = None) -> dict:
         expected = (expected_signer_address or self.address or "").lower()
@@ -1296,12 +1329,14 @@ class NadoClient:
         isolated_only: bool = False,
         isolated_margin: Optional[float] = None,
         reduce_only: bool = False,
+        sender: Optional[str] = None,
         _retry_count: int = 0,
     ) -> dict:
         if not self._initialized or not self.client:
             return {"success": False, "error": "Client not initialized. Please try /start again."}
 
         try:
+            sender_hex = (sender or "").strip() or self.subaccount_hex
             try:
                 builder_id, builder_fee_rate = get_nado_builder_routing_config()
             except ValueError as cfg_err:
@@ -1389,7 +1424,7 @@ class NadoClient:
                 isolated_margin_x6 = max(0, self._to_x6_int(float(isolated_margin)))
 
             order = OrderParams(
-                sender=self.subaccount_hex,
+                sender=sender_hex,
                 priceX18=price_x18,
                 amount=amount_x18,
                 expiration=get_expiration_timestamp(expiration_secs),
@@ -1476,6 +1511,7 @@ class NadoClient:
                             isolated_only=isolated_only,
                             isolated_margin=isolated_margin,
                             reduce_only=reduce_only,
+                            sender=sender,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -1510,6 +1546,7 @@ class NadoClient:
                                 isolated_only=isolated_only,
                                 isolated_margin=isolated_margin,
                                 reduce_only=reduce_only,
+                                sender=sender,
                                 _retry_count=_retry_count + 1,
                             )
                         except Exception as retry_e:
@@ -1538,6 +1575,7 @@ class NadoClient:
                             isolated_only=isolated_only,
                             isolated_margin=isolated_margin,
                             reduce_only=reduce_only,
+                            sender=sender,
                             _retry_count=_retry_count + 1,
                         )
                         if retry_result.get("success"):
@@ -1567,6 +1605,7 @@ class NadoClient:
                             isolated_only=isolated_only,
                             isolated_margin=isolated_margin,
                             reduce_only=reduce_only,
+                            sender=sender,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -1585,6 +1624,7 @@ class NadoClient:
         isolated_only: bool = False,
         isolated_margin: Optional[float] = None,
         reduce_only: bool = False,
+        sender: Optional[str] = None,
     ) -> dict:
         mp = self.get_market_price(product_id)
         if mp["mid"] == 0:
@@ -1605,6 +1645,7 @@ class NadoClient:
             isolated_only=isolated_only,
             isolated_margin=isolated_margin,
             reduce_only=reduce_only,
+            sender=sender,
         )
 
     def place_limit_order(
@@ -1617,6 +1658,7 @@ class NadoClient:
         isolated_margin: Optional[float] = None,
         reduce_only: bool = False,
         post_only: bool = False,
+        sender: Optional[str] = None,
     ) -> dict:
         return self.place_order(
             product_id,
@@ -1627,17 +1669,19 @@ class NadoClient:
             isolated_only=isolated_only,
             isolated_margin=isolated_margin,
             reduce_only=reduce_only,
+            sender=sender,
         )
 
-    def cancel_order(self, product_id: int, digest: str) -> dict:
+    def cancel_order(self, product_id: int, digest: str, sender: Optional[str] = None) -> dict:
         if not self._initialized or not self.client:
             return {"success": False, "error": "Client not initialized"}
 
         try:
             from nado_protocol.engine_client.types.execute import CancelOrdersParams
 
+            eff_sender = (sender or "").strip() or self.subaccount_hex
             cancel_params = CancelOrdersParams(
-                sender=self.subaccount_hex,
+                sender=eff_sender,
                 productIds=[product_id],
                 digests=[digest],
             )
