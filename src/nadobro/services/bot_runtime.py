@@ -17,6 +17,10 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     "dn_mode", "order_observability",
     "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
     "vol_market",
+    # VOL perp direction is chosen at start (Start Long / Start Short). Saved dashboard
+    # `vol_direction` must not overwrite live runtime each tick — that caused opposite-side
+    # entries when UI showed one direction and stale settings said another.
+    "vol_direction",
 })
 
 from src.nadobro.config import (
@@ -702,6 +706,26 @@ def start_user_bot(
         state["notional_usd"] = 100.0
         state["vol_phase"] = "idle"
         state["session_realized_pnl_usd"] = 0.0
+        # Keep saved VOL prefs aligned with this run so dashboards / Advanced match execution.
+        if vol_market_kw == "perp":
+            try:
+                from src.nadobro.services.settings_service import update_user_settings
+
+                d = str(state.get("vol_direction") or "long").strip().lower()
+                d = "short" if d == "short" else "long"
+
+                def _sync_vol_direction_pref(settings: dict) -> None:
+                    strategies = settings.setdefault("strategies", {})
+                    vol_cfg = strategies.setdefault("vol", {})
+                    vol_cfg["vol_direction"] = d
+
+                update_user_settings(telegram_id, _sync_vol_direction_pref)
+            except Exception:
+                logger.warning(
+                    "Could not sync vol_direction into user strategy prefs for user=%s",
+                    telegram_id,
+                    exc_info=True,
+                )
     from src.nadobro.services.runtime_supervisor import strategy_worker_group
 
     state["worker_group"] = strategy_worker_group(strategy)

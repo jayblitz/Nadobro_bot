@@ -47,6 +47,11 @@ class _VolClient:
 
 
 class VolStrategyRebuildTests(unittest.TestCase):
+    def test_vol_direction_not_overwritten_by_runtime_settings_merge(self):
+        """Regression: _run_cycle merges strategy prefs each tick; vol_direction in prefs
+        must not clobber the side chosen at start (Start Long vs stale SHORT in settings)."""
+        self.assertIn("vol_direction", bot_runtime._STRATEGY_SETTINGS_RUNTIME_BLOCKLIST)
+
     def test_vol_idle_places_limit_entry_with_fixed_margin(self):
         state = {"product": "BTC", "vol_direction": "long", "tp_pct": 1.0, "sl_pct": 1.0}
         client = _VolClient(mid=100.0)
