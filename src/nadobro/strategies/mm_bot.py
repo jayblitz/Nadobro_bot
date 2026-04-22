@@ -11,13 +11,15 @@ from src.nadobro.services.trade_service import execute_limit_order
 
 logger = logging.getLogger(__name__)
 
-STALE_DRIFT_MULTIPLIER = 3.0
+STALE_DRIFT_MULTIPLIER = 2.0
 MM_DEFAULT_LEVELS = 2
 GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
 GRID_MIN_SPREAD_BP = 8.0
 DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
+POST_ONLY_REPRICE_MAX_RETRIES = 3
+POST_ONLY_REPRICE_STEP_BP = 0.5
 
 
 MOMENTUM_EMA_CROSSOVER_BP = 5.0       # EMA fast-slow divergence threshold (bp)
@@ -54,20 +56,38 @@ def _compute_realized_vol_bp(history: list[float]) -> float:
     return avg_abs_return * 10000.0
 
 
+def _update_both_emas(state: dict, mid: float, ema_fast_alpha: float, ema_slow_alpha: float) -> tuple[float, float]:
+    """Advance and persist both EMAs exactly once per cycle.
+
+    Idempotent within a single run_cycle via `_mm_ema_updated_mid` tag so subsequent
+    callers (reference price, crossover detector) read consistent values without
+    double-mixing the alpha.
+    """
+    tag = float(state.get("_mm_ema_updated_mid") or 0.0)
+    if tag > 0 and abs(tag - mid) < mid * 1e-12:
+        return (
+            float(state.get("mm_ref_ema_fast") or mid),
+            float(state.get("mm_ref_ema_slow") or mid),
+        )
+    prev_fast = float(state.get("mm_ref_ema_fast") or mid)
+    prev_slow = float(state.get("mm_ref_ema_slow") or mid)
+    ema_fast = (ema_fast_alpha * mid) + ((1.0 - ema_fast_alpha) * prev_fast)
+    ema_slow = (ema_slow_alpha * mid) + ((1.0 - ema_slow_alpha) * prev_slow)
+    state["mm_ref_ema_fast"] = ema_fast
+    state["mm_ref_ema_slow"] = ema_slow
+    state["_mm_ema_updated_mid"] = float(mid)
+    return ema_fast, ema_slow
+
+
 def _compute_reference_price(state: dict, mid: float, mode: str, ema_fast_alpha: float, ema_slow_alpha: float) -> float:
     mode = (mode or "mid").lower().strip()
     if mode == "mid":
         return mid
+    ema_fast, ema_slow = _update_both_emas(state, mid, ema_fast_alpha, ema_slow_alpha)
     if mode == "ema_fast":
-        prev = float(state.get("mm_ref_ema_fast") or mid)
-        ema = (ema_fast_alpha * mid) + ((1.0 - ema_fast_alpha) * prev)
-        state["mm_ref_ema_fast"] = ema
-        return ema
+        return ema_fast
     if mode == "ema_slow":
-        prev = float(state.get("mm_ref_ema_slow") or mid)
-        ema = (ema_slow_alpha * mid) + ((1.0 - ema_slow_alpha) * prev)
-        state["mm_ref_ema_slow"] = ema
-        return ema
+        return ema_slow
     return mid
 
 
@@ -105,11 +125,15 @@ def _resolve_side_multipliers(directional_bias: str, net_units: float, inv_soft_
 
 
 def _detect_ema_crossover(state: dict, mid: float, ema_fast_alpha: float, ema_slow_alpha: float) -> dict:
-    """Detect EMA fast/slow crossover for momentum detection."""
+    """Detect EMA fast/slow crossover for momentum detection.
+
+    Captures previous-cycle EMAs BEFORE advancing them, so the crossover is measured
+    across cycles (not within-cycle). Advancement is delegated to `_update_both_emas`,
+    which is idempotent per-mid so this stays consistent with the reference-price path.
+    """
     prev_fast = float(state.get("mm_ref_ema_fast") or mid)
     prev_slow = float(state.get("mm_ref_ema_slow") or mid)
-    ema_fast = (ema_fast_alpha * mid) + ((1.0 - ema_fast_alpha) * prev_fast)
-    ema_slow = (ema_slow_alpha * mid) + ((1.0 - ema_slow_alpha) * prev_slow)
+    ema_fast, ema_slow = _update_both_emas(state, mid, ema_fast_alpha, ema_slow_alpha)
 
     divergence_bp = abs(ema_fast - ema_slow) / max(ema_slow, 1e-9) * 10000.0
     prev_divergence_sign = 1 if prev_fast > prev_slow else -1
@@ -236,37 +260,21 @@ def _compute_grid_prices(
     min_range_pct: float = 1.0,
     max_range_pct: float = 1.0,
 ) -> list[dict]:
-    half_spread = spread_bp / 10000.0
+    # GRID and RGRID share one price shape under POSITIVE spread: buys BELOW
+    # anchor, sells ABOVE anchor. RGRID's "reversal" is applied via the
+    # side-budget skew (directional_bias), not by flipping the prices — the
+    # previous implementation flipped them and then the post-only clamp below
+    # collapsed every RGRID level to top-of-book.
+    #
+    # NEGATIVE spread_bp is a separate, intentional mode: the bot concedes the
+    # trade by crossing the book (buys ABOVE anchor, sells BELOW anchor). In
+    # that mode we deliberately skip the post-only clamp; we're not trying to
+    # be a maker.
+    signed_half_spread = float(spread_bp) / 10000.0
+    is_concede = signed_half_spread < 0.0
     orders = []
-    if strategy == "rgrid":
-        base_off = max(0.0, abs(spread_bp) / 10000.0)
-        for i in range(levels):
-            lvl = i + 1
-            offset = base_off * lvl
-            # Reverse Grid:
-            # - buy quote at/above anchor (fills on upward continuation)
-            # - sell quote at/below anchor (fills on downward continuation)
-            buy_price = reference_price * (1.0 + offset)
-            sell_price = reference_price * (1.0 - offset)
-
-            if soft_reset_side and mid_price and mid_price > 0:
-                reset_nudge = (0.1 * lvl) / 10000.0
-                if soft_reset_side == "buy":
-                    buy_price = float(best_bid or (mid_price * (1.0 - reset_nudge)))
-                elif soft_reset_side == "sell":
-                    sell_price = float(best_ask or (mid_price * (1.0 + reset_nudge)))
-
-            if best_bid and best_bid > 0:
-                buy_price = min(buy_price, float(best_bid))
-            if best_ask and best_ask > 0:
-                sell_price = max(sell_price, float(best_ask))
-
-            lvl = i + 1
-            orders.append({"price": buy_price, "is_long": True, "level": lvl})
-            orders.append({"price": sell_price, "is_long": False, "level": lvl})
-        return orders
     for i in range(1, levels + 1):
-        offset = half_spread * i
+        offset = signed_half_spread * i
         buy_price = reference_price * (1.0 - offset)
         sell_price = reference_price * (1.0 + offset)
         if soft_reset_side and mid_price and mid_price > 0:
@@ -275,10 +283,13 @@ def _compute_grid_prices(
                 buy_price = float(best_bid or (mid_price * (1.0 - reset_nudge)))
             elif soft_reset_side == "sell":
                 sell_price = float(best_ask or (mid_price * (1.0 + reset_nudge)))
-        if best_bid and best_bid > 0:
-            buy_price = min(buy_price, float(best_bid))
-        if best_ask and best_ask > 0:
-            sell_price = max(sell_price, float(best_ask))
+        # Post-only safety (positive-spread maker mode only): buys can't sit
+        # at/above best_bid, sells can't sit at/below best_ask.
+        if not is_concede:
+            if best_bid and best_bid > 0:
+                buy_price = min(buy_price, float(best_bid))
+            if best_ask and best_ask > 0:
+                sell_price = max(sell_price, float(best_ask))
         orders.append({"price": buy_price, "is_long": True, "level": i})
         orders.append({"price": sell_price, "is_long": False, "level": i})
     return orders
@@ -436,12 +447,25 @@ def _estimate_net_units_from_fill_history(state: dict) -> float:
     return buy_total - sell_total
 
 
-def _reprice_post_only_quote(client, product_id: int, is_long: bool, fallback_price: float) -> float:
+def _reprice_post_only_quote(
+    client,
+    product_id: int,
+    is_long: bool,
+    fallback_price: float,
+    attempt: int = 0,
+) -> float:
+    """Step the post-only quote further inside the safe side of the book on each retry.
+
+    Attempt 0 = 0.5 bp inside, attempt 1 = 1.0 bp, attempt 2 = 2.0 bp. This gives the
+    retry a real chance of clearing during fast markets instead of bouncing off the
+    same level we just failed on.
+    """
     try:
         mp = client.get_market_price(product_id) or {}
         bid = float(mp.get("bid") or 0.0)
         ask = float(mp.get("ask") or 0.0)
-        nudge = 0.00002  # 0.2 bp inside the safe side of book
+        step_bp = POST_ONLY_REPRICE_STEP_BP * (2.0 ** max(0, attempt))
+        nudge = step_bp / 10000.0
         if is_long and bid > 0:
             return bid * (1.0 - nudge)
         if (not is_long) and ask > 0:
@@ -506,6 +530,12 @@ def run_cycle(
     open_orders: list = None,
     **kwargs,
 ) -> dict:
+    # Clear per-cycle EMA idempotency tag so `_update_both_emas` will advance the
+    # EMAs on this cycle's mid (the tag is only to prevent double-mixing within
+    # the SAME cycle when both the crossover detector and the reference-price
+    # path want the latest EMAs).
+    state.pop("_mm_ema_updated_mid", None)
+
     product = state.get("product", "BTC")
     strategy = str(state.get("strategy", "grid") or "grid").lower()
     if strategy == "mm":
@@ -575,7 +605,10 @@ def run_cycle(
     max_spread_bp = max(min_spread_bp, float(state.get("max_spread_bp") or 30.0))
     inv_soft_limit_usd = max(1.0, float(state.get("inventory_soft_limit_usd") or (notional * 0.60)))
     cycle_notional_cfg = max(0.0, float(state.get("cycle_notional_usd") or notional))
-    cycle_notional = max(cycle_notional_cfg, notional * max(1.0, leverage))
+    # Use the larger of the user's explicit per-cycle notional or their `notional_usd`
+    # directly. Leverage is applied separately at place-order (per Nado risk weights);
+    # multiplying it in here would double-count margin and blow through level sizing.
+    cycle_notional = max(cycle_notional_cfg, notional)
     session_cap_notional = max(0.0, float(state.get("session_notional_cap_usd") or 0.0))
     carry_notional = max(0.0, float(state.get("mm_notional_carry_usd") or 0.0))
     session_done = max(0.0, float(state.get("mm_session_notional_done_usd") or 0.0))
@@ -980,11 +1013,23 @@ def run_cycle(
     quote_distances_bp = []
     placed_notional_usd = 0.0
 
+    # Look up the product's price tick so the dedupe tolerance matches Nado's
+    # enforced price_increment. A 1e-6 relative tolerance is finer than the tick
+    # on most markets, which let same-tick duplicate orders slip through.
+    price_increment = 0.0
+    try:
+        from src.nadobro.services.nado_client import _price_increment_cache  # type: ignore
+        price_increment = float(_price_increment_cache.get((network, product_id)) or 0.0)
+    except Exception:
+        price_increment = 0.0
+
     for order_spec in grid_orders:
         if orders_placed >= available_slots:
             break
         order_price = order_spec["price"]
-        price_tol = order_price * 1e-6
+        # Use the larger of the relative 1e-6 or half a tick so orders that round
+        # to the same tick are correctly treated as duplicates.
+        price_tol = max(order_price * 1e-6, price_increment * 0.5)
         if any(abs(order_price - ep) < price_tol for ep in existing_prices):
             continue
         if pause_flatten_only:
@@ -1020,14 +1065,22 @@ def run_cycle(
         if not result.get("success"):
             err_text = str(result.get("error") or "").lower()
             if "post-only" in err_text and "crosses the book" in err_text:
-                retry_price = _reprice_post_only_quote(
-                    client,
-                    product_id,
-                    bool(order_spec["is_long"]),
-                    order_price,
-                )
-                retry_tol = max(abs(order_price) * 1e-6, 1e-9)
-                if retry_price > 0 and abs(retry_price - order_price) > retry_tol:
+                # Retry with progressively wider nudges inside the safe side of the
+                # book. A single 0.2-bp nudge used to silently lose the quote whenever
+                # the book flickered during repricing.
+                last_price = order_price
+                for retry_attempt in range(POST_ONLY_REPRICE_MAX_RETRIES):
+                    retry_price = _reprice_post_only_quote(
+                        client,
+                        product_id,
+                        bool(order_spec["is_long"]),
+                        last_price,
+                        attempt=retry_attempt,
+                    )
+                    retry_tol = max(abs(last_price) * 1e-6, 1e-9)
+                    if retry_price <= 0 or abs(retry_price - last_price) <= retry_tol:
+                        break
+                    last_price = retry_price
                     result = execute_limit_order(
                         telegram_id,
                         product,
@@ -1047,6 +1100,10 @@ def run_cycle(
                     )
                     if result.get("success"):
                         order_price = retry_price
+                        break
+                    retry_err = str(result.get("error") or "").lower()
+                    if "post-only" not in retry_err or "crosses the book" not in retry_err:
+                        break
 
         if result.get("success"):
             orders_placed += 1
@@ -1138,13 +1195,13 @@ def run_cycle(
         "grid_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd") if strategy in ("grid", "rgrid") else None,
     }
 
-    # Update cumulative PnL tracking
-    cycle_pnl = float(result.get("pnl", 0) or 0)
-    if strategy == "rgrid":
-        current_grid_pnl = float(state.get("grid_last_cycle_pnl_usd") or 0.0)
-        previous_grid_pnl = float(state.get("grid_prev_cycle_pnl_usd") or 0.0)
-        cycle_pnl = current_grid_pnl - previous_grid_pnl
-        state["grid_prev_cycle_pnl_usd"] = current_grid_pnl
+    # Update cumulative PnL tracking. Previously this only worked for RGRID; GRID
+    # fell through to `result.get("pnl", 0)` on a dict that never had a "pnl" key,
+    # so the circuit breaker's drawdown check was always a no-op on GRID.
+    current_grid_pnl = float(state.get("grid_last_cycle_pnl_usd") or 0.0)
+    previous_grid_pnl = float(state.get("grid_prev_cycle_pnl_usd") or 0.0)
+    cycle_pnl = current_grid_pnl - previous_grid_pnl
+    state["grid_prev_cycle_pnl_usd"] = current_grid_pnl
     state["mm_cumulative_pnl"] = mm_cumulative_pnl + cycle_pnl
     result["cycle_pnl_usd"] = cycle_pnl
 

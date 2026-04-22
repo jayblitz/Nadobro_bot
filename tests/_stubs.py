@@ -142,6 +142,9 @@ def install_test_stubs() -> None:
                 return {}
 
         class _DummySession:
+            def __init__(self):
+                self.headers = {}
+
             def mount(self, *args, **kwargs):
                 return None
 

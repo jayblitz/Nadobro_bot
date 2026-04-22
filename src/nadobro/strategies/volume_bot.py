@@ -11,7 +11,12 @@ from src.nadobro.config import (
     normalize_volume_spot_symbol,
 )
 from src.nadobro.services.nado_archive import query_order_by_digest
-from src.nadobro.services.trade_service import execute_limit_order, execute_spot_limit_order
+from src.nadobro.services.trade_service import (
+    execute_limit_order,
+    execute_market_order,
+    execute_spot_limit_order,
+    execute_spot_market_order,
+)
 from src.nadobro.services.user_service import get_user_readonly_client
 
 logger = logging.getLogger(__name__)
@@ -22,6 +27,14 @@ CLOSE_AFTER_SECONDS = 60.0
 MIN_SIZE = 0.0001
 MIN_EFFECTIVE_MARGIN_USD = 10.0
 DEFAULT_TARGET_VOLUME_USD = 10000.0
+
+# Max seconds a post-only close is allowed to rest before we cancel-and-retry
+# with a wider limit. After CLOSE_ESCALATE_AFTER_SECONDS we'll force-close
+# via a reduce-only IOC order so margin is actually released and the next
+# cycle can re-enter (the "compiles and uses up the margin" bug).
+CLOSE_REPOST_AFTER_SECONDS = 45.0
+CLOSE_ESCALATE_AFTER_SECONDS = 180.0
+SPOT_BALANCE_RACE_GRACE_SECONDS = 15.0
 
 
 def _normalize_direction(raw: str) -> str:
@@ -150,6 +163,89 @@ def _run_volume_spot_cycle(
             return {"success": True, "done": False, "action": "close_digest_missing_retry", "orders_placed": 0, "placed_notional_usd": 0.0}
         open_digests = {str(o.get("digest") or "") for o in (client.get_open_orders(spot_product_id) or [])}
         if close_digest in open_digests:
+            # Same TTL / escalation ladder as perp — a post-only spot sell can get
+            # marooned above a dropping market and hold the base balance forever.
+            close_posted_ts = float(state.get("vol_close_posted_ts") or 0.0)
+            entry_ts = float(state.get("vol_entry_fill_ts") or 0.0)
+            stuck_in_close = (now_ts - close_posted_ts) if close_posted_ts > 0 else 0.0
+            stuck_since_entry = (now_ts - entry_ts) if entry_ts > 0 else stuck_in_close
+
+            if stuck_since_entry >= CLOSE_ESCALATE_AFTER_SECONDS:
+                try:
+                    client.cancel_order(spot_product_id, close_digest)
+                except Exception as cancel_err:
+                    logger.warning(
+                        "VOL spot close cancel-before-escalate failed user=%s product=%s digest=%s err=%s",
+                        telegram_id, product, close_digest[:16], cancel_err,
+                    )
+                escalate_size = _spot_base_balance(client, spot_product_id)
+                if escalate_size >= MIN_SIZE * 2:
+                    logger.warning(
+                        "VOL spot force-close (market sell) user=%s product=%s stuck_seconds=%.1f size=%.8f",
+                        telegram_id, product, stuck_since_entry, escalate_size,
+                    )
+                    force_res = execute_spot_market_order(
+                        telegram_id,
+                        product,
+                        escalate_size,
+                        is_buy=False,
+                        enforce_rate_limit=False,
+                        source="vol",
+                        strategy_session_id=state.get("strategy_session_id"),
+                        network=network,
+                        spot_product_id=spot_product_id,
+                        spot_symbol=spot_symbol,
+                        asset_label=spot_symbol,
+                    )
+                    if force_res.get("success"):
+                        state["vol_close_digest"] = force_res.get("digest")
+                        state["vol_close_posted_ts"] = now_ts
+                        state["vol_last_order_digest"] = str(force_res.get("digest") or "")
+                        state["vol_last_order_kind"] = "close_escalated_market"
+                        return {
+                            "success": True,
+                            "done": False,
+                            "action": "close_escalated_force_close",
+                            "detail": f"Spot force-sold stuck inventory (stuck {stuck_since_entry:.0f}s)",
+                            "orders_placed": 1,
+                            "placed_notional_usd": round(escalate_size * mid, 4),
+                            "vol_order_attempts": 1,
+                            "vol_order_failures": 0,
+                        }
+                    logger.warning(
+                        "VOL spot force-close failed user=%s product=%s err=%s",
+                        telegram_id, product, str(force_res.get("error"))[:200],
+                    )
+                state["vol_phase"] = "filled_wait_close"
+                state["vol_close_digest"] = None
+                state["vol_close_posted_ts"] = 0.0
+                return {
+                    "success": True, "done": False,
+                    "action": "close_escalate_fallback_retry",
+                    "orders_placed": 0, "placed_notional_usd": 0.0,
+                }
+
+            if stuck_in_close >= CLOSE_REPOST_AFTER_SECONDS:
+                try:
+                    client.cancel_order(spot_product_id, close_digest)
+                except Exception as cancel_err:
+                    logger.warning(
+                        "VOL spot close cancel-for-repost failed user=%s product=%s digest=%s err=%s",
+                        telegram_id, product, close_digest[:16], cancel_err,
+                    )
+                logger.info(
+                    "VOL spot close stale; cancel-and-repost user=%s product=%s stuck=%.1fs",
+                    telegram_id, product, stuck_in_close,
+                )
+                state["vol_phase"] = "filled_wait_close"
+                state["vol_close_digest"] = None
+                state["vol_close_posted_ts"] = 0.0
+                return {
+                    "success": True, "done": False,
+                    "action": "close_stale_cancel_for_repost",
+                    "orders_placed": 0, "placed_notional_usd": 0.0,
+                }
+
             return {"success": True, "done": False, "action": "waiting_limit_close_fill", "orders_placed": 0, "placed_notional_usd": 0.0}
 
         entry_sz = float(state.get("vol_entry_size") or MIN_SIZE)
@@ -157,6 +253,7 @@ def _run_volume_spot_cycle(
         if base_after > max(MIN_SIZE, entry_sz * 0.05):
             state["vol_phase"] = "filled_wait_close"
             state["vol_close_digest"] = None
+            state["vol_close_posted_ts"] = 0.0
             return {"success": True, "done": False, "action": "close_not_filled_retry", "orders_placed": 0, "placed_notional_usd": 0.0}
 
         close_fill = _entry_fill_data(network, close_digest) or {}
@@ -183,6 +280,7 @@ def _run_volume_spot_cycle(
         state["vol_entry_size"] = 0.0
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
+        state["vol_close_posted_ts"] = 0.0
         state["vol_last_order_digest"] = close_digest
         state["vol_last_order_kind"] = "close_filled"
 
@@ -263,9 +361,37 @@ def _run_volume_spot_cycle(
 
         base = _spot_base_balance(client, spot_product_id)
         if base < MIN_SIZE * 2:
+            # Guard against a balance-lookup race. If the entry was very recent and
+            # the balance endpoint simply hasn't indexed the fill yet, swallow this
+            # cycle and wait another tick rather than resetting to idle (which would
+            # cause a second entry while the first is still settling — the "margin
+            # stacks" symptom on spot).
+            if (now_ts - entry_ts) < SPOT_BALANCE_RACE_GRACE_SECONDS:
+                return {
+                    "success": True,
+                    "done": False,
+                    "action": "waiting_balance_settle",
+                    "orders_placed": 0,
+                    "placed_notional_usd": 0.0,
+                }
             state["vol_phase"] = "idle"
             state["vol_entry_digest"] = None
+            state["vol_close_digest"] = None
+            state["vol_close_posted_ts"] = 0.0
             return {"success": True, "done": False, "action": "position_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
+
+        # Defensive: clear any stale close order before posting a fresh one.
+        stale_close_digest = str(state.get("vol_close_digest") or "")
+        if stale_close_digest:
+            try:
+                client.cancel_order(spot_product_id, stale_close_digest)
+            except Exception as cancel_err:
+                logger.debug(
+                    "VOL spot stale close cancel (pre-post) failed user=%s digest=%s err=%s",
+                    telegram_id, stale_close_digest[:16], cancel_err,
+                )
+            state["vol_close_digest"] = None
+            state["vol_close_posted_ts"] = 0.0
 
         pos_size = min(float(state.get("vol_entry_size") or base), base)
         pos_size = max(pos_size, MIN_SIZE)
@@ -316,6 +442,7 @@ def _run_volume_spot_cycle(
         state["vol_phase"] = "pending_close_fill"
         state["vol_close_digest"] = close_result.get("digest")
         state["vol_close_size"] = float(pos_size or 0.0)
+        state["vol_close_posted_ts"] = now_ts
         state["vol_last_order_digest"] = str(close_result.get("digest") or "")
         state["vol_last_order_kind"] = "close_posted"
         return {
@@ -459,15 +586,38 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     state["target_volume_usd"] = round(target_volume, 4)
 
     if vol_market == "spot":
-        allowed = list_volume_spot_product_names(network=network, client=client)
+        allowed = list_volume_spot_product_names(network=network, client=client) or []
+        # Forgive common aliases: users typing "BTC" on mainnet should resolve to
+        # the spot-equivalent symbol (KBTC on current Nado catalog) without forcing
+        # them to know the exact listing name.
         if product not in allowed:
+            aliases = {"BTC": "KBTC", "ETH": "WETH"}
+            aliased = aliases.get(product)
+            if aliased and aliased in allowed:
+                product = aliased
+                state["product"] = product
+            elif not allowed:
+                return {
+                    "success": False,
+                    "error": f"Volume spot has no resolvable spot pairs on {network}.",
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Volume spot supports only: {', '.join(allowed)} on {network}."
+                    ),
+                }
+        raw_spot_pid = get_spot_product_id(product, network=network, client=client)
+        if raw_spot_pid is None:
             return {
                 "success": False,
                 "error": (
-                    f"Volume spot supports only: {', '.join(allowed) or 'no spot pairs resolved'} on {network}."
+                    f"Could not resolve spot product id for '{product}' on {network}. "
+                    f"Available: {', '.join(allowed) or 'none'}."
                 ),
             }
-        spot_product_id = int(get_spot_product_id(product, network=network, client=client))
+        spot_product_id = int(raw_spot_pid)
         meta = get_spot_metadata(product, network=network) or {}
         spot_symbol = str(meta.get("symbol") or product).upper()
         mp = client.get_market_price(spot_product_id)
@@ -612,12 +762,104 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             return {"success": True, "done": False, "action": "close_digest_missing_retry", "orders_placed": 0, "placed_notional_usd": 0.0}
         open_digests = {str(o.get("digest") or "") for o in (client.get_open_orders(product_id) or [])}
         if close_digest in open_digests:
+            # Core fix for "compiles and uses up the margin": a post-only close can
+            # rest on the book forever in a trending market with the position still
+            # open and margin locked. Tier the stuck-close handling:
+            #   1) REPOST: after CLOSE_REPOST_AFTER_SECONDS, cancel and re-quote at
+            #      a fresh maker price.
+            #   2) ESCALATE: after CLOSE_ESCALATE_AFTER_SECONDS since entry, cancel
+            #      and force-close via a reduce-only market order so margin is
+            #      actually released and the bot can re-enter the next cycle.
+            close_posted_ts = float(state.get("vol_close_posted_ts") or 0.0)
+            entry_ts = float(state.get("vol_entry_fill_ts") or 0.0)
+            stuck_in_close = (now_ts - close_posted_ts) if close_posted_ts > 0 else 0.0
+            stuck_since_entry = (now_ts - entry_ts) if entry_ts > 0 else stuck_in_close
+
+            if stuck_since_entry >= CLOSE_ESCALATE_AFTER_SECONDS:
+                try:
+                    client.cancel_order(product_id, close_digest)
+                except Exception as cancel_err:
+                    logger.warning(
+                        "VOL close cancel-before-escalate failed user=%s product=%s digest=%s err=%s",
+                        telegram_id, product, close_digest[:16], cancel_err,
+                    )
+                pos_for_escalate = _load_position(client, product_id)
+                if pos_for_escalate:
+                    escalate_size = abs(float(pos_for_escalate.get("amount", 0.0) or 0.0))
+                    escalate_side = str(pos_for_escalate.get("side", "") or "").upper()
+                    escalate_is_long = escalate_side == "SHORT"
+                    logger.warning(
+                        "VOL force-close (IOC reduce_only) user=%s product=%s stuck_seconds=%.1f size=%.8f",
+                        telegram_id, product, stuck_since_entry, escalate_size,
+                    )
+                    force_res = execute_market_order(
+                        telegram_id,
+                        product,
+                        escalate_size,
+                        is_long=escalate_is_long,
+                        leverage=FIXED_LEVERAGE,
+                        reduce_only=True,
+                        enforce_rate_limit=False,
+                        source="vol",
+                        strategy_session_id=state.get("strategy_session_id"),
+                    )
+                    if force_res.get("success"):
+                        state["vol_close_digest"] = force_res.get("digest")
+                        state["vol_close_posted_ts"] = now_ts
+                        state["vol_last_order_digest"] = str(force_res.get("digest") or "")
+                        state["vol_last_order_kind"] = "close_escalated_ioc"
+                        return {
+                            "success": True,
+                            "done": False,
+                            "action": "close_escalated_force_close",
+                            "detail": f"Force-closed stuck position with IOC reduce-only (stuck {stuck_since_entry:.0f}s)",
+                            "orders_placed": 1,
+                            "placed_notional_usd": round(escalate_size * mid, 4),
+                            "vol_order_attempts": 1,
+                            "vol_order_failures": 0,
+                        }
+                    # Force-close failed — fall through to repost path below
+                    logger.warning(
+                        "VOL force-close IOC failed user=%s product=%s err=%s",
+                        telegram_id, product, str(force_res.get("error"))[:200],
+                    )
+                state["vol_phase"] = "filled_wait_close"
+                state["vol_close_digest"] = None
+                state["vol_close_posted_ts"] = 0.0
+                return {
+                    "success": True, "done": False,
+                    "action": "close_escalate_fallback_retry",
+                    "orders_placed": 0, "placed_notional_usd": 0.0,
+                }
+
+            if stuck_in_close >= CLOSE_REPOST_AFTER_SECONDS:
+                try:
+                    client.cancel_order(product_id, close_digest)
+                except Exception as cancel_err:
+                    logger.warning(
+                        "VOL close cancel-for-repost failed user=%s product=%s digest=%s err=%s",
+                        telegram_id, product, close_digest[:16], cancel_err,
+                    )
+                logger.info(
+                    "VOL close stale; cancel-and-repost user=%s product=%s stuck=%.1fs",
+                    telegram_id, product, stuck_in_close,
+                )
+                state["vol_phase"] = "filled_wait_close"
+                state["vol_close_digest"] = None
+                state["vol_close_posted_ts"] = 0.0
+                return {
+                    "success": True, "done": False,
+                    "action": "close_stale_cancel_for_repost",
+                    "orders_placed": 0, "placed_notional_usd": 0.0,
+                }
+
             return {"success": True, "done": False, "action": "waiting_limit_close_fill", "orders_placed": 0, "placed_notional_usd": 0.0}
 
         pos = _load_position(client, product_id)
         if pos:
             state["vol_phase"] = "filled_wait_close"
             state["vol_close_digest"] = None
+            state["vol_close_posted_ts"] = 0.0
             return {"success": True, "done": False, "action": "close_not_filled_retry", "orders_placed": 0, "placed_notional_usd": 0.0}
 
         close_fill = _entry_fill_data(network, close_digest) or {}
@@ -645,6 +887,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_entry_size"] = 0.0
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
+        state["vol_close_posted_ts"] = 0.0
         state["vol_last_order_digest"] = close_digest
         state["vol_last_order_kind"] = "close_filled"
 
@@ -727,7 +970,24 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         if not pos:
             state["vol_phase"] = "idle"
             state["vol_entry_digest"] = None
+            state["vol_close_digest"] = None
+            state["vol_close_posted_ts"] = 0.0
             return {"success": True, "done": False, "action": "position_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
+
+        # Defensive: if a stale close_digest lingered (e.g., from a prior cycle that
+        # transitioned back after a cancel-and-repost), make sure it's off the book
+        # so we don't leave two reduce-only quotes resting simultaneously.
+        stale_close_digest = str(state.get("vol_close_digest") or "")
+        if stale_close_digest:
+            try:
+                client.cancel_order(product_id, stale_close_digest)
+            except Exception as cancel_err:
+                logger.debug(
+                    "VOL stale close cancel (pre-post) failed user=%s product=%s digest=%s err=%s",
+                    telegram_id, product, stale_close_digest[:16], cancel_err,
+                )
+            state["vol_close_digest"] = None
+            state["vol_close_posted_ts"] = 0.0
 
         pos_size = abs(float(pos.get("amount", 0.0) or 0.0))
         pos_side = str(pos.get("side", "") or "").upper()
@@ -786,6 +1046,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_phase"] = "pending_close_fill"
         state["vol_close_digest"] = close_result.get("digest")
         state["vol_close_size"] = float(pos_size or 0.0)
+        state["vol_close_posted_ts"] = now_ts
         state["vol_last_order_digest"] = str(close_result.get("digest") or "")
         state["vol_last_order_kind"] = "close_posted"
         logger.info(
