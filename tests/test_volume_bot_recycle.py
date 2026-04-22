@@ -136,6 +136,24 @@ class PerpCloseTtlTests(unittest.TestCase):
         self.assertEqual(state["vol_close_digest"], "d-force")
         self.assertGreater(state["vol_close_posted_ts"], 0.0)
 
+    def test_escalate_is_rate_limited_by_force_close_cooldown(self):
+        state = self._state_with_stale_close(entry_offset_s=300.0, close_offset_s=200.0)
+        state["vol_last_force_close_attempt_ts"] = time.time() - 5.0
+        client = _VolClient(
+            mid=100.0,
+            open_orders=[{"digest": "d-stale-close", "price": 100.0}],
+            positions=[{"product_id": 2, "amount": 1.0, "side": "LONG"}],
+        )
+        with patch.object(volume_bot, "get_product_id", return_value=2), patch.object(
+            volume_bot, "execute_market_order"
+        ) as market_mock:
+            result = volume_bot.run_cycle(
+                telegram_id=1, network="mainnet", state=state, client=client
+            )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["action"], "waiting_force_close_cooldown")
+        self.assertFalse(market_mock.called)
+
     def test_close_posted_ts_is_set_when_close_is_first_placed(self):
         # Fresh `filled_wait_close` transitioning to `pending_close_fill` —
         # we need the TTL clock to start now, not stay at 0.
@@ -295,6 +313,18 @@ class SpotBalanceRaceTests(unittest.TestCase):
         self.assertEqual(result["action"], "waiting_balance_settle")
         # State MUST still be `filled_wait_close` — NOT reset to idle.
         self.assertEqual(state["vol_phase"], "filled_wait_close")
+
+
+class AdaptiveCloseTtlTests(unittest.TestCase):
+    def test_ttl_windows_widen_under_wide_spread_and_fast_move(self):
+        state = {
+            "adaptive_close_ttl": True,
+            "vol_prev_mid": 95.0,
+        }
+        mp = {"bid": 99.0, "ask": 101.0, "mid": 100.0}
+        repost_s, escalate_s = volume_bot._compute_close_ttl_windows(state, mp, 100.0)
+        self.assertGreater(repost_s, volume_bot.CLOSE_REPOST_AFTER_SECONDS)
+        self.assertGreater(escalate_s, volume_bot.CLOSE_ESCALATE_AFTER_SECONDS)
 
 
 if __name__ == "__main__":

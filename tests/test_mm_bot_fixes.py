@@ -10,6 +10,7 @@ Covers:
     - Post-only widening retry ladder.
 """
 import unittest
+from unittest.mock import patch
 
 from _stubs import install_test_stubs
 
@@ -175,6 +176,47 @@ class PostOnlyRepriceTests(unittest.TestCase):
         self.assertGreaterEqual(prices_buy[1], prices_buy[2])
         self.assertLessEqual(prices_sell[0], prices_sell[1])
         self.assertLessEqual(prices_sell[1], prices_sell[2])
+
+
+class ConcedeModePostOnlyTests(unittest.TestCase):
+    def test_negative_spread_disables_post_only_for_concede_quotes(self):
+        state = {
+            "product": "BTC",
+            "strategy": "rgrid",
+            "spread_bp": -10.0,
+            "levels": 1,
+            "notional_usd": 100.0,
+            "cycle_notional_usd": 100.0,
+            "min_order_notional_usd": 10.0,
+            "max_open_orders": 1,
+            "interval_seconds": 60,
+        }
+
+        class _Client:
+            def get_market_price(self, _product_id):
+                return {"mid": 100.0, "bid": 99.9, "ask": 100.1}
+
+            def get_open_orders(self, _product_id):
+                return []
+
+            def get_all_positions(self):
+                return []
+
+            def get_balance(self):
+                return {"equity": 1000.0}
+
+        client = _Client()
+        with patch.object(mm_bot, "get_product_id", return_value=2), patch.object(
+            mm_bot,
+            "execute_limit_order",
+            return_value={"success": True, "digest": "d1"},
+        ) as place_mock:
+            result = mm_bot.run_cycle(
+                telegram_id=1, network="mainnet", state=state, client=client
+            )
+        self.assertTrue(result["success"])
+        self.assertTrue(place_mock.called)
+        self.assertFalse(place_mock.call_args.kwargs["post_only"])
 
 
 if __name__ == "__main__":

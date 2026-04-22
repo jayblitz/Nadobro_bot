@@ -35,6 +35,7 @@ DEFAULT_TARGET_VOLUME_USD = 10000.0
 CLOSE_REPOST_AFTER_SECONDS = 45.0
 CLOSE_ESCALATE_AFTER_SECONDS = 180.0
 SPOT_BALANCE_RACE_GRACE_SECONDS = 15.0
+FORCE_CLOSE_RETRY_COOLDOWN_SECONDS = 20.0
 
 
 def _normalize_direction(raw: str) -> str:
@@ -91,6 +92,42 @@ def _spot_base_balance(client, spot_product_id: int) -> float:
         return float(b.get(spot_product_id, b.get(str(spot_product_id), 0)) or 0.0)
     except Exception:
         return 0.0
+
+
+def _compute_close_ttl_windows(state: dict, mp: dict, now_mid: float) -> tuple[float, float]:
+    """Compute repost/escalate windows with optional adaptive widening.
+
+    Goal: reduce fee drag from unnecessary force-close IOC/market escalation during
+    temporarily wide spreads or fast moves. Windows can be overridden directly via
+    state keys `close_repost_after_seconds` / `close_escalate_after_seconds`.
+    """
+    configured_repost = float(state.get("close_repost_after_seconds") or 0.0)
+    configured_escalate = float(state.get("close_escalate_after_seconds") or 0.0)
+    base_repost = configured_repost if configured_repost > 0 else CLOSE_REPOST_AFTER_SECONDS
+    base_escalate = configured_escalate if configured_escalate > 0 else CLOSE_ESCALATE_AFTER_SECONDS
+
+    adaptive_enabled = bool(state.get("adaptive_close_ttl", True))
+    if not adaptive_enabled or now_mid <= 0:
+        return base_repost, base_escalate
+
+    bid = float(mp.get("bid") or 0.0)
+    ask = float(mp.get("ask") or 0.0)
+    spread_bp = 0.0
+    if bid > 0 and ask > 0 and ask >= bid:
+        spread_bp = (ask - bid) / max(now_mid, 1e-9) * 10000.0
+
+    prev_mid = float(state.get("vol_prev_mid") or now_mid)
+    move_bp = abs(now_mid - prev_mid) / max(prev_mid, 1e-9) * 10000.0 if prev_mid > 0 else 0.0
+
+    # Mild adaptive widening: at most +50% (keeps the close loop responsive but
+    # avoids jumping to taker close too aggressively when maker fill conditions are poor).
+    spread_component = min(0.35, max(0.0, (spread_bp - 2.0) / 20.0))
+    move_component = min(0.15, move_bp / 50.0)
+    widen_mult = 1.0 + spread_component + move_component
+
+    repost_after = min(120.0, max(15.0, base_repost * widen_mult))
+    escalate_after = min(360.0, max(90.0, base_escalate * widen_mult))
+    return repost_after, escalate_after
 
 
 def _run_volume_spot_cycle(
@@ -169,8 +206,18 @@ def _run_volume_spot_cycle(
             entry_ts = float(state.get("vol_entry_fill_ts") or 0.0)
             stuck_in_close = (now_ts - close_posted_ts) if close_posted_ts > 0 else 0.0
             stuck_since_entry = (now_ts - entry_ts) if entry_ts > 0 else stuck_in_close
+            repost_after_s, escalate_after_s = _compute_close_ttl_windows(state, mp, mid)
 
-            if stuck_since_entry >= CLOSE_ESCALATE_AFTER_SECONDS:
+            if stuck_since_entry >= escalate_after_s:
+                last_force_ts = float(state.get("vol_last_force_close_attempt_ts") or 0.0)
+                if last_force_ts > 0 and (now_ts - last_force_ts) < FORCE_CLOSE_RETRY_COOLDOWN_SECONDS:
+                    return {
+                        "success": True,
+                        "done": False,
+                        "action": "waiting_force_close_cooldown",
+                        "orders_placed": 0,
+                        "placed_notional_usd": 0.0,
+                    }
                 try:
                     client.cancel_order(spot_product_id, close_digest)
                 except Exception as cancel_err:
@@ -179,6 +226,7 @@ def _run_volume_spot_cycle(
                         telegram_id, product, close_digest[:16], cancel_err,
                     )
                 escalate_size = _spot_base_balance(client, spot_product_id)
+                state["vol_last_force_close_attempt_ts"] = now_ts
                 if escalate_size >= MIN_SIZE * 2:
                     logger.warning(
                         "VOL spot force-close (market sell) user=%s product=%s stuck_seconds=%.1f size=%.8f",
@@ -225,7 +273,7 @@ def _run_volume_spot_cycle(
                     "orders_placed": 0, "placed_notional_usd": 0.0,
                 }
 
-            if stuck_in_close >= CLOSE_REPOST_AFTER_SECONDS:
+            if stuck_in_close >= repost_after_s:
                 try:
                     client.cancel_order(spot_product_id, close_digest)
                 except Exception as cancel_err:
@@ -281,6 +329,7 @@ def _run_volume_spot_cycle(
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
         state["vol_close_posted_ts"] = 0.0
+        state["vol_last_force_close_attempt_ts"] = 0.0
         state["vol_last_order_digest"] = close_digest
         state["vol_last_order_kind"] = "close_filled"
 
@@ -378,6 +427,7 @@ def _run_volume_spot_cycle(
             state["vol_entry_digest"] = None
             state["vol_close_digest"] = None
             state["vol_close_posted_ts"] = 0.0
+            state["vol_last_force_close_attempt_ts"] = 0.0
             return {"success": True, "done": False, "action": "position_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
 
         # Defensive: clear any stale close order before posting a fresh one.
@@ -624,6 +674,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         mid = float(mp.get("mid") or 0.0)
         if mid <= 0:
             return {"success": False, "error": "Could not fetch spot market price"}
+        state["vol_prev_mid"] = mid
         phase = str(state.get("vol_phase") or "idle")
         now_ts = time.time()
         session_pnl = float(state.get("session_realized_pnl_usd") or 0.0)
@@ -688,6 +739,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     now_ts = time.time()
     session_pnl = float(state.get("session_realized_pnl_usd") or 0.0)
     volume_done = float(state.get("volume_done_usd") or 0.0)
+    state["vol_prev_mid"] = mid
 
     tp_pct = float(state.get("tp_pct") or 0.0)
     sl_pct = float(state.get("sl_pct") or 0.0)
@@ -774,8 +826,18 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             entry_ts = float(state.get("vol_entry_fill_ts") or 0.0)
             stuck_in_close = (now_ts - close_posted_ts) if close_posted_ts > 0 else 0.0
             stuck_since_entry = (now_ts - entry_ts) if entry_ts > 0 else stuck_in_close
+            repost_after_s, escalate_after_s = _compute_close_ttl_windows(state, mp, mid)
 
-            if stuck_since_entry >= CLOSE_ESCALATE_AFTER_SECONDS:
+            if stuck_since_entry >= escalate_after_s:
+                last_force_ts = float(state.get("vol_last_force_close_attempt_ts") or 0.0)
+                if last_force_ts > 0 and (now_ts - last_force_ts) < FORCE_CLOSE_RETRY_COOLDOWN_SECONDS:
+                    return {
+                        "success": True,
+                        "done": False,
+                        "action": "waiting_force_close_cooldown",
+                        "orders_placed": 0,
+                        "placed_notional_usd": 0.0,
+                    }
                 try:
                     client.cancel_order(product_id, close_digest)
                 except Exception as cancel_err:
@@ -788,6 +850,18 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     escalate_size = abs(float(pos_for_escalate.get("amount", 0.0) or 0.0))
                     escalate_side = str(pos_for_escalate.get("side", "") or "").upper()
                     escalate_is_long = escalate_side == "SHORT"
+                    state["vol_last_force_close_attempt_ts"] = now_ts
+                    if escalate_size < MIN_SIZE:
+                        state["vol_phase"] = "filled_wait_close"
+                        state["vol_close_digest"] = None
+                        state["vol_close_posted_ts"] = 0.0
+                        return {
+                            "success": True,
+                            "done": False,
+                            "action": "close_escalate_size_too_small_retry",
+                            "orders_placed": 0,
+                            "placed_notional_usd": 0.0,
+                        }
                     logger.warning(
                         "VOL force-close (IOC reduce_only) user=%s product=%s stuck_seconds=%.1f size=%.8f",
                         telegram_id, product, stuck_since_entry, escalate_size,
@@ -832,7 +906,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                     "orders_placed": 0, "placed_notional_usd": 0.0,
                 }
 
-            if stuck_in_close >= CLOSE_REPOST_AFTER_SECONDS:
+            if stuck_in_close >= repost_after_s:
                 try:
                     client.cancel_order(product_id, close_digest)
                 except Exception as cancel_err:
@@ -888,6 +962,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
         state["vol_close_posted_ts"] = 0.0
+        state["vol_last_force_close_attempt_ts"] = 0.0
         state["vol_last_order_digest"] = close_digest
         state["vol_last_order_kind"] = "close_filled"
 
@@ -972,6 +1047,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             state["vol_entry_digest"] = None
             state["vol_close_digest"] = None
             state["vol_close_posted_ts"] = 0.0
+            state["vol_last_force_close_attempt_ts"] = 0.0
             return {"success": True, "done": False, "action": "position_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
 
         # Defensive: if a stale close_digest lingered (e.g., from a prior cycle that

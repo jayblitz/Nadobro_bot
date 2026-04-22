@@ -1012,6 +1012,7 @@ def run_cycle(
     errors = []
     quote_distances_bp = []
     placed_notional_usd = 0.0
+    post_only_quotes = dynamic_spread_bp >= 0.0
 
     # Look up the product's price tick so the dedupe tolerance matches Nado's
     # enforced price_increment. A 1e-6 relative tolerance is finer than the tick
@@ -1053,7 +1054,7 @@ def run_cycle(
             is_long=order_spec["is_long"],
             leverage=leverage,
             enforce_rate_limit=False,
-            post_only=True,
+            post_only=post_only_quotes,
             source=strategy,
             strategy_session_id=state.get("strategy_session_id"),
             reduce_only=bool(
@@ -1064,7 +1065,7 @@ def run_cycle(
         )
         if not result.get("success"):
             err_text = str(result.get("error") or "").lower()
-            if "post-only" in err_text and "crosses the book" in err_text:
+            if post_only_quotes and "post-only" in err_text and "crosses the book" in err_text:
                 # Retry with progressively wider nudges inside the safe side of the
                 # book. A single 0.2-bp nudge used to silently lose the quote whenever
                 # the book flickered during repricing.
