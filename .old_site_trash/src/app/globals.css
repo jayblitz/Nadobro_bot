@@ -1,0 +1,235 @@
+@import "tailwindcss";
+
+:root {
+  --background: #030a15;
+  --foreground: #e6f5ff;
+  --brand-cyan: #69e3ff;
+  --brand-cyan-bright: #19deff;
+  --brand-green: #00ffb0;
+  --brand-purple: #8a5dff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-brand-cyan: var(--brand-cyan);
+  --color-brand-green: var(--brand-green);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), "Inter", Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* --------------------------------------------------------------------
+   Hero backdrop primitives (reused by HeroSection + AuroraBackground)
+-------------------------------------------------------------------- */
+
+.hero-grid {
+  background-image:
+    linear-gradient(rgba(105, 227, 255, 0.13) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(105, 227, 255, 0.13) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(circle at center, black 40%, transparent 95%);
+  -webkit-mask-image: radial-gradient(circle at center, black 40%, transparent 95%);
+}
+
+.hero-blur {
+  position: absolute;
+  width: 24rem;
+  height: 24rem;
+  border-radius: 999px;
+  filter: blur(60px);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.hero-blur-left {
+  left: -4rem;
+  top: 1rem;
+  background: radial-gradient(circle, rgba(25, 222, 255, 0.8), transparent 70%);
+  animation: drift-left 10s ease-in-out infinite;
+}
+
+.hero-blur-right {
+  right: -2rem;
+  bottom: -4rem;
+  background: radial-gradient(circle, rgba(0, 255, 176, 0.65), transparent 70%);
+  animation: drift-right 12s ease-in-out infinite;
+}
+
+.scan-line {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(0, 255, 178, 0.07) 46%,
+    rgba(84, 250, 255, 0.12) 50%,
+    rgba(0, 255, 178, 0.07) 54%,
+    transparent 100%
+  );
+  background-size: 100% 240px;
+  animation: scan-move 5.5s linear infinite;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+/* --------------------------------------------------------------------
+   Shiny text — slow moving specular sweep across a gradient-filled word
+-------------------------------------------------------------------- */
+
+.shiny-text {
+  background-position: 200% 0;
+  animation-name: shine;
+  animation-iteration-count: infinite;
+  animation-timing-function: linear;
+}
+
+@keyframes shine {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* --------------------------------------------------------------------
+   Primary CTA — Nadobro cyan→green gradient pill with lift on hover
+-------------------------------------------------------------------- */
+
+.cta-btn {
+  background-image: linear-gradient(
+    120deg,
+    #69e3ff 0%,
+    #6fffd1 50%,
+    #00ffb0 100%
+  );
+  box-shadow:
+    0 10px 30px rgba(0, 255, 178, 0.25),
+    0 0 0 1px rgba(255, 255, 255, 0.18) inset;
+  transition:
+    transform 260ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 260ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 260ms ease;
+}
+
+.cta-btn:hover {
+  transform: translateY(-2px) scale(1.02);
+  filter: saturate(1.1) brightness(1.04);
+  box-shadow:
+    0 16px 42px rgba(0, 255, 178, 0.35),
+    0 0 0 1px rgba(255, 255, 255, 0.28) inset;
+}
+
+.cta-btn:active {
+  transform: translateY(0) scale(0.99);
+}
+
+/* --------------------------------------------------------------------
+   Floating pill nav shell — brand-tinted border glow
+-------------------------------------------------------------------- */
+
+.pill-nav-shell {
+  position: relative;
+}
+
+.pill-nav-shell::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 9999px;
+  padding: 1px;
+  background: linear-gradient(
+    120deg,
+    rgba(105, 227, 255, 0.45),
+    rgba(0, 255, 178, 0.2) 50%,
+    rgba(138, 93, 255, 0.35)
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+/* --------------------------------------------------------------------
+   Glass card utility (retained for downstream pages)
+-------------------------------------------------------------------- */
+
+.glass {
+  background: linear-gradient(160deg, rgba(14, 34, 61, 0.88), rgba(6, 17, 31, 0.65));
+  border: 1px solid rgba(145, 243, 255, 0.2);
+  box-shadow: 0 20px 50px rgba(0, 10, 25, 0.55);
+  backdrop-filter: blur(6px);
+}
+
+.float-card {
+  animation: float-y 6.5s ease-in-out infinite;
+}
+
+.float-card-delay {
+  animation-delay: 1.2s;
+}
+
+@keyframes float-y {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes drift-left {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(18px, -12px);
+  }
+}
+
+@keyframes drift-right {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(-22px, 14px);
+  }
+}
+
+@keyframes scan-move {
+  0% {
+    background-position: 0 -220px;
+  }
+  100% {
+    background-position: 0 320px;
+  }
+}
+
+/* --------------------------------------------------------------------
+   Global accessibility: respect reduced-motion users
+-------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
