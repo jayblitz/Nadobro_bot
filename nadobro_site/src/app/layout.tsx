@@ -1,39 +1,35 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, Space_Grotesk } from "next/font/google";
 import "./globals.css";
-import { SiteHeader } from "@/components/site-header";
-import { SiteFooter } from "@/components/site-footer";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const inter = Inter({
+  variable: "--font-sans",
   subsets: ["latin"],
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const spaceGrotesk = Space_Grotesk({
+  variable: "--font-display",
   subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "NadoBro | Telegram-Native Trading",
+  title: "NadoBro — Trade perps from Telegram",
   description:
-    "NadoBro is a Telegram-native perpetual futures platform on Nado CLOB DEX, built on Ink.",
+    "NadoBro is a Telegram-native trading bot for Nado perpetuals. Type the trade, we handle the routing.",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: Readonly<{ children: React.ReactNode }>) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${inter.variable} ${spaceGrotesk.variable}`}
     >
-      <body className="min-h-full flex flex-col bg-[#030a15] text-slate-100">
-        <SiteHeader />
-        <main className="flex-1">{children}</main>
-        <SiteFooter />
+      <body className="min-h-screen bg-[var(--background)] text-[var(--foreground)] antialiased">
+        {children}
       </body>
     </html>
   );
