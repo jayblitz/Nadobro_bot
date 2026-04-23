@@ -23,7 +23,7 @@ from src.nadobro.config import get_product_id, get_product_max_leverage, get_per
 from src.nadobro.handlers.formatters import (
     escape_md, format_ai_response, fmt_positions, fmt_trade_preview, fmt_strategy_update,
     fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, build_trade_preview_text,
-    fmt_alert_menu_intro, fmt_close_all_confirm, fmt_mode_view,
+    fmt_alert_menu_intro, fmt_close_all_confirm, fmt_mode_view, fmt_strategy_hub_intro,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
@@ -565,10 +565,8 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "nav:strategy_hub":
-        header = localize_text("🤖 *Nadobro Strategy Lab*", lang)
-        body = localize_text("Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.", lang)
         await _reply_loc(update.message, 
-            f"{header}\n\n{body}",
+            fmt_strategy_hub_intro(),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(strategy_hub_kb(), lang),
         )

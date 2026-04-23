@@ -18,15 +18,27 @@ SIZE_PRESETS = {
 }
 
 
-HOME_BTN_TRADE = "🤖 Trade Console"
-HOME_BTN_PORTFOLIO = "📁 Portfolio Deck"
-HOME_BTN_HOME = "🏠 Home"
-HOME_BTN_WALLET = "💼 Wallet Vault"
-HOME_BTN_POINTS = "🏆 Nado Points"
-HOME_BTN_STRATEGIES = "🧠 Strategy Lab"
-HOME_BTN_ALERTS = "🔔 Alert Engine"
-HOME_BTN_SETTINGS = "⚙️ Control Panel"
-HOME_BTN_MODE = "🌐 Execution Mode"
+HOME_MODULE_EMOJIS = {
+    "trade": "🤖",
+    "portfolio": "📁",
+    "home": "🏠",
+    "wallet": "💼",
+    "points": "🏆",
+    "strategies": "🧠",
+    "alerts": "🔔",
+    "settings": "⚙️",
+    "mode": "🌐",
+}
+
+HOME_BTN_TRADE = f"{HOME_MODULE_EMOJIS['trade']} Trade Console"
+HOME_BTN_PORTFOLIO = f"{HOME_MODULE_EMOJIS['portfolio']} Portfolio Deck"
+HOME_BTN_HOME = f"{HOME_MODULE_EMOJIS['home']} Home"
+HOME_BTN_WALLET = f"{HOME_MODULE_EMOJIS['wallet']} Wallet Vault"
+HOME_BTN_POINTS = f"{HOME_MODULE_EMOJIS['points']} Nado Points"
+HOME_BTN_STRATEGIES = f"{HOME_MODULE_EMOJIS['strategies']} Strategy Lab"
+HOME_BTN_ALERTS = f"{HOME_MODULE_EMOJIS['alerts']} Alert Engine"
+HOME_BTN_SETTINGS = f"{HOME_MODULE_EMOJIS['settings']} Control Panel"
+HOME_BTN_MODE = f"{HOME_MODULE_EMOJIS['mode']} Execution Mode"
 
 
 REPLY_BUTTON_MAP = {

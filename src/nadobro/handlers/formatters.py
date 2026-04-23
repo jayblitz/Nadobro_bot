@@ -200,20 +200,20 @@ def fmt_price(price, product="BTC"):
 
 def fmt_positions(positions, prices=None, mode_label: str | None = None):
     if not positions:
-        header = [_loc("📋 *Open Positions*"), md2_rule()]
+        header = [_ui_header("Open Positions", icon="📋"), md2_rule()]
         if mode_label:
-            header.append(f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}")
+            header.append(_ui_section("Snapshot", [f"└ 🌐 *{_loc('Mode:')}* {escape_md(mode_label)}"]))
         return "\n".join(header) + "\n\n" + _loc("No open positions\\.")
 
     lines = [
-        _loc("📋 *Open Positions*"),
+        _ui_header("Open Positions", icon="📋"),
         md2_rule(),
         "",
     ]
     if mode_label:
-        lines.append(f"🌐 *{_loc('Mode:')}* {escape_md(mode_label)}")
-        lines.append("")
-    lines.append(f"📌 *{_loc('Total')}:* {escape_md(str(len(positions)))}")
+        lines.append(_ui_section("Snapshot", [f"├ 🌐 *{_loc('Mode:')}* {escape_md(mode_label)}", f"└ 📌 *{_loc('Total')}:* {escape_md(str(len(positions)))}"]))
+    else:
+        lines.append(_ui_section("Snapshot", [f"└ 📌 *{_loc('Total')}:* {escape_md(str(len(positions)))}"]))
     lines.append("")
     any_estimated_pnl = False
 
@@ -283,8 +283,8 @@ def fmt_positions(positions, prices=None, mode_label: str | None = None):
 
 def fmt_balance(balance_data, wallet_addr=None):
     lines = [
-        _loc("💰 *Wallet Vault Balance*"),
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+        _ui_header("Wallet Vault Balance", icon="💰"),
+        md2_rule(),
         "",
     ]
 
@@ -542,7 +542,7 @@ def fmt_wallet_info(wallet_info):
 def fmt_alerts(alerts):
     if not alerts:
         return (
-            _loc("🔔 *Alert Engine*")
+            _ui_header("Alert Engine", icon="🔔")
             + "\n"
             + md2_rule()
             + "\n\n"
@@ -552,10 +552,10 @@ def fmt_alerts(alerts):
         )
 
     lines = [
-        _loc("🔔 *Alert Engine*"),
+        _ui_header("Alert Engine", icon="🔔"),
         md2_rule(),
         "",
-        f"📌 *{_loc('Active alerts')}:* {escape_md(str(len(alerts)))}",
+        _ui_section("Snapshot", [f"└ 📌 *{_loc('Active alerts')}:* {escape_md(str(len(alerts)))}"]),
         "",
     ]
 
@@ -582,37 +582,42 @@ def fmt_alert_menu_intro() -> str:
     return (
         "🔔 *Alert Engine*\n"
         f"{md2_rule()}\n\n"
-        "*What you can do*\n"
-        "• Create price alerts\n"
-        "• Watch funding thresholds\n"
-        "• Track PnL triggers\n\n"
+        "*Your toolkit*\n"
+        "├ Create price alerts\n"
+        "├ Watch funding thresholds\n"
+        "└ Track PnL triggers\n\n"
         "_Pick an action below\\._"
     )
 
 
 def fmt_alert_product_prompt() -> str:
-    return (
-        "🔔 *Create Alert*\n"
-        f"{md2_rule()}\n\n"
-        "Choose the asset you want to monitor\\."
+    return "\n\n".join(
+        [
+            _ui_header("Create Alert", icon="🔔"),
+            md2_rule(),
+            _ui_footer_hint("Choose the asset you want to monitor\\."),
+        ]
     )
 
 
 def fmt_alert_condition_prompt(product: str) -> str:
-    return (
-        f"🔔 *{escape_md(product)}\\-PERP Alert*\n"
-        f"{md2_rule()}\n\n"
-        "Choose the trigger type below\\."
+    return "\n\n".join(
+        [
+            f"🔔 *{escape_md(product)}\\-PERP Alert*",
+            md2_rule(),
+            _ui_footer_hint("Choose the trigger type below\\."),
+        ]
     )
 
 
 def fmt_alert_target_prompt(product: str, label: str, example: str) -> str:
-    return (
-        f"🔔 *{escape_md(product)}\\-PERP*\n"
-        f"{md2_rule()}\n\n"
-        f"*Trigger:* {escape_md(label)}\n\n"
-        "Enter the target value in chat\\.\n"
-        f"{example}"
+    return "\n\n".join(
+        [
+            f"🔔 *{escape_md(product)}\\-PERP*",
+            md2_rule(),
+            _ui_section("Trigger", [f"└ {escape_md(label)}"]),
+            "Enter the target value in chat\\.\n" + f"{example}",
+        ]
     )
 
 
@@ -621,8 +626,9 @@ def fmt_mode_view(current_network: str) -> str:
     return (
         "🌐 *Execution Mode*\n"
         f"{md2_rule()}\n\n"
-        f"*Current mode:* {escape_md(network_label)}\n\n"
-        "Choose where Nadobro should trade and read account state\\."
+        "*Quick snapshot*\n"
+        f"└ *Current mode* — {escape_md(network_label)}\n\n"
+        "_Choose where Nadobro should trade and read account state\\._"
     )
 
 
@@ -651,8 +657,8 @@ def fmt_points_dashboard(payload: dict) -> str:
 
     lines = [
         "🏆 *Your Nado Points Dashboard*",
-        escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-        f"📅 *Window:* {escape_md(window)}",
+        md2_rule(),
+        _ui_section("Snapshot", [f"└ 📅 *Window* — {escape_md(window)}"]),
         "",
     ]
     if no_activity:
@@ -708,7 +714,7 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
     upnl_str = f"+${unrealized_pnl:,.2f}" if unrealized_pnl >= 0 else f"-${abs(unrealized_pnl):,.2f}"
 
     lines = [
-        _loc("📁 *Portfolio Deck*"),
+        _ui_header("Portfolio Deck", icon="📁"),
         md2_rule(),
         "",
     ]
@@ -953,23 +959,130 @@ def md2_rule(width: int = 30) -> str:
     return escape_md("━" * w)
 
 
+def _ui_header(title: str, subtitle: str | None = None, icon: str | None = None) -> str:
+    lines = []
+    if icon:
+        lines.append(f"{icon} *{_loc(title)}*")
+    else:
+        lines.append(f"*{_loc(title)}*")
+    if subtitle:
+        lines.append(_loc(subtitle))
+    return "\n".join(lines)
+
+
+def _ui_section(title: str, lines: list[str] | None = None, icon: str | None = None) -> str:
+    head = f"*{_loc(title)}*"
+    if icon:
+        head = f"{icon} {head}"
+    body = [head]
+    if lines:
+        body.extend(lines)
+    return "\n".join(body)
+
+
+def _ui_tree_line(prefix: str, label: str, value: str) -> str:
+    return f"{prefix} *{_loc(label)}* — {escape_md(value)}"
+
+
+def _ui_footer_hint(text: str) -> str:
+    return f"_{_loc(text)}_"
+
+
+def fmt_home_header() -> str:
+    """First lines of home / start dashboard (MarkdownV2)."""
+    return "\n".join(
+        [
+            _loc("🎯 *Nadobro Command Center*"),
+            _loc(
+                "_Your trading copilot is online and ready\\._"
+            ),
+            "📌",
+        ]
+    )
+
+
+def _fmt_home_toolkit_tree() -> str:
+    """Module map: matches reply keyboard and home card inline actions (MarkdownV2)."""
+    return "\n".join(
+        [
+            f"├ 💼 *Wallet Vault* — {escape_md('balances & linked signer')}",
+            f"├ 🤖 *Trade Console* — {escape_md('perp orders')}",
+            f"├ 🧠 *Strategy Lab* — {escape_md('automation')}",
+            f"├ 📁 *Portfolio Deck* — {escape_md('positions & PnL')}",
+            f"├ 🏆 *Nado Points* — {escape_md('rewards & market radar')}",
+            f"├ 🔔 *Alert Engine* — {escape_md('price & funding triggers')}",
+            f"├ ⚙️ *Control Panel* — {escape_md('leverage & slippage')}",
+            f"└ 🌐 *Execution Mode* — {escape_md('mainnet vs testnet')}",
+        ]
+    )
+
+
+def _fmt_network_balance_snapshot(network: str, balance_str: str) -> str:
+    net_emoji = "🧪" if network == "testnet" else "🌐"
+    net_name = "TESTNET" if network == "testnet" else "MAINNET"
+    return "\n".join(
+        [
+            f"*{_loc('Quick snapshot')}*",
+            f"├ {net_emoji} *Mode* — {escape_md(net_name)}",
+            f"├ 💵 *USDT* — {escape_md(balance_str)}",
+        ]
+    )
+
+
+def fmt_home_command_center_card(network: str, balance_str: str) -> str:
+    """Home “Command Center” card for logged-in users (MarkdownV2)."""
+    return "\n\n".join(
+        [
+            fmt_home_header(),
+            md2_rule(28),
+            _fmt_network_balance_snapshot(network, balance_str),
+            md2_rule(28),
+            f"*{_loc('Your toolkit')}*",
+            _fmt_home_toolkit_tree(),
+            md2_rule(24),
+            "_Tap a button below, or type here for AI Q\\&A and plain\\-language trades\\._",
+        ]
+    )
+
+
 def fmt_dashboard_home() -> str:
     """Home dashboard banner after /start (MarkdownV2)."""
-    return (
-        "🤖 *Nadobro Command Center*\n"
-        f"{md2_rule()}\n\n"
-        "*Status:* online ✅\n\n"
-        "*Next step*\n"
-        "Use the reply keyboard below to open modules\\.\n\n"
-        "*What you can do*\n"
-        "• 💼 Wallet Vault — balances \\& linked signer\n"
-        "• 🤖 Trade Console — perp orders\n"
-        "• 🧠 Strategy Lab — automation\n"
-        "• 📁 Portfolio Deck — positions \\& PnL\n"
-        "• 🏆 Points \\& Market Radar\n"
-        "• 🔔 Alert Engine — price \\& funding triggers\n"
-        "• ⚙️ Control Panel — leverage \\& slippage\n\n"
-        "_Chat here for AI Q\\&A and plain\\-language trades\\._"
+    status = _ui_section("Status", [f"├ 🟢 *Nadobro* — {escape_md('online')} · ✅"])
+    nxt = _ui_section(
+        "Next step",
+        [escape_md("Use the reply keyboard below to open modules.")],
+    )
+    return "\n\n".join(
+        [
+            fmt_home_header(),
+            md2_rule(28),
+            status,
+            "",
+            nxt,
+            md2_rule(28),
+            f"*{_loc('Your toolkit')}*",
+            _fmt_home_toolkit_tree(),
+            md2_rule(24),
+            "_Tap a button below, or type here for AI Q\\&A and plain\\-language trades\\._",
+        ]
+    )
+
+
+def fmt_strategy_hub_intro() -> str:
+    return "\n\n".join(
+        [
+            _ui_header("Nadobro Strategy Lab", icon="🧠"),
+            md2_rule(28),
+            _ui_section(
+                "Your toolkit",
+                [
+                    "├ Open any strategy cockpit dashboard",
+                    "├ Edit parameters with safety defaults",
+                    "└ Launch with pre\\-trade analytics",
+                ],
+            ),
+            _ui_footer_hint("Pick a strategy below\\."),
+        ]
     )
 
 
@@ -1043,62 +1156,80 @@ def fmt_settings(user_data):
     risk_profile = str(user_data.get("risk_profile", "balanced")).upper()
 
     lines = [
-        _loc("⚙️ *Control Panel*"),
+        _ui_header("Control Panel", icon="⚙️"),
         md2_rule(),
         "",
-        f"🛡 *{_loc('Risk Profile')}:* {escape_md(risk_profile)}",
-        f"⚡ *{_loc('Default Leverage')}:* {escape_md(f'{leverage}x')}",
-        f"📊 *{_loc('Slippage')}:* {escape_md(f'{slippage}%')}",
+        _ui_section(
+            "Quick snapshot",
+            [
+                _ui_tree_line("├", "Risk Profile", risk_profile),
+                _ui_tree_line("├", "Default Leverage", f"{leverage}x"),
+                _ui_tree_line("└", "Slippage", f"{slippage}%"),
+            ],
+        ),
         "",
-        _loc("_Use the buttons below to change language, leverage, slippage, or risk preset\\._"),
+        _ui_footer_hint("Use the buttons below to change language, leverage, slippage, or risk preset\\."),
     ]
 
     return "\n".join(lines)
 
 
 def fmt_wallet_connect_card(pk_hex: str) -> str:
-    return (
-        "👛 *Wallet Connect*\n"
-        f"{md2_rule()}\n\n"
-        "*Step 1*\n"
-        "Open https://app\\.nado\\.xyz, connect your wallet, and deposit at least $5 USDT0\\.\n\n"
-        "*Step 2*\n"
-        "Go to *Settings → 1\\-Click Trading → Advanced 1CT*\\.\n\n"
-        "*Step 3*\n"
-        "Paste this trading key into the *1CT Private Key* field:\n\n"
-        f"`{escape_md(pk_hex)}`\n\n"
-        "*Step 4*\n"
-        "Enable the toggle, save, and confirm the wallet transaction\\.\n\n"
-        "*Final step*\n"
-        "Reply here with your main wallet address \\(`0x...`\\)\\.\n\n"
-        "_This signer is for trading only and cannot withdraw funds\\._"
+    return "\n\n".join(
+        [
+            _ui_header("Wallet Connect", icon="👛"),
+            md2_rule(),
+            _ui_section(
+                "Setup steps",
+                [
+                    "├ 1\\. Open https://app\\.nado\\.xyz, connect your wallet, and deposit at least $5 USDT0\\.",
+                    "├ 2\\. Go to *Settings → 1\\-Click Trading → Advanced 1CT*\\.",
+                    "├ 3\\. Paste the trading key below into *1CT Private Key*:",
+                    f"│ `{escape_md(pk_hex)}`",
+                    "├ 4\\. Enable the toggle, save, and confirm the wallet transaction\\.",
+                    "└ 5\\. Reply here with your main wallet address \\(`0x...`\\)\\.",
+                ],
+            ),
+            _ui_footer_hint("This signer is for trading only and cannot withdraw funds\\."),
+        ]
     )
 
 
 def fmt_wallet_balance_card(amount: float) -> str:
-    return (
-        "💰 *Wallet Balance*\n"
-        f"{md2_rule()}\n\n"
-        f"*Available USDT0:* {escape_md(f'${amount:,.2f}')}"
+    return "\n\n".join(
+        [
+            _ui_header("Wallet Balance", icon="💰"),
+            md2_rule(),
+            _ui_section("Quick snapshot", [f"└ *Available USDT0* — {escape_md(f'${amount:,.2f}')}"]),
+        ]
     )
 
 
 def fmt_wallet_balance_error() -> str:
-    return (
-        "💰 *Wallet Balance*\n"
-        f"{md2_rule()}\n\n"
-        "⚠️ Could not fetch balance right now\\. Try again shortly\\."
+    return "\n\n".join(
+        [
+            _ui_header("Wallet Balance", icon="💰"),
+            md2_rule(),
+            "⚠️ Could not fetch balance right now\\. Try again shortly\\.",
+        ]
     )
 
 
 def fmt_wallet_revoke_steps_card() -> str:
-    return (
-        "🔄 *Revoke 1CT Key*\n"
-        f"{md2_rule()}\n\n"
-        "1\\. Open Nado → Settings\n"
-        "2\\. 1\\-Click Trading → Advanced 1CT\n"
-        "3\\. Disable the toggle and save\n\n"
-        "_You can also reset Nadobro's stored signer below if you want to link a new key\\._"
+    return "\n\n".join(
+        [
+            _ui_header("Revoke 1CT Key", icon="🔄"),
+            md2_rule(),
+            _ui_section(
+                "Steps",
+                [
+                    "├ 1\\. Open Nado → Settings",
+                    "├ 2\\. 1\\-Click Trading → Advanced 1CT",
+                    "└ 3\\. Disable the toggle and save",
+                ],
+            ),
+            _ui_footer_hint("You can also reset Nadobro's stored signer below if you want to link a new key\\."),
+        ]
     )
 
 

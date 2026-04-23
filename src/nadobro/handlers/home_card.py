@@ -8,10 +8,10 @@ from telegram.ext import CallbackContext
 from src.nadobro.i18n import localize_text, localize_markup, get_active_language
 from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.formatters import (
-    escape_md,
     fmt_alert_menu_intro,
+    fmt_home_command_center_card,
     fmt_mode_view,
-    md2_rule,
+    fmt_strategy_hub_intro,
     fmt_positions,
     fmt_settings,
     fmt_wallet_info,
@@ -51,7 +51,6 @@ def build_home_card_text(telegram_id: int) -> str:
         return "⚠️ User not found\\. Use /start first\\."
 
     network = user.network_mode.value
-    network_label = "🧪 TESTNET" if network == "testnet" else "🌐 MAINNET"
     balance_str = "N/A"
     try:
         client = get_user_readonly_client(telegram_id)
@@ -65,16 +64,7 @@ def build_home_card_text(telegram_id: int) -> str:
     except Exception:
         pass
 
-    return (
-        "🤖 *Nadobro Command Center*\n"
-        f"{md2_rule()}\n\n"
-        f"*Execution mode*\n{escape_md(network_label)}\n\n"
-        f"*Wallet balance \\(USDT\\)*\n{escape_md(balance_str)}\n\n"
-        f"{md2_rule()}\n\n"
-        "*Shortcuts*\n"
-        "Tap the buttons below for Trade, Portfolio, Strategies, Points, Alerts, and Settings\\.\n\n"
-        "_Chat here for AI Q\\&A and plain\\-language trades\\._"
-    )
+    return fmt_home_command_center_card(network, balance_str)
 
 
 async def build_home_card_text_async(telegram_id: int) -> str:
@@ -285,10 +275,7 @@ def _view_mode_text(telegram_id: int):
 
 
 def _view_strategy_text():
-    lang = get_active_language()
-    header = localize_text("🤖 *Nadobro Strategy Lab*", lang)
-    body = localize_text("Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.", lang)
-    return f"{header}\n\n{body}", strategy_hub_kb()
+    return fmt_strategy_hub_intro(), strategy_hub_kb()
 
 
 def _view_wallet_text(telegram_id: int):

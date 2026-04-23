@@ -13,7 +13,7 @@ from src.nadobro.handlers.formatters import (
     fmt_wallet_balance_card, fmt_wallet_balance_error, fmt_wallet_connect_card,
     fmt_wallet_info, fmt_alerts, fmt_portfolio, fmt_wallet_revoke_steps_card,
     fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard,
-    fmt_trade_history, fmt_analytics,
+    fmt_trade_history, fmt_analytics, fmt_strategy_hub_intro,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
@@ -350,8 +350,7 @@ async def _handle_nav(query, data, telegram_id, context=None):
         await _handle_onboarding(query, "onboarding:resume", telegram_id, context)
     elif target == "strategy_hub":
         await _edit_loc(query,
-            "🤖 *Nadobro Strategy Lab*\n\n"
-            "Pick a strategy to open its cockpit dashboard, edit parameters, and launch with pre\\-trade analytics\\.",
+            fmt_strategy_hub_intro(),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
         )
