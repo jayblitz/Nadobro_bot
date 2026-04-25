@@ -1507,6 +1507,10 @@ def fmt_status_overview(status: dict, onboarding: dict):
 
     if status.get("last_error"):
         lines.append(f"{_loc('Note')}: {escape_md(str(status.get('last_error'))[:160])}")
+    if status.get("last_error_category"):
+        lines.append(f"{_loc('Error class')}: *{escape_md(str(status.get('last_error_category')).upper())}*")
+    if status.get("last_order_error"):
+        lines.append(f"{_loc('Last order error')}: {escape_md(str(status.get('last_order_error'))[:160])}")
 
     heartbeat = _fmt_age_seconds(float(status.get("worker_last_heartbeat") or 0.0))
     cycle_ms = float(status.get("last_cycle_ms") or 0.0)

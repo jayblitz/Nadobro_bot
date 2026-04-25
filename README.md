@@ -1,6 +1,6 @@
 # Nadobro Bot
 
-Nadobro is a Telegram trading bot for Nado DEX that lets users manage wallets, place trades, monitor markets, and run automated strategies from chat.
+Nadobro is a Telegram-first Ink financial copilot for Nado DEX. It lets users ask market questions, inspect live Nado/Ink context, receive strategy recommendations, manage wallets, place trades, monitor sessions, and run automated strategies from chat.
 
 ## Latest Updates (March 2026)
 
@@ -17,6 +17,10 @@ Nadobro is a Telegram trading bot for Nado DEX that lets users manage wallets, p
 - Automated strategies: Market Making, Grid, Delta Neutral, Volume Bot, and Bro Mode
 - Price and funding alerts
 - Admin controls for trading safety and diagnostics
+- DMind financial expert layer for finance-native structuring, signal scoring, and strategy recommendations
+- Source freshness tracking for provider-backed market answers
+- n8n workflow layer for Telegram-visible automations backed by safe Nadobro action APIs
+- Strategy phase/status surface for recovery after failed or stuck sessions
 
 ## Quick Start
 
@@ -28,6 +32,9 @@ Nadobro is a Telegram trading bot for Nado DEX that lets users manage wallets, p
    - `ENCRYPTION_KEY`
    - `XAI_API_KEY` (optional)
    - `OPENAI_API_KEY` (optional)
+   - `DMIND_API_KEY` (recommended for Minara-parity financial reasoning)
+   - `N8N_BASE_URL`, `N8N_API_KEY`, `N8N_WEBHOOK_SECRET` (optional workflow engine)
+   - Market-data provider keys such as `CMC_API_KEY`, `COINGECKO_API_KEY`, `COINGLASS_API_KEY`, `ARKHAM_API_KEY`, `GLASSNODE_API_KEY`, `ROOTDATA_API_KEY`, `GOPLUS_API_KEY`, `FMP_API_KEY`
    - `TELEGRAM_TRANSPORT` (`polling` or `webhook`, default `polling`)
    - `TELEGRAM_WEBHOOK_URL` (required for webhook mode)
    - `TELEGRAM_WEBHOOK_PATH` (optional, default `/telegram/webhook`)
@@ -38,6 +45,13 @@ Nadobro is a Telegram trading bot for Nado DEX that lets users manage wallets, p
 ## Deployment
 
 For Fly.io deployment instructions, see `deploy.md`.
+
+## Minara-Parity Architecture
+
+See:
+
+- `docs/minara_for_ink_product_spec.md`
+- `docs/minara_parity_architecture.md`
 
 ## Telegram Mini App
 

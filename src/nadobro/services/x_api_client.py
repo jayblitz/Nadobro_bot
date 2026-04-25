@@ -34,6 +34,23 @@ def is_available() -> bool:
     return bool(_get_bearer_token())
 
 
+def _record_x_source(detail: str, confidence: float = 0.85):
+    try:
+        from src.nadobro.services.source_registry import record_source
+
+        record_source(
+            "x",
+            ttl_seconds=TWEET_CACHE_TTL,
+            confidence=confidence,
+            source_url="https://x.com",
+            license_tier="api",
+            allowed_use="sentiment",
+            detail=detail,
+        )
+    except Exception:
+        pass
+
+
 def _headers() -> dict:
     return {
         "Authorization": f"Bearer {_get_bearer_token()}",
@@ -60,6 +77,7 @@ def search_recent_tweets(
     """
     token = _get_bearer_token()
     if not token:
+        _record_x_source("X API not configured", confidence=0.0)
         return []
 
     capped_hours_back = max(1, min(int(hours_back or 168), 168))
@@ -68,6 +86,7 @@ def search_recent_tweets(
     cache_key = f"{query}:{max_results}:{capped_hours_back}"
     cached = _tweet_cache.get(cache_key)
     if cached and (time.time() - cached["ts"]) < TWEET_CACHE_TTL:
+        _record_x_source(f"X cached tweets: {query[:60]}")
         return cached["tweets"]
 
     start_time = (datetime.utcnow() - timedelta(hours=capped_hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -91,10 +110,12 @@ def search_recent_tweets(
 
         if resp.status_code == 429:
             logger.warning("X API rate limited — falling back to Grok search")
+            _record_x_source("X API rate limited", confidence=0.0)
             return []
 
         if resp.status_code != 200:
             logger.warning("X API error %d: %s", resp.status_code, resp.text[:300])
+            _record_x_source(f"X API error {resp.status_code}", confidence=0.0)
             return []
 
         data = resp.json()
@@ -123,13 +144,16 @@ def search_recent_tweets(
         _tweet_cache[cache_key] = {"tweets": tweets, "ts": time.time()}
 
         logger.info("X API returned %d tweets for query: %s", len(tweets), query[:80])
+        _record_x_source(f"X recent search: {query[:60]}")
         return tweets
 
     except requests.Timeout:
         logger.warning("X API timeout for query: %s", query[:80])
+        _record_x_source("X API timeout", confidence=0.0)
         return []
     except Exception:
         logger.warning("X API request failed", exc_info=True)
+        _record_x_source("X API request failed", confidence=0.0)
         return []
 
 

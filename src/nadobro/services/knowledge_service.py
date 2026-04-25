@@ -1533,6 +1533,18 @@ def _filter_official_sources(sources: list[str]) -> list[str]:
     return filtered[:3]
 
 
+def _append_freshness(answer: str, limit: int = 3) -> str:
+    try:
+        from src.nadobro.services.source_registry import freshness_footer
+
+        footer = freshness_footer(limit=limit)
+    except Exception:
+        footer = ""
+    if not footer or "Data freshness:" in (answer or ""):
+        return answer
+    return f"{answer}\n\n{footer}"
+
+
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
     if provider == "openai":
         client = _get_openai_client()
@@ -1754,7 +1766,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         )
         if telegram_id:
             _add_to_chat_history(telegram_id, "assistant", direct_answer)
-        yield direct_answer
+        yield _append_freshness(direct_answer)
         return
 
     _load_knowledge_base()
@@ -1881,6 +1893,10 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
                 sources_line = "\n\nSources:\n" + "\n".join(f"- {s}" for s in used_sources)
                 yield sources_line
                 full_answer += sources_line
+            freshness_line = _append_freshness("")
+            if freshness_line.strip():
+                yield "\n\n" + freshness_line.strip()
+                full_answer += "\n\n" + freshness_line.strip()
 
             if telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", full_answer.strip())
@@ -1985,7 +2001,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         )
         if telegram_id:
             _add_to_chat_history(telegram_id, "assistant", direct_answer)
-        return direct_answer
+        return _append_freshness(direct_answer)
 
     _load_knowledge_base()
 
@@ -2121,6 +2137,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         if not skip_sources and "Sources:" not in answer:
             sources_line = "Sources:\n" + "\n".join(f"- {s}" for s in used_sources)
             answer = f"{answer}\n\n{sources_line}"
+        answer = _append_freshness(answer)
 
         if telegram_id:
             _add_to_chat_history(telegram_id, "assistant", answer)

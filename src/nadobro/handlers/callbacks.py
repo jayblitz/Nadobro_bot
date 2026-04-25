@@ -682,7 +682,10 @@ async def _handle_positions(query, data, telegram_id, context):
 async def _handle_portfolio(query, data, telegram_id):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "view"
-    user = get_user(telegram_id)
+    try:
+        user = get_user(telegram_id)
+    except Exception:
+        user = None
     mode_label = None
     if user:
         mode_label = user.network_mode.value.upper()
@@ -812,7 +815,18 @@ async def _handle_wallet(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else "view"
 
     if action == "view":
-        msg, kb = build_wallet_view_payload(telegram_id, context=context, verify_signer=True)
+        try:
+            info = get_user_wallet_info(telegram_id, verify_signer=True)
+            is_linked = bool(info and info.get("is_linked"))
+            if not is_linked and context is not None:
+                from src.nadobro.handlers.wallet_view import _ensure_pending_wallet_signer
+
+                pk_hex, _ = _ensure_pending_wallet_signer(context)
+                msg, kb = fmt_wallet_connect_card(pk_hex), wallet_kb_not_linked()
+            else:
+                msg, kb = fmt_wallet_info(info), (wallet_kb() if is_linked else wallet_kb_not_linked())
+        except Exception:
+            msg, kb = build_wallet_view_payload(telegram_id, context=context, verify_signer=True)
         await _edit_loc(query, 
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,

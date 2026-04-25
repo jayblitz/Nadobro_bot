@@ -978,6 +978,13 @@ def get_user_bot_status(telegram_id: int) -> dict:
         except Exception:
             session_analytics = {"total_trades": 0}
 
+    try:
+        from src.nadobro.services.strategy_fsm import infer_phase
+
+        strategy_phase = infer_phase(state).to_dict()
+    except Exception:
+        strategy_phase = {"phase": "unknown", "detail": "", "recoverable": True, "allowed_actions": []}
+
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -997,6 +1004,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "last_error_category": state.get("last_error_category") or "",
         "last_action": state.get("last_action"),
         "last_action_detail": state.get("last_action_detail"),
+        "strategy_phase": strategy_phase,
         "last_run_ts": last_run,
         "next_cycle_in": next_cycle_in,
         "error_streak": int(state.get("error_streak") or 0),
@@ -1480,6 +1488,12 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
 
 
 async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
+    try:
+        from src.nadobro.services.strategy_fsm import PHASE_SCANNING, apply_phase
+
+        apply_phase(state, PHASE_SCANNING, "Strategy cycle started.")
+    except Exception:
+        pass
     # Apply latest saved strategy parameters (margin, spreads, etc.) every cycle so edits
     # in the UI take effect without restarting the loop.
     try:
@@ -1680,7 +1694,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
-    if strategy not in ("grid", "rgrid", "dn", "vol"):
+    if strategy not in ("dn", "vol"):
         move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
         sl_pct = float(state.get("sl_pct") or 0.0)
         tp_pct = float(state.get("tp_pct") or 0.0)

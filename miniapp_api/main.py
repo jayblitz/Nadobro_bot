@@ -19,7 +19,7 @@ from miniapp_api.asgi_rate_limit import RateLimitMiddleware
 from miniapp_api.config import MINIAPP_API_PORT, MINIAPP_CORS_ORIGINS
 
 # Import routers
-from miniapp_api.routers import users, market, trade, positions, candles, quotes, strategies
+from miniapp_api.routers import users, market, trade, positions, candles, quotes, strategies, workflows, intelligence
 from miniapp_api.ws import voice
 
 logging.basicConfig(
@@ -77,6 +77,8 @@ app.include_router(quotes.router, prefix="/api", tags=["quotes"])
 app.include_router(trade.router, prefix="/api", tags=["trade"])
 app.include_router(positions.router, prefix="/api", tags=["positions"])
 app.include_router(strategies.router, prefix="/api", tags=["strategies"])
+app.include_router(workflows.router, prefix="/api", tags=["workflows"])
+app.include_router(intelligence.router, prefix="/api", tags=["intelligence"])
 app.include_router(voice.router, tags=["voice"])
 
 

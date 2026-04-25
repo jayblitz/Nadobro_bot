@@ -144,6 +144,30 @@ def make_decision(
     if not client:
         return {"action": "hold", "reasoning": "LLM client not available", "confidence": 0.0}
 
+    finance_context = ""
+    try:
+        from src.nadobro.services.dmind_service import analyze_financial_context, build_degraded_notice
+
+        dmind = analyze_financial_context(
+            "Score this autonomous Nado strategy decision context.",
+            context=market_snapshot_text,
+            task="bro_mode_decision",
+            schema_hint={
+                "action_bias": "open_long|open_short|close|hold",
+                "confidence": "0..1",
+                "risks": ["string"],
+                "summary": "string",
+            },
+        )
+        if dmind.get("ok") and dmind.get("text"):
+            finance_context = f"\n\nDMIND FINANCE EXPERT CONTEXT:\n{dmind['text'][:2500]}"
+        else:
+            degraded = build_degraded_notice()
+            if degraded:
+                finance_context = f"\n\nFINANCE EXPERT DEGRADED MODE:\n{degraded}"
+    except Exception:
+        finance_context = ""
+
     from src.nadobro.services.budget_guard import get_bro_profile
     profile_data = get_bro_profile(bro_profile)
 
@@ -170,7 +194,7 @@ def make_decision(
             model=BRO_DECISION_MODEL,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": market_snapshot_text},
+                {"role": "user", "content": market_snapshot_text + finance_context},
             ],
             max_tokens=600,
             temperature=0.3,

@@ -36,6 +36,23 @@ def _set_cache(key: str, data):
     _cache[key] = {"data": data, "ts": time.time()}
 
 
+def _record_cmc_source(detail: str, ttl: int = CMC_CACHE_TTL, confidence: float = 0.9):
+    try:
+        from src.nadobro.services.source_registry import record_source
+
+        record_source(
+            "coinmarketcap",
+            ttl_seconds=ttl,
+            confidence=confidence,
+            source_url="https://coinmarketcap.com",
+            license_tier="api",
+            allowed_use="analysis",
+            detail=detail,
+        )
+    except Exception:
+        pass
+
+
 def _cmc_get(path: str, params: dict = None, timeout: int = 8) -> dict:
     headers = {
         "X-CMC_PRO_API_KEY": _get_api_key(),
@@ -106,6 +123,7 @@ def get_crypto_quotes(symbols: list[str]) -> dict:
         }
 
     _set_cache(cache_key, result)
+    _record_cmc_source(f"CMC quotes: {', '.join(sorted(result.keys()))}")
     return result
 
 
@@ -121,6 +139,7 @@ def get_fear_greed_index() -> dict:
         "update_time": raw.get("update_time", ""),
     }
     _set_cache("fear_greed", result)
+    _record_cmc_source("CMC Fear & Greed", ttl=CMC_SENTIMENT_CACHE_TTL)
     return result
 
 
@@ -140,6 +159,7 @@ def get_global_metrics() -> dict:
         "total_market_cap_change_24h": quote.get("total_market_cap_yesterday_percentage_change", 0),
     }
     _set_cache("global_metrics", result)
+    _record_cmc_source("CMC global metrics")
     return result
 
 
@@ -185,6 +205,7 @@ def get_trending() -> dict:
         logger.warning(f"CMC gainers/losers fetch failed: {e}")
 
     _set_cache("trending", result)
+    _record_cmc_source("CMC trending/gainers/losers")
     return result
 
 
@@ -206,6 +227,7 @@ def get_latest_news(limit: int = 5) -> list[dict]:
                     "slug": item.get("slug", ""),
                 })
         _set_cache("news", articles)
+            _record_cmc_source("CMC latest news", ttl=CMC_SENTIMENT_CACHE_TTL)
         return articles
     except Exception as e:
         logger.warning(f"CMC news fetch failed: {e}")

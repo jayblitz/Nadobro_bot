@@ -138,6 +138,9 @@ def install_test_stubs() -> None:
         requests_adapters = types.ModuleType("requests.adapters")
 
         class _DummyResponse:
+            def raise_for_status(self):
+                return None
+
             def json(self):
                 return {}
 
@@ -160,6 +163,8 @@ def install_test_stubs() -> None:
 
         requests_mod.Session = _DummySession
         requests_mod.RequestException = Exception
+        requests_mod.HTTPError = Exception
+        requests_mod.Timeout = TimeoutError
         requests_adapters.HTTPAdapter = _HTTPAdapter
         sys.modules["requests"] = requests_mod
         sys.modules["requests.adapters"] = requests_adapters

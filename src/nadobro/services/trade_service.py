@@ -476,6 +476,53 @@ def execute_market_order(
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
+    intent_id = kwargs.get("intent_id")
+    if not intent_id:
+        try:
+            from src.nadobro.services.order_intents import build_intent_id
+
+            intent_id = build_intent_id(
+                user_id=telegram_id,
+                network=network,
+                strategy_session_id=strategy_session_id,
+                source=source,
+                product=product,
+                side=OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
+                size=size,
+                reduce_only=bool(reduce_only),
+            )
+        except Exception:
+            intent_id = None
+    if intent_id:
+        try:
+            from src.nadobro.services.order_intents import create_order_intent, should_skip_duplicate
+
+            skip_duplicate, existing_intent = should_skip_duplicate(intent_id)
+            if skip_duplicate and existing_intent and existing_intent.get("trade_id"):
+                return {
+                    "success": True,
+                    "duplicate": True,
+                    "intent_id": intent_id,
+                    "trade_id": existing_intent.get("trade_id"),
+                    "digest": existing_intent.get("order_digest"),
+                    "message": "Duplicate order intent suppressed.",
+                }
+            create_order_intent(
+                intent_id,
+                {
+                    "user_id": telegram_id,
+                    "network": network,
+                    "strategy_session_id": strategy_session_id,
+                    "source": source,
+                    "product": product,
+                    "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
+                    "size": size,
+                    "reduce_only": bool(reduce_only),
+                },
+            )
+        except Exception:
+            pass
+
     trade_data = {
         "user_id": telegram_id,
         "product_id": product_id,
@@ -493,6 +540,13 @@ def execute_market_order(
     trade_id = insert_trade(trade_data, network=network)
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
+    if intent_id:
+        try:
+            from src.nadobro.services.order_intents import update_order_intent
+
+            update_order_intent(intent_id, status="recorded", trade_id=trade_id)
+        except Exception:
+            pass
 
     isolated_only = is_product_isolated_only(product, network=network, client=client)
     isolated_margin = None
@@ -537,6 +591,13 @@ def execute_market_order(
             )
         except Exception:
             pass
+        if intent_id:
+            try:
+                from src.nadobro.services.order_intents import update_order_intent
+
+                update_order_intent(intent_id, status="failed", error=str(submit_result), trade_id=trade_id)
+            except Exception:
+                pass
         return {"success": False, "error": str(submit_result)}
     result = submit_result
 
@@ -553,6 +614,10 @@ def execute_market_order(
                     },
                     network=network,
                 )
+                if intent_id:
+                    from src.nadobro.services.order_intents import update_order_intent
+
+                    update_order_intent(intent_id, status="submitted", trade_id=trade_id, order_digest=digest)
             except Exception:
                 pass
         try:
@@ -569,6 +634,20 @@ def execute_market_order(
             if "price" not in update_data or not update_data.get("price"):
                 update_data["price"] = _get_post_fill_price(client, product_id) or result.get("price", 0)
             update_trade(trade_id, update_data, network=network)
+            if intent_id:
+                try:
+                    from src.nadobro.services.order_intents import update_order_intent
+
+                    update_order_intent(
+                        intent_id,
+                        status="filled" if fill_data else "submitted",
+                        trade_id=trade_id,
+                        order_digest=digest,
+                        fill_price=update_data.get("fill_price"),
+                        filled_at=update_data.get("filled_at"),
+                    )
+                except Exception:
+                    pass
 
             # Enqueue for background sync if archive didn't resolve
             if not fill_data:
