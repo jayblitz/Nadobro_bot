@@ -34,6 +34,8 @@ def _normalize_strategy_id(text: str) -> str | None:
         return "vol"
     if any(x in t for x in ("r-grid", "rgrid", "reverse grid", "reverse-grid")):
         return "rgrid"
+    if any(x in t for x in ("dynamic grid", "dgrid", "d-grid")):
+        return "dgrid"
     if "grid" in t:
         return "grid"
     return None
@@ -70,7 +72,7 @@ def _extract_direction(text: str) -> str:
 def _is_strategy_start_request(text: str) -> bool:
     t = (text or "").lower()
     trigger_words = ("start", "run", "launch", "activate", "enable")
-    strategy_words = ("grid", "rgrid", "r-grid", "reverse grid", "delta neutral", "volume", "vol", "bro", "alpha")
+    strategy_words = ("grid", "rgrid", "r-grid", "reverse grid", "dynamic grid", "dgrid", "d-grid", "delta neutral", "volume", "vol", "bro", "alpha")
     return any(w in t for w in trigger_words) and any(w in t for w in strategy_words)
 
 
@@ -145,7 +147,7 @@ async def handle_managed_agent_turn(
                 "handled": True,
                 "response": (
                     "I couldn't map that strategy request yet. "
-                    "Try: start grid BTC 3x, run r-grid ETH 4x, start delta neutral BTC, "
+ "Try: start grid BTC 3x, run dgrid BTC, run r-grid ETH 4x, start delta neutral BTC, "
                     "start volume bot SOL, or activate alpha agent."
                 ),
                 "show_menu": False,

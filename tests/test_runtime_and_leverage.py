@@ -653,6 +653,14 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertEqual(dn.get("funding_entry_mode"), "enter_anyway")
         self.assertEqual(strategy_worker_group("dn"), "dn")
 
+    def test_dgrid_strategy_defaults_and_worker_group(self):
+        from src.nadobro.services.runtime_supervisor import strategy_worker_group
+
+        dgrid = bot_runtime._strategy_defaults("dgrid")
+        self.assertEqual(strategy_worker_group("dgrid"), "mm_grid")
+        self.assertEqual(dgrid.get("interval_seconds"), 30)
+        self.assertIn("dgrid_trend_on_variance_ratio", dgrid)
+
     def test_handle_strategy_job_vol_overlap_drops_extra_pending_tick(self):
         telegram_id = 77
         network = "mainnet"

@@ -173,7 +173,7 @@ class TradeHistoryItem(BaseModel):
 # ---------------------------------------------------------------------------
 
 class StrategyStartRequest(BaseModel):
-    strategy: str = Field(..., pattern=r"^(grid|rgrid|dn|vol|bro)$")
+    strategy: str = Field(..., pattern=r"^(grid|rgrid|dgrid|dn|vol|bro)$")
     product: str = Field(default="BTC", min_length=1, max_length=32)
     leverage: float = Field(default=3.0, ge=1)
     slippage_pct: float = Field(default=1.0, ge=0, le=100)

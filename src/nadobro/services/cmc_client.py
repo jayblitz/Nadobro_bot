@@ -227,7 +227,7 @@ def get_latest_news(limit: int = 5) -> list[dict]:
                     "slug": item.get("slug", ""),
                 })
         _set_cache("news", articles)
-            _record_cmc_source("CMC latest news", ttl=CMC_SENTIMENT_CACHE_TTL)
+        _record_cmc_source("CMC latest news", ttl=CMC_SENTIMENT_CACHE_TTL)
         return articles
     except Exception as e:
         logger.warning(f"CMC news fetch failed: {e}")

@@ -133,6 +133,8 @@ def _normalize_strategy_id(strategy: str) -> str:
         return "grid"
     if sid in ("reverse_grid", "reverse-grid"):
         return "rgrid"
+    if sid in ("dynamic_grid", "dynamic-grid", "d-grid"):
+        return "dgrid"
     return sid
 
 
@@ -143,7 +145,7 @@ def _migrate_state_strategy(state: dict) -> dict:
     if sid == "mm":
         state["strategy"] = "grid"
         state["strategy_id_v2"] = 1
-    elif sid in ("grid", "rgrid", "dn", "vol", "bro"):
+    elif sid in ("grid", "rgrid", "dgrid", "dn", "vol", "bro"):
         state["strategy_id_v2"] = int(state.get("strategy_id_v2") or 1)
     return state
 
@@ -181,6 +183,8 @@ def _strategy_display_name(strategy: str) -> str:
         return "GRID"
     if sid == "rgrid":
         return "REVERSE GRID"
+    if sid == "dgrid":
+        return "DYNAMIC GRID"
     return sid.upper() if sid else "STRATEGY"
 
 
@@ -392,6 +396,28 @@ def _strategy_defaults(strategy: str) -> dict:
             "min_range_pct": 1.0,
             "max_range_pct": 1.0,
         },
+        "dgrid": {
+            "notional_usd": 100.0,
+            "cycle_notional_usd": 100.0,
+            "spread_bp": 8.0,
+            "interval_seconds": 30,
+            "levels": 4,
+            "tp_pct": 1.2,
+            "sl_pct": 0.8,
+            "dgrid_trend_on_variance_ratio": 1.25,
+            "dgrid_range_on_variance_ratio": 1.15,
+            "dgrid_min_spread_bp": 2.0,
+            "dgrid_max_spread_bp": 50.0,
+            "dgrid_short_window_points": 4,
+            "dgrid_long_window_points": 12,
+            "rgrid_stop_loss_pct": 0.8,
+            "rgrid_take_profit_pct": 1.2,
+            "rgrid_discretion": 0.06,
+            "grid_reset_threshold_pct": 0.2,
+            "rgrid_reset_threshold_pct": 0.2,
+            "grid_reset_timeout_seconds": 120,
+            "rgrid_reset_timeout_seconds": 120,
+        },
         "dn": {
             "notional_usd": 50.0,
             "spread_bp": 3.0,
@@ -421,7 +447,7 @@ def _strategy_defaults(strategy: str) -> dict:
     return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
 
 
-SUPPORTED_STRATEGIES = ("grid", "rgrid", "dn", "vol", "bro")
+SUPPORTED_STRATEGIES = ("grid", "rgrid", "dgrid", "dn", "vol", "bro")
 
 
 def _mark_previous_sessions_superseded(telegram_id: int, network: str) -> None:
@@ -458,6 +484,9 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
                     "budget_usd", "risk_level", "max_positions", "products",
                     "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
                     "rgrid_discretion", "rgrid_reset_threshold_pct",
+                    "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
+                    "dgrid_min_spread_bp", "dgrid_max_spread_bp", "dgrid_short_window_points",
+                    "dgrid_long_window_points",
                     "target_volume_usd", "funding_entry_mode", "fixed_margin_usd", "vol_direction",
                 )
             }),
@@ -688,7 +717,7 @@ def start_user_bot(
             "runs": 0,
         }
     )
-    if strategy in ("grid", "rgrid"):
+    if strategy in ("grid", "rgrid", "dgrid"):
         mm_ok, mm_msg = _run_mm_start_guard(telegram_id, network, product.upper(), float(state.get("leverage") or leverage or 1.0), state)
         if not mm_ok:
             return False, mm_msg
@@ -760,7 +789,7 @@ def start_user_bot(
             f"VOL bot started on {str(product).upper()}-PERP ({network}) "
             f"| Direction {direction} | Margin $100 @ 1x | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
         )
-    if strategy in ("grid", "rgrid"):
+    if strategy in ("grid", "rgrid", "dgrid"):
         spread_key = "rgrid_spread_bp" if strategy == "rgrid" else "spread_bp"
         margin_usd = float(state.get("notional_usd") or 0.0)
         cycle_notional_cfg = float(state.get("cycle_notional_usd") or margin_usd or 0.0)
@@ -1040,6 +1069,12 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "rgrid_reset_threshold_pct": state.get("rgrid_reset_threshold_pct") or state.get("grid_reset_threshold_pct"),
         "rgrid_reset_timeout_seconds": state.get("rgrid_reset_timeout_seconds") or state.get("grid_reset_timeout_seconds"),
         "rgrid_discretion": state.get("rgrid_discretion") or state.get("grid_discretion"),
+        "dgrid_phase": state.get("dgrid_phase") or "",
+        "dgrid_variance_ratio": float(state.get("dgrid_variance_ratio") or 0.0),
+        "dgrid_realized_move_bp": float(state.get("dgrid_realized_move_bp") or 0.0),
+        "dgrid_dynamic_spread_bp": float(state.get("dgrid_dynamic_spread_bp") or 0.0),
+        "dgrid_reset_threshold_bp": float(state.get("dgrid_reset_threshold_bp") or 0.0),
+        "dgrid_phase_changed": bool(state.get("dgrid_phase_changed")),
         "other_running_networks": other_running_networks,
         "strategy_session_id": strategy_session_id,
         "running_sessions": running_sessions,
@@ -1458,7 +1493,7 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
                        client, mid: float, product_id: int, product: str, open_orders: list) -> dict:
     from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
 
-    if strategy in ("grid", "rgrid"):
+    if strategy in ("grid", "rgrid", "dgrid"):
         return mm_bot.run_cycle(
             telegram_id, network, state,
             client=client, mid=mid, open_orders=open_orders,
@@ -1785,7 +1820,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 client, mid, product_id, product, open_orders,
             )
 
-    if strategy in ("grid", "rgrid") and result.get("action") == "grid_stop_loss_hit":
+    if strategy in ("grid", "rgrid", "dgrid") and result.get("action") == "grid_stop_loss_hit":
         _finalize_session(state, stop_reason="grid_sl_hit")
         state["running"] = False
         strategy_label = _strategy_display_name(strategy)
@@ -1815,7 +1850,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
         return True, None
-    if strategy in ("grid", "rgrid") and result.get("action") == "grid_take_profit_hit":
+    if strategy in ("grid", "rgrid", "dgrid") and result.get("action") == "grid_take_profit_hit":
         _finalize_session(state, stop_reason="tp_hit")
         state["running"] = False
         strategy_label = _strategy_display_name(strategy)
@@ -1845,7 +1880,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
         return True, None
-    if strategy in ("grid", "rgrid") and result.get("action") == "circuit_breaker":
+    if strategy in ("grid", "rgrid", "dgrid") and result.get("action") == "circuit_breaker":
         _finalize_session(state, stop_reason="circuit_breaker")
         state["running"] = False
         strategy_label = _strategy_display_name(strategy)
@@ -1871,7 +1906,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 error=close_res.get("error", "unknown"),
             )
         return True, None
-    if strategy in ("grid", "rgrid") and result.get("done") and str(result.get("reason") or "") == "session notional cap reached":
+    if strategy in ("grid", "rgrid", "dgrid") and result.get("done") and str(result.get("reason") or "") == "session notional cap reached":
         _finalize_session(state, stop_reason="session_cap_hit")
         state["running"] = False
         strategy_label = _strategy_display_name(strategy)

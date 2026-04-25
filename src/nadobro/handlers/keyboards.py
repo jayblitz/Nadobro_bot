@@ -742,6 +742,9 @@ def strategy_hub_kb():
             InlineKeyboardButton("🧮 Reverse GRID", callback_data="strategy:preview:rgrid"),
         ],
         [
+            InlineKeyboardButton("⚡ Dynamic GRID", callback_data="strategy:preview:dgrid"),
+        ],
+        [
             InlineKeyboardButton("⚖️ Mirror DN", callback_data="strategy:preview:dn"),
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],

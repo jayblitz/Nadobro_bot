@@ -219,5 +219,38 @@ class ConcedeModePostOnlyTests(unittest.TestCase):
         self.assertFalse(place_mock.call_args.kwargs["post_only"])
 
 
+class DynamicGridTests(unittest.TestCase):
+    def test_dgrid_switches_to_rgrid_on_high_variance_and_forces_zero_spread(self):
+        state = {
+            "strategy": "dgrid",
+            "spread_bp": 8.0,
+            "dgrid_trend_on_variance_ratio": 1.25,
+            "dgrid_range_on_variance_ratio": 1.15,
+        }
+        # Quiet long window plus a sharp recent move yields a high variance ratio.
+        history = [100, 100.05, 100.0, 100.04, 100.02, 100.03, 100.01, 100.02, 100.0, 103.0, 97.0, 104.0]
+        result = mm_bot._apply_dgrid_controls(state, history, 8.0)
+
+        self.assertEqual(result["phase"], "rgrid")
+        self.assertEqual(result["spread_bp"], 0.0)
+        self.assertEqual(state["dgrid_phase"], "rgrid")
+        self.assertGreaterEqual(state["dgrid_reset_threshold_bp"], 5.0)
+
+    def test_dgrid_switches_to_grid_on_low_variance_and_sizes_spread(self):
+        state = {
+            "strategy": "dgrid",
+            "dgrid_phase": "rgrid",
+            "dgrid_trend_on_variance_ratio": 1.25,
+            "dgrid_range_on_variance_ratio": 1.15,
+            "dgrid_max_spread_bp": 50.0,
+        }
+        history = [100.0, 100.01, 100.02, 100.03, 100.04, 100.05, 100.06, 100.07]
+        result = mm_bot._apply_dgrid_controls(state, history, 8.0)
+
+        self.assertEqual(result["phase"], "grid")
+        self.assertGreaterEqual(result["spread_bp"], 0.0)
+        self.assertLessEqual(result["spread_bp"], 50.0)
+
+
 if __name__ == "__main__":
     unittest.main()

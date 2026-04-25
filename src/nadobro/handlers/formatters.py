@@ -1421,7 +1421,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
     session_volume = float(status.get("session_volume_usd") or 0.0)
     if strategy == "VOL" and session_volume <= 0:
         session_volume = float(status.get("volume_done_usd") or 0.0)
-    if strategy in ("GRID", "RGRID") and session_volume <= 0:
+    if strategy in ("GRID", "RGRID", "DGRID") and session_volume <= 0:
         session_volume = float(status.get("session_notional_done_usd") or 0.0)
     session_fees = float(status.get("session_fees_usd") or 0.0)
     session_funding = float(status.get("session_funding_usd") or 0.0)
@@ -1429,7 +1429,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
     session_pnl = float(status.get("session_analytics_pnl_usd") or 0.0)
     if strategy == "VOL":
         session_pnl = float(status.get("session_realized_pnl_usd") or session_pnl)
-    elif strategy in ("GRID", "RGRID"):
+    elif strategy in ("GRID", "RGRID", "DGRID"):
         session_pnl = float(status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
     elif strategy == "BRO":
         session_pnl = float((status.get("bro_state") or {}).get("total_pnl") or session_pnl)
@@ -1545,7 +1545,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
         lines.extend(["", "*Alpha Agent*"])
         lines.append(f"{_loc('Trades')}: *{escape_md(str(trade_count))}* \\| {_loc('Open Positions')}: *{escape_md(str(active))}*")
 
-    if strategy in ("GRID", "RGRID"):
+    if strategy in ("GRID", "RGRID", "DGRID"):
         anchor = float(status.get("rgrid_anchor_price") or 0.0)
         buy_exp = float(status.get("rgrid_buy_exposure_price") or 0.0)
         sell_exp = float(status.get("rgrid_sell_exposure_price") or 0.0)
@@ -1556,7 +1556,20 @@ def fmt_status_overview(status: dict, onboarding: dict):
         tp_pct = float(status.get("rgrid_take_profit_pct") or 0.0)
         discretion = float(status.get("rgrid_discretion") or 0.0)
         inventory_source = str(status.get("inventory_source") or "").strip().lower()
-        lines.extend(["", "*Reverse GRID*" if strategy == "RGRID" else "*GRID*"])
+        if strategy == "DGRID":
+            phase = str(status.get("dgrid_phase") or "grid").upper()
+            vr = float(status.get("dgrid_variance_ratio") or 0.0)
+            move_bp = float(status.get("dgrid_realized_move_bp") or 0.0)
+            reset_bp = float(status.get("dgrid_reset_threshold_bp") or 0.0)
+            lines.extend(["", "*Dynamic GRID*"])
+            lines.append(
+                f"{_loc('Phase')}: *{escape_md(phase)}* \\| "
+                f"{_loc('Variance')}: *{escape_md(f'{vr:.2f}')}* \\| "
+                f"{_loc('Move')}: *{escape_md(f'{move_bp:.1f}bp')}*"
+            )
+            lines.append(f"{_loc('Auto reset')}: *{escape_md(f'{reset_bp:.1f}bp')}*")
+        else:
+            lines.extend(["", "*Reverse GRID*" if strategy == "RGRID" else "*GRID*"])
         lines.append(
             f"{_loc('Anchor')}: *{escape_md(f'{anchor:,.2f}') if anchor > 0 else 'n/a'}* \\| "
             f"{_loc('Drift')}: *{escape_md(f'{drift_pct:.3f}%')}*"

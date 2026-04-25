@@ -20,6 +20,10 @@ DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
 POST_ONLY_REPRICE_MAX_RETRIES = 3
 POST_ONLY_REPRICE_STEP_BP = 0.5
+DGRID_TREND_ON_VARIANCE_RATIO = 1.25
+DGRID_RANGE_ON_VARIANCE_RATIO = 1.15
+DGRID_MAX_SPREAD_BP = 50.0
+DGRID_RESET_OPTIONS_BP = (5.0, 12.5, 25.0, 50.0, 100.0)
 
 
 MOMENTUM_EMA_CROSSOVER_BP = 5.0       # EMA fast-slow divergence threshold (bp)
@@ -54,6 +58,97 @@ def _compute_realized_vol_bp(history: list[float]) -> float:
         return 0.0
     avg_abs_return = sum(returns) / len(returns)
     return avg_abs_return * 10000.0
+
+
+def _compute_variance_ratio(history: list[float], short_window: int = 4, long_window: int = 12) -> float:
+    """Approximate a variance ratio from recent absolute log returns.
+
+    Tread DGRID uses a volatility proxy variance ratio to distinguish ranging
+    vs trending regimes. Nadobro may not have a full external volatility proxy
+    for every market yet, so we derive a local proxy from the same mid history
+    already used by the MM engine.
+    """
+    returns = []
+    for i in range(1, len(history)):
+        prev = float(history[i - 1] or 0.0)
+        cur = float(history[i] or 0.0)
+        if prev <= 0 or cur <= 0:
+            continue
+        returns.append((cur - prev) / prev)
+    if len(returns) < max(3, short_window):
+        return 1.0
+
+    short = returns[-max(2, short_window):]
+    long = returns[-max(short_window, long_window):]
+
+    def _variance(values: list[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        return sum((v - mean) ** 2 for v in values) / max(1, len(values) - 1)
+
+    long_var = _variance(long)
+    if long_var <= 1e-18:
+        return 1.0
+    return max(0.0, _variance(short) / long_var)
+
+
+def _snap_reset_threshold_bp(value_bp: float) -> float:
+    value = max(0.0, float(value_bp or 0.0))
+    return min(DGRID_RESET_OPTIONS_BP, key=lambda opt: abs(opt - value))
+
+
+def _apply_dgrid_controls(state: dict, history: list[float], base_spread_bp: float) -> dict:
+    variance_ratio = _compute_variance_ratio(
+        history,
+        short_window=int(state.get("dgrid_short_window_points") or 4),
+        long_window=int(state.get("dgrid_long_window_points") or 12),
+    )
+    realized_move_bp = _compute_realized_vol_bp(history)
+    previous_phase = str(state.get("dgrid_phase") or "grid").lower()
+    if previous_phase not in ("grid", "rgrid"):
+        previous_phase = "grid"
+
+    phase = previous_phase
+    trend_on = float(state.get("dgrid_trend_on_variance_ratio") or DGRID_TREND_ON_VARIANCE_RATIO)
+    range_on = float(state.get("dgrid_range_on_variance_ratio") or DGRID_RANGE_ON_VARIANCE_RATIO)
+    if variance_ratio >= trend_on:
+        phase = "rgrid"
+    elif variance_ratio <= range_on:
+        phase = "grid"
+
+    spread_from_move = _clamp(
+        max(float(state.get("dgrid_min_spread_bp") or 0.0), realized_move_bp),
+        0.0,
+        float(state.get("dgrid_max_spread_bp") or DGRID_MAX_SPREAD_BP),
+    )
+    if spread_from_move <= 0:
+        spread_from_move = max(0.0, float(base_spread_bp or 0.0))
+    quote_spread_bp = 0.0 if phase == "rgrid" else spread_from_move
+    reset_bp = _snap_reset_threshold_bp(max(spread_from_move * 4.0, 5.0))
+    reset_pct = reset_bp / 100.0
+
+    changed = phase != previous_phase
+    now = time.time()
+    if changed:
+        state["dgrid_last_switch_ts"] = now
+    state["dgrid_phase"] = phase
+    state["dgrid_variance_ratio"] = round(variance_ratio, 6)
+    state["dgrid_realized_move_bp"] = round(realized_move_bp, 4)
+    state["dgrid_dynamic_spread_bp"] = round(quote_spread_bp, 4)
+    state["dgrid_reset_threshold_bp"] = reset_bp
+    state["dgrid_last_eval_ts"] = now
+    state["dgrid_phase_changed"] = bool(changed)
+    state["grid_reset_threshold_pct"] = reset_pct
+    state["rgrid_reset_threshold_pct"] = reset_pct
+    return {
+        "phase": phase,
+        "variance_ratio": variance_ratio,
+        "realized_move_bp": realized_move_bp,
+        "spread_bp": quote_spread_bp,
+        "reset_threshold_bp": reset_bp,
+        "phase_changed": changed,
+    }
 
 
 def _update_both_emas(state: dict, mid: float, ema_fast_alpha: float, ema_slow_alpha: float) -> tuple[float, float]:
@@ -540,6 +635,7 @@ def run_cycle(
     strategy = str(state.get("strategy", "grid") or "grid").lower()
     if strategy == "mm":
         strategy = "grid"
+    configured_strategy = strategy
     product_id = get_product_id(product, network=network)
     if product_id is None:
         return {"success": False, "error": f"Invalid product '{product}'", "orders_placed": 0}
@@ -621,7 +717,10 @@ def run_cycle(
         order_birth_ts = {}
         state["mm_order_birth_ts"] = order_birth_ts
 
-    if strategy == "rgrid":
+    if strategy == "dgrid":
+        levels = max(1, int(state.get("levels", GRID_DEFAULT_LEVELS)))
+        spread_bp = max(float(state.get("spread_bp") or GRID_MIN_SPREAD_BP), MM_MIN_SPREAD_BP)
+    elif strategy == "rgrid":
         levels = max(1, int(state.get("levels", GRID_DEFAULT_LEVELS)))
         if "rgrid_spread_bp" in state:
             spread_bp = float(state.get("rgrid_spread_bp") or 0.0)
@@ -655,9 +754,22 @@ def run_cycle(
             "reason": "session notional cap reached",
         }
 
-    history = _update_mid_history(state, mid, max_points=max(vol_window, 8))
+    history = _update_mid_history(
+        state,
+        mid,
+        max_points=max(vol_window, 8, int(state.get("dgrid_long_window_points") or 12) + 1),
+    )
+    if configured_strategy == "dgrid":
+        dgrid_state = _apply_dgrid_controls(state, history, spread_bp)
+        strategy = dgrid_state["phase"]
+        spread_bp = float(dgrid_state["spread_bp"])
+        # Preserve user-visible strategy identity while running through the
+        # existing GRID/RGRID engine internally.
+        state["strategy"] = "dgrid"
     vol_bp = _compute_realized_vol_bp(history[-vol_window:])
     dynamic_spread_bp = spread_bp * (1.0 + (vol_bp * vol_sensitivity / 100.0))
+    if configured_strategy == "dgrid":
+        dynamic_spread_bp = float(spread_bp)
     if strategy == "rgrid":
         max_abs = max(abs(min_spread_bp), abs(max_spread_bp))
         dynamic_spread_bp = _clamp(dynamic_spread_bp, -max_abs, max_abs)
@@ -1055,7 +1167,7 @@ def run_cycle(
             leverage=leverage,
             enforce_rate_limit=False,
             post_only=post_only_quotes,
-            source=strategy,
+            source=configured_strategy,
             strategy_session_id=state.get("strategy_session_id"),
             reduce_only=bool(
                 pause_flatten_only
@@ -1091,7 +1203,7 @@ def run_cycle(
                         leverage=leverage,
                         enforce_rate_limit=False,
                         post_only=True,
-                        source=strategy,
+                        source=configured_strategy,
                         strategy_session_id=state.get("strategy_session_id"),
                         reduce_only=bool(
                             pause_flatten_only
@@ -1174,6 +1286,7 @@ def run_cycle(
     result = {
         "success": success,
         "error": errors[0] if not success else None,
+        "strategy": configured_strategy,
         "orders_placed": orders_placed,
         "orders_cancelled": orders_cancelled,
         "levels": levels,
@@ -1195,6 +1308,14 @@ def run_cycle(
         "grid_reset_side": state.get("grid_reset_side") if strategy in ("grid", "rgrid") else None,
         "grid_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd") if strategy in ("grid", "rgrid") else None,
     }
+    if configured_strategy == "dgrid":
+        result.update({
+            "dgrid_phase": state.get("dgrid_phase"),
+            "dgrid_variance_ratio": state.get("dgrid_variance_ratio"),
+            "dgrid_realized_move_bp": state.get("dgrid_realized_move_bp"),
+            "dgrid_reset_threshold_bp": state.get("dgrid_reset_threshold_bp"),
+            "dgrid_phase_changed": state.get("dgrid_phase_changed"),
+        })
 
     # Update cumulative PnL tracking. Previously this only worked for RGRID; GRID
     # fell through to `result.get("pnl", 0)` on a dict that never had a "pnl" key,

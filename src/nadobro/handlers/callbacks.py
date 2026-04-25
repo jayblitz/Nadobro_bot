@@ -1184,7 +1184,7 @@ async def _handle_settings(query, data, telegram_id, context):
 
 
 async def _handle_strategy(query, data, context, telegram_id):
-    supported = ("grid", "rgrid", "dn", "vol", "bro")
+    supported = ("grid", "rgrid", "dgrid", "dn", "vol", "bro")
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     strategy_id = parts[2] if len(parts) > 2 else ""
@@ -1376,6 +1376,9 @@ async def _handle_strategy(query, data, context, telegram_id):
             "grid_reset_threshold_pct", "grid_reset_timeout_seconds",
             "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
             "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
+            "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
+            "dgrid_min_spread_bp", "dgrid_max_spread_bp",
+            "dgrid_short_window_points", "dgrid_long_window_points",
             "auto_close_on_maintenance", "is_long_bias",
         }
         if field not in allowed_numeric_fields:
@@ -1410,6 +1413,12 @@ async def _handle_strategy(query, data, context, telegram_id):
             "rgrid_reset_threshold_pct": (0.05, 20),
             "rgrid_reset_timeout_seconds": (15, 86400),
             "rgrid_discretion": (0.01, 0.5),
+            "dgrid_trend_on_variance_ratio": (1.0, 5.0),
+            "dgrid_range_on_variance_ratio": (0.1, 2.0),
+            "dgrid_min_spread_bp": (0.0, 50.0),
+            "dgrid_max_spread_bp": (1.0, 200.0),
+            "dgrid_short_window_points": (2, 50),
+            "dgrid_long_window_points": (4, 200),
             "auto_close_on_maintenance": (0, 1),
             "is_long_bias": (0, 1),
         }
@@ -1483,6 +1492,9 @@ async def _handle_strategy(query, data, context, telegram_id):
             "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
             "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
             "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
+            "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
+            "dgrid_min_spread_bp", "dgrid_max_spread_bp",
+            "dgrid_short_window_points", "dgrid_long_window_points",
         )
         if strategy_id == "vol" and field not in {"tp_pct", "sl_pct"}:
             return
@@ -1521,6 +1533,12 @@ async def _handle_strategy(query, data, context, telegram_id):
             "rgrid_reset_threshold_pct": "Enter RGRID reset threshold % \\(example: `1\\.0`\\)",
             "rgrid_reset_timeout_seconds": "Enter RGRID reset timeout seconds \\(example: `120`\\)",
             "rgrid_discretion": "Enter RGRID discretion \\(example: `0\\.06`\\)",
+            "dgrid_trend_on_variance_ratio": "Enter DGRID trend switch variance ratio \\(example: `1\\.25`\\)",
+            "dgrid_range_on_variance_ratio": "Enter DGRID range switch variance ratio \\(example: `1\\.15`\\)",
+            "dgrid_min_spread_bp": "Enter DGRID minimum spread in bps \\(example: `2`\\)",
+            "dgrid_max_spread_bp": "Enter DGRID maximum spread in bps \\(example: `50`\\)",
+            "dgrid_short_window_points": "Enter DGRID short volatility window points \\(example: `4`\\)",
+            "dgrid_long_window_points": "Enter DGRID long volatility window points \\(example: `12`\\)",
         }
         await _edit_loc(query, 
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -2077,6 +2095,16 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
             f"Reset: *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}*\n"
             f"Discretion: *{escape_md(f'{grid_discretion:.2f}')}*\n\n"
         )
+    elif strategy == "dgrid":
+        trend_on = float(conf.get("dgrid_trend_on_variance_ratio", 1.25))
+        range_on = float(conf.get("dgrid_range_on_variance_ratio", 1.15))
+        min_spread = float(conf.get("dgrid_min_spread_bp", 2.0))
+        max_spread = float(conf.get("dgrid_max_spread_bp", 50.0))
+        extra = (
+            f"Auto phase: *GRID ⇄ RGRID* \\| Variance: *{escape_md(f'{range_on:.2f} / {trend_on:.2f}')}*\n"
+            f"Auto spread: *{escape_md(f'{min_spread:.1f} - {max_spread:.1f} bp')}* \\| "
+            "Reset: *auto ~4x spread*\n\n"
+        )
     elif strategy == "grid":
         threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
         close_offset = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
@@ -2119,6 +2147,8 @@ def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
         return [("setup", "⚙️ Core"), ("execution", "🧠 Execution"), ("risk", "🛡 Risk")]
     if strategy == "rgrid":
         return [("setup", "⚙️ Core"), ("risk", "🛡 Risk"), ("reset", "🔄 Reset")]
+    if strategy == "dgrid":
+        return [("setup", "⚙️ Core"), ("regime", "⚡ Regime"), ("risk", "🛡 Risk")]
     if strategy == "dn":
         return [("setup", "⚙️ Core"), ("safety", "🛡 Safety")]
     return [("setup", "⚙️ Core")]
@@ -2139,6 +2169,12 @@ def _strategy_section_for_field(strategy: str, field: str) -> str:
         if field in {"rgrid_stop_loss_pct", "rgrid_take_profit_pct"}:
             return "risk"
         return "setup"
+    if strategy == "dgrid":
+        if field.startswith("dgrid_"):
+            return "regime"
+        if field in {"rgrid_stop_loss_pct", "rgrid_take_profit_pct", "tp_pct", "sl_pct"}:
+            return "risk"
+        return "setup"
     if strategy == "dn":
         return "safety" if field == "auto_close_on_maintenance" else "setup"
     return "setup"
@@ -2148,6 +2184,8 @@ def _strategy_config_menu_text(strategy: str, conf: dict, network: str) -> str:
     titles = {
         "grid": "GRID",
         "rgrid": "Reverse GRID",
+        "dgrid": "Dynamic GRID",
+        "dgrid": "Dynamic GRID",
         "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",
     }
@@ -2257,6 +2295,35 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Levels: *{escape_md(levels)}* \\| Spread: *{escape_md(rgrid_spread)}*\n\n"
             "Set the basic breakout loop here\\."
+        )
+
+    if strategy == "dgrid":
+        if section == "regime":
+            trend_on = float(conf.get("dgrid_trend_on_variance_ratio", 1.25))
+            range_on = float(conf.get("dgrid_range_on_variance_ratio", 1.15))
+            min_spread = float(conf.get("dgrid_min_spread_bp", 2.0))
+            max_spread = float(conf.get("dgrid_max_spread_bp", 50.0))
+            return (
+                "⚡ *Dynamic GRID · Regime*\n\n"
+                f"Switch to RGRID: *{escape_md(f'{trend_on:.2f}')}* variance ratio\n"
+                f"Switch to GRID: *{escape_md(f'{range_on:.2f}')}* variance ratio\n"
+                f"Spread band: *{escape_md(f'{min_spread:.1f} - {max_spread:.1f} bp')}*\n\n"
+                "DGRID uses hysteresis so it does not flip\\-flop in mixed regimes\\."
+            )
+        if section == "risk":
+            pnl_sl = f"{float(conf.get('rgrid_stop_loss_pct', sl_pct)):.2f}%"
+            pnl_tp = f"{float(conf.get('rgrid_take_profit_pct', tp_pct)):.2f}%"
+            return (
+                "⚡ *Dynamic GRID · Risk*\n\n"
+                f"PnL stop: *{escape_md(pnl_sl)}* \\| PnL take profit: *{escape_md(pnl_tp)}*\n\n"
+                "GRID phase watches realized PnL; RGRID phase watches open exposure risk\\."
+            )
+        levels = str(int(conf.get("levels", 4)))
+        return (
+            "⚡ *Dynamic GRID · Core*\n\n"
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"Levels: *{escape_md(levels)}* \\| Starting spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n\n"
+            "DGRID automatically switches between GRID and RGRID while resizing spread from realized movement\\."
         )
 
     if strategy == "dn":
@@ -2391,6 +2458,62 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("Session Cap", callback_data="strategy:input:grid:session_notional_cap_usd"),
                     InlineKeyboardButton("Custom Reset", callback_data="strategy:input:grid:grid_reset_threshold_pct"),
+                ],
+            ]
+    elif strategy == "dgrid":
+        if section == "setup":
+            rows = [
+                [
+                    InlineKeyboardButton("Margin $50", callback_data="strategy:set:dgrid:notional_usd:50"),
+                    InlineKeyboardButton("Margin $100", callback_data="strategy:set:dgrid:notional_usd:100"),
+                    InlineKeyboardButton("Margin $250", callback_data="strategy:set:dgrid:notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("Levels 3", callback_data="strategy:set:dgrid:levels:3"),
+                    InlineKeyboardButton("Levels 4", callback_data="strategy:set:dgrid:levels:4"),
+                    InlineKeyboardButton("Levels 6", callback_data="strategy:set:dgrid:levels:6"),
+                ],
+                [
+                    InlineKeyboardButton("30s", callback_data="strategy:set:dgrid:interval_seconds:30"),
+                    InlineKeyboardButton("60s", callback_data="strategy:set:dgrid:interval_seconds:60"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Margin", callback_data="strategy:input:dgrid:notional_usd"),
+                    InlineKeyboardButton("Custom Interval", callback_data="strategy:input:dgrid:interval_seconds"),
+                ],
+            ]
+        elif section == "regime":
+            rows = [
+                [
+                    InlineKeyboardButton("Trend 1.25", callback_data="strategy:set:dgrid:dgrid_trend_on_variance_ratio:1.25"),
+                    InlineKeyboardButton("Trend 1.50", callback_data="strategy:set:dgrid:dgrid_trend_on_variance_ratio:1.50"),
+                ],
+                [
+                    InlineKeyboardButton("Range 1.15", callback_data="strategy:set:dgrid:dgrid_range_on_variance_ratio:1.15"),
+                    InlineKeyboardButton("Range 1.05", callback_data="strategy:set:dgrid:dgrid_range_on_variance_ratio:1.05"),
+                ],
+                [
+                    InlineKeyboardButton("Max 25bp", callback_data="strategy:set:dgrid:dgrid_max_spread_bp:25"),
+                    InlineKeyboardButton("Max 50bp", callback_data="strategy:set:dgrid:dgrid_max_spread_bp:50"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Trend", callback_data="strategy:input:dgrid:dgrid_trend_on_variance_ratio"),
+                    InlineKeyboardButton("Custom Max", callback_data="strategy:input:dgrid:dgrid_max_spread_bp"),
+                ],
+            ]
+        else:
+            rows = [
+                [
+                    InlineKeyboardButton("PnL SL 0.5%", callback_data="strategy:set:dgrid:rgrid_stop_loss_pct:0.5"),
+                    InlineKeyboardButton("1.0%", callback_data="strategy:set:dgrid:rgrid_stop_loss_pct:1.0"),
+                ],
+                [
+                    InlineKeyboardButton("PnL TP 1.5%", callback_data="strategy:set:dgrid:rgrid_take_profit_pct:1.5"),
+                    InlineKeyboardButton("2.0%", callback_data="strategy:set:dgrid:rgrid_take_profit_pct:2.0"),
+                ],
+                [
+                    InlineKeyboardButton("Custom PnL SL", callback_data="strategy:input:dgrid:rgrid_stop_loss_pct"),
+                    InlineKeyboardButton("Custom PnL TP", callback_data="strategy:input:dgrid:rgrid_take_profit_pct"),
                 ],
             ]
     elif strategy == "rgrid":
@@ -2589,6 +2712,7 @@ def _build_strategy_preview_text(
     names = {
         "grid": "GRID",
         "rgrid": "Reverse GRID",
+        "dgrid": "Dynamic GRID",
         "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",
     }
@@ -2735,6 +2859,50 @@ def _build_strategy_preview_text(
             f"• Phase: *{escape_md(phase)}*\n\n"
             "ℹ️ *How it works*\n"
             f"{how_it_works}"
+            + (f"\n\n{warning}" if warning else "")
+        )
+
+    if strategy_id == "dgrid":
+        levels = int(conf.get("levels", 4) or 4)
+        trend_on = float(conf.get("dgrid_trend_on_variance_ratio", 1.25))
+        range_on = float(conf.get("dgrid_range_on_variance_ratio", 1.15))
+        min_spread = float(conf.get("dgrid_min_spread_bp", 2.0))
+        max_spread = float(conf.get("dgrid_max_spread_bp", 50.0))
+        phase = str(bot_status.get("dgrid_phase") or "grid").upper()
+        variance = float(bot_status.get("dgrid_variance_ratio") or 0.0)
+        realized_move = float(bot_status.get("dgrid_realized_move_bp") or 0.0)
+        reset_bp = float(bot_status.get("dgrid_reset_threshold_bp") or 0.0)
+        session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
+        session_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
+        warning = ""
+        if not wallet_ready:
+            warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
+        elif available_margin < required_margin:
+            warning = (
+                f"⚠️ Recommended available margin {escape_md(_fmt_usd(recommended_available))} "
+                f"\\(trade {escape_md(_fmt_usd(required_margin))} + buffer {escape_md(_fmt_usd(recommended_available - required_margin))}\\)\\."
+            )
+        return (
+            "⚡ *Dynamic GRID Dashboard*\n"
+            f"Status: {status_emoji} *{status_label}*\n\n"
+            "🔑 *Account*\n"
+            f"• Status: *{escape_md(account_status)}*\n"
+            f"• Wallet: `{escape_md(wallet_short)}`\n"
+            f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
+            "⚙️ *Configuration*\n"
+            f"• Market: *{escape_md(product)}\\-PERP*\n"
+            f"• Margin: *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Levels: *{escape_md(str(levels))}*\n"
+            f"• Phase: *{escape_md(phase)}* \\| Variance: *{escape_md(f'{variance:.2f}')}*\n"
+            f"• Realized move: *{escape_md(f'{realized_move:.1f}bp')}* \\| Reset: *{escape_md(f'{reset_bp:.1f}bp')}*\n"
+            f"• Hysteresis: *{escape_md(f'{range_on:.2f} / {trend_on:.2f}')}* \\| Spread: *{escape_md(f'{min_spread:.0f}-{max_spread:.0f}bp')}*\n\n"
+            "📊 *Statistics*\n"
+            f"• Total Volume: *{escape_md(_fmt_usd(session_volume))}*\n"
+            f"• Total Trades: *{escape_md(str(trades_count))}*\n"
+            f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
+            f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n\n"
+            "ℹ️ *How it works*\n"
+            "Automatically switches between GRID in range regimes and RGRID in trend regimes, while resizing spread from recent realized movement\\."
             + (f"\n\n{warning}" if warning else "")
         )
 
