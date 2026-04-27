@@ -246,6 +246,7 @@ class NadoClientReliabilityTests(unittest.TestCase):
         from src.nadobro.services.nado_archive import (
             _isolated_subaccounts_list_from_response,
             isolated_subaccount_from_row,
+            query_isolated_subaccounts_for_parent,
         )
 
         rows = _isolated_subaccounts_list_from_response(
@@ -255,6 +256,17 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertEqual(rows[0].get("product_id"), 9)
         self.assertEqual(isolated_subaccount_from_row({"subaccountHex": "0xchild"}, "0xparent"), "0xchild")
         self.assertEqual(isolated_subaccount_from_row({"subaccount": "0xparent"}, "0xparent"), "")
+
+        captured = {}
+
+        def _fake_post(_url, payload):
+            captured["payload"] = payload
+            return {"isolated_subaccounts": []}
+
+        with patch("src.nadobro.services.nado_archive._post", side_effect=_fake_post):
+            query_isolated_subaccounts_for_parent("mainnet", "0xparent")
+
+        self.assertEqual(captured["payload"]["isolated_subaccounts"]["subaccount"], ["0xparent"])
 
     def test_archive_unwraps_orders_under_data(self):
         from src.nadobro.services.nado_archive import _orders_list_from_archive_response

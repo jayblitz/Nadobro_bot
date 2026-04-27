@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 import logging
 import asyncio
@@ -9,49 +8,16 @@ import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-
-class _TokenRedactFilter(logging.Filter):
-    _BOT_TOKEN_RE = re.compile(r"/bot\d+:[A-Za-z0-9_-]+/")
-    _ADDR_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
-
-    def _redact(self, val):
-        # Keep original arg types whenever possible so %-style log formatting
-        # (e.g. `%d`) keeps working for numeric arguments.
-        if isinstance(val, str):
-            s = val
-            if self._BOT_TOKEN_RE.search(s):
-                s = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", s)
-            if self._ADDR_RE.search(s):
-                s = self._ADDR_RE.sub("0x<REDACTED_ADDR>", s)
-            return s
-
-        s = str(val)
-        redacted = s
-        if self._BOT_TOKEN_RE.search(redacted):
-            redacted = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", redacted)
-        if self._ADDR_RE.search(redacted):
-            redacted = self._ADDR_RE.sub("0x<REDACTED_ADDR>", redacted)
-        return redacted if redacted != s else val
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            record.msg = self._BOT_TOKEN_RE.sub("/bot<REDACTED>/", record.msg)
-            record.msg = self._ADDR_RE.sub("0x<REDACTED_ADDR>", record.msg)
-        if record.args:
-            if isinstance(record.args, dict):
-                record.args = {k: self._redact(v) for k, v in record.args.items()}
-            elif isinstance(record.args, tuple):
-                record.args = tuple(self._redact(a) for a in record.args)
-        return True
+from src.nadobro.services.log_redaction import RedactingFormatter, SensitiveDataRedactFilter
 
 
-_redact_filter = _TokenRedactFilter()
+_redact_filter = SensitiveDataRedactFilter()
 _stream_handler = logging.StreamHandler(sys.stdout)
 _stream_handler.addFilter(_redact_filter)
+_stream_handler.setFormatter(RedactingFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[_stream_handler],
 )
 

@@ -12,6 +12,7 @@ import requests
 from typing import Optional
 
 from src.nadobro.config import NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE
+from src.nadobro.services.log_redaction import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def _post(url: str, payload: dict) -> dict | list | None:
                 body = (e.response.text or "")[:200]
             except Exception:
                 pass
-            logger.warning("Archive API HTTP %s (attempt %d): %s", status, attempt + 1, body)
+            logger.warning("Archive API HTTP %s (attempt %d): %s", status, attempt + 1, redact_sensitive_text(body))
             if attempt >= _MAX_RETRIES:
                 return None
         except requests.RequestException as e:
@@ -178,7 +179,7 @@ def query_isolated_subaccounts_for_parent(
     if not parent:
         return []
     url = archive_url_for_network(network)
-    payload = {"isolated_subaccounts": {"subaccount": parent, "limit": min(max(1, int(limit)), 500)}}
+    payload = {"isolated_subaccounts": {"subaccount": [parent], "limit": min(max(1, int(limit)), 500)}}
     result = _post(url, payload)
     return _isolated_subaccounts_list_from_response(result) or []
 
