@@ -142,10 +142,9 @@ def _enrich_single_position(
 async def list_positions(client: UserClient, user: AuthUser):
     """List all open positions."""
     positions = await run_blocking(client.get_all_positions) or []
-    return [
-        _enrich_single_position(client, p, user.telegram_id, user.network)
-        for p in positions
-    ]
+    return await run_blocking(
+        lambda: [_enrich_single_position(client, p, user.telegram_id, user.network) for p in positions]
+    )
 
 
 @router.get("/portfolio", response_model=PortfolioSummary)
@@ -159,10 +158,9 @@ async def get_portfolio(client: UserClient, user: AuthUser):
     balances = balance.get("balances", {})
     usdt_balance = float(balances.get(0, 0) or 0)
 
-    pos_responses = [
-        _enrich_single_position(client, p, user.telegram_id, user.network)
-        for p in positions
-    ]
+    pos_responses = await run_blocking(
+        lambda: [_enrich_single_position(client, p, user.telegram_id, user.network) for p in positions]
+    )
 
     total_unrealized = 0.0
     for pr in pos_responses:

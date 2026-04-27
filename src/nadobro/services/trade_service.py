@@ -2287,11 +2287,14 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
 def get_trade_history(telegram_id: int, limit: int = 20) -> list:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
-    trades = get_trades_by_user(telegram_id, limit=None, network=network)
+    requested = max(1, int(limit or 20))
+    # Over-fetch modestly because logical rows can merge related open/close records.
+    fetch_limit = min(max(requested * 3, requested), 500)
+    trades = get_trades_by_user(telegram_id, limit=fetch_limit, network=network)
     logical_rows = _build_logical_trade_rows(trades)
     for row in logical_rows:
         row["network"] = network
-    return logical_rows[: max(1, int(limit or 20))]
+    return logical_rows[:requested]
 
 
 def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]:
@@ -2363,23 +2366,19 @@ def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]
 def get_trade_analytics(telegram_id: int, strategy_session_id: int | None = None) -> dict:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
-    trades = get_trades_by_user(telegram_id, limit=None, network=network)
+    target_session_id = None
     if strategy_session_id is not None:
         try:
             target_session_id = int(strategy_session_id)
         except (TypeError, ValueError):
             target_session_id = None
-        if target_session_id is not None:
-            filtered_trades = []
-            for t in trades:
-                try:
-                    if int(t.get("strategy_session_id") or 0) == target_session_id:
-                        filtered_trades.append(t)
-                except (TypeError, ValueError):
-                    continue
-            trades = [
-                t for t in filtered_trades
-            ]
+    analytics_limit = 5000 if target_session_id is None else 2000
+    trades = get_trades_by_user(
+        telegram_id,
+        limit=analytics_limit,
+        network=network,
+        strategy_session_id=target_session_id,
+    )
     if not trades:
         return {"total_trades": 0}
     logical_trades = _build_logical_trade_rows(trades)

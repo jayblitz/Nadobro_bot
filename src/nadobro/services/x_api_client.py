@@ -23,6 +23,17 @@ _BASE_URL = "https://api.x.com/2"
 
 _tweet_cache: dict = {}
 TWEET_CACHE_TTL = 300  # 5 min
+_TWEET_CACHE_MAX_ENTRIES = 128
+
+
+def _prune_tweet_cache(now: float | None = None) -> None:
+    ts = now or time.time()
+    stale = [k for k, v in _tweet_cache.items() if ts - float(v.get("ts") or 0) > TWEET_CACHE_TTL]
+    for k in stale:
+        _tweet_cache.pop(k, None)
+    while len(_tweet_cache) > _TWEET_CACHE_MAX_ENTRIES:
+        oldest = min(_tweet_cache, key=lambda k: float(_tweet_cache[k].get("ts") or 0))
+        _tweet_cache.pop(oldest, None)
 
 
 def _get_bearer_token() -> Optional[str]:
@@ -84,6 +95,7 @@ def search_recent_tweets(
 
     # Check cache
     cache_key = f"{query}:{max_results}:{capped_hours_back}"
+    _prune_tweet_cache()
     cached = _tweet_cache.get(cache_key)
     if cached and (time.time() - cached["ts"]) < TWEET_CACHE_TTL:
         _record_x_source(f"X cached tweets: {query[:60]}")
@@ -142,6 +154,7 @@ def search_recent_tweets(
 
         # Cache results
         _tweet_cache[cache_key] = {"tweets": tweets, "ts": time.time()}
+        _prune_tweet_cache()
 
         logger.info("X API returned %d tweets for query: %s", len(tweets), query[:80])
         _record_x_source(f"X recent search: {query[:60]}")

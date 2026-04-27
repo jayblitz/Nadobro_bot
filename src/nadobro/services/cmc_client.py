@@ -10,6 +10,7 @@ CMC_CACHE_TTL = 120
 CMC_SENTIMENT_CACHE_TTL = 300
 
 _cache: dict = {}
+_CACHE_MAX_ENTRIES = 128
 
 CMC_SYMBOL_ID_MAP = {
     "BTC": 1, "ETH": 1027, "SOL": 5426, "XRP": 52,
@@ -29,11 +30,21 @@ def _get_cached(key: str, ttl: int = CMC_CACHE_TTL):
     entry = _cache.get(key)
     if entry and time.time() - entry["ts"] < ttl:
         return entry["data"]
+    if entry:
+        _cache.pop(key, None)
     return None
 
 
 def _set_cache(key: str, data):
-    _cache[key] = {"data": data, "ts": time.time()}
+    now = time.time()
+    if len(_cache) >= _CACHE_MAX_ENTRIES:
+        stale = [k for k, v in _cache.items() if now - float(v.get("ts") or 0) > max(CMC_SENTIMENT_CACHE_TTL, CMC_CACHE_TTL)]
+        for k in stale:
+            _cache.pop(k, None)
+        while len(_cache) >= _CACHE_MAX_ENTRIES:
+            oldest = min(_cache, key=lambda k: float(_cache[k].get("ts") or 0))
+            _cache.pop(oldest, None)
+    _cache[key] = {"data": data, "ts": now}
 
 
 def _record_cmc_source(detail: str, ttl: int = CMC_CACHE_TTL, confidence: float = 0.9):

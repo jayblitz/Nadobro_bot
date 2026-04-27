@@ -19,9 +19,18 @@ def _loc(text):
 
 _user_cache = {}
 _USER_CACHE_TTL = 10
+_USER_CACHE_MAX_ENTRIES = 512
 
 
 def _cache_user(user: UserRow):
+    if len(_user_cache) >= _USER_CACHE_MAX_ENTRIES:
+        now = time.time()
+        stale = [k for k, v in _user_cache.items() if now - float(v.get("ts") or 0) > _USER_CACHE_TTL]
+        for k in stale:
+            _user_cache.pop(k, None)
+        while len(_user_cache) >= _USER_CACHE_MAX_ENTRIES:
+            oldest = min(_user_cache, key=lambda k: float(_user_cache[k].get("ts") or 0))
+            _user_cache.pop(oldest, None)
     _user_cache[user.telegram_id] = {"user": user, "ts": time.time()}
 
 
@@ -29,6 +38,8 @@ def _get_cached_user(telegram_id: int) -> Optional[UserRow]:
     entry = _user_cache.get(telegram_id)
     if entry and (time.time() - entry["ts"] < _USER_CACHE_TTL):
         return entry["user"]
+    if entry:
+        _user_cache.pop(telegram_id, None)
     return None
 
 
@@ -131,8 +142,19 @@ def get_user_nado_client(telegram_id: int, network: str | None = None, **kwargs)
         return None
 
 
-_readonly_cache: dict[str, NadoClient] = {}
+_readonly_cache: dict[str, dict] = {}
 _READONLY_CACHE_TTL = 60
+_READONLY_CACHE_MAX_ENTRIES = 256
+
+
+def _prune_readonly_cache(now: float | None = None) -> None:
+    ts = now or time.time()
+    stale = [k for k, v in _readonly_cache.items() if ts - float(v.get("ts") or 0) > _READONLY_CACHE_TTL]
+    for k in stale:
+        _readonly_cache.pop(k, None)
+    while len(_readonly_cache) > _READONLY_CACHE_MAX_ENTRIES:
+        oldest = min(_readonly_cache, key=lambda k: float(_readonly_cache[k].get("ts") or 0))
+        _readonly_cache.pop(oldest, None)
 
 
 def _is_wallet_fully_linked(user: Optional[UserRow]) -> bool:
@@ -145,11 +167,14 @@ def get_user_readonly_client(telegram_id: int, network: str | None = None) -> Op
         return None
     selected_network = str(network or user.network_mode.value)
     cache_key = f"ro:{user.main_address}:{selected_network}"
+    _prune_readonly_cache()
     cached = _readonly_cache.get(cache_key)
+    if cached and time.time() - float(cached.get("ts") or 0) < _READONLY_CACHE_TTL:
+        return cached.get("client")
     if cached:
-        return cached
+        _readonly_cache.pop(cache_key, None)
     client = NadoClient.from_address(user.main_address, selected_network)
-    _readonly_cache[cache_key] = client
+    _readonly_cache[cache_key] = {"client": client, "ts": time.time()}
     return client
 
 

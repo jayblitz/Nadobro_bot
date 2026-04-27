@@ -175,16 +175,28 @@ def find_open_trade(telegram_id: int, product_id: int, network: str = "mainnet")
     )
 
 
-def get_trades_by_user(telegram_id: int, limit: int | None = 50, network: str = "mainnet") -> list:
+def get_trades_by_user(
+    telegram_id: int,
+    limit: int | None = 50,
+    network: str = "mainnet",
+    strategy_session_id: int | None = None,
+) -> list:
     table = _trades_table(network)
+    where = ["user_id = %s"]
+    params: list = [telegram_id]
+    if strategy_session_id is not None:
+        where.append("strategy_session_id = %s")
+        params.append(int(strategy_session_id))
+    where_sql = " AND ".join(where)
     if limit is None or int(limit) <= 0:
         return query_all(
-            f"SELECT * FROM {table} WHERE user_id = %s ORDER BY created_at DESC",
-            (telegram_id,),
+            f"SELECT * FROM {table} WHERE {where_sql} ORDER BY created_at DESC",
+            tuple(params),
         )
+    params.append(int(limit))
     return query_all(
-        f"SELECT * FROM {table} WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
-        (telegram_id, limit),
+        f"SELECT * FROM {table} WHERE {where_sql} ORDER BY created_at DESC LIMIT %s",
+        tuple(params),
     )
 
 

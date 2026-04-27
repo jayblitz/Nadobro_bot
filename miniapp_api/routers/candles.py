@@ -16,6 +16,17 @@ router = APIRouter()
 
 # In-memory cache: (network, product, granularity) -> (expires_at, data)
 _cache: dict[tuple[str, str, int], tuple[float, list]] = {}
+_CACHE_MAX_ENTRIES = 256
+
+
+def _prune_cache(now: float | None = None) -> None:
+    ts = now or time.time()
+    stale = [k for k, v in _cache.items() if float(v[0] or 0) < ts]
+    for k in stale:
+        _cache.pop(k, None)
+    while len(_cache) > _CACHE_MAX_ENTRIES:
+        oldest = min(_cache, key=lambda k: float(_cache[k][0] or 0))
+        _cache.pop(oldest, None)
 
 
 @router.get("/products/{product}/candles")
@@ -45,6 +56,7 @@ async def get_candles(
     # Check cache
     cache_key = (str(user.network), product_upper, granularity)
     now = time.time()
+    _prune_cache(now)
     cached = _cache.get(cache_key)
     if cached and cached[0] > now:
         return {"candles": cached[1][:limit]}
@@ -65,5 +77,6 @@ async def get_candles(
 
     ttl = CACHE_TTL_SECONDS.get(interval, 60)
     _cache[cache_key] = (now + ttl, candles)
+    _prune_cache(now)
 
     return {"candles": candles[:limit]}

@@ -288,7 +288,7 @@ async def _notify_limit_order_filled_once(trade_row: dict, network: str):
 
         trade_id = int(trade_row.get("id"))
         dedupe_key = f"limit_fill_notified:{network}:{trade_id}"
-        if get_bot_state(dedupe_key):
+        if await run_blocking(get_bot_state, dedupe_key):
             return
 
         user_id = int(trade_row.get("user_id"))
@@ -308,7 +308,7 @@ async def _notify_limit_order_filled_once(trade_row: dict, network: str):
             f"🌐 Network: {network}"
         )
         await _bot_app.bot.send_message(chat_id=user_id, text=msg)
-        set_bot_state(dedupe_key, {"notified_at": datetime.now(timezone.utc).isoformat()})
+        await run_blocking(set_bot_state, dedupe_key, {"notified_at": datetime.now(timezone.utc).isoformat()})
     except Exception as e:
         logger.warning("Failed to send limit-fill notification: %s", e)
 
@@ -339,7 +339,7 @@ async def _notify_limit_order_cancelled_once(
 
         trade_id = int(trade_row.get("id"))
         dedupe_key = f"limit_cancel_notified:{network}:{trade_id}"
-        if get_bot_state(dedupe_key):
+        if await run_blocking(get_bot_state, dedupe_key):
             return
 
         user_id = int(trade_row.get("user_id"))
@@ -363,7 +363,7 @@ async def _notify_limit_order_cancelled_once(
             f"🌐 Network: {network}"
         )
         await _bot_app.bot.send_message(chat_id=user_id, text=msg)
-        set_bot_state(dedupe_key, {"notified_at": datetime.now(timezone.utc).isoformat()})
+        await run_blocking(set_bot_state, dedupe_key, {"notified_at": datetime.now(timezone.utc).isoformat()})
     except Exception as e:
         logger.warning("Failed to send limit-cancel notification: %s", e)
 
@@ -431,9 +431,9 @@ async def sync_pending_fills():
                             from src.nadobro.services.user_service import get_user_nado_client
                             user_id = entry["user_id"]
                             product_id = entry["product_id"]
-                            client = get_user_nado_client(int(user_id), network=network)
+                            client = await run_blocking(get_user_nado_client, int(user_id), network=network)
                             if client:
-                                open_orders = client.get_open_orders(product_id, refresh=True) or []
+                                open_orders = await run_blocking(client.get_open_orders, product_id, refresh=True) or []
                                 digest_still_open = any(
                                     str(o.get("digest")) == digest for o in open_orders
                                 )
@@ -553,9 +553,9 @@ async def sync_pending_fills():
                         from src.nadobro.services.user_service import get_user_nado_client
                         user_id = entry["user_id"]
                         product_id = entry["product_id"]
-                        client = get_user_nado_client(int(user_id), network=network)
+                        client = await run_blocking(get_user_nado_client, int(user_id), network=network)
                         if client:
-                            open_orders = client.get_open_orders(product_id, refresh=True) or []
+                            open_orders = await run_blocking(client.get_open_orders, product_id, refresh=True) or []
                             digest_still_open = any(str(o.get("digest")) == digest for o in open_orders)
                     except Exception:
                         digest_still_open = True
