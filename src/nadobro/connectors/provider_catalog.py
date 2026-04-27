@@ -17,7 +17,26 @@ class ProviderSpec:
 
     @property
     def configured(self) -> bool:
-        return not self.api_key_env or bool(os.environ.get(self.api_key_env, ""))
+        if not self.api_key_env:
+            return True
+        if bool(os.environ.get(self.api_key_env, "")):
+            return True
+        if self.provider == "nanogpt":
+            return bool(os.environ.get("NANO_GPT_API_KEY", ""))
+        if self.provider == "n8n":
+            url = (
+                os.environ.get("N8N_BASE_URL")
+                or os.environ.get("n8n_Server_URL")
+                or os.environ.get("N8N_SERVER_URL")
+                or ""
+            ).strip()
+            authed = bool(
+                (os.environ.get("N8N_API_KEY") or "").strip()
+                or (os.environ.get("n8n_authorization") or "").strip()
+                or (os.environ.get("n8n_MCP_Access_Token") or "").strip()
+            )
+            return bool(url and authed)
+        return False
 
     def to_dict(self) -> dict:
         return {
@@ -32,7 +51,8 @@ class ProviderSpec:
 
 
 MINARA_EQUIVALENT_PROVIDERS: tuple[ProviderSpec, ...] = (
-    ProviderSpec("dmind", "DMIND_API_KEY", "financial_llm", "real-time", "financial structuring, summarization, signal scoring", "https://dmind.ai/"),
+    ProviderSpec("nanogpt", "NANOGPT_API_KEY", "financial_llm", "real-time", "NanoGPT router: finance reasoning and workflow JSON (OpenAI-compatible)", "https://nano-gpt.com/api"),
+    ProviderSpec("dmind", "DMIND_API_KEY", "financial_llm", "real-time", "financial structuring, summarization, signal scoring (optional if NanoGPT set)", "https://dmind.ai/"),
     ProviderSpec("n8n", "N8N_API_KEY", "workflow", "real-time", "workflow creation, deployment, run status", "https://n8n.io/"),
     ProviderSpec("ink_rpc", "INK_RPC_URL", "blockchain_rpc", "real-time", "Ink blocks, logs, wallet/protocol events"),
     ProviderSpec("arkham", "ARKHAM_API_KEY", "onchain_intelligence", "real-time", "entities, capital flow, whale tracking", "https://arkhamintelligence.com/"),

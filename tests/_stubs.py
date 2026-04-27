@@ -157,11 +157,19 @@ def install_test_stubs() -> None:
             def post(self, *args, **kwargs):
                 return _DummyResponse()
 
+        def _requests_get(*args, **kwargs):
+            return _DummyResponse()
+
+        def _requests_post(*args, **kwargs):
+            return _DummyResponse()
+
         class _HTTPAdapter:
             def __init__(self, *args, **kwargs):
                 pass
 
         requests_mod.Session = _DummySession
+        requests_mod.get = _requests_get
+        requests_mod.post = _requests_post
         requests_mod.RequestException = Exception
         requests_mod.HTTPError = Exception
         requests_mod.Timeout = TimeoutError

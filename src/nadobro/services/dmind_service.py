@@ -1,8 +1,8 @@
-"""DMind financial expert LLM integration.
+"""Finance-specialist LLM layer: NanoGPT (preferred) or DMind.
 
-DMind is treated as the finance-specialist layer. Generic LLMs may provide
-style and explanation, but market recommendations should pass through this
-service or clearly disclose degraded mode.
+Generic LLMs may provide style and explanation elsewhere, but structured
+market recommendations should pass through this service or clearly disclose
+degraded mode when no finance provider is configured.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Any
 
 import requests
 
+from src.nadobro.services.nanogpt_client import nanogpt_chat_completion, nanogpt_is_configured
 from src.nadobro.services.source_registry import record_source
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 DMIND_BASE_URL = os.environ.get("DMIND_BASE_URL", "https://api.dmind.ai").rstrip("/")
 DMIND_MODEL = os.environ.get("DMIND_MODEL", "dmind-finance")
 DMIND_TIMEOUT_SECONDS = float(os.environ.get("DMIND_TIMEOUT_SECONDS", "20"))
+NANOGPT_FINANCE_TIMEOUT = float(os.environ.get("NANOGPT_FINANCE_TIMEOUT_SECONDS", "45"))
 
 
 class DMindUnavailable(RuntimeError):
@@ -33,7 +35,11 @@ def is_dmind_configured() -> bool:
     return bool(os.environ.get("DMIND_API_KEY", ""))
 
 
-def _headers() -> dict[str, str]:
+def is_finance_expert_configured() -> bool:
+    return nanogpt_is_configured() or is_dmind_configured()
+
+
+def _dmind_headers() -> dict[str, str]:
     key = os.environ.get("DMIND_API_KEY", "")
     return {
         "Authorization": f"Bearer {key}",
@@ -58,36 +64,91 @@ def _extract_text(payload: dict[str, Any]) -> str:
     return json.dumps(payload)[:4000]
 
 
-def analyze_financial_context(
+def _analyze_via_nanogpt(
     prompt: str,
     *,
-    context: str = "",
-    task: str = "market_analysis",
-    schema_hint: dict[str, Any] | None = None,
+    context: str,
+    task: str,
+    schema_hint: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Run DMind finance analysis.
+    from src.nadobro.services.nanogpt_client import nanogpt_default_model
 
-    Returns a stable envelope even when DMind is not configured so callers can
-    disclose degraded mode rather than silently falling back.
-    """
-    if not is_dmind_configured():
+    model = (os.environ.get("NANOGPT_FINANCE_MODEL") or nanogpt_default_model()).strip()
+    user_payload = json.dumps(
+        {
+            "task": task,
+            "prompt": prompt,
+            "context": context[:20000],
+            "schema_hint": schema_hint or {},
+        },
+        ensure_ascii=True,
+    )
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "You are Nadobro's finance-native expert. Structure data, summarize market context, "
+                "score signals, and give cautious trading views grounded only in the provided context. "
+                "Do not invent live prices or events missing from context."
+            ),
+        },
+        {"role": "user", "content": user_payload},
+    ]
+    started = time.perf_counter()
+    ok, text, raw = nanogpt_chat_completion(
+        messages,
+        model=model,
+        temperature=0.1,
+        timeout=NANOGPT_FINANCE_TIMEOUT,
+    )
+    latency_ms = (time.perf_counter() - started) * 1000
+    if ok and text.strip():
         record_source(
-            "dmind",
-            ttl_seconds=30,
-            confidence=0.0,
-            source_url="https://dmind.ai/",
-            detail="DMind not configured",
+            "nanogpt",
+            ttl_seconds=300,
+            confidence=0.88,
+            latency_ms=latency_ms,
+            source_url="https://nano-gpt.com/api",
+            detail=f"NanoGPT finance {task}",
             allowed_use="finance_llm",
+            metadata={"model": model},
         )
         return {
-            "ok": False,
-            "degraded": True,
-            "provider": "dmind",
-            "error": "DMIND_API_KEY not configured",
-            "text": "",
-            "confidence": 0.0,
+            "ok": True,
+            "degraded": False,
+            "provider": "nanogpt",
+            "model": model,
+            "text": text.strip(),
+            "raw": raw,
+            "confidence": 0.88,
         }
+    logger.warning("NanoGPT finance request failed or empty: ok=%s", ok)
+    record_source(
+        "nanogpt",
+        ttl_seconds=30,
+        confidence=0.0,
+        latency_ms=latency_ms,
+        source_url="https://nano-gpt.com/api",
+        detail="NanoGPT finance request failed",
+        allowed_use="finance_llm",
+    )
+    return {
+        "ok": False,
+        "degraded": True,
+        "provider": "nanogpt",
+        "error": "NanoGPT returned no usable text",
+        "text": "",
+        "confidence": 0.0,
+    }
 
+
+def _analyze_via_dmind(
+    prompt: str,
+    *,
+    context: str,
+    task: str,
+    schema_hint: dict[str, Any] | None,
+) -> dict[str, Any]:
     url = f"{DMIND_BASE_URL}/v1/chat/completions"
     body = {
         "model": DMIND_MODEL,
@@ -117,7 +178,7 @@ def analyze_financial_context(
     }
     started = time.perf_counter()
     try:
-        resp = requests.post(url, headers=_headers(), json=body, timeout=DMIND_TIMEOUT_SECONDS)
+        resp = requests.post(url, headers=_dmind_headers(), json=body, timeout=DMIND_TIMEOUT_SECONDS)
         latency_ms = (time.perf_counter() - started) * 1000
         resp.raise_for_status()
         payload = resp.json()
@@ -163,7 +224,45 @@ def analyze_financial_context(
         }
 
 
-def build_degraded_notice() -> str:
+def analyze_financial_context(
+    prompt: str,
+    *,
+    context: str = "",
+    task: str = "market_analysis",
+    schema_hint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run finance analysis via NanoGPT (if configured) else DMind.
+
+    Returns a stable envelope when neither is configured so callers can
+    disclose degraded mode rather than silently falling back.
+    """
+    if nanogpt_is_configured():
+        return _analyze_via_nanogpt(prompt, context=context, task=task, schema_hint=schema_hint)
     if is_dmind_configured():
+        return _analyze_via_dmind(prompt, context=context, task=task, schema_hint=schema_hint)
+
+    record_source(
+        "finance_llm",
+        ttl_seconds=30,
+        confidence=0.0,
+        source_url="https://nano-gpt.com/api",
+        detail="Finance LLM not configured",
+        allowed_use="finance_llm",
+    )
+    return {
+        "ok": False,
+        "degraded": True,
+        "provider": "none",
+        "error": "NANOGPT_API_KEY or DMIND_API_KEY not configured",
+        "text": "",
+        "confidence": 0.0,
+    }
+
+
+def build_degraded_notice() -> str:
+    if is_finance_expert_configured():
         return ""
-    return "DMind finance expert is not configured; this response is in degraded mode."
+    return (
+        "Finance expert LLM is not configured (set NANOGPT_API_KEY for NanoGPT, "
+        "or DMIND_API_KEY for DMind); responses that rely on it are in degraded mode."
+    )

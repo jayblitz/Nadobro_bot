@@ -160,7 +160,8 @@ def make_decision(
             },
         )
         if dmind.get("ok") and dmind.get("text"):
-            finance_context = f"\n\nDMIND FINANCE EXPERT CONTEXT:\n{dmind['text'][:2500]}"
+            prov = str(dmind.get("provider") or "finance").upper()
+            finance_context = f"\n\n{prov} FINANCE EXPERT CONTEXT:\n{dmind['text'][:2500]}"
         else:
             degraded = build_degraded_notice()
             if degraded:
