@@ -21,6 +21,10 @@ logging.basicConfig(
     handlers=[_stream_handler],
 )
 
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger("nadobro")
 
 # Load local .env during development before reading config vars.

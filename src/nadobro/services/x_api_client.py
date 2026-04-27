@@ -15,6 +15,8 @@ from typing import Optional
 
 import requests
 
+from src.nadobro.services.log_redaction import redact_sensitive_text
+
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.x.com/2"
@@ -24,6 +26,9 @@ _BASE_URL = "https://api.x.com/2"
 _tweet_cache: dict = {}
 TWEET_CACHE_TTL = 300  # 5 min
 _TWEET_CACHE_MAX_ENTRIES = 128
+_credits_depleted_until = 0.0
+_credits_depleted_logged = False
+_CREDITS_BACKOFF_SECONDS = int(os.environ.get("X_API_CREDITS_DEPLETED_BACKOFF_SECONDS", str(6 * 60 * 60)))
 
 
 def _prune_tweet_cache(now: float | None = None) -> None:
@@ -42,7 +47,23 @@ def _get_bearer_token() -> Optional[str]:
 
 def is_available() -> bool:
     """Check if X API is configured."""
-    return bool(_get_bearer_token())
+    return bool(_get_bearer_token()) and time.time() >= _credits_depleted_until
+
+
+def _credits_depleted_active() -> bool:
+    return time.time() < _credits_depleted_until
+
+
+def _mark_credits_depleted(body: str = "") -> None:
+    global _credits_depleted_until, _credits_depleted_logged
+    _credits_depleted_until = time.time() + max(300, _CREDITS_BACKOFF_SECONDS)
+    if not _credits_depleted_logged:
+        logger.warning(
+            "X API credits depleted; disabling direct X polling for %.1f hours. Response: %s",
+            max(300, _CREDITS_BACKOFF_SECONDS) / 3600,
+            redact_sensitive_text((body or "")[:300]),
+        )
+        _credits_depleted_logged = True
 
 
 def _record_x_source(detail: str, confidence: float = 0.85):
@@ -90,6 +111,9 @@ def search_recent_tweets(
     if not token:
         _record_x_source("X API not configured", confidence=0.0)
         return []
+    if _credits_depleted_active():
+        _record_x_source("X API credits depleted backoff", confidence=0.0)
+        return []
 
     capped_hours_back = max(1, min(int(hours_back or 168), 168))
 
@@ -125,8 +149,13 @@ def search_recent_tweets(
             _record_x_source("X API rate limited", confidence=0.0)
             return []
 
+        if resp.status_code == 402 and "CreditsDepleted" in (resp.text or ""):
+            _mark_credits_depleted(resp.text or "")
+            _record_x_source("X API credits depleted", confidence=0.0)
+            return []
+
         if resp.status_code != 200:
-            logger.warning("X API error %d: %s", resp.status_code, resp.text[:300])
+            logger.warning("X API error %d: %s", resp.status_code, redact_sensitive_text(resp.text[:300]))
             _record_x_source(f"X API error {resp.status_code}", confidence=0.0)
             return []
 

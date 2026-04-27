@@ -91,8 +91,12 @@ def _get_pinecone_index():
         _pinecone_index = pc.Index(index_name)
         logger.info("Connected to Pinecone index: %s", index_name)
         return _pinecone_index
-    except Exception:
-        logger.warning("Pinecone init failed — vector store disabled", exc_info=True)
+    except ImportError as e:
+        logger.warning("Pinecone SDK unavailable — vector store disabled: %s", e)
+        _pinecone_index = None
+        return None
+    except Exception as e:
+        logger.warning("Pinecone init failed — vector store disabled: %s", e)
         _pinecone_index = None
         return None
 
