@@ -122,7 +122,7 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
     "dn": {
         "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6,
         "auto_close_on_maintenance": 1.0,
-        "funding_entry_mode": "enter_anyway",
+        "funding_entry_mode": "wait",
     },
     "vol": {
         "notional_usd": 100.0,
@@ -155,6 +155,7 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "sl_pct": 1.5,
         "max_loss_pct": 15.0,
         "leverage_cap": 5,
+        "min_reward_risk": 1.2,
         "products": ["BTC", "ETH", "SOL"],
         "use_sentiment": True,
         "use_cmc": True,
@@ -215,7 +216,7 @@ RUNTIME_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "spread_bp": 3.0,
         "interval_seconds": 90,
         "auto_close_on_maintenance": 1.0,
-        "funding_entry_mode": "enter_anyway",
+        "funding_entry_mode": "wait",
     },
     "vol": {
         "notional_usd": 100.0,
@@ -245,6 +246,7 @@ RUNTIME_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "interval_seconds": 300, "cycle_seconds": 300,
         "tp_pct": 2.0, "sl_pct": 1.5, "max_loss_pct": 15.0,
         "leverage_cap": 5,
+        "min_reward_risk": 1.2,
         "use_sentiment": True, "use_cmc": True, "min_confidence": 0.65,
         "howl_enabled": True, "howl_hour_utc": 2,
     },

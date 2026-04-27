@@ -5,7 +5,10 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:  # optional in degraded/fallback environments
+    OpenAI = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,8 @@ def _get_client() -> Optional[OpenAI]:
     global _xai_client
     if _xai_client:
         return _xai_client
+    if OpenAI is None:
+        return None
     api_key = os.environ.get("XAI_API_KEY")
     if not api_key:
         return None

@@ -1449,6 +1449,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "reference_mode": {"mid", "ema_fast", "ema_slow"},
             "directional_bias": {"neutral", "long_bias", "short_bias"},
             "vol_direction": {"long", "short"},
+            "funding_entry_mode": {"wait", "enter_anyway"},
         }
         allowed_vals = allowed_text.get(field, set())
         if raw_value not in allowed_vals:
@@ -2116,9 +2117,12 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         )
     elif strategy == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
+        funding_mode = str(conf.get("funding_entry_mode", "wait")).strip().lower()
+        funding_label = "WAIT FAVORABLE" if funding_mode == "wait" else "ENTER ANYWAY"
         extra = (
             "Hedge model: *Spot long + matching perp short* \\(BTC/ETH only\\)\n"
             "Leverage cap: *1x to 5x* \\(used on perp leg\\)\n"
+            f"Funding entry: *{escape_md(funding_label)}*\n"
             f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
         )
     return base + extra + "Use presets or set custom values below\\."
@@ -2164,7 +2168,7 @@ def _strategy_section_for_field(strategy: str, field: str) -> str:
             return "risk"
         return "setup"
     if strategy == "dn":
-        return "safety" if field == "auto_close_on_maintenance" else "setup"
+        return "safety" if field in {"auto_close_on_maintenance", "funding_entry_mode"} else "setup"
     return "setup"
 
 
@@ -2242,12 +2246,12 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             session_cap = f"${session_cap_value:,.0f}" if session_cap_value > 0 else "OFF"
             return (
                 "⚙️ *GRID · Risk*\n\n"
-                f"TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n"
+                f"PnL TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}* of margin\n"
                 f"Cycle budget: *{escape_md(cycle_budget)}* \\| "
                 f"Inventory limit: *{escape_md(inventory_limit)}*\n"
                 f"TTL: *{escape_md(ttl_str)}* \\| "
                 f"Session cap: *{escape_md(session_cap)}*\n\n"
-                "Control downside and pacing here\\."
+                "Control downside and pacing here\\. These are PnL stops, not raw price\\-move stops\\."
             )
         return (
             "⚙️ *GRID · Core*\n\n"
@@ -2263,7 +2267,7 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 "⚙️ *Reverse GRID · Risk*\n\n"
                 f"PnL stop: *{escape_md(pnl_sl)}* \\| "
                 f"PnL take profit: *{escape_md(pnl_tp)}*\n\n"
-                "Set when the strategy should cut or lock gains\\."
+                "Set when the strategy should cut or lock gains based on realized/open PnL, not raw market drift\\."
             )
         if section == "reset":
             reset_threshold = f"{float(conf.get('rgrid_reset_threshold_pct', 1.0)):.2f}%"
@@ -2315,12 +2319,15 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         )
 
     if strategy == "dn":
+        funding_mode = str(conf.get("funding_entry_mode", "wait")).strip().lower()
+        funding_label = "WAIT FAVORABLE" if funding_mode == "wait" else "ENTER ANYWAY"
         if section == "safety":
             auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
             return (
                 "⚙️ *Mirror Delta Neutral · Safety*\n\n"
+                f"Funding entry: *{escape_md(funding_label)}*\n"
                 f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
-                "This decides whether DN exits automatically during maintenance windows\\."
+                "WAIT FAVORABLE avoids entering new hedges while the short leg would pay funding\\."
             )
         return (
             "⚙️ *Mirror Delta Neutral · Core*\n\n"
@@ -2598,10 +2605,16 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 ],
             ]
         else:
-            rows = [[
-                InlineKeyboardButton("Auto-Close ON", callback_data="strategy:set:dn:auto_close_on_maintenance:1"),
-                InlineKeyboardButton("Auto-Close OFF", callback_data="strategy:set:dn:auto_close_on_maintenance:0"),
-            ]]
+            rows = [
+                [
+                    InlineKeyboardButton("Wait Favorable", callback_data="strategy:set_text:dn:funding_entry_mode:wait"),
+                    InlineKeyboardButton("Enter Anyway", callback_data="strategy:set_text:dn:funding_entry_mode:enter_anyway"),
+                ],
+                [
+                    InlineKeyboardButton("Auto-Close ON", callback_data="strategy:set:dn:auto_close_on_maintenance:1"),
+                    InlineKeyboardButton("Auto-Close OFF", callback_data="strategy:set:dn:auto_close_on_maintenance:0"),
+                ],
+            ]
 
     rows.append([InlineKeyboardButton("◀ Back", callback_data=f"strategy:config:{strategy}")])
     return InlineKeyboardMarkup(rows)

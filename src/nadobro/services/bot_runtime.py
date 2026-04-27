@@ -476,7 +476,7 @@ def _run_mm_start_guard(telegram_id: int, network: str, product: str, leverage: 
 
     margin_usd = float(state.get("notional_usd") or 0.0)
     cycle_notional_cfg = float(state.get("cycle_notional_usd") or margin_usd or 0.0)
-    cycle_notional = max(cycle_notional_cfg, margin_usd * max(1.0, leverage))
+    cycle_notional = max(cycle_notional_cfg, margin_usd)
     inventory_soft_limit = float(
         state.get("inventory_soft_limit_usd")
         or (margin_usd * 0.60)
@@ -678,11 +678,13 @@ def start_user_bot(
     _save_state(telegram_id, network, state)
     _ensure_task(telegram_id, network)
     if strategy == "dn":
+        funding_mode = str(state.get("funding_entry_mode") or "wait").strip().lower()
+        funding_label = "wait favorable" if funding_mode == "wait" else "enter anyway"
         return (
             True,
             f"DN bot started with {str(dn_pair.get('spot_symbol') or product.upper())} spot long + "
             f"{str(dn_pair.get('perp_symbol') or f'{product.upper()}-PERP')} short ({network}) "
-            f"| TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}% | Leverage {state.get('leverage')}x",
+            f"| Funding mode {funding_label} | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}% | Leverage {state.get('leverage')}x",
         )
     if strategy == "vol":
         direction = str(state.get("vol_direction") or "long").upper()
@@ -701,7 +703,7 @@ def start_user_bot(
         spread_key = "rgrid_spread_bp" if strategy == "rgrid" else "spread_bp"
         margin_usd = float(state.get("notional_usd") or 0.0)
         cycle_notional_cfg = float(state.get("cycle_notional_usd") or margin_usd or 0.0)
-        cycle_notional = max(cycle_notional_cfg, margin_usd * max(1.0, float(state.get("leverage") or 1.0)))
+        cycle_notional = max(cycle_notional_cfg, margin_usd)
         spread_bp = float(state.get(spread_key) or state.get("spread_bp") or 0.0)
         return (
             True,
@@ -967,6 +969,11 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "vol_entry_digest": state.get("vol_entry_digest") or "",
         "vol_close_digest": state.get("vol_close_digest") or "",
         "vol_effective_margin_usd": float(state.get("vol_effective_margin_usd") or 0.0),
+        "vol_closed_cycles": int(state.get("vol_closed_cycles") or 0),
+        "vol_winning_cycles": int(state.get("vol_winning_cycles") or 0),
+        "vol_losing_cycles": int(state.get("vol_losing_cycles") or 0),
+        "vol_win_rate": float(state.get("vol_win_rate") or 0.0),
+        "vol_avg_cycle_pnl_usd": float(state.get("vol_avg_cycle_pnl_usd") or 0.0),
         "runtime_diagnostics": get_runtime_diagnostics(),
     }
 
@@ -1595,7 +1602,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
-    if strategy not in ("dn", "vol"):
+    if strategy not in ("grid", "rgrid", "dgrid", "dn", "vol"):
         move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
         sl_pct = float(state.get("sl_pct") or 0.0)
         tp_pct = float(state.get("tp_pct") or 0.0)

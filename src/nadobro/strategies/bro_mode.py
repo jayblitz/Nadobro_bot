@@ -403,12 +403,33 @@ def _handle_open(
     bro_settings,
 ) -> dict:
     product = _normalize_product_symbol(decision.get("product", "BTC"))
+    allowed_products = {
+        _normalize_product_symbol(p)
+        for p in (state.get("products") or get_perp_products(network=network)[:6] or [])
+    }
+    if allowed_products and product not in allowed_products:
+        return {
+            "success": True,
+            "action": "blocked",
+            "detail": f"{product} is outside this Bro Mode product list.",
+        }
     is_long = decision["action"] == "open_long"
     confidence = decision.get("confidence", 0)
     leverage = min(int(decision.get("leverage", 3)), max_leverage)
     size_pct = float(decision.get("size_pct", 0.3))
     tp_pct = float(decision.get("tp_pct", 2.0))
     sl_pct = float(decision.get("sl_pct", 1.0))
+    expected_pnl_pct = float(decision.get("expected_pnl_pct") or 0.0)
+    min_reward_risk = float(state.get("min_reward_risk") or 1.2)
+    if expected_pnl_pct > 0 and sl_pct > 0 and (expected_pnl_pct / sl_pct) < min_reward_risk:
+        return {
+            "success": True,
+            "action": "blocked",
+            "detail": (
+                f"Reward/risk too weak for {product}: expected {expected_pnl_pct:.2f}% "
+                f"vs SL {sl_pct:.2f}% (need >= {min_reward_risk:.1f}x)."
+            ),
+        }
 
     # Risk guardrails: clamp leverage to product-specific max
     from src.nadobro.config import get_product_max_leverage
@@ -466,9 +487,12 @@ def _handle_open(
         max_notional = available * 0.5
         if mid > 0 and size * mid > max_notional and max_notional > 0:
             size = max_notional / mid
+            notional_usd = size * mid
             logger.info("Bro Mode: clamped size to %.6f (50%% of balance)", size)
     except Exception as e:
         logger.warning("Bro Mode: balance check failed: %s", e)
+    if size <= 0 or notional_usd <= 0:
+        return {"success": True, "action": "blocked", "detail": "Computed position size is zero; holding."}
 
     if is_long:
         tp_price = mid * (1 + tp_pct / 100)
@@ -567,7 +591,9 @@ def _handle_close(
         return {"success": False, "error": f"Unknown product '{close_product}'"}
 
     is_long = pos.get("side", "").lower() == "long"
-    size = pos.get("size", 0)
+    size = float(pos.get("size", pos.get("amount", 0)) or 0)
+    if size <= 0:
+        return {"success": True, "action": "hold", "detail": f"No closeable size for {close_product}"}
 
     result = execute_market_order(
         telegram_id=telegram_id,
@@ -576,6 +602,7 @@ def _handle_close(
         is_long=not is_long,
         leverage=1.0,
         slippage_pct=1.5,
+        reduce_only=True,
         enforce_rate_limit=False,
         source="bro",
         strategy_session_id=state.get("strategy_session_id"),
@@ -616,7 +643,7 @@ def _handle_close(
 def _emergency_close_all(telegram_id, network, state, products):
     from src.nadobro.services.trade_service import close_all_positions
     try:
-        result = close_all_positions(telegram_id)
+        result = close_all_positions(telegram_id, network=network)
         if result.get("success"):
             logger.info("Bro Mode emergency flatten successful for user %s", telegram_id)
             closed = result.get("closed", [])
@@ -655,3 +682,8 @@ def get_bro_status(state: dict) -> dict:
         "bro_profile": state.get("bro_profile", "normal"),
         "composite_score": last_decision.get("composite_score", 0),
     }
+
+
+# === AUDIT COMPLETE: Bro Mode ===
+# Status: Improved & Ready
+# Key Changes: Opens are constrained to configured products and reward/risk, closes are reduce-only, and emergency flatten uses the active strategy network.

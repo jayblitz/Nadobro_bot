@@ -272,7 +272,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "dn")
         close_all.assert_not_called()
 
-    def test_run_cycle_sl_path_returns_tuple(self):
+    def test_run_cycle_grid_price_move_does_not_trigger_generic_sl(self):
         telegram_id = 7
         network = "mainnet"
         state = {
@@ -290,6 +290,9 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             def get_market_price(self, _product_id):
                 return {"mid": 90.0}
 
+            def get_open_orders(self, _product_id):
+                return []
+
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
 
         async def _run_blocking_stub(func, *args, **kwargs):
@@ -302,15 +305,18 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         ), patch.object(
             bot_runtime, "get_user_nado_client", return_value=FakeClient()
         ), patch.object(
+            bot_runtime, "_dispatch_strategy", return_value={"success": True, "orders_placed": 0}
+        ), patch.object(
             bot_runtime, "_save_state"
         ), patch.object(
             bot_runtime, "close_all_positions", return_value={"success": True}
-        ), patch.object(
+        ) as close_mock, patch.object(
             bot_runtime, "_notify"
         ):
             result = asyncio.run(bot_runtime._run_cycle(telegram_id, network, state))
 
         self.assertEqual(result, (True, None))
+        close_mock.assert_not_called()
 
     def test_run_cycle_grid_uses_strategy_pnl_stop_action(self):
         telegram_id = 8
@@ -356,6 +362,30 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
         self.assertEqual(result, (True, None))
         self.assertTrue(close_mock.called)
+
+    def test_mm_start_guard_uses_cycle_notional_without_leverage_multiplier(self):
+        class FakeClient:
+            def get_all_positions(self):
+                return []
+
+            def get_open_orders(self, _product_id):
+                return []
+
+            def get_balance(self):
+                return {"balances": {0: 205.0}}
+
+        state = {
+            "notional_usd": 100.0,
+            "cycle_notional_usd": 100.0,
+            "inventory_soft_limit_usd": 60.0,
+        }
+
+        with patch.object(bot_runtime, "get_user_readonly_client", return_value=FakeClient()), patch.object(
+            bot_runtime, "get_product_id", return_value=2
+        ):
+            ok, msg = bot_runtime._run_mm_start_guard(1, "mainnet", "BTC", 3.0, state)
+
+        self.assertTrue(ok, msg)
 
     def test_ensure_task_uses_cached_loop_when_called_off_loop(self):
         calls = []
@@ -681,6 +711,109 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertTrue(result.get("success"))
         self.assertEqual(result.get("action"), "enter_short")
 
+    def test_dn_signed_funding_tracks_negative_carry(self):
+        class FakeClient:
+            def get_funding_rate(self, _product_id):
+                return {"funding_rate": -0.0002}
+
+            def get_all_positions(self):
+                return [{"product_id": 117, "amount": 1.0, "side": "SHORT"}]
+
+            def get_balance(self):
+                return {"balances": {118: 1.0}}
+
+        state = {
+            "product": "WBSPYX",
+            "notional_usd": 100.0,
+            "leverage": 2.0,
+            "funding_entry_mode": "enter_anyway",
+            "slippage_pct": 1.0,
+        }
+        with patch(
+            "src.nadobro.config.get_dn_pair",
+            return_value={
+                "product": "WBSPYX",
+                "perp_product_id": 117,
+                "spot_product_id": 118,
+                "spot_symbol": "WBSPYX",
+                "entry_allowed": True,
+                "entry_block_reason": "",
+            },
+        ):
+            result = delta_neutral.run_cycle(
+                telegram_id=1,
+                network="testnet",
+                state=state,
+                client=FakeClient(),
+                mid=100.0,
+                product_id=117,
+                product="WBSPYX",
+                open_orders=[],
+            )
+
+        self.assertTrue(result.get("success"))
+        self.assertLess(float(result.get("funding_earned_this_cycle") or 0.0), 0.0)
+        self.assertLess(float(state.get("dn_total_funding_earned") or 0.0), 0.0)
+
+    def test_dn_rolls_back_same_cycle_spot_buy_when_perp_entry_fails(self):
+        class FakeClient:
+            def get_funding_rate(self, _product_id):
+                return {"funding_rate": 0.0002}
+
+            def get_all_positions(self):
+                return []
+
+            def get_balance(self):
+                return {"balances": {118: 0.0}}
+
+        state = {
+            "product": "WBSPYX",
+            "notional_usd": 100.0,
+            "leverage": 2.0,
+            "funding_entry_mode": "enter_anyway",
+            "slippage_pct": 1.0,
+        }
+        spot_calls = []
+
+        def _spot_exec(*args, **kwargs):
+            spot_calls.append((args, kwargs))
+            return {"success": True}
+
+        with patch(
+            "src.nadobro.config.get_dn_pair",
+            return_value={
+                "product": "WBSPYX",
+                "perp_product_id": 117,
+                "spot_product_id": 118,
+                "spot_symbol": "WBSPYX",
+                "entry_allowed": True,
+                "entry_block_reason": "",
+            },
+        ), patch(
+            "src.nadobro.services.trade_service.execute_spot_market_order",
+            side_effect=_spot_exec,
+        ), patch(
+            "src.nadobro.services.trade_service.execute_market_order",
+            return_value={"success": False, "error": "perp rejected"},
+        ):
+            result = delta_neutral.run_cycle(
+                telegram_id=1,
+                network="testnet",
+                state=state,
+                client=FakeClient(),
+                mid=100.0,
+                product_id=117,
+                product="WBSPYX",
+                open_orders=[],
+            )
+
+        self.assertFalse(result.get("success"))
+        self.assertEqual(result.get("action"), "entry_failed")
+        self.assertTrue(result.get("spot_rollback_result"))
+        self.assertEqual(len(spot_calls), 2)
+        self.assertTrue(spot_calls[0][1].get("is_buy"))
+        self.assertFalse(spot_calls[1][1].get("is_buy"))
+
     def test_start_user_bot_rejects_dn_pair_when_entry_blocked(self):
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="testnet"))
         with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
@@ -708,7 +841,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         from src.nadobro.services.runtime_supervisor import strategy_worker_group
 
         dn = bot_runtime._strategy_defaults("dn")
-        self.assertEqual(dn.get("funding_entry_mode"), "enter_anyway")
+        self.assertEqual(dn.get("funding_entry_mode"), "wait")
         self.assertEqual(strategy_worker_group("dn"), "dn")
 
     def test_vol_strategy_defaults_enable_signal_mode(self):
@@ -770,6 +903,55 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         )
         self.assertTrue(should_close)
         self.assertEqual(reason, "trade_tp_hit")
+
+    def test_volume_close_prioritizes_session_sl_over_target_volume(self):
+        class FakeClient:
+            network = "testnet"
+
+            def get_balance(self):
+                return {"balances": {0: 1000.0}}
+
+            def get_market_price(self, _product_id):
+                return {"mid": 100.0, "bid": 99.9, "ask": 100.1}
+
+            def get_open_orders(self, _product_id):
+                return []
+
+            def get_all_positions(self):
+                return []
+
+        state = {
+            "running": True,
+            "product": "BTC",
+            "vol_phase": "pending_close_fill",
+            "vol_direction": "long",
+            "fixed_margin_usd": 100.0,
+            "target_volume_usd": 10.0,
+            "volume_done_usd": 0.0,
+            "session_realized_pnl_usd": -0.9,
+            "tp_pct": 1.0,
+            "sl_pct": 1.0,
+            "vol_close_digest": "close-digest",
+            "vol_close_size": 1.0,
+            "vol_entry_size": 1.0,
+            "vol_entry_fill_price": 100.0,
+        }
+
+        with patch.object(volume_bot, "_entry_fill_data", return_value={"fill_price": 100.0}), patch.object(
+            volume_bot, "_close_realized_pnl", return_value=(-0.2, 0.0)
+        ):
+            result = volume_bot.run_cycle(
+                telegram_id=1,
+                network="testnet",
+                state=state,
+                client=FakeClient(),
+                mid=100.0,
+            )
+
+        self.assertTrue(result.get("done"))
+        self.assertEqual(result.get("stop_reason"), "sl_hit")
+        self.assertEqual(state.get("vol_closed_cycles"), 1)
+        self.assertEqual(state.get("vol_losing_cycles"), 1)
 
     def test_dgrid_strategy_defaults_and_worker_group(self):
         from src.nadobro.services.runtime_supervisor import strategy_worker_group

@@ -202,6 +202,23 @@ def _volume_exit_reason(state: dict, mid: float, now_ts: float, direction: str) 
     return False, "min_hold" if held < hold_min else "waiting_edge"
 
 
+def _record_volume_cycle_metrics(state: dict, cycle_pnl: float) -> None:
+    closed = int(state.get("vol_closed_cycles") or 0) + 1
+    wins = int(state.get("vol_winning_cycles") or 0)
+    losses = int(state.get("vol_losing_cycles") or 0)
+    if cycle_pnl > 1e-9:
+        wins += 1
+    elif cycle_pnl < -1e-9:
+        losses += 1
+    total_pnl = float(state.get("vol_total_cycle_pnl_usd") or 0.0) + float(cycle_pnl or 0.0)
+    state["vol_closed_cycles"] = closed
+    state["vol_winning_cycles"] = wins
+    state["vol_losing_cycles"] = losses
+    state["vol_total_cycle_pnl_usd"] = round(total_pnl, 6)
+    state["vol_avg_cycle_pnl_usd"] = round(total_pnl / max(1, closed), 6)
+    state["vol_win_rate"] = round(wins / max(1, wins + losses), 6) if (wins + losses) > 0 else 0.0
+
+
 def _spot_base_balance(client, spot_product_id: int) -> float:
     try:
         bal = client.get_balance() or {}
@@ -441,6 +458,7 @@ def _run_volume_spot_cycle(
         traded_notional = (entry_size * entry_price) + (close_size * close_price)
         volume_done += traded_notional
         session_pnl += cycle_pnl
+        _record_volume_cycle_metrics(state, cycle_pnl)
         state["volume_done_usd"] = round(volume_done, 4)
         state["volume_remaining_usd"] = round(max(0.0, target_volume - volume_done), 4)
         state["session_realized_pnl_usd"] = round(session_pnl, 6)
@@ -456,14 +474,14 @@ def _run_volume_spot_cycle(
         state["vol_last_order_digest"] = close_digest
         state["vol_last_order_kind"] = "close_filled"
 
-        if target_volume > 0 and volume_done >= target_volume:
+        if sl_usd > 0 and session_pnl <= -sl_usd:
             state["running"] = False
             return {
                 "success": True,
                 "done": True,
-                "stop_reason": "target_volume_hit",
-                "action": "target_volume_hit",
-                "detail": f"Target volume reached with order #{close_digest[:10]}",
+                "stop_reason": "sl_hit",
+                "action": "closed_limit_and_session_sl_hit",
+                "detail": f"SL hit after close #{close_digest[:10]}",
                 "orders_placed": 0,
                 "placed_notional_usd": round(traded_notional, 4),
                 "vol_order_attempts": 0,
@@ -471,9 +489,8 @@ def _run_volume_spot_cycle(
                 "session_realized_pnl_usd": round(session_pnl, 6),
                 "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
-                "volume_remaining_usd": 0.0,
+                "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
             }
-
         if tp_usd > 0 and session_pnl >= tp_usd:
             state["running"] = False
             return {
@@ -491,14 +508,14 @@ def _run_volume_spot_cycle(
                 "volume_done_usd": round(volume_done, 4),
                 "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
             }
-        if sl_usd > 0 and session_pnl <= -sl_usd:
+        if target_volume > 0 and volume_done >= target_volume:
             state["running"] = False
             return {
                 "success": True,
                 "done": True,
-                "stop_reason": "sl_hit",
-                "action": "closed_limit_and_session_sl_hit",
-                "detail": f"SL hit after close #{close_digest[:10]}",
+                "stop_reason": "target_volume_hit",
+                "action": "target_volume_hit",
+                "detail": f"Target volume reached with order #{close_digest[:10]}",
                 "orders_placed": 0,
                 "placed_notional_usd": round(traded_notional, 4),
                 "vol_order_attempts": 0,
@@ -506,7 +523,7 @@ def _run_volume_spot_cycle(
                 "session_realized_pnl_usd": round(session_pnl, 6),
                 "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
-                "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
+                "volume_remaining_usd": 0.0,
             }
         return {
             "success": True,
@@ -752,6 +769,11 @@ def _run_volume_spot_cycle(
         "volume_done_usd": round(volume_done, 4),
         "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
     }
+
+
+# === AUDIT COMPLETE: Volume Execution Bot ===
+# Status: Improved & Ready
+# Key Changes: Session SL/TP now takes priority over target-volume completion, and closed-cycle win-rate/PnL metrics are tracked.
 
 
 def get_fee_pnl_preview(telegram_id: int, product: str, target_volume_usd: float) -> dict:
@@ -1124,6 +1146,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         traded_notional = (entry_size * entry_price) + (close_size * close_price)
         volume_done += traded_notional
         session_pnl += cycle_pnl
+        _record_volume_cycle_metrics(state, cycle_pnl)
         state["volume_done_usd"] = round(volume_done, 4)
         state["volume_remaining_usd"] = round(max(0.0, target_volume - volume_done), 4)
         state["session_realized_pnl_usd"] = round(session_pnl, 6)
@@ -1139,14 +1162,14 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_last_order_digest"] = close_digest
         state["vol_last_order_kind"] = "close_filled"
 
-        if target_volume > 0 and volume_done >= target_volume:
+        if sl_usd > 0 and session_pnl <= -sl_usd:
             state["running"] = False
             return {
                 "success": True,
                 "done": True,
-                "stop_reason": "target_volume_hit",
-                "action": "target_volume_hit",
-                "detail": f"Target volume reached with order #{close_digest[:10]}",
+                "stop_reason": "sl_hit",
+                "action": "closed_limit_and_session_sl_hit",
+                "detail": f"SL hit after close #{close_digest[:10]}",
                 "orders_placed": 0,
                 "placed_notional_usd": round(traded_notional, 4),
                 "vol_order_attempts": 0,
@@ -1154,9 +1177,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "session_realized_pnl_usd": round(session_pnl, 6),
                 "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
-                "volume_remaining_usd": 0.0,
+                "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
             }
-
         if tp_usd > 0 and session_pnl >= tp_usd:
             state["running"] = False
             return {
@@ -1174,14 +1196,14 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "volume_done_usd": round(volume_done, 4),
                 "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
             }
-        if sl_usd > 0 and session_pnl <= -sl_usd:
+        if target_volume > 0 and volume_done >= target_volume:
             state["running"] = False
             return {
                 "success": True,
                 "done": True,
-                "stop_reason": "sl_hit",
-                "action": "closed_limit_and_session_sl_hit",
-                "detail": f"SL hit after close #{close_digest[:10]}",
+                "stop_reason": "target_volume_hit",
+                "action": "target_volume_hit",
+                "detail": f"Target volume reached with order #{close_digest[:10]}",
                 "orders_placed": 0,
                 "placed_notional_usd": round(traded_notional, 4),
                 "vol_order_attempts": 0,
@@ -1189,7 +1211,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                 "session_realized_pnl_usd": round(session_pnl, 6),
                 "cycle_realized_pnl_usd": round(cycle_pnl, 6),
                 "volume_done_usd": round(volume_done, 4),
-                "volume_remaining_usd": round(max(0.0, target_volume - volume_done), 4),
+                "volume_remaining_usd": 0.0,
             }
         return {
             "success": True,

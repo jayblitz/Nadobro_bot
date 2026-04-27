@@ -1503,6 +1503,15 @@ def fmt_status_overview(status: dict, onboarding: dict):
             )
             lines.append(f"{_loc('Target')}: *{escape_md(_fmt_compact_usd(target_volume))}*")
         lines.append(f"{_loc('Phase')}: *{escape_md(vol_phase)}*")
+        closed_cycles = int(status.get("vol_closed_cycles") or 0)
+        if closed_cycles > 0:
+            vol_win_rate_pct = float(status.get("vol_win_rate") or 0.0) * 100.0
+            vol_avg_pnl = float(status.get("vol_avg_cycle_pnl_usd") or 0.0)
+            lines.append(
+                f"{_loc('Cycles')}: *{escape_md(str(closed_cycles))}* \\| "
+                f"{_loc('Win rate')}: *{escape_md(f'{vol_win_rate_pct:.0f}%')}* \\| "
+                f"{_loc('Avg PnL')}: *{escape_md(_fmt_signed_usd(vol_avg_pnl))}*"
+            )
 
     pause_reason = str(status.get("pause_reason") or "").strip()
     if global_pause_active:
@@ -1594,6 +1603,16 @@ def fmt_status_overview(status: dict, onboarding: dict):
             f"{_loc('Side')}: *{escape_md(reset_side)}* \\| "
             f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}*"
         )
+        maker_fill_ratio = status.get("maker_fill_ratio")
+        cancellation_ratio = status.get("cancellation_ratio")
+        avg_quote_distance_bp = status.get("avg_quote_distance_bp")
+        if maker_fill_ratio is not None or cancellation_ratio is not None or avg_quote_distance_bp is not None:
+            lines.append(
+                f"{_loc('Quote health')}: "
+                f"{_loc('fill')} *{escape_md(f'{float(maker_fill_ratio or 0) * 100:.0f}%')}* \\| "
+                f"{_loc('cancel')} *{escape_md(f'{float(cancellation_ratio or 0) * 100:.0f}%')}* \\| "
+                f"{_loc('avg distance')} *{escape_md(f'{float(avg_quote_distance_bp or 0):.1f}bp')}*"
+            )
         if strategy == "RGRID":
             lines.append(f"{_loc('Discretion')}: *{escape_md(f'{discretion:.2f}')}*")
         if inventory_source and inventory_source != "exchange":
