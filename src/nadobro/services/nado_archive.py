@@ -138,6 +138,31 @@ def _isolated_subaccounts_list_from_response(result) -> list:
     return []
 
 
+def isolated_subaccount_from_row(row: dict, parent_subaccount_hex: str = "") -> str:
+    """Extract an isolated child subaccount from known archive response shapes."""
+    if not isinstance(row, dict):
+        return ""
+    parent = (parent_subaccount_hex or "").strip().lower()
+    for key in (
+        "isolated_subaccount",
+        "isolatedSubaccount",
+        "isolated_subaccount_hex",
+        "isolatedSubaccountHex",
+        "child_subaccount",
+        "childSubaccount",
+        "subaccount_hex",
+        "subaccountHex",
+        "subaccount",
+    ):
+        value = (row.get(key) or "").strip()
+        if not value:
+            continue
+        if parent and value.lower() == parent:
+            continue
+        return value
+    return ""
+
+
 def query_isolated_subaccounts_for_parent(
     network: str,
     parent_subaccount_hex: str,

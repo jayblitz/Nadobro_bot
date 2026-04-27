@@ -57,16 +57,14 @@ See:
 
 ## Telegram Mini App
 
-The repo includes `miniapp_web/` (Vite + React) and `miniapp_api/` (FastAPI) for a Telegram Web App: trading UI, portfolio, and **Speak with Bro** (Gemini Live) voice.
+The repo still retains `miniapp_web/` and `miniapp_api/` as archived code for a future Telegram Web App, but Mini App work is not part of the active bot-first product path.
 
-Mini App is currently archived in production while bot stability is prioritized:
+Current behavior:
 
-- Bot deploy runs in bot-only mode.
-- `BOT_DISABLE_MINIAPP=true` disables Mini App buttons in Telegram UI.
-- Mini App code remains in-repo for future re-enable.
+- Bot deploy runs in bot-only mode by default.
+- Mini App buttons and Telegram menu registration are hidden unless `BOT_ENABLE_MINIAPP=true` is set deliberately.
+- `BOT_DISABLE_MINIAPP=true` still hard-disables Mini App surfaces even if `MINIAPP_URL` exists.
 
-- Set `MINIAPP_URL` to your public HTTPS origin (e.g. `https://<app>.fly.dev/`).
-- Set `GEMINI_API_KEY` for voice.
+To resume Mini App work later, set `BOT_ENABLE_MINIAPP=true`, set `MINIAPP_URL` to a public HTTPS origin, and restore the frontend/API deploy path intentionally.
+
 - Docs: [nadobro.gitbook.io/docs](https://nadobro.gitbook.io/docs)
-
-Local dev: `cd miniapp_web && npm ci && npm run dev` (proxies `/api` and `/ws` to `localhost:8081`); run `uvicorn miniapp_api.main:app --host 127.0.0.1 --port 8081` from the repo root with `PYTHONPATH=.` and the same env vars as the bot.

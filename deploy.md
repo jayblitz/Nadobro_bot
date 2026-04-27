@@ -142,6 +142,7 @@ Current production runtime uses Telegram webhook mode.
 Mini App code is retained in this repository (`miniapp_web/`, `miniapp_api/`) but is intentionally disabled in the bot-first deploy profile.
 
 - `BOT_DISABLE_MINIAPP=true` hides Mini App entry points in Telegram UI, even if `MINIAPP_URL` is still set.
+- Mini App remains archived by default; `BOT_ENABLE_MINIAPP=true` is required to opt back in.
 - nginx keeps webhook ingress at `POST /telegram/webhook` and serves bot health at `GET /health`.
 - Requests to `/`, `/api/`, and `/ws/` return `410 miniapp_archived` in this profile.
 

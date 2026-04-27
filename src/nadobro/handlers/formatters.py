@@ -696,6 +696,11 @@ def _compute_exchange_stats(positions, prices):
                 current = float((prices.get(base) or {}).get("mid", 0) or 0)
             except Exception:
                 current = 0.0
+        if not current:
+            try:
+                current = float(p.get("mark_price") or p.get("price") or 0)
+            except Exception:
+                current = 0.0
         if current:
             pnl = _calc_position_pnl(p, current)
             if pnl is not None:
@@ -805,16 +810,22 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
                 current = float((prices.get(base) or {}).get("mid", 0) or 0)
             except Exception:
                 current = 0.0
+        if not current:
+            try:
+                current = float(p.get("mark_price") or p.get("price") or 0)
+            except Exception:
+                current = 0.0
 
         pnl_text = _loc("N/A")
         if current:
             pnl = _calc_position_pnl(p, current)
             if pnl is not None:
                 pnl_text = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+        source_note = " \\| local sync" if str(p.get("source") or "") == "local_trade_ledger" else ""
 
         lines.append(
             f"• *{escape_md(pname)}* \\| {escape_md(side)} {escape_md(f'{amount:.4f}')} \\| "
-            f"{_loc('PnL')}: {escape_md(pnl_text)}"
+            f"{_loc('PnL')}: {escape_md(pnl_text)}{source_note}"
         )
 
     if len(positions) > 5:

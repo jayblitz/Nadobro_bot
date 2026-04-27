@@ -376,9 +376,14 @@ async def run_bot():
             await bot_app.bot.set_chat_menu_button(
                 menu_button=MenuButtonWebApp(text="Mini App", web_app=WebAppInfo(url=MINIAPP_URL)),
             )
-            logger.info("Mini App menu button registered (MINIAPP_URL set)")
+            logger.info("Mini App menu button registered (explicitly enabled)")
+        else:
+            from telegram import MenuButtonCommands
+
+            await bot_app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+            logger.info("Telegram menu button reset to commands; Mini App archived")
     except Exception as e:
-        logger.warning("Mini App menu button not set: %s", e)
+        logger.warning("Telegram menu button not updated: %s", e)
 
     if transport_mode == "webhook":
         if bootstrap_health_server:

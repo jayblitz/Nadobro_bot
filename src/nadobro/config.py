@@ -4,8 +4,10 @@ from typing import Optional
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-_MINIAPP_DISABLED = (os.environ.get("BOT_DISABLE_MINIAPP") or "").strip().lower() in ("1", "true", "yes", "on")
-MINIAPP_URL = "" if _MINIAPP_DISABLED else (os.environ.get("MINIAPP_URL") or "").strip()
+_MINIAPP_ENABLE = (os.environ.get("BOT_ENABLE_MINIAPP") or "").strip().lower() in ("1", "true", "yes", "on")
+_MINIAPP_DISABLE = (os.environ.get("BOT_DISABLE_MINIAPP") or "").strip().lower() in ("1", "true", "yes", "on")
+_MINIAPP_ARCHIVED = _MINIAPP_DISABLE or not _MINIAPP_ENABLE
+MINIAPP_URL = "" if _MINIAPP_ARCHIVED else (os.environ.get("MINIAPP_URL") or "").strip()
 XAI_API_KEY = os.environ.get("XAI_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 NANOGPT_API_KEY = os.environ.get("NANOGPT_API_KEY") or os.environ.get("NANO_GPT_API_KEY")

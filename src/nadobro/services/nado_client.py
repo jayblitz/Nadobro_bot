@@ -951,6 +951,28 @@ class NadoClient:
         _positions_fallback_cache[fallback_key] = {"data": positions, "ts": time.time()}
         return positions
 
+    def _isolated_subaccount_hexes(self) -> list[str]:
+        try:
+            from src.nadobro.services.nado_archive import (
+                isolated_subaccount_from_row,
+                query_isolated_subaccounts_for_parent,
+            )
+
+            rows = query_isolated_subaccounts_for_parent(self.network, self.subaccount_hex or "") or []
+        except Exception as e:
+            logger.warning("isolated subaccount discovery failed: %s", e)
+            return []
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            iso = isolated_subaccount_from_row(row, self.subaccount_hex or "")
+            if not iso or iso in seen:
+                continue
+            seen.add(iso)
+            out.append(iso)
+        return out
+
     def get_all_positions(self) -> list:
         # Default (cross / main) subaccount.
         main = self._positions_for_subaccount_hex(
@@ -962,17 +984,7 @@ class NadoClient:
         # Isolated margin: each market uses a dedicated child subaccount; balances do not
         # appear on the parent subaccount_info.perp_balances list.
         try:
-            from src.nadobro.services.nado_archive import query_isolated_subaccounts_for_parent
-
-            rows = query_isolated_subaccounts_for_parent(self.network, self.subaccount_hex or "") or []
-            seen_iso: set[str] = set()
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                iso = (row.get("isolated_subaccount") or row.get("isolatedSubaccount") or "").strip()
-                if not iso or iso in seen_iso:
-                    continue
-                seen_iso.add(iso)
+            for iso in self._isolated_subaccount_hexes():
                 iso_positions = self._positions_for_subaccount_hex(iso, allow_empty_cache_fallback=False)
                 for p in iso_positions:
                     p["subaccount"] = iso

@@ -279,14 +279,12 @@ def _order_sender_params(client, network: str) -> list[str | None]:
     """
     Subaccounts that may hold perp orders: None = default subaccount, else isolated child hex.
     """
-    from src.nadobro.services.nado_archive import query_isolated_subaccounts_for_parent
+    from src.nadobro.services.nado_archive import isolated_subaccount_from_row, query_isolated_subaccounts_for_parent
 
     out: list[str | None] = [None]
     try:
         for row in query_isolated_subaccounts_for_parent(network, client.subaccount_hex or "") or []:
-            if not isinstance(row, dict):
-                continue
-            iso = (row.get("isolated_subaccount") or row.get("isolatedSubaccount") or "").strip()
+            iso = isolated_subaccount_from_row(row, client.subaccount_hex or "")
             if iso:
                 out.append(iso)
     except Exception as e:
@@ -2318,20 +2316,52 @@ def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]
         TradeStatus.PARTIALLY_FILLED.value,
     }
     by_digest: dict[str, dict] = {}
+    active_product_ids: set[int] = set()
     for t in trades:
         digest = str(t.get("order_digest") or "").strip()
-        if not digest:
-            continue
         status = str(t.get("status") or "").lower()
-        if status not in pending_like:
-            continue
-        by_digest[digest] = t
+        if status in pending_like or status == TradeStatus.FILLED.value:
+            try:
+                active_product_ids.add(int(t.get("product_id")))
+            except Exception:
+                pass
+        if status in pending_like and digest:
+            by_digest[digest] = t
 
     rows: list[dict] = []
     try:
         all_open_orders = client.get_all_open_orders(refresh=refresh) or []
     except Exception:
         all_open_orders = []
+
+    seen_digests = {str(o.get("digest") or "").strip() for o in all_open_orders if str(o.get("digest") or "").strip()}
+    if active_product_ids:
+        for product_id in sorted(active_product_ids):
+            for sender in _order_sender_params(client, network):
+                try:
+                    direct_orders = client.get_open_orders(product_id, refresh=refresh, sender=sender) or []
+                except Exception as e:
+                    logger.debug(
+                        "direct open-order probe failed user=%s product=%s sender=%s err=%s",
+                        telegram_id,
+                        product_id,
+                        "default" if sender is None else "isolated",
+                        e,
+                    )
+                    continue
+                for order in direct_orders:
+                    digest = str((order or {}).get("digest") or "").strip()
+                    if digest and digest in seen_digests:
+                        continue
+                    normalized = dict(order or {})
+                    normalized["product_id"] = int(normalized.get("product_id") or product_id)
+                    if not normalized.get("product_name"):
+                        normalized["product_name"] = get_product_name(product_id, network=network, client=client)
+                    if sender:
+                        normalized["sender"] = sender
+                    all_open_orders.append(normalized)
+                    if digest:
+                        seen_digests.add(digest)
 
     for order in all_open_orders:
         digest = str(order.get("digest") or "").strip()
@@ -2361,6 +2391,81 @@ def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]
 
     rows.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
     return rows
+
+
+def get_local_position_hints(telegram_id: int, network: str | None = None, limit: int = 500) -> list[dict]:
+    """
+    Conservative portfolio fallback from the local trade ledger.
+
+    This is only meant to fill gaps when live Nado position discovery returns no
+    row for a product, most commonly isolated xStock markets while archive
+    subaccount discovery is lagging or returns a changed shape.
+    """
+    user = get_user(telegram_id)
+    selected_network = str(network or (user.network_mode.value if user else "mainnet"))
+    try:
+        trades = get_trades_by_user(telegram_id, limit=min(max(int(limit or 500), 1), 500), network=selected_network) or []
+    except Exception as e:
+        logger.debug("local_position_hints trades lookup failed user=%s err=%s", telegram_id, e)
+        return []
+
+    allowed_statuses = {TradeStatus.FILLED.value, TradeStatus.PARTIALLY_FILLED.value}
+    net_by_pid: dict[int, float] = defaultdict(float)
+    notional_by_pid: dict[int, float] = defaultdict(float)
+    names_by_pid: dict[int, str] = {}
+
+    for trade in trades:
+        status = str(trade.get("status") or "").lower()
+        if status not in allowed_statuses:
+            continue
+        try:
+            product_id = int(trade.get("product_id"))
+        except Exception:
+            continue
+        product_name = str(trade.get("product_name") or get_product_name(product_id, network=selected_network)).upper()
+        if not product_name.endswith("-PERP") and not product_name.startswith("ID:"):
+            continue
+        try:
+            qty = abs(float(trade.get("fill_size") or trade.get("size") or 0.0))
+        except Exception:
+            qty = 0.0
+        if qty <= 0:
+            continue
+        side = str(trade.get("side") or "").upper()
+        signed_qty = qty if side in (OrderSide.LONG.value, "BUY", "LONG") else -qty
+        try:
+            price = float(trade.get("fill_price") or trade.get("price") or 0.0)
+        except Exception:
+            price = 0.0
+
+        net_by_pid[product_id] += signed_qty
+        if price > 0:
+            notional_by_pid[product_id] += signed_qty * price
+        names_by_pid[product_id] = product_name
+
+    hints: list[dict] = []
+    for product_id, signed_amount in net_by_pid.items():
+        if abs(signed_amount) <= 1e-9:
+            continue
+        amount = abs(float(signed_amount))
+        avg_price = 0.0
+        if signed_amount:
+            try:
+                avg_price = abs(float(notional_by_pid.get(product_id, 0.0)) / float(signed_amount))
+            except Exception:
+                avg_price = 0.0
+        hints.append(
+            {
+                "product_id": product_id,
+                "product_name": names_by_pid.get(product_id) or get_product_name(product_id, network=selected_network),
+                "amount": amount,
+                "signed_amount": float(signed_amount),
+                "price": avg_price,
+                "side": "LONG" if signed_amount > 0 else "SHORT",
+                "source": "local_trade_ledger",
+            }
+        )
+    return hints
 
 
 def get_trade_analytics(telegram_id: int, strategy_session_id: int | None = None) -> dict:

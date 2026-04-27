@@ -243,13 +243,18 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertEqual(len(net[1]["legs"]), 2)
 
     def test_isolated_subaccounts_response_parsing(self):
-        from src.nadobro.services.nado_archive import _isolated_subaccounts_list_from_response
+        from src.nadobro.services.nado_archive import (
+            _isolated_subaccounts_list_from_response,
+            isolated_subaccount_from_row,
+        )
 
         rows = _isolated_subaccounts_list_from_response(
             {"isolated_subaccounts": [{"isolated_subaccount": "0xabc", "product_id": 9}]}
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].get("product_id"), 9)
+        self.assertEqual(isolated_subaccount_from_row({"subaccountHex": "0xchild"}, "0xparent"), "0xchild")
+        self.assertEqual(isolated_subaccount_from_row({"subaccount": "0xparent"}, "0xparent"), "")
 
     def test_archive_unwraps_orders_under_data(self):
         from src.nadobro.services.nado_archive import _orders_list_from_archive_response
