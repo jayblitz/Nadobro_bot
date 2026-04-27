@@ -29,7 +29,6 @@ from src.nadobro.config import (
     get_product_id,
     get_product_max_leverage,
     get_spot_product_id,
-    get_spot_metadata,
     get_perp_products,
     list_volume_spot_product_names,
     normalize_volume_spot_symbol,
@@ -46,7 +45,6 @@ from src.nadobro.services.trade_service import (
     close_all_positions,
     close_delta_neutral_legs,
     get_trade_analytics,
-    stop_volume_spot_cleanup,
 )
 from src.nadobro.services.user_service import (
     get_user_nado_client,
@@ -57,6 +55,14 @@ from src.nadobro.services.user_service import (
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, record_metric
 from src.nadobro.services.execution_queue import enqueue_strategy
+from src.nadobro.services.strategy_registry import (
+    SUPPORTED_STRATEGIES,
+    migrate_state_strategy,
+    normalize_strategy_id,
+    runtime_strategy_default,
+    strategy_display_name,
+)
+from src.nadobro.services.strategy_lifecycle import cleanup_strategy_positions
 
 logger = logging.getLogger(__name__)
 
@@ -128,26 +134,11 @@ _CYCLE_SKIP_MARKERS = frozenset({"maintenance_pause", "skipped_interval"})
 
 
 def _normalize_strategy_id(strategy: str) -> str:
-    sid = str(strategy or "").lower().strip()
-    if sid == "mm":
-        return "grid"
-    if sid in ("reverse_grid", "reverse-grid"):
-        return "rgrid"
-    if sid in ("dynamic_grid", "dynamic-grid", "d-grid"):
-        return "dgrid"
-    return sid
+    return normalize_strategy_id(strategy)
 
 
 def _migrate_state_strategy(state: dict) -> dict:
-    if not isinstance(state, dict):
-        return state
-    sid = str(state.get("strategy") or "").lower().strip()
-    if sid == "mm":
-        state["strategy"] = "grid"
-        state["strategy_id_v2"] = 1
-    elif sid in ("grid", "rgrid", "dgrid", "dn", "vol", "bro"):
-        state["strategy_id_v2"] = int(state.get("strategy_id_v2") or 1)
-    return state
+    return migrate_state_strategy(state)
 
 
 def _safe_last_run_ts(raw) -> float:
@@ -178,14 +169,7 @@ def _safe_last_run_ts(raw) -> float:
 
 
 def _strategy_display_name(strategy: str) -> str:
-    sid = _normalize_strategy_id(strategy)
-    if sid == "grid":
-        return "GRID"
-    if sid == "rgrid":
-        return "REVERSE GRID"
-    if sid == "dgrid":
-        return "DYNAMIC GRID"
-    return sid.upper() if sid else "STRATEGY"
+    return strategy_display_name(strategy)
 
 
 def _update_order_observability(state: dict, result: dict) -> None:
@@ -370,84 +354,8 @@ async def _notify(telegram_id: int, text: str, **fmt_kwargs):
 
 
 def _strategy_defaults(strategy: str) -> dict:
-    strategy = _normalize_strategy_id(strategy)
     default_bro_products = get_perp_products()[:6] or ["BTC", "ETH", "SOL"]
-    presets = {
-        "grid": {
-            "notional_usd": 400.0,
-            "cycle_notional_usd": 400.0,
-            "spread_bp": 4.0,
-            "interval_seconds": 45,
-            "threshold_bp": 12.0,
-            "close_offset_bp": 24.0,
-        },
-        "rgrid": {
-            "notional_usd": 100.0,
-            "spread_bp": 10.0,
-            "rgrid_spread_bp": 10.0,
-            "interval_seconds": 60,
-            "levels": 4,
-            "rgrid_stop_loss_pct": 0.8,
-            "rgrid_take_profit_pct": 1.2,
-            "rgrid_discretion": 0.06,
-            "rgrid_reset_threshold_pct": 1.0,
-            "rgrid_reset_timeout_seconds": 120,
-            # Legacy fallback (read-only compatibility).
-            "min_range_pct": 1.0,
-            "max_range_pct": 1.0,
-        },
-        "dgrid": {
-            "notional_usd": 100.0,
-            "cycle_notional_usd": 100.0,
-            "spread_bp": 8.0,
-            "interval_seconds": 30,
-            "levels": 4,
-            "tp_pct": 1.2,
-            "sl_pct": 0.8,
-            "dgrid_trend_on_variance_ratio": 1.25,
-            "dgrid_range_on_variance_ratio": 1.15,
-            "dgrid_min_spread_bp": 2.0,
-            "dgrid_max_spread_bp": 50.0,
-            "dgrid_short_window_points": 4,
-            "dgrid_long_window_points": 12,
-            "rgrid_stop_loss_pct": 0.8,
-            "rgrid_take_profit_pct": 1.2,
-            "rgrid_discretion": 0.06,
-            "grid_reset_threshold_pct": 0.2,
-            "rgrid_reset_threshold_pct": 0.2,
-            "grid_reset_timeout_seconds": 120,
-            "rgrid_reset_timeout_seconds": 120,
-        },
-        "dn": {
-            "notional_usd": 50.0,
-            "spread_bp": 3.0,
-            "interval_seconds": 90,
-            "auto_close_on_maintenance": 1.0,
-            "funding_entry_mode": "enter_anyway",
-        },
-        "vol": {
-            "notional_usd": 100.0,
-            "fixed_margin_usd": 100.0,
-            "target_volume_usd": 10000.0,
-            "leverage": 1.0,
-            "interval_seconds": 10,
-            "vol_direction": "long",
-            "tp_pct": 1.0,
-            "sl_pct": 1.0,
-        },
-        "bro": {
-            "budget_usd": 500.0, "risk_level": "balanced", "max_positions": 3,
-            "interval_seconds": 300, "cycle_seconds": 300,
-            "tp_pct": 2.0, "sl_pct": 1.5, "max_loss_pct": 15.0,
-            "leverage_cap": 5, "products": default_bro_products,
-            "use_sentiment": True, "use_cmc": True, "min_confidence": 0.65,
-            "howl_enabled": True, "howl_hour_utc": 2,
-        },
-    }
-    return presets.get(strategy, {"notional_usd": 100.0, "spread_bp": 5.0, "interval_seconds": 60})
-
-
-SUPPORTED_STRATEGIES = ("grid", "rgrid", "dgrid", "dn", "vol", "bro")
+    return runtime_strategy_default(strategy, default_bro_products)
 
 
 def _mark_previous_sessions_superseded(telegram_id: int, network: str) -> None:
@@ -864,32 +772,7 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
         task.cancel()
 
     if cancel_orders:
-        strategy = str(state.get("strategy") or "").lower()
-        if strategy == "dn":
-            close_res = close_delta_neutral_legs(
-                telegram_id,
-                str(state.get("product") or ""),
-                network=network,
-                slippage_pct=float(state.get("slippage_pct") or 1.0),
-                strategy_session_id=state.get("strategy_session_id"),
-            )
-        elif strategy == "vol" and str(state.get("vol_market") or "perp") == "spot":
-            prod = normalize_volume_spot_symbol(str(state.get("product") or ""))
-            spot_pid = get_spot_product_id(prod, network=network)
-            if spot_pid is None:
-                close_res = {"success": True, "skipped": True}
-            else:
-                sym = str((get_spot_metadata(prod, network=network) or {}).get("symbol") or prod).upper()
-                close_res = stop_volume_spot_cleanup(
-                    telegram_id,
-                    int(spot_pid),
-                    sym,
-                    network=network,
-                    slippage_pct=float(state.get("slippage_pct") or 1.0),
-                    strategy_session_id=state.get("strategy_session_id"),
-                )
-        else:
-            close_res = close_all_positions(telegram_id, network=network)
+        close_res = cleanup_strategy_positions(telegram_id, network, state)
         if not close_res.get("success"):
             return False, f"Strategy loop stopped, but cleanup failed: {close_res.get('error', 'unknown')}"
 
@@ -899,6 +782,7 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
 def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[bool, str]:
     stopped = 0
     close_errors: list[str] = []
+    stop_errors: list[str] = []
     rows = query_all(
         "SELECT key, value FROM bot_state WHERE key LIKE %s",
         (f"{STATE_PREFIX}{telegram_id}:%",),
@@ -911,6 +795,7 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             if int(user_id_str) != int(telegram_id):
                 continue
             state = json.loads(row.get("value") or "{}")
+            _migrate_state_strategy(state)
             if not state.get("running"):
                 continue
             _finalize_session(state, stop_reason="user_stop_all")
@@ -921,41 +806,22 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             if task:
                 task.cancel()
             if cancel_orders:
-                strategy = str(state.get("strategy") or "").lower()
-                if strategy == "dn":
-                    close_res = close_delta_neutral_legs(
-                        telegram_id,
-                        str(state.get("product") or ""),
-                        network=network,
-                        slippage_pct=float(state.get("slippage_pct") or 1.0),
-                        strategy_session_id=state.get("strategy_session_id"),
-                    )
-                elif strategy == "vol" and str(state.get("vol_market") or "perp") == "spot":
-                    prod = normalize_volume_spot_symbol(str(state.get("product") or ""))
-                    spot_pid = get_spot_product_id(prod, network=network)
-                    if spot_pid is None:
-                        close_res = {"success": True}
-                    else:
-                        sym = str((get_spot_metadata(prod, network=network) or {}).get("symbol") or prod).upper()
-                        close_res = stop_volume_spot_cleanup(
-                            telegram_id,
-                            int(spot_pid),
-                            sym,
-                            network=network,
-                            slippage_pct=float(state.get("slippage_pct") or 1.0),
-                            strategy_session_id=state.get("strategy_session_id"),
-                        )
-                else:
-                    close_res = close_all_positions(telegram_id, network=network)
+                close_res = cleanup_strategy_positions(telegram_id, network, state)
                 if not close_res.get("success"):
                     close_errors.append(f"{network}: {close_res.get('error', 'close_all_positions failed')}")
             stopped += 1
-        except Exception:
+        except Exception as exc:
+            key = str(row.get("key", ""))
+            logger.warning("stop_all_user_bots failed for key=%s user=%s: %s", key, telegram_id, exc, exc_info=True)
+            stop_errors.append(f"{key or 'unknown'}: {exc}")
             continue
     if stopped > 0:
-        if cancel_orders and close_errors:
-            return True, f"Stopped {stopped} running strategy loop(s). Some close-all actions failed: {'; '.join(close_errors)}"
+        all_errors = [*close_errors, *stop_errors]
+        if all_errors:
+            return True, f"Stopped {stopped} running strategy loop(s). Some stop/cleanup actions failed: {'; '.join(all_errors)}"
         return True, f"Stopped {stopped} running strategy loop(s)."
+    if stop_errors:
+        return False, f"No strategy bot was fully stopped. Errors: {'; '.join(stop_errors)}"
     return False, "No running strategy bot found."
 
 

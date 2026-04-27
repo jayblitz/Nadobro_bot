@@ -9,8 +9,8 @@ from miniapp_api.models.schemas import StrategyActionResponse, StrategyStartRequ
 from src.nadobro.config import list_volume_spot_product_names
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.bot_runtime import get_user_bot_status, start_user_bot, stop_user_bot
-from src.nadobro.services.onboarding_service import is_new_onboarding_complete
-from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user, get_user_readonly_client
+from src.nadobro.services.trading_readiness import check_trading_readiness
+from src.nadobro.services.user_service import get_user, get_user_readonly_client
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +18,11 @@ router = APIRouter()
 
 
 def _require_trading_ready(telegram_id: int) -> None:
-    if not is_new_onboarding_complete(telegram_id):
-        raise HTTPException(status_code=403, detail="Complete onboarding and accept Terms of Service first.")
-    ok, msg = ensure_active_wallet_ready(telegram_id)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg or "Wallet not ready for trading.")
+    readiness = check_trading_readiness(telegram_id)
+    if readiness.ok:
+        return
+    status = 403 if readiness.code in ("trading_paused", "onboarding_incomplete") else 400
+    raise HTTPException(status_code=status, detail=readiness.reason)
 
 
 @router.get("/strategies/status")
@@ -69,8 +69,6 @@ async def strategies_start(body: StrategyStartRequest, user: AuthUser):
 
 @router.post("/strategies/stop", response_model=StrategyActionResponse)
 async def strategies_stop(user: AuthUser):
-    _require_trading_ready(user.telegram_id)
-
     ok, message = await run_blocking(stop_user_bot, user.telegram_id, True)
     if not ok:
         raise HTTPException(status_code=400, detail=message)

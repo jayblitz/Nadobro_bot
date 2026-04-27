@@ -77,8 +77,27 @@ from src.nadobro.config import (
 )
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, log_slow
+from src.nadobro.services.trading_readiness import check_trading_readiness
 
 logger = logging.getLogger(__name__)
+
+
+async def _show_trading_readiness_block(query, readiness) -> None:
+    if readiness.code == "onboarding_incomplete":
+        await _edit_loc(query,
+            "⚠️ Complete setup first (language + accept terms).",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
+                [InlineKeyboardButton("Exit", callback_data="nav:main")],
+            ]),
+        )
+        return
+    await _edit_loc(query,
+        f"⚠️ {escape_md(readiness.reason)}",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=back_kb(),
+    )
 
 
 def _strategy_available_products(strategy_id: str, network: str, vol_market: str | None = None) -> tuple[str, ...]:
@@ -293,7 +312,7 @@ async def _handle_mode(query, data, telegram_id, context=None):
     if target_network not in ("testnet", "mainnet"):
         return
 
-    user = get_user(telegram_id)
+    user = await run_blocking(get_user, telegram_id)
     current_network = user.network_mode.value if user else "testnet"
 
     if target_network == current_network:
@@ -404,27 +423,18 @@ async def _handle_nav(query, data, telegram_id, context=None):
 async def _handle_trade(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
-    if not is_new_onboarding_complete(telegram_id):
-        await _edit_loc(query,
-            "⚠️ Complete setup first (language + accept terms).",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
-                [InlineKeyboardButton("Exit", callback_data="nav:main")],
-            ]),
-        )
+    needs_wallet = action in ("long", "short", "limit_long", "limit_short")
+    readiness = await run_blocking(
+        check_trading_readiness,
+        telegram_id,
+        require_wallet=needs_wallet,
+        block_when_paused=False,
+    )
+    if not readiness.ok:
+        await _show_trading_readiness_block(query, readiness)
         return
-    user = get_user(telegram_id)
+    user = await run_blocking(get_user, telegram_id)
     network = user.network_mode.value if user else "mainnet"
-    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
-    if action in ("long", "short", "limit_long", "limit_short") and not wallet_ready:
-        await _edit_loc(query,
-            "⚠️ {msg}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-            msg=escape_md(wallet_msg),
-        )
-        return
 
     if action in ("long", "short"):
         action_label = "🟢 BUY / LONG" if action == "long" else "🔴 SELL / SHORT"
@@ -545,7 +555,7 @@ async def _handle_leverage(query, data, telegram_id, context):
     product = parts[2]
     size = float(parts[3])
     leverage = int(parts[4])
-    user = get_user(telegram_id)
+    user = await run_blocking(get_user, telegram_id)
     network = user.network_mode.value if user else "mainnet"
     max_leverage = get_product_max_leverage(product, network=network)
     if leverage > max_leverage:
@@ -560,13 +570,13 @@ async def _handle_leverage(query, data, telegram_id, context):
 
     price = 0
     try:
-        client = get_user_readonly_client(telegram_id)
+        client = await run_blocking(get_user_readonly_client, telegram_id)
         if client:
-            user = get_user(telegram_id)
+            user = await run_blocking(get_user, telegram_id)
             network = user.network_mode.value if user else "mainnet"
-            pid = get_product_id(product, network=network, client=client)
+            pid = await run_blocking(get_product_id, product, network=network, client=client)
             if pid is not None:
-                mp = client.get_market_price(pid)
+                mp = await run_blocking(client.get_market_price, pid)
                 price = mp.get("mid", 0)
     except Exception:
         pass
@@ -600,15 +610,9 @@ async def _handle_exec_trade(query, data, telegram_id, context):
             reply_markup=back_kb(),
         )
         return
-    if not is_new_onboarding_complete(telegram_id):
-        await _edit_loc(query,
-            "⚠️ Complete setup first (language + accept terms).",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("▶ Complete setup", callback_data="onboarding:resume")],
-                [InlineKeyboardButton("Exit", callback_data="nav:main")],
-            ]),
-        )
+    readiness = await run_blocking(check_trading_readiness, telegram_id)
+    if not readiness.ok:
+        await _show_trading_readiness_block(query, readiness)
         return
 
     action = pending.get("action", "long")
@@ -618,22 +622,6 @@ async def _handle_exec_trade(query, data, telegram_id, context):
     slippage_pct = pending.get("slippage_pct", _get_user_settings(telegram_id, context).get("slippage", 1))
 
     context.user_data.pop("pending_trade", None)
-
-    if is_trading_paused():
-        await _edit_loc(query, 
-            "⏸ Trading is temporarily paused by admin\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-        )
-        return
-    wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
-    if not wallet_ready:
-        await _edit_loc(query, 
-            f"⚠️ {escape_md(wallet_msg)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-        )
-        return
 
     from src.nadobro.handlers.messages import execute_action_directly
     await execute_action_directly(query, context, telegram_id, {
@@ -750,7 +738,7 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "refresh"
     if action == "stop":
-        ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
+        ok, msg = await run_blocking(stop_user_bot, telegram_id, True)
         status = await run_blocking(get_user_bot_status, telegram_id)
         onboarding = await run_blocking(evaluate_readiness, telegram_id)
         text = fmt_status_overview(status, onboarding)
@@ -1619,8 +1607,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             start_payload["vol_market"] = vol_m
         await execute_action_directly(query, context, telegram_id, start_payload)
     elif action == "status":
-        st = get_user_bot_status(telegram_id)
-        readiness = evaluate_readiness(telegram_id)
+        st = await run_blocking(get_user_bot_status, telegram_id)
+        readiness = await run_blocking(evaluate_readiness, telegram_id)
         text = fmt_status_overview(st, readiness)
         await _edit_loc(query, 
             text,
@@ -1631,9 +1619,9 @@ async def _handle_strategy(query, data, context, telegram_id):
             ),
         )
     elif action == "stop":
-        ok, msg = stop_user_bot(telegram_id, cancel_orders=True)
-        st = get_user_bot_status(telegram_id)
-        readiness = evaluate_readiness(telegram_id)
+        ok, msg = await run_blocking(stop_user_bot, telegram_id, True)
+        st = await run_blocking(get_user_bot_status, telegram_id)
+        readiness = await run_blocking(evaluate_readiness, telegram_id)
         text = fmt_status_overview(st, readiness)
         prefix = "🛑" if ok else "⚠️"
         text += f"\n\n{prefix} {escape_md(msg)}"

@@ -25,6 +25,7 @@ from src.nadobro.services.nanogpt_client import (
     nanogpt_is_configured,
     openai_compatible_chat,
 )
+from src.nadobro.services.provider_config import n8n_base_url, n8n_configured, n8n_deploy_headers
 from src.nadobro.services.source_registry import record_source
 
 logger = logging.getLogger(__name__)
@@ -34,11 +35,7 @@ WORKFLOW_PREFIX = "workflow:"
 
 def _n8n_base_url() -> str:
     """Resolve n8n origin: standard env first, then Fly/Cursor-style ``n8n_Server_URL``."""
-    for key in ("N8N_BASE_URL", "n8n_Server_URL", "N8N_SERVER_URL"):
-        raw = (os.environ.get(key) or "").strip().rstrip("/")
-        if raw:
-            return raw
-    return ""
+    return n8n_base_url()
 
 
 def _n8n_deploy_headers() -> dict[str, str]:
@@ -47,31 +44,11 @@ def _n8n_deploy_headers() -> dict[str, str]:
     Accepts the same secret names used for MCP / Fly: ``n8n_authorization``,
     ``n8n_MCP_Access_Token``, or ``N8N_API_KEY``.
     """
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    api_key = (os.environ.get("N8N_API_KEY") or "").strip()
-    auth = (os.environ.get("n8n_authorization") or "").strip()
-    mcp = (os.environ.get("n8n_MCP_Access_Token") or "").strip()
-    if api_key:
-        headers["X-N8N-API-KEY"] = api_key
-        return headers
-    if auth:
-        first = auth.split(None, 1)[0].lower() if auth else ""
-        if first in ("bearer", "basic"):
-            headers["Authorization"] = auth
-        else:
-            headers["X-N8N-API-KEY"] = auth
-        return headers
-    if mcp:
-        headers["X-N8N-API-KEY"] = mcp
-    return headers
+    return n8n_deploy_headers()
 
 
 def _n8n_deploy_ready() -> bool:
-    base = _n8n_base_url()
-    h = _n8n_deploy_headers()
-    if not base:
-        return False
-    return "X-N8N-API-KEY" in h or "Authorization" in h
+    return n8n_configured()
 
 N8N_WORKFLOW_SYSTEM_PROMPT = """You are an expert n8n workflow author. The user describes automation they want.
 Return ONLY a single JSON object (no markdown, no commentary) with this exact shape:

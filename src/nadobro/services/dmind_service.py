@@ -16,6 +16,7 @@ from typing import Any
 import requests
 
 from src.nadobro.services.nanogpt_client import nanogpt_chat_completion, nanogpt_is_configured
+from src.nadobro.services.provider_config import dmind_configured
 from src.nadobro.services.source_registry import record_source
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class DMindUnavailable(RuntimeError):
 
 
 def is_dmind_configured() -> bool:
-    return bool(os.environ.get("DMIND_API_KEY", ""))
+    return dmind_configured()
 
 
 def is_finance_expert_configured() -> bool:

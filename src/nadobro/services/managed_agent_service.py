@@ -3,14 +3,15 @@ import re
 from typing import TypedDict
 
 from src.nadobro.config import get_perp_products
-from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.bot_runtime import start_user_bot, stop_all_user_bots
 from src.nadobro.services.knowledge_service import answer_nado_question
 from src.nadobro.services.managed_agent_prompt import (
     build_managed_agent_system_prompt,
     build_style_instruction,
 )
-from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user
+from src.nadobro.services.strategy_registry import infer_strategy_from_text
+from src.nadobro.services.trading_readiness import check_trading_readiness
+from src.nadobro.services.user_service import get_user
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +26,7 @@ class ManagedAgentResult(TypedDict):
 
 
 def _normalize_strategy_id(text: str) -> str | None:
-    t = (text or "").lower()
-    if any(x in t for x in ("alpha agent", "bro mode", "bro strategy", "alpha mode")):
-        return "bro"
-    if any(x in t for x in ("delta neutral", "delta-neutral", " dn ")):
-        return "dn"
-    if any(x in t for x in ("volume bot", "vol bot", " vol ")):
-        return "vol"
-    if any(x in t for x in ("r-grid", "rgrid", "reverse grid", "reverse-grid")):
-        return "rgrid"
-    if any(x in t for x in ("dynamic grid", "dgrid", "d-grid")):
-        return "dgrid"
-    if "grid" in t:
-        return "grid"
-    return None
+    return infer_strategy_from_text(text)
 
 
 def _extract_product(text: str, telegram_id: int) -> str:
@@ -126,20 +114,19 @@ async def handle_managed_agent_turn(
         }
 
     if _is_strategy_start_request(prompt_text):
-        if is_trading_paused():
+        readiness = check_trading_readiness(telegram_id, require_onboarding=False)
+        if not readiness.ok:
+            route = "strategy_start_blocked_paused" if readiness.code == "trading_paused" else "strategy_start_blocked_wallet"
+            response = (
+                "Trading is paused right now by admin controls. I can keep scanning until it's back."
+                if readiness.code == "trading_paused"
+                else f"Need your wallet setup first, boss: {readiness.reason}"
+            )
             return {
                 "handled": True,
-                "response": "Trading is paused right now by admin controls. I can keep scanning until it's back.",
+                "response": response,
                 "show_menu": True,
-                "route": "strategy_start_blocked_paused",
-            }
-        wallet_ready, wallet_msg = ensure_active_wallet_ready(telegram_id)
-        if not wallet_ready:
-            return {
-                "handled": True,
-                "response": f"Need your wallet setup first, boss: {wallet_msg}",
-                "show_menu": True,
-                "route": "strategy_start_blocked_wallet",
+                "route": route,
             }
         strategy = _normalize_strategy_id(prompt_text)
         if not strategy:

@@ -27,6 +27,16 @@ CLOSE_AFTER_SECONDS = 60.0
 MIN_SIZE = 0.0001
 MIN_EFFECTIVE_MARGIN_USD = 10.0
 DEFAULT_TARGET_VOLUME_USD = 10000.0
+DEFAULT_VOL_EMA_LEN = 50
+DEFAULT_VOL_RSI_LEN = 14
+DEFAULT_VOL_RSI_LONG_MAX = 50.0
+DEFAULT_VOL_RSI_SHORT_MIN = 50.0
+DEFAULT_VOL_TRADE_TP_PCT = 0.40
+DEFAULT_VOL_TRADE_SL_PCT = 0.20
+DEFAULT_VOL_HOLD_MIN_SECONDS = 60.0
+DEFAULT_VOL_HOLD_MAX_SECONDS = 540.0
+DEFAULT_VOL_MAX_SPREAD_BP = 12.0
+DEFAULT_VOL_MIN_EDGE_BP = 4.0
 
 # Max seconds a post-only close is allowed to rest before we cancel-and-retry
 # with a wider limit. After CLOSE_ESCALATE_AFTER_SECONDS we'll force-close
@@ -83,6 +93,113 @@ def _maker_limit_price(book: dict, is_buy: bool) -> float:
     if is_buy:
         return bid if bid > 0 else mid
     return ask if ask > 0 else mid
+
+
+def _pseudo_random_hold_seconds(seed: int, lo: float, hi: float) -> float:
+    lo_i = max(1, int(lo))
+    hi_i = max(lo_i, int(hi))
+    x = ((int(seed) * 9301 + 49297) % 233280)
+    r = x / 233280.0
+    return float(lo_i + int(r * (hi_i - lo_i + 1)))
+
+
+def _quote_quality(mp: dict, mid: float, max_spread_bp: float) -> tuple[bool, float, str]:
+    bid = float(mp.get("bid") or 0.0)
+    ask = float(mp.get("ask") or 0.0)
+    if mid <= 0 or bid <= 0 or ask <= 0 or ask < bid:
+        return False, 0.0, "invalid_book"
+    spread_bp = (ask - bid) / max(mid, 1e-9) * 10000.0
+    if max_spread_bp > 0 and spread_bp > max_spread_bp:
+        return False, spread_bp, "spread_too_wide"
+    return True, spread_bp, ""
+
+
+def _volume_signal(product: str, mid: float, state: dict) -> dict:
+    """Return a conservative entry signal from local price history.
+
+    The volume bot should not manufacture trades just to hit volume. It only
+    enters when short-term price action agrees with trend and pullback filters.
+    """
+    try:
+        from src.nadobro.services.price_tracker import compute_ema, compute_rsi, get_history
+    except Exception:
+        return {"ok": False, "reason": "signal_unavailable"}
+
+    ema_len = int(state.get("vol_ema_len") or DEFAULT_VOL_EMA_LEN)
+    rsi_len = int(state.get("vol_rsi_len") or DEFAULT_VOL_RSI_LEN)
+    rsi_long_max = float(state.get("vol_rsi_long_max") or DEFAULT_VOL_RSI_LONG_MAX)
+    rsi_short_min = float(state.get("vol_rsi_short_min") or DEFAULT_VOL_RSI_SHORT_MIN)
+    min_edge_bp = float(state.get("vol_min_edge_bp") or DEFAULT_VOL_MIN_EDGE_BP)
+
+    history = get_history(product, limit=max(ema_len, rsi_len) + 2)
+    if len(history) < max(ema_len, rsi_len) + 1:
+        return {"ok": False, "reason": "warming_signal_history", "history_points": len(history)}
+    prev_mid = float((history[-2] or {}).get("mid") or 0.0)
+    ema = compute_ema(product, ema_len)
+    rsi = compute_rsi(product, rsi_len)
+    if not ema or rsi is None or prev_mid <= 0 or mid <= 0:
+        return {"ok": False, "reason": "signal_incomplete", "history_points": len(history)}
+
+    edge_bp = abs(mid - ema) / max(mid, 1e-9) * 10000.0
+    long_ok = mid > ema and mid > prev_mid and rsi < rsi_long_max and edge_bp >= min_edge_bp
+    short_ok = mid < ema and mid < prev_mid and rsi > rsi_short_min and edge_bp >= min_edge_bp
+
+    direction_mode = str(state.get("vol_direction_mode") or "signal").strip().lower()
+    configured = _normalize_direction(state.get("vol_direction") or state.get("direction") or "long")
+    next_dir = _normalize_direction(state.get("vol_next_direction") or configured)
+    if direction_mode == "fixed":
+        direction = configured
+        ok = long_ok if direction == "long" else short_ok
+    elif direction_mode in ("pingpong", "signal_pingpong"):
+        direction = next_dir
+        ok = long_ok if direction == "long" else short_ok
+    else:
+        if long_ok and not short_ok:
+            direction = "long"
+            ok = True
+        elif short_ok and not long_ok:
+            direction = "short"
+            ok = True
+        else:
+            direction = configured
+            ok = False
+
+    reason = "signal_ok" if ok else "waiting_signal"
+    return {
+        "ok": bool(ok),
+        "direction": direction,
+        "reason": reason,
+        "ema": float(ema),
+        "rsi": float(rsi),
+        "prev_mid": prev_mid,
+        "edge_bp": edge_bp,
+        "long_ok": bool(long_ok),
+        "short_ok": bool(short_ok),
+        "direction_mode": direction_mode,
+    }
+
+
+def _volume_exit_reason(state: dict, mid: float, now_ts: float, direction: str) -> tuple[bool, str]:
+    entry_price = float(state.get("vol_entry_fill_price") or 0.0)
+    entry_ts = float(state.get("vol_entry_fill_ts") or 0.0)
+    if entry_price <= 0 or entry_ts <= 0 or mid <= 0:
+        return False, "missing_entry"
+
+    trade_tp_pct = float(state.get("vol_trade_tp_pct") or DEFAULT_VOL_TRADE_TP_PCT)
+    trade_sl_pct = float(state.get("vol_trade_sl_pct") or DEFAULT_VOL_TRADE_SL_PCT)
+    hold_min = float(state.get("vol_hold_min_seconds") or DEFAULT_VOL_HOLD_MIN_SECONDS)
+    hold_max = float(state.get("vol_hold_seconds") or state.get("vol_hold_max_seconds") or DEFAULT_VOL_HOLD_MAX_SECONDS)
+    held = max(0.0, now_ts - entry_ts)
+    side = 1.0 if direction == "long" else -1.0
+    pnl_pct = side * (mid - entry_price) / max(entry_price, 1e-9) * 100.0
+
+    if trade_tp_pct > 0 and pnl_pct >= trade_tp_pct:
+        return True, "trade_tp_hit"
+    if trade_sl_pct > 0 and pnl_pct <= -trade_sl_pct:
+        return True, "trade_sl_hit"
+    if held >= max(hold_min, hold_max):
+        return True, "hold_expired"
+    return False, "min_hold" if held < hold_min else "waiting_edge"
 
 
 def _spot_base_balance(client, spot_product_id: int) -> float:
@@ -182,6 +299,12 @@ def _run_volume_spot_cycle(
         state["vol_entry_fill_ts"] = now_ts
         state["vol_entry_fill_price"] = entry_price
         state["vol_entry_size"] = entry_size
+        hold_seed = int(now_ts) + int(telegram_id) + int(spot_product_id)
+        state["vol_hold_seconds"] = _pseudo_random_hold_seconds(
+            hold_seed,
+            float(state.get("vol_hold_min_seconds") or DEFAULT_VOL_HOLD_MIN_SECONDS),
+            float(state.get("vol_hold_max_seconds") or DEFAULT_VOL_HOLD_MAX_SECONDS),
+        )
         state["vol_last_order_digest"] = entry_digest
         state["vol_last_order_kind"] = "entry_filled"
         return {
@@ -405,8 +528,14 @@ def _run_volume_spot_cycle(
         if entry_ts <= 0:
             state["vol_phase"] = "idle"
             return {"success": True, "done": False, "action": "entry_ts_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
-        if now_ts < (entry_ts + CLOSE_AFTER_SECONDS):
-            return {"success": True, "done": False, "action": "waiting_close_timer", "orders_placed": 0, "placed_notional_usd": 0.0}
+        if bool(state.get("vol_trade_exits_enabled", False)):
+            should_close, exit_reason = _volume_exit_reason(state, mid, now_ts, direction)
+            if not should_close:
+                return {"success": True, "done": False, "action": exit_reason, "orders_placed": 0, "placed_notional_usd": 0.0}
+        else:
+            exit_reason = "close_timer"
+            if now_ts < (entry_ts + CLOSE_AFTER_SECONDS):
+                return {"success": True, "done": False, "action": "waiting_close_timer", "orders_placed": 0, "placed_notional_usd": 0.0}
 
         base = _spot_base_balance(client, spot_product_id)
         if base < MIN_SIZE * 2:
@@ -499,7 +628,7 @@ def _run_volume_spot_cycle(
             "success": True,
             "done": False,
             "action": "placed_limit_close_wait_fill",
-            "detail": f"Spot maker sell posted #{str(close_result.get('digest') or '')[:10]} at ${close_limit:,.2f}",
+            "detail": f"Spot maker sell posted #{str(close_result.get('digest') or '')[:10]} at ${close_limit:,.2f} ({exit_reason})",
             "orders_placed": 1,
             "placed_notional_usd": round(pos_size * close_limit, 4),
             "vol_order_attempts": 1,
@@ -521,6 +650,44 @@ def _run_volume_spot_cycle(
             "vol_order_failures": 1,
             "last_order_error": "insufficient_effective_margin",
         }
+    if bool(state.get("vol_signal_filter_enabled", False)):
+        max_spread_bp = float(state.get("vol_max_spread_bp") or DEFAULT_VOL_MAX_SPREAD_BP)
+        quality_ok, spread_bp, quality_reason = _quote_quality(mp, mid, max_spread_bp)
+        state["vol_spread_bp"] = round(spread_bp, 4)
+        if not quality_ok:
+            return {
+                "success": True,
+                "done": False,
+                "action": quality_reason,
+                "detail": f"VOL spot skipped entry: {quality_reason} (spread {spread_bp:.2f} bp)",
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "vol_signal_reason": quality_reason,
+                "vol_spread_bp": round(spread_bp, 4),
+            }
+        signal_state = dict(state)
+        signal_state["vol_direction_mode"] = "fixed"
+        signal_state["vol_direction"] = "long"
+        signal = _volume_signal(product, mid, signal_state)
+        state["vol_signal"] = {
+            "ok": bool(signal.get("ok")),
+            "reason": signal.get("reason"),
+            "direction": signal.get("direction"),
+            "ema": round(float(signal.get("ema") or 0.0), 6),
+            "rsi": round(float(signal.get("rsi") or 0.0), 4),
+            "edge_bp": round(float(signal.get("edge_bp") or 0.0), 4),
+            "direction_mode": "spot_long",
+        }
+        if not signal.get("ok"):
+            return {
+                "success": True,
+                "done": False,
+                "action": str(signal.get("reason") or "waiting_signal"),
+                "detail": "VOL spot skipped entry: long signal filter did not confirm setup.",
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "vol_signal": state["vol_signal"],
+            }
     size = max(effective_margin / mid, MIN_SIZE)
     entry_limit = _maker_limit_price(mp, is_buy=True)
     logger.info(
@@ -796,6 +963,12 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_entry_fill_ts"] = now_ts
         state["vol_entry_fill_price"] = entry_price
         state["vol_entry_size"] = entry_size
+        hold_seed = int(now_ts) + int(telegram_id) + int(product_id)
+        state["vol_hold_seconds"] = _pseudo_random_hold_seconds(
+            hold_seed,
+            float(state.get("vol_hold_min_seconds") or DEFAULT_VOL_HOLD_MIN_SECONDS),
+            float(state.get("vol_hold_max_seconds") or DEFAULT_VOL_HOLD_MAX_SECONDS),
+        )
         state["vol_last_order_digest"] = entry_digest
         state["vol_last_order_kind"] = "entry_filled"
         return {
@@ -1038,8 +1211,14 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         if entry_ts <= 0:
             state["vol_phase"] = "idle"
             return {"success": True, "done": False, "action": "entry_ts_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
-        if now_ts < (entry_ts + CLOSE_AFTER_SECONDS):
-            return {"success": True, "done": False, "action": "waiting_close_timer", "orders_placed": 0, "placed_notional_usd": 0.0}
+        if bool(state.get("vol_trade_exits_enabled", False)):
+            should_close, exit_reason = _volume_exit_reason(state, mid, now_ts, direction)
+            if not should_close:
+                return {"success": True, "done": False, "action": exit_reason, "orders_placed": 0, "placed_notional_usd": 0.0}
+        else:
+            exit_reason = "close_timer"
+            if now_ts < (entry_ts + CLOSE_AFTER_SECONDS):
+                return {"success": True, "done": False, "action": "waiting_close_timer", "orders_placed": 0, "placed_notional_usd": 0.0}
 
         pos = _load_position(client, product_id)
         if not pos:
@@ -1135,7 +1314,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             "success": True,
             "done": False,
             "action": "placed_limit_close_wait_fill",
-            "detail": f"Maker close posted #{str(close_result.get('digest') or '')[:10]} at ${close_limit:,.2f}",
+            "detail": f"Maker close posted #{str(close_result.get('digest') or '')[:10]} at ${close_limit:,.2f} ({exit_reason})",
             "orders_placed": 1,
             "placed_notional_usd": round(pos_size * close_limit, 4),
             "vol_order_attempts": 1,
@@ -1157,6 +1336,45 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             "vol_order_failures": 1,
             "last_order_error": "insufficient_effective_margin",
         }
+    if bool(state.get("vol_signal_filter_enabled", False)):
+        max_spread_bp = float(state.get("vol_max_spread_bp") or DEFAULT_VOL_MAX_SPREAD_BP)
+        quality_ok, spread_bp, quality_reason = _quote_quality(mp, mid, max_spread_bp)
+        state["vol_spread_bp"] = round(spread_bp, 4)
+        if not quality_ok:
+            return {
+                "success": True,
+                "done": False,
+                "action": quality_reason,
+                "detail": f"VOL skipped entry: {quality_reason} (spread {spread_bp:.2f} bp)",
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "vol_signal_reason": quality_reason,
+                "vol_spread_bp": round(spread_bp, 4),
+            }
+
+        signal = _volume_signal(product, mid, state)
+        state["vol_signal"] = {
+            "ok": bool(signal.get("ok")),
+            "reason": signal.get("reason"),
+            "direction": signal.get("direction"),
+            "ema": round(float(signal.get("ema") or 0.0), 6),
+            "rsi": round(float(signal.get("rsi") or 0.0), 4),
+            "edge_bp": round(float(signal.get("edge_bp") or 0.0), 4),
+            "direction_mode": signal.get("direction_mode"),
+        }
+        if not signal.get("ok"):
+            return {
+                "success": True,
+                "done": False,
+                "action": str(signal.get("reason") or "waiting_signal"),
+                "detail": "VOL skipped entry: signal filter did not confirm a positive-expectancy setup.",
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "vol_signal": state["vol_signal"],
+            }
+        direction = _normalize_direction(signal.get("direction") or direction)
+        state["vol_direction"] = direction
+        state["direction"] = direction
     size = max(effective_margin / mid, MIN_SIZE)
     is_long = direction == "long"
     entry_limit = _maker_limit_price(mp, is_buy=is_long)

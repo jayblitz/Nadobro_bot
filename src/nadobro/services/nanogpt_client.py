@@ -9,11 +9,9 @@ from typing import Any
 
 import requests
 
+from src.nadobro.services.provider_config import nanogpt_api_key, nanogpt_base_url as _configured_base_url
+
 logger = logging.getLogger(__name__)
-
-
-def nanogpt_api_key() -> str:
-    return (os.environ.get("NANOGPT_API_KEY") or os.environ.get("NANO_GPT_API_KEY") or "").strip()
 
 
 def nanogpt_is_configured() -> bool:
@@ -21,7 +19,7 @@ def nanogpt_is_configured() -> bool:
 
 
 def nanogpt_base_url() -> str:
-    raw = (os.environ.get("NANOGPT_BASE_URL") or "https://nano-gpt.com/api/v1").strip().rstrip("/")
+    raw = _configured_base_url()
     if (os.environ.get("NANOGPT_USE_LEGACY_ENDPOINT") or "").strip().lower() in ("1", "true", "yes", "on"):
         if raw.endswith("/v1"):
             return raw[: -len("/v1")] + "/v1legacy"

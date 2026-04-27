@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Awaitable, Callable
 
@@ -15,9 +16,11 @@ _DEDUP_TTL_SECONDS = 20.0
 _stats: dict[str, int] = {
     "strategy_enqueued": 0,
     "strategy_deduped": 0,
+    "strategy_backpressured": 0,
     "strategy_dropped": 0,
     "vol_strategy_enqueued": 0,
     "vol_strategy_deduped": 0,
+    "vol_strategy_backpressured": 0,
     "vol_strategy_dropped": 0,
     "alert_enqueued": 0,
     "alert_deduped": 0,
@@ -26,6 +29,15 @@ _stats: dict[str, int] = {
 
 _strategy_handler: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 _alert_handler: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+
+
+def _queue_put_timeout_seconds(kind: str) -> float:
+    env_key = "NADO_STRATEGY_QUEUE_PUT_TIMEOUT_SECONDS" if kind == "strategy" else "NADO_ALERT_QUEUE_PUT_TIMEOUT_SECONDS"
+    raw = (os.environ.get(env_key) or "2.0").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 2.0
 
 
 def register_handlers(
@@ -60,36 +72,67 @@ async def enqueue_strategy(payload: dict[str, Any], dedupe_key: str) -> bool:
     if not any((not t.done()) and (t.get_name() or "").startswith("strategy-") for t in _workers):
         logger.warning("No active strategy queue workers detected; restarting workers")
         start_workers(_strategy_worker_target, _alert_worker_target)
-    if not _dedupe_ok(f"strategy:{dedupe_key}"):
+    dedupe_marker = f"strategy:{dedupe_key}"
+    if not _dedupe_ok(dedupe_marker):
         _stats["strategy_deduped"] += 1
         if is_vol:
             _stats["vol_strategy_deduped"] += 1
         return False
     try:
-        _strategy_queue.put_nowait(payload)
+        if _strategy_queue.full():
+            _stats["strategy_backpressured"] += 1
+            if is_vol:
+                _stats["vol_strategy_backpressured"] += 1
+            logger.warning(
+                "strategy queue full; waiting for capacity key=%s qsize=%s/%s",
+                dedupe_key,
+                _strategy_queue.qsize(),
+                _strategy_queue.maxsize,
+            )
+        await asyncio.wait_for(_strategy_queue.put(payload), timeout=_queue_put_timeout_seconds("strategy"))
         _stats["strategy_enqueued"] += 1
         if is_vol:
             _stats["vol_strategy_enqueued"] += 1
         return True
-    except asyncio.QueueFull:
+    except asyncio.TimeoutError:
+        _dedupe_seen.pop(dedupe_marker, None)
         _stats["strategy_dropped"] += 1
         if is_vol:
             _stats["vol_strategy_dropped"] += 1
-        logger.warning("strategy queue full; dropping job key=%s", dedupe_key)
+        logger.error(
+            "strategy queue remained full after timeout; dropping job key=%s qsize=%s/%s",
+            dedupe_key,
+            _strategy_queue.qsize(),
+            _strategy_queue.maxsize,
+        )
         return False
 
 
 async def enqueue_alert(payload: dict[str, Any], dedupe_key: str) -> bool:
-    if not _dedupe_ok(f"alert:{dedupe_key}"):
+    dedupe_marker = f"alert:{dedupe_key}"
+    if not _dedupe_ok(dedupe_marker):
         _stats["alert_deduped"] += 1
         return False
     try:
-        _alert_queue.put_nowait(payload)
+        if _alert_queue.full():
+            logger.warning(
+                "alert queue full; waiting for capacity key=%s qsize=%s/%s",
+                dedupe_key,
+                _alert_queue.qsize(),
+                _alert_queue.maxsize,
+            )
+        await asyncio.wait_for(_alert_queue.put(payload), timeout=_queue_put_timeout_seconds("alert"))
         _stats["alert_enqueued"] += 1
         return True
-    except asyncio.QueueFull:
+    except asyncio.TimeoutError:
+        _dedupe_seen.pop(dedupe_marker, None)
         _stats["alert_dropped"] += 1
-        logger.warning("alert queue full; dropping job key=%s", dedupe_key)
+        logger.error(
+            "alert queue remained full after timeout; dropping job key=%s qsize=%s/%s",
+            dedupe_key,
+            _alert_queue.qsize(),
+            _alert_queue.maxsize,
+        )
         return False
 
 

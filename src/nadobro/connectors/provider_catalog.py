@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
+
+from src.nadobro.services.provider_config import provider_configured
 
 
 @dataclass(frozen=True)
@@ -17,26 +18,7 @@ class ProviderSpec:
 
     @property
     def configured(self) -> bool:
-        if not self.api_key_env:
-            return True
-        if bool(os.environ.get(self.api_key_env, "")):
-            return True
-        if self.provider == "nanogpt":
-            return bool(os.environ.get("NANO_GPT_API_KEY", ""))
-        if self.provider == "n8n":
-            url = (
-                os.environ.get("N8N_BASE_URL")
-                or os.environ.get("n8n_Server_URL")
-                or os.environ.get("N8N_SERVER_URL")
-                or ""
-            ).strip()
-            authed = bool(
-                (os.environ.get("N8N_API_KEY") or "").strip()
-                or (os.environ.get("n8n_authorization") or "").strip()
-                or (os.environ.get("n8n_MCP_Access_Token") or "").strip()
-            )
-            return bool(url and authed)
-        return False
+        return provider_configured(self.provider, self.api_key_env)
 
     def to_dict(self) -> dict:
         return {

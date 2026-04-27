@@ -2,6 +2,11 @@ import json
 from datetime import datetime
 
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
+from src.nadobro.services.strategy_registry import (
+    MARKET_MAKING_STRATEGIES,
+    normalize_strategy_id,
+    settings_strategy_defaults,
+)
 from src.nadobro.services.user_service import get_user
 
 SETTINGS_PREFIX = "user_settings:"
@@ -12,81 +17,7 @@ def _settings_key(telegram_id: int, network: str) -> str:
 
 
 def _default_strategy_settings() -> dict:
-    return {
-        "grid": {
-            "notional_usd": 75.0, "spread_bp": 4.0, "interval_seconds": 45, "tp_pct": 0.6, "sl_pct": 0.5,
-            "levels": 2, "threshold_bp": 0.0, "close_offset_bp": 24.0,
-            "reference_mode": "ema_fast",
-            "ema_fast_alpha": 0.45,
-            "ema_slow_alpha": 0.20,
-            "vol_window_points": 12,
-            "vol_sensitivity": 0.02,
-            "min_spread_bp": 2.0,
-            "max_spread_bp": 20.0,
-            "quote_ttl_seconds": 90,
-            "directional_bias": "neutral",
-            "inventory_soft_limit_usd": 45.0,
-            "cycle_notional_usd": 75.0,
-            "session_notional_cap_usd": 0.0,
-            "grid_reset_threshold_pct": 0.8,
-            "grid_reset_timeout_seconds": 120,
-        },
-        "rgrid": {
-            "notional_usd": 100.0, "spread_bp": 10.0, "rgrid_spread_bp": 10.0, "interval_seconds": 60,
-            "tp_pct": 1.2, "sl_pct": 0.8, "rgrid_stop_loss_pct": 0.8, "rgrid_take_profit_pct": 1.2,
-            "levels": 4, "rgrid_discretion": 0.06,
-            "rgrid_reset_threshold_pct": 1.0, "rgrid_reset_timeout_seconds": 120,
-            # Legacy keys kept for one migration cycle.
-            "min_range_pct": 1.0, "max_range_pct": 1.0,
-        },
-        "dgrid": {
-            "notional_usd": 100.0, "cycle_notional_usd": 100.0, "spread_bp": 8.0,
-            "interval_seconds": 30, "tp_pct": 1.2, "sl_pct": 0.8, "levels": 4,
-            "dgrid_trend_on_variance_ratio": 1.25,
-            "dgrid_range_on_variance_ratio": 1.15,
-            "dgrid_min_spread_bp": 2.0,
-            "dgrid_max_spread_bp": 50.0,
-            "dgrid_short_window_points": 4,
-            "dgrid_long_window_points": 12,
-            "rgrid_stop_loss_pct": 0.8,
-            "rgrid_take_profit_pct": 1.2,
-            "rgrid_discretion": 0.06,
-            "grid_reset_threshold_pct": 0.2,
-            "rgrid_reset_threshold_pct": 0.2,
-            "grid_reset_timeout_seconds": 120,
-            "rgrid_reset_timeout_seconds": 120,
-        },
-        "dn": {
-            "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6,
-            "auto_close_on_maintenance": 1.0,
-            "funding_entry_mode": "enter_anyway",
-        },
-        "vol": {
-            "notional_usd": 100.0,
-            "fixed_margin_usd": 100.0,
-            "target_volume_usd": 10000.0,
-            "interval_seconds": 10,
-            "tp_pct": 1.0,
-            "sl_pct": 1.0,
-            "vol_direction": "long",
-        },
-        "bro": {
-            "budget_usd": 500.0,
-            "risk_level": "balanced",
-            "max_positions": 3,
-            "cycle_seconds": 300,
-            "tp_pct": 2.0,
-            "sl_pct": 1.5,
-            "max_loss_pct": 15.0,
-            "leverage_cap": 5,
-            "products": ["BTC", "ETH", "SOL"],
-            "use_sentiment": True,
-            "use_cmc": True,
-            "min_confidence": 0.65,
-            "howl_enabled": True,
-            "howl_hour_utc": 2,
-        },
-    }
+    return settings_strategy_defaults()
 
 
 def _default_settings() -> dict:
@@ -115,14 +46,7 @@ def _looks_like_grid_config(cfg: dict) -> bool:
 
 
 def _normalize_strategy_id(strategy: str) -> str:
-    sid = str(strategy or "").lower().strip()
-    if sid == "mm":
-        return "grid"
-    if sid in ("reverse_grid", "reverse-grid"):
-        return "rgrid"
-    if sid in ("dynamic_grid", "dynamic-grid", "d-grid"):
-        return "dgrid"
-    return sid
+    return normalize_strategy_id(strategy)
 
 
 def _migrate_loaded_strategies(loaded_strats: dict) -> dict:
@@ -185,7 +109,7 @@ def update_user_settings(telegram_id: int, mutator):
 def sync_cycle_notional_with_margin(strategies: dict, strategy_id: str) -> None:
     """When margin (notional_usd) changes, keep per-cycle budget aligned for MM/Grid."""
     strategy_id = _normalize_strategy_id(strategy_id)
-    if strategy_id not in ("grid", "rgrid", "dgrid"):
+    if strategy_id not in MARKET_MAKING_STRATEGIES:
         return
     cfg = strategies.get(strategy_id)
     if not isinstance(cfg, dict):

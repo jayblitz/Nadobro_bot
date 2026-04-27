@@ -19,9 +19,11 @@ from src.nadobro.services import execution_queue
 from src.nadobro.services import runtime_supervisor
 from src.nadobro.services import trade_service
 from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.strategy_lifecycle import cleanup_strategy_positions
 from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
 from src.nadobro.services.trade_service import _place_take_profit_order
 from src.nadobro.strategies import delta_neutral
+from src.nadobro.strategies import volume_bot
 
 
 class RuntimeAndLeverageTests(unittest.TestCase):
@@ -188,7 +190,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
         close_calls = []
 
-        def _close_stub(user_id, network=None, **kwargs):
+        def _close_stub(user_id, network, state):
+            _ = state
             close_calls.append((user_id, network))
             return {"success": True}
 
@@ -202,7 +205,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             }
             with patch.object(bot_runtime, "query_all", return_value=rows), patch.object(
                 bot_runtime, "set_bot_state"
-            ), patch.object(bot_runtime, "close_all_positions", side_effect=_close_stub):
+            ), patch.object(bot_runtime, "cleanup_strategy_positions", side_effect=_close_stub):
                 ok, msg = bot_runtime.stop_all_user_bots(telegram_id, cancel_orders=True)
         finally:
             bot_runtime._tasks = old_tasks
@@ -213,6 +216,61 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             close_calls,
             [(telegram_id, "mainnet"), (telegram_id, "testnet")],
         )
+
+    def test_stop_all_user_bots_migrates_state_before_cleanup(self):
+        telegram_id = 42
+        rows = [
+            {
+                "key": f"{bot_runtime.STATE_PREFIX}{telegram_id}:mainnet",
+                "value": json.dumps({"running": True, "strategy": "delta_neutral"}),
+            },
+        ]
+        seen_state = {}
+
+        def _cleanup_stub(_user_id, _network, state):
+            seen_state.update(state)
+            return {"success": True}
+
+        with patch.object(bot_runtime, "query_all", return_value=rows), patch.object(
+            bot_runtime, "set_bot_state"
+        ), patch.object(bot_runtime, "cleanup_strategy_positions", side_effect=_cleanup_stub):
+            ok, msg = bot_runtime.stop_all_user_bots(telegram_id, cancel_orders=True)
+
+        self.assertTrue(ok)
+        self.assertIn("Stopped 1 running strategy loop(s).", msg)
+        self.assertEqual(seen_state.get("strategy"), "dn")
+
+    def test_stop_all_user_bots_reports_row_errors(self):
+        telegram_id = 42
+        rows = [
+            {
+                "key": f"{bot_runtime.STATE_PREFIX}{telegram_id}:mainnet",
+                "value": "{not json",
+            },
+        ]
+
+        with patch.object(bot_runtime, "query_all", return_value=rows):
+            ok, msg = bot_runtime.stop_all_user_bots(telegram_id, cancel_orders=True)
+
+        self.assertFalse(ok)
+        self.assertIn("No strategy bot was fully stopped", msg)
+        self.assertIn("mainnet", msg)
+
+    def test_cleanup_strategy_positions_normalizes_strategy_aliases(self):
+        calls = []
+
+        def _dn_stub(*args, **kwargs):
+            calls.append(("dn", args, kwargs))
+            return {"success": True}
+
+        with patch("src.nadobro.services.strategy_lifecycle.close_delta_neutral_legs", side_effect=_dn_stub), patch(
+            "src.nadobro.services.strategy_lifecycle.close_all_positions"
+        ) as close_all:
+            res = cleanup_strategy_positions(42, "mainnet", {"strategy": "delta_neutral", "product": "BTC"})
+
+        self.assertTrue(res["success"])
+        self.assertEqual(calls[0][0], "dn")
+        close_all.assert_not_called()
 
     def test_run_cycle_sl_path_returns_tuple(self):
         telegram_id = 7
@@ -652,6 +710,66 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         dn = bot_runtime._strategy_defaults("dn")
         self.assertEqual(dn.get("funding_entry_mode"), "enter_anyway")
         self.assertEqual(strategy_worker_group("dn"), "dn")
+
+    def test_vol_strategy_defaults_enable_signal_mode(self):
+        vol = bot_runtime._strategy_defaults("vol")
+        self.assertEqual(vol.get("vol_direction_mode"), "signal")
+        self.assertGreater(float(vol.get("vol_trade_tp_pct")), float(vol.get("vol_trade_sl_pct")))
+        self.assertIn("vol_max_spread_bp", vol)
+
+    def test_volume_signal_waits_for_history(self):
+        from src.nadobro.services import price_tracker
+
+        old_hist = dict(price_tracker._price_history)
+        try:
+            price_tracker._price_history.clear()
+            signal = volume_bot._volume_signal("BTC", 100.0, {"vol_ema_len": 5, "vol_rsi_len": 3})
+            self.assertFalse(signal["ok"])
+            self.assertEqual(signal["reason"], "warming_signal_history")
+        finally:
+            price_tracker._price_history.clear()
+            price_tracker._price_history.update(old_hist)
+
+    def test_volume_signal_accepts_long_pullback_setup(self):
+        from src.nadobro.services import price_tracker
+
+        old_hist = dict(price_tracker._price_history)
+        try:
+            price_tracker._price_history.clear()
+            mids = [100, 101, 102, 103, 104, 105, 106, 107, 106, 107]
+            for mid in mids:
+                price_tracker.record_price("BTC", mid - 0.5, mid + 0.5, mid)
+            signal = volume_bot._volume_signal(
+                "BTC",
+                107.0,
+                {
+                    "vol_ema_len": 5,
+                    "vol_rsi_len": 3,
+                    "vol_rsi_long_max": 90,
+                    "vol_min_edge_bp": 1,
+                },
+            )
+            self.assertTrue(signal["ok"])
+            self.assertEqual(signal["direction"], "long")
+        finally:
+            price_tracker._price_history.clear()
+            price_tracker._price_history.update(old_hist)
+
+    def test_volume_exit_reason_trade_tp(self):
+        should_close, reason = volume_bot._volume_exit_reason(
+            {
+                "vol_entry_fill_price": 100.0,
+                "vol_entry_fill_ts": 1000.0,
+                "vol_trade_tp_pct": 0.4,
+                "vol_trade_sl_pct": 0.2,
+                "vol_hold_seconds": 540,
+            },
+            mid=100.5,
+            now_ts=1010.0,
+            direction="long",
+        )
+        self.assertTrue(should_close)
+        self.assertEqual(reason, "trade_tp_hit")
 
     def test_dgrid_strategy_defaults_and_worker_group(self):
         from src.nadobro.services.runtime_supervisor import strategy_worker_group
