@@ -27,8 +27,11 @@ _tweet_cache: dict = {}
 TWEET_CACHE_TTL = 300  # 5 min
 _TWEET_CACHE_MAX_ENTRIES = 128
 _credits_depleted_until = 0.0
+_credits_next_probe_at = 0.0
 _credits_depleted_logged = False
 _CREDITS_BACKOFF_SECONDS = int(os.environ.get("X_API_CREDITS_DEPLETED_BACKOFF_SECONDS", str(6 * 60 * 60)))
+# After CreditsDepleted, retry at most this often (so topping up credits recovers without a deploy).
+_CREDITS_PROBE_SECONDS = int(os.environ.get("X_API_CREDITS_PROBE_SECONDS", str(5 * 60)))
 
 
 def _prune_tweet_cache(now: float | None = None) -> None:
@@ -46,24 +49,41 @@ def _get_bearer_token() -> Optional[str]:
 
 
 def is_available() -> bool:
-    """Check if X API is configured."""
-    return bool(_get_bearer_token()) and time.time() >= _credits_depleted_until
+    """True if X API is configured and we may attempt a request (including probe windows)."""
+    if not _get_bearer_token():
+        return False
+    now = time.time()
+    if now >= _credits_depleted_until:
+        return True
+    return now >= _credits_next_probe_at
 
 
-def _credits_depleted_active() -> bool:
-    return time.time() < _credits_depleted_until
+def _credits_backoff_should_skip_request() -> bool:
+    """Skip HTTP when still in the long backoff window and before the next probe time."""
+    now = time.time()
+    return now < _credits_depleted_until and now < _credits_next_probe_at
 
 
 def _mark_credits_depleted(body: str = "") -> None:
-    global _credits_depleted_until, _credits_depleted_logged
-    _credits_depleted_until = time.time() + max(300, _CREDITS_BACKOFF_SECONDS)
+    global _credits_depleted_until, _credits_next_probe_at, _credits_depleted_logged
+    now = time.time()
+    _credits_depleted_until = now + max(300, _CREDITS_BACKOFF_SECONDS)
+    _credits_next_probe_at = now + max(60, _CREDITS_PROBE_SECONDS)
     if not _credits_depleted_logged:
         logger.warning(
-            "X API credits depleted; disabling direct X polling for %.1f hours. Response: %s",
+            "X API credits depleted; backing off %.1f h with probes every %.0f min. Response: %s",
             max(300, _CREDITS_BACKOFF_SECONDS) / 3600,
+            max(60, _CREDITS_PROBE_SECONDS) / 60,
             redact_sensitive_text((body or "")[:300]),
         )
         _credits_depleted_logged = True
+
+
+def _clear_credits_depleted_state() -> None:
+    global _credits_depleted_until, _credits_next_probe_at, _credits_depleted_logged
+    _credits_depleted_until = 0.0
+    _credits_next_probe_at = 0.0
+    _credits_depleted_logged = False
 
 
 def _record_x_source(detail: str, confidence: float = 0.85):
@@ -111,7 +131,7 @@ def search_recent_tweets(
     if not token:
         _record_x_source("X API not configured", confidence=0.0)
         return []
-    if _credits_depleted_active():
+    if _credits_backoff_should_skip_request():
         _record_x_source("X API credits depleted backoff", confidence=0.0)
         return []
 
@@ -159,6 +179,7 @@ def search_recent_tweets(
             _record_x_source(f"X API error {resp.status_code}", confidence=0.0)
             return []
 
+        _clear_credits_depleted_state()
         data = resp.json()
         tweets_raw = data.get("data", [])
         users_raw = data.get("includes", {}).get("users", [])

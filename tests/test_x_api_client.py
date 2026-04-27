@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from _stubs import install_test_stubs
 
@@ -19,10 +19,12 @@ class _Resp:
 class XApiClientTests(unittest.TestCase):
     def setUp(self):
         x_api_client._credits_depleted_until = 0.0
+        x_api_client._credits_next_probe_at = 0.0
         x_api_client._credits_depleted_logged = False
 
     def tearDown(self):
         x_api_client._credits_depleted_until = 0.0
+        x_api_client._credits_next_probe_at = 0.0
         x_api_client._credits_depleted_logged = False
 
     def test_credits_depleted_enters_backoff_and_skips_followup_requests(self):
@@ -36,6 +38,22 @@ class XApiClientTests(unittest.TestCase):
         self.assertEqual(second, [])
         self.assertEqual(req.call_count, 1)
         self.assertFalse(x_api_client.is_available())
+
+    def test_credits_probe_then_success_clears_backoff(self):
+        ok = MagicMock()
+        ok.status_code = 200
+        ok.text = "{}"
+        ok.json = lambda: {"data": [], "includes": {"users": []}}
+
+        with patch.dict("os.environ", {"X_API_BEARER_TOKEN": "token"}, clear=False), patch.object(
+            x_api_client.requests, "get", side_effect=[_Resp(), ok]
+        ) as req:
+            x_api_client.search_recent_tweets("q1")
+            x_api_client._credits_next_probe_at = 0.0
+            out = x_api_client.search_recent_tweets("q2")
+            self.assertEqual(req.call_count, 2)
+            self.assertEqual(out, [])
+            self.assertTrue(x_api_client.is_available())
 
 
 if __name__ == "__main__":
