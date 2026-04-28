@@ -127,6 +127,12 @@ def onboarding_accept_tos_kb():
     ])
 
 
+def private_access_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Request Access", url="https://t.me/jaynadobro")],
+    ])
+
+
 def persistent_menu_kb():
     if DUAL_MODE_CARD_FLOW:
         return ReplyKeyboardMarkup(

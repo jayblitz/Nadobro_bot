@@ -14,6 +14,7 @@ from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.user_service import get_or_create_user
 from src.nadobro.services.nado_client import NadoClient
 from src.nadobro.models.database import NetworkMode
+from src.nadobro.services.invite_service import has_private_access
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,9 @@ async def get_current_user(request: Request) -> CurrentUser:
 
     if user_row is None:
         raise HTTPException(status_code=500, detail="Failed to resolve user")
+
+    if not await run_blocking(has_private_access, tg_user.id):
+        raise HTTPException(status_code=403, detail="Private alpha access code required")
 
     # UserRow stores attributes directly (telegram_id, main_address, network_mode, etc.)
     # and keeps the raw dict in _data.  Prefer _data for dict access; fall back to vars().

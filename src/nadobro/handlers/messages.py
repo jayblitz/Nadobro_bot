@@ -32,6 +32,7 @@ from src.nadobro.handlers.keyboards import (
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
     mode_kb, strategy_hub_kb, wallet_kb, positions_kb, points_scope_kb,
     alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb,
+    private_access_kb,
 )
 from src.nadobro.handlers.trade_card import (
     open_trade_card_from_message,
@@ -54,6 +55,22 @@ from src.nadobro.services.points_service import (
 )
 from src.nadobro.services.managed_agent_state import is_managed_agent_enabled
 from src.nadobro.services.managed_agent_service import handle_managed_agent_turn
+from src.nadobro.services.invite_service import (
+    INVITE_CODE_LENGTH,
+    has_private_access,
+    normalize_code,
+    redeem_invite_code,
+)
+
+PRIVATE_ACCESS_MSG = """🔐 Private Alpha Access
+
+Welcome to Nadobro Bot!
+
+This is a private alpha version. To access the bot, please enter your access code.
+
+If you don't have an access code, please contact @jaynadobro to request one.
+
+Enter your 8-character access code below:"""
 
 
 async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
@@ -375,6 +392,18 @@ async def handle_message(update: Update, context: CallbackContext):
 
 
 async def _handle_message_inner(update, context, telegram_id, username, text, started):
+    if not await run_blocking(has_private_access, telegram_id):
+        normalized = normalize_code(text)
+        if len(normalized) == INVITE_CODE_LENGTH:
+            ok, msg = await run_blocking(redeem_invite_code, telegram_id, username, normalized)
+            if ok:
+                await update.message.reply_text(f"{msg}\n\nSend /start to continue setup.")
+            else:
+                await update.message.reply_text(msg, reply_markup=private_access_kb())
+            return
+        await update.message.reply_text(PRIVATE_ACCESS_MSG, reply_markup=private_access_kb())
+        return
+
     resolved_text = resolve_reply_button_text(text)
     flow = context.user_data.get("trade_flow") or {}
     current_state = flow.get("state")

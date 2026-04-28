@@ -45,6 +45,8 @@ class WalletOnboardingFlowTests(unittest.TestCase):
         context = SimpleNamespace(user_data={})
 
         with patch.object(commands, "get_or_create_user", return_value=(SimpleNamespace(), True, None)), patch.object(
+            commands, "has_private_access", return_value=True
+        ), patch.object(
             commands, "is_new_onboarding_complete", return_value=False
         ), patch.object(
             commands, "get_new_onboarding_state", return_value={"language": "en"}

@@ -27,6 +27,7 @@ from src.nadobro.handlers.keyboards import (
     onboarding_accept_tos_kb,
     copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
+    private_access_kb,
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback, open_trade_card_from_callback
 from src.nadobro.handlers.render_utils import plain_text_fallback
@@ -76,6 +77,7 @@ from src.nadobro.config import (
     normalize_volume_spot_symbol,
 )
 from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.invite_service import has_private_access
 from src.nadobro.services.perf import timed_metric, log_slow
 from src.nadobro.services.trading_readiness import check_trading_readiness
 
@@ -170,6 +172,10 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
             if "Query is too old" not in str(e) and "query id is invalid" not in str(e):
                 raise
         await query.message.chat.send_action(ChatAction.TYPING)
+
+        if not await run_blocking(has_private_access, telegram_id):
+            await _edit_loc(query, _PRIVATE_ACCESS_MSG, reply_markup=private_access_kb())
+            return
 
         if data.startswith("onb:"):
             await _handle_onb_new(query, data, telegram_id, context)
@@ -274,6 +280,16 @@ By tapping *"Let's Get It"* you accept the Terms of Use & Privacy Policy.
 We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
 
 Ready?"""
+
+_PRIVATE_ACCESS_MSG = """🔐 Private Alpha Access
+
+Welcome to Nadobro Bot!
+
+This is a private alpha version. To access the bot, please enter your access code.
+
+If you don't have an access code, please contact @jaynadobro to request one.
+
+Enter your 8-character access code below:"""
 
 async def _handle_onb_new(query, data, telegram_id, context):
     if data == "onb:accept_tos":

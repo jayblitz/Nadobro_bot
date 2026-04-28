@@ -169,6 +169,12 @@ def setup_bot():
 
     from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_ops, cmd_stop_all, cmd_revoke
     from src.nadobro.handlers.managed_agent import cmd_agent_on, cmd_agent_off, cmd_agent_status
+    from src.nadobro.handlers.admin_invites import (
+        cmd_invite_generate,
+        cmd_invite_status,
+        cmd_invite_revoke,
+        cmd_invite_grant,
+    )
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
 
@@ -197,6 +203,10 @@ def setup_bot():
     app.add_handler(CommandHandler("agent_on", cmd_agent_on))
     app.add_handler(CommandHandler("agent_off", cmd_agent_off))
     app.add_handler(CommandHandler("agent_status", cmd_agent_status))
+    app.add_handler(CommandHandler("invite_generate", cmd_invite_generate))
+    app.add_handler(CommandHandler("invite_status", cmd_invite_status))
+    app.add_handler(CommandHandler("invite_revoke", cmd_invite_revoke))
+    app.add_handler(CommandHandler("invite_grant", cmd_invite_grant))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

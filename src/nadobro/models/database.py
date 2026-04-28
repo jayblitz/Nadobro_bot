@@ -526,6 +526,10 @@ class UserRow:
         self.last_trade_at = self._data.get("last_trade_at")
         self.total_trades = int(self._data.get("total_trades") or 0)
         self.total_volume_usd = float(self._data.get("total_volume_usd") or 0)
+        self.private_access_granted = bool(self._data.get("private_access_granted"))
+        self.private_access_code_id = self._data.get("private_access_code_id")
+        self.private_access_granted_at = self._data.get("private_access_granted_at")
+        self.private_access_granted_by = self._data.get("private_access_granted_by")
 
 
 # --- New copy trading ORM functions (Nado-native v2) ---

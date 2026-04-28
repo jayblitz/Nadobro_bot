@@ -237,6 +237,38 @@ def init_db():
                     details TEXT,
                     created_at TIMESTAMPTZ DEFAULT now()
                 );
+                CREATE TABLE IF NOT EXISTS invite_codes (
+                    id BIGSERIAL PRIMARY KEY,
+                    code_hash TEXT UNIQUE NOT NULL,
+                    code_prefix TEXT NOT NULL,
+                    created_by BIGINT NOT NULL,
+                    created_for_telegram_id BIGINT,
+                    note TEXT,
+                    max_redemptions INT NOT NULL DEFAULT 1,
+                    redemption_count INT NOT NULL DEFAULT 0,
+                    redeemed_by BIGINT,
+                    redeemed_username TEXT,
+                    redeemed_at TIMESTAMPTZ,
+                    expires_at TIMESTAMPTZ,
+                    revoked_at TIMESTAMPTZ,
+                    revoked_by BIGINT,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now(),
+                    CHECK (max_redemptions > 0),
+                    CHECK (redemption_count >= 0)
+                );
+                CREATE INDEX IF NOT EXISTS idx_invite_codes_redeemed_by ON invite_codes (redeemed_by);
+                CREATE INDEX IF NOT EXISTS idx_invite_codes_created_at ON invite_codes (created_at DESC);
+            """)
+            conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted BOOLEAN DEFAULT false;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_code_id BIGINT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted_at TIMESTAMPTZ;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted_by BIGINT;
+                CREATE INDEX IF NOT EXISTS idx_users_private_access ON users (private_access_granted);
             """)
             conn.commit()
 
