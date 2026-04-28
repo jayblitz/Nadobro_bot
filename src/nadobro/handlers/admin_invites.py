@@ -95,6 +95,7 @@ async def cmd_invite_status(update: Update, context: CallbackContext):
         f"Code prefix: {status.get('code_prefix')}",
         f"Created by: {status.get('created_by')}",
         f"Created for: {status.get('created_for_telegram_id') or '-'}",
+        f"Active: {'yes' if status.get('active') else 'no'}",
         f"Redemptions: {status.get('redemption_count')}/{status.get('max_redemptions')}",
         f"Redeemed by: {status.get('redeemed_by') or '-'}",
         f"Redeemed username: {status.get('redeemed_username') or '-'}",

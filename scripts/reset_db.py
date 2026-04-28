@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Reset Nadobro database: truncates users, network trades/alerts, bot_state, admin_logs,
-and copy-trading tables.
+Hard reset Nadobro database: drops all known app tables and recreates the
+production schema from src.nadobro.db.init_db().
 
 Run from project root with .env set (or SUPABASE_DATABASE_URL):
   python scripts/reset_db.py
   # or with venv: .venv/bin/python scripts/reset_db.py
 
-Type 'yes' when prompted to confirm. All application data will be deleted.
+Type 'hard reset' when prompted to confirm. All application data in these
+tables will be deleted and table definitions will be recreated.
 """
 import sys
 from pathlib import Path
@@ -22,37 +23,56 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.nadobro.db import execute
+from src.nadobro.models.database import init_db
 
-TRUNCATE_SQL = """
-TRUNCATE
-  users,
-  trades,
-  trades_testnet,
-  trades_mainnet,
-  alerts,
-  alerts_testnet,
-  alerts_mainnet,
-  bot_state,
+DROP_SQL = """
+DROP TABLE IF EXISTS
+  miniapp_rate_limit,
+  fill_sync_queue,
+  strategy_performance_snapshots,
+  strategies,
+  points_snapshots,
+  open_orders,
+  positions,
+  strategy_sessions,
+  invite_codes,
   admin_logs,
+  bot_state,
   copy_trades,
+  copy_positions,
+  copy_snapshots,
   copy_mirrors,
-  copy_traders
-RESTART IDENTITY CASCADE;
+  copy_traders,
+  alerts_mainnet,
+  alerts_testnet,
+  alerts,
+  trades_mainnet,
+  trades_testnet,
+  trades,
+  users
+CASCADE;
 """
 
 
 def main():
     confirm = input(
-        "Reset database? This will DELETE users, trades/alerts (all networks), bot state, and copy-trading data. "
-        "Type 'yes' to confirm: "
+        "Hard reset database? This will DROP and RECREATE all Nadobro app tables. "
+        "Type 'hard reset' to confirm: "
     )
-    if confirm.strip().lower() != "yes":
+    if confirm.strip().lower() != "hard reset":
         print("Aborted.")
         sys.exit(0)
 
     try:
-        execute(TRUNCATE_SQL)
-        print("Database reset complete. All tables truncated.")
+        execute(DROP_SQL)
+        init_db()
+        try:
+            from miniapp_api.rate_limit import ensure_rate_limit_table
+
+            ensure_rate_limit_table()
+        except Exception as e:
+            print(f"Warning: miniapp_rate_limit was not recreated: {e}")
+        print("Database hard reset complete. App tables dropped and production schema recreated.")
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)

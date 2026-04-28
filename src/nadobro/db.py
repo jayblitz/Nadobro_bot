@@ -246,6 +246,7 @@ def init_db():
                     note TEXT,
                     max_redemptions INT NOT NULL DEFAULT 1,
                     redemption_count INT NOT NULL DEFAULT 0,
+                    active BOOLEAN NOT NULL DEFAULT true,
                     redeemed_by BIGINT,
                     redeemed_username TEXT,
                     redeemed_at TIMESTAMPTZ,
@@ -268,6 +269,7 @@ def init_db():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_code_id BIGINT;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted_at TIMESTAMPTZ;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted_by BIGINT;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;
                 CREATE INDEX IF NOT EXISTS idx_users_private_access ON users (private_access_granted);
             """)
             conn.commit()
@@ -516,6 +518,149 @@ def init_db():
             logger.info("strategy_sessions table verified/created")
 
         # --- fill_sync_queue table ---
+        # --- Product database design tables: strategy configs, positions, orders, points, and analytics ---
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS strategies (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                    strategy_type TEXT NOT NULL CHECK (
+                        strategy_type IN ('grid', 'r_grid', 'd_grid', 'delta_neutral', 'volume_bot', 'bro_mode')
+                    ),
+                    name TEXT,
+                    network TEXT NOT NULL DEFAULT 'mainnet' CHECK (network IN ('testnet', 'mainnet')),
+                    pair TEXT NOT NULL,
+                    capital_usd NUMERIC(20, 8),
+                    leverage NUMERIC(10, 4) NOT NULL DEFAULT 1,
+                    risk_level TEXT NOT NULL DEFAULT 'medium',
+                    parameters JSONB NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'stopped' CHECK (status IN ('running', 'paused', 'stopped', 'failed')),
+                    started_at TIMESTAMPTZ,
+                    stopped_at TIMESTAMPTZ,
+                    last_run_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                );
+                CREATE INDEX IF NOT EXISTS idx_strategies_user_status ON strategies (user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_strategies_user_type_network_status
+                    ON strategies (user_id, strategy_type, network, status);
+                CREATE INDEX IF NOT EXISTS idx_strategies_type_pair ON strategies (strategy_type, pair);
+
+                CREATE TABLE IF NOT EXISTS strategy_performance_snapshots (
+                    id BIGSERIAL PRIMARY KEY,
+                    strategy_id BIGINT NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                    period TEXT NOT NULL CHECK (period IN ('daily', 'weekly', 'monthly')),
+                    period_start DATE NOT NULL,
+                    pnl_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                    fees_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                    volume_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                    trade_count INT NOT NULL DEFAULT 0,
+                    win_rate NUMERIC(8, 4),
+                    metadata JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (strategy_id, period, period_start)
+                );
+                CREATE INDEX IF NOT EXISTS idx_strategy_perf_user_period
+                    ON strategy_performance_snapshots (user_id, period, period_start DESC);
+
+                CREATE TABLE IF NOT EXISTS positions (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                    strategy_id BIGINT REFERENCES strategies(id) ON DELETE SET NULL,
+                    network TEXT NOT NULL CHECK (network IN ('testnet', 'mainnet')),
+                    pair TEXT NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('long', 'short')),
+                    size NUMERIC(30, 12) NOT NULL,
+                    entry_price NUMERIC(30, 12),
+                    mark_price NUMERIC(30, 12),
+                    leverage NUMERIC(10, 4) NOT NULL DEFAULT 1,
+                    unrealized_pnl_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                    realized_pnl_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+                    opened_at TIMESTAMPTZ DEFAULT now(),
+                    closed_at TIMESTAMPTZ,
+                    metadata JSONB NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions (user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_positions_pair_status ON positions (pair, status);
+
+                CREATE TABLE IF NOT EXISTS open_orders (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                    strategy_id BIGINT REFERENCES strategies(id) ON DELETE SET NULL,
+                    network TEXT NOT NULL CHECK (network IN ('testnet', 'mainnet')),
+                    pair TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    order_type TEXT NOT NULL DEFAULT 'limit',
+                    size NUMERIC(30, 12) NOT NULL,
+                    price NUMERIC(30, 12),
+                    leverage NUMERIC(10, 4) DEFAULT 1,
+                    order_digest TEXT UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    placed_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now(),
+                    metadata JSONB NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_open_orders_user_status ON open_orders (user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_open_orders_pair_status ON open_orders (pair, status);
+
+                CREATE TABLE IF NOT EXISTS points_snapshots (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                    period TEXT NOT NULL CHECK (period IN ('daily', 'weekly', 'monthly', 'all')),
+                    period_start DATE NOT NULL,
+                    nado_points NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                    volume_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                    cost_per_point_usd NUMERIC(20, 8),
+                    maker_ratio NUMERIC(8, 4),
+                    taker_ratio NUMERIC(8, 4),
+                    metadata JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (user_id, period, period_start)
+                );
+                CREATE INDEX IF NOT EXISTS idx_points_snapshots_user_period
+                    ON points_snapshots (user_id, period, period_start DESC);
+            """)
+            conn.commit()
+            logger.info("Strategy, position, order, and points analytics tables verified/created")
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_status TEXT DEFAULT 'not_started';
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS has_strategy_bot BOOLEAN DEFAULT false;
+
+                ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS scope TEXT DEFAULT 'global';
+                ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS user_id BIGINT;
+                ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
+                CREATE INDEX IF NOT EXISTS idx_bot_state_scope_key ON bot_state (scope, key);
+                CREATE INDEX IF NOT EXISTS idx_bot_state_user_scope ON bot_state (user_id, scope);
+
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS total_pnl_usd NUMERIC(20, 8) DEFAULT 0;
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS total_volume_usd NUMERIC(20, 8) DEFAULT 0;
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS nado_points NUMERIC(20, 8) DEFAULT 0;
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS win_rate NUMERIC(8, 4);
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS last_updated_at TIMESTAMPTZ;
+                CREATE INDEX IF NOT EXISTS idx_copy_traders_leaderboard
+                    ON copy_traders (active, total_pnl_usd DESC, total_volume_usd DESC);
+
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS budget_cap_usd NUMERIC(20, 8);
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS risk_multiplier NUMERIC(10, 4) DEFAULT 1;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS risk_factor DOUBLE PRECISION DEFAULT 1.0;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS last_synced_fill_tid BIGINT;
+
+                ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS original_trade_digest TEXT;
+                ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS copied_order_digest TEXT;
+                ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS pair TEXT;
+                ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS pnl_usd NUMERIC(20, 8);
+                ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS fees_usd NUMERIC(20, 8) DEFAULT 0;
+                CREATE INDEX IF NOT EXISTS idx_copy_trades_original_digest ON copy_trades (original_trade_digest);
+            """)
+            conn.commit()
+            logger.info("Product database design columns verified/created")
+
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS fill_sync_queue (

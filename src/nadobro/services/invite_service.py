@@ -154,7 +154,7 @@ def redeem_invite_code(telegram_id: int, username: str | None, code: str) -> tup
             if not invite:
                 conn.rollback()
                 return False, "Invalid access code. Please check the code and try again."
-            if invite.get("revoked_at") or _is_expired(invite):
+            if invite.get("active") is False or invite.get("revoked_at") or _is_expired(invite):
                 conn.rollback()
                 return False, "This access code is no longer available."
             if invite.get("created_for_telegram_id") and int(invite["created_for_telegram_id"]) != telegram_id:
@@ -249,7 +249,7 @@ def revoke_invite_code(admin_id: int, code: str) -> tuple[bool, str]:
     row = execute_returning(
         """
         UPDATE invite_codes
-        SET revoked_at = now(), revoked_by = %s, updated_at = now()
+        SET active = false, revoked_at = now(), revoked_by = %s, updated_at = now()
         WHERE code_hash = %s AND revoked_at IS NULL
         RETURNING id, redeemed_by
         """,
@@ -284,7 +284,7 @@ def get_invite_code_status(code: str) -> Optional[dict]:
         return None
     return query_one(
         """
-        SELECT id, code_prefix, created_by, created_for_telegram_id, note,
+        SELECT id, code_prefix, created_by, created_for_telegram_id, note, active,
                max_redemptions, redemption_count, redeemed_by, redeemed_username,
                redeemed_at, expires_at, revoked_at, revoked_by, created_at, updated_at
         FROM invite_codes
