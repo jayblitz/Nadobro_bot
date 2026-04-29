@@ -712,6 +712,10 @@ def run_cycle(
         1.0,
         float(state.get("min_order_notional_usd") or DEFAULT_MIN_ORDER_NOTIONAL_USD),
     )
+    leverage_for_budget = max(1.0, float(leverage or 1.0))
+    # Treat cycle budget as margin-like budget for strategy sizing. A higher
+    # leverage permits meeting the same exchange notional floor with less budget.
+    min_budget_per_order_usd = min_order_notional_usd / leverage_for_budget
     order_birth_ts = state.setdefault("mm_order_birth_ts", {})
     if not isinstance(order_birth_ts, dict):
         order_birth_ts = {}
@@ -1101,15 +1105,16 @@ def run_cycle(
     side_budget_weight_total = max(1e-9, buy_mult + sell_mult)
     buy_budget_usd = cycle_target_notional * (buy_mult / side_budget_weight_total)
     sell_budget_usd = cycle_target_notional * (sell_mult / side_budget_weight_total)
-    buy_levels = min(levels, int(buy_budget_usd // min_order_notional_usd))
-    sell_levels = min(levels, int(sell_budget_usd // min_order_notional_usd))
+    buy_levels = min(levels, int(buy_budget_usd // min_budget_per_order_usd))
+    sell_levels = min(levels, int(sell_budget_usd // min_budget_per_order_usd))
     if buy_levels <= 0 and sell_levels <= 0:
-        needed_cycle_notional = min_order_notional_usd * 2.0
+        needed_cycle_notional = min_budget_per_order_usd * 2.0
         return {
             "success": False,
             "error": (
                 f"MM cycle notional is too small for exchange minimum order size. "
-                f"Set cycle notional to at least ${needed_cycle_notional:.0f}."
+                f"Set cycle notional to at least ${needed_cycle_notional:.0f} "
+                f"at {leverage_for_budget:.1f}x leverage."
             ),
             "orders_placed": 0,
             "orders_cancelled": orders_cancelled,

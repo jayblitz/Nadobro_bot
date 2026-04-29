@@ -1609,6 +1609,29 @@ async def _handle_strategy(query, data, context, telegram_id):
         strategy_leverage = 1 if strategy_id == "vol" else settings.get("default_leverage", 3)
         if strategy_id == "dn":
             strategy_leverage = max(1, min(float(strategy_leverage), 5))
+        strategy_conf = (settings.get("strategies", {}) or {}).get(strategy_id, {}) or {}
+        mm_budget_ok, mm_cycle_budget, mm_required_cycle_budget, mm_min_order_notional = _mm_cycle_budget_preflight(
+            strategy_id, strategy_conf, float(strategy_leverage or 1.0)
+        )
+        if not mm_budget_ok:
+            vkb_block = _vol_market_pref(context) if strategy_id == "vol" else "perp"
+            await _edit_loc(
+                query,
+                "⚠️ *Cannot start strategy*\n\n"
+                f"Cycle budget is below exchange minimum requirements at *{escape_md(f'{float(strategy_leverage):.1f}x')}* leverage\\.\n"
+                f"Current cycle budget: *{escape_md(f'${mm_cycle_budget:,.2f}')}*\n"
+                f"Required minimum: *{escape_md(f'${mm_required_cycle_budget:,.2f}')}*\n"
+                f"Min order notional: *{escape_md(f'${mm_min_order_notional:,.2f}')}*\n\n"
+                "Increase margin/cycle budget or leverage, then try again\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=strategy_action_kb(
+                    strategy_id,
+                    product,
+                    list(available_pairs),
+                    vol_market=vkb_block,
+                ),
+            )
+            return
         vol_m = _vol_market_pref(context) if strategy_id == "vol" else "perp"
         if strategy_id == "vol" and vol_m == "spot":
             start_direction = "long"
@@ -2052,6 +2075,24 @@ async def _handle_howl(query, data, telegram_id, context):
 def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
     from src.nadobro.handlers import shared_get_user_settings
     return shared_get_user_settings(telegram_id, context)
+
+
+def _mm_cycle_budget_preflight(strategy_id: str, strategy_conf: dict, leverage: float) -> tuple[bool, float, float, float]:
+    if strategy_id not in ("grid", "rgrid", "dgrid"):
+        return True, 0.0, 0.0, 0.0
+
+    from src.nadobro.strategies.mm_bot import DEFAULT_MIN_ORDER_NOTIONAL_USD
+
+    margin_usd = max(0.0, float(strategy_conf.get("notional_usd", 100.0) or 0.0))
+    cycle_cfg = max(0.0, float(strategy_conf.get("cycle_notional_usd", margin_usd) or 0.0))
+    cycle_budget = max(cycle_cfg, margin_usd)
+    lev = max(1.0, float(leverage or 1.0))
+    min_order_notional = max(
+        1.0,
+        float(strategy_conf.get("min_order_notional_usd") or DEFAULT_MIN_ORDER_NOTIONAL_USD),
+    )
+    required = 2.0 * (min_order_notional / lev)
+    return cycle_budget >= required, cycle_budget, required, min_order_notional
 
 
 def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
@@ -2746,6 +2787,9 @@ def _build_strategy_preview_text(
     leverage = 1.0 if strategy_id == "vol" else float(settings.get("default_leverage", 3))
     if strategy_id == "dn":
         leverage = max(1.0, min(leverage, 5.0))
+    mm_budget_ok, mm_cycle_budget, mm_required_cycle_budget, mm_min_order_notional = _mm_cycle_budget_preflight(
+        strategy_id, conf, leverage
+    )
 
     def _fmt_usd(value: float) -> str:
         return f"${value:,.2f}"
@@ -2899,6 +2943,12 @@ def _build_strategy_preview_text(
                 f"⚠️ Recommended available margin {escape_md(_fmt_usd(recommended_available))} "
                 f"\\(trade {escape_md(_fmt_usd(required_margin))} + buffer {escape_md(_fmt_usd(recommended_available - required_margin))}\\)\\."
             )
+        if not mm_budget_ok:
+            warning = (
+                f"⚠️ Cycle budget too low for exchange minimums at {escape_md(f'{leverage:.1f}x')} leverage\\. "
+                f"Current: {escape_md(_fmt_usd(mm_cycle_budget))} · Required: {escape_md(_fmt_usd(mm_required_cycle_budget))} "
+                f"\\(min order {escape_md(_fmt_usd(mm_min_order_notional))}\\)\\."
+            )
         return (
             "⚡ *Dynamic GRID Dashboard*\n"
             f"Status: {status_emoji} *{status_label}*\n\n"
@@ -2937,6 +2987,12 @@ def _build_strategy_preview_text(
             warning = (
                 f"⚠️ Recommended available margin {escape_md(_fmt_usd(recommended_available))} "
                 f"\\(trade {escape_md(_fmt_usd(required_margin))} + buffer {escape_md(_fmt_usd(recommended_available - required_margin))}\\)\\."
+            )
+        if not mm_budget_ok:
+            warning = (
+                f"⚠️ Cycle budget too low for exchange minimums at {escape_md(f'{leverage:.1f}x')} leverage\\. "
+                f"Current: {escape_md(_fmt_usd(mm_cycle_budget))} · Required: {escape_md(_fmt_usd(mm_required_cycle_budget))} "
+                f"\\(min order {escape_md(_fmt_usd(mm_min_order_notional))}\\)\\."
             )
         return (
             "📊 *GRID Dashboard*\n"
