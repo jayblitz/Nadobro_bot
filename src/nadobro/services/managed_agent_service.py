@@ -88,7 +88,7 @@ async def handle_managed_agent_turn(
     if not prompt_text:
         return {
             "handled": True,
-            "response": "Hey boss, say the word and we lock in.",
+            "response": "Hey bro, I'm here. Tell me what you want to check, build, or trade.",
             "show_menu": False,
             "route": "empty",
         }
@@ -96,7 +96,7 @@ async def handle_managed_agent_turn(
     if _is_casual_ping(prompt_text):
         return {
             "handled": True,
-            "response": "Locked in legend. Printing soon - what move do you want next?",
+            "response": "I'm here, bro. What are we checking: market, strategy, portfolio, or a build idea?",
             "show_menu": False,
             "route": "casual",
         }
@@ -156,7 +156,7 @@ async def handle_managed_agent_turn(
         if ok:
             return {
                 "handled": True,
-                "response": f"Hey boss, strategy is live. {msg}",
+                "response": f"Locked in, bro. Strategy is live. {msg}",
                 "show_menu": True,
                 "route": "strategy_start_ok",
             }

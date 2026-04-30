@@ -183,6 +183,10 @@ def install_test_stubs() -> None:
 
         class _Account:
             @staticmethod
+            def enable_unaudited_hdwallet_features():
+                return None
+
+            @staticmethod
             def create():
                 key = types.SimpleNamespace(hex=lambda: "0x0")
                 return types.SimpleNamespace(key=key, address="0x" + "0" * 40)

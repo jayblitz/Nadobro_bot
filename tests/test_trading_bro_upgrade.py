@@ -16,6 +16,33 @@ if "openai" not in sys.modules:
     openai_mod.OpenAI = _OpenAI
     sys.modules["openai"] = openai_mod
 
+if "cryptography.fernet" not in sys.modules:
+    crypto_mod = types.ModuleType("cryptography")
+    fernet_mod = types.ModuleType("cryptography.fernet")
+
+    class _Fernet:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def generate_key():
+            return b"0" * 44
+
+        def encrypt(self, value):
+            return value
+
+        def decrypt(self, value):
+            return value
+
+    class _InvalidToken(Exception):
+        pass
+
+    fernet_mod.Fernet = _Fernet
+    fernet_mod.InvalidToken = _InvalidToken
+    crypto_mod.fernet = fernet_mod
+    sys.modules["cryptography"] = crypto_mod
+    sys.modules["cryptography.fernet"] = fernet_mod
+
 
 class TradingBroUpgradeTests(unittest.TestCase):
     def test_classifier_treats_mm_build_question_as_learning(self):
@@ -80,6 +107,20 @@ class TradingBroUpgradeTests(unittest.TestCase):
         self.assertIn("*Strategy Builder*", card)
         self.assertIn("1\\. Add router", card)
         self.assertIn("\\- Test it", card)
+
+    def test_trading_bro_prompt_uses_cool_buddy_tone(self):
+        from src.nadobro.services.trading_bro_service import build_trading_bro_question
+
+        framed = build_trading_bro_question("Explain D-GRID", mode="educational_guide")
+
+        self.assertIn("cool buddy", framed)
+        self.assertIn("relaxed, helpful, confident", framed)
+
+    def test_streaming_draft_updates_at_word_like_boundaries(self):
+        from src.nadobro.handlers.messages import _should_update_streaming_draft
+
+        self.assertTrue(_should_update_streaming_draft("This is a longer streamed chunk ", 0, 1.0, 2.0))
+        self.assertFalse(_should_update_streaming_draft("This is a longer streamed chu", 0, 1.0, 2.0))
 
 
 if __name__ == "__main__":

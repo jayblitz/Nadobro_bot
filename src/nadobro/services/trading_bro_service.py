@@ -34,7 +34,8 @@ def build_trading_bro_question(text: str, *, mode: str | None = None) -> str:
     return (
         "TRADING BRO ANSWER MODE\n"
         f"Mode: {selected_mode}\n\n"
-        "Answer like a full trading companion, not a narrow product-support bot.\n"
+        "Answer like a cool buddy who trades with the user, not a narrow product-support bot.\n"
+        "- Tone: relaxed, helpful, confident, and human. Warm bro energy, not forced degen slang.\n"
         "- If the user is asking to learn/build/debug, do not execute trades or strategies.\n"
         "- Give a clear answer first, then structured sections with practical steps.\n"
         "- For strategy/build questions, cover architecture, logic, risk controls, execution, monitoring, and tests.\n"

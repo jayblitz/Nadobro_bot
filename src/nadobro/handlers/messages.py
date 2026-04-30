@@ -116,6 +116,8 @@ logger = logging.getLogger(__name__)
 
 TRADE_FLOW_STEPS = ["direction", "order_type", "product", "leverage", "size", "limit_price", "tpsl", "confirm"]
 PENDING_TEXT_CLOSE_ALL_KEY = "pending_text_close_all"
+STREAM_DRAFT_MIN_CHARS = 24
+STREAM_DRAFT_MIN_SECONDS = 0.35
 
 
 _STATE_REQUIRED_ACTIONS = {
@@ -1326,6 +1328,29 @@ async def _delete_user_message(update: Update):
         pass
 
 
+async def _typing_heartbeat(chat, stop_event: asyncio.Event, interval_seconds: float = 3.0):
+    """Keep Telegram's typing indicator alive while a response is being prepared."""
+    while not stop_event.is_set():
+        try:
+            await chat.send_action(ChatAction.TYPING)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
+
+
+def _should_update_streaming_draft(text: str, last_len: int, last_ts: float, now_ts: float) -> bool:
+    delta = len(text) - int(last_len or 0)
+    if delta < STREAM_DRAFT_MIN_CHARS or (now_ts - float(last_ts or 0.0)) < STREAM_DRAFT_MIN_SECONDS:
+        return False
+    if not text:
+        return False
+    # Prefer word-like updates so the draft feels like it is typing, not dumping paragraphs.
+    return text[-1].isspace() or text[-1] in ".,;:!?)]}\n"
+
+
 async def _handle_pending_alert(update, context, telegram_id, text):
     pending = context.user_data.get("pending_alert")
     if not pending:
@@ -1601,25 +1626,13 @@ async def _handle_nado_question(update, context, question):
     typing_task = None
     stop_typing = asyncio.Event()
 
-    async def _typing_heartbeat():
-        # Telegram typing indicator expires quickly; refresh while LLM is running.
-        while not stop_typing.is_set():
-            try:
-                await update.message.chat.send_action(ChatAction.TYPING)
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(stop_typing.wait(), timeout=4.0)
-            except asyncio.TimeoutError:
-                continue
-
     full_text = ""
     last_draft_len = 0
     last_draft_ts = 0.0
     draft_ok = True
 
     try:
-        typing_task = asyncio.create_task(_typing_heartbeat())
+        typing_task = asyncio.create_task(_typing_heartbeat(update.message.chat, stop_typing))
         try:
             # Show immediate visual feedback while retrieval/LLM warm-up happens.
             await context.bot.send_message_draft(
@@ -1634,7 +1647,7 @@ async def _handle_nado_question(update, context, question):
         async for chunk in stream_trading_bro_answer(question, telegram_id=telegram_id, user_name=user_name):
             full_text += chunk
             now_ts = time.time()
-            if draft_ok and (len(full_text) - last_draft_len >= 120) and (now_ts - last_draft_ts >= 1.2):
+            if draft_ok and _should_update_streaming_draft(full_text, last_draft_len, last_draft_ts, now_ts):
                 try:
                     await context.bot.send_message_draft(
                         chat_id=chat_id,
@@ -1693,12 +1706,23 @@ async def _handle_managed_agent_message(update, context, telegram_id, username, 
         return False
 
     increment_counter("managed_agent.turn.received")
-    with timed_metric("managed_agent.turn"):
-        result = await handle_managed_agent_turn(
-            telegram_id=telegram_id,
-            text=text,
-            username=username,
-        )
+    stop_typing = asyncio.Event()
+    typing_task = None
+    try:
+        typing_task = asyncio.create_task(_typing_heartbeat(update.message.chat, stop_typing))
+        with timed_metric("managed_agent.turn"):
+            result = await handle_managed_agent_turn(
+                telegram_id=telegram_id,
+                text=text,
+                username=username,
+            )
+    finally:
+        stop_typing.set()
+        if typing_task:
+            try:
+                await typing_task
+            except Exception:
+                pass
     if not result.get("handled"):
         increment_counter("managed_agent.turn.unhandled")
         return False
