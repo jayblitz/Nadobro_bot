@@ -735,6 +735,14 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
         f"💎 *{_loc('Position Value:')}* {escape_md(f'${position_value:,.2f}')} \\| "
         f"{upnl_emoji} *{_loc('Unrealized PnL:')}* {escape_md(upnl_str)}",
     ])
+    if any(str(p.get("source") or "") == "local_trade_ledger" for p in (positions or [])):
+        lines.extend([
+            "",
+            _loc(
+                "⚠️ *local sync* rows fill gaps when the exchange omits a position \\(often isolated margin\\)\\. "
+                "*Close all* only closes *live* exchange positions; use *Refresh* after you close on Nado\\."
+            ),
+        ])
 
     if total_trades > 0:
         total_volume = float(stats.get("total_volume", 0) or 0)

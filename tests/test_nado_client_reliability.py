@@ -266,7 +266,7 @@ class NadoClientReliabilityTests(unittest.TestCase):
         with patch("src.nadobro.services.nado_archive._post", side_effect=_fake_post):
             query_isolated_subaccounts_for_parent("mainnet", "0xparent")
 
-        self.assertEqual(captured["payload"]["isolated_subaccounts"]["subaccount"], ["0xparent"])
+        self.assertEqual(captured["payload"]["isolated_subaccounts"]["subaccount"], "0xparent")
 
     def test_archive_unwraps_orders_under_data(self):
         from src.nadobro.services.nado_archive import _orders_list_from_archive_response

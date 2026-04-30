@@ -179,7 +179,8 @@ def query_isolated_subaccounts_for_parent(
     if not parent:
         return []
     url = archive_url_for_network(network)
-    payload = {"isolated_subaccounts": {"subaccount": [parent], "limit": min(max(1, int(limit)), 500)}}
+    # Archive API expects a single hex string here, not an array (see Nado docs).
+    payload = {"isolated_subaccounts": {"subaccount": parent, "limit": min(max(1, int(limit)), 500)}}
     result = _post(url, payload)
     return _isolated_subaccounts_list_from_response(result) or []
 
