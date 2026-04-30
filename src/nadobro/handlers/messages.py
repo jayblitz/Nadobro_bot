@@ -25,7 +25,7 @@ from src.nadobro.handlers.formatters import (
     escape_md, format_ai_response, fmt_positions, fmt_trade_preview, fmt_strategy_update,
     fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, build_trade_preview_text,
     fmt_alert_menu_intro, fmt_close_all_confirm, fmt_mode_view, fmt_strategy_hub_intro,
-    fmt_bro_answer_card,
+    fmt_bro_answer_card, fmt_referral_dashboard,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
@@ -34,7 +34,7 @@ from src.nadobro.handlers.keyboards import (
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
     mode_kb, strategy_hub_kb, wallet_kb, positions_kb, points_scope_kb,
     alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb,
-    private_access_kb, bro_answer_kb,
+    private_access_kb, bro_answer_kb, referral_kb,
 )
 from src.nadobro.handlers.trade_card import (
     open_trade_card_from_message,
@@ -55,6 +55,7 @@ from src.nadobro.services.points_service import (
     request_points_refresh,
     relay_user_reply_to_lowiqpts,
 )
+from src.nadobro.services.referral_service import get_referral_dashboard
 from src.nadobro.services.managed_agent_state import is_managed_agent_enabled
 from src.nadobro.services.managed_agent_service import handle_managed_agent_turn
 from src.nadobro.services.invite_service import (
@@ -531,6 +532,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         "portfolio:view",
         "wallet:view",
         "points:view",
+        "refer:view",
         "nav:strategy_hub",
         "alert:menu",
         "settings:view",
@@ -648,6 +650,16 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             fmt_points_dashboard(payload),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(points_scope_kb("week"), lang),
+        )
+        return
+
+    if callback_data == "refer:view":
+        payload = await run_blocking(get_referral_dashboard, telegram_id)
+        await _reply_loc(
+            update.message,
+            fmt_referral_dashboard(payload),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=localize_markup(referral_kb(can_generate=bool(payload.get("remaining_codes"))), lang),
         )
         return
 

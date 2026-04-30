@@ -240,8 +240,11 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS invite_codes (
                     id BIGSERIAL PRIMARY KEY,
                     code_hash TEXT UNIQUE NOT NULL,
+                    public_code TEXT,
+                    code_type TEXT NOT NULL DEFAULT 'private_access',
                     code_prefix TEXT NOT NULL,
                     created_by BIGINT NOT NULL,
+                    referrer_user_id BIGINT,
                     created_for_telegram_id BIGINT,
                     note TEXT,
                     max_redemptions INT NOT NULL DEFAULT 1,
@@ -253,13 +256,28 @@ def init_db():
                     expires_at TIMESTAMPTZ,
                     revoked_at TIMESTAMPTZ,
                     revoked_by BIGINT,
+                    earned_volume_threshold_usd DOUBLE PRECISION,
+                    sequence_number INT,
                     created_at TIMESTAMPTZ DEFAULT now(),
                     updated_at TIMESTAMPTZ DEFAULT now(),
+                    CHECK (code_type IN ('private_access', 'referral')),
                     CHECK (max_redemptions > 0),
                     CHECK (redemption_count >= 0)
                 );
                 CREATE INDEX IF NOT EXISTS idx_invite_codes_redeemed_by ON invite_codes (redeemed_by);
                 CREATE INDEX IF NOT EXISTS idx_invite_codes_created_at ON invite_codes (created_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_public_code ON invite_codes (public_code) WHERE public_code IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_invite_codes_referrer ON invite_codes (referrer_user_id, code_type, active);
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'invite_codes_code_type_check'
+                    ) THEN
+                        ALTER TABLE invite_codes
+                        ADD CONSTRAINT invite_codes_code_type_check
+                        CHECK (code_type IN ('private_access', 'referral'));
+                    END IF;
+                END $$;
             """)
             conn.commit()
 
@@ -270,7 +288,50 @@ def init_db():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted_at TIMESTAMPTZ;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted_by BIGINT;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS public_code TEXT;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS code_type TEXT NOT NULL DEFAULT 'private_access';
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS referrer_user_id BIGINT;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS earned_volume_threshold_usd DOUBLE PRECISION;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS sequence_number INT;
                 CREATE INDEX IF NOT EXISTS idx_users_private_access ON users (private_access_granted);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_public_code ON invite_codes (public_code) WHERE public_code IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_invite_codes_referrer ON invite_codes (referrer_user_id, code_type, active);
+            """)
+            conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS referrals (
+                    id BIGSERIAL PRIMARY KEY,
+                    referrer_user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                    referred_user_id BIGINT NOT NULL UNIQUE REFERENCES users(telegram_id) ON DELETE CASCADE,
+                    invite_code_id BIGINT REFERENCES invite_codes(id),
+                    referred_username TEXT,
+                    referred_volume_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    referred_trade_count INT NOT NULL DEFAULT 0,
+                    first_trade_at TIMESTAMPTZ,
+                    last_trade_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now(),
+                    CHECK (referrer_user_id <> referred_user_id),
+                    CHECK (referred_volume_usd >= 0),
+                    CHECK (referred_trade_count >= 0)
+                );
+                CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals (referrer_user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals (referred_user_id);
+
+                CREATE TABLE IF NOT EXISTS referral_volume_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    referral_id BIGINT NOT NULL REFERENCES referrals(id) ON DELETE CASCADE,
+                    referrer_user_id BIGINT NOT NULL,
+                    referred_user_id BIGINT NOT NULL,
+                    volume_usd DOUBLE PRECISION NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'trade_stats',
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    CHECK (volume_usd >= 0)
+                );
+                CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referrer ON referral_volume_events (referrer_user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referred ON referral_volume_events (referred_user_id, created_at DESC);
             """)
             conn.commit()
 

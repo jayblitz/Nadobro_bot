@@ -1070,6 +1070,7 @@ def _fmt_home_toolkit_tree() -> str:
             f"├ 🧠 *Strategy Lab* — {escape_md('automation')}",
             f"├ 📁 *Portfolio Deck* — {escape_md('positions & PnL')}",
             f"├ 🏆 *Nado Points* — {escape_md('rewards & market radar')}",
+            f"├ 🎁 *Refer Friends* — {escape_md('earned invite codes')}",
             f"├ 🔔 *Alert Engine* — {escape_md('price & funding triggers')}",
             f"├ ⚙️ *Control Panel* — {escape_md('leverage & slippage')}",
             f"└ 🌐 *Execution Mode* — {escape_md('mainnet vs testnet')}",
@@ -1112,6 +1113,77 @@ def fmt_dashboard_home() -> str:
         "Next step",
         [escape_md("Use the reply keyboard below to open modules.")],
     )
+
+
+def fmt_referral_dashboard(payload: dict) -> str:
+    code = payload.get("share_code") or {}
+    public_code = str(code.get("public_code") or "")
+    link = str(code.get("link") or "")
+    warning = str(payload.get("warning") or "")
+    own_volume = float(payload.get("own_volume_usd") or 0.0)
+    total_referrals = int(payload.get("total_referrals") or 0)
+    total_referred_volume = float(payload.get("total_referred_volume") or 0.0)
+    total_referred_trades = int(payload.get("total_referred_trades") or 0)
+    earned_codes = int(payload.get("earned_codes") or 0)
+    generated_codes = int(payload.get("generated_codes") or 0)
+    remaining_codes = int(payload.get("remaining_codes") or 0)
+    max_codes = int(payload.get("max_codes") or 1000)
+    volume_per_code = float(payload.get("volume_per_code") or 10000.0)
+    next_needed = float(payload.get("next_code_volume_needed") or 0.0)
+
+    lines = [
+        _ui_header("Referral Deck", icon="🎁"),
+        md2_rule(),
+        "",
+        "*Snapshot*",
+        f"👥 *Direct Referrals:* {escape_md(str(total_referrals))}",
+        f"💎 *Referred Volume:* {escape_md(f'${total_referred_volume:,.2f}')}",
+        f"📈 *Referred Trades:* {escape_md(str(total_referred_trades))}",
+        "",
+        "*Invite Codes*",
+        f"🏦 *Your Volume:* {escape_md(f'${own_volume:,.2f}')}",
+        f"🎟 *Earned:* {escape_md(str(earned_codes))} / {escape_md(str(max_codes))}",
+        f"🧾 *Generated:* {escape_md(str(generated_codes))} \\| *Available:* {escape_md(str(remaining_codes))}",
+        f"⚙️ *Rule:* {escape_md(f'1 invite code per ${volume_per_code:,.0f} own trading volume')}",
+    ]
+
+    if public_code:
+        lines.extend([
+            "",
+            "*Share Access*",
+            f"🔑 *Code:* `{escape_md(public_code)}`",
+            f"🔗 *Link:* {escape_md(link)}",
+        ])
+    else:
+        lines.extend([
+            "",
+            "⚠️ *Invite locked*",
+            escape_md(warning or f"Trade ${next_needed:,.2f} more volume to unlock your next invite code."),
+        ])
+
+    referred_users = payload.get("referred_users") or []
+    lines.extend(["", "*Direct Referrals*"])
+    if not referred_users:
+        lines.append(escape_md("No direct referrals yet. Share your code with high-quality traders when you unlock one."))
+    else:
+        for row in referred_users[:5]:
+            username = str(row.get("username") or "").strip()
+            label = f"@{username}" if username else f"ID {row.get('referred_user_id')}"
+            vol = float(row.get("referred_volume_usd") or 0.0)
+            trades = int(row.get("referred_trade_count") or 0)
+            lines.append(
+                f"• *{escape_md(label)}* \\| {escape_md(f'${vol:,.2f}')} \\| "
+                f"{escape_md(str(trades))} trades"
+            )
+        if len(referred_users) > 5:
+            lines.append(f"• \\.\\.\\. and {escape_md(str(len(referred_users) - 5))} more")
+
+    lines.extend([
+        "",
+        md2_rule(24),
+        "_Quality focused: codes are earned through your own volume and direct referred volume is tracked transparently\\._",
+    ])
+    return "\n".join(lines)
     return "\n\n".join(
         [
             fmt_home_header(),

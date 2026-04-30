@@ -35,6 +35,7 @@ HOME_BTN_PORTFOLIO = f"{HOME_MODULE_EMOJIS['portfolio']} Portfolio Deck"
 HOME_BTN_HOME = f"{HOME_MODULE_EMOJIS['home']} Home"
 HOME_BTN_WALLET = f"{HOME_MODULE_EMOJIS['wallet']} Wallet Vault"
 HOME_BTN_POINTS = f"{HOME_MODULE_EMOJIS['points']} Nado Points"
+HOME_BTN_REFER = "🎁 Refer Friends"
 HOME_BTN_STRATEGIES = f"{HOME_MODULE_EMOJIS['strategies']} Strategy Lab"
 HOME_BTN_ALERTS = f"{HOME_MODULE_EMOJIS['alerts']} Alert Engine"
 HOME_BTN_SETTINGS = f"{HOME_MODULE_EMOJIS['settings']} Control Panel"
@@ -47,6 +48,7 @@ REPLY_BUTTON_MAP = {
     HOME_BTN_PORTFOLIO: "portfolio:view",
     HOME_BTN_WALLET: "wallet:view",
     HOME_BTN_POINTS: "points:view",
+    HOME_BTN_REFER: "refer:view",
     HOME_BTN_STRATEGIES: "nav:strategy_hub",
     HOME_BTN_ALERTS: "alert:menu",
     HOME_BTN_SETTINGS: "settings:view",
@@ -84,6 +86,8 @@ REPLY_BUTTON_MAP.update({
     "Positions": "pos:view",
     "Wallet": "wallet:view",
     "Points": "points:view",
+    "🎁 Refer Friends": "refer:view",
+    "Refer Friends": "refer:view",
     "📡 Market Radar": "points:view",
     "Market Radar": "points:view",
     "Strategies": "nav:strategy_hub",
@@ -144,8 +148,9 @@ def persistent_menu_kb():
         [
             [KeyboardButton(HOME_BTN_TRADE), KeyboardButton(HOME_BTN_PORTFOLIO)],
             [KeyboardButton(HOME_BTN_WALLET), KeyboardButton(HOME_BTN_POINTS)],
-            [KeyboardButton(HOME_BTN_STRATEGIES), KeyboardButton(HOME_BTN_ALERTS)],
-            [KeyboardButton(HOME_BTN_SETTINGS), KeyboardButton(HOME_BTN_MODE)],
+            [KeyboardButton(HOME_BTN_STRATEGIES), KeyboardButton(HOME_BTN_REFER)],
+            [KeyboardButton(HOME_BTN_ALERTS), KeyboardButton(HOME_BTN_SETTINGS)],
+            [KeyboardButton(HOME_BTN_MODE)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -163,11 +168,14 @@ def home_card_kb():
             InlineKeyboardButton("🏆 Nado Points", callback_data="points:view"),
         ],
         [
-            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🎁 Refer Friends", callback_data="refer:view"),
             InlineKeyboardButton("🔔 Alert Engine", callback_data="alert:menu"),
         ],
         [
+            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
             InlineKeyboardButton("⚙️ Control Panel", callback_data="settings:view"),
+        ],
+        [
             InlineKeyboardButton("🌐 Execution Mode", callback_data="home:mode"),
         ],
     ]
@@ -226,6 +234,17 @@ def portfolio_kb(has_positions: bool = False):
     if has_positions:
         rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
     rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def referral_kb(can_generate: bool = False):
+    rows = []
+    if can_generate:
+        rows.append([InlineKeyboardButton("🎟 Generate Invite Code", callback_data="refer:generate")])
+    rows.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="refer:view"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 

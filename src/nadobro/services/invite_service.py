@@ -44,6 +44,13 @@ def _generate_plain_code() -> str:
     return "".join(secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH))
 
 
+def _normalize_invite_payload(code: str) -> str:
+    raw = str(code or "").strip()
+    if raw.lower().startswith("ref_"):
+        raw = raw[4:]
+    return normalize_code(raw)
+
+
 def _is_expired(row: dict) -> bool:
     expires_at = row.get("expires_at")
     if not expires_at:
@@ -141,7 +148,7 @@ def generate_invite_codes(
 
 def redeem_invite_code(telegram_id: int, username: str | None, code: str) -> tuple[bool, str]:
     telegram_id = int(telegram_id)
-    normalized = normalize_code(code)
+    normalized = _normalize_invite_payload(code)
     if len(normalized) != INVITE_CODE_LENGTH:
         return False, "Invalid access code. Please enter the 8-character code from @jaynadobro."
 
@@ -160,6 +167,17 @@ def redeem_invite_code(telegram_id: int, username: str | None, code: str) -> tup
             if invite.get("created_for_telegram_id") and int(invite["created_for_telegram_id"]) != telegram_id:
                 conn.rollback()
                 return False, "This access code was issued for another Telegram account."
+            is_referral_code = str(invite.get("code_type") or "private_access") == "referral"
+            referrer_user_id = invite.get("referrer_user_id") or invite.get("created_by")
+            if is_referral_code:
+                if int(referrer_user_id or 0) == telegram_id:
+                    conn.rollback()
+                    return False, "You cannot use your own referral invite code."
+                cur.execute("SELECT referrer_user_id FROM referrals WHERE referred_user_id = %s", (telegram_id,))
+                existing_referral = dict(cur.fetchone() or {})
+                if existing_referral and int(existing_referral.get("referrer_user_id") or 0) != int(referrer_user_id or 0):
+                    conn.rollback()
+                    return False, "This Telegram account is already linked to another referrer."
             if int(invite.get("redemption_count") or 0) >= int(invite.get("max_redemptions") or 1):
                 if invite.get("redeemed_by") == telegram_id:
                     cur.execute(
@@ -203,9 +221,20 @@ def redeem_invite_code(telegram_id: int, username: str | None, code: str) -> tup
                 """,
                 (invite["id"], invite["created_by"], telegram_id),
             )
+            if is_referral_code:
+                cur.execute(
+                    """
+                    INSERT INTO referrals (referrer_user_id, referred_user_id, invite_code_id, referred_username)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (referred_user_id) DO NOTHING
+                    """,
+                    (int(referrer_user_id), telegram_id, invite["id"], username),
+                )
         conn.commit()
         invalidate_private_access_cache(telegram_id)
         invalidate_user_cache(telegram_id)
+        if str(invite.get("code_type") or "private_access") == "referral":
+            return True, "Access granted. Welcome to Nadobro — your referral is linked."
         return True, "Access granted. Welcome to Nadobro."
     except Exception:
         conn.rollback()

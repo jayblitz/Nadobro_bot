@@ -364,6 +364,16 @@ def update_trade_stats(telegram_id: int, volume_usd: float, increment_trade_coun
         ),
     )
     invalidate_user_cache(telegram_id)
+    try:
+        from src.nadobro.services.referral_service import record_referred_volume
+
+        record_referred_volume(
+            int(telegram_id),
+            float(volume_usd or 0.0),
+            increment_trade_count=bool(increment_trade_count),
+        )
+    except Exception as e:
+        logger.warning("Failed to record referral volume for user %s: %s", telegram_id, e)
 
 
 def get_all_users_count() -> int:

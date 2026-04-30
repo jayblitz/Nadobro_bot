@@ -17,6 +17,7 @@ from src.nadobro.handlers.formatters import (
     fmt_portfolio,
     fmt_help,
     fmt_points_dashboard,
+    fmt_referral_dashboard,
 )
 from src.nadobro.handlers.keyboards import (
     home_card_kb,
@@ -28,12 +29,14 @@ from src.nadobro.handlers.keyboards import (
     alerts_kb,
     settings_kb,
     portfolio_kb,
+    referral_kb,
     persistent_menu_kb,
 )
 from src.nadobro.handlers.wallet_view import build_wallet_view_payload
 from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
 from src.nadobro.services.points_service import get_points_dashboard
+from src.nadobro.services.referral_service import get_referral_dashboard
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric
 from src.nadobro.services.portfolio_service import PortfolioSnapshotUnavailable, get_portfolio_snapshot
@@ -269,6 +272,11 @@ def _view_points_text(telegram_id: int):
     return fmt_points_dashboard(payload), points_scope_kb("week")
 
 
+def _view_referral_text(telegram_id: int):
+    payload = get_referral_dashboard(telegram_id)
+    return fmt_referral_dashboard(payload), referral_kb(can_generate=bool(payload.get("remaining_codes")))
+
+
 def _view_alerts_text():
     return fmt_alert_menu_intro(), alerts_kb()
 
@@ -296,6 +304,8 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
         return await run_blocking(_view_positions_text, telegram_id)
     if callback_data == "points:view":
         return await run_blocking(_view_points_text, telegram_id)
+    if callback_data == "refer:view":
+        return await run_blocking(_view_referral_text, telegram_id)
     if callback_data == "alert:menu":
         return _view_alerts_text()
     if callback_data == "settings:view":

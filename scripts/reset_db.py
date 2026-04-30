@@ -28,6 +28,8 @@ from src.nadobro.models.database import init_db
 DROP_SQL = """
 DROP TABLE IF EXISTS
   miniapp_rate_limit,
+  referral_volume_events,
+  referrals,
   fill_sync_queue,
   strategy_performance_snapshots,
   strategies,
