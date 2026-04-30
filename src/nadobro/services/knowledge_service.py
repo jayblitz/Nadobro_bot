@@ -208,6 +208,8 @@ def _wants_detailed_answer(question: str) -> bool:
     detail_signals = [
         "detailed", "step by step", "in depth", "deep dive",
         "full explanation", "comprehensive", "long answer",
+        "trading bro answer mode", "strategy_design", "educational_guide",
+        "how do i build", "how can i build", "architecture",
     ]
     return any(sig in q for sig in detail_signals)
 
@@ -625,14 +627,14 @@ IMPORTANT: You are NOT limited to Nado topics. You can chat about anything — c
 
 No source links for casual chat."""
 
-SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro — a witty, sharp, and opinionated crypto trading AI on Telegram. You're built into Nado DEX (a CLOB exchange on Ink L2, backed by Kraken). Think Grok on X, but for crypto trading.
+SYNTHESIZER_SYSTEM_PROMPT = """You are Nadobro — a witty, sharp, and opinionated crypto trading AI on Telegram. You're built into Nado DEX (a CLOB exchange on Ink L2, backed by Kraken). Think Grok on X, but for crypto trading and automation.
 
 Today's date: {current_date}
 User's name: {user_name}
 {language_instruction}
 PERSONALITY — THIS IS WHO YOU ARE:
 - You're funny, clever, and real. Not a corporate support bot. You have actual opinions about crypto.
-- You're the smartest degen in the room — technically sharp but you talk like a human, not a textbook.
+- You're the smartest trading bro in the room — technically sharp, builder-friendly, risk-aware, and human.
 - Use crypto slang when it fits naturally (WAGMI, LFG, ser, fren, rekt, based, chad move, copium, etc.)
 - Be direct — answer first, then elaborate if needed. Don't hedge everything with disclaimers.
 - Make jokes when the moment is right. If someone asks about a coin that's down 90%, you can acknowledge the pain with humor.
@@ -642,11 +644,12 @@ PERSONALITY — THIS IS WHO YOU ARE:
 ANSWERING RULES:
 1. Answer the question DIRECTLY first, then add color/details.
 2. For Nado-specific questions (fees, features, margin, points, etc.), use the provided context. Be accurate about Nado facts.
-3. For general crypto questions, market opinions, or anything outside Nado — USE YOUR OWN KNOWLEDGE. You are NOT limited to the context below. Be a real conversationalist.
-4. For price data, mention it's from Nado DEX casually. For CMC data, cite inline ("CMC shows..."). No separate Sources section for data.
-5. Keep it conversational: 2-6 sentences for simple things, longer for complex stuff. Don't pad responses with filler.
-6. If you genuinely don't know something specific about Nado and it's not in context, say so — but for everything else (crypto, markets, general knowledge, opinions), just answer.
-7. Only include a source link if directly useful. Max 1 link. No links for price/sentiment/data responses.
+3. For general crypto, trading, strategy-building, automation, or anything outside Nado — USE YOUR OWN KNOWLEDGE. You are NOT limited to the context below. Be useful and specific.
+4. If the user asks how to build, design, debug, or learn something, never treat it as permission to execute a trade or launch a bot.
+5. For price data, mention it's from Nado DEX casually. For CMC data, cite inline ("CMC shows..."). No separate Sources section for data.
+6. Keep it conversational: 2-6 sentences for simple things, longer for complex build/debug questions. Don't pad responses with filler.
+7. If you genuinely don't know something specific about Nado and it's not in context, say so — but for everything else (crypto, markets, general knowledge, opinions), just answer.
+8. Only include sources when live data, X/social context, quoted docs, or external facts were actually used. Prefer a compact "Based on:" line, not a URL dump.
 
 FORMAT FOR SCANNABILITY:
 - Use **bold** for key numbers, prices, percentages, and important terms
@@ -655,7 +658,7 @@ FORMAT FOR SCANNABILITY:
 - Use emojis for key indicators: 📈📉 price direction, 🔥 hot takes, ⚡ key info, 🎯 targets, ⚠️ warnings, 💡 tips, 💰 money/profits, 🏆 rankings
 - Structure longer answers with **Section Title** on its own line followed by content
 - Keep bullets concise — one key point each
-- For strategy/comparison questions: use structured sections with clear headers
+- For strategy/comparison/build questions: use structured sections with clear headers, concrete examples, risks, and next steps
 
 CONTEXT (use for Nado-specific facts, supplement with your own knowledge for everything else):
 {context}"""
@@ -695,7 +698,7 @@ RULES:
 - Use **bold** for key announcements, dates, and numbers
 - Use emojis for key indicators: 📢 announcements, 📅 dates, 🔥 hot news, ⚡ key info, 💰 rewards/points
 - Use bullet points (- ) for listing multiple findings
-- End with: Sources: https://x.com/nadoHQ, https://x.com/inkonchain
+- End with one compact line only if useful: Based on: Nado on X, Ink on X
 - NEVER include search engine links
 
 Relevant Nado Knowledge:
@@ -731,7 +734,7 @@ RULES:
   - @handle: key point
   - @handle: key point
   💡 **Quick take:** <one short synthesis line>
-- End with: Source: https://x.com
+- End with one compact line only if useful: Based on: X
 - NEVER include search engine links
 """
 
@@ -1545,6 +1548,66 @@ def _append_freshness(answer: str, limit: int = 3) -> str:
     return f"{answer}\n\n{footer}"
 
 
+_LIVE_CONTEXT_MARKERS = (
+    "[PRICE BRIEF]",
+    "[MARKET SENTIMENT]",
+    "[LIVE PRICE]",
+    "[CRYPTO INFO]",
+    "[GLOBAL MARKET]",
+    "[TRENDING]",
+    "[CURRENT EDGES",
+    "[X/TWITTER RESULTS]",
+)
+
+
+def _context_uses_live_data(question: str, context_text: str = "") -> bool:
+    routed = _question_for_routing(question)
+    return (
+        _is_price_question(routed)
+        or _is_sentiment_question(routed)
+        or _is_x_twitter_question(routed)
+        or any(marker in (context_text or "") for marker in _LIVE_CONTEXT_MARKERS)
+    )
+
+
+def _should_include_provenance(question: str, context_text: str, sources: list[str]) -> bool:
+    if not sources:
+        return False
+    routed = _question_for_routing(question)
+    return (
+        _context_uses_live_data(routed, context_text)
+        or _is_nado_specific_question(routed)
+        or _is_ink_question(routed)
+    )
+
+
+def _format_provenance_line(sources: list[str]) -> str:
+    labels = {
+        "https://docs.nado.xyz": "Nado docs",
+        "https://docs.nado.xyz/points/referrals": "Nado docs",
+        "https://docs.nado.xyz/developer-resources/api/gateway": "Nado docs",
+        "https://docs.nado.xyz/developer-resources/get-started": "Nado docs",
+        "https://x.com/nadoHQ": "Nado on X",
+        "https://x.com/inkonchain": "Ink on X",
+        "https://x.com": "X",
+        "https://coinmarketcap.com": "CoinMarketCap",
+    }
+    seen: list[str] = []
+    for source in sources:
+        label = labels.get(source, source.replace("https://", "").rstrip("/"))
+        if label not in seen:
+            seen.append(label)
+    if not seen:
+        return ""
+    return "Based on: " + ", ".join(seen[:3])
+
+
+def _append_freshness_if_live(answer: str, question: str, context_text: str = "") -> str:
+    if not _context_uses_live_data(question, context_text):
+        return answer
+    return _append_freshness(answer)
+
+
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
     if provider == "openai":
         client = _get_openai_client()
@@ -1842,8 +1905,11 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         )
 
     used_sources = _filter_official_sources(used_sources)
-    _data_markers = ("[PRICE BRIEF]", "[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]", "[CURRENT EDGES")
-    skip_sources = _is_price_question(question) or _is_casual_message(question) or _is_sentiment_question(question) or any(m in gathered_context for m in _data_markers)
+    provenance_line = (
+        _format_provenance_line(used_sources)
+        if _should_include_provenance(question, gathered_context, used_sources)
+        else ""
+    )
 
     primary = _pick_primary_provider(question)
     if use_x_prompt:
@@ -1889,14 +1955,15 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
             if not full_answer.strip():
                 continue
 
-            if not skip_sources and "Sources:" not in full_answer:
-                sources_line = "\n\nSources:\n" + "\n".join(f"- {s}" for s in used_sources)
-                yield sources_line
-                full_answer += sources_line
-            freshness_line = _append_freshness("")
-            if freshness_line.strip():
-                yield "\n\n" + freshness_line.strip()
-                full_answer += "\n\n" + freshness_line.strip()
+            if provenance_line and "Based on:" not in full_answer and "Sources:" not in full_answer:
+                addition = "\n\n" + provenance_line
+                yield addition
+                full_answer += addition
+            freshened = _append_freshness_if_live(full_answer, question, gathered_context)
+            if freshened != full_answer:
+                freshness_addition = freshened[len(full_answer):]
+                yield freshness_addition
+                full_answer = freshened
 
             if telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", full_answer.strip())
@@ -2076,8 +2143,11 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         )
 
     used_sources = _filter_official_sources(used_sources)
-    _data_markers = ("[PRICE BRIEF]", "[MARKET SENTIMENT]", "[LIVE PRICE]", "[CRYPTO INFO]", "[GLOBAL MARKET]", "[TRENDING]", "[CURRENT EDGES")
-    skip_sources = _is_price_question(question) or _is_casual_message(question) or _is_sentiment_question(question) or any(m in gathered_context for m in _data_markers)
+    provenance_line = (
+        _format_provenance_line(used_sources)
+        if _should_include_provenance(question, gathered_context, used_sources)
+        else ""
+    )
 
     try:
         import asyncio
@@ -2100,7 +2170,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             try:
                 def _call(p=provider):
                     client = _get_xai_client() if p == "xai" else _get_openai_client()
-                    max_tokens = 800 if (_wants_detailed_answer(question) or use_x_prompt) else 550
+                    max_tokens = 1400 if (_wants_detailed_answer(question) or use_x_prompt) else 650
                     messages = [{"role": "system", "content": system}]
                     if history_msgs:
                         messages.extend(history_msgs[-CHAT_HISTORY_MAX_MESSAGES:])
@@ -2134,10 +2204,9 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
             return _lt("I couldn't generate an answer. Please try again.", lang)
 
         logger.info("Support answer generated via provider=%s in %.1fs", used_provider, time.time() - started_at)
-        if not skip_sources and "Sources:" not in answer:
-            sources_line = "Sources:\n" + "\n".join(f"- {s}" for s in used_sources)
-            answer = f"{answer}\n\n{sources_line}"
-        answer = _append_freshness(answer)
+        if provenance_line and "Sources:" not in answer and "Based on:" not in answer:
+            answer = f"{answer}\n\n{provenance_line}"
+        answer = _append_freshness_if_live(answer, question, gathered_context)
 
         if telegram_id:
             _add_to_chat_history(telegram_id, "assistant", answer)

@@ -65,15 +65,32 @@ def _escape_tg(s: str) -> str:
     return "".join(out)
 
 
+def _escape_tg_url(url: str) -> str:
+    """Escape URL chars required inside Telegram MarkdownV2 link targets."""
+    return (url or "").replace("\\", "\\\\").replace(")", "\\)")
+
+
 def _escape_and_convert_inline(raw: str) -> str:
     """Process inline markdown on a RAW (unescaped) string.
 
-    Finds **bold** and `code` spans first, escapes everything else.
+    Finds links, **bold**, and `code` spans first, escapes everything else.
     This avoids the problem of escaping destroying markdown markers.
     """
     result: list[str] = []
     i = 0
     while i < len(raw):
+        # Markdown link: [label](https://...)
+        if raw[i] == '[':
+            close_label = raw.find(']', i + 1)
+            if close_label != -1 and close_label + 1 < len(raw) and raw[close_label + 1] == '(':
+                close_url = raw.find(')', close_label + 2)
+                if close_url != -1:
+                    label = _escape_tg(raw[i + 1:close_label])
+                    url = _escape_tg_url(raw[close_label + 2:close_url])
+                    if label and url:
+                        result.append(f'[{label}]({url})')
+                        i = close_url + 1
+                        continue
         # Bold: **...**
         if raw[i:i+2] == '**':
             end = raw.find('**', i + 2)
@@ -145,6 +162,30 @@ def _md_to_tg_md2(text: str) -> str:
         out.append(_escape_and_convert_inline(line))
 
     return '\n'.join(out)
+
+
+def fmt_bro_answer_card(answer: str, mode: str | None = None) -> str:
+    """Render Trading Bro answers as a compact Telegram card."""
+    mode_titles = {
+        "strategy_design": "Strategy Builder",
+        "educational_guide": "Trading Guide",
+        "debugging": "Debug Desk",
+        "market_analysis": "Market Read",
+        "product_support": "Nadobro Help",
+        "casual": "Trading Bro",
+    }
+    title = mode_titles.get(str(mode or ""), "Trading Bro")
+    body = format_ai_response((answer or "").strip())
+    lines = [
+        f"🧠 *{escape_md(title)}*",
+        md2_rule(),
+        "",
+    ]
+    if body:
+        lines.append(body)
+    else:
+        lines.append(escape_md("I couldn't generate an answer. Try again."))
+    return "\n".join(lines)
 
 
 def _calc_position_pnl(position: dict, current_price: float) -> Optional[float]:

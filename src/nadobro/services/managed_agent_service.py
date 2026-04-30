@@ -1,15 +1,12 @@
 import logging
 import re
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from src.nadobro.config import get_perp_products
 from src.nadobro.services.bot_runtime import start_user_bot, stop_all_user_bots
-from src.nadobro.services.knowledge_service import answer_nado_question
-from src.nadobro.services.managed_agent_prompt import (
-    build_managed_agent_system_prompt,
-    build_style_instruction,
-)
+from src.nadobro.services.conversation_intent import classify_conversation_intent, is_educational_request
 from src.nadobro.services.strategy_registry import infer_strategy_from_text
+from src.nadobro.services.trading_bro_service import answer_trading_bro_question
 from src.nadobro.services.trading_readiness import check_trading_readiness
 from src.nadobro.services.user_service import get_user
 
@@ -23,6 +20,7 @@ class ManagedAgentResult(TypedDict):
     response: str
     show_menu: bool
     route: str
+    mode: NotRequired[str]
 
 
 def _normalize_strategy_id(text: str) -> str | None:
@@ -59,6 +57,8 @@ def _extract_direction(text: str) -> str:
 
 def _is_strategy_start_request(text: str) -> bool:
     t = (text or "").lower()
+    if is_educational_request(t):
+        return False
     trigger_words = ("start", "run", "launch", "activate", "enable")
     strategy_words = ("grid", "rgrid", "r-grid", "reverse grid", "dynamic grid", "dgrid", "d-grid", "delta neutral", "volume", "vol", "bro", "alpha")
     return any(w in t for w in trigger_words) and any(w in t for w in strategy_words)
@@ -84,8 +84,6 @@ async def handle_managed_agent_turn(
     text: str,
     username: str | None = None,
 ) -> ManagedAgentResult:
-    _system_prompt = build_managed_agent_system_prompt(username)
-    style_instruction = build_style_instruction()
     prompt_text = (text or "").strip()
     if not prompt_text:
         return {
@@ -102,6 +100,8 @@ async def handle_managed_agent_turn(
             "show_menu": False,
             "route": "casual",
         }
+
+    conversation_intent = classify_conversation_intent(prompt_text)
 
     if _is_strategy_stop_request(prompt_text):
         ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
@@ -168,15 +168,12 @@ async def handle_managed_agent_turn(
         }
 
     try:
-        framed_question = (
-            f"{_system_prompt}\n\n"
-            f"{style_instruction}\n\n"
-            f"User message:\n{prompt_text}"
-        )
-        answer = await answer_nado_question(
-            framed_question,
+        mode = "strategy_design" if conversation_intent.name == "learn" else None
+        answer = await answer_trading_bro_question(
+            prompt_text,
             telegram_id=telegram_id,
             user_name=username,
+            mode=mode,
         )
         if answer and answer.strip():
             return {
@@ -184,6 +181,7 @@ async def handle_managed_agent_turn(
                 "response": answer.strip(),
                 "show_menu": False,
                 "route": "analysis",
+                "mode": mode or conversation_intent.name,
             }
     except Exception as exc:
         logger.warning("Managed agent fallback failed for user %s: %s", telegram_id, exc)

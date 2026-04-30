@@ -174,6 +174,32 @@ def home_card_kb():
     return InlineKeyboardMarkup(rows)
 
 
+def bro_answer_kb(mode: str | None = None):
+    rows = []
+    if mode in {"strategy_design", "educational_guide"}:
+        rows.append([
+            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
+        ])
+    elif mode == "market_analysis":
+        rows.append([
+            InlineKeyboardButton("🏆 Market Radar", callback_data="points:view"),
+            InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
+        ])
+    elif mode == "debugging":
+        rows.append([
+            InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
+            InlineKeyboardButton("⚙️ Control Panel", callback_data="settings:view"),
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
+            InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
+        ])
+    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
+
+
 def status_kb(is_running: bool = False, strategy_label: str | None = None):
     """Inline actions for /status with strategy-aware stop control."""
     rows = [[InlineKeyboardButton("🔄 Refresh", callback_data="status:refresh")]]

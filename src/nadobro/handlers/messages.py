@@ -13,7 +13,8 @@ from src.nadobro.services.user_service import (
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.trade_service import close_position, close_all_positions, get_trade_analytics
 from src.nadobro.services.alert_service import create_alert
-from src.nadobro.services.knowledge_service import answer_nado_question, stream_nado_answer
+from src.nadobro.services.conversation_intent import classify_conversation_intent
+from src.nadobro.services.trading_bro_service import answer_mode_for_text, stream_trading_bro_answer
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.bot_runtime import start_user_bot
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness, is_new_onboarding_complete
@@ -24,6 +25,7 @@ from src.nadobro.handlers.formatters import (
     escape_md, format_ai_response, fmt_positions, fmt_trade_preview, fmt_strategy_update,
     fmt_trade_result, fmt_wallet_info, fmt_settings, fmt_portfolio, build_trade_preview_text,
     fmt_alert_menu_intro, fmt_close_all_confirm, fmt_mode_view, fmt_strategy_hub_intro,
+    fmt_bro_answer_card,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_confirm_kb, REPLY_BUTTON_MAP,
@@ -32,7 +34,7 @@ from src.nadobro.handlers.keyboards import (
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
     mode_kb, strategy_hub_kb, wallet_kb, positions_kb, points_scope_kb,
     alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb,
-    private_access_kb,
+    private_access_kb, bro_answer_kb,
 )
 from src.nadobro.handlers.trade_card import (
     open_trade_card_from_message,
@@ -487,10 +489,13 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
             )
         return
 
-    if await handle_position_management_intent(update, context, telegram_id, text):
+    conversation_intent = classify_conversation_intent(text)
+    allow_operational_intents = conversation_intent.name not in {"learn", "debug"}
+
+    if allow_operational_intents and await handle_position_management_intent(update, context, telegram_id, text):
         return
 
-    if await handle_trade_intent_message(update, context, telegram_id, text):
+    if allow_operational_intents and await handle_trade_intent_message(update, context, telegram_id, text):
         return
 
     if await _handle_interaction_intent_message(update, context, telegram_id, text):
@@ -1586,6 +1591,7 @@ async def _handle_nado_question(update, context, question):
     telegram_id = update.effective_user.id
     user = update.effective_user
     user_name = user.first_name or user.username or "trader"
+    answer_mode = answer_mode_for_text(question)
 
     try:
         await update.message.chat.send_action(ChatAction.TYPING)
@@ -1619,13 +1625,13 @@ async def _handle_nado_question(update, context, question):
             await context.bot.send_message_draft(
                 chat_id=chat_id,
                 draft_id=draft_id,
-                text=localize_text("🧠 Ask NadoBro\n\nThinking..."),
+                text=localize_text("🧠 Trading Bro\n\nThinking..."),
             )
             last_draft_ts = time.time()
         except Exception:
             draft_ok = False
 
-        async for chunk in stream_nado_answer(question, telegram_id=telegram_id, user_name=user_name):
+        async for chunk in stream_trading_bro_answer(question, telegram_id=telegram_id, user_name=user_name):
             full_text += chunk
             now_ts = time.time()
             if draft_ok and (len(full_text) - last_draft_len >= 120) and (now_ts - last_draft_ts >= 1.2):
@@ -1633,7 +1639,7 @@ async def _handle_nado_question(update, context, question):
                     await context.bot.send_message_draft(
                         chat_id=chat_id,
                         draft_id=draft_id,
-                        text=f"🧠 Ask NadoBro\n\n{full_text}",
+                        text=f"🧠 Trading Bro\n\n{full_text}",
                     )
                     last_draft_len = len(full_text)
                     last_draft_ts = now_ts
@@ -1642,11 +1648,9 @@ async def _handle_nado_question(update, context, question):
 
         if full_text.strip():
             await _reply_loc(update.message,
-                f"🧠 *Ask NadoBro*\n\n{format_ai_response(full_text)}",
+                fmt_bro_answer_card(full_text, mode=answer_mode),
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
-                ]),
+                reply_markup=bro_answer_kb(answer_mode),
             )
         else:
             await _reply_loc(update.message,
@@ -1661,11 +1665,9 @@ async def _handle_nado_question(update, context, question):
         if full_text.strip():
             try:
                 await _reply_loc(update.message,
-                    f"🧠 *Ask NadoBro*\n\n{format_ai_response(full_text)}",
+                    fmt_bro_answer_card(full_text, mode=answer_mode),
                     parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
-                    ]),
+                    reply_markup=bro_answer_kb(answer_mode),
                 )
                 return
             except Exception:
@@ -1706,7 +1708,12 @@ async def _handle_managed_agent_message(update, context, telegram_id, username, 
     increment_counter(f"managed_agent.route.{route}")
     reply_markup = persistent_menu_kb() if result.get("show_menu") else None
     raw = (result.get("response") or "").strip() or "Done."
-    formatted = format_ai_response(raw)
+    if route == "analysis":
+        answer_mode = str(result.get("mode") or answer_mode_for_text(text))
+        formatted = fmt_bro_answer_card(raw, mode=answer_mode)
+        reply_markup = bro_answer_kb(answer_mode)
+    else:
+        formatted = format_ai_response(raw)
     try:
         await _reply_loc(
             update.message,
