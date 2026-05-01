@@ -283,7 +283,9 @@ def _view_points_text(telegram_id: int):
 
 
 def _view_referral_text(telegram_id: int):
-    payload = get_referral_dashboard(telegram_id)
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    payload = get_referral_dashboard(telegram_id, network=network)
     return fmt_referral_dashboard(payload), referral_kb(can_generate=bool(payload.get("remaining_codes")))
 
 

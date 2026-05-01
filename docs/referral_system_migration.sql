@@ -6,8 +6,12 @@ BEGIN;
 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS public_code TEXT;
 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS code_type TEXT NOT NULL DEFAULT 'private_access';
 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS referrer_user_id BIGINT;
+ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS network TEXT;
 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS earned_volume_threshold_usd DOUBLE PRECISION;
 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS sequence_number INT;
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mainnet_volume_usd DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS testnet_volume_usd DOUBLE PRECISION DEFAULT 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_public_code
   ON invite_codes (public_code)
@@ -15,6 +19,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_public_code
 
 CREATE INDEX IF NOT EXISTS idx_invite_codes_referrer
   ON invite_codes (referrer_user_id, code_type, active);
+
+CREATE INDEX IF NOT EXISTS idx_invite_codes_referrer_network
+  ON invite_codes (referrer_user_id, network, code_type, active);
 
 DO $$
 BEGIN
@@ -55,11 +62,16 @@ CREATE TABLE IF NOT EXISTS referral_volume_events (
   referral_id BIGINT NOT NULL REFERENCES referrals(id) ON DELETE CASCADE,
   referrer_user_id BIGINT NOT NULL,
   referred_user_id BIGINT NOT NULL,
+  network TEXT NOT NULL DEFAULT 'mainnet',
   volume_usd DOUBLE PRECISION NOT NULL,
+  trade_count_delta INT NOT NULL DEFAULT 1,
   source TEXT NOT NULL DEFAULT 'trade_stats',
   created_at TIMESTAMPTZ DEFAULT now(),
   CHECK (volume_usd >= 0)
 );
+
+ALTER TABLE referral_volume_events ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT 'mainnet';
+ALTER TABLE referral_volume_events ADD COLUMN IF NOT EXISTS trade_count_delta INT NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referrer
   ON referral_volume_events (referrer_user_id, created_at DESC);
@@ -67,12 +79,36 @@ CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referrer
 CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referred
   ON referral_volume_events (referred_user_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referrer_network
+  ON referral_volume_events (referrer_user_id, network, created_at DESC);
+
+-- Backfill per-mode user volume counters from network-specific trade tables.
+UPDATE users u
+SET mainnet_volume_usd = COALESCE(v.total, 0)
+FROM (
+  SELECT user_id, COALESCE(SUM(ABS(size) * COALESCE(NULLIF(price, 0), fill_price, 0)), 0) AS total
+  FROM trades_mainnet
+  WHERE status IN ('filled', 'closed')
+  GROUP BY user_id
+) v
+WHERE u.telegram_id = v.user_id;
+
+UPDATE users u
+SET testnet_volume_usd = COALESCE(v.total, 0)
+FROM (
+  SELECT user_id, COALESCE(SUM(ABS(size) * COALESCE(NULLIF(price, 0), fill_price, 0)), 0) AS total
+  FROM trades_testnet
+  WHERE status IN ('filled', 'closed')
+  GROUP BY user_id
+) v
+WHERE u.telegram_id = v.user_id;
+
 -- Sample data: one earned referral invite and one linked referred user.
 -- Replace Telegram IDs before running against a real environment.
-INSERT INTO users (telegram_id, telegram_username, total_volume_usd, private_access_granted)
+INSERT INTO users (telegram_id, telegram_username, total_volume_usd, testnet_volume_usd, private_access_granted)
 VALUES
-  (100001, 'referrer_demo', 12500, true),
-  (100002, 'referred_demo', 2500, true)
+  (100001, 'referrer_demo', 12500, 12500, true),
+  (100002, 'referred_demo', 2500, 2500, true)
 ON CONFLICT (telegram_id) DO UPDATE
 SET telegram_username = EXCLUDED.telegram_username;
 
@@ -83,6 +119,7 @@ INSERT INTO invite_codes (
   code_prefix,
   created_by,
   referrer_user_id,
+  network,
   note,
   max_redemptions,
   redemption_count,
@@ -99,6 +136,7 @@ VALUES (
   'NAD',
   100001,
   100001,
+  'testnet',
   'sample referral invite',
   1,
   1,

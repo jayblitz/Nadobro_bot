@@ -1130,18 +1130,20 @@ def fmt_referral_dashboard(payload: dict) -> str:
     max_codes = int(payload.get("max_codes") or 1000)
     volume_per_code = float(payload.get("volume_per_code") or 10000.0)
     next_needed = float(payload.get("next_code_volume_needed") or 0.0)
+    network = str(payload.get("network") or "mainnet").upper()
 
     lines = [
         _ui_header("Referral Deck", icon="🎁"),
         md2_rule(),
         "",
         "*Snapshot*",
+        f"🌐 *Mode:* {escape_md(network)}",
         f"👥 *Direct Referrals:* {escape_md(str(total_referrals))}",
         f"💎 *Referred Volume:* {escape_md(f'${total_referred_volume:,.2f}')}",
         f"📈 *Referred Trades:* {escape_md(str(total_referred_trades))}",
         "",
         "*Invite Codes*",
-        f"🏦 *Your Volume:* {escape_md(f'${own_volume:,.2f}')}",
+        f"🏦 *Your {escape_md(network.title())} Volume:* {escape_md(f'${own_volume:,.2f}')}",
         f"🎟 *Earned:* {escape_md(str(earned_codes))} / {escape_md(str(max_codes))}",
         f"🧾 *Generated:* {escape_md(str(generated_codes))} \\| *Available:* {escape_md(str(remaining_codes))}",
         f"⚙️ *Rule:* {escape_md(f'1 invite code per ${volume_per_code:,.0f} own trading volume')}",

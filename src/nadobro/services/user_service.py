@@ -346,19 +346,35 @@ def run_strategy_start_preflight(
     return True, ""
 
 
-def update_trade_stats(telegram_id: int, volume_usd: float, increment_trade_count: bool = True):
+def update_trade_stats(
+    telegram_id: int,
+    volume_usd: float,
+    increment_trade_count: bool = True,
+    *,
+    network: str = "mainnet",
+):
+    network = str(network or "mainnet").strip().lower()
+    volume_column = "testnet_volume_usd" if network == "testnet" else "mainnet_volume_usd"
     row = query_one(
-        "SELECT total_trades, total_volume_usd FROM users WHERE telegram_id = %s",
+        f"SELECT total_trades, total_volume_usd, {volume_column} FROM users WHERE telegram_id = %s",
         (telegram_id,),
     )
     if not row:
         return
     next_total_trades = int(row.get("total_trades") or 0) + (1 if increment_trade_count else 0)
     execute(
-        "UPDATE users SET total_trades = %s, total_volume_usd = %s, last_trade_at = %s WHERE telegram_id = %s",
+        f"""
+        UPDATE users
+        SET total_trades = %s,
+            total_volume_usd = %s,
+            {volume_column} = %s,
+            last_trade_at = %s
+        WHERE telegram_id = %s
+        """,
         (
             next_total_trades,
             float(row.get("total_volume_usd") or 0) + volume_usd,
+            float(row.get(volume_column) or 0) + volume_usd,
             datetime.utcnow().isoformat(),
             telegram_id,
         ),
@@ -370,6 +386,7 @@ def update_trade_stats(telegram_id: int, volume_usd: float, increment_trade_coun
         record_referred_volume(
             int(telegram_id),
             float(volume_usd or 0.0),
+            network=network,
             increment_trade_count=bool(increment_trade_count),
         )
     except Exception as e:

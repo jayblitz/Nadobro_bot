@@ -4,6 +4,7 @@ from typing import Optional
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+BOT_USERNAME = (os.environ.get("BOT_USERNAME") or "Nadbro_bot").lstrip("@")
 _MINIAPP_ENABLE = (os.environ.get("BOT_ENABLE_MINIAPP") or "").strip().lower() in ("1", "true", "yes", "on")
 _MINIAPP_DISABLE = (os.environ.get("BOT_DISABLE_MINIAPP") or "").strip().lower() in ("1", "true", "yes", "on")
 _MINIAPP_ARCHIVED = _MINIAPP_DISABLE or not _MINIAPP_ENABLE

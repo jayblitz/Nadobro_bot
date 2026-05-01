@@ -167,6 +167,7 @@ def setup_bot():
     from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, filters
     from telegram import Update
 
+    from src.nadobro.config import BOT_USERNAME
     from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_ops, cmd_stop_all, cmd_revoke
     from src.nadobro.handlers.managed_agent import cmd_agent_on, cmd_agent_off, cmd_agent_status
     from src.nadobro.handlers.admin_invites import (
@@ -188,10 +189,25 @@ def setup_bot():
     async def _error_handler(update: object, context) -> None:
         logger.exception("Unhandled Telegram update error", exc_info=context.error)
 
+    async def _post_init(application) -> None:
+        try:
+            me = await application.bot.get_me()
+            actual = (me.username or "").lstrip("@")
+            expected = (BOT_USERNAME or "").lstrip("@")
+            if expected and actual and actual.lower() != expected.lower():
+                logger.warning(
+                    "BOT_USERNAME mismatch: configured=%s telegram_getMe=%s. Referral links may be wrong.",
+                    expected,
+                    actual,
+                )
+        except Exception as exc:
+            logger.warning("Could not validate BOT_USERNAME against Telegram getMe(): %s", exc)
+
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .concurrent_updates(True)
+        .post_init(_post_init)
         .build()
     )
 

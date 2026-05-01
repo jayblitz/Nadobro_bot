@@ -5,18 +5,33 @@
 
 app = 'nadobro-bot'
 primary_region = 'ams'
+kill_signal = 'SIGTERM'
+kill_timeout = 60
 
 [build]
+  dockerfile = 'Dockerfile'
+
+[experimental]
+  auto_rollback = true
+
+[deploy]
+  strategy = 'rolling'
 
 [env]
+  PYTHONUNBUFFERED = "1"
+  PYTHONDONTWRITEBYTECODE = "1"
+  ENVIRONMENT = "production"
+  LOG_LEVEL = "INFO"
   TELEGRAM_TRANSPORT = "webhook"
   TELEGRAM_WEBHOOK_PATH = "/telegram/webhook"
+  TELEGRAM_WEBHOOK_PORT = "8082"
+  PORT = "8080"
   BOT_DISABLE_MINIAPP = "true"
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
   max_machines_running = 1

@@ -448,10 +448,12 @@ async def _handle_nav(query, data, telegram_id, context=None):
 
 async def _handle_referrals(query, data, telegram_id):
     action = data.split(":", 1)[1] if ":" in data else "view"
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
     if action == "generate":
-        ok, msg, _row = await run_blocking(generate_referral_invite_code, telegram_id)
+        ok, msg, _row = await run_blocking(generate_referral_invite_code, telegram_id, network)
         if not ok:
-            payload = await run_blocking(get_referral_dashboard, telegram_id)
+            payload = await run_blocking(get_referral_dashboard, telegram_id, network)
             await _edit_loc(
                 query,
                 fmt_referral_dashboard(payload) + "\n\n" + f"⚠️ {escape_md(msg)}",
@@ -459,7 +461,7 @@ async def _handle_referrals(query, data, telegram_id):
                 reply_markup=referral_kb(can_generate=bool(payload.get("remaining_codes"))),
             )
             return
-    payload = await run_blocking(get_referral_dashboard, telegram_id)
+    payload = await run_blocking(get_referral_dashboard, telegram_id, network)
     await _edit_loc(
         query,
         fmt_referral_dashboard(payload),

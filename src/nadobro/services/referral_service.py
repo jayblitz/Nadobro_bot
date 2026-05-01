@@ -13,6 +13,7 @@ from math import floor
 import psycopg2.extras
 
 from src.nadobro.db import execute_returning, get_db, put_db, query_all, query_one
+from src.nadobro.config import BOT_USERNAME
 from src.nadobro.services.invite_service import _generate_plain_code, _hash_code, normalize_code
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,12 @@ logger = logging.getLogger(__name__)
 REFERRAL_VOLUME_PER_INVITE_USD = float(os.environ.get("REFERRAL_VOLUME_PER_INVITE_USD", "10000"))
 REFERRAL_MAX_INVITE_CODES = int(os.environ.get("REFERRAL_MAX_INVITE_CODES", "1000"))
 REFERRAL_LINK_PREFIX = "ref_"
+VALID_REFERRAL_NETWORKS = frozenset({"mainnet", "testnet"})
+
+
+def normalize_network(network: str | None) -> str:
+    value = str(network or "mainnet").strip().lower()
+    return value if value in VALID_REFERRAL_NETWORKS else "mainnet"
 
 
 def earned_invite_allowance(total_volume_usd: float) -> int:
@@ -41,51 +48,76 @@ def referral_start_payload(code: str) -> str:
 
 
 def bot_deep_link(code: str) -> str:
-    bot_username = (os.environ.get("TELEGRAM_BOT_USERNAME") or os.environ.get("BOT_USERNAME") or "NadobroBot").lstrip("@")
+    bot_username = (BOT_USERNAME or "Nadbro_bot").lstrip("@")
     return f"https://t.me/{bot_username}?start={referral_start_payload(code)}"
 
 
-def _generated_code_count(telegram_id: int) -> int:
+def get_user_trade_volume_for_network(telegram_id: int, network: str) -> float:
+    network = normalize_network(network)
+    table = f"trades_{network}"
     row = query_one(
-        "SELECT COUNT(*) AS count FROM invite_codes WHERE code_type = 'referral' AND referrer_user_id = %s",
+        f"""
+        SELECT COALESCE(SUM(ABS(size) * COALESCE(NULLIF(price, 0), fill_price, 0)), 0) AS total
+        FROM {table}
+        WHERE user_id = %s
+          AND status IN ('filled', 'closed')
+        """,
         (int(telegram_id),),
+    )
+    return float((row or {}).get("total") or 0.0)
+
+
+def _generated_code_count(telegram_id: int, network: str) -> int:
+    network = normalize_network(network)
+    row = query_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM invite_codes
+        WHERE code_type = 'referral'
+          AND referrer_user_id = %s
+          AND (network = %s OR (network IS NULL AND %s = 'testnet'))
+        """,
+        (int(telegram_id), network, network),
     )
     return int((row or {}).get("count") or 0)
 
 
-def _active_share_code(telegram_id: int) -> dict | None:
+def _active_share_code(telegram_id: int, network: str) -> dict | None:
+    network = normalize_network(network)
     return query_one(
         """
-        SELECT id, public_code, code_prefix, redemption_count, max_redemptions, created_at
+        SELECT id, public_code, code_prefix, network, redemption_count, max_redemptions, created_at
         FROM invite_codes
         WHERE code_type = 'referral'
           AND referrer_user_id = %s
+          AND (network = %s OR (network IS NULL AND %s = 'testnet'))
           AND active = true
           AND revoked_at IS NULL
           AND redemption_count < max_redemptions
         ORDER BY created_at DESC
         LIMIT 1
         """,
-        (int(telegram_id),),
+        (int(telegram_id), network, network),
     )
 
 
-def generate_referral_invite_code(telegram_id: int) -> tuple[bool, str, dict | None]:
+def generate_referral_invite_code(telegram_id: int, network: str = "mainnet") -> tuple[bool, str, dict | None]:
+    network = normalize_network(network)
     user_row = query_one(
-        "SELECT telegram_id, total_volume_usd FROM users WHERE telegram_id = %s",
+        "SELECT telegram_id FROM users WHERE telegram_id = %s",
         (int(telegram_id),),
     )
     if not user_row:
         return False, "User not found. Use /start first.", None
 
-    total_volume = float(user_row.get("total_volume_usd") or 0.0)
+    total_volume = get_user_trade_volume_for_network(int(telegram_id), network)
     earned = earned_invite_allowance(total_volume)
-    generated = _generated_code_count(int(telegram_id))
+    generated = _generated_code_count(int(telegram_id), network)
     if generated >= earned:
         needed = ((generated + 1) * REFERRAL_VOLUME_PER_INVITE_USD) - total_volume
         return (
             False,
-            f"Referral codes unlock every ${REFERRAL_VOLUME_PER_INVITE_USD:,.0f} of your own trading volume. "
+            f"Referral codes unlock every ${REFERRAL_VOLUME_PER_INVITE_USD:,.0f} of your own {network} trading volume. "
             f"Trade about ${max(0.0, needed):,.2f} more to unlock the next one.",
             None,
         )
@@ -100,10 +132,10 @@ def generate_referral_invite_code(telegram_id: int) -> tuple[bool, str, dict | N
             """
             INSERT INTO invite_codes
                 (code_hash, public_code, code_type, code_prefix, created_by, referrer_user_id,
-                 note, max_redemptions, earned_volume_threshold_usd, sequence_number)
-            VALUES (%s, %s, 'referral', %s, %s, %s, %s, 1, %s, %s)
+                 network, note, max_redemptions, earned_volume_threshold_usd, sequence_number)
+            VALUES (%s, %s, 'referral', %s, %s, %s, %s, %s, 1, %s, %s)
             ON CONFLICT (code_hash) DO NOTHING
-            RETURNING id, public_code, code_prefix, created_at, redemption_count, max_redemptions
+            RETURNING id, public_code, code_prefix, network, created_at, redemption_count, max_redemptions
             """,
             (
                 _hash_code(code),
@@ -111,7 +143,8 @@ def generate_referral_invite_code(telegram_id: int) -> tuple[bool, str, dict | N
                 code[:3],
                 int(telegram_id),
                 int(telegram_id),
-                f"earned_volume_threshold=${threshold:,.0f}",
+                network,
+                f"{network}_earned_volume_threshold=${threshold:,.0f}",
                 threshold,
                 sequence,
             ),
@@ -123,13 +156,14 @@ def generate_referral_invite_code(telegram_id: int) -> tuple[bool, str, dict | N
     return False, "Could not generate a unique referral code. Try again.", None
 
 
-def ensure_share_code_for_user(telegram_id: int) -> tuple[dict | None, str | None]:
-    row = _active_share_code(int(telegram_id))
+def ensure_share_code_for_user(telegram_id: int, network: str = "mainnet") -> tuple[dict | None, str | None]:
+    network = normalize_network(network)
+    row = _active_share_code(int(telegram_id), network)
     if row:
         row["link"] = bot_deep_link(row["public_code"])
         return row, None
 
-    ok, msg, generated = generate_referral_invite_code(int(telegram_id))
+    ok, msg, generated = generate_referral_invite_code(int(telegram_id), network=network)
     if ok:
         return generated, None
     return None, msg
@@ -161,7 +195,15 @@ def create_referral_from_invite(referrer_user_id: int, referred_user_id: int, in
     return True, "Referral linked."
 
 
-def record_referred_volume(referred_user_id: int, volume_usd: float, *, source: str = "trade_stats", increment_trade_count: bool = True) -> None:
+def record_referred_volume(
+    referred_user_id: int,
+    volume_usd: float,
+    *,
+    network: str = "mainnet",
+    source: str = "trade_stats",
+    increment_trade_count: bool = True,
+) -> None:
+    network = normalize_network(network)
     volume = max(0.0, float(volume_usd or 0.0))
     if volume <= 0:
         return
@@ -192,14 +234,16 @@ def record_referred_volume(referred_user_id: int, volume_usd: float, *, source: 
             cur.execute(
                 """
                 INSERT INTO referral_volume_events
-                    (referral_id, referrer_user_id, referred_user_id, volume_usd, source)
-                VALUES (%s, %s, %s, %s, %s)
+                    (referral_id, referrer_user_id, referred_user_id, network, volume_usd, trade_count_delta, source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     referral["id"],
                     referral["referrer_user_id"],
                     int(referred_user_id),
+                    network,
                     volume,
+                    1 if increment_trade_count else 0,
                     source,
                 ),
             )
@@ -211,44 +255,52 @@ def record_referred_volume(referred_user_id: int, volume_usd: float, *, source: 
         put_db(conn)
 
 
-def get_referral_dashboard(telegram_id: int) -> dict:
+def get_referral_dashboard(telegram_id: int, network: str = "mainnet") -> dict:
+    network = normalize_network(network)
     user = query_one(
-        "SELECT telegram_id, total_volume_usd FROM users WHERE telegram_id = %s",
+        "SELECT telegram_id FROM users WHERE telegram_id = %s",
         (int(telegram_id),),
-    ) or {"telegram_id": int(telegram_id), "total_volume_usd": 0.0}
-    total_volume = float(user.get("total_volume_usd") or 0.0)
+    ) or {"telegram_id": int(telegram_id)}
+    total_volume = get_user_trade_volume_for_network(int(telegram_id), network)
     earned = earned_invite_allowance(total_volume)
-    generated = _generated_code_count(int(telegram_id))
-    code = _active_share_code(int(telegram_id))
+    generated = _generated_code_count(int(telegram_id), network)
+    code = _active_share_code(int(telegram_id), network)
     if code:
         code["link"] = bot_deep_link(code["public_code"])
     warning = None
 
     stats = query_one(
         """
-        SELECT COUNT(*) AS total_referrals,
-               COALESCE(SUM(referred_volume_usd), 0) AS total_referred_volume,
-               COALESCE(SUM(referred_trade_count), 0) AS total_referred_trades
+        SELECT COUNT(DISTINCT referrals.id) AS total_referrals,
+               COALESCE(SUM(e.volume_usd), 0) AS total_referred_volume,
+               COALESCE(SUM(e.trade_count_delta), 0) AS total_referred_trades
         FROM referrals
-        WHERE referrer_user_id = %s
+        LEFT JOIN referral_volume_events e
+          ON e.referral_id = referrals.id
+         AND e.network = %s
+        WHERE referrals.referrer_user_id = %s
         """,
-        (int(telegram_id),),
+        (network, int(telegram_id)),
     ) or {}
     referred_users = query_all(
         """
         SELECT r.referred_user_id,
                COALESCE(u.telegram_username, r.referred_username, '') AS username,
-               r.referred_volume_usd,
-               r.referred_trade_count,
-               r.last_trade_at,
+               COALESCE(SUM(e.volume_usd), 0) AS referred_volume_usd,
+               COALESCE(SUM(e.trade_count_delta), 0) AS referred_trade_count,
+               MAX(e.created_at) AS last_trade_at,
                r.created_at
         FROM referrals r
         LEFT JOIN users u ON u.telegram_id = r.referred_user_id
+        LEFT JOIN referral_volume_events e
+          ON e.referral_id = r.id
+         AND e.network = %s
         WHERE r.referrer_user_id = %s
-        ORDER BY r.referred_volume_usd DESC, r.created_at DESC
+        GROUP BY r.id, r.referred_user_id, u.telegram_username, r.referred_username, r.created_at
+        ORDER BY COALESCE(SUM(e.volume_usd), 0) DESC, r.created_at DESC
         LIMIT 10
         """,
-        (int(telegram_id),),
+        (network, int(telegram_id)),
     )
     remaining = max(0, earned - generated)
     next_needed = 0.0 if earned >= REFERRAL_MAX_INVITE_CODES else max(
@@ -257,13 +309,14 @@ def get_referral_dashboard(telegram_id: int) -> dict:
     )
     if not code and remaining <= 0:
         warning = (
-            f"Referral codes unlock every ${REFERRAL_VOLUME_PER_INVITE_USD:,.0f} of your own trading volume. "
+            f"Referral codes unlock every ${REFERRAL_VOLUME_PER_INVITE_USD:,.0f} of your own {network} trading volume. "
             f"Trade about ${next_needed:,.2f} more to unlock the next one."
         )
     elif not code and remaining > 0:
         warning = "You have an earned invite available. Tap Generate Invite Code to create it."
     return {
         "telegram_id": int(telegram_id),
+        "network": network,
         "own_volume_usd": total_volume,
         "earned_codes": earned,
         "generated_codes": generated,

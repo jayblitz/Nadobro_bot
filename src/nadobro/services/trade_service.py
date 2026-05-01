@@ -673,9 +673,9 @@ def execute_market_order(
             fill_price = float(update_data.get("fill_price") or update_data.get("price") or 0.0)
             if fill_size > 0 and fill_price > 0:
                 tracked_volume = fill_size * fill_price
-                update_trade_stats(telegram_id, tracked_volume, increment_trade_count=True)
+                update_trade_stats(telegram_id, tracked_volume, increment_trade_count=True, network=network)
             else:
-                update_trade_stats(telegram_id, 0.0, increment_trade_count=True)
+                update_trade_stats(telegram_id, 0.0, increment_trade_count=True, network=network)
         except Exception as e:
             logger.warning("Post-order stats update failed: %s", e)
         exec_px = float(
@@ -865,9 +865,9 @@ def execute_spot_market_order(
         fill_price = float(update_data.get("fill_price") or post_px or 0.0)
         if fill_size > 0 and fill_price > 0:
             tracked_volume = abs(fill_size * fill_price)
-            update_trade_stats(telegram_id, tracked_volume, increment_trade_count=True)
+            update_trade_stats(telegram_id, tracked_volume, increment_trade_count=True, network=network)
         else:
-            update_trade_stats(telegram_id, 0.0, increment_trade_count=True)
+            update_trade_stats(telegram_id, 0.0, increment_trade_count=True, network=network)
         return {
             "success": True,
             "side": "BUY" if is_buy else "SELL",
@@ -1806,9 +1806,9 @@ def _record_close_in_db(
                 insert_trade(close_trade_data, network=selected_network)
             try:
                 if fill_data:
-                    update_trade_stats(telegram_id, close_size * close_price, increment_trade_count=True)
+                    update_trade_stats(telegram_id, close_size * close_price, increment_trade_count=True, network=selected_network)
                 else:
-                    update_trade_stats(telegram_id, 0.0, increment_trade_count=True)
+                    update_trade_stats(telegram_id, 0.0, increment_trade_count=True, network=selected_network)
             except Exception:
                 pass
         else:
@@ -1864,9 +1864,9 @@ def _record_close_in_db(
                 insert_trade(close_trade_data, network=selected_network)
             try:
                 if fill_data:
-                    update_trade_stats(telegram_id, close_size * close_price, increment_trade_count=True)
+                    update_trade_stats(telegram_id, close_size * close_price, increment_trade_count=True, network=selected_network)
                 else:
-                    update_trade_stats(telegram_id, 0.0, increment_trade_count=True)
+                    update_trade_stats(telegram_id, 0.0, increment_trade_count=True, network=selected_network)
             except Exception:
                 pass
             logger.info(

@@ -663,7 +663,9 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         return
 
     if callback_data == "refer:view":
-        payload = await run_blocking(get_referral_dashboard, telegram_id)
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+        payload = await run_blocking(get_referral_dashboard, telegram_id, network)
         await _reply_loc(
             update.message,
             fmt_referral_dashboard(payload),

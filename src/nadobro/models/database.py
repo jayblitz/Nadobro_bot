@@ -526,6 +526,8 @@ class UserRow:
         self.last_trade_at = self._data.get("last_trade_at")
         self.total_trades = int(self._data.get("total_trades") or 0)
         self.total_volume_usd = float(self._data.get("total_volume_usd") or 0)
+        self.mainnet_volume_usd = float(self._data.get("mainnet_volume_usd") or 0)
+        self.testnet_volume_usd = float(self._data.get("testnet_volume_usd") or 0)
         self.private_access_granted = bool(self._data.get("private_access_granted"))
         self.private_access_code_id = self._data.get("private_access_code_id")
         self.private_access_granted_at = self._data.get("private_access_granted_at")

@@ -185,7 +185,9 @@ def init_db():
                     last_active TIMESTAMPTZ DEFAULT now(),
                     last_trade_at TIMESTAMPTZ,
                     total_trades INT DEFAULT 0,
-                    total_volume_usd DOUBLE PRECISION DEFAULT 0
+                    total_volume_usd DOUBLE PRECISION DEFAULT 0,
+                    mainnet_volume_usd DOUBLE PRECISION DEFAULT 0,
+                    testnet_volume_usd DOUBLE PRECISION DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS bot_state (
                     id SERIAL PRIMARY KEY,
@@ -245,6 +247,7 @@ def init_db():
                     code_prefix TEXT NOT NULL,
                     created_by BIGINT NOT NULL,
                     referrer_user_id BIGINT,
+                    network TEXT,
                     created_for_telegram_id BIGINT,
                     note TEXT,
                     max_redemptions INT NOT NULL DEFAULT 1,
@@ -268,6 +271,7 @@ def init_db():
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS public_code TEXT;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS code_type TEXT NOT NULL DEFAULT 'private_access';
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS referrer_user_id BIGINT;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS network TEXT;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS earned_volume_threshold_usd DOUBLE PRECISION;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS sequence_number INT;
                 CREATE INDEX IF NOT EXISTS idx_invite_codes_redeemed_by ON invite_codes (redeemed_by);
@@ -293,15 +297,19 @@ def init_db():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_code_id BIGINT;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted_at TIMESTAMPTZ;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_access_granted_by BIGINT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS mainnet_volume_usd DOUBLE PRECISION DEFAULT 0;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS testnet_volume_usd DOUBLE PRECISION DEFAULT 0;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS public_code TEXT;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS code_type TEXT NOT NULL DEFAULT 'private_access';
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS referrer_user_id BIGINT;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS network TEXT;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS earned_volume_threshold_usd DOUBLE PRECISION;
                 ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS sequence_number INT;
                 CREATE INDEX IF NOT EXISTS idx_users_private_access ON users (private_access_granted);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_public_code ON invite_codes (public_code) WHERE public_code IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_invite_codes_referrer ON invite_codes (referrer_user_id, code_type, active);
+                CREATE INDEX IF NOT EXISTS idx_invite_codes_referrer_network ON invite_codes (referrer_user_id, network, code_type, active);
             """)
             conn.commit()
 
@@ -331,13 +339,18 @@ def init_db():
                     referral_id BIGINT NOT NULL REFERENCES referrals(id) ON DELETE CASCADE,
                     referrer_user_id BIGINT NOT NULL,
                     referred_user_id BIGINT NOT NULL,
+                    network TEXT NOT NULL DEFAULT 'mainnet',
                     volume_usd DOUBLE PRECISION NOT NULL,
+                    trade_count_delta INT NOT NULL DEFAULT 1,
                     source TEXT NOT NULL DEFAULT 'trade_stats',
                     created_at TIMESTAMPTZ DEFAULT now(),
                     CHECK (volume_usd >= 0)
                 );
+                ALTER TABLE referral_volume_events ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT 'mainnet';
+                ALTER TABLE referral_volume_events ADD COLUMN IF NOT EXISTS trade_count_delta INT NOT NULL DEFAULT 1;
                 CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referrer ON referral_volume_events (referrer_user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referred ON referral_volume_events (referred_user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_referral_volume_events_referrer_network ON referral_volume_events (referrer_user_id, network, created_at DESC);
             """)
             conn.commit()
 
@@ -550,6 +563,33 @@ def init_db():
                     conn.commit()
                 except Exception:
                     conn.rollback()
+            try:
+                cur.execute("""
+                    UPDATE users u
+                    SET mainnet_volume_usd = COALESCE(v.total, 0)
+                    FROM (
+                        SELECT user_id, COALESCE(SUM(ABS(size) * COALESCE(NULLIF(price, 0), fill_price, 0)), 0) AS total
+                        FROM trades_mainnet
+                        WHERE status IN ('filled', 'closed')
+                        GROUP BY user_id
+                    ) v
+                    WHERE u.telegram_id = v.user_id;
+                """)
+                cur.execute("""
+                    UPDATE users u
+                    SET testnet_volume_usd = COALESCE(v.total, 0)
+                    FROM (
+                        SELECT user_id, COALESCE(SUM(ABS(size) * COALESCE(NULLIF(price, 0), fill_price, 0)), 0) AS total
+                        FROM trades_testnet
+                        WHERE status IN ('filled', 'closed')
+                        GROUP BY user_id
+                    ) v
+                    WHERE u.telegram_id = v.user_id;
+                """)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.warning("Failed to backfill per-network user volume counters", exc_info=True)
 
         # --- strategy_sessions table ---
         with conn.cursor() as cur:
