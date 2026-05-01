@@ -106,6 +106,17 @@ def _enqueue_fill_sync(trade_id: int, network: str, user_id: int, client, digest
         logger.warning("Failed to enqueue fill sync for trade %s: %s", trade_id, e)
 
 
+def _clear_portfolio_caches(user_id: int, network: str) -> None:
+    try:
+        from src.nadobro.services.nado_sync import clear_cache as clear_nado_sync_cache
+        from src.nadobro.services.portfolio_service import clear_portfolio_snapshot_cache
+
+        clear_nado_sync_cache(int(user_id), network)
+        clear_portfolio_snapshot_cache(int(user_id), network)
+    except Exception:
+        logger.debug("Failed to clear portfolio caches user=%s network=%s", user_id, network, exc_info=True)
+
+
 def _build_fill_update(fill_data: dict | None, mid_price: float = 0.0) -> dict:
     """Build trade update dict from fill data, with market-mid fallback."""
     if fill_data and fill_data.get("fill_price", 0) > 0:
@@ -1226,6 +1237,7 @@ def execute_limit_order(
             logger.error("Failed to update limit trade %s status to FAILED: %s", trade_id, e)
 
     if result["success"]:
+        _clear_portfolio_caches(telegram_id, network)
         return {
             "success": True,
             "side": "LONG" if is_long else "SHORT",

@@ -7,7 +7,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.nadobro.services.feature_flags import portfolio_sync_enabled, portfolio_sync_interval_seconds
-from src.nadobro.services.nado_sync import get_cached_snapshot, sync_user
+from src.nadobro.services.nado_sync import sync_user
 from src.nadobro.services.user_service import get_user
 from src.nadobro.utils.visual import divider, money, pct, signed, stale_banner, time_ago
 
@@ -33,9 +33,6 @@ def portfolio_deck_kb(has_positions: bool = False, has_orders: bool = False) -> 
 async def snapshot_for_user(user_id: int, *, force: bool = False) -> dict[str, Any]:
     user = get_user(user_id)
     network = user.network_mode.value if user else "mainnet"
-    cached = get_cached_snapshot(user_id, network)
-    if cached and not force:
-        return cached
     return await sync_user(user_id, network=network, reason="refresh" if force else "cold_render", force=force)
 
 

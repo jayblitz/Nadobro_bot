@@ -687,11 +687,32 @@ def init_db():
                     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
                     opened_at TIMESTAMPTZ DEFAULT now(),
                     closed_at TIMESTAMPTZ,
+                    synced_at TIMESTAMPTZ,
                     metadata JSONB NOT NULL DEFAULT '{}'
                 );
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS isolated BOOLEAN NOT NULL DEFAULT false;
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS product_id INTEGER;
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS amount_x18 NUMERIC(78,0);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS v_quote_balance_x18 NUMERIC(78,0);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS last_cum_funding_x18 NUMERIC(78,0);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS est_pnl NUMERIC(38,18);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS est_liq_price NUMERIC(38,18);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS avg_entry_price NUMERIC(38,18);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS notional_value NUMERIC(38,18);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS margin_used NUMERIC(38,18);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS strategy_session_id BIGINT;
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS close_price NUMERIC(38,18);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS close_realized_pnl NUMERIC(38,18);
+                ALTER TABLE positions ADD COLUMN IF NOT EXISTS synced_at TIMESTAMPTZ;
                 ALTER TABLE positions ADD COLUMN IF NOT EXISTS time_limit TIMESTAMPTZ NULL;
                 ALTER TABLE positions ADD COLUMN IF NOT EXISTS time_limit_source TEXT NULL;
                 ALTER TABLE positions ADD COLUMN IF NOT EXISTS time_limit_fired_at TIMESTAMPTZ NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS positions_unique_open
+                    ON positions (user_id, network, COALESCE(product_id, 0), isolated)
+                    WHERE closed_at IS NULL;
+                CREATE INDEX IF NOT EXISTS positions_user_network_open
+                    ON positions (user_id, network)
+                    WHERE closed_at IS NULL;
                 CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions (user_id, status);
                 CREATE INDEX IF NOT EXISTS idx_positions_pair_status ON positions (pair, status);
                 CREATE INDEX IF NOT EXISTS idx_positions_time_limit_due
@@ -713,11 +734,22 @@ def init_db():
                     status TEXT NOT NULL DEFAULT 'open',
                     placed_at TIMESTAMPTZ DEFAULT now(),
                     updated_at TIMESTAMPTZ DEFAULT now(),
+                    synced_at TIMESTAMPTZ,
                     metadata JSONB NOT NULL DEFAULT '{}'
                 );
+                ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS isolated BOOLEAN NOT NULL DEFAULT false;
+                ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS product_id INTEGER;
+                ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS price_x18 NUMERIC(78,0);
+                ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS amount_x18 NUMERIC(78,0);
+                ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS expiration BIGINT;
+                ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS nonce BIGINT;
+                ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS strategy_session_id BIGINT;
+                ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS synced_at TIMESTAMPTZ;
                 ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS time_limit TIMESTAMPTZ NULL;
                 ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS time_limit_source TEXT NULL;
                 ALTER TABLE open_orders ADD COLUMN IF NOT EXISTS time_limit_fired_at TIMESTAMPTZ NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS open_orders_unique_digest
+                    ON open_orders (user_id, network, order_digest);
                 CREATE INDEX IF NOT EXISTS idx_open_orders_user_status ON open_orders (user_id, status);
                 CREATE INDEX IF NOT EXISTS idx_open_orders_pair_status ON open_orders (pair, status);
                 CREATE INDEX IF NOT EXISTS idx_open_orders_time_limit_due
@@ -789,6 +821,57 @@ def init_db():
                 );
                 CREATE INDEX IF NOT EXISTS idx_points_snapshots_user_period
                     ON points_snapshots (user_id, period, period_start DESC);
+
+                CREATE TABLE IF NOT EXISTS funding_payments_mainnet (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    amount_x18 NUMERIC(78,0) NOT NULL,
+                    balance_amount_x18 NUMERIC(78,0),
+                    rate_x18 NUMERIC(78,0),
+                    oracle_price_x18 NUMERIC(78,0),
+                    paid_at TIMESTAMPTZ NOT NULL,
+                    synced_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (user_id, product_id, paid_at, amount_x18)
+                );
+                CREATE TABLE IF NOT EXISTS funding_payments_testnet (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    amount_x18 NUMERIC(78,0) NOT NULL,
+                    balance_amount_x18 NUMERIC(78,0),
+                    rate_x18 NUMERIC(78,0),
+                    oracle_price_x18 NUMERIC(78,0),
+                    paid_at TIMESTAMPTZ NOT NULL,
+                    synced_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (user_id, product_id, paid_at, amount_x18)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS funding_payments_mainnet_event_unique
+                    ON funding_payments_mainnet (user_id, product_id, paid_at, amount_x18);
+                CREATE UNIQUE INDEX IF NOT EXISTS funding_payments_testnet_event_unique
+                    ON funding_payments_testnet (user_id, product_id, paid_at, amount_x18);
+                CREATE TABLE IF NOT EXISTS sync_cursors (
+                    user_id BIGINT,
+                    network TEXT,
+                    matches_idx NUMERIC(78,0),
+                    funding_idx NUMERIC(78,0),
+                    ws_last_event_at TIMESTAMPTZ,
+                    PRIMARY KEY (user_id, network)
+                );
+                CREATE TABLE IF NOT EXISTS sync_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    network TEXT,
+                    ran_at TIMESTAMPTZ DEFAULT now(),
+                    positions_seen INTEGER DEFAULT 0,
+                    positions_closed INTEGER DEFAULT 0,
+                    orders_seen INTEGER DEFAULT 0,
+                    orders_cleared INTEGER DEFAULT 0,
+                    fills_inserted INTEGER DEFAULT 0,
+                    funding_inserted INTEGER DEFAULT 0,
+                    duration_ms INTEGER,
+                    error TEXT
+                );
             """)
             conn.commit()
             logger.info("Strategy, position, order, and points analytics tables verified/created")
