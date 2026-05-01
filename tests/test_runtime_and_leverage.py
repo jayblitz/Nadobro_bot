@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -27,6 +28,15 @@ from src.nadobro.strategies import volume_bot
 
 
 class RuntimeAndLeverageTests(unittest.TestCase):
+    def test_invite_public_code_column_is_added_before_index(self):
+        sql_source = Path("src/nadobro/db.py").read_text()
+        alter_idx = sql_source.index("ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS public_code TEXT;")
+        index_idx = sql_source.index(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_public_code ON invite_codes (public_code)"
+        )
+
+        self.assertLess(alter_idx, index_idx)
+
     def test_run_blocking_preserves_language_contextvars(self):
         async def _run():
             with language_context("fr"):

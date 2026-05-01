@@ -264,6 +264,12 @@ def init_db():
                     CHECK (max_redemptions > 0),
                     CHECK (redemption_count >= 0)
                 );
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS public_code TEXT;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS code_type TEXT NOT NULL DEFAULT 'private_access';
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS referrer_user_id BIGINT;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS earned_volume_threshold_usd DOUBLE PRECISION;
+                ALTER TABLE invite_codes ADD COLUMN IF NOT EXISTS sequence_number INT;
                 CREATE INDEX IF NOT EXISTS idx_invite_codes_redeemed_by ON invite_codes (redeemed_by);
                 CREATE INDEX IF NOT EXISTS idx_invite_codes_created_at ON invite_codes (created_at DESC);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_public_code ON invite_codes (public_code) WHERE public_code IS NOT NULL;
