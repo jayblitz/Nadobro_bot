@@ -515,6 +515,9 @@ def trade_card_text_input_kb(session_id: str):
 def trade_card_confirm_kb(session_id: str):
     return InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("⏱ Auto-close at…", callback_data=trade_card_cb(session_id, "time_limit")),
+        ],
+        [
             InlineKeyboardButton("✅ Confirm Trade", callback_data=trade_card_cb(session_id, "confirm")),
             InlineKeyboardButton("❌ Cancel", callback_data=trade_card_cb(session_id, "cancel")),
         ],

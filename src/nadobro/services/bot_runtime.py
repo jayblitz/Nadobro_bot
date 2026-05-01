@@ -55,6 +55,7 @@ from src.nadobro.services.user_service import (
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, record_metric
 from src.nadobro.services.execution_queue import enqueue_strategy
+from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
 from src.nadobro.services.strategy_registry import (
     SUPPORTED_STRATEGIES,
     migrate_state_strategy,
@@ -68,6 +69,7 @@ logger = logging.getLogger(__name__)
 
 STATE_PREFIX = "strategy_bot:"
 RUNTIME_TICK_SECONDS = 20
+BRO_MIGRATION_NOTICE = "Bro Mode is now Strategy Studio — describe your trade in chat and I'll handle it"
 
 
 def _strategy_cycle_timeout_seconds() -> float | None:
@@ -375,6 +377,57 @@ def _mark_previous_sessions_superseded(telegram_id: int, network: str) -> None:
         logger.warning("Could not supersede old sessions for user %s: %s", telegram_id, e)
 
 
+def _schedule_bro_migration_notice(telegram_id: int) -> None:
+    if not _bot_app:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = _runtime_loop
+    if loop and loop.is_running():
+        loop.create_task(_notify(telegram_id, BRO_MIGRATION_NOTICE))
+
+
+def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> None:
+    """Disable the retired Bro autoloop without touching positions or pending orders."""
+    now = datetime.utcnow().isoformat()
+    session_id = state.get("strategy_session_id")
+    state["running"] = False
+    state["last_action"] = "migrated_to_studio"
+    state["last_action_detail"] = "Legacy Bro Mode autoloop retired."
+    state["bro_migrated_to_studio_at"] = state.get("bro_migrated_to_studio_at") or now
+    should_notify = not bool(state.get("bro_migration_notice_sent"))
+    state["bro_migration_notice_sent"] = True
+    _save_state(telegram_id, network, state)
+    try:
+        if session_id:
+            update_strategy_session(
+                int(session_id),
+                {
+                    "status": "migrated",
+                    "stopped_at": now,
+                    "stop_reason": "migrated_to_strategy_studio",
+                },
+            )
+        else:
+            rows = get_running_strategy_sessions(telegram_id, network)
+            for row in rows:
+                if str(row.get("strategy") or "").lower() != "bro":
+                    continue
+                update_strategy_session(
+                    int(row["id"]),
+                    {
+                        "status": "migrated",
+                        "stopped_at": now,
+                        "stop_reason": "migrated_to_strategy_studio",
+                    },
+                )
+    except Exception as e:
+        logger.warning("Could not mark Bro session migrated user=%s network=%s: %s", telegram_id, network, e)
+    if should_notify:
+        _schedule_bro_migration_notice(telegram_id)
+
+
 def _create_session(telegram_id: int, strategy: str, product: str, network: str, state: dict) -> int | None:
     """Create a strategy_sessions row and return the session_id."""
     try:
@@ -518,6 +571,8 @@ def start_user_bot(
         network = "mainnet"
 
     if strategy == "bro":
+        if not legacy_bro_autoloop_enabled():
+            return False, "Bro Mode is now Strategy Studio — describe your trade in chat and I'll handle it."
         _mark_previous_sessions_superseded(telegram_id, network)
         _, strat_cfg = get_strategy_settings(telegram_id, strategy)
         state = _default_state()
@@ -1061,6 +1116,16 @@ def restore_running_bots(enabled: bool = False):
             user_id = int(user_id_str)
             state = json.loads(row.get("value") or "{}")
             if state.get("running"):
+                strategy = str(state.get("strategy") or "").lower().strip()
+                if strategy == "bro" and not legacy_bro_autoloop_enabled():
+                    _migrate_legacy_bro_state(user_id, network, state)
+                    logger.info(
+                        "Migrated legacy Bro autoloop session user=%s network=%s",
+                        user_id,
+                        network,
+                        extra={"feature": "studio"},
+                    )
+                    continue
                 _ensure_task(user_id, network)
         except Exception:
             continue
@@ -1150,6 +1215,15 @@ async def _bot_loop(telegram_id: int, network: str):
 
 
 async def handle_strategy_job(payload: dict):
+    kind = str((payload or {}).get("kind") or "")
+    if kind.startswith("time_limit"):
+        from src.nadobro.services.time_limit_watcher import handle_time_limit_job
+        await handle_time_limit_job(payload)
+        return
+    if kind == "condition_order":
+        from src.nadobro.services.condition_watcher import handle_condition_job
+        await handle_condition_job(payload)
+        return
     telegram_id = int(payload.get("telegram_id"))
     network = str(payload.get("network"))
     key = _task_key(telegram_id, network)
@@ -1386,6 +1460,8 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
             mid=mid,
         )
     elif strategy == "bro":
+        if not legacy_bro_autoloop_enabled():
+            return {"success": True, "action": "skipped", "reason": "legacy_bro_autoloop_disabled"}
         from src.nadobro.strategies import bro_mode
         return bro_mode.run_cycle(
             telegram_id, network, state,

@@ -13,6 +13,7 @@ except Exception:  # optional in degraded/fallback environments
 logger = logging.getLogger(__name__)
 
 _xai_client: Optional[OpenAI] = None
+_openai_client: Optional[OpenAI] = None
 
 BRO_DECISION_MODEL = os.environ.get("BRO_DECISION_MODEL", "grok-3")
 BRO_SCAN_MODEL = os.environ.get("BRO_SCAN_MODEL", "grok-3-mini-fast")
@@ -32,6 +33,56 @@ def _get_client() -> Optional[OpenAI]:
         return None
     _xai_client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
     return _xai_client
+
+
+def _get_openai_client() -> Optional[OpenAI]:
+    global _openai_client
+    if _openai_client:
+        return _openai_client
+    if OpenAI is None:
+        return None
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
+
+
+def chat_json(messages: list[dict], schema: dict | None = None, model: str | None = None) -> tuple[dict, str]:
+    """Provider-selected JSON chat used by Strategy Studio without duplicating LLM clients."""
+    providers = [
+        ("grok", _get_client(), model or os.environ.get("STUDIO_XAI_MODEL", "grok-3-mini-fast")),
+        ("openai", _get_openai_client(), os.environ.get("STUDIO_OPENAI_MODEL", "gpt-4o")),
+    ]
+    last_error: Exception | None = None
+    for provider, client, selected_model in providers:
+        if client is None:
+            continue
+        for attempt in range(2 if provider == "grok" else 1):
+            try:
+                kwargs = {
+                    "model": selected_model,
+                    "messages": messages,
+                    "temperature": 0,
+                }
+                if provider == "openai":
+                    kwargs["response_format"] = {"type": "json_object"}
+                resp = client.chat.completions.create(**kwargs)
+                content = resp.choices[0].message.content or "{}"
+                parsed = json.loads(content)
+                logger.info("Strategy Studio extractor provider=%s", provider, extra={"feature": "studio"})
+                return parsed, provider
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Strategy Studio JSON chat failed provider=%s attempt=%s: %s",
+                    provider,
+                    attempt + 1,
+                    e,
+                    extra={"feature": "studio"},
+                )
+                continue
+    raise RuntimeError(f"No LLM provider returned valid JSON: {last_error}")
 
 
 SYSTEM_PROMPT = """You are Bro, an autonomous quant trading agent for Nado DEX (perpetuals on Ink L2).

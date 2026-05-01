@@ -110,6 +110,12 @@ async def _build_alert_context() -> tuple[dict, dict]:
 def set_bot_app(app):
     global _bot_app
     _bot_app = app
+    try:
+        from src.nadobro.services.time_limit_watcher import set_bot_app as set_time_limit_bot_app
+
+        set_time_limit_bot_app(app)
+    except Exception:
+        pass
 
 
 def set_check_client(client: NadoClient):
@@ -614,8 +620,22 @@ _EDGE_SCAN_SECONDS = int(os.environ.get("EDGE_SCAN_INTERVAL_SECONDS", "1800"))
 
 def start_scheduler():
     relay_poll_seconds = relay_poll_interval_seconds()
+    from src.nadobro.services.condition_watcher import condition_tick
+    from src.nadobro.services.feature_flags import studio_condition_interval_seconds, studio_enabled, time_limit_enabled
+    from src.nadobro.services.time_limit_watcher import time_limit_tick
+
     scheduler.add_job(check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS, id="check_alerts", replace_existing=True)
     scheduler.add_job(tick_price_tracker, "interval", seconds=60, id="price_tracker", replace_existing=True)
+    if time_limit_enabled():
+        scheduler.add_job(time_limit_tick, "interval", seconds=60, id="time_limit_watcher", replace_existing=True)
+    if studio_enabled():
+        scheduler.add_job(
+            condition_tick,
+            "interval",
+            seconds=studio_condition_interval_seconds(),
+            id="condition_watcher",
+            replace_existing=True,
+        )
     scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True)
     scheduler.add_job(poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds, id="lowiqpts_relay_poll", replace_existing=True)
     scheduler.add_job(sync_pending_fills, "interval", seconds=30, id="fill_sync", replace_existing=True)

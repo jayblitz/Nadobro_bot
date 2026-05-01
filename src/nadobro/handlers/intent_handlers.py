@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 async def _reply_md_safe(message, text: str) -> None:
     try:
-        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
+        await message.reply_text(text, parse_mode="MARKDOWN_V2")
     except BadRequest as e:
         if "Can't parse entities" not in str(e):
             raise

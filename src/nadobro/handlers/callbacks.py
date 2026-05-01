@@ -182,6 +182,10 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
 
         if data.startswith("onb:"):
             await _handle_onb_new(query, data, telegram_id, context)
+        elif data.startswith("studio:"):
+            from src.nadobro.handlers.studio_handler import handle_studio_callback
+
+            await handle_studio_callback(query, context)
         elif data.startswith("nav:"):
             await _handle_nav(query, data, telegram_id, context)
         elif data.startswith("card:trade:"):
@@ -782,6 +786,16 @@ async def _handle_portfolio(query, data, telegram_id):
 async def _handle_status_callback(query, data: str, telegram_id: int):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "refresh"
+    if action == "studio":
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        from src.nadobro.studio.status import build_status_cards
+
+        status = await run_blocking(get_user_bot_status, telegram_id)
+        onboarding = await run_blocking(evaluate_readiness, telegram_id)
+        base = fmt_status_overview(status, onboarding)
+        studio_text, markup = await run_blocking(build_status_cards, telegram_id, onboarding.get("network"), page)
+        await query.edit_message_text(f"{base}\n\n{studio_text}", reply_markup=markup)
+        return
     if action == "stop":
         ok, msg = await run_blocking(stop_user_bot, telegram_id, True)
         status = await run_blocking(get_user_bot_status, telegram_id)

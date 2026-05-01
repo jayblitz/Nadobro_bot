@@ -787,6 +787,270 @@ def get_running_strategy_sessions(user_id: int, network: str | None = None) -> l
 
 
 # ---------------------------------------------------------------------------
+# Time limits, Studio sessions, and conditional orders
+# ---------------------------------------------------------------------------
+
+_VALID_TIME_LIMIT_SOURCES = frozenset({"manual", "studio", "bro", "time_limit"})
+_STUDIO_ACTIVE_STATES = ("EXTRACTING", "CLARIFYING", "CONFIRMING", "EXECUTING")
+
+
+def _json_payload(value, default):
+    if value is None:
+        return json.dumps(default)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def set_position_time_limit(position_id: int, ts, source: str = "manual"):
+    source = source if source in _VALID_TIME_LIMIT_SOURCES else "manual"
+    execute(
+        """UPDATE positions
+           SET time_limit = %s, time_limit_source = %s, time_limit_fired_at = NULL
+           WHERE id = %s""",
+        (ts, source, position_id),
+    )
+
+
+def set_order_time_limit(order_id: int, ts, source: str = "manual"):
+    source = source if source in _VALID_TIME_LIMIT_SOURCES else "manual"
+    execute(
+        """UPDATE open_orders
+           SET time_limit = %s, time_limit_source = %s, time_limit_fired_at = NULL, updated_at = now()
+           WHERE id = %s""",
+        (ts, source, order_id),
+    )
+
+
+def clear_position_time_limit(position_id: int):
+    execute(
+        "UPDATE positions SET time_limit = NULL, time_limit_source = NULL, time_limit_fired_at = NULL WHERE id = %s",
+        (position_id,),
+    )
+
+
+def clear_order_time_limit(order_id: int):
+    execute(
+        """UPDATE open_orders
+           SET time_limit = NULL, time_limit_source = NULL, time_limit_fired_at = NULL, updated_at = now()
+           WHERE id = %s""",
+        (order_id,),
+    )
+
+
+def fetch_due_time_limits(now_utc, network: str, limit: int = 50) -> dict:
+    """Atomically claim due position/order time limits for one network."""
+    if network not in _VALID_NETWORKS:
+        raise ValueError(f"Invalid network: {network}")
+    rows_positions = query_all(
+        """
+        WITH due AS (
+            SELECT id
+            FROM positions
+            WHERE network = %s
+              AND status = 'open'
+              AND time_limit IS NOT NULL
+              AND time_limit <= %s
+              AND time_limit_fired_at IS NULL
+            ORDER BY time_limit ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE positions p
+        SET time_limit_fired_at = %s
+        FROM due
+        WHERE p.id = due.id
+        RETURNING p.*
+        """,
+        (network, now_utc, limit, now_utc),
+    )
+    rows_orders = query_all(
+        """
+        WITH due AS (
+            SELECT id
+            FROM open_orders
+            WHERE network = %s
+              AND status IN ('open', 'pending', 'armed')
+              AND time_limit IS NOT NULL
+              AND time_limit <= %s
+              AND time_limit_fired_at IS NULL
+            ORDER BY time_limit ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE open_orders o
+        SET time_limit_fired_at = %s, updated_at = now()
+        FROM due
+        WHERE o.id = due.id
+        RETURNING o.*
+        """,
+        (network, now_utc, limit, now_utc),
+    )
+    return {"positions": rows_positions, "orders": rows_orders}
+
+
+def insert_studio_session(data: dict) -> Optional[int]:
+    allowed = {
+        "telegram_id", "network", "state", "intent_json", "history_json", "strategy_session_id",
+    }
+    filtered = {k: v for k, v in data.items() if k in allowed and v is not None}
+    filtered.setdefault("state", "EXTRACTING")
+    filtered["intent_json"] = _json_payload(filtered.get("intent_json"), {})
+    filtered["history_json"] = _json_payload(filtered.get("history_json"), [])
+    cols = list(filtered.keys())
+    vals = [filtered[c] for c in cols]
+    row = execute_returning(
+        pgsql.SQL("INSERT INTO studio_sessions ({}) VALUES ({}) RETURNING id").format(
+            pgsql.SQL(", ").join(pgsql.Identifier(c) for c in cols),
+            pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols)),
+        ),
+        vals,
+    )
+    return row["id"] if row else None
+
+
+def update_studio_session(session_id: int, data: dict):
+    allowed = {"state", "intent_json", "history_json", "strategy_session_id"}
+    filtered = {k: v for k, v in data.items() if k in allowed}
+    if not filtered:
+        return
+    if "intent_json" in filtered:
+        filtered["intent_json"] = _json_payload(filtered["intent_json"], {})
+    if "history_json" in filtered:
+        filtered["history_json"] = _json_payload(filtered["history_json"], [])
+    filtered["updated_at"] = datetime.utcnow().isoformat()
+    set_clause = pgsql.SQL(", ").join(
+        pgsql.SQL("{} = %s").format(pgsql.Identifier(k)) for k in filtered.keys()
+    )
+    execute(
+        pgsql.SQL("UPDATE studio_sessions SET {} WHERE id = %s").format(set_clause),
+        list(filtered.values()) + [session_id],
+    )
+
+
+def cancel_active_studio_sessions(telegram_id: int, network: str, exclude_id: int | None = None):
+    params: list = [datetime.utcnow().isoformat(), telegram_id, network]
+    extra = ""
+    if exclude_id is not None:
+        extra = " AND id <> %s"
+        params.append(int(exclude_id))
+    execute(
+        f"""UPDATE studio_sessions
+            SET state = 'CANCELLED', updated_at = %s
+            WHERE telegram_id = %s AND network = %s
+              AND state IN ('EXTRACTING', 'CLARIFYING', 'CONFIRMING', 'EXECUTING')
+              {extra}""",
+        tuple(params),
+    )
+
+
+def get_active_studio_session(telegram_id: int, network: str) -> Optional[dict]:
+    return query_one(
+        """SELECT * FROM studio_sessions
+           WHERE telegram_id = %s AND network = %s
+             AND state IN ('EXTRACTING', 'CLARIFYING', 'CONFIRMING', 'EXECUTING')
+           ORDER BY updated_at DESC
+           LIMIT 1""",
+        (telegram_id, network),
+    )
+
+
+def get_studio_session(session_id: int) -> Optional[dict]:
+    return query_one("SELECT * FROM studio_sessions WHERE id = %s", (session_id,))
+
+
+def get_active_studio_sessions_for_user(telegram_id: int, network: str | None = None) -> list:
+    params: list = [telegram_id]
+    network_sql = ""
+    if network:
+        network_sql = " AND network = %s"
+        params.append(network)
+    return query_all(
+        f"""SELECT * FROM studio_sessions
+            WHERE telegram_id = %s{network_sql}
+              AND state IN ('EXTRACTING', 'CLARIFYING', 'CONFIRMING', 'EXECUTING')
+            ORDER BY updated_at DESC""",
+        tuple(params),
+    )
+
+
+def insert_conditional_order(data: dict) -> Optional[int]:
+    allowed = {
+        "telegram_id", "network", "studio_session_id", "strategy_session_id", "symbol",
+        "action", "order_type", "intent_json", "conditions_json", "status",
+        "time_limit", "time_limit_source",
+    }
+    filtered = {k: v for k, v in data.items() if k in allowed and v is not None}
+    filtered.setdefault("order_type", "conditional")
+    filtered.setdefault("status", "armed")
+    filtered["intent_json"] = _json_payload(filtered.get("intent_json"), {})
+    filtered["conditions_json"] = _json_payload(filtered.get("conditions_json"), [])
+    cols = list(filtered.keys())
+    vals = [filtered[c] for c in cols]
+    row = execute_returning(
+        pgsql.SQL("INSERT INTO conditional_orders ({}) VALUES ({}) RETURNING id").format(
+            pgsql.SQL(", ").join(pgsql.Identifier(c) for c in cols),
+            pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols)),
+        ),
+        vals,
+    )
+    return row["id"] if row else None
+
+
+def get_armed_conditional_orders(network: str, limit: int = 100) -> list:
+    return query_all(
+        """SELECT * FROM conditional_orders
+           WHERE network = %s AND status = 'armed'
+           ORDER BY updated_at ASC
+           LIMIT %s""",
+        (network, limit),
+    )
+
+
+def claim_conditional_order(order_id: int) -> Optional[dict]:
+    return execute_returning(
+        """UPDATE conditional_orders
+           SET status = 'firing', fired_at = now(), updated_at = now()
+           WHERE id = %s AND status = 'armed'
+           RETURNING *""",
+        (order_id,),
+    )
+
+
+def update_conditional_order(order_id: int, data: dict):
+    allowed = {
+        "status", "last_evaluated_at", "last_evaluation", "error_message",
+        "time_limit_fired_at", "fired_at",
+    }
+    filtered = {k: v for k, v in data.items() if k in allowed}
+    if not filtered:
+        return
+    filtered["updated_at"] = datetime.utcnow().isoformat()
+    set_clause = pgsql.SQL(", ").join(
+        pgsql.SQL("{} = %s").format(pgsql.Identifier(k)) for k in filtered.keys()
+    )
+    execute(
+        pgsql.SQL("UPDATE conditional_orders SET {} WHERE id = %s").format(set_clause),
+        list(filtered.values()) + [order_id],
+    )
+
+
+def get_active_conditional_orders_for_user(telegram_id: int, network: str | None = None) -> list:
+    params: list = [telegram_id]
+    network_sql = ""
+    if network:
+        network_sql = " AND network = %s"
+        params.append(network)
+    return query_all(
+        f"""SELECT * FROM conditional_orders
+            WHERE telegram_id = %s{network_sql}
+              AND status IN ('armed', 'firing')
+            ORDER BY created_at DESC""",
+        tuple(params),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Fill Sync Queue ORM
 # ---------------------------------------------------------------------------
 

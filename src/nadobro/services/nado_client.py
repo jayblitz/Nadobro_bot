@@ -237,6 +237,52 @@ class NadoClient:
 
         return {"bid": 0, "ask": 0, "mid": 0}
 
+    def get_candlesticks(self, product_id: int, timeframe: str = "1h", limit: int = 200, max_time: int | None = None) -> list[dict]:
+        """Fetch OHLCV candles from the Nado indexer through the official SDK."""
+        if not self._initialized or not self.client:
+            if self.private_key is not None:
+                self.initialize()
+            if not self._initialized or not self.client:
+                return []
+        try:
+            from nado_protocol.indexer_client.types.query import IndexerCandlesticksParams
+            from nado_protocol.indexer_client.types.models import IndexerCandlesticksGranularity
+            from nado_protocol.utils.math import from_x18
+
+            granularity_map = {
+                "1m": IndexerCandlesticksGranularity.ONE_MINUTE,
+                "5m": getattr(IndexerCandlesticksGranularity, "FIVE_MINUTES", 300),
+                "15m": getattr(IndexerCandlesticksGranularity, "FIFTEEN_MINUTES", 900),
+                "1h": getattr(IndexerCandlesticksGranularity, "ONE_HOUR", 3600),
+                "4h": getattr(IndexerCandlesticksGranularity, "FOUR_HOURS", 14400),
+                "1d": getattr(IndexerCandlesticksGranularity, "ONE_DAY", 86400),
+            }
+            params = IndexerCandlesticksParams(
+                product_id=int(product_id),
+                granularity=granularity_map.get(str(timeframe), granularity_map["1h"]),
+                max_time=max_time,
+                limit=int(limit),
+            )
+            data = self.client.market.get_candlesticks(params)
+            rows = getattr(data, "candlesticks", None) or getattr(data, "data", None) or data
+            candles = []
+            for row in rows or []:
+                get = row.get if isinstance(row, dict) else lambda k, default=None: getattr(row, k, default)
+                candles.append(
+                    {
+                        "time": get("timestamp") or get("time") or get("start_time") or get("update_time"),
+                        "open": float(from_x18(int(get("open_x18", 0) or 0))),
+                        "high": float(from_x18(int(get("high_x18", 0) or 0))),
+                        "low": float(from_x18(int(get("low_x18", 0) or 0))),
+                        "close": float(from_x18(int(get("close_x18", 0) or 0))),
+                        "volume": float(get("volume", 0) or 0),
+                    }
+                )
+            return candles
+        except Exception as e:
+            logger.warning("SDK get_candlesticks failed product_id=%s timeframe=%s: %s", product_id, timeframe, e)
+            return []
+
     def get_all_market_prices(self) -> dict:
         prices = {}
         try:

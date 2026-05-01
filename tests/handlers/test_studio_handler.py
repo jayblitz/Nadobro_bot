@@ -1,0 +1,47 @@
+import asyncio
+from types import SimpleNamespace
+
+from src.nadobro.handlers.studio_handler import handle_studio_text
+from src.nadobro.studio.intent import Quantity, TradingIntent
+
+
+class Msg:
+    text = "long btc 1 at 2x"
+
+    def __init__(self):
+        self.replies = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append((text, kwargs))
+
+
+def test_studio_text_disabled(monkeypatch):
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.studio_enabled", lambda: False)
+    update = SimpleNamespace(message=Msg(), effective_user=SimpleNamespace(id=1))
+    assert asyncio.run(handle_studio_text(update, SimpleNamespace())) is False
+
+
+def test_studio_text_confirmation(monkeypatch):
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.studio_enabled", lambda: True)
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler._network", lambda uid: "mainnet")
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.conversation.active_session", lambda *a: None)
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.conversation.start_session", lambda *a: {"id": 1, "history_json": []})
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.conversation.save_turn", lambda *a, **k: None)
+
+    async def fake_extract(*args, **kwargs):
+        return TradingIntent(
+            action="buy",
+            symbol="BTC",
+            order_type="market",
+            quantity=Quantity(type="contracts", value=1),
+            leverage=2,
+            take_profit={"type": "percent", "value": 2},
+            stop_loss={"type": "percent", "value": -1},
+            raw_input="long",
+        )
+
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.extract", fake_extract)
+    msg = Msg()
+    update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=1))
+    assert asyncio.run(handle_studio_text(update, SimpleNamespace())) is True
+    assert "Strategy Summary" in msg.replies[0][0]

@@ -282,6 +282,14 @@ async def run_bot():
     start_scheduler()
     auto_restore = os.environ.get("NADO_AUTO_RESTORE_STRATEGIES", "true").strip().lower() in ("1", "true", "yes", "on")
     restore_running_bots(enabled=auto_restore)
+    try:
+        from src.nadobro.services.feature_flags import time_limit_enabled
+        from src.nadobro.services.time_limit_watcher import time_limit_tick
+
+        if time_limit_enabled():
+            asyncio.create_task(time_limit_tick())
+    except Exception as e:
+        logger.warning("Could not schedule startup time-limit catch-up: %s", e)
 
     copy_enabled = os.environ.get("NADO_COPY_TRADING", "true").strip().lower() in ("1", "true", "yes", "on")
     if copy_enabled:

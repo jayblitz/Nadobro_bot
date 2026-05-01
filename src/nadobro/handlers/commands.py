@@ -162,10 +162,26 @@ async def cmd_status(update: Update, context: CallbackContext):
         status = await run_blocking(get_user_bot_status, telegram_id)
         onboarding = await run_blocking(evaluate_readiness, telegram_id)
         text = fmt_status_overview(status, onboarding)
+        try:
+            from src.nadobro.services.feature_flags import studio_enabled
+            from src.nadobro.studio.status import build_status_cards
+
+            if studio_enabled():
+                studio_text, studio_markup = await run_blocking(
+                    build_status_cards,
+                    telegram_id,
+                    onboarding.get("network"),
+                )
+                text = f"{text}\n\n{studio_text}"
+            else:
+                studio_markup = None
+        except Exception as e:
+            logger.warning("Studio status render failed: %s", e)
+            studio_markup = None
 
         lang = get_active_language()
         localized = localize_text(text, lang)
-        reply_markup = localize_markup(
+        reply_markup = studio_markup or localize_markup(
             status_kb(
                 is_running=bool(status.get("running")),
                 strategy_label=str(status.get("strategy") or "").upper() or None,
