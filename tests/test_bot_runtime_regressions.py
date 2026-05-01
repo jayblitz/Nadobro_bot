@@ -33,3 +33,10 @@ def test_portfolio_deck_does_not_return_unbounded_cached_snapshot():
 
     assert "get_cached_snapshot" not in source
     assert "return await sync_user" in source
+
+
+def test_trade_card_has_markdown_fallback_for_edits():
+    source = (ROOT / "src/nadobro/handlers/trade_card.py").read_text()
+
+    assert "Can't parse entities" in source
+    assert "plain_text_fallback" in source

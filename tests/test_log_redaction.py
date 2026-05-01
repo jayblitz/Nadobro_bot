@@ -60,6 +60,22 @@ class LogRedactionTests(unittest.TestCase):
         self.assertNotIn("0xac63eaedbbbb85afb7a42b1312b4982c23f14288", output)
         self.assertNotIn("64656661756c740000000000", output)
 
+    def test_redaction_preserves_numeric_log_args(self):
+        self.assertEqual(redact_sensitive_text(7.123456789012345), 7.123456789012345)
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.addFilter(SensitiveDataRedactFilter())
+        handler.setFormatter(RedactingFormatter("%(message)s"))
+        logger = logging.getLogger("test.redaction.numeric")
+        logger.handlers = [handler]
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+
+        logger.info("Support answer generated in %.1fs", 7.123456789012345)
+
+        self.assertIn("7.1s", stream.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -697,6 +697,7 @@ RULES:
 - Keep under 2000 chars
 - Use **bold** for key announcements, dates, and numbers
 - Use emojis for key indicators: 📢 announcements, 📅 dates, 🔥 hot news, ⚡ key info, 💰 rewards/points
+- Include exact tweet URLs from the context inline for every specific X update you mention.
 - Use bullet points (- ) for listing multiple findings
 - End with one compact line only if useful: Based on: Nado on X, Ink on X
 - NEVER include search engine links
@@ -728,6 +729,7 @@ RULES:
 - Keep under 2000 chars
 - Use **bold** for key findings and important names
 - Use emojis: 🔥 hot takes, 📈📉 market moves, ⚡ breaking, 🎯 key points
+- Include exact tweet URLs from the context inline for every specific X update you mention.
 - Format:
   **What X is saying about <topic>:**
   - @handle: key point
@@ -1603,9 +1605,28 @@ def _format_provenance_line(sources: list[str]) -> str:
 
 
 def _append_freshness_if_live(answer: str, question: str, context_text: str = "") -> str:
-    if not _context_uses_live_data(question, context_text):
+    return answer
+
+
+def _extract_x_status_links(context_text: str, limit: int = 3) -> list[str]:
+    links: list[str] = []
+    for match in re.finditer(r"https://x\.com/[A-Za-z0-9_]+/status/\d+(?:\?s=\d+)?", context_text or ""):
+        url = match.group(0)
+        if url not in links:
+            links.append(url)
+        if len(links) >= limit:
+            break
+    return links
+
+
+def _append_x_links_if_needed(answer: str, context_text: str) -> str:
+    if "x.com/" in (answer or "") and "/status/" in (answer or ""):
         return answer
-    return _append_freshness(answer)
+    links = _extract_x_status_links(context_text)
+    if not links:
+        return answer
+    label = "Tweet link" if len(links) == 1 else "Tweet links"
+    return f"{answer}\n\n{label}: " + " | ".join(links)
 
 
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
@@ -1964,6 +1985,12 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
                 freshness_addition = freshened[len(full_answer):]
                 yield freshness_addition
                 full_answer = freshened
+            if "[X/TWITTER RESULTS" in gathered_context:
+                linked = _append_x_links_if_needed(full_answer, gathered_context)
+                if linked != full_answer:
+                    link_addition = linked[len(full_answer):]
+                    yield link_addition
+                    full_answer = linked
 
             if telegram_id:
                 _add_to_chat_history(telegram_id, "assistant", full_answer.strip())
@@ -2207,6 +2234,8 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         if provenance_line and "Sources:" not in answer and "Based on:" not in answer:
             answer = f"{answer}\n\n{provenance_line}"
         answer = _append_freshness_if_live(answer, question, gathered_context)
+        if "[X/TWITTER RESULTS" in gathered_context:
+            answer = _append_x_links_if_needed(answer, gathered_context)
 
         if telegram_id:
             _add_to_chat_history(telegram_id, "assistant", answer)

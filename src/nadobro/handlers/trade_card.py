@@ -281,15 +281,34 @@ async def _edit_or_send_trade_card(
                 reply_markup=kb,
             )
             return message_id
+        except BadRequest as e:
+            if "Can't parse entities" not in str(e):
+                raise
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=plain_text_fallback(text),
+                reply_markup=kb,
+            )
+            return message_id
         except Exception:
             pass
 
-    message = await context.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=kb,
-    )
+    try:
+        message = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=kb,
+        )
+    except BadRequest as e:
+        if "Can't parse entities" not in str(e):
+            raise
+        message = await context.bot.send_message(
+            chat_id=chat_id,
+            text=plain_text_fallback(text),
+            reply_markup=kb,
+        )
     return message.message_id
 
 
@@ -303,6 +322,12 @@ async def _edit_message_safely(query, text: str, reply_markup=None):
         )
     except BadRequest as e:
         if "Message is not modified" in str(e):
+            return
+        if "Can't parse entities" in str(e):
+            await query.edit_message_text(
+                plain_text_fallback(localize_text(text, lang)),
+                reply_markup=localize_markup(reply_markup, lang) if reply_markup else reply_markup,
+            )
             return
         raise
 

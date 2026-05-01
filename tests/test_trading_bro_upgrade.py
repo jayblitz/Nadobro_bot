@@ -76,6 +76,8 @@ class TradingBroUpgradeTests(unittest.TestCase):
 
     def test_source_policy_omits_generic_sources_and_keeps_live_provenance(self):
         from src.nadobro.services.knowledge_service import (
+            _append_freshness_if_live,
+            _append_x_links_if_needed,
             _format_provenance_line,
             _should_include_provenance,
         )
@@ -95,6 +97,17 @@ class TradingBroUpgradeTests(unittest.TestCase):
             )
         )
         self.assertEqual(_format_provenance_line(["https://x.com"]), "Based on: X")
+        self.assertEqual(
+            _append_freshness_if_live("Clean answer", "latest Nado news", "[X/TWITTER RESULTS]"),
+            "Clean answer",
+        )
+        self.assertIn(
+            "https://x.com/nadoHQ/status/2050260192751751237",
+            _append_x_links_if_needed(
+                "Nado points dropped.",
+                "Link: https://x.com/nadoHQ/status/2050260192751751237",
+            ),
+        )
 
     def test_bro_answer_card_and_markdown_links_render_safely(self):
         from src.nadobro.handlers.formatters import fmt_bro_answer_card, format_ai_response

@@ -27,9 +27,7 @@ def redact_sensitive_text(value: Any) -> Any:
     values so %-style logging keeps numeric formatting semantics.
     """
     if not isinstance(value, str):
-        text = str(value)
-        redacted = redact_sensitive_text(text)
-        return redacted if redacted != text else value
+        return value
 
     text = _URL_CREDENTIALS_RE.sub(r"\1<REDACTED>:<REDACTED>@", value)
     text = _BOT_TOKEN_RE.sub("/bot<REDACTED>", text)
