@@ -48,6 +48,31 @@ from src.nadobro.handlers import admin_invites, commands
 
 
 class PrivateAccessFlowTests(unittest.TestCase):
+    def test_cmd_start_existing_user_sends_non_empty_dashboard(self):
+        calls = []
+
+        async def _reply_text(text, **kwargs):
+            calls.append((text, kwargs))
+
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1, username="u"),
+            message=SimpleNamespace(reply_text=_reply_text),
+        )
+        context = SimpleNamespace(user_data={}, args=[])
+
+        with patch.object(commands, "get_or_create_user", return_value=(SimpleNamespace(), False, None)), patch.object(
+            commands, "has_private_access", return_value=True
+        ), patch.object(
+            commands, "is_new_onboarding_complete", return_value=True
+        ), patch.object(
+            commands, "get_user_language", return_value="en"
+        ):
+            asyncio.run(commands.cmd_start(update, context))
+
+        self.assertTrue(calls)
+        self.assertIsInstance(calls[0][0], str)
+        self.assertGreater(len(calls[0][0].strip()), 0)
+
     def test_cmd_start_without_access_shows_private_card(self):
         calls = []
 

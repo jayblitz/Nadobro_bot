@@ -42,10 +42,10 @@ def _resolve_host_ipv4(url: str) -> str:
     hostname = m.group(1)
     try:
         ipv4 = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
-        logger.info("Resolved %s -> %s (IPv4)", hostname, ipv4)
+        logger.info("Resolved database hostname to IPv4")
         return url.replace(f"@{hostname}", f"@{ipv4}") + (f"&options=-csearch_path%3Dpublic" if "?" in url else f"?options=-csearch_path%3Dpublic")
     except Exception as e:
-        logger.warning("IPv4 resolution failed for %s: %s — using hostname as-is", hostname, e)
+        logger.warning("IPv4 resolution failed for database hostname: %s — using hostname as-is", e)
         return url
 
 

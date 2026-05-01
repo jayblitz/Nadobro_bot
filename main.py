@@ -185,6 +185,9 @@ def setup_bot():
             lang = normalize_lang(get_user_language(user.id))
             _ACTIVE_LANG.set(lang)
 
+    async def _error_handler(update: object, context) -> None:
+        logger.exception("Unhandled Telegram update error", exc_info=context.error)
+
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
@@ -210,6 +213,7 @@ def setup_bot():
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(_error_handler)
 
     logger.info("Bot handlers registered (pure bot mode, language middleware active)")
     return app

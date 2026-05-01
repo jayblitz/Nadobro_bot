@@ -17,6 +17,12 @@ class TelegramUiFormatterTests(unittest.TestCase):
         self.assertIn("└ 🌐 *Execution Mode*", text)
         self.assertIn("Q\\&A", text)
 
+    def test_dashboard_home_returns_non_empty_message(self):
+        text = formatters.fmt_dashboard_home()
+        self.assertIsInstance(text, str)
+        self.assertGreater(len(text.strip()), 0)
+        self.assertIn("*Status*", text)
+
     def test_strategy_hub_intro_uses_tree_sections(self):
         text = formatters.fmt_strategy_hub_intro()
         self.assertIn("🧠 *Nadobro Strategy Lab*", text)

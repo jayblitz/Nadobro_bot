@@ -6,6 +6,7 @@ def test_main_reduces_noisy_third_party_loggers():
     assert 'logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)' in source
     assert 'logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)' in source
     assert 'logging.getLogger("httpx").setLevel(logging.WARNING)' in source
+    assert "app.add_error_handler(_error_handler)" in source
 
 
 def test_pinecone_dependency_uses_current_package():

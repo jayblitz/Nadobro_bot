@@ -1104,6 +1104,15 @@ def fmt_dashboard_home() -> str:
         "Next step",
         [escape_md("Use the reply keyboard below to open modules.")],
     )
+    return "\n\n".join(
+        [
+            fmt_home_header(),
+            md2_rule(28),
+            status,
+            md2_rule(28),
+            nxt,
+        ]
+    )
 
 
 def fmt_referral_dashboard(payload: dict) -> str:

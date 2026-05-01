@@ -1,6 +1,7 @@
 import logging
 import os
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
 from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language
@@ -39,6 +40,11 @@ from src.nadobro.handlers.home_card import (
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.invite_service import has_private_access, redeem_invite_code
 logger = logging.getLogger(__name__)
+
+
+def _safe_text(text: str | None, fallback: str) -> str:
+    value = str(text or "").strip()
+    return value or fallback
 
 
 # New onboarding messages (exact copy from spec)
@@ -122,8 +128,12 @@ async def cmd_start(update: Update, context: CallbackContext):
         if DUAL_MODE_CARD_FLOW:
             await _send_dashboard_card(update, context, telegram_id)
             return
-        await update.message.reply_text(
+        text = _safe_text(
             localize_text(fmt_dashboard_home(), lang),
+            "🤖 Nadobro Command Center online.",
+        )
+        await update.message.reply_text(
+            text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(persistent_menu_kb(), lang),
         )
@@ -131,11 +141,23 @@ async def cmd_start(update: Update, context: CallbackContext):
 
 async def _send_dashboard_card(update: Update, context: CallbackContext, telegram_id: int):
     lang = get_active_language()
-    await update.message.reply_text(
+    text = _safe_text(
         localize_text(fmt_dashboard_home(), lang),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=localize_markup(home_card_kb(), lang),
+        "🤖 Nadobro Command Center online.",
     )
+    try:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=localize_markup(home_card_kb(), lang),
+        )
+    except BadRequest as e:
+        if "Can't parse entities" not in str(e):
+            raise
+        await update.message.reply_text(
+            plain_text_fallback(text),
+            reply_markup=localize_markup(home_card_kb(), lang),
+        )
 
 
 async def cmd_help(update: Update, context: CallbackContext):
