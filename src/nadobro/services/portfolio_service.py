@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.nadobro.services.trade_service import (
-    get_local_position_hints,
     get_open_limit_orders,
     get_trade_analytics,
 )
@@ -74,25 +73,6 @@ def clear_portfolio_snapshot_cache(telegram_id: int | None = None, network: str 
             _snapshot_cache.pop(key, None)
 
 
-def _merge_position_hints(telegram_id: int, network: str, live_positions: list[dict]) -> list[dict]:
-    positions = list(live_positions or [])
-    try:
-        live_product_ids = {
-            int(p.get("product_id"))
-            for p in positions
-            if p.get("product_id") is not None
-        }
-        missing_hints = [
-            p for p in get_local_position_hints(telegram_id, network=network)
-            if int(p.get("product_id")) not in live_product_ids
-        ]
-        if missing_hints:
-            positions.extend(missing_hints)
-    except Exception as e:
-        logger.debug("portfolio local position hints failed user=%s err=%s", telegram_id, e)
-    return positions
-
-
 def get_portfolio_snapshot(telegram_id: int, *, force_refresh: bool = False) -> PortfolioSnapshot:
     started = time.perf_counter()
     user = get_user(telegram_id)
@@ -145,12 +125,11 @@ def get_portfolio_snapshot(telegram_id: int, *, force_refresh: bool = False) -> 
         open_orders = []
         timings["orders"] = 0.0
 
-    positions = _merge_position_hints(telegram_id, network, live_positions)
     timings["total"] = time.perf_counter() - started
     snapshot = PortfolioSnapshot(
         telegram_id=int(telegram_id),
         network=network,
-        positions=positions,
+        positions=list(live_positions or []),
         prices=prices,
         stats=stats or {},
         open_orders=open_orders or [],

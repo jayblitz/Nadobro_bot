@@ -263,8 +263,18 @@ def _view_positions_text(telegram_id: int):
     return build_positions_view(telegram_id)
 
 
-def _view_portfolio_text(telegram_id: int):
-    return build_portfolio_view(telegram_id)
+async def _view_portfolio_text(telegram_id: int):
+    from src.nadobro.handlers.portfolio_deck import render_portfolio_deck, snapshot_for_user
+
+    try:
+        snapshot = await snapshot_for_user(telegram_id)
+        return render_portfolio_deck(snapshot)
+    except Exception as e:
+        logger.warning("portfolio_deck_unavailable user=%s err=%s", telegram_id, e)
+        return localize_text(
+            "⚠️ Portfolio refresh is temporarily unavailable\\. Try again shortly\\.",
+            get_active_language(),
+        ), home_card_kb()
 
 
 def _view_points_text(telegram_id: int):
@@ -299,7 +309,7 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
     if callback_data == "wallet:view":
         return await run_blocking(_view_wallet_text, telegram_id)
     if callback_data == "portfolio:view":
-        return await run_blocking(_view_portfolio_text, telegram_id)
+        return await _view_portfolio_text(telegram_id)
     if callback_data == "pos:view":
         return await run_blocking(_view_positions_text, telegram_id)
     if callback_data == "points:view":

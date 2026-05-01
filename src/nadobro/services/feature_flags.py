@@ -31,3 +31,19 @@ def studio_condition_interval_seconds() -> int:
         return max(5, int(float(raw)))
     except ValueError:
         return 60
+
+
+def portfolio_sync_enabled() -> bool:
+    return env_flag("NADO_PORTFOLIO_SYNC", False)
+
+
+def portfolio_ws_enabled() -> bool:
+    return env_flag("NADO_PORTFOLIO_WS", False)
+
+
+def portfolio_sync_interval_seconds() -> int:
+    raw = (os.environ.get("NADO_PORTFOLIO_SYNC_SECONDS") or "30").strip()
+    try:
+        return max(5, int(float(raw)))
+    except ValueError:
+        return 30

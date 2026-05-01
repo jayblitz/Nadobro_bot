@@ -66,6 +66,9 @@ relay/.fly-bootstrap.env
 .claude/
 .DS_Store
 
+# Cursor MCP config may contain local Nado signer keys.
+.cursor/mcp.json
+
 # Marketing / Next.js site (local installs)
 nadobro_site/node_modules/
 nadobro_site/.next/

@@ -36,7 +36,6 @@ from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.wallet_view import build_wallet_view_payload
 from src.nadobro.handlers.home_card import (
     build_home_card_text_async,
-    build_portfolio_view,
     build_positions_view,
 )
 from src.nadobro.handlers.state_reset import clear_pending_user_state
@@ -727,54 +726,178 @@ async def _handle_portfolio(query, data, telegram_id):
     if user:
         mode_label = user.network_mode.value.upper()
 
+    if action == "close_all_confirm":
+        from src.nadobro.handlers.portfolio_deck import render_close_all_confirm
+
+        text, kb = render_close_all_confirm()
+        await _edit_loc(query, text, reply_markup=kb)
+        return
+
+    if action == "close_all_yes":
+        await _edit_loc(query, "⏳ Closing all positions…")
+        network = user.network_mode.value if user else "mainnet"
+        result = await run_blocking(close_all_positions, telegram_id, network=network)
+        if isinstance(result, dict) and not result.get("success", False):
+            await _edit_loc(query, f"⚠ Close all failed: {str(result.get('error') or result.get('message') or 'unknown error')[:240]}")
+            return
+        from src.nadobro.handlers.portfolio_deck import render_portfolio_deck, snapshot_for_user
+
+        snapshot = await snapshot_for_user(telegram_id, force=True)
+        text, kb = render_portfolio_deck(snapshot)
+        await _edit_loc(query, text, reply_markup=kb)
+        return
+
+    if action == "cancel_all_confirm":
+        from src.nadobro.handlers.orders_view import render_cancel_all_confirm
+
+        text, kb = render_cancel_all_confirm()
+        await _edit_loc(query, text, reply_markup=kb)
+        return
+
+    if action == "cancel_all_yes":
+        await _edit_loc(query, "⏳ Cancelling open orders…")
+        from src.nadobro.handlers.portfolio_deck import render_portfolio_deck, snapshot_for_user
+
+        snapshot = await snapshot_for_user(telegram_id, force=True)
+        client = await run_blocking(get_user_nado_client, telegram_id, snapshot.get("network"))
+        if not client:
+            await _edit_loc(query, "⚠ Cannot cancel orders: Nado client unavailable.")
+            return
+        plain_by_product: dict[int, list[str]] = {}
+        trigger_by_product: dict[int, list[str]] = {}
+        skipped = 0
+        failures: list[str] = []
+        for order in snapshot.get("open_orders") or []:
+            try:
+                pid = int(order.get("product_id"))
+            except Exception:
+                skipped += 1
+                continue
+            digest = str(order.get("digest") or order.get("order_digest") or "")
+            if not digest:
+                skipped += 1
+                continue
+            target = trigger_by_product if bool(order.get("is_trigger")) else plain_by_product
+            target.setdefault(pid, []).append(digest)
+        for pid, digests in plain_by_product.items():
+            result = await client.cancel_orders(product_id=pid, digests=digests)
+            if not result.get("success"):
+                failures.append(str(result.get("error") or f"product {pid}"))
+        for pid, digests in trigger_by_product.items():
+            result = await client.cancel_trigger_orders(product_id=pid, digests=digests)
+            if not result.get("success"):
+                failures.append(str(result.get("error") or f"trigger product {pid}"))
+        if failures:
+            await _edit_loc(query, f"⚠ Some orders were not cancelled: {'; '.join(failures)[:240]}")
+            return
+        if skipped:
+            logger.warning("portfolio_cancel_all_skipped_orders user=%s skipped=%s", telegram_id, skipped)
+        snapshot = await snapshot_for_user(telegram_id, force=True)
+        text, kb = render_portfolio_deck(snapshot)
+        await _edit_loc(query, text, reply_markup=kb)
+        return
+
+    if action == "cancel_order":
+        await _edit_loc(query, "⏳ Cancelling order…")
+        from src.nadobro.handlers.orders_view import render_orders_view, sorted_orders
+        from src.nadobro.handlers.portfolio_deck import snapshot_for_user
+
+        try:
+            order_index = int(parts[2]) if len(parts) > 2 else -1
+        except (TypeError, ValueError):
+            order_index = -1
+        snapshot = await snapshot_for_user(telegram_id, force=True)
+        orders = sorted_orders(snapshot)
+        if order_index < 0 or order_index >= len(orders):
+            text, kb = render_orders_view(snapshot)
+            await _edit_loc(query, "⚠ Order list changed. Please try again.\n\n" + text, reply_markup=kb)
+            return
+        order = orders[order_index]
+        try:
+            product_id = int(order.get("product_id"))
+        except Exception:
+            await _edit_loc(query, "⚠ Cannot cancel this order: missing product id.")
+            return
+        digest = str(order.get("digest") or order.get("order_digest") or "")
+        if not digest:
+            await _edit_loc(query, "⚠ Cannot cancel this order: missing order digest.")
+            return
+        client = await run_blocking(get_user_nado_client, telegram_id, snapshot.get("network"))
+        if not client:
+            await _edit_loc(query, "⚠ Cannot cancel order: Nado client unavailable.")
+            return
+        if bool(order.get("is_trigger")):
+            result = await client.cancel_trigger_orders(product_id=product_id, digests=[digest])
+        else:
+            result = await client.cancel_orders(product_id=product_id, digests=[digest])
+        if not result.get("success"):
+            await _edit_loc(query, f"⚠ Cancel failed: {str(result.get('error') or 'unknown error')[:240]}")
+            return
+        snapshot = await snapshot_for_user(telegram_id, force=True)
+        text, kb = render_orders_view(snapshot)
+        await _edit_loc(query, text, reply_markup=kb)
+        return
+
+    if action == "positions":
+        from src.nadobro.handlers.portfolio_deck import snapshot_for_user
+        from src.nadobro.handlers.positions_view import render_positions_view
+
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        snapshot = await snapshot_for_user(telegram_id)
+        text, kb = render_positions_view(snapshot, page=page)
+        await _edit_loc(query, text, reply_markup=kb)
+        return
+
+    if action == "orders":
+        from src.nadobro.handlers.orders_view import render_orders_view
+        from src.nadobro.handlers.portfolio_deck import snapshot_for_user
+
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        snapshot = await snapshot_for_user(telegram_id)
+        text, kb = render_orders_view(snapshot, page=page)
+        await _edit_loc(query, text, reply_markup=kb)
+        return
+
     if action == "history":
+        from src.nadobro.handlers.history_view import render_history_view
+        from src.nadobro.handlers.portfolio_deck import snapshot_for_user
+
         try:
             page = max(0, int(parts[2])) if len(parts) > 2 else 0
         except (TypeError, ValueError):
             page = 0
-        PAGE_SIZE = 10
-        trades = await run_blocking(get_trade_history, telegram_id, limit=500)
-        has_more = len(trades) > (page + 1) * PAGE_SIZE
-        msg = fmt_trade_history(trades, page=page, page_size=PAGE_SIZE, mode_label=mode_label)
         try:
-            await _edit_loc(query,
-                msg,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=portfolio_history_kb(page=page, has_more=has_more),
-            )
-        except BadRequest as e:
-            if "Message is not modified" in str(e):
-                return
-            raise
+            snapshot = await snapshot_for_user(telegram_id)
+        except Exception as e:
+            logger.warning("portfolio_history_snapshot_failed user=%s err=%s", telegram_id, e)
+            snapshot = {"network": mode_label or "MAINNET", "matches": []}
+        text, kb = render_history_view(snapshot, page=page)
+        await _edit_loc(query, text, reply_markup=kb)
         return
 
-    if action == "analytics":
+    if action in ("analytics", "performance"):
+        from src.nadobro.handlers.performance_view import render_performance_view
+
+        network = user.network_mode.value if user else "mainnet"
         try:
-            stats = await run_blocking(get_trade_analytics, telegram_id)
+            text, kb = await run_blocking(render_performance_view, telegram_id, network)
         except Exception as e:
-            logger.warning("portfolio_analytics_failed user=%s err=%s", telegram_id, e)
-            stats = {}
-        msg = fmt_analytics(stats, mode_label=mode_label)
-        try:
-            await _edit_loc(query,
-                msg,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=portfolio_analytics_kb(),
-            )
-        except BadRequest as e:
-            if "Message is not modified" in str(e):
-                return
-            raise
+            logger.warning("portfolio_performance_failed user=%s err=%s", telegram_id, e)
+            text, kb = "📊 Performance\n\nNo performance data available.", portfolio_analytics_kb()
+        await _edit_loc(query, text, reply_markup=kb)
         return
 
     # Default: portfolio overview
-    force_refresh_orders = action == "refresh"
+    from src.nadobro.handlers.portfolio_deck import render_loading, render_portfolio_deck, snapshot_for_user
+
+    force_refresh = action == "refresh"
+    await _edit_loc(query, render_loading())
     with timed_metric("cb.portfolio.view"):
-        msg, reply_markup = await run_blocking(build_portfolio_view, telegram_id, force_refresh_orders)
+        snapshot = await snapshot_for_user(telegram_id, force=force_refresh)
+        msg, reply_markup = render_portfolio_deck(snapshot)
     try:
         await _edit_loc(query,
             msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup,
         )
     except BadRequest as e:

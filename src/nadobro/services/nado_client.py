@@ -2,6 +2,7 @@ import logging
 import time
 import os
 import random
+import asyncio
 import requests
 from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -128,8 +129,13 @@ class NadoClient:
 
             mode = NadoClientMode.TESTNET if self.network == "testnet" else NadoClientMode.MAINNET
             self.client = create_nado_client(mode, self.private_key)
-            self.address = self.client.context.signer.address
+            signer = getattr(getattr(self.client, "context", None), "signer", None)
+            signer_address = getattr(signer, "address", None)
+            if signer_address:
+                self.address = signer_address
             query_addr = self.main_address or self.address
+            if not query_addr:
+                raise RuntimeError("Nado client requires a signer or read-only address")
             self.subaccount_hex = self._compute_subaccount_hex(query_addr)
             self._initialized = True
             self.private_key = None  # Clear raw key after SDK init
@@ -205,6 +211,35 @@ class NadoClient:
                 logger.error("REST query failed type=%s unexpected: %s", query_type, e)
                 return None
         return None
+
+    @staticmethod
+    def _to_plain(value):
+        """Convert SDK/Pydantic objects into plain Python containers."""
+        if value is None or isinstance(value, (str, int, float, bool, Decimal)):
+            return value
+        if isinstance(value, list):
+            return [NadoClient._to_plain(v) for v in value]
+        if isinstance(value, tuple):
+            return [NadoClient._to_plain(v) for v in value]
+        if isinstance(value, dict):
+            return {str(k): NadoClient._to_plain(v) for k, v in value.items()}
+        if hasattr(value, "dict"):
+            try:
+                return NadoClient._to_plain(value.dict())
+            except Exception:
+                pass
+        if hasattr(value, "__dict__"):
+            return NadoClient._to_plain(
+                {k: v for k, v in vars(value).items() if not k.startswith("_")}
+            )
+        return value
+
+    def _ensure_sdk_client(self) -> bool:
+        if self._initialized and self.client:
+            return True
+        if self.private_key is not None or self.address or self.main_address:
+            return self.initialize()
+        return False
 
     def get_market_price(self, product_id: int) -> dict:
         cache_key = f"{self.network}:{product_id}"
@@ -517,6 +552,217 @@ class NadoClient:
                 except Exception:
                     continue
         return rows
+
+    async def get_matches(
+        self,
+        *,
+        product_ids: list[int] | None = None,
+        limit: int = 200,
+        idx: str | None = None,
+        max_time: int | None = None,
+    ) -> list[dict]:
+        """
+        Fetch indexer match/fill events for this subaccount.
+
+        SDK 0.3.3 aliases ``idx`` as ``submission_idx`` on IndexerBaseParams.
+        """
+        if not self._ensure_sdk_client():
+            return []
+        try:
+            from nado_protocol.indexer_client.types.query import IndexerMatchesParams
+
+            def _call():
+                params = IndexerMatchesParams(
+                    subaccounts=[self.subaccount_hex],
+                    product_ids=product_ids,
+                    isolated=None,
+                    idx=int(idx) if idx is not None else None,
+                    max_time=max_time,
+                    limit=int(limit),
+                )
+                return self.client.context.indexer_client.get_matches(params)
+
+            data = await asyncio.to_thread(_call)
+            rows = getattr(data, "matches", None)
+            if rows is None and isinstance(data, dict):
+                rows = data.get("matches")
+            return self._to_plain(rows or [])
+        except Exception as e:
+            logger.error("SDK get_matches failed: %s", e)
+            return []
+
+    async def get_interest_and_funding_payments(
+        self,
+        *,
+        product_ids: list[int] | None = None,
+        limit: int = 200,
+        idx: str | None = None,
+    ) -> list[dict]:
+        """
+        Fetch user-scoped indexer interest and funding payments.
+
+        Nado SDK 0.3.3 names the cursor ``max_idx`` on this endpoint.
+        """
+        if not self._ensure_sdk_client():
+            return []
+        try:
+            from nado_protocol.indexer_client.types.query import IndexerInterestAndFundingParams
+
+            if product_ids is None:
+                product_ids = [
+                    int(pid)
+                    for name in get_perp_products(network=self.network, client=self)
+                    if (pid := get_product_id(name, network=self.network, client=self)) is not None
+                ]
+            def _call():
+                params = IndexerInterestAndFundingParams(
+                    subaccount=self.subaccount_hex,
+                    product_ids=list(product_ids or []),
+                    max_idx=idx,
+                    limit=int(limit),
+                )
+                return self.client.context.indexer_client.get_interest_and_funding_payments(params)
+
+            data = await asyncio.to_thread(_call)
+            plain = self._to_plain(data)
+            if isinstance(plain, dict):
+                payments = []
+                for key in ("funding_payments", "interest_payments"):
+                    for row in plain.get(key) or []:
+                        item = dict(row)
+                        item.setdefault("type", "funding" if key == "funding_payments" else "interest")
+                        payments.append(item)
+                return payments
+            return []
+        except Exception as e:
+            logger.error("SDK get_interest_and_funding_payments failed: %s", e)
+            return []
+
+    async def calculate_account_summary(self, *, ts: int | None = None) -> dict:
+        """
+        Fetch a MarginManager-backed account summary for the active subaccount.
+
+        In SDK 0.3.3 MarginManager.calculate_account_summary takes no args; the
+        subaccount and optional snapshot timestamp are supplied through from_client.
+        """
+        if not self._ensure_sdk_client():
+            return {}
+        try:
+            from nado_protocol.utils.margin_manager import MarginManager
+
+            def _call():
+                manager = MarginManager.from_client(
+                    self.client,
+                    subaccount=self.subaccount_hex,
+                    include_indexer_events=True,
+                    snapshot_timestamp=ts,
+                )
+                return manager.calculate_account_summary()
+
+            return self._to_plain(await asyncio.to_thread(_call)) or {}
+        except Exception as e:
+            logger.error("SDK calculate_account_summary failed: %s", e)
+            return {}
+
+    async def cancel_orders(self, *, product_id: int, digests: list[str]) -> dict:
+        """
+        Cancel multiple plain engine orders for one product.
+
+        CancelOrdersParams accepts hex digest strings and converts them to bytes32.
+        """
+        clean_digests = [str(d).strip() for d in (digests or []) if str(d).strip()]
+        if not clean_digests:
+            return {"success": True, "cancelled": 0, "digests": []}
+        if not self._ensure_sdk_client():
+            return {"success": False, "error": "Client not initialized", "digests": clean_digests}
+        try:
+            from nado_protocol.engine_client.types.execute import CancelOrdersParams
+
+            cancel_params = CancelOrdersParams(
+                sender=self.subaccount_hex,
+                productIds=[int(product_id)],
+                digests=clean_digests,
+            )
+            response = await asyncio.to_thread(self.client.market.cancel_orders, cancel_params)
+            return {
+                "success": True,
+                "cancelled": len(clean_digests),
+                "digests": clean_digests,
+                "response": self._to_plain(response),
+            }
+        except Exception as e:
+            logger.error("cancel_orders failed: %s", e)
+            return {"success": False, "error": str(e), "digests": clean_digests}
+
+    async def get_trigger_orders(
+        self,
+        *,
+        product_ids: list[int] | None = None,
+        limit: int = 100,
+        digests: list[str] | None = None,
+    ) -> list[dict]:
+        """List trigger / TP / SL / TWAP orders from the trigger service."""
+        if not self._ensure_sdk_client():
+            return []
+        trigger_client = getattr(getattr(self.client, "context", None), "trigger_client", None)
+        if not trigger_client:
+            return []
+        try:
+            from nado_protocol.trigger_client.types.query import (
+                ListTriggerOrdersParams,
+                ListTriggerOrdersTx,
+                TriggerOrderStatusType,
+            )
+
+            params = ListTriggerOrdersParams(
+                tx=ListTriggerOrdersTx(sender=self.subaccount_hex, recvTime=int(time.time() * 1000)),
+                product_ids=product_ids,
+                status_types=[
+                    TriggerOrderStatusType.WAITING_PRICE,
+                    TriggerOrderStatusType.WAITING_DEPENDENCY,
+                    TriggerOrderStatusType.TWAP_EXECUTING,
+                ],
+                digests=digests,
+                limit=int(limit),
+            )
+            response = await asyncio.to_thread(trigger_client.list_trigger_orders, params)
+            data = getattr(response, "data", None)
+            rows = getattr(data, "orders", None)
+            if rows is None and isinstance(data, dict):
+                rows = data.get("orders")
+            return self._to_plain(rows or [])
+        except Exception as e:
+            logger.error("get_trigger_orders failed: %s", e)
+            return []
+
+    async def cancel_trigger_orders(self, *, product_id: int, digests: list[str]) -> dict:
+        """Cancel trigger / TP / SL / TWAP orders for one product."""
+        clean_digests = [str(d).strip() for d in (digests or []) if str(d).strip()]
+        if not clean_digests:
+            return {"success": True, "cancelled": 0, "digests": []}
+        if not self._ensure_sdk_client():
+            return {"success": False, "error": "Client not initialized", "digests": clean_digests}
+        trigger_client = getattr(getattr(self.client, "context", None), "trigger_client", None)
+        if not trigger_client:
+            return {"success": False, "error": "Trigger client not initialized", "digests": clean_digests}
+        try:
+            from nado_protocol.trigger_client.types.execute import CancelTriggerOrdersParams
+
+            params = CancelTriggerOrdersParams(
+                sender=self.subaccount_hex,
+                productIds=[int(product_id)],
+                digests=clean_digests,
+            )
+            response = await asyncio.to_thread(trigger_client.cancel_trigger_orders, params)
+            return {
+                "success": True,
+                "cancelled": len(clean_digests),
+                "digests": clean_digests,
+                "response": self._to_plain(response),
+            }
+        except Exception as e:
+            logger.error("cancel_trigger_orders failed: %s", e)
+            return {"success": False, "error": str(e), "digests": clean_digests}
 
     @staticmethod
     def _from_x18_dynamic(value) -> float:

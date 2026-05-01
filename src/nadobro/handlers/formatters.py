@@ -776,14 +776,6 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
         f"💎 *{_loc('Position Value:')}* {escape_md(f'${position_value:,.2f}')} \\| "
         f"{upnl_emoji} *{_loc('Unrealized PnL:')}* {escape_md(upnl_str)}",
     ])
-    if any(str(p.get("source") or "") == "local_trade_ledger" for p in (positions or [])):
-        lines.extend([
-            "",
-            _loc(
-                "⚠️ *local sync* rows fill gaps when the exchange omits a position \\(often isolated margin\\)\\. "
-                "*Close all* only closes *live* exchange positions; use *Refresh* after you close on Nado\\."
-            ),
-        ])
 
     if total_trades > 0:
         total_volume = float(stats.get("total_volume", 0) or 0)
@@ -870,11 +862,10 @@ def fmt_portfolio(stats, positions, prices=None, open_orders=None, mode_label: s
             pnl = _calc_position_pnl(p, current)
             if pnl is not None:
                 pnl_text = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
-        source_note = " \\| local sync" if str(p.get("source") or "") == "local_trade_ledger" else ""
 
         lines.append(
             f"• *{escape_md(pname)}* \\| {escape_md(side)} {escape_md(f'{amount:.4f}')} \\| "
-            f"{_loc('PnL')}: {escape_md(pnl_text)}{source_note}"
+            f"{_loc('PnL')}: {escape_md(pnl_text)}"
         )
 
     if len(positions) > 5:

@@ -42,7 +42,6 @@ from src.nadobro.handlers.trade_card import (
     is_trade_card_mode_enabled,
 )
 from src.nadobro.handlers.home_card import (
-    build_portfolio_view,
     build_positions_view,
     open_home_card_view_from_message,
 )
@@ -639,10 +638,16 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "portfolio:view":
         await update.message.chat.send_action(ChatAction.TYPING)
         with timed_metric("msg.portfolio.view"):
-            msg, reply_markup = await run_blocking(build_portfolio_view, telegram_id)
+            from src.nadobro.handlers.portfolio_deck import render_portfolio_deck, snapshot_for_user
+
+            try:
+                snapshot = await snapshot_for_user(telegram_id)
+                msg, reply_markup = render_portfolio_deck(snapshot)
+            except Exception as e:
+                logging.getLogger(__name__).warning("message_portfolio_deck_failed user=%s err=%s", telegram_id, e)
+                msg, reply_markup = "⚠️ Portfolio refresh is temporarily unavailable. Try again shortly.", persistent_menu_kb()
         await _reply_loc(update.message, 
             msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(reply_markup, lang),
         )
         return

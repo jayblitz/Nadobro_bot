@@ -49,13 +49,13 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIn("Portfolio refresh is temporarily unavailable", text)
         self.assertIsNotNone(reply_markup)
 
-    def test_resolve_home_view_uses_blocking_wrapper_for_portfolio(self):
-        run_blocking_mock = AsyncMock(return_value=("portfolio", "keyboard"))
-        with patch.object(home_card, "run_blocking", run_blocking_mock):
+    def test_resolve_home_view_uses_new_portfolio_deck_path(self):
+        view_mock = AsyncMock(return_value=("portfolio", "keyboard"))
+        with patch.object(home_card, "_view_portfolio_text", view_mock):
             result = asyncio.run(home_card.resolve_home_view("portfolio:view", telegram_id=5))
 
         self.assertEqual(result, ("portfolio", "keyboard"))
-        run_blocking_mock.assert_awaited_once_with(home_card._view_portfolio_text, 5)
+        view_mock.assert_awaited_once_with(5)
 
     def test_handle_portfolio_history_invalid_page_does_not_raise(self):
         query = SimpleNamespace()

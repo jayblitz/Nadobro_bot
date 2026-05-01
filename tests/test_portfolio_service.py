@@ -44,7 +44,7 @@ class PortfolioServiceTests(unittest.TestCase):
     def tearDown(self):
         portfolio_service.clear_portfolio_snapshot_cache()
 
-    def test_snapshot_merges_live_positions_local_hints_and_orders(self):
+    def test_snapshot_uses_live_positions_and_orders(self):
         client = _Client()
         with patch.object(portfolio_service, "get_user", return_value=_User()), patch.object(
             portfolio_service, "get_user_readonly_client", return_value=client
@@ -54,25 +54,11 @@ class PortfolioServiceTests(unittest.TestCase):
             portfolio_service,
             "get_open_limit_orders",
             return_value=[{"product": "AAPL-PERP", "size": 3.0}],
-        ), patch.object(
-            portfolio_service,
-            "get_local_position_hints",
-            return_value=[
-                {
-                    "product_id": 117,
-                    "product_name": "AAPL-PERP",
-                    "amount": 3.0,
-                    "signed_amount": 3.0,
-                    "price": 266.3,
-                    "side": "LONG",
-                    "source": "local_trade_ledger",
-                }
-            ],
         ):
             snapshot = portfolio_service.get_portfolio_snapshot(42)
 
         self.assertEqual(snapshot.network, "mainnet")
-        self.assertEqual({p["product_name"] for p in snapshot.positions}, {"BTC-PERP", "AAPL-PERP"})
+        self.assertEqual({p["product_name"] for p in snapshot.positions}, {"BTC-PERP"})
         self.assertEqual(snapshot.open_orders[0]["product"], "AAPL-PERP")
         self.assertFalse(snapshot.from_cache)
 
@@ -84,8 +70,6 @@ class PortfolioServiceTests(unittest.TestCase):
             portfolio_service, "get_trade_analytics", return_value={}
         ), patch.object(
             portfolio_service, "get_open_limit_orders", return_value=[]
-        ), patch.object(
-            portfolio_service, "get_local_position_hints", return_value=[]
         ):
             first = portfolio_service.get_portfolio_snapshot(42)
             first.positions.append({"product_name": "MUTATED-PERP"})

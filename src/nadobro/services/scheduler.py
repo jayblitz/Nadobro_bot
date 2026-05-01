@@ -621,7 +621,13 @@ _EDGE_SCAN_SECONDS = int(os.environ.get("EDGE_SCAN_INTERVAL_SECONDS", "1800"))
 def start_scheduler():
     relay_poll_seconds = relay_poll_interval_seconds()
     from src.nadobro.services.condition_watcher import condition_tick
-    from src.nadobro.services.feature_flags import studio_condition_interval_seconds, studio_enabled, time_limit_enabled
+    from src.nadobro.services.feature_flags import (
+        portfolio_sync_enabled,
+        portfolio_sync_interval_seconds,
+        studio_condition_interval_seconds,
+        studio_enabled,
+        time_limit_enabled,
+    )
     from src.nadobro.services.time_limit_watcher import time_limit_tick
 
     scheduler.add_job(check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS, id="check_alerts", replace_existing=True)
@@ -635,6 +641,17 @@ def start_scheduler():
             seconds=studio_condition_interval_seconds(),
             id="condition_watcher",
             replace_existing=True,
+        )
+    if portfolio_sync_enabled():
+        from src.nadobro.services.nado_sync import sync_active_users
+
+        scheduler.add_job(
+            sync_active_users,
+            "interval",
+            seconds=portfolio_sync_interval_seconds(),
+            id="portfolio_sync",
+            replace_existing=True,
+            kwargs={"reason": "poll"},
         )
     scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True)
     scheduler.add_job(poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds, id="lowiqpts_relay_poll", replace_existing=True)

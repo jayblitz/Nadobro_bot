@@ -6,12 +6,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     gcc \
     libpq-dev \
+    fonts-dejavu \
+    fonts-noto \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py ./
+COPY assets/ ./assets/
 COPY src/ ./src/
 COPY deploy/nginx-miniapp.conf /etc/nginx/nginx.conf
 RUN nginx -t

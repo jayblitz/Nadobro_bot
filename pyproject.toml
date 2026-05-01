@@ -10,6 +10,7 @@ dependencies = [
     "nado-protocol==0.3.3",
     "openai==2.17.0",
     "pandas==2.2.3",
+    "Pillow>=10.4.0",
     "pinecone",
     "psycopg2-binary==2.9.11",
     "python-dotenv==1.2.1",

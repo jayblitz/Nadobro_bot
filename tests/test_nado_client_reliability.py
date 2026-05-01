@@ -1,4 +1,6 @@
 import unittest
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from _stubs import install_test_stubs
@@ -289,6 +291,202 @@ class NadoClientReliabilityTests(unittest.TestCase):
         )
         self.assertTrue(o["is_filled"])
         self.assertGreater(o["fill_size"], 0)
+
+
+class NadoClientPortfolioWrapperTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.client = NadoClient.from_address("0x" + "1" * 40, network="testnet")
+        self.client._initialized = True
+        self.client.client = SimpleNamespace(
+            context=SimpleNamespace(indexer_client=SimpleNamespace(), trigger_client=SimpleNamespace()),
+            market=SimpleNamespace(),
+        )
+
+    async def test_get_matches_uses_indexer_params_and_returns_dicts(self):
+        captured = {}
+
+        class _Params:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class _Indexer:
+            def get_matches(self, params):
+                captured["params"] = params
+                return SimpleNamespace(matches=[SimpleNamespace(digest="0xabc", submission_idx="10")])
+
+        self.client.client.context.indexer_client = _Indexer()
+        with patch.dict(
+            sys.modules,
+            {
+                "nado_protocol.indexer_client.types.query": SimpleNamespace(
+                    IndexerMatchesParams=_Params
+                )
+            },
+        ):
+            rows = await self.client.get_matches(product_ids=[1], idx="7", limit=50, max_time=123)
+
+        self.assertEqual(rows, [{"digest": "0xabc", "submission_idx": "10"}])
+        self.assertEqual(captured["subaccounts"], [self.client.subaccount_hex])
+        self.assertEqual(captured["product_ids"], [1])
+        self.assertEqual(captured["idx"], 7)
+        self.assertEqual(captured["limit"], 50)
+        self.assertEqual(captured["max_time"], 123)
+
+    async def test_get_interest_and_funding_payments_flattens_payment_types(self):
+        captured = {}
+
+        class _Params:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class _Indexer:
+            def get_interest_and_funding_payments(self, params):
+                captured["params"] = params
+                return SimpleNamespace(
+                    funding_payments=[{"amount": "100", "idx": "9"}],
+                    interest_payments=[{"amount": "-5", "idx": "8"}],
+                    next_idx="7",
+                )
+
+        self.client.client.context.indexer_client = _Indexer()
+        with patch.dict(
+            sys.modules,
+            {
+                "nado_protocol.indexer_client.types.query": SimpleNamespace(
+                    IndexerInterestAndFundingParams=_Params
+                )
+            },
+        ):
+            rows = await self.client.get_interest_and_funding_payments(
+                product_ids=[2], idx="99", limit=25
+            )
+
+        self.assertEqual(rows[0]["type"], "funding")
+        self.assertEqual(rows[1]["type"], "interest")
+        self.assertEqual(captured["subaccount"], self.client.subaccount_hex)
+        self.assertEqual(captured["product_ids"], [2])
+        self.assertEqual(captured["max_idx"], "99")
+        self.assertEqual(captured["limit"], 25)
+
+    async def test_calculate_account_summary_uses_margin_manager_from_client(self):
+        captured = {}
+
+        class _Manager:
+            @classmethod
+            def from_client(cls, client, **kwargs):
+                captured["client"] = client
+                captured.update(kwargs)
+                return cls()
+
+            def calculate_account_summary(self):
+                return SimpleNamespace(portfolio_value="123", cross_positions=[], isolated_positions=[])
+
+        with patch.dict(
+            sys.modules,
+            {"nado_protocol.utils.margin_manager": SimpleNamespace(MarginManager=_Manager)},
+        ):
+            summary = await self.client.calculate_account_summary(ts=456)
+
+        self.assertEqual(summary["portfolio_value"], "123")
+        self.assertIs(captured["client"], self.client.client)
+        self.assertEqual(captured["subaccount"], self.client.subaccount_hex)
+        self.assertEqual(captured["snapshot_timestamp"], 456)
+        self.assertTrue(captured["include_indexer_events"])
+
+    async def test_cancel_orders_uses_multi_digest_params(self):
+        captured = {}
+
+        class _Params:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class _Market:
+            def cancel_orders(self, params):
+                captured["params"] = params
+                return SimpleNamespace(status="success")
+
+        self.client.client.market = _Market()
+        with patch.dict(
+            sys.modules,
+            {
+                "nado_protocol.engine_client.types.execute": SimpleNamespace(
+                    CancelOrdersParams=_Params
+                )
+            },
+        ):
+            result = await self.client.cancel_orders(product_id=3, digests=["0xaaa", "0xbbb"])
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["cancelled"], 2)
+        self.assertEqual(captured["sender"], self.client.subaccount_hex)
+        self.assertEqual(captured["productIds"], [3])
+        self.assertEqual(captured["digests"], ["0xaaa", "0xbbb"])
+
+    async def test_get_trigger_orders_uses_trigger_client(self):
+        captured = {}
+
+        class _Tx:
+            def __init__(self, **kwargs):
+                captured["tx_kwargs"] = kwargs
+
+        class _Params:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class _Status:
+            WAITING_PRICE = "waiting_price"
+            WAITING_DEPENDENCY = "waiting_dependency"
+            TWAP_EXECUTING = "twap_executing"
+
+        class _TriggerClient:
+            def list_trigger_orders(self, params):
+                captured["params"] = params
+                return SimpleNamespace(data=SimpleNamespace(orders=[SimpleNamespace(order={"digest": "0xtrg"})]))
+
+        self.client.client.context.trigger_client = _TriggerClient()
+        with patch.dict(
+            sys.modules,
+            {
+                "nado_protocol.trigger_client.types.query": SimpleNamespace(
+                    ListTriggerOrdersParams=_Params,
+                    ListTriggerOrdersTx=_Tx,
+                    TriggerOrderStatusType=_Status,
+                )
+            },
+        ):
+            rows = await self.client.get_trigger_orders(product_ids=[1], limit=10)
+
+        self.assertEqual(rows, [{"order": {"digest": "0xtrg"}}])
+        self.assertEqual(captured["tx_kwargs"]["sender"], self.client.subaccount_hex)
+        self.assertEqual(captured["product_ids"], [1])
+        self.assertEqual(captured["limit"], 10)
+
+    async def test_cancel_trigger_orders_uses_trigger_client(self):
+        captured = {}
+
+        class _Params:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class _TriggerClient:
+            def cancel_trigger_orders(self, params):
+                captured["params"] = params
+                return SimpleNamespace(status="success")
+
+        self.client.client.context.trigger_client = _TriggerClient()
+        with patch.dict(
+            sys.modules,
+            {
+                "nado_protocol.trigger_client.types.execute": SimpleNamespace(
+                    CancelTriggerOrdersParams=_Params
+                )
+            },
+        ):
+            result = await self.client.cancel_trigger_orders(product_id=3, digests=["0xaaa"])
+
+        self.assertTrue(result["success"])
+        self.assertEqual(captured["productIds"], [3])
+        self.assertEqual(captured["digests"], ["0xaaa"])
 
 
 if __name__ == "__main__":
