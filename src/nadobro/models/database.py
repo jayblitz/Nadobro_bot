@@ -615,7 +615,8 @@ def insert_copy_position(data: dict) -> Optional[int]:
     cols = [
         "mirror_id", "user_id", "product_id", "product_name", "side",
         "entry_price", "size", "leverage", "tp_price", "sl_price",
-        "leader_entry_price", "leader_size", "status", "opened_at",
+        "tp_order_digest", "sl_order_digest", "leader_entry_price",
+        "leader_size", "status", "opened_at",
     ]
     filtered = {k: v for k, v in data.items() if k in cols and v is not None}
     if "opened_at" not in filtered:
@@ -1079,16 +1080,48 @@ def get_pending_fill_syncs(limit: int = 100) -> list:
     )
 
 
+def claim_pending_fill_syncs(limit: int = 100, stale_after_minutes: int = 10) -> list:
+    """Atomically claim pending fill-sync rows for one worker/process."""
+    return query_all(
+        """
+        WITH claim AS (
+            SELECT id
+            FROM fill_sync_queue
+            WHERE status = 'pending'
+               OR (status = 'processing' AND claimed_at < now() - (%s * interval '1 minute'))
+            ORDER BY created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT %s
+        )
+        UPDATE fill_sync_queue q
+        SET status = 'processing',
+            claimed_at = now(),
+            attempts = attempts + 1
+        FROM claim
+        WHERE q.id = claim.id
+        RETURNING q.*
+        """,
+        (int(stale_after_minutes), int(limit)),
+    )
+
+
+def release_fill_sync(sync_id: int):
+    execute(
+        "UPDATE fill_sync_queue SET status = 'pending', claimed_at = NULL WHERE id = %s AND status = 'processing'",
+        (sync_id,),
+    )
+
+
 def resolve_fill_sync(sync_id: int):
     execute(
-        "UPDATE fill_sync_queue SET status = 'resolved', resolved_at = %s WHERE id = %s",
+        "UPDATE fill_sync_queue SET status = 'resolved', claimed_at = NULL, resolved_at = %s WHERE id = %s",
         (datetime.utcnow().isoformat(), sync_id),
     )
 
 
 def expire_fill_sync(sync_id: int):
     execute(
-        "UPDATE fill_sync_queue SET status = 'expired', resolved_at = %s WHERE id = %s",
+        "UPDATE fill_sync_queue SET status = 'expired', claimed_at = NULL, resolved_at = %s WHERE id = %s",
         (datetime.utcnow().isoformat(), sync_id),
     )
 
@@ -1097,4 +1130,84 @@ def increment_fill_sync_attempts(sync_id: int):
     execute(
         "UPDATE fill_sync_queue SET attempts = attempts + 1 WHERE id = %s",
         (sync_id,),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Order Intent ORM
+# ---------------------------------------------------------------------------
+
+def get_order_intent_row(intent_id: str) -> Optional[dict]:
+    row = query_one(
+        "SELECT intent_id, status, value, trade_id, order_digest, created_at, updated_at FROM order_intents WHERE intent_id = %s",
+        (str(intent_id),),
+    )
+    if not row:
+        return None
+    value = row.get("value") or {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = {}
+    payload = dict(value)
+    payload.setdefault("intent_id", row.get("intent_id"))
+    payload["status"] = row.get("status") or payload.get("status")
+    if row.get("trade_id") is not None:
+        payload["trade_id"] = row.get("trade_id")
+    if row.get("order_digest"):
+        payload["order_digest"] = row.get("order_digest")
+    if row.get("created_at") is not None:
+        payload.setdefault("created_at", row.get("created_at"))
+    if row.get("updated_at") is not None:
+        payload.setdefault("updated_at", row.get("updated_at"))
+    return payload
+
+
+def reserve_order_intent_row(intent_id: str, payload: dict, stale_after_seconds: int = 120) -> Optional[dict]:
+    stored = json.dumps(payload)
+    return execute_returning(
+        """
+        INSERT INTO order_intents (intent_id, status, value, trade_id, order_digest)
+        VALUES (%s, %s, %s::jsonb, %s, %s)
+        ON CONFLICT (intent_id) DO UPDATE
+        SET status = EXCLUDED.status,
+            value = EXCLUDED.value,
+            trade_id = EXCLUDED.trade_id,
+            order_digest = EXCLUDED.order_digest,
+            updated_at = now()
+        WHERE order_intents.status NOT IN ('pending', 'recorded', 'submitted', 'filled')
+           OR order_intents.updated_at < now() - (%s * interval '1 second')
+        RETURNING intent_id, status, value, trade_id, order_digest, created_at, updated_at
+        """,
+        (
+            str(intent_id),
+            str(payload.get("status") or "pending"),
+            stored,
+            payload.get("trade_id"),
+            payload.get("order_digest"),
+            int(stale_after_seconds),
+        ),
+    )
+
+
+def update_order_intent_row(intent_id: str, payload: dict) -> Optional[dict]:
+    return execute_returning(
+        """
+        UPDATE order_intents
+        SET status = %s,
+            value = %s::jsonb,
+            trade_id = %s,
+            order_digest = %s,
+            updated_at = now()
+        WHERE intent_id = %s
+        RETURNING intent_id, status, value, trade_id, order_digest, created_at, updated_at
+        """,
+        (
+            str(payload.get("status") or "pending"),
+            json.dumps(payload),
+            payload.get("trade_id"),
+            payload.get("order_digest"),
+            str(intent_id),
+        ),
     )

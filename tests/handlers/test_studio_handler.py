@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from src.nadobro.handlers.studio_handler import handle_studio_text
+from src.nadobro.handlers.studio_handler import handle_studio_callback, handle_studio_text
 from src.nadobro.studio.intent import Quantity, TradingIntent
 
 
@@ -13,6 +13,20 @@ class Msg:
 
     async def reply_text(self, text, **kwargs):
         self.replies.append((text, kwargs))
+
+
+class Query:
+    def __init__(self, data: str, user_id: int):
+        self.data = data
+        self.from_user = SimpleNamespace(id=user_id)
+        self.edits = []
+        self.answered = False
+
+    async def answer(self):
+        self.answered = True
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
 
 
 def test_studio_text_disabled(monkeypatch):
@@ -45,3 +59,32 @@ def test_studio_text_confirmation(monkeypatch):
     update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=1))
     assert asyncio.run(handle_studio_text(update, SimpleNamespace())) is True
     assert "Strategy Summary" in msg.replies[0][0]
+
+
+def test_studio_callback_rejects_session_owned_by_another_user(monkeypatch):
+    intent = TradingIntent(
+        action="buy",
+        symbol="BTC",
+        order_type="market",
+        quantity=Quantity(type="contracts", value=1),
+        leverage=2,
+        raw_input="long",
+    )
+    monkeypatch.setattr(
+        "src.nadobro.handlers.studio_handler.conversation.get_studio_session_row",
+        lambda session_id: {"id": session_id, "telegram_id": 111, "intent_json": {}, "history_json": []},
+    )
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.conversation.load_intent", lambda row: intent)
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.conversation.load_history", lambda row: [])
+    executed = {}
+    monkeypatch.setattr(
+        "src.nadobro.handlers.studio_handler.execute_intent",
+        lambda *args, **kwargs: executed.setdefault("called", True),
+    )
+
+    query = Query("studio:confirm:7", user_id=222)
+
+    assert asyncio.run(handle_studio_callback(query, SimpleNamespace())) is True
+    assert query.answered is True
+    assert query.edits[-1][0] == "Studio session not found."
+    assert executed == {}

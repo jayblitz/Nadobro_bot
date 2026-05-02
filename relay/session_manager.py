@@ -2,6 +2,8 @@ import logging
 import secrets
 from typing import Optional
 
+import asyncpg
+
 from relay.db import get_pool
 from relay.telegram_client import click_message_button, get_lowiqpts_entity, send_message
 
@@ -37,15 +39,32 @@ async def create_session(
     entity = await get_lowiqpts_entity()
     lowiqpts_chat_id = entity.id
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO relay_sessions
-                (id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id, status)
-            VALUES ($1, $2, $3, $4, $5, $6, 'active')
-            """,
-            session_id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id,
-        )
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                existing = await conn.fetchval(
+                    "SELECT id FROM relay_sessions WHERE request_id = $1 AND status = 'active'",
+                    request_id,
+                )
+                if existing:
+                    return {"ok": True, "session_id": existing}
+                await conn.execute(
+                    """
+                    INSERT INTO relay_sessions
+                        (id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'active')
+                    """,
+                    session_id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id,
+                )
+    except asyncpg.UniqueViolationError:
+        async with pool.acquire() as conn:
+            existing = await conn.fetchval(
+                "SELECT id FROM relay_sessions WHERE request_id = $1 AND status = 'active'",
+                request_id,
+            )
+        if existing:
+            return {"ok": True, "session_id": existing}
+        return {"ok": False, "error": "busy", "detail": "Another session is active. Close it first or wait for idle expiry."}
 
     try:
         await send_message(entity, f"/nado {wallet}")

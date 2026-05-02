@@ -486,6 +486,8 @@ def init_db():
                 leverage DOUBLE PRECISION DEFAULT 1.0,
                 tp_price DOUBLE PRECISION,
                 sl_price DOUBLE PRECISION,
+                tp_order_digest TEXT,
+                sl_order_digest TEXT,
                 leader_entry_price DOUBLE PRECISION,
                 leader_size DOUBLE PRECISION,
                 status TEXT NOT NULL DEFAULT 'open',
@@ -494,8 +496,14 @@ def init_db():
                 closed_at TIMESTAMPTZ,
                 close_reason TEXT
             );
+            ALTER TABLE copy_positions ADD COLUMN IF NOT EXISTS tp_order_digest TEXT;
+            ALTER TABLE copy_positions ADD COLUMN IF NOT EXISTS sl_order_digest TEXT;
             CREATE INDEX IF NOT EXISTS idx_copy_positions_mirror ON copy_positions (mirror_id, status);
             CREATE INDEX IF NOT EXISTS idx_copy_positions_user ON copy_positions (user_id, status);
+            CREATE INDEX IF NOT EXISTS idx_copy_positions_tp_digest
+                ON copy_positions (tp_order_digest) WHERE tp_order_digest IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_copy_positions_sl_digest
+                ON copy_positions (sl_order_digest) WHERE sl_order_digest IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS copy_snapshots (
                 id SERIAL PRIMARY KEY,
@@ -923,16 +931,40 @@ def init_db():
                     order_digest TEXT NOT NULL,
                     product_id INT NOT NULL,
                     placed_at_ts DOUBLE PRECISION,
-                    status TEXT DEFAULT 'pending',
+                    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'resolved', 'expired')),
                     attempts INT DEFAULT 0,
+                    claimed_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ DEFAULT now(),
                     resolved_at TIMESTAMPTZ
                 );
+                ALTER TABLE fill_sync_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
                 CREATE INDEX IF NOT EXISTS idx_fill_sync_pending
                     ON fill_sync_queue (status) WHERE status = 'pending';
+                CREATE INDEX IF NOT EXISTS idx_fill_sync_processing
+                    ON fill_sync_queue (claimed_at) WHERE status = 'processing';
             """)
             conn.commit()
             logger.info("fill_sync_queue table verified/created")
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS order_intents (
+                    intent_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'recorded', 'submitted', 'filled', 'failed', 'cancelled', 'expired')),
+                    value JSONB NOT NULL DEFAULT '{}',
+                    trade_id BIGINT,
+                    order_digest TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_intents_status_updated
+                    ON order_intents (status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_order_intents_trade_id
+                    ON order_intents (trade_id) WHERE trade_id IS NOT NULL;
+            """)
+            conn.commit()
+            logger.info("order_intents table verified/created")
 
         # --- Additional indexes and constraints ---
         with conn.cursor() as cur:

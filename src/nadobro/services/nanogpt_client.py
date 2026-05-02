@@ -7,9 +7,8 @@ import logging
 import os
 from typing import Any
 
-import requests
-
 from src.nadobro.services.provider_config import nanogpt_api_key, nanogpt_base_url as _configured_base_url
+from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +51,24 @@ def openai_compatible_chat(
         "temperature": temperature,
     }
     try:
-        resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+        effective_timeout = provider_timeout_seconds("nanogpt", timeout)
+        resp, _latency_ms = post_json_with_retries(
+            "nanogpt",
+            url,
+            headers=headers,
+            json_body=body,
+            timeout=effective_timeout,
+        )
         resp.raise_for_status()
         payload = resp.json()
     except Exception as exc:
         logger.warning("openai_compatible_chat failed: %s", exc)
+        record_provider_degraded(
+            "nanogpt",
+            f"OpenAI-compatible chat failed: {exc}",
+            allowed_use="llm",
+            source_url=base_url,
+        )
         return False, "", {}
 
     choices = payload.get("choices")

@@ -13,10 +13,9 @@ import os
 import time
 from typing import Any
 
-import requests
-
 from src.nadobro.services.nanogpt_client import nanogpt_chat_completion, nanogpt_is_configured
 from src.nadobro.services.provider_config import dmind_configured
+from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
 from src.nadobro.services.source_registry import record_source
 
 logger = logging.getLogger(__name__)
@@ -24,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 DMIND_BASE_URL = os.environ.get("DMIND_BASE_URL", "https://api.dmind.ai").rstrip("/")
 DMIND_MODEL = os.environ.get("DMIND_MODEL", "dmind-finance")
-DMIND_TIMEOUT_SECONDS = float(os.environ.get("DMIND_TIMEOUT_SECONDS", "20"))
-NANOGPT_FINANCE_TIMEOUT = float(os.environ.get("NANOGPT_FINANCE_TIMEOUT_SECONDS", "45"))
+DMIND_TIMEOUT_SECONDS = provider_timeout_seconds("dmind", 20)
+NANOGPT_FINANCE_TIMEOUT = provider_timeout_seconds("nanogpt_finance", 45)
 
 
 class DMindUnavailable(RuntimeError):
@@ -179,8 +178,13 @@ def _analyze_via_dmind(
     }
     started = time.perf_counter()
     try:
-        resp = requests.post(url, headers=_dmind_headers(), json=body, timeout=DMIND_TIMEOUT_SECONDS)
-        latency_ms = (time.perf_counter() - started) * 1000
+        resp, latency_ms = post_json_with_retries(
+            "dmind",
+            url,
+            headers=_dmind_headers(),
+            json_body=body,
+            timeout=DMIND_TIMEOUT_SECONDS,
+        )
         resp.raise_for_status()
         payload = resp.json()
         text = _extract_text(payload)
@@ -193,6 +197,13 @@ def _analyze_via_dmind(
             detail=f"DMind {task}",
             allowed_use="finance_llm",
             metadata={"model": DMIND_MODEL},
+        )
+        record_provider_degraded(
+            "dmind",
+            f"DMind request failed: {exc}",
+            latency_ms=latency_ms,
+            source_url="https://dmind.ai/",
+            allowed_use="finance_llm",
         )
         return {
             "ok": True,

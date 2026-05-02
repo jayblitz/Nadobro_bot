@@ -355,26 +355,21 @@ def update_trade_stats(
 ):
     network = str(network or "mainnet").strip().lower()
     volume_column = "testnet_volume_usd" if network == "testnet" else "mainnet_volume_usd"
-    row = query_one(
-        f"SELECT total_trades, total_volume_usd, {volume_column} FROM users WHERE telegram_id = %s",
-        (telegram_id,),
-    )
-    if not row:
-        return
-    next_total_trades = int(row.get("total_trades") or 0) + (1 if increment_trade_count else 0)
+    trade_delta = 1 if increment_trade_count else 0
+    volume_delta = float(volume_usd or 0.0)
     execute(
         f"""
         UPDATE users
-        SET total_trades = %s,
-            total_volume_usd = %s,
-            {volume_column} = %s,
+        SET total_trades = COALESCE(total_trades, 0) + %s,
+            total_volume_usd = COALESCE(total_volume_usd, 0) + %s,
+            {volume_column} = COALESCE({volume_column}, 0) + %s,
             last_trade_at = %s
         WHERE telegram_id = %s
         """,
         (
-            next_total_trades,
-            float(row.get("total_volume_usd") or 0) + volume_usd,
-            float(row.get(volume_column) or 0) + volume_usd,
+            trade_delta,
+            volume_delta,
+            volume_delta,
             datetime.utcnow().isoformat(),
             telegram_id,
         ),

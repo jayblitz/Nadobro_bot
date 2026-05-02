@@ -68,7 +68,7 @@ def infer_phase(state: dict) -> StrategyPhase:
         return StrategyPhase(PHASE_FAILED, str(state.get("last_error")), recoverable=True, allowed_actions=("recover", "stop", "flatten"))
 
     vol_phase = str(state.get("vol_phase") or "")
-    if vol_phase in {"pending_entry_fill", "pending_close_fill"}:
+    if vol_phase in {"pending_entry_fill", "pending_fill", "pending_close_fill"}:
         return StrategyPhase(PHASE_WAITING_FILL, vol_phase, allowed_actions=("stop", "recover"))
     if vol_phase in {"filled_wait_close"}:
         return StrategyPhase(PHASE_CLOSING, vol_phase, allowed_actions=("stop", "flatten"))

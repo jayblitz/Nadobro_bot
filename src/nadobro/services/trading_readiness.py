@@ -1,4 +1,4 @@
-"""Shared trading readiness gates for Telegram, Mini App, and agents."""
+"""Shared trading readiness gates for Telegram and agents."""
 
 from __future__ import annotations
 

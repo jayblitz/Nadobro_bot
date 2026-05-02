@@ -26,6 +26,7 @@ from src.nadobro.services.nanogpt_client import (
     openai_compatible_chat,
 )
 from src.nadobro.services.provider_config import n8n_base_url, n8n_configured, n8n_deploy_headers
+from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
 from src.nadobro.services.source_registry import record_source
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ Rules for nodes:
       "main": [[{"node": "Target Node Name", "type": "main", "index": 0}]]
     }
   }
-- Use realistic placeholder URLs the user can edit (e.g. their Nadobro Mini App API or Nado gateway). Never invent secrets.
+- Use realistic placeholder URLs the user can edit (e.g. Nado gateway or their own webhook endpoint). Never invent secrets.
 - Keep workflows small (usually 3–8 nodes) and actionable for a beginner.
 """
 
@@ -104,7 +105,7 @@ def _starter_setup_guide(template_id: str) -> str:
     return (
         f"This is a starter '{template_id}' workflow you can open in n8n. "
         "Click 'Test workflow' on the first node, then inspect the HTTP response. "
-        "Replace placeholder URLs with your Mini App API base or Nado endpoints, and add n8n "
+        "Replace placeholder URLs with Nado endpoints or your own webhook endpoints, and add n8n "
         "Credentials where needed (none required for the demo HTTP step)."
     )
 
@@ -369,7 +370,12 @@ def _workflow_llm_complete(messages: list[dict[str, Any]]) -> tuple[bool, str]:
             or os.environ.get("NANOGPT_MODEL")
             or "chatgpt-4o-latest"
         ).strip()
-        ok, text, _raw = nanogpt_chat_completion(messages, model=model, temperature=0.15, timeout=120.0)
+        ok, text, _raw = nanogpt_chat_completion(
+            messages,
+            model=model,
+            temperature=0.15,
+            timeout=provider_timeout_seconds("nanogpt_workflow", 120),
+        )
         return ok, text
     key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if key:
@@ -380,7 +386,7 @@ def _workflow_llm_complete(messages: list[dict[str, Any]]) -> tuple[bool, str]:
             model=model,
             messages=messages,
             temperature=0.15,
-            timeout=120.0,
+            timeout=provider_timeout_seconds("openai_workflow", 120),
         )
         return ok, text
     key = (os.environ.get("XAI_API_KEY") or "").strip()
@@ -392,7 +398,7 @@ def _workflow_llm_complete(messages: list[dict[str, Any]]) -> tuple[bool, str]:
             model=model,
             messages=messages,
             temperature=0.15,
-            timeout=120.0,
+            timeout=provider_timeout_seconds("xai_workflow", 120),
         )
         return ok, text
     return False, ""
@@ -578,13 +584,13 @@ def deploy_to_n8n(workflow: dict[str, Any]) -> dict[str, Any]:
     }
     started = time.perf_counter()
     try:
-        resp = requests.post(
+        resp, latency_ms = post_json_with_retries(
+            "n8n",
             f"{base_url}/api/v1/workflows",
             headers=req_headers,
-            json=payload,
-            timeout=30,
+            json_body=payload,
+            timeout=provider_timeout_seconds("n8n", 30),
         )
-        latency_ms = (time.perf_counter() - started) * 1000
         resp.raise_for_status()
         data = resp.json()
         workflow["n8n_workflow_id"] = str(data.get("id") or "")
@@ -606,6 +612,13 @@ def deploy_to_n8n(workflow: dict[str, Any]) -> dict[str, Any]:
             ttl_seconds=30,
             confidence=0.0,
             detail="n8n deploy failed",
+            allowed_use="workflow",
+            source_url=base_url,
+        )
+        record_provider_degraded(
+            "n8n",
+            f"n8n deploy failed: {exc}",
+            latency_ms=(time.perf_counter() - started) * 1000,
             allowed_use="workflow",
             source_url=base_url,
         )

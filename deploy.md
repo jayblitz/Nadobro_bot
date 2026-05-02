@@ -38,8 +38,7 @@ fly secrets set \
   OPENAI_API_KEY="your-openai-api-key" \
   SESSION_SECRET="your-session-secret" \
   NADO_BUILDER_ID="your-builder-id" \
-  NADO_BUILDER_FEE_RATE="10" \
-  BOT_DISABLE_MINIAPP="true"
+  NADO_BUILDER_FEE_RATE="10"
 ```
 
 Builder routing safety:
@@ -137,13 +136,3 @@ Current production runtime uses Telegram webhook mode.
 2. Use idempotency keys on jobs to avoid duplicate execution.
 3. Scale ingress and worker capacity independently.
 
-## Telegram Mini App (archived for now)
-
-Mini App code is retained in this repository (`miniapp_web/`, `miniapp_api/`) but is intentionally disabled in the bot-first deploy profile.
-
-- `BOT_DISABLE_MINIAPP=true` hides Mini App entry points in Telegram UI, even if `MINIAPP_URL` is still set.
-- Mini App remains archived by default; `BOT_ENABLE_MINIAPP=true` is required to opt back in.
-- nginx keeps webhook ingress at `POST /telegram/webhook` and serves bot health at `GET /health`.
-- Requests to `/`, `/api/`, and `/ws/` return `410 miniapp_archived` in this profile.
-
-When resuming Mini App work, re-enable its deploy path deliberately instead of removing this archive guard by accident.

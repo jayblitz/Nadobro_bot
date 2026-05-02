@@ -378,8 +378,8 @@ async def sync_pending_fills():
     """Background job: resolve pending fills via Nado archive API."""
     try:
         from src.nadobro.models.database import (
-            get_pending_fill_syncs, update_trade, resolve_fill_sync,
-            expire_fill_sync, increment_fill_sync_attempts,
+            claim_pending_fill_syncs, update_trade, resolve_fill_sync,
+            expire_fill_sync, release_fill_sync,
             increment_session_metrics,
             get_trade_by_id,
         )
@@ -387,7 +387,7 @@ async def sync_pending_fills():
         from src.nadobro.services.trade_service import reconcile_close_trade_fill
         from src.nadobro.services.user_service import update_trade_stats
 
-        pending = await run_blocking(get_pending_fill_syncs, 50)
+        pending = await run_blocking(claim_pending_fill_syncs, 50)
         if not pending:
             return
 
@@ -419,8 +419,6 @@ async def sync_pending_fills():
                     if age_seconds > 7200:  # 2 hours
                         await run_blocking(expire_fill_sync, sync_id)
                         continue
-
-                await run_blocking(increment_fill_sync_attempts, sync_id)
 
                 fill_data = await run_blocking(
                     query_order_by_digest,
@@ -461,6 +459,7 @@ async def sync_pending_fills():
                                         digest_still_open = True
                                 if not digest_still_open:
                                     if attempts < 20:
+                                        await run_blocking(release_fill_sync, sync_id)
                                         continue
                                     await run_blocking(
                                         update_trade, trade_id,
@@ -479,6 +478,7 @@ async def sync_pending_fills():
                         except Exception:
                             pass
                     if not fill_data or not fill_data.get("is_filled"):
+                        await run_blocking(release_fill_sync, sync_id)
                         continue
 
                 requested_size = abs(float((trade_row or {}).get("size") or 0))
@@ -568,6 +568,8 @@ async def sync_pending_fills():
                     if not digest_still_open:
                         await run_blocking(resolve_fill_sync, sync_id)
                         resolved_count += 1
+                    else:
+                        await run_blocking(release_fill_sync, sync_id)
                     logger.info(
                         "Fill sync partial trade #%s: filled=%.6f/%.6f price=%.6f",
                         trade_id,
@@ -589,6 +591,10 @@ async def sync_pending_fills():
                     )
             except Exception as e:
                 logger.warning("Fill sync error for entry %s: %s", entry.get("id"), e)
+                try:
+                    await run_blocking(release_fill_sync, entry.get("id"))
+                except Exception:
+                    pass
                 continue
 
         if resolved_count > 0:

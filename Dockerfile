@@ -27,8 +27,7 @@ RUN useradd --create-home --uid ${APP_UID} ${APP_USER} \
     && chown -R ${APP_USER}:${APP_USER} /tmp/nginx
 ENV PYTHONPATH=/app/site-packages:/app \
     PATH=/app/site-packages/bin:$PATH \
-    TELEGRAM_WEBHOOK_PORT=8082 \
-    BOT_DISABLE_MINIAPP=true
+    TELEGRAM_WEBHOOK_PORT=8082
 WORKDIR /app
 COPY --from=builder /build/site-packages /app/site-packages
 COPY --chown=${APP_USER}:${APP_USER} main.py ./

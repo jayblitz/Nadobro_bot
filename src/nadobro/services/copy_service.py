@@ -684,7 +684,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             if result.get("success"):
                 fill_price = float(result.get("price", leader_entry) or leader_entry)
                 # Record the copy position
-                await run_blocking(
+                copy_position_id = await run_blocking(
                     insert_copy_position,
                     {
                         "mirror_id": mirror_id,
@@ -703,7 +703,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                 )
 
                 # Place TP/SL orders if leader has them
-                await run_blocking(
+                bracket_digests = await run_blocking(
                     _place_tp_sl_orders,
                     user_id,
                     product_key,
@@ -714,6 +714,23 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     leader_pos.get("tp_price"),
                     leader_pos.get("sl_price"),
                 )
+                if copy_position_id and bracket_digests:
+                    from src.nadobro.db import execute as db_execute
+
+                    await run_blocking(
+                        db_execute,
+                        """
+                        UPDATE copy_positions
+                        SET tp_order_digest = %s,
+                            sl_order_digest = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            bracket_digests.get("tp_order_digest"),
+                            bracket_digests.get("sl_order_digest"),
+                            copy_position_id,
+                        ),
+                    )
 
                 side_emoji = "🟢 LONG" if is_long else "🔴 SHORT"
                 wallet = mirror.get("wallet_address", "")
@@ -740,9 +757,10 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                         size: float, is_long: bool, leverage: float,
                         tp_price: Optional[float], sl_price: Optional[float]):
     """Place TP and SL orders for a copy position."""
+    digests = {}
     if tp_price and tp_price > 0:
         try:
-            execute_limit_order(
+            result = execute_limit_order(
                 telegram_id=user_id,
                 product=product_key,
                 size=size,
@@ -754,12 +772,14 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                 order_type_override="TAKE_PROFIT",
                 source="copy",
             )
+            if result.get("success") and result.get("digest"):
+                digests["tp_order_digest"] = result.get("digest")
         except Exception as e:
             logger.warning("Failed to place TP for copy user %s: %s", user_id, e)
 
     if sl_price and sl_price > 0:
         try:
-            execute_limit_order(
+            result = execute_limit_order(
                 telegram_id=user_id,
                 product=product_key,
                 size=size,
@@ -771,8 +791,11 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                 order_type_override="STOP_LOSS",
                 source="copy",
             )
+            if result.get("success") and result.get("digest"):
+                digests["sl_order_digest"] = result.get("digest")
         except Exception as e:
             logger.warning("Failed to place SL for copy user %s: %s", user_id, e)
+    return digests
 
 
 def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, network: str):
@@ -802,7 +825,7 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
     params.append(existing_cp["id"])
     db_execute(f"UPDATE copy_positions SET {', '.join(updates)} WHERE id = %s", params)
 
-    # Cancel old orders and place new ones
+    # Cancel only the TP/SL orders this copy position created.
     product_name = existing_cp.get("product_name", "")
     product_key = product_name.replace("-PERP", "")
     pid = existing_cp["product_id"]
@@ -814,18 +837,30 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
     try:
         client = get_user_nado_client(user_id, network)
         if client:
-            orders = client.get_open_orders(pid) or []
-            for o in orders:
-                otype = (o.get("order_type") or o.get("type") or "").lower()
-                if "take_profit" in otype or "stop_loss" in otype or "tp" in otype or "sl" in otype:
+            for digest in {
+                str(existing_cp.get("tp_order_digest") or "").strip(),
+                str(existing_cp.get("sl_order_digest") or "").strip(),
+            }:
+                if digest:
                     try:
-                        digest = o.get("digest") or o.get("order_digest") or o.get("id")
-                        if digest:
-                            client.cancel_order(pid, str(digest))
+                        client.cancel_order(pid, digest)
                     except Exception:
                         pass
     except Exception as e:
         logger.debug("Failed to cancel old TP/SL: %s", e)
 
     # Place updated TP/SL
-    _place_tp_sl_orders(user_id, product_key, pid, size, is_long, leverage, new_tp, new_sl)
+    bracket_digests = _place_tp_sl_orders(user_id, product_key, pid, size, is_long, leverage, new_tp, new_sl)
+    db_execute(
+        """
+        UPDATE copy_positions
+        SET tp_order_digest = %s,
+            sl_order_digest = %s
+        WHERE id = %s
+        """,
+        (
+            bracket_digests.get("tp_order_digest"),
+            bracket_digests.get("sl_order_digest"),
+            existing_cp["id"],
+        ),
+    )

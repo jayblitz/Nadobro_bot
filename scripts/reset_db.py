@@ -68,12 +68,6 @@ def main():
     try:
         execute(DROP_SQL)
         init_db()
-        try:
-            from miniapp_api.rate_limit import ensure_rate_limit_table
-
-            ensure_rate_limit_table()
-        except Exception as e:
-            print(f"Warning: miniapp_rate_limit was not recreated: {e}")
         print("Database hard reset complete. App tables dropped and production schema recreated.")
     except Exception as e:
         print(f"Error: {e}")

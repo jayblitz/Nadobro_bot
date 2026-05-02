@@ -2,10 +2,6 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-import ast
-from pathlib import Path
-
-
 def test_source_registry_records_freshness():
     from src.nadobro.services.source_registry import SourceRegistry
 
@@ -53,6 +49,15 @@ def test_strategy_fsm_infers_failed_recoverable_state():
 
     assert phase.phase == PHASE_FAILED
     assert phase.recoverable is True
+    assert "recover" in phase.allowed_actions
+
+
+def test_strategy_fsm_maps_volume_pending_fill_to_waiting_fill():
+    from src.nadobro.services.strategy_fsm import PHASE_WAITING_FILL, infer_phase
+
+    phase = infer_phase({"running": True, "vol_phase": "pending_fill"})
+
+    assert phase.phase == PHASE_WAITING_FILL
     assert "recover" in phase.allowed_actions
 
 
@@ -148,19 +153,6 @@ def test_workflow_builder_llm_path(monkeypatch):
     assert wf["template_id"] == "llm_generated"
     assert wf["name"] == "LLM WF"
     assert wf["connections"]["Start"]["main"][0][0]["node"] == "Done"
-
-
-def test_miniapp_strategy_stop_does_not_require_readiness():
-    source = Path("miniapp_api/routers/strategies.py").read_text()
-    tree = ast.parse(source)
-    fn = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "strategies_stop")
-    calls = [
-        node.func.id
-        for node in ast.walk(fn)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    ]
-    assert "_require_trading_ready" not in calls
-    assert "stop_user_bot" in source
 
 
 def test_order_intent_suppresses_recent_duplicate(monkeypatch):

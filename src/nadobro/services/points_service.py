@@ -551,14 +551,23 @@ async def poll_lowiqpts_relay_events(bot_app) -> None:
     if not relay_is_configured():
         return
     bot_data = bot_app.bot_data
-    cursor = bot_data.get(_RELAY_CURSOR_KEY)
-    response = await relay_poll_events(cursor=str(cursor) if cursor else None)
+    queue, _ = _pending_maps(bot_data)
+    session_id = ""
+    for req in queue:
+        session_id = str(req.get("relay_session_id", "")).strip()
+        if session_id:
+            break
+    if not session_id:
+        return
+    cursor_key = f"{_RELAY_CURSOR_KEY}:{session_id}"
+    cursor = bot_data.get(cursor_key)
+    response = await relay_poll_events(session_id=session_id, cursor=str(cursor) if cursor else None)
     if not response.get("ok"):
         return
 
     events, next_cursor = _extract_events_response(response)
     if next_cursor:
-        bot_data[_RELAY_CURSOR_KEY] = next_cursor
+        bot_data[cursor_key] = next_cursor
     for event in events:
         try:
             await _process_relay_event(bot_app, bot_data, event)

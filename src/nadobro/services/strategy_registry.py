@@ -1,7 +1,7 @@
 """Canonical strategy identity and defaults.
 
 Keep aliases, display names, supported ids, and default payloads in one place so
-runtime, settings, Mini App, and managed-agent surfaces do not drift.
+runtime, settings, and managed-agent surfaces do not drift.
 """
 
 from __future__ import annotations

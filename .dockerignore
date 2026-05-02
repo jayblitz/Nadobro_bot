@@ -7,5 +7,3 @@ tests
 relay
 docs
 .claude
-miniapp_web/node_modules
-miniapp_web/dist

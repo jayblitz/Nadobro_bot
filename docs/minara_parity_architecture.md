@@ -49,7 +49,7 @@ Initial provider targets mirror Minara’s public docs:
 
 ### Ink Intelligence Service
 
-`src/nadobro/services/ink_intelligence_service.py` combines the existing Nado scanner, CMC, X/social, Pinecone, archive fills, provider status, and DMind analysis into one snapshot for the Telegram copilot and Mini App API.
+`src/nadobro/services/ink_intelligence_service.py` combines the existing Nado scanner, CMC, X/social, Pinecone, archive fills, provider status, and DMind analysis into one snapshot for the Telegram copilot.
 
 ### n8n Workflow Layer
 
@@ -85,16 +85,6 @@ n8n must never hold raw signing keys or bypass wallet readiness, budget guard, a
 - stopped
 
 `src/nadobro/services/order_intents.py` adds idempotent order intent envelopes so retries can be associated with a stable intent before/after a Nado digest is available.
-
-## API Surfaces
-
-Mini App API routes:
-
-- `/api/intelligence/providers`
-- `/api/intelligence/snapshot`
-- `/api/workflows/templates`
-- `/api/workflows/build`
-- `/api/workflows/{workflow_id}`
 
 Strategy status responses now include `strategy_phase` so Telegram and workflows can show recoverable states and allowed actions.
 

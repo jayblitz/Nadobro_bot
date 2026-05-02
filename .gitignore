@@ -69,11 +69,3 @@ relay/.fly-bootstrap.env
 # Cursor MCP config may contain local Nado signer keys.
 .cursor/mcp.json
 
-# Marketing / Next.js site (local installs)
-nadobro_site/node_modules/
-nadobro_site/.next/
-
-# Telegram Mini App frontend (built in Docker)
-miniapp_web/node_modules/
-miniapp_web/dist/
-miniapp_web/tsconfig.tsbuildinfo

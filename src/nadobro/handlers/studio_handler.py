@@ -78,6 +78,9 @@ async def handle_studio_callback(query, context: CallbackContext) -> bool:
     if not row:
         await query.edit_message_text("Studio session not found.")
         return True
+    if int(row.get("telegram_id") or 0) != int(query.from_user.id):
+        await query.edit_message_text("Studio session not found.")
+        return True
     intent = conversation.load_intent(row)
     history = conversation.load_history(row)
     if action == "cancel":

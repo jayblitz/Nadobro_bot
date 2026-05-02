@@ -48,7 +48,7 @@ async def store_event(
     return cursor_id
 
 
-async def poll_events(cursor: Optional[str] = None, limit: int = 25) -> dict:
+async def poll_events(session_id: str, cursor: Optional[str] = None, limit: int = 25) -> dict:
     pool = get_pool()
     after_cursor = 0
     if cursor:
@@ -63,11 +63,12 @@ async def poll_events(cursor: Optional[str] = None, limit: int = 25) -> dict:
             SELECT e.cursor_id, e.session_id, e.text, e.options_json, e.source_message_id, e.created_at
             FROM relay_events e
             JOIN relay_sessions s ON s.id = e.session_id
-            WHERE e.cursor_id > $1
+            WHERE e.session_id = $1
+              AND e.cursor_id > $2
             ORDER BY e.cursor_id ASC
-            LIMIT $2
+            LIMIT $3
             """,
-            after_cursor, limit,
+            str(session_id), after_cursor, limit,
         )
 
     events = []

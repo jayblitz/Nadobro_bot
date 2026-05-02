@@ -1,6 +1,8 @@
 import asyncio
+import hmac
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -89,8 +91,18 @@ async def verify_auth(
     token = _expected_token()
     if not token:
         raise HTTPException(status_code=503, detail="RELAY_AUTH_TOKEN not configured")
-    if credentials is None or credentials.credentials != token:
+    if credentials is None or not hmac.compare_digest(credentials.credentials, token):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+_WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+
+
+def _normalize_wallet(wallet: str) -> str:
+    value = str(wallet or "").strip()
+    if not _WALLET_RE.fullmatch(value):
+        raise HTTPException(status_code=422, detail="Invalid wallet address")
+    return value
 
 
 class StartRequest(BaseModel):
@@ -130,7 +142,7 @@ async def start_session_endpoint(
         result = await create_session(
             telegram_user_id=body.telegram_user_id,
             chat_id=body.chat_id,
-            wallet=body.wallet,
+            wallet=_normalize_wallet(body.wallet),
             request_id=body.request_id,
         )
         if not result.get("ok") and result.get("error") == "busy":
@@ -156,11 +168,12 @@ async def reply_session_endpoint(
 
 @app.get("/events/poll")
 async def poll_events_endpoint(
+    session_id: str = Query(..., min_length=1),
     cursor: Optional[str] = Query(default=None),
     limit: int = Query(default=25, ge=1, le=100),
     _auth: None = Depends(verify_auth),
 ):
-    return await poll_events(cursor=cursor, limit=limit)
+    return await poll_events(session_id=session_id, cursor=cursor, limit=limit)
 
 
 @app.post("/sessions/close")

@@ -103,57 +103,88 @@ def _active_share_code(telegram_id: int, network: str) -> dict | None:
 
 def generate_referral_invite_code(telegram_id: int, network: str = "mainnet") -> tuple[bool, str, dict | None]:
     network = normalize_network(network)
-    user_row = query_one(
-        "SELECT telegram_id FROM users WHERE telegram_id = %s",
-        (int(telegram_id),),
-    )
-    if not user_row:
-        return False, "User not found. Use /start first.", None
+    user_id = int(telegram_id)
+    table = f"trades_{network}"
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT telegram_id FROM users WHERE telegram_id = %s FOR UPDATE", (user_id,))
+            user_row = dict(cur.fetchone() or {})
+            if not user_row:
+                conn.rollback()
+                return False, "User not found. Use /start first.", None
 
-    total_volume = get_user_trade_volume_for_network(int(telegram_id), network)
-    earned = earned_invite_allowance(total_volume)
-    generated = _generated_code_count(int(telegram_id), network)
-    if generated >= earned:
-        needed = ((generated + 1) * REFERRAL_VOLUME_PER_INVITE_USD) - total_volume
-        return (
-            False,
-            f"Referral codes unlock every ${REFERRAL_VOLUME_PER_INVITE_USD:,.0f} of your own {network} trading volume. "
-            f"Trade about ${max(0.0, needed):,.2f} more to unlock the next one.",
-            None,
-        )
+            cur.execute(
+                f"""
+                SELECT COALESCE(SUM(ABS(size) * COALESCE(NULLIF(price, 0), fill_price, 0)), 0) AS total
+                FROM {table}
+                WHERE user_id = %s
+                  AND status IN ('filled', 'closed')
+                """,
+                (user_id,),
+            )
+            total_volume = float((dict(cur.fetchone() or {}).get("total")) or 0.0)
+            earned = earned_invite_allowance(total_volume)
 
-    sequence = generated + 1
-    threshold = sequence * REFERRAL_VOLUME_PER_INVITE_USD
-    attempts = 0
-    while attempts < 10:
-        attempts += 1
-        code = _generate_plain_code()
-        row = execute_returning(
-            """
-            INSERT INTO invite_codes
-                (code_hash, public_code, code_type, code_prefix, created_by, referrer_user_id,
-                 network, note, max_redemptions, earned_volume_threshold_usd, sequence_number)
-            VALUES (%s, %s, 'referral', %s, %s, %s, %s, %s, 1, %s, %s)
-            ON CONFLICT (code_hash) DO NOTHING
-            RETURNING id, public_code, code_prefix, network, created_at, redemption_count, max_redemptions
-            """,
-            (
-                _hash_code(code),
-                code,
-                code[:3],
-                int(telegram_id),
-                int(telegram_id),
-                network,
-                f"{network}_earned_volume_threshold=${threshold:,.0f}",
-                threshold,
-                sequence,
-            ),
-        )
-        if row:
-            row["link"] = bot_deep_link(row["public_code"])
-            return True, "Referral invite code generated.", row
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM invite_codes
+                WHERE code_type = 'referral'
+                  AND referrer_user_id = %s
+                  AND (network = %s OR (network IS NULL AND %s = 'testnet'))
+                """,
+                (user_id, network, network),
+            )
+            generated = int((dict(cur.fetchone() or {}).get("count")) or 0)
+            if generated >= earned:
+                conn.rollback()
+                needed = ((generated + 1) * REFERRAL_VOLUME_PER_INVITE_USD) - total_volume
+                return (
+                    False,
+                    f"Referral codes unlock every ${REFERRAL_VOLUME_PER_INVITE_USD:,.0f} of your own {network} trading volume. "
+                    f"Trade about ${max(0.0, needed):,.2f} more to unlock the next one.",
+                    None,
+                )
 
-    return False, "Could not generate a unique referral code. Try again.", None
+            sequence = generated + 1
+            threshold = sequence * REFERRAL_VOLUME_PER_INVITE_USD
+            for _attempt in range(10):
+                code = _generate_plain_code()
+                cur.execute(
+                    """
+                    INSERT INTO invite_codes
+                        (code_hash, public_code, code_type, code_prefix, created_by, referrer_user_id,
+                         network, note, max_redemptions, earned_volume_threshold_usd, sequence_number)
+                    VALUES (%s, %s, 'referral', %s, %s, %s, %s, %s, 1, %s, %s)
+                    ON CONFLICT (code_hash) DO NOTHING
+                    RETURNING id, public_code, code_prefix, network, created_at, redemption_count, max_redemptions
+                    """,
+                    (
+                        _hash_code(code),
+                        code,
+                        code[:3],
+                        user_id,
+                        user_id,
+                        network,
+                        f"{network}_earned_volume_threshold=${threshold:,.0f}",
+                        threshold,
+                        sequence,
+                    ),
+                )
+                row = dict(cur.fetchone() or {})
+                if row:
+                    conn.commit()
+                    row["link"] = bot_deep_link(row["public_code"])
+                    return True, "Referral invite code generated.", row
+
+        conn.rollback()
+        return False, "Could not generate a unique referral code. Try again.", None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        put_db(conn)
 
 
 def ensure_share_code_for_user(telegram_id: int, network: str = "mainnet") -> tuple[dict | None, str | None]:

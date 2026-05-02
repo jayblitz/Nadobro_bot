@@ -22,6 +22,15 @@ _decision_cache: dict = {}
 DECISION_CACHE_TTL = 240
 
 
+def _llm_timeout_seconds() -> float:
+    try:
+        from src.nadobro.services.provider_runtime import provider_timeout_seconds
+
+        return provider_timeout_seconds("bro_llm", 45)
+    except Exception:
+        return 45.0
+
+
 def _get_client() -> Optional[OpenAI]:
     global _xai_client
     if _xai_client:
@@ -31,7 +40,7 @@ def _get_client() -> Optional[OpenAI]:
     api_key = os.environ.get("XAI_API_KEY")
     if not api_key:
         return None
-    _xai_client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    _xai_client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1", timeout=_llm_timeout_seconds())
     return _xai_client
 
 
@@ -44,7 +53,7 @@ def _get_openai_client() -> Optional[OpenAI]:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
-    _openai_client = OpenAI(api_key=api_key)
+    _openai_client = OpenAI(api_key=api_key, timeout=_llm_timeout_seconds())
     return _openai_client
 
 

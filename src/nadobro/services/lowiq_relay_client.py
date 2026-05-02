@@ -105,8 +105,8 @@ async def send_user_reply_option(*, session_id: str, option_text: str, source_me
     )
 
 
-async def poll_events(*, cursor: Optional[str]) -> dict:
-    params: dict[str, Any] = {"limit": _DEFAULT_POLL_LIMIT}
+async def poll_events(*, session_id: str, cursor: Optional[str]) -> dict:
+    params: dict[str, Any] = {"session_id": str(session_id), "limit": _DEFAULT_POLL_LIMIT}
     if cursor:
         params["cursor"] = str(cursor)
     return await _request("GET", "/events/poll", params=params)

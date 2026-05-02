@@ -85,8 +85,8 @@ def execute_intent(telegram_id: int, intent: TradingIntent, studio_session_id: i
                 is_long=is_long,
                 leverage=float(intent.leverage or 1),
                 enforce_rate_limit=True,
-                tp_price=_absolute_level(intent.take_profit, intent.entry_price),
-                sl_price=_absolute_level(intent.stop_loss, intent.entry_price),
+                tp_price=_absolute_level(intent.take_profit, intent.entry_price, intent.action, "take_profit"),
+                sl_price=_absolute_level(intent.stop_loss, intent.entry_price, intent.action, "stop_loss"),
                 source="studio",
                 strategy_session_id=session_id,
             )
@@ -99,8 +99,8 @@ def execute_intent(telegram_id: int, intent: TradingIntent, studio_session_id: i
                 leverage=float(intent.leverage or 1),
                 slippage_pct=1.0,
                 enforce_rate_limit=True,
-                tp_price=_absolute_level(intent.take_profit, None),
-                sl_price=_absolute_level(intent.stop_loss, None),
+                tp_price=_absolute_level(intent.take_profit, None, intent.action, "take_profit"),
+                sl_price=_absolute_level(intent.stop_loss, None, intent.action, "stop_loss"),
                 source="studio",
                 strategy_session_id=session_id,
             )
@@ -111,11 +111,19 @@ def execute_intent(telegram_id: int, intent: TradingIntent, studio_session_id: i
         return {"success": False, "error": str(e), "strategy_session_id": session_id}
 
 
-def _absolute_level(level, entry_price):
+def _absolute_level(level, entry_price, action: str = "buy", kind: str = "take_profit"):
     if not level:
         return None
     if level.type == "absolute_price":
         return float(level.value)
     if entry_price:
-        return float(entry_price) * (1.0 + float(level.value) / 100.0)
+        pct = abs(float(level.value)) / 100.0
+        is_short = action == "sell"
+        is_stop = kind == "stop_loss"
+        direction = 1.0
+        if is_short:
+            direction = 1.0 if is_stop else -1.0
+        else:
+            direction = -1.0 if is_stop else 1.0
+        return float(entry_price) * (1.0 + direction * pct)
     return None

@@ -55,16 +55,4 @@ See:
 - `docs/minara_parity_architecture.md`
 - `docs/dynamic_grid_strategy.md`
 
-## Telegram Mini App
-
-The repo still retains `miniapp_web/` and `miniapp_api/` as archived code for a future Telegram Web App, but Mini App work is not part of the active bot-first product path.
-
-Current behavior:
-
-- Bot deploy runs in bot-only mode by default.
-- Mini App buttons and Telegram menu registration are hidden unless `BOT_ENABLE_MINIAPP=true` is set deliberately.
-- `BOT_DISABLE_MINIAPP=true` still hard-disables Mini App surfaces even if `MINIAPP_URL` exists.
-
-To resume Mini App work later, set `BOT_ENABLE_MINIAPP=true`, set `MINIAPP_URL` to a public HTTPS origin, and restore the frontend/API deploy path intentionally.
-
 - Docs: [nadobro.gitbook.io/docs](https://nadobro.gitbook.io/docs)

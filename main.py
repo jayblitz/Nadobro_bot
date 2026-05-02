@@ -319,14 +319,9 @@ async def run_bot():
     transport_mode, webhook_url, webhook_path = _resolve_transport_settings()
     webhook_secret = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
     if transport_mode == "webhook" and not webhook_secret:
-        if os.environ.get("ENVIRONMENT", "").lower() == "production":
-            raise RuntimeError(
-                "TELEGRAM_WEBHOOK_SECRET must be set in production. "
-                "Webhook mode without a secret allows spoofed updates."
-            )
-        logger.warning(
-            "TELEGRAM_WEBHOOK_SECRET is not set. Webhook mode without a secret "
-            "allows spoofed updates. Set TELEGRAM_WEBHOOK_SECRET for production."
+        raise RuntimeError(
+            "TELEGRAM_WEBHOOK_SECRET must be set when TELEGRAM_TRANSPORT=webhook. "
+            "Webhook mode without a secret allows spoofed updates."
         )
     if transport_mode == "webhook" and webhook_url:
         parsed = urlparse(webhook_url)
@@ -377,19 +372,10 @@ async def run_bot():
     logger.info("Bot commands registered in Menu")
 
     try:
-        from src.nadobro.config import MINIAPP_URL
-        if MINIAPP_URL:
-            from telegram import MenuButtonWebApp, WebAppInfo
+        from telegram import MenuButtonCommands
 
-            await bot_app.bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(text="Mini App", web_app=WebAppInfo(url=MINIAPP_URL)),
-            )
-            logger.info("Mini App menu button registered (explicitly enabled)")
-        else:
-            from telegram import MenuButtonCommands
-
-            await bot_app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-            logger.info("Telegram menu button reset to commands; Mini App archived")
+        await bot_app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("Telegram menu button reset to commands")
     except Exception as e:
         logger.warning("Telegram menu button not updated: %s", e)
 

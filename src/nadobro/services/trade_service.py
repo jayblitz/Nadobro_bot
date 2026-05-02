@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
@@ -386,6 +387,7 @@ def validate_trade(
     size: float,
     leverage: float = 1.0,
     enforce_rate_limit: bool = True,
+    reduce_only: bool = False,
 ) -> tuple[bool, str]:
     user_obj = get_user(telegram_id)
     network = user_obj.network_mode.value if user_obj else "mainnet"
@@ -412,13 +414,6 @@ def validate_trade(
     if not client:
         return False, "Could not initialize client. Please try again."
 
-    balance = client.get_balance()
-    if not balance.get("exists"):
-        return False, "Subaccount not found. Please deposit funds first on Nado."
-
-    balances = balance.get("balances", {}) or {}
-    usdt_balance = balances.get(0, balances.get("0", 0))
-
     try:
         mp = client.get_market_price(product_id)
     except Exception as e:
@@ -428,18 +423,25 @@ def validate_trade(
         return False, f"Could not fetch {product} price. Market may be unavailable."
 
     notional = size * mp["mid"]
-    required_margin = notional / leverage if leverage > 1 else notional
-
-    if required_margin > usdt_balance * 0.95:
-        return False, (
-            f"Insufficient margin.\n"
-            f"Required: ~${required_margin:,.2f}\n"
-            f"Available: ${usdt_balance:,.2f}\n"
-            f"(Using 95% safety buffer)"
-        )
-
     if notional < MIN_TRADE_SIZE_USD:
         return False, f"Minimum trade size is ${MIN_TRADE_SIZE_USD}."
+
+    if not reduce_only:
+        balance = client.get_balance()
+        if not balance.get("exists"):
+            return False, "Subaccount not found. Please deposit funds first on Nado."
+
+        balances = balance.get("balances", {}) or {}
+        usdt_balance = balances.get(0, balances.get("0", 0))
+        required_margin = notional / leverage if leverage > 1 else notional
+
+        if required_margin > usdt_balance * 0.95:
+            return False, (
+                f"Insufficient margin.\n"
+                f"Required: ~${required_margin:,.2f}\n"
+                f"Available: ${usdt_balance:,.2f}\n"
+                f"(Using 95% safety buffer)"
+            )
 
     if enforce_rate_limit:
         allowed, msg = check_rate_limit(telegram_id, network=network)
@@ -474,6 +476,7 @@ def execute_market_order(
         size,
         leverage,
         enforce_rate_limit=enforce_rate_limit,
+        reduce_only=bool(reduce_only),
     )
     if not valid:
         return {"success": False, "error": msg}
@@ -486,6 +489,9 @@ def execute_market_order(
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 
     intent_id = kwargs.get("intent_id")
+    order_nonce = kwargs.get("order_nonce") or kwargs.get("client_order_id") or kwargs.get("idempotency_key")
+    if source == "manual" and not order_nonce:
+        order_nonce = f"manual:{uuid.uuid4().hex}"
     if not intent_id:
         try:
             from src.nadobro.services.order_intents import build_intent_id
@@ -499,24 +505,15 @@ def execute_market_order(
                 side=OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
                 size=size,
                 reduce_only=bool(reduce_only),
+                order_nonce=order_nonce,
             )
         except Exception:
             intent_id = None
     if intent_id:
         try:
-            from src.nadobro.services.order_intents import create_order_intent, should_skip_duplicate
+            from src.nadobro.services.order_intents import reserve_order_intent
 
-            skip_duplicate, existing_intent = should_skip_duplicate(intent_id)
-            if skip_duplicate and existing_intent and existing_intent.get("trade_id"):
-                return {
-                    "success": True,
-                    "duplicate": True,
-                    "intent_id": intent_id,
-                    "trade_id": existing_intent.get("trade_id"),
-                    "digest": existing_intent.get("order_digest"),
-                    "message": "Duplicate order intent suppressed.",
-                }
-            create_order_intent(
+            reserved, existing_intent = reserve_order_intent(
                 intent_id,
                 {
                     "user_id": telegram_id,
@@ -527,8 +524,25 @@ def execute_market_order(
                     "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
                     "size": size,
                     "reduce_only": bool(reduce_only),
+                    "order_nonce": order_nonce,
                 },
             )
+            if not reserved and existing_intent and existing_intent.get("trade_id"):
+                return {
+                    "success": True,
+                    "duplicate": True,
+                    "intent_id": intent_id,
+                    "trade_id": existing_intent.get("trade_id"),
+                    "digest": existing_intent.get("order_digest"),
+                    "message": "Duplicate order intent suppressed.",
+                }
+            if not reserved:
+                return {
+                    "success": False,
+                    "duplicate": True,
+                    "intent_id": intent_id,
+                    "error": "Order is already being submitted. Please wait.",
+                }
         except Exception:
             pass
 
@@ -1159,6 +1173,7 @@ def execute_limit_order(
         size,
         leverage,
         enforce_rate_limit=enforce_rate_limit,
+        reduce_only=bool(reduce_only),
     )
     if not valid:
         return {"success": False, "error": msg}
@@ -1196,9 +1211,77 @@ def execute_limit_order(
         limit_trade_data["strategy_session_id"] = strategy_session_id
     if linked_open_trade_id:
         limit_trade_data["open_trade_id"] = linked_open_trade_id
+
+    intent_id = kwargs.get("intent_id")
+    order_nonce = kwargs.get("order_nonce") or kwargs.get("client_order_id") or kwargs.get("idempotency_key")
+    if source == "manual" and not order_nonce:
+        order_nonce = f"manual:{uuid.uuid4().hex}"
+    if not intent_id:
+        try:
+            from src.nadobro.services.order_intents import build_intent_id
+
+            intent_id = build_intent_id(
+                user_id=telegram_id,
+                network=network,
+                strategy_session_id=strategy_session_id,
+                source=source,
+                product=product,
+                side=OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
+                size=size,
+                reduce_only=bool(reduce_only),
+                price=price,
+                order_nonce=order_nonce,
+            )
+        except Exception:
+            intent_id = None
+    if intent_id:
+        try:
+            from src.nadobro.services.order_intents import reserve_order_intent
+
+            reserved, existing_intent = reserve_order_intent(
+                intent_id,
+                {
+                    "user_id": telegram_id,
+                    "network": network,
+                    "strategy_session_id": strategy_session_id,
+                    "source": source,
+                    "product": product,
+                    "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
+                    "size": size,
+                    "price": price,
+                    "reduce_only": bool(reduce_only),
+                    "order_nonce": order_nonce,
+                },
+            )
+            if not reserved and existing_intent and existing_intent.get("trade_id"):
+                return {
+                    "success": True,
+                    "duplicate": True,
+                    "intent_id": intent_id,
+                    "trade_id": existing_intent.get("trade_id"),
+                    "digest": existing_intent.get("order_digest"),
+                    "message": "Duplicate order intent suppressed.",
+                }
+            if not reserved:
+                return {
+                    "success": False,
+                    "duplicate": True,
+                    "intent_id": intent_id,
+                    "error": "Order is already being submitted. Please wait.",
+                }
+        except Exception:
+            pass
+
     trade_id = insert_trade(limit_trade_data, network=network)
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
+    if intent_id:
+        try:
+            from src.nadobro.services.order_intents import update_order_intent
+
+            update_order_intent(intent_id, status="recorded", trade_id=trade_id)
+        except Exception:
+            pass
 
     isolated_only = is_product_isolated_only(product, network=network, client=client)
     isolated_margin = None
@@ -1226,6 +1309,13 @@ def execute_limit_order(
                 },
                 network=network,
             )
+            if intent_id:
+                try:
+                    from src.nadobro.services.order_intents import update_order_intent
+
+                    update_order_intent(intent_id, status="submitted", trade_id=trade_id, order_digest=digest)
+                except Exception:
+                    pass
             # Enqueue for background fill sync (limit orders fill asynchronously)
             _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
         except Exception as e:
@@ -1235,6 +1325,13 @@ def execute_limit_order(
             update_trade(trade_id, {"status": TradeStatus.FAILED.value, "error_message": result.get("error", "Unknown error")}, network=network)
         except Exception as e:
             logger.error("Failed to update limit trade %s status to FAILED: %s", trade_id, e)
+        if intent_id:
+            try:
+                from src.nadobro.services.order_intents import update_order_intent
+
+                update_order_intent(intent_id, status="failed", error=result.get("error", "Unknown error"), trade_id=trade_id)
+            except Exception:
+                pass
 
     if result["success"]:
         _clear_portfolio_caches(telegram_id, network)

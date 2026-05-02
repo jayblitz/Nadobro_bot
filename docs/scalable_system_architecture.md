@@ -1,6 +1,6 @@
 # Nadobro Scalable System Architecture
 
-Nadobro is now prioritized as a Telegram-first trading product with a platform-grade backend. The Mini App remains archived until the bot, execution layer, and portfolio read models are reliable under real trading load.
+Nadobro is now prioritized as a Telegram-first trading product with a platform-grade backend.
 
 ## Architecture
 
@@ -42,7 +42,6 @@ Current active backend modules should move toward this ownership model:
 - `src/nadobro/services/bot_runtime.py`: strategy orchestration and lifecycle.
 - `src/nadobro/services/workflow_service.py`: n8n workflow generation/deployment.
 - `src/nadobro/services/dmind_service.py` and `nanogpt_client.py`: financial LLM routing.
-- `miniapp_api/` and `miniapp_web/`: archived until explicitly re-enabled.
 
 ## Data Flow
 
@@ -158,7 +157,7 @@ The Telegram Portfolio card now consumes this read model instead of assembling p
 
 ## Rollout Plan
 
-1. Keep Mini App archived and ship bot-first improvements.
+1. Ship bot-first improvements.
 2. Use `portfolio_service` as the canonical Portfolio read model.
 3. Move account readiness, order submit, and strategy status toward the same read/command service split.
 4. Add a reconciliation worker that periodically persists `exchange_positions` and `exchange_open_orders`.
