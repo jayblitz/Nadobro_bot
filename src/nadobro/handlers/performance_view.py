@@ -50,6 +50,7 @@ def render_performance_view(user_id: int, network: str, limit: int = 5) -> tuple
     if not sessions:
         lines.append("No strategy sessions yet.")
     rows = [
+        [InlineKeyboardButton("📤 Generate PnL Card", callback_data="portfolio:share_pnl")],
         [InlineKeyboardButton("📜 History", callback_data="portfolio:history")],
         [InlineKeyboardButton("⬅ Portfolio", callback_data="portfolio:view")],
     ]

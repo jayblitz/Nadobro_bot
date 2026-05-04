@@ -889,6 +889,38 @@ async def _handle_portfolio(query, data, telegram_id):
         await _edit_loc(query, text, reply_markup=kb)
         return
 
+    if action == "share_pnl":
+        # Build a PnL share-card from the *requesting user's* latest strategy
+        # session and referral code. Both queries are scoped by telegram_id so
+        # one user can never render another user's stats.
+        import io as _io
+
+        from src.nadobro.services.pnl_card import generate_pnl_card
+        from src.nadobro.services.pnl_card_builder import build_pnl_card_data
+
+        network = user.network_mode.value if user else "mainnet"
+        try:
+            data = await run_blocking(build_pnl_card_data, telegram_id, network)
+            png_bytes = await run_blocking(generate_pnl_card, data)
+        except Exception as e:
+            logger.warning("portfolio_share_pnl_failed user=%s err=%s", telegram_id, e)
+            await query.answer("Could not generate PnL card.", show_alert=True)
+            return
+        try:
+            await query.message.reply_photo(
+                photo=_io.BytesIO(png_bytes),
+                caption=(
+                    "📊 *Your PnL Card*\n"
+                    "Share your performance on Nado."
+                ),
+                parse_mode="Markdown",
+            )
+            await query.answer()
+        except Exception as e:
+            logger.warning("portfolio_share_pnl_send_failed user=%s err=%s", telegram_id, e)
+            await query.answer("Could not send PnL card image.", show_alert=True)
+        return
+
     # Default: portfolio overview
     from src.nadobro.handlers.portfolio_deck import render_loading, render_portfolio_deck, snapshot_for_user
 
