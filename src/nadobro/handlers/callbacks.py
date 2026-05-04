@@ -1384,12 +1384,22 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id not in supported:
             return
         if strategy_id == "bro":
+            # CEO directive (2026-05): Bro Mode → Strategy Studio. The hub button now
+            # emits studio:home, but we keep this branch as a defensive fallback for
+            # any deep links / cached menus that still emit strategy:preview:bro.
+            # Legacy Alpha Agent dashboard remains reachable only when the operator
+            # has explicitly re-enabled the legacy autoloop via env var.
+            from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
+            if not legacy_bro_autoloop_enabled():
+                from src.nadobro.handlers.studio_handler import handle_studio_home
+                await handle_studio_home(query, context)
+                return
             from src.nadobro.handlers.keyboards import bro_action_kb
             with timed_metric("cb.strategy.preview.bro"):
                 preview_text = await run_blocking(_build_bro_preview_text, telegram_id)
             bot_status = get_user_bot_status(telegram_id) or {}
             is_running = bool(bot_status.get("running") and bot_status.get("strategy") == "bro")
-            await _edit_loc(query, 
+            await _edit_loc(query,
                 preview_text,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=bro_action_kb(is_running=is_running),
@@ -2952,7 +2962,27 @@ def _build_strategy_preview_text(
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
-    leverage = 1.0 if strategy_id == "vol" else float(settings.get("default_leverage", 3))
+    # CEO directive (2026-05): MM family and Volume Perp run at per-asset MAX
+    # leverage at runtime (mm_bot.py / volume_bot.py overwrite state["leverage"]
+    # at cycle start). Reflect that in the preview so the dashboard shows what
+    # the bot will actually use, and so the budget preflight uses the real value.
+    if strategy_id in ("grid", "rgrid", "dgrid"):
+        try:
+            from src.nadobro.config import get_product_max_leverage as _gpml
+            leverage = float(_gpml(product, network=network))
+        except Exception:
+            leverage = float(settings.get("default_leverage", 3))
+    elif strategy_id == "vol":
+        if (vol_market or "perp").lower() == "spot":
+            leverage = 1.0
+        else:
+            try:
+                from src.nadobro.config import get_product_max_leverage as _gpml
+                leverage = float(_gpml(product, network=network))
+            except Exception:
+                leverage = 1.0
+    else:
+        leverage = float(settings.get("default_leverage", 3))
     if strategy_id == "dn":
         leverage = max(1.0, min(leverage, 5.0))
     mm_budget_ok, mm_cycle_budget, mm_required_cycle_budget, mm_min_order_notional = _mm_cycle_budget_preflight(
@@ -3066,6 +3096,11 @@ def _build_strategy_preview_text(
             warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
         elif available_margin < fixed_margin:
             warning = f"⚠️ Add margin before starting \\(need {escape_md(_fmt_usd(fixed_margin))}\\)\\."
+        # CEO directive: Volume Perp uses per-asset MAX leverage; spot stays at 1x.
+        _vol_lev_label = (
+            "1x \\(spot\\)" if (vol_market or "perp").lower() == "spot"
+            else f"MAX \\({leverage:.0f}x per\\-asset, perp\\)"
+        )
         return (
             "🔁 *Volume Bot Dashboard*\n"
             f"Status: {status_emoji} *{status_label}*\n\n"
@@ -3075,7 +3110,8 @@ def _build_strategy_preview_text(
             f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
             "⚙️ *Configuration*\n"
             f"• Market: *{escape_md(market_label)}*\n"
-            f"• Size: *{escape_md(_fmt_usd(fixed_margin))}*\n"
+            f"• Notional per trade: *{escape_md(_fmt_usd(fixed_margin))}*\n"
+            f"• Leverage: *{_vol_lev_label}*\n"
             f"• Direction: *{escape_md(direction_label)}*\n"
             f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
             f"• TP/SL: *{escape_md(f'{tp_pct:.1f}% / {sl_pct:.1f}%')}*\n\n"
@@ -3175,7 +3211,7 @@ def _build_strategy_preview_text(
             f"• Levels: *{escape_md(str(levels))}*\n"
             f"• Spread: *{escape_md(f'{min_spread:.0f}bp - {max_spread:.0f}bp')}*\n"
             f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
-            f"• Leverage: *{escape_md(f'{leverage:.0f}x')}*\n"
+            f"• Leverage: *{escape_md(f'MAX ({leverage:.0f}x per-asset)')}*\n"
             f"• Reset: *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}*\n"
             f"• TP/SL: *{escape_md(f'{tp_pct:.1f}% / {sl_pct:.1f}%')}*\n\n"
             "📊 *Statistics*\n"
@@ -3219,7 +3255,7 @@ def _build_strategy_preview_text(
             f"• Levels: *{escape_md(str(levels))}*\n"
             f"• Spread: *{escape_md(f'{spread_bp:.0f}bp')}*\n"
             f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
-            f"• Leverage: *{escape_md(f'{leverage:.0f}x')}*\n"
+            f"• Leverage: *{escape_md(f'MAX ({leverage:.0f}x per-asset)')}*\n"
             f"• Reset: *{escape_md(f'{reset_threshold:.2f}% / {reset_timeout}s')}*\n"
             f"• Discretion: *{escape_md(f'{discretion:.2f}')}*\n"
             f"• PnL SL/TP: *{escape_md(f'{max_loss_pct:.2f}% / {grid_tp:.2f}%')}*\n\n"

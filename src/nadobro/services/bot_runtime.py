@@ -648,9 +648,15 @@ def start_user_bot(
         max_leverage = get_product_max_leverage(product, network=network)
         if strategy == "dn":
             max_leverage = min(max_leverage, 5)
-        if strategy == "vol":
-            max_leverage = 1
-    if float(leverage or 0) > max_leverage:
+        # NOTE (CEO directive 2026-05): Volume Perp now uses per-asset MAX leverage
+        # rather than being pinned to 1x. The strategy itself overwrites
+        # state["leverage"] at cycle start (volume_bot._resolve_max_leverage).
+    # CEO directive: MM and Volume Perp coerce to MAX leverage internally — accept
+    # the user's stale UI value silently rather than rejecting; the strategies
+    # overwrite state["leverage"] at cycle start (mm_bot.py:~686, volume_bot.py:~884).
+    if strategy in ("mm", "vol") and not (strategy == "vol" and vol_market_kw == "spot"):
+        leverage = float(max_leverage)
+    elif float(leverage or 0) > max_leverage:
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
     if float(leverage or 0) < 1:
         return False, "Leverage must be at least 1x."

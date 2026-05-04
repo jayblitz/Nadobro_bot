@@ -52,10 +52,15 @@ class VolStrategyRebuildTests(unittest.TestCase):
         must not clobber the side chosen at start (Start Long vs stale SHORT in settings)."""
         self.assertIn("vol_direction", bot_runtime._STRATEGY_SETTINGS_RUNTIME_BLOCKLIST)
 
-    def test_vol_idle_places_limit_entry_with_fixed_margin(self):
+    def test_vol_idle_places_limit_entry_with_target_notional_at_max_lev(self):
+        # CEO directive (2026-05): Volume Perp uses per-asset MAX leverage and
+        # sizes by NOTIONAL ($100 default). Stub the catalog so this test isn't
+        # tied to whatever live max-leverage BTC has on the network at runtime.
         state = {"product": "BTC", "vol_direction": "long", "tp_pct": 1.0, "sl_pct": 1.0}
         client = _VolClient(mid=100.0)
         with patch.object(volume_bot, "get_product_id", return_value=2), patch.object(
+            volume_bot, "get_product_max_leverage", return_value=50.0
+        ), patch.object(
             volume_bot,
             "execute_limit_order",
             return_value={"success": True, "digest": "d1", "price": 100.1, "size": 1.0},
@@ -68,7 +73,11 @@ class VolStrategyRebuildTests(unittest.TestCase):
         self.assertEqual(state.get("vol_phase"), "pending_fill")
         self.assertAlmostEqual(float(state.get("vol_entry_fill_price") or 0), 100.1)
         self.assertEqual(float(state.get("vol_entry_fill_ts") or 0), 0.0)
-        self.assertEqual(state.get("leverage"), 1.0)
+        # Leverage is now per-asset MAX, not pinned to 1x.
+        self.assertEqual(state.get("leverage"), 50.0)
+        self.assertEqual(state.get("leverage_mode"), "MAX")
+        # Notional target stays at $100 (mirrored into legacy fixed_margin_usd).
+        self.assertEqual(state.get("target_notional_usd"), 100.0)
         self.assertEqual(state.get("fixed_margin_usd"), 100.0)
 
     def test_vol_pending_fill_waits_while_order_is_open(self):
