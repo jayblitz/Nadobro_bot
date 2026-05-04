@@ -134,3 +134,48 @@ def test_loaded_font_is_truetype_when_system_fonts_available():
     font = pc._get_font(48, bold=True)
     # If we got a TTF the size attribute is set; the bitmap default has no .size.
     assert getattr(font, "size", None) is not None or font.__class__.__name__ == "FreeTypeFont"
+
+
+def test_qr_resolver_prefers_jpeg_then_png():
+    """Telegram-bot QR is the bottom-left CTA; resolver tries the canonical
+    designer-provided JPEG first, then PNG fallbacks."""
+    chosen = pc._resolve_qr_path()
+    # The repo ships "Nadobro tg QR code.jpeg" by default.
+    assert chosen is not None
+    assert chosen.name == "Nadobro tg QR code.jpeg"
+
+
+def test_qr_paste_is_compositied_at_footer_box(monkeypatch, tmp_path):
+    """Paste helper writes pixels inside the (_X_QR, _Y_QR) → (+_SZ_QR, +_SZ_QR)
+    box and leaves the rest of the canvas untouched."""
+    from PIL import Image as _Image
+
+    canvas = _Image.new("RGBA", (pc.CANVAS_W, pc.CANVAS_H), (0, 0, 0, 255))
+    pc._paste_telegram_qr(canvas)
+    # Sample a pixel inside the QR box — should no longer be pure black.
+    inside = canvas.getpixel((pc._X_QR + pc._SZ_QR // 2, pc._Y_QR + pc._SZ_QR // 2))
+    # Sample a pixel far away (top-right corner) — should stay (0,0,0,255).
+    outside = canvas.getpixel((pc.CANVAS_W - 4, 4))
+    assert inside != (0, 0, 0, 255), "QR didn't write into the footer box"
+    assert outside == (0, 0, 0, 255), "QR bled outside the footer box"
+
+
+def test_qr_missing_does_not_crash(monkeypatch, tmp_path):
+    """Renderer must keep working even if the QR asset disappears."""
+    monkeypatch.setattr(pc, "_QR_CANDIDATES", (tmp_path / "no_qr.jpeg",))
+    out = pc.generate_pnl_card(_sample_data())
+    assert out.startswith(PNG_HEADER)
+    assert _open_png(out).size == (1024, 578)
+
+
+def test_legacy_footer_text_constants_are_removed():
+    """Guard against accidental re-introduction of the old "Join now:" /
+    URL two-line footer. The new footer is the QR code only."""
+    # If these layout constants come back, the legacy text will render again.
+    assert not hasattr(pc, "_Y_FOOTER1")
+    assert not hasattr(pc, "_Y_FOOTER2")
+    assert not hasattr(pc, "_SZ_FOOTER")
+    # The QR layout constants must exist instead.
+    assert hasattr(pc, "_X_QR")
+    assert hasattr(pc, "_Y_QR")
+    assert hasattr(pc, "_SZ_QR")
