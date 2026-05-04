@@ -64,10 +64,10 @@ _SZ_FEES_VALUE = 52
 _SZ_PNL_LABEL = 28
 _SZ_PNL_VALUE = 52
 
-# Footer + referral
-_Y_FOOTER1 = 498       # "Join now:"
-_Y_FOOTER2 = 524       # "https://t.me/Nadbro_bot"
-_SZ_FOOTER = 22
+# Footer — QR code (replaces former "Join now: …" two-line text) + referral
+_X_QR = 36
+_Y_QR = 462           # top edge; bottom = _Y_QR + _SZ_QR ≈ 572 (6px from canvas bottom)
+_SZ_QR = 110
 _X_REFERRAL_RIGHT = 990   # right edge for "Referral Code: …" (anchored right)
 _Y_REFERRAL = 538
 _SZ_REFERRAL = 22
@@ -111,6 +111,14 @@ _LOGO_CANDIDATES: tuple[Path, ...] = (
 _NADO_ICON_CANDIDATES: tuple[Path, ...] = (
     LOGOS_DIR / "nado.png",
     ASSETS / "logo" / "nado.png",
+)
+
+# Telegram-bot QR code rendered in the bottom-left footer (replaces the
+# former "Join now: …" two-line text).
+_QR_CANDIDATES: tuple[Path, ...] = (
+    CARDS_DIR / "Nadobro tg QR code.jpeg",
+    CARDS_DIR / "nadobro_bot_qr.png",
+    CARDS_DIR / "nadobro_bot_qr.jpg",
 )
 
 
@@ -346,6 +354,37 @@ def _paste_logo(canvas: Image.Image) -> None:
     canvas.alpha_composite(logo, dest=(box_x, box_y))
 
 
+def _resolve_qr_path() -> Path | None:
+    for p in _QR_CANDIDATES:
+        if p.exists():
+            return p
+    return None
+
+
+def _paste_telegram_qr(canvas: Image.Image) -> None:
+    """Composite the Telegram-bot QR code in the bottom-left footer.
+
+    Pasted as a square at ``(_X_QR, _Y_QR)`` sized ``_SZ_QR``. The source
+    JPEG already includes the NB logo / NADOBRO wordmark / @NADBRO_BOT
+    handle baked in, so users only need to scan the visible QR pattern.
+
+    Silently skipped if the asset is missing — keeps the renderer robust
+    in environments without the QR file.
+    """
+    qr_path = _resolve_qr_path()
+    if qr_path is None:
+        return
+    try:
+        qr = Image.open(qr_path).convert("RGBA")
+    except (OSError, ValueError):
+        return
+    qr.thumbnail((_SZ_QR, _SZ_QR), Image.LANCZOS)
+    # Centre inside the QR box so non-square sources still align cleanly.
+    box_x = _X_QR + (_SZ_QR - qr.width) // 2
+    box_y = _Y_QR + (_SZ_QR - qr.height) // 2
+    canvas.alpha_composite(qr, dest=(box_x, box_y))
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -389,7 +428,6 @@ def generate_pnl_card(data: dict) -> bytes:
     f_fees_val = _get_font(_SZ_FEES_VALUE, bold=True)
     f_pnl_lbl = _get_font(_SZ_PNL_LABEL, bold=False)
     f_pnl_val = _get_font(_SZ_PNL_VALUE, bold=True)
-    f_footer = _get_font(_SZ_FOOTER, bold=False)
     f_ref = _get_font(_SZ_REFERRAL, bold=False)
 
     # 1) Header — NB box logo + "NADOBRO" wordmark
@@ -437,9 +475,10 @@ def generate_pnl_card(data: dict) -> bytes:
     )
     draw.text((_X_PNL_COL, _Y_FEES_VALUE), pnl, fill=pnl_color, font=f_pnl_val)
 
-    # 6) Footer — "Join now:" / URL stacked, referral right-aligned
-    draw.text((_X_LEFT, _Y_FOOTER1), "Join now:", fill=WHITE, font=f_footer)
-    draw.text((_X_LEFT, _Y_FOOTER2), "https://t.me/Nadbro_bot", fill=WHITE, font=f_footer)
+    # 6) Footer — Telegram-bot QR (left, replaces former "Join now: …" text);
+    #    referral code right-aligned at the bottom. The QR image is the only
+    #    join CTA on the card now — users scan it to open the bot.
+    _paste_telegram_qr(img)
 
     referral = data.get("referral_code")
     if referral:
