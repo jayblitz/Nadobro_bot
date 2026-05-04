@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
 
 from src.nadobro.services.async_utils import run_blocking
@@ -19,6 +20,56 @@ from src.nadobro.studio.execution_bridge import execute_intent
 from src.nadobro.studio.extractor import extract
 
 _CANCEL_WORDS = {"cancel", "nevermind", "never mind", "stop"}
+
+
+_STUDIO_HOME_TEXT = (
+    "🧠 *Strategy Studio*\n\n"
+    "Describe your trade in plain English and I'll handle the rest — extraction, "
+    "clarification, confirmation, and execution.\n\n"
+    "*Quick examples:*\n"
+    "• `long 0.05 ETH 5x with 3% TP and 2% SL`\n"
+    "• `short BTC perp $100 max lev, close in 30 min`\n"
+    "• `buy SOL spot $50 if price drops below 140`\n\n"
+    "Just type your trade in chat and I'll show you a confirmation card before "
+    "anything goes live."
+)
+
+_STUDIO_EXAMPLES_TEXT = (
+    "📚 *Strategy Studio — more examples*\n\n"
+    "• `scalp BTC perp $200 5x, TP 0.4% SL 0.2%, 10 minute time limit`\n"
+    "• `DCA into ETH spot $50 every hour for 6 hours`\n"
+    "• `open a 3x LONG on SOL when RSI(14) on 15m crosses above 30`\n"
+    "• `flatten my BTC short if mark price hits 65000`\n"
+    "• `volume run on ETH for $5000 total turnover, $100 per trade`\n"
+    "• `mean-reversion mm grid on BTC, $200 budget, 4 levels, 5bp spread`\n\n"
+    "Type any of these (or your own) in chat to start a session."
+)
+
+
+async def handle_studio_home(query, context: CallbackContext) -> bool:
+    """Strategy Studio home card — entry point from the strategy hub button."""
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 More Examples", callback_data="studio:examples")],
+        [InlineKeyboardButton("◀ Back", callback_data="nav:strategies")],
+    ])
+    await query.edit_message_text(
+        _STUDIO_HOME_TEXT,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+    return True
+
+
+async def _handle_studio_examples(query, context: CallbackContext) -> bool:
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀ Back", callback_data="studio:home")],
+    ])
+    await query.edit_message_text(
+        _STUDIO_EXAMPLES_TEXT,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+    return True
 
 
 def _network(telegram_id: int) -> str:
@@ -71,6 +122,12 @@ async def handle_studio_callback(query, context: CallbackContext) -> bool:
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     session_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+    # Menu actions don't require an active session — they are entry points from the
+    # strategy hub button (studio:home) and the in-card examples link.
+    if action == "home":
+        return await handle_studio_home(query, context)
+    if action == "examples":
+        return await _handle_studio_examples(query, context)
     if not session_id:
         await query.edit_message_text("Studio session not found.")
         return True

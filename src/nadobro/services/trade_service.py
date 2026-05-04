@@ -401,7 +401,9 @@ def validate_trade(
         return False, "Trade size must be positive."
 
     max_leverage = get_product_max_leverage(product, network=network, client=client)
-    if leverage > max_leverage:
+    # Tolerance for float jitter when strategies coerce to per-asset MAX (e.g. 50.0
+    # vs. catalog returning 49.999999 from a derived weight).
+    if leverage > max_leverage + 1e-9:
         return False, f"Max leverage for {product.upper()} is {max_leverage}x."
 
     if leverage < 1:
@@ -1287,6 +1289,15 @@ def execute_limit_order(
     isolated_margin = None
     if isolated_only and float(leverage or 0) > 0:
         isolated_margin = (float(size) * float(price)) / max(1.0, float(leverage))
+    logger.debug(
+        "execute_limit_order place_limit_order isolated_margin=%s size=%.8f price=%.6f leverage=%.2f post_only=%s reduce_only=%s",
+        isolated_margin,
+        float(size),
+        float(price),
+        float(leverage),
+        bool(post_only),
+        bool(reduce_only),
+    )
     result = client.place_limit_order(
         product_id,
         size,

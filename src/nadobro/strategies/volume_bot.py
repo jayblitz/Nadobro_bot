@@ -1,10 +1,18 @@
-"""Simple volume strategy: fixed-side, fixed-margin, timed close loop."""
+"""Simple volume strategy: fixed-notional, max-leverage, timed close loop.
+
+CEO directive (2026-05): Volume strategy now sizes by NOTIONAL ($100 per trade by
+default) and uses per-asset MAX leverage on perp so margin shrinks proportionally
+and post-only refresh quotes can sit alongside closing legs. Spot stays at 1x.
+SL/TP percentages are applied to the position NOTIONAL (not margin), so a 5% SL
+at $100 notional triggers at -$5 PnL regardless of leverage.
+"""
 import logging
 import time
 
 from src.nadobro.config import (
     EST_FEE_RATE,
     get_product_id,
+    get_product_max_leverage,
     get_spot_metadata,
     get_spot_product_id,
     list_volume_spot_product_names,
@@ -21,10 +29,17 @@ from src.nadobro.services.user_service import get_user_readonly_client
 
 logger = logging.getLogger(__name__)
 
-FIXED_MARGIN_USD = 100.0
-FIXED_LEVERAGE = 1.0
+# Position notional per Volume trade (the "position value" in CEO terms).
+# User-overridable via state["target_notional_usd"] (legacy: state["fixed_margin_usd"]).
+TARGET_NOTIONAL_USD = 100.0
+# Backward-compat alias — external callers (preview cards, copy trading) may still
+# import FIXED_MARGIN_USD; we keep the name pointing at the same value so they don't break.
+FIXED_MARGIN_USD = TARGET_NOTIONAL_USD
 CLOSE_AFTER_SECONDS = 60.0
 MIN_SIZE = 0.0001
+# Notional floor — abort the cycle if user/state misconfigures below this.
+MIN_NOTIONAL_USD = 10.0
+# Legacy floor kept for any external import; semantically replaced by MIN_NOTIONAL_USD.
 MIN_EFFECTIVE_MARGIN_USD = 10.0
 DEFAULT_TARGET_VOLUME_USD = 10000.0
 DEFAULT_VOL_EMA_LEN = 50
@@ -46,6 +61,35 @@ CLOSE_REPOST_AFTER_SECONDS = 45.0
 CLOSE_ESCALATE_AFTER_SECONDS = 180.0
 SPOT_BALANCE_RACE_GRACE_SECONDS = 15.0
 FORCE_CLOSE_RETRY_COOLDOWN_SECONDS = 20.0
+
+
+def _resolve_max_leverage(product: str, network: str, client, *, vol_market: str) -> float:
+    """Per-asset max leverage for Volume. Spot is pinned to 1x (spot has no leverage)."""
+    if (vol_market or "perp").lower() == "spot":
+        return 1.0
+    try:
+        return float(get_product_max_leverage(product, network=network, client=client))
+    except Exception:
+        # Defensive: if catalog is unavailable, fall back to the legacy 1x so we
+        # never accidentally over-leverage when the resolver fails.
+        return 1.0
+
+
+def _resolve_target_notional(state: dict) -> float:
+    """User-overridable position notional with $100 default.
+
+    Reads state["target_notional_usd"] first (new key); falls back to legacy
+    state["fixed_margin_usd"] for backward compatibility with existing user configs.
+    Floored at MIN_NOTIONAL_USD; defaults to TARGET_NOTIONAL_USD ($100).
+    """
+    raw = state.get("target_notional_usd")
+    if raw is None:
+        raw = state.get("fixed_margin_usd")
+    try:
+        val = float(raw) if raw is not None else TARGET_NOTIONAL_USD
+    except (TypeError, ValueError):
+        val = TARGET_NOTIONAL_USD
+    return max(MIN_NOTIONAL_USD, val)
 
 
 def _normalize_direction(raw: str) -> str:
@@ -276,6 +320,7 @@ def _run_volume_spot_cycle(
     mid: float,
     fixed_margin: float,
     effective_margin: float,
+    target_notional: float,
     target_volume: float,
     tp_usd: float,
     sl_usd: float,
@@ -284,7 +329,12 @@ def _run_volume_spot_cycle(
     phase: str,
     now_ts: float,
 ) -> dict:
-    """Volume spot: post-only buy → wait fill → 60s → post-only sell (same phase keys as perp)."""
+    """Volume spot: post-only buy → wait fill → 60s → post-only sell (same phase keys as perp).
+
+    Sizing is by ``target_notional`` (USD); ``effective_margin`` is retained for the
+    wallet sanity floor and legacy preview fields. SL/TP USD thresholds (``tp_usd``,
+    ``sl_usd``) are pre-computed by the caller against the position notional.
+    """
     direction = "long"
 
     if phase == "pending_fill":
@@ -654,18 +704,31 @@ def _run_volume_spot_cycle(
         }
 
     # idle
-    if effective_margin < MIN_EFFECTIVE_MARGIN_USD:
+    if target_notional < MIN_NOTIONAL_USD:
         return {
             "success": False,
             "error": (
-                f"Insufficient margin for Vol cycle. Need >= ${MIN_EFFECTIVE_MARGIN_USD:.2f} "
-                f"effective margin, available quote balance low."
+                f"Volume requires a notional >= ${MIN_NOTIONAL_USD:.2f} per trade "
+                f"(configured target ${target_notional:.2f})."
             ),
             "orders_placed": 0,
             "placed_notional_usd": 0.0,
             "vol_order_attempts": 0,
             "vol_order_failures": 1,
-            "last_order_error": "insufficient_effective_margin",
+            "last_order_error": "insufficient_notional",
+        }
+    if effective_margin <= 0:
+        return {
+            "success": False,
+            "error": (
+                f"Wallet quote balance too low for Vol max-leverage margin "
+                f"(need ~${target_notional:.2f}/leverage, available balance is empty)."
+            ),
+            "orders_placed": 0,
+            "placed_notional_usd": 0.0,
+            "vol_order_attempts": 0,
+            "vol_order_failures": 1,
+            "last_order_error": "insufficient_margin_for_max_lev",
         }
     if bool(state.get("vol_signal_filter_enabled", False)):
         max_spread_bp = float(state.get("vol_max_spread_bp") or DEFAULT_VOL_MAX_SPREAD_BP)
@@ -705,15 +768,17 @@ def _run_volume_spot_cycle(
                 "placed_notional_usd": 0.0,
                 "vol_signal": state["vol_signal"],
             }
-    size = max(effective_margin / mid, MIN_SIZE)
+    # Size by target NOTIONAL (USD) — spot leverage is always 1x so notional == margin here.
+    size = max(target_notional / mid, MIN_SIZE)
     entry_limit = _maker_limit_price(mp, is_buy=True)
     logger.info(
-        "VOL spot entry user=%s network=%s product=%s size=%.8f limit=%.8f",
+        "VOL spot entry user=%s network=%s product=%s size=%.8f limit=%.8f target_notional=%.2f",
         telegram_id,
         network,
         product,
         size,
         entry_limit,
+        target_notional,
     )
     open_result = execute_spot_limit_order(
         telegram_id,
@@ -780,8 +845,8 @@ def get_fee_pnl_preview(telegram_id: int, product: str, target_volume_usd: float
     estimated_fees = target_volume_usd * EST_FEE_RATE
     return {
         "target_volume_usd": target_volume_usd,
-        "flip_size_usd": FIXED_MARGIN_USD,
-        "num_flips": max(1, int(target_volume_usd / FIXED_MARGIN_USD)),
+        "flip_size_usd": TARGET_NOTIONAL_USD,
+        "num_flips": max(1, int(target_volume_usd / TARGET_NOTIONAL_USD)),
         "fee_rate": EST_FEE_RATE,
         "estimated_fees": round(estimated_fees, 4),
         "estimated_slippage": round(target_volume_usd * 0.0002, 4),
@@ -814,13 +879,27 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_direction"] = direction
         state["direction"] = direction
 
-    fixed_margin = float(state.get("fixed_margin_usd") or FIXED_MARGIN_USD)
-    state["fixed_margin_usd"] = round(fixed_margin, 4)
-    state["leverage"] = FIXED_LEVERAGE
+    # CEO directive: Volume Perp now sizes by NOTIONAL ($100 default) at per-asset
+    # MAX leverage; margin shrinks proportionally so post-only refresh quotes can
+    # coexist with closing legs. Spot stays at 1x via _resolve_max_leverage.
+    target_notional = _resolve_target_notional(state)
+    state["target_notional_usd"] = round(target_notional, 4)
+    # Legacy mirror — preview cards and copy-trade still read fixed_margin_usd.
+    state["fixed_margin_usd"] = round(target_notional, 4)
+    fixed_margin = target_notional  # alias retained for downstream call signatures
+    max_lev = _resolve_max_leverage(product, network, client, vol_market=vol_market)
+    state["leverage"] = max_lev
+    state["leverage_mode"] = "MAX"
+    required_margin = target_notional / max(1.0, max_lev)
     available_quote = _available_quote_balance(client)
-    effective_margin = min(fixed_margin, max(0.0, available_quote * 0.90)) if available_quote > 0 else fixed_margin
+    effective_margin = (
+        min(required_margin, max(0.0, available_quote * 0.90))
+        if available_quote > 0
+        else required_margin
+    )
     if effective_margin > 0:
         state["vol_effective_margin_usd"] = round(effective_margin, 4)
+    state["vol_required_margin_usd"] = round(required_margin, 4)
     target_volume = float(state.get("target_volume_usd") or DEFAULT_TARGET_VOLUME_USD)
     state["target_volume_usd"] = round(target_volume, 4)
 
@@ -870,8 +949,10 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         volume_done = float(state.get("volume_done_usd") or 0.0)
         tp_pct = float(state.get("tp_pct") or 0.0)
         sl_pct = float(state.get("sl_pct") or 0.0)
-        tp_usd = (max(effective_margin, MIN_EFFECTIVE_MARGIN_USD) * tp_pct / 100.0) if tp_pct > 0 else 0.0
-        sl_usd = (max(effective_margin, MIN_EFFECTIVE_MARGIN_USD) * sl_pct / 100.0) if sl_pct > 0 else 0.0
+        # Session SL/TP applied to NOTIONAL (CEO directive). Otherwise at high leverage
+        # the SL would trigger on cents of margin PnL.
+        tp_usd = (max(target_notional, MIN_NOTIONAL_USD) * tp_pct / 100.0) if tp_pct > 0 else 0.0
+        sl_usd = (max(target_notional, MIN_NOTIONAL_USD) * sl_pct / 100.0) if sl_pct > 0 else 0.0
         if tp_usd > 0 and session_pnl >= tp_usd:
             state["running"] = False
             return {
@@ -906,6 +987,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             mid,
             fixed_margin,
             effective_margin,
+            target_notional,
             target_volume,
             tp_usd,
             sl_usd,
@@ -932,8 +1014,10 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
 
     tp_pct = float(state.get("tp_pct") or 0.0)
     sl_pct = float(state.get("sl_pct") or 0.0)
-    tp_usd = (max(effective_margin, MIN_EFFECTIVE_MARGIN_USD) * tp_pct / 100.0) if tp_pct > 0 else 0.0
-    sl_usd = (max(effective_margin, MIN_EFFECTIVE_MARGIN_USD) * sl_pct / 100.0) if sl_pct > 0 else 0.0
+    # Session SL/TP applied to NOTIONAL (CEO directive). Otherwise at high leverage
+    # the SL would trigger on cents of margin PnL.
+    tp_usd = (max(target_notional, MIN_NOTIONAL_USD) * tp_pct / 100.0) if tp_pct > 0 else 0.0
+    sl_usd = (max(target_notional, MIN_NOTIONAL_USD) * sl_pct / 100.0) if sl_pct > 0 else 0.0
     if tp_usd > 0 and session_pnl >= tp_usd:
         state["running"] = False
         return {
@@ -1066,7 +1150,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
                         product,
                         escalate_size,
                         is_long=escalate_is_long,
-                        leverage=FIXED_LEVERAGE,
+                        leverage=float(state.get("leverage") or 1.0),
                         reduce_only=True,
                         enforce_rate_limit=False,
                         source="vol",
@@ -1285,7 +1369,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             pos_size,
             close_limit,
             is_long=close_is_long,
-            leverage=FIXED_LEVERAGE,
+            leverage=float(state.get("leverage") or 1.0),
             reduce_only=True,
             enforce_rate_limit=False,
             post_only=True,
@@ -1345,18 +1429,31 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         }
 
     # phase == idle
-    if effective_margin < MIN_EFFECTIVE_MARGIN_USD:
+    if target_notional < MIN_NOTIONAL_USD:
         return {
             "success": False,
             "error": (
-                f"Insufficient margin for Vol cycle. Need >= ${MIN_EFFECTIVE_MARGIN_USD:.2f} "
-                f"effective margin, available ${available_quote:.2f}."
+                f"Volume requires a notional >= ${MIN_NOTIONAL_USD:.2f} per trade "
+                f"(configured target ${target_notional:.2f})."
             ),
             "orders_placed": 0,
             "placed_notional_usd": 0.0,
             "vol_order_attempts": 0,
             "vol_order_failures": 1,
-            "last_order_error": "insufficient_effective_margin",
+            "last_order_error": "insufficient_notional",
+        }
+    if effective_margin <= 0:
+        return {
+            "success": False,
+            "error": (
+                f"Wallet quote balance too low for Vol max-leverage margin "
+                f"(need ~${(target_notional / max(1.0, float(state.get('leverage') or 1.0))):.2f}, available ${available_quote:.2f})."
+            ),
+            "orders_placed": 0,
+            "placed_notional_usd": 0.0,
+            "vol_order_attempts": 0,
+            "vol_order_failures": 1,
+            "last_order_error": "insufficient_margin_for_max_lev",
         }
     if bool(state.get("vol_signal_filter_enabled", False)):
         max_spread_bp = float(state.get("vol_max_spread_bp") or DEFAULT_VOL_MAX_SPREAD_BP)
@@ -1397,11 +1494,13 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         direction = _normalize_direction(signal.get("direction") or direction)
         state["vol_direction"] = direction
         state["direction"] = direction
-    size = max(effective_margin / mid, MIN_SIZE)
+    # Size by target NOTIONAL (USD) at max leverage. e.g. $100 notional / 50x = $2 margin.
+    size = max(target_notional / mid, MIN_SIZE)
     is_long = direction == "long"
     entry_limit = _maker_limit_price(mp, is_buy=is_long)
     logger.info(
-        "VOL entry order attempt user=%s network=%s product=%s phase=%s direction=%s size=%.8f limit=%.8f effective_margin=%.2f",
+        "VOL entry order attempt user=%s network=%s product=%s phase=%s direction=%s "
+        "size=%.8f limit=%.8f target_notional=%.2f leverage=%.1fx margin=%.2f",
         telegram_id,
         network,
         product,
@@ -1409,6 +1508,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         direction,
         size,
         entry_limit,
+        target_notional,
+        float(state.get("leverage") or 1.0),
         effective_margin,
     )
     open_result = execute_limit_order(
@@ -1417,7 +1518,7 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         size,
         entry_limit,
         is_long=is_long,
-        leverage=FIXED_LEVERAGE,
+        leverage=float(state.get("leverage") or 1.0),
         enforce_rate_limit=False,
         post_only=True,
         source="vol",

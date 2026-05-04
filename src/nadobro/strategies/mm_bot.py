@@ -6,7 +6,7 @@ Cancels stale orders that drift beyond threshold from current mid.
 """
 import logging
 import time
-from src.nadobro.config import get_product_id
+from src.nadobro.config import get_product_id, get_product_max_leverage
 from src.nadobro.services.trade_service import execute_limit_order
 
 logger = logging.getLogger(__name__)
@@ -683,7 +683,16 @@ def run_cycle(
 
     spread_bp = float(state.get("spread_bp") or 5.0)
     notional = float(state.get("notional_usd") or 100.0)
-    leverage = float(state.get("leverage") or 3.0)
+    # CEO directive: MM strategies always run at per-asset MAX leverage so margin
+    # shrinks proportionally and post-only refresh quotes can sit alongside closing
+    # legs. The user-configured leverage in state is overwritten here for transparency.
+    try:
+        leverage = float(get_product_max_leverage(product, network=network, client=client))
+    except Exception:
+        # Defensive fallback: keep prior behavior if catalog is unavailable.
+        leverage = max(1.0, float(state.get("leverage") or 3.0))
+    state["leverage"] = leverage
+    state["leverage_mode"] = "MAX"
     max_orders = int(state.get("max_open_orders", 6))
     min_range_pct = float(state.get("min_range_pct") or 1.0)
     max_range_pct = float(state.get("max_range_pct") or 1.0)

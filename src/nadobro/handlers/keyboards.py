@@ -798,7 +798,7 @@ def strategy_hub_kb():
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],
         [
-            InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro"),
+            InlineKeyboardButton("🧠 Strategy Studio", callback_data="studio:home"),
         ],
         [
             InlineKeyboardButton("🔁 Copy Trading", callback_data="copy:hub"),
