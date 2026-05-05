@@ -257,13 +257,13 @@ class DynamicGridTests(unittest.TestCase):
 
 
 class GridBudgetVsMinNotionalTests(unittest.TestCase):
-    def test_small_cycle_returns_error_without_orders_when_below_venue_floor(self):
-        """Each quote slot must budget venue min USD notional; leverage does not shrink it."""
+    def test_collateral_below_estimated_margin_per_quote_returns_error(self):
+        """Collateral cap must cover at least one venue-sized quote (margin heuristic)."""
         state = {
             "product": "BTC",
             "strategy": "grid",
-            "notional_usd": 64.0,
-            "cycle_notional_usd": 64.0,
+            "notional_usd": 10.0,
+            "cycle_notional_usd": 10.0,
             "levels": 4,
             "spread_bp": 8.0,
             "min_order_notional_usd": 100.0,
@@ -280,14 +280,63 @@ class GridBudgetVsMinNotionalTests(unittest.TestCase):
             def get_all_positions(self):
                 return []
 
+            def get_balance(self):
+                return {"exists": True, "balances": {0: 1_000_000.0}}
+
         with patch.object(mm_bot, "get_product_id", return_value=90), patch.object(
             mm_bot, "get_product_max_leverage", return_value=10.0
         ), patch.object(mm_bot, "execute_limit_order") as m_exec:
             out = mm_bot.run_cycle(1, "mainnet", state, client=C())
 
         self.assertFalse(out.get("success", True))
-        self.assertIn("too small", (out.get("error") or "").lower())
+        self.assertIn("collateral", (out.get("error") or "").lower())
         m_exec.assert_not_called()
+
+    def test_modest_collateral_caps_resting_quotes_and_places_orders(self):
+        """$64 collateral / ~$17.5 est margin per $100-notional quote @ 10x yields ~3 slots."""
+        state = {
+            "product": "BTC",
+            "strategy": "grid",
+            "notional_usd": 64.0,
+            "cycle_notional_usd": 64.0,
+            "levels": 4,
+            "spread_bp": 8.0,
+            "min_order_notional_usd": 100.0,
+            "threshold_bp": 0.0,
+            "max_open_orders": 6,
+        }
+
+        class C:
+            def get_market_price(self, _pid):
+                return {"mid": 100000.0, "bid": 99990.0, "ask": 100010.0}
+
+            def get_open_orders(self, _pid):
+                return []
+
+            def get_all_positions(self):
+                return []
+
+            def get_balance(self):
+                return {"exists": True, "balances": {0: 1_000_000.0}}
+
+        with patch.object(mm_bot, "get_product_id", return_value=90), patch.object(
+            mm_bot, "get_product_max_leverage", return_value=10.0
+        ), patch.object(mm_bot, "execute_limit_order", return_value={"success": True, "digest": "abc"}):
+            out = mm_bot.run_cycle(1, "mainnet", state, client=C())
+
+        self.assertEqual(out.get("mm_max_resting_quotes_cap"), 3)
+        self.assertGreater(out.get("orders_placed", 0), 0)
+        self.assertGreaterEqual(out.get("mm_buy_quote_levels", 0) + out.get("mm_sell_quote_levels", 0), 1)
+
+
+class MmCollateralEstimateTests(unittest.TestCase):
+    def test_estimate_quote_capacity_respects_leverage(self):
+        cap = mm_bot.estimate_mm_quote_capacity(50.0, 100.0, 10.0, max_open_orders=6)
+        self.assertEqual(cap["max_resting_quotes"], 2)
+
+    def test_allocate_quote_levels_splits_neutral_three_slots(self):
+        buy_l, sell_l = mm_bot._mm_allocate_quote_levels(3, 4, 1.0, 1.0)
+        self.assertEqual(buy_l + sell_l, 3)
 
 
 if __name__ == "__main__":

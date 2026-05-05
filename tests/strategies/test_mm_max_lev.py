@@ -5,10 +5,10 @@ alongside closing legs.
 Locks in:
   - state["leverage"] is overwritten to per-asset max at cycle start.
   - state["leverage_mode"] is "MAX".
-  - The user's notional_usd budget remains the per-cycle notional (no change
-    to per-level sizing formula).
-  - Grid depth is capped using venue min notional per quote (not min/leverage);
-    leverage reduces margin per dollar notional, not the exchange floor per order.
+  - state["notional_usd"] acts as a collateral cap; resting-quote concurrency is
+    bounded by an estimated margin-per-quote (venue min notional / leverage × safety).
+  - Each filled/resting quote still carries ~venue min notional; leverage does not
+    shrink that exchange floor.
 """
 import unittest
 from unittest.mock import patch

@@ -1841,22 +1841,39 @@ async def _handle_strategy(query, data, context, telegram_id):
         strategy_leverage = 1 if strategy_id == "vol" else settings.get("default_leverage", 3)
         if strategy_id == "dn":
             strategy_leverage = max(1, min(float(strategy_leverage), 5))
+        if strategy_id in ("grid", "rgrid", "dgrid"):
+            try:
+                from src.nadobro.config import get_product_max_leverage as _gpml
+                strategy_leverage = float(_gpml(product, network=network))
+            except Exception:
+                strategy_leverage = float(settings.get("default_leverage", 3))
         strategy_conf = (settings.get("strategies", {}) or {}).get(strategy_id, {}) or {}
-        mm_budget_ok, mm_cycle_budget, mm_required_cycle_budget, mm_min_order_notional = _mm_cycle_budget_preflight(
-            strategy_id, strategy_conf, float(strategy_leverage or 1.0)
+        wallet_usdt_pf = None
+        ro = get_user_readonly_client(telegram_id)
+        if ro:
+            try:
+                b = ro.get_balance() or {}
+                if b.get("exists"):
+                    wallet_usdt_pf = float((b.get("balances") or {}).get(0, 0) or 0.0)
+                    if wallet_usdt_pf == 0:
+                        wallet_usdt_pf = float((b.get("balances") or {}).get("0", 0) or 0.0)
+            except Exception:
+                pass
+        mm_budget_ok, mm_collateral_budget, mm_required_min_collateral, mm_min_order_notional, mm_max_quotes_est, mm_margin_per_quote_est = _mm_cycle_budget_preflight(
+            strategy_id, strategy_conf, float(strategy_leverage or 1.0), wallet_usdt=wallet_usdt_pf
         )
         if not mm_budget_ok:
             vkb_block = _vol_market_pref(context) if strategy_id == "vol" else "perp"
             await _edit_loc(
                 query,
                 "⚠️ *Cannot start strategy*\n\n"
-                f"Cycle budget is below venue minimum quote sizing\\. Each resting order needs roughly "
-                f"*{escape_md(f'${mm_min_order_notional:,.2f}')}* notional \\(venue floor\\)\\.\n"
-                f"Current cycle budget: *{escape_md(f'${mm_cycle_budget:,.2f}')}*\n"
-                f"Recommended minimum: *{escape_md(f'${mm_required_cycle_budget:,.2f}')}* "
-                f"for a minimal two\\-sided grid\\. Leverage lowers margin per dollar but does not "
-                f"lower this notional floor\\.\n\n"
-                "Increase margin/cycle budget, reduce grid levels, or use a product with lower minimums\\.",
+                "Collateral is below the estimated minimum for one venue\\-sized resting quote\\.\n"
+                f"Each quote still carries roughly *{escape_md(f'${mm_min_order_notional:,.2f}')}* notional \\(exchange floor\\)\\.\n"
+                f"Configured collateral cap: *{escape_md(f'${mm_collateral_budget:,.2f}')}*\n"
+                f"Estimated margin per quote \\(~{escape_md(f'{strategy_leverage:.0f}x')}\\): "
+                f"*{escape_md(f'${mm_margin_per_quote_est:,.2f}')}* \\(incl\\. safety buffer\\)\n"
+                f"Need at least: *{escape_md(f'${mm_required_min_collateral:,.2f}')}*\n\n"
+                "Deposit USDT, raise configured margin, or pick a product with a lower minimum order size\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=strategy_action_kb(
                     strategy_id,
@@ -2311,22 +2328,54 @@ def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
     return shared_get_user_settings(telegram_id, context)
 
 
-def _mm_cycle_budget_preflight(strategy_id: str, strategy_conf: dict, _leverage: float) -> tuple[bool, float, float, float]:
-    if strategy_id not in ("grid", "rgrid", "dgrid"):
-        return True, 0.0, 0.0, 0.0
+def _mm_cycle_budget_preflight(
+    strategy_id: str,
+    strategy_conf: dict,
+    leverage: float,
+    *,
+    wallet_usdt: float | None = None,
+) -> tuple[bool, float, float, float, int, float]:
+    """MM grid family: collateral vs estimated margin per venue-sized quote.
 
-    from src.nadobro.strategies.mm_bot import DEFAULT_MIN_ORDER_NOTIONAL_USD
+    Returns
+        ok, collateral_budget, required_min_collateral_1q, min_order_notional,
+        max_resting_quotes_est, margin_per_quote_est
+    """
+    if strategy_id not in ("grid", "rgrid", "dgrid"):
+        return True, 0.0, 0.0, 0.0, 0, 0.0
+
+    from src.nadobro.strategies.mm_bot import DEFAULT_MIN_ORDER_NOTIONAL_USD, estimate_mm_quote_capacity
 
     margin_usd = max(0.0, float(strategy_conf.get("notional_usd", 100.0) or 0.0))
     cycle_cfg = max(0.0, float(strategy_conf.get("cycle_notional_usd", margin_usd) or 0.0))
-    cycle_budget = max(cycle_cfg, margin_usd)
+    collateral_cfg = max(cycle_cfg, margin_usd)
+    if wallet_usdt is not None and float(wallet_usdt) > 0:
+        collateral_budget = min(collateral_cfg, float(wallet_usdt))
+    else:
+        collateral_budget = collateral_cfg
+
     min_order_notional = max(
         1.0,
         float(strategy_conf.get("min_order_notional_usd") or DEFAULT_MIN_ORDER_NOTIONAL_USD),
     )
-    # Need enough USD cycle budget that both sides can place at least one quote at venue min notional.
-    required = 2.0 * min_order_notional
-    return cycle_budget >= required, cycle_budget, required, min_order_notional
+    try:
+        max_open_orders = int(strategy_conf.get("max_open_orders", 6) or 6)
+    except (TypeError, ValueError):
+        max_open_orders = 6
+    max_open_orders = max(1, max_open_orders)
+
+    lev = max(1.0, float(leverage or 1.0))
+    cap = estimate_mm_quote_capacity(
+        collateral_budget,
+        min_order_notional,
+        lev,
+        max_open_orders=max_open_orders,
+    )
+    max_q = int(cap["max_resting_quotes"])
+    margin_per = float(cap["margin_per_quote_est_usd"])
+    required_min = float(cap["min_collateral_1_quote_usd"])
+    ok = max_q >= 1
+    return ok, collateral_budget, required_min, min_order_notional, max_q, margin_per
 
 
 def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
@@ -3018,6 +3067,20 @@ def _build_strategy_preview_text(
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
+    available_margin = 0.0
+    mid = 0.0
+    funding_rate = 0.0
+    client = get_user_readonly_client(telegram_id)
+    if client:
+        try:
+            bal = client.get_balance()
+            if bal and bal.get("exists"):
+                available_margin = float((bal.get("balances", {}) or {}).get(0, 0) or 0.0)
+                if available_margin == 0:
+                    available_margin = float((bal.get("balances", {}) or {}).get("0", 0) or 0.0)
+        except Exception:
+            pass
+
     # CEO directive (2026-05): MM family and Volume Perp run at per-asset MAX
     # leverage at runtime (mm_bot.py / volume_bot.py overwrite state["leverage"]
     # at cycle start). Reflect that in the preview so the dashboard shows what
@@ -3041,27 +3104,16 @@ def _build_strategy_preview_text(
         leverage = float(settings.get("default_leverage", 3))
     if strategy_id == "dn":
         leverage = max(1.0, min(leverage, 5.0))
-    mm_budget_ok, mm_cycle_budget, mm_required_cycle_budget, mm_min_order_notional = _mm_cycle_budget_preflight(
-        strategy_id, conf, leverage
+    wallet_for_preflight = available_margin if available_margin > 0 else None
+    mm_budget_ok, mm_collateral_budget, mm_required_min_collateral, mm_min_order_notional, mm_max_quotes_est, mm_margin_per_quote_est = _mm_cycle_budget_preflight(
+        strategy_id, conf, leverage, wallet_usdt=wallet_for_preflight
     )
 
     def _fmt_usd(value: float) -> str:
         return f"${value:,.2f}"
 
-    available_margin = 0.0
-    mid = 0.0
-    funding_rate = 0.0
-    client = get_user_readonly_client(telegram_id)
     dn_pair = get_dn_pair(product, network=network, client=client) if strategy_id == "dn" else {}
     if client:
-        try:
-            bal = client.get_balance()
-            if bal and bal.get("exists"):
-                available_margin = float((bal.get("balances", {}) or {}).get(0, 0) or 0.0)
-                if available_margin == 0:
-                    available_margin = float((bal.get("balances", {}) or {}).get("0", 0) or 0.0)
-        except Exception:
-            pass
         try:
             user = get_user(telegram_id)
             network = user.network_mode.value if user else "mainnet"
@@ -3205,8 +3257,9 @@ def _build_strategy_preview_text(
             )
         if not mm_budget_ok:
             warning = (
-                f"⚠️ Cycle budget too low for venue min quote size \\(~*{escape_md(_fmt_usd(mm_min_order_notional))}* per order\\)\\.\n"
-                f"Current: {escape_md(_fmt_usd(mm_cycle_budget))} · Recommended min: {escape_md(_fmt_usd(mm_required_cycle_budget))}\\."
+                f"⚠️ Collateral looks tight for MM quoting \\(each resting order ~*{escape_md(_fmt_usd(mm_min_order_notional))}* notional\\)\\.\n"
+                f"Budget after wallet cap: *{escape_md(_fmt_usd(mm_collateral_budget))}* · Need ~*{escape_md(_fmt_usd(mm_required_min_collateral))}* for one quote "
+                f"\\(~*{escape_md(_fmt_usd(mm_margin_per_quote_est))}* est\\. margin at *{escape_md(f'{leverage:.0f}x')}*\\)\\."
             )
         return (
             "⚡ *Dynamic GRID Dashboard*\n"
@@ -3217,7 +3270,9 @@ def _build_strategy_preview_text(
             f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
             "⚙️ *Configuration*\n"
             f"• Market: *{escape_md(product)}\\-PERP*\n"
-            f"• Margin: *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Margin \\(collateral cap\\): *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Est\\. max resting quotes: *{escape_md(str(mm_max_quotes_est))}* \\| "
+            f"*~{escape_md(_fmt_usd(mm_margin_per_quote_est))}* margin/quote \\(est\\.\\)\n"
             f"• Levels: *{escape_md(str(levels))}*\n"
             f"• Phase: *{escape_md(phase)}* \\| Variance: *{escape_md(f'{variance:.2f}')}*\n"
             f"• Realized move: *{escape_md(f'{realized_move:.1f}bp')}* \\| Reset: *{escape_md(f'{reset_bp:.1f}bp')}*\n"
@@ -3249,8 +3304,9 @@ def _build_strategy_preview_text(
             )
         if not mm_budget_ok:
             warning = (
-                f"⚠️ Cycle budget too low for venue min quote size \\(~*{escape_md(_fmt_usd(mm_min_order_notional))}* per order\\)\\.\n"
-                f"Current: {escape_md(_fmt_usd(mm_cycle_budget))} · Recommended min: {escape_md(_fmt_usd(mm_required_cycle_budget))}\\."
+                f"⚠️ Collateral looks tight for MM quoting \\(each resting order ~*{escape_md(_fmt_usd(mm_min_order_notional))}* notional\\)\\.\n"
+                f"Budget after wallet cap: *{escape_md(_fmt_usd(mm_collateral_budget))}* · Need ~*{escape_md(_fmt_usd(mm_required_min_collateral))}* for one quote "
+                f"\\(~*{escape_md(_fmt_usd(mm_margin_per_quote_est))}* est\\. margin at *{escape_md(f'{leverage:.0f}x')}*\\)\\."
             )
         return (
             "📊 *GRID Dashboard*\n"
@@ -3261,7 +3317,9 @@ def _build_strategy_preview_text(
             f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
             "⚙️ *Configuration*\n"
             f"• Market: *{escape_md(product)}\\-PERP*\n"
-            f"• Margin: *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Margin \\(collateral cap\\): *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Est\\. max resting quotes: *{escape_md(str(mm_max_quotes_est))}* \\| "
+            f"*~{escape_md(_fmt_usd(mm_margin_per_quote_est))}* margin/quote \\(est\\.\\)\n"
             f"• Levels: *{escape_md(str(levels))}*\n"
             f"• Spread: *{escape_md(f'{min_spread:.0f}bp - {max_spread:.0f}bp')}*\n"
             f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
@@ -3273,7 +3331,7 @@ def _build_strategy_preview_text(
             f"• Total Trades: *{escape_md(str(trades_count))}*\n"
             f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
             f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n"
-            f"• Effective Notional: *{escape_md(_fmt_usd(cycle_notional))}*\n\n"
+            f"• Est\\. quote depth cap: *{escape_md(str(mm_max_quotes_est))}* resting \\(wallet \\& collateral limited\\)\n\n"
             "ℹ️ *How it works*\n"
             "Places maker-only bids and asks around the market to harvest spread\\."
             + (f"\n\n{warning}" if warning else "")
@@ -3296,6 +3354,12 @@ def _build_strategy_preview_text(
                 f"⚠️ Recommended available margin {escape_md(_fmt_usd(recommended_available))} "
                 f"\\(trade {escape_md(_fmt_usd(required_margin))} + buffer {escape_md(_fmt_usd(recommended_available - required_margin))}\\)\\."
             )
+        if not mm_budget_ok:
+            warning = (
+                f"⚠️ Collateral looks tight for MM quoting \\(each resting order ~*{escape_md(_fmt_usd(mm_min_order_notional))}* notional\\)\\.\n"
+                f"Budget after wallet cap: *{escape_md(_fmt_usd(mm_collateral_budget))}* · Need ~*{escape_md(_fmt_usd(mm_required_min_collateral))}* for one quote "
+                f"\\(~*{escape_md(_fmt_usd(mm_margin_per_quote_est))}* est\\. margin at *{escape_md(f'{leverage:.0f}x')}*\\)\\."
+            )
         return (
             "🧮 *Reverse GRID Dashboard*\n"
             f"Status: {status_emoji} *{status_label}*\n\n"
@@ -3305,7 +3369,9 @@ def _build_strategy_preview_text(
             f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
             "⚙️ *Configuration*\n"
             f"• Market: *{escape_md(product)}\\-PERP*\n"
-            f"• Margin: *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Margin \\(collateral cap\\): *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Est\\. max resting quotes: *{escape_md(str(mm_max_quotes_est))}* \\| "
+            f"*~{escape_md(_fmt_usd(mm_margin_per_quote_est))}* margin/quote \\(est\\.\\)\n"
             f"• Levels: *{escape_md(str(levels))}*\n"
             f"• Spread: *{escape_md(f'{spread_bp:.0f}bp')}*\n"
             f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
@@ -3318,7 +3384,7 @@ def _build_strategy_preview_text(
             f"• Total Trades: *{escape_md(str(trades_count))}*\n"
             f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
             f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n"
-            f"• Effective Notional: *{escape_md(_fmt_usd(cycle_notional))}*\n\n"
+            f"• Est\\. quote depth cap: *{escape_md(str(mm_max_quotes_est))}* resting \\(wallet \\& collateral limited\\)\n\n"
             "ℹ️ *How it works*\n"
             "Anchors to exposure and places buy above / sell below to capture continuation\\."
             + (f"\n\n{warning}" if warning else "")
