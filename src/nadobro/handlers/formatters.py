@@ -164,7 +164,12 @@ def _md_to_tg_md2(text: str) -> str:
     return '\n'.join(out)
 
 
-def fmt_bro_answer_card(answer: str, mode: str | None = None) -> str:
+def fmt_bro_answer_card(
+    answer: str,
+    mode: str | None = None,
+    *,
+    sources: list[str] | None = None,
+) -> str:
     """Render Trading Bro answers as a compact Telegram card."""
     mode_titles = {
         "strategy_design": "Strategy Builder",
@@ -173,11 +178,13 @@ def fmt_bro_answer_card(answer: str, mode: str | None = None) -> str:
         "market_analysis": "Market Read",
         "product_support": "Nadobro Help",
         "casual": "Trading Bro",
+        "morning_brief": "Morning Brief",
     }
     title = mode_titles.get(str(mode or ""), "Trading Bro")
+    title_emoji = "📊" if mode == "morning_brief" else "🧠"
     body = format_ai_response((answer or "").strip())
     lines = [
-        f"🧠 *{escape_md(title)}*",
+        f"{title_emoji} *{escape_md(title)}*",
         md2_rule(),
         "",
     ]
@@ -185,6 +192,23 @@ def fmt_bro_answer_card(answer: str, mode: str | None = None) -> str:
         lines.append(body)
     else:
         lines.append(escape_md("I couldn't generate an answer. Try again."))
+
+    if sources:
+        unique = []
+        seen: set[str] = set()
+        for src in sources:
+            if not src:
+                continue
+            key = src.strip()
+            if key.lower() in seen:
+                continue
+            seen.add(key.lower())
+            unique.append(key)
+            if len(unique) >= 6:
+                break
+        if unique:
+            lines.append("")
+            lines.append(f"_{escape_md('Sources: ' + ', '.join(unique))}_")
     return "\n".join(lines)
 
 

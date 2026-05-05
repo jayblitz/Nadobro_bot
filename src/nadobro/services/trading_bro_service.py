@@ -40,7 +40,9 @@ def build_trading_bro_question(text: str, *, mode: str | None = None) -> str:
         "- Give a clear answer first, then structured sections with practical steps.\n"
         "- For strategy/build questions, cover architecture, logic, risk controls, execution, monitoring, and tests.\n"
         "- Keep Telegram readability high: short headings, concise bullets, useful examples, no filler.\n"
-        "- Include sources only when live data, X/social context, quoted docs, or external facts were actually used.\n\n"
+        "- Include sources only when live data, X/social context, quoted docs, or external facts were actually used.\n"
+        "- Whenever the question touches markets, prices, or trade ideas, close with one '🎯 Actionable Insight: …' line"
+        " — one concrete next step on Nado, or 'sit out' if there is no edge.\n\n"
         f"User message:\n{text}"
     )
 

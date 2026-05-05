@@ -499,6 +499,12 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     if await handle_studio_text(update, context):
         return
 
+    from src.nadobro.services.brief_intent import is_brief_request
+    if is_brief_request(text):
+        from src.nadobro.handlers.brief_commands import _send_brief
+        await _send_brief(update, context)
+        return
+
     conversation_intent = classify_conversation_intent(text)
     allow_operational_intents = conversation_intent.name not in {"learn", "debug"}
 
