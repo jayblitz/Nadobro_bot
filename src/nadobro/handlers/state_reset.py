@@ -24,6 +24,7 @@ _TRANSIENT_USER_DATA_KEYS = (
     "trade_flow_limit_price_input",
     "copy_setup",
     "active_setup",
+    "studio_live_mode",
 )
 
 

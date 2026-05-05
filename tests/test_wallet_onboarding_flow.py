@@ -94,6 +94,7 @@ class WalletOnboardingFlowTests(unittest.TestCase):
                 "trade_flow": {"state": "size"},
                 "pending_copy_wallet": True,
                 "pending_admin_copy_wallet": True,
+                "studio_live_mode": True,
             }
         )
 
