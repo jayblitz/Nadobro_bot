@@ -633,6 +633,31 @@ async def initial_ai_setup():
 
 
 _EDGE_SCAN_SECONDS = int(os.environ.get("EDGE_SCAN_INTERVAL_SECONDS", "1800"))
+_NEWS_WARMUP_MINUTES = int(os.environ.get("NEWS_WARMUP_MINUTES", "12"))
+
+
+async def tick_news_warmup() -> None:
+    """Pre-warm the news bundle cache so user-facing /brief calls hit warm data.
+
+    Skips when no users have been active recently (no chat history entries) to
+    avoid burning outbound HTTP calls on idle days.
+    """
+    try:
+        from src.nadobro.services.knowledge_service import _chat_history
+
+        if not _chat_history:
+            logger.debug("news warmup skipped: no recent chat activity")
+            return
+    except Exception:
+        pass
+
+    try:
+        from src.nadobro.services.news_aggregator import fetch_news_bundle
+
+        bundle = await fetch_news_bundle()
+        logger.info("news warmup ok: %d items, %d sources", len(bundle.items), len(bundle.sources_used))
+    except Exception as exc:
+        logger.warning("news warmup failed: %s", exc)
 
 
 def start_scheduler():
@@ -674,6 +699,7 @@ def start_scheduler():
     scheduler.add_job(poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds, id="lowiqpts_relay_poll", replace_existing=True)
     scheduler.add_job(sync_pending_fills, "interval", seconds=30, id="fill_sync", replace_existing=True)
     scheduler.add_job(tick_edge_scanner, "interval", seconds=_EDGE_SCAN_SECONDS, id="edge_scanner", replace_existing=True)
+    scheduler.add_job(tick_news_warmup, "interval", minutes=_NEWS_WARMUP_MINUTES, id="news_warmup", replace_existing=True)
     scheduler.add_job(initial_ai_setup, "date", id="initial_ai_setup", replace_existing=True)
     scheduler.start()
     logger.info(

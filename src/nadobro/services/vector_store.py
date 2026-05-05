@@ -27,6 +27,7 @@ KNOWLEDGE_FILE = Path(__file__).parent.parent / "data" / "nado_knowledge.txt"
 NS_KNOWLEDGE = "knowledge"
 NS_X_FINDINGS = "x_findings"
 NS_QA_HISTORY = "qa_history"
+NS_NEWS_FINDINGS = "news_findings"
 
 # Dedup threshold — cosine similarity above this means "same question"
 QA_DEDUP_THRESHOLD = 0.92

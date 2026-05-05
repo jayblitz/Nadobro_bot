@@ -176,6 +176,7 @@ def setup_bot():
         cmd_invite_revoke,
         cmd_invite_grant,
     )
+    from src.nadobro.handlers.brief_commands import cmd_market_news, cmd_morning_brief
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
 
@@ -226,6 +227,8 @@ def setup_bot():
     app.add_handler(CommandHandler("invite_status", cmd_invite_status))
     app.add_handler(CommandHandler("invite_revoke", cmd_invite_revoke))
     app.add_handler(CommandHandler("invite_grant", cmd_invite_grant))
+    app.add_handler(CommandHandler("brief", cmd_morning_brief))
+    app.add_handler(CommandHandler("news", cmd_market_news))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

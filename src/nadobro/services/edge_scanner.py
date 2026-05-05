@@ -25,6 +25,25 @@ _edge_cache: dict = {
 
 SCAN_INTERVAL_SECONDS = int(os.environ.get("EDGE_SCAN_INTERVAL_SECONDS", "1800"))  # 30 min
 
+
+def get_recent_findings(limit: int = 10) -> list[dict]:
+    """Return the most recent edge findings from the in-memory cache.
+
+    Used by the morning brief composer to surface live Nado promos /
+    multipliers (e.g. "4x WTI this week") without re-running a scan.
+    """
+    edges = _edge_cache.get("edges") or []
+    if not isinstance(edges, list):
+        return []
+    return list(edges[: max(0, int(limit))])
+
+
+def last_scan_timestamp() -> float:
+    try:
+        return float(_edge_cache.get("last_scan") or 0.0)
+    except Exception:
+        return 0.0
+
 # ── LLM analysis prompt ─────────────────────────────────────────────
 
 EDGE_ANALYSIS_PROMPT = """You are an alpha scanner for Nado DEX traders.
