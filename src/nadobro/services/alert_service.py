@@ -34,13 +34,25 @@ def create_alert(telegram_id: int, product: str, condition: str, target_value: f
     if not alert_cond:
         return {"success": False, "error": _loc("Unknown condition '{condition}'.").format(condition=condition)}
 
-    alert_id = insert_alert({
-        "user_id": telegram_id,
-        "product_id": product_id,
-        "product_name": get_product_name(product_id, network=network),
-        "condition": alert_cond,
-        "target_value": target_value,
-    }, network=network)
+    # Wrap insert_alert to surface DB / validation errors as a structured
+    # response instead of crashing the upstream Telegram handler. Without
+    # this, any exception (pool exhausted, table missing, ValueError from
+    # the column whitelist) propagates uncaught and the user sees nothing
+    # — they tap "Set price" → type a number → silence. (Audit 2026-05.)
+    try:
+        alert_id = insert_alert({
+            "user_id": telegram_id,
+            "product_id": product_id,
+            "product_name": get_product_name(product_id, network=network),
+            "condition": alert_cond,
+            "target_value": target_value,
+        }, network=network)
+    except Exception as e:
+        logger.exception(
+            "create_alert insert failed user=%s product=%s condition=%s",
+            telegram_id, product, condition,
+        )
+        return {"success": False, "error": _loc("Database error. Please try again.")}
     if not alert_id:
         return {"success": False, "error": _loc("Failed to create alert.")}
 
@@ -80,10 +92,24 @@ def delete_alert(telegram_id: int, alert_id: int) -> dict:
     return {"success": True, "message": _loc("Alert #{alert_id} deleted.").format(alert_id=alert_id)}
 
 
-def get_triggered_alerts(prices: dict, funding_rates: dict = None, positions_by_user: dict = None) -> list:
+def get_triggered_alerts(
+    prices: dict,
+    funding_rates: dict = None,
+    positions_by_user: dict = None,
+    network: str = None,
+) -> list:
+    # When `network` is provided, evaluate only alerts in that network's
+    # table and use it as the source-of-truth for `update_alert_triggered`.
+    # Without this scope, alerts from BOTH networks are evaluated against
+    # the caller's single price feed — a testnet alert can fire on mainnet
+    # prices and vice versa. (Audit 2026-05.)
     triggered = []
-    active_alerts = get_all_active_alerts()
+    active_alerts = get_all_active_alerts(network=network)
     for alert in active_alerts:
+        if network and (alert.get("network") or network) != network:
+            # Belt-and-suspenders: drop any row whose network column
+            # disagrees with the requested scope.
+            continue
         product_name = (alert.get("product_name") or "").replace("-PERP", "")
         cond = alert.get("condition")
         target = float(alert.get("target_value") or 0)
@@ -132,7 +158,10 @@ def get_triggered_alerts(prices: dict, funding_rates: dict = None, positions_by_
                 should_trigger = True
 
         if should_trigger:
-            alert_network = alert.get("network", "mainnet")
+            # When the caller scoped by network, rows came from a single
+            # network table without a `network` column — use the param as
+            # source-of-truth so we update the right table.
+            alert_network = network or alert.get("network") or "mainnet"
             update_alert_triggered(alert["id"], network=alert_network)
             if cond in (AlertCondition.FUNDING_ABOVE.value, AlertCondition.FUNDING_BELOW.value):
                 value_type = "funding_rate"

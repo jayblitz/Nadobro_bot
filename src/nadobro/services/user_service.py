@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -20,34 +21,42 @@ def _loc(text):
 _user_cache = {}
 _USER_CACHE_TTL = 10
 _USER_CACHE_MAX_ENTRIES = 512
+# `get_user` is called via `run_blocking` from many handlers (16-worker
+# thread pool). The eviction loop below iterates and pops while another
+# worker may be reading or writing — without a lock this races. (Audit
+# 2026-05.)
+_user_cache_lock = threading.RLock()
 
 
 def _cache_user(user: UserRow):
-    if len(_user_cache) >= _USER_CACHE_MAX_ENTRIES:
-        now = time.time()
-        stale = [k for k, v in _user_cache.items() if now - float(v.get("ts") or 0) > _USER_CACHE_TTL]
-        for k in stale:
-            _user_cache.pop(k, None)
-        while len(_user_cache) >= _USER_CACHE_MAX_ENTRIES:
-            oldest = min(_user_cache, key=lambda k: float(_user_cache[k].get("ts") or 0))
-            _user_cache.pop(oldest, None)
-    _user_cache[user.telegram_id] = {"user": user, "ts": time.time()}
+    with _user_cache_lock:
+        if len(_user_cache) >= _USER_CACHE_MAX_ENTRIES:
+            now = time.time()
+            stale = [k for k, v in _user_cache.items() if now - float(v.get("ts") or 0) > _USER_CACHE_TTL]
+            for k in stale:
+                _user_cache.pop(k, None)
+            while len(_user_cache) >= _USER_CACHE_MAX_ENTRIES:
+                oldest = min(_user_cache, key=lambda k: float(_user_cache[k].get("ts") or 0))
+                _user_cache.pop(oldest, None)
+        _user_cache[user.telegram_id] = {"user": user, "ts": time.time()}
 
 
 def _get_cached_user(telegram_id: int) -> Optional[UserRow]:
-    entry = _user_cache.get(telegram_id)
-    if entry and (time.time() - entry["ts"] < _USER_CACHE_TTL):
-        return entry["user"]
-    if entry:
-        _user_cache.pop(telegram_id, None)
+    with _user_cache_lock:
+        entry = _user_cache.get(telegram_id)
+        if entry and (time.time() - entry["ts"] < _USER_CACHE_TTL):
+            return entry["user"]
+        if entry:
+            _user_cache.pop(telegram_id, None)
     return None
 
 
 def invalidate_user_cache(telegram_id: Optional[int] = None):
-    if telegram_id:
-        _user_cache.pop(telegram_id, None)
-    else:
-        _user_cache.clear()
+    with _user_cache_lock:
+        if telegram_id:
+            _user_cache.pop(telegram_id, None)
+        else:
+            _user_cache.clear()
 
 
 def get_or_create_user(telegram_id: int, username: str = None) -> tuple[UserRow, bool, Optional[str]]:

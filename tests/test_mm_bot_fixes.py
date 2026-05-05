@@ -179,7 +179,11 @@ class PostOnlyRepriceTests(unittest.TestCase):
 
 
 class ConcedeModePostOnlyTests(unittest.TestCase):
-    def test_negative_spread_disables_post_only_for_concede_quotes(self):
+    def test_negative_spread_keeps_post_only_under_maker_only_mandate(self):
+        # Updated 2026-05 audit: every MM quote must be post-only, including
+        # RGRID concede quotes (negative spread). A crossing post-only is
+        # rejected by the exchange and the existing retry ladder reprices
+        # on the safe side — that is correct under the maker-only mandate.
         state = {
             "product": "BTC",
             "strategy": "rgrid",
@@ -216,7 +220,7 @@ class ConcedeModePostOnlyTests(unittest.TestCase):
             )
         self.assertTrue(result["success"])
         self.assertTrue(place_mock.called)
-        self.assertFalse(place_mock.call_args.kwargs["post_only"])
+        self.assertTrue(place_mock.call_args.kwargs["post_only"])
 
 
 class DynamicGridTests(unittest.TestCase):

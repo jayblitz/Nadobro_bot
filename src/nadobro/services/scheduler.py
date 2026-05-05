@@ -144,7 +144,18 @@ async def handle_alert_job(payload: dict):
         if not prices:
             return
         funding_rates, positions_by_user = await _build_alert_context()
-        triggered = await run_blocking(get_triggered_alerts, prices, funding_rates, positions_by_user)
+        # Scope evaluation to the alert worker's configured network so we
+        # don't fire mainnet alerts against testnet prices (or vice versa).
+        # Alerts in the OTHER network are paused until a second worker
+        # covers it. (Audit 2026-05.)
+        alert_network = getattr(_check_client, "network", "mainnet")
+        triggered = await run_blocking(
+            get_triggered_alerts,
+            prices,
+            funding_rates,
+            positions_by_user,
+            alert_network,
+        )
         for alert in triggered:
             try:
                 from src.nadobro.i18n import language_context, get_user_language, localize_text, get_active_language

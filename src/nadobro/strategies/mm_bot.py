@@ -1138,7 +1138,12 @@ def run_cycle(
     errors = []
     quote_distances_bp = []
     placed_notional_usd = 0.0
-    post_only_quotes = dynamic_spread_bp >= 0.0
+    # Maker-only mandate: every quote is post-only. The retry ladder below
+    # already uses post_only=True; aligning the first attempt prevents the
+    # RGRID-concede branch (negative dynamic_spread_bp) from ever taking
+    # liquidity. A crossing post-only is rejected by the exchange and the
+    # ladder reprices on the safe side. (Audit 2026-05.)
+    post_only_quotes = True
 
     # Look up the product's price tick so the dedupe tolerance matches Nado's
     # enforced price_increment. A 1e-6 relative tolerance is finer than the tick
