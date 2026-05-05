@@ -5,6 +5,7 @@ RGRID mode: reverse-grid quoting with exposure anchor and PnL risk controls.
 Cancels stale orders that drift beyond threshold from current mid.
 """
 import logging
+import math
 import time
 from src.nadobro.config import get_product_id, get_product_max_leverage
 from src.nadobro.services.trade_service import execute_limit_order
@@ -17,6 +18,9 @@ GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
 GRID_MIN_SPREAD_BP = 8.0
 DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
+# Rough cushion vs venue maintenance / account-health buffers when translating
+# per-quote notional into a collateral budget (tunable via state mm_collateral_safety_factor).
+MM_COLLATERAL_SAFETY_FACTOR = 1.75
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
 POST_ONLY_REPRICE_MAX_RETRIES = 3
 POST_ONLY_REPRICE_STEP_BP = 0.5
@@ -217,6 +221,90 @@ def _resolve_side_multipliers(directional_bias: str, net_units: float, inv_soft_
             sell_mult *= 0.55
 
     return buy_mult, sell_mult, pause_to_flatten_only, pause_reason
+
+
+def _mm_margin_per_quote_estimate_usd(
+    min_order_notional_usd: float,
+    leverage: float,
+    safety_factor: float,
+) -> float:
+    lev = max(1.0, float(leverage or 1.0))
+    mn = max(1.0, float(min_order_notional_usd))
+    sf = max(1.0, float(safety_factor))
+    return (mn / lev) * sf
+
+
+def _mm_spot_usdt_balance(client) -> float:
+    try:
+        bal = client.get_balance() or {}
+        if not bal.get("exists"):
+            return 0.0
+        b = bal.get("balances") or {}
+        return float(b.get(0, b.get("0", 0)) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _mm_allocate_quote_levels(
+    max_slots: int,
+    levels: int,
+    buy_mult: float,
+    sell_mult: float,
+) -> tuple[int, int]:
+    """Split concurrent quote slots across buy/sell ladders using side weights."""
+    max_slots = max(0, int(max_slots))
+    levels = max(1, int(levels))
+    tw = max(1e-12, float(buy_mult) + float(sell_mult))
+    raw_b = max_slots * float(buy_mult) / tw
+    raw_s = max_slots * float(sell_mult) / tw
+    bi = min(levels, int(math.floor(raw_b)))
+    si = min(levels, int(math.floor(raw_s)))
+    while bi + si > max_slots:
+        if bi >= si and bi > 0:
+            bi -= 1
+        elif si > 0:
+            si -= 1
+        else:
+            break
+    while bi + si < max_slots:
+        rb = raw_b - bi if bi < levels else -1.0
+        rs = raw_s - si if si < levels else -1.0
+        if rb <= 0 and rs <= 0:
+            break
+        if rb >= rs and bi < levels:
+            bi += 1
+        elif si < levels:
+            si += 1
+        else:
+            break
+    return bi, si
+
+
+def estimate_mm_quote_capacity(
+    collateral_usd: float,
+    min_order_notional_usd: float,
+    leverage: float,
+    max_open_orders: int = 6,
+    *,
+    safety_factor: float | None = None,
+) -> dict[str, float | int]:
+    """Estimate resting-quote concurrency from collateral budget (for previews / preflight).
+
+    Each resting quote still carries ~min_order_notional_usd notional; leverage only
+    reduces estimated margin per quote for budgeting purposes.
+    """
+    sf = MM_COLLATERAL_SAFETY_FACTOR if safety_factor is None else float(safety_factor)
+    margin_per = _mm_margin_per_quote_estimate_usd(min_order_notional_usd, leverage, sf)
+    if margin_per <= 0:
+        return {"margin_per_quote_est_usd": 0.0, "max_resting_quotes": 0, "min_collateral_1_quote_usd": 0.0, "min_collateral_2_quote_usd": 0.0}
+    raw_slots = int(max(0.0, float(collateral_usd)) / margin_per)
+    max_slots = max(0, min(int(max_open_orders), raw_slots))
+    return {
+        "margin_per_quote_est_usd": round(margin_per, 4),
+        "max_resting_quotes": max_slots,
+        "min_collateral_1_quote_usd": round(margin_per, 4),
+        "min_collateral_2_quote_usd": round(2.0 * margin_per, 4),
+    }
 
 
 def _detect_ema_crossover(state: dict, mid: float, ema_fast_alpha: float, ema_slow_alpha: float) -> dict:
@@ -722,9 +810,8 @@ def run_cycle(
         float(state.get("min_order_notional_usd") or DEFAULT_MIN_ORDER_NOTIONAL_USD),
     )
     leverage_for_budget = max(1.0, float(leverage or 1.0))
-    # Treat cycle budget as margin-like budget for strategy sizing. A higher
-    # leverage permits meeting the same exchange notional floor with less budget.
-    min_budget_per_order_usd = min_order_notional_usd / leverage_for_budget
+    # Venue min-notional is USD per resting quote after bumps — leverage reduces *margin*
+    # per dollar notional but does not shrink how much notional each quote carries.
     order_birth_ts = state.setdefault("mm_order_birth_ts", {})
     if not isinstance(order_birth_ts, dict):
         order_birth_ts = {}
@@ -1111,28 +1198,84 @@ def run_cycle(
             "reference_price": reference_price,
         }
 
-    side_budget_weight_total = max(1e-9, buy_mult + sell_mult)
-    buy_budget_usd = cycle_target_notional * (buy_mult / side_budget_weight_total)
-    sell_budget_usd = cycle_target_notional * (sell_mult / side_budget_weight_total)
-    buy_levels = min(levels, int(buy_budget_usd // min_budget_per_order_usd))
-    sell_levels = min(levels, int(sell_budget_usd // min_budget_per_order_usd))
-    if buy_levels <= 0 and sell_levels <= 0:
-        needed_cycle_notional = min_budget_per_order_usd * 2.0
+    safety_mm = MM_COLLATERAL_SAFETY_FACTOR
+    try:
+        sfx = float(state.get("mm_collateral_safety_factor") or 0.0)
+        if sfx >= 1.0:
+            safety_mm = sfx
+    except (TypeError, ValueError):
+        pass
+    margin_per_quote_est = _mm_margin_per_quote_estimate_usd(
+        min_order_notional_usd, leverage_for_budget, safety_mm
+    )
+    collateral_budget_cfg = max(0.0, float(notional))
+    spot_usdt = _mm_spot_usdt_balance(client)
+    effective_collateral = collateral_budget_cfg
+    if spot_usdt > 0:
+        effective_collateral = min(effective_collateral, spot_usdt)
+
+    max_by_collateral = (
+        int(effective_collateral / margin_per_quote_est) if margin_per_quote_est > 0 else 0
+    )
+    max_resting_quotes = max(0, min(max_orders, max_by_collateral))
+    if session_cap_notional > 0:
+        cycle_slot_cap = int(cycle_target_notional // min_order_notional_usd)
+        max_resting_quotes = min(max_resting_quotes, cycle_slot_cap)
+
+    state["mm_effective_collateral_usd"] = round(effective_collateral, 6)
+    state["mm_margin_per_quote_est_usd"] = round(margin_per_quote_est, 6)
+    state["mm_max_resting_quotes_cap"] = int(max_resting_quotes)
+
+    if max_resting_quotes <= 0:
+        if session_cap_notional > 0 and cycle_target_notional > 0:
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": orders_cancelled,
+                "reason": "session remainder below venue min quote notional",
+                "spread_bp": dynamic_spread_bp,
+                "reference_price": reference_price,
+                "mm_effective_collateral_usd": round(effective_collateral, 4),
+                "mm_margin_per_quote_est_usd": round(margin_per_quote_est, 4),
+                "mm_max_resting_quotes_cap": 0,
+            }
+        need = margin_per_quote_est
         return {
             "success": False,
             "error": (
-                f"MM cycle notional is too small for exchange minimum order size. "
-                f"Set cycle notional to at least ${needed_cycle_notional:.0f} "
-                f"at {leverage_for_budget:.1f}x leverage."
+                f"MM collateral budget (~${effective_collateral:.0f}) is too small for even one "
+                f"venue-sized quote at ~${min_order_notional_usd:.0f} notional with "
+                f"{leverage_for_budget:.1f}x leverage (~${need:.2f} estimated margin per quote "
+                f"including safety buffer). Add collateral, raise configured margin, or use a "
+                f"market with lower minimum size."
             ),
             "orders_placed": 0,
             "orders_cancelled": orders_cancelled,
-            "reason": "cycle notional below exchange minimum",
+            "reason": "collateral below estimated per-quote margin",
+            "spread_bp": dynamic_spread_bp,
+            "reference_price": reference_price,
+            "mm_effective_collateral_usd": round(effective_collateral, 4),
+            "mm_margin_per_quote_est_usd": round(margin_per_quote_est, 4),
+            "mm_max_resting_quotes_cap": 0,
+        }
+
+    buy_levels, sell_levels = _mm_allocate_quote_levels(
+        max_resting_quotes, levels, buy_mult, sell_mult
+    )
+    if buy_levels <= 0 and sell_levels <= 0:
+        return {
+            "success": False,
+            "error": "Could not allocate grid levels for MM quote slots (check levels / inventory pause state).",
+            "orders_placed": 0,
+            "orders_cancelled": orders_cancelled,
+            "reason": "zero allocated quote levels",
             "spread_bp": dynamic_spread_bp,
             "reference_price": reference_price,
         }
-    per_level_buy_size = (buy_budget_usd / max(1, buy_levels) / mid) if buy_levels > 0 else 0.0
-    per_level_sell_size = (sell_budget_usd / max(1, sell_levels) / mid) if sell_levels > 0 else 0.0
+
+    min_quote_size = min_order_notional_usd / max(mid, 1e-12)
+    per_level_buy_size = float(min_quote_size) if buy_levels > 0 else 0.0
+    per_level_sell_size = float(min_quote_size) if sell_levels > 0 else 0.0
 
     orders_placed = 0
     errors = []
@@ -1177,6 +1320,7 @@ def run_cycle(
         size_to_use = per_level_buy_size if order_spec["is_long"] else per_level_sell_size
         if size_to_use <= 0:
             continue
+        size_to_use = max(float(size_to_use), min_order_notional_usd / max(mid, 1e-12))
         result = execute_limit_order(
             telegram_id,
             product,
@@ -1323,6 +1467,11 @@ def run_cycle(
         "inventory_source": inventory_source,
         "pause_reason": state.get("mm_pause_reason") or None,
         "errors": errors if errors else None,
+        "mm_buy_quote_levels": buy_levels,
+        "mm_sell_quote_levels": sell_levels,
+        "mm_max_resting_quotes_cap": max_resting_quotes,
+        "mm_margin_per_quote_est_usd": round(margin_per_quote_est, 4),
+        "mm_effective_collateral_usd": round(effective_collateral, 4),
         "grid_reset_active": bool(state.get("grid_reset_active", False)) if strategy in ("grid", "rgrid") else None,
         "grid_reset_side": state.get("grid_reset_side") if strategy in ("grid", "rgrid") else None,
         "grid_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd") if strategy in ("grid", "rgrid") else None,
