@@ -50,9 +50,12 @@ _STUDIO_EXAMPLES_TEXT = (
 async def handle_studio_home(query, context: CallbackContext) -> bool:
     """Strategy Studio home card — entry point from the strategy hub button."""
     context.user_data[_STUDIO_LIVE_MODE_KEY] = True
+    telegram_id = int(query.from_user.id)
+    network = await run_blocking(_network, telegram_id)
+    await run_blocking(conversation.abandon_active_studio_sessions, telegram_id, network)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📚 More Examples", callback_data="studio:examples")],
-        [InlineKeyboardButton("◀ Back", callback_data="nav:strategies")],
+        [InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub")],
     ])
     await query.edit_message_text(
         _STUDIO_HOME_TEXT,
@@ -95,8 +98,9 @@ async def handle_studio_text(update: Update, context: CallbackContext) -> bool:
             context.user_data.pop(_STUDIO_LIVE_MODE_KEY, None)
             return True
         return False
-    if not row and not studio_live_mode:
-        # Free text should only enter Strategy Studio after an explicit user opt-in.
+    if not studio_live_mode:
+        # Persisted session without in-memory opt-in (restart, worker hop, home nav) must not hijack chat.
+        await run_blocking(conversation.abandon_active_studio_sessions, telegram_id, network)
         return False
     if not row:
         row = await run_blocking(conversation.start_session, telegram_id, network, raw)

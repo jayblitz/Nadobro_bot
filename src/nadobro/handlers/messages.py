@@ -3,6 +3,7 @@ import re
 import time
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
 from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language, resolve_reply_button_text
@@ -471,6 +472,9 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
         return
 
     if await _handle_pending_bro_input(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_question(update, context, telegram_id, text):
         return
 
     relay_result = await relay_user_reply_to_lowiqpts(context, update.effective_chat.id, text)
@@ -1659,6 +1663,14 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
             ]),
         )
         return True
+
+
+async def _handle_pending_question(update, context, telegram_id, text):
+    if not context.user_data.get("pending_question"):
+        return False
+    context.user_data.pop("pending_question", None)
+    await _handle_nado_question(update, context, text)
+    return True
 
 
 async def _handle_nado_question(update, context, question):

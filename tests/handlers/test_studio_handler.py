@@ -66,6 +66,15 @@ def test_studio_text_requires_live_mode_without_active_session(monkeypatch):
     monkeypatch.setattr("src.nadobro.handlers.studio_handler.studio_enabled", lambda: True)
     monkeypatch.setattr("src.nadobro.handlers.studio_handler._network", lambda uid: "mainnet")
     monkeypatch.setattr("src.nadobro.handlers.studio_handler.conversation.active_session", lambda *a: None)
+    abandoned = {"n": 0}
+
+    def fake_abandon(*_a, **_k):
+        abandoned["n"] += 1
+
+    monkeypatch.setattr(
+        "src.nadobro.handlers.studio_handler.conversation.abandon_active_studio_sessions",
+        fake_abandon,
+    )
 
     extracted = {"called": False}
 
@@ -78,6 +87,40 @@ def test_studio_text_requires_live_mode_without_active_session(monkeypatch):
     update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=1))
     context = SimpleNamespace(user_data={})
     assert asyncio.run(handle_studio_text(update, context)) is False
+    assert abandoned["n"] == 1
+    assert extracted["called"] is False
+    assert msg.replies == []
+
+
+def test_studio_text_abandons_persisted_session_without_live_mode(monkeypatch):
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.studio_enabled", lambda: True)
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler._network", lambda uid: "mainnet")
+    monkeypatch.setattr(
+        "src.nadobro.handlers.studio_handler.conversation.active_session",
+        lambda *a: {"id": 99, "history_json": [], "intent_json": {}},
+    )
+    abandoned = {"n": 0}
+
+    def fake_abandon(*_a, **_k):
+        abandoned["n"] += 1
+
+    monkeypatch.setattr(
+        "src.nadobro.handlers.studio_handler.conversation.abandon_active_studio_sessions",
+        fake_abandon,
+    )
+
+    extracted = {"called": False}
+
+    async def fake_extract(*args, **kwargs):
+        extracted["called"] = True
+        return None
+
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.extract", fake_extract)
+    msg = Msg()
+    update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=1))
+    context = SimpleNamespace(user_data={})
+    assert asyncio.run(handle_studio_text(update, context)) is False
+    assert abandoned["n"] == 1
     assert extracted["called"] is False
     assert msg.replies == []
 
