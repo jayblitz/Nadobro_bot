@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 import os
 import random
@@ -23,6 +24,13 @@ _ALL_PRODUCTS_CACHE = {}
 _ALL_PRODUCTS_TTL = 20
 _FUNDING_CACHE = {}
 _FUNDING_TTL = 10
+# Shared lock for the price / open-orders / funding caches. Methods on
+# NadoClient are routinely called via `run_blocking` from a 16-worker
+# thread pool (see services/async_utils.py); without a lock, two workers
+# can clobber each other's writes or read torn state. RLock so a method
+# that holds the lock can still call into another locked helper. (Audit
+# 2026-05.)
+_caches_lock = threading.RLock()
 _size_increment_cache = {}
 _price_increment_cache = {}
 _size_increment_x18_cache = {}
@@ -243,7 +251,8 @@ class NadoClient:
 
     def get_market_price(self, product_id: int) -> dict:
         cache_key = f"{self.network}:{product_id}"
-        cached = _price_cache.get(cache_key)
+        with _caches_lock:
+            cached = _price_cache.get(cache_key)
         if cached and (time.time() - cached["ts"] < _PRICE_CACHE_TTL):
             return cached["data"]
 
@@ -254,7 +263,8 @@ class NadoClient:
                 bid = from_x18(int(mp.bid_x18))
                 ask = from_x18(int(mp.ask_x18)) if hasattr(mp, 'ask_x18') else bid
                 result = {"bid": float(bid), "ask": float(ask), "mid": float((bid + ask) / 2)}
-                _price_cache[cache_key] = {"data": result, "ts": time.time()}
+                with _caches_lock:
+                    _price_cache[cache_key] = {"data": result, "ts": time.time()}
                 return result
             except Exception as e:
                 logger.error(f"SDK get_market_price failed: {e}")
@@ -265,7 +275,8 @@ class NadoClient:
                 bid = int(data["data"]["bid_x18"]) / 1e18
                 ask = int(data["data"].get("ask_x18", data["data"]["bid_x18"])) / 1e18
                 result = {"bid": bid, "ask": ask, "mid": (bid + ask) / 2}
-                _price_cache[cache_key] = {"data": result, "ts": time.time()}
+                with _caches_lock:
+                    _price_cache[cache_key] = {"data": result, "ts": time.time()}
                 return result
         except Exception as e:
             logger.error(f"REST get_market_price failed: {e}")
@@ -443,7 +454,8 @@ class NadoClient:
         eff_sender = (sender or "").strip() or self.subaccount_hex
         cache_key = (self.network, str(eff_sender or ""), int(product_id))
         if not refresh:
-            cached = _open_orders_cache.get(cache_key)
+            with _caches_lock:
+                cached = _open_orders_cache.get(cache_key)
             if cached and (time.time() - float(cached.get("ts", 0))) < _OPEN_ORDERS_CACHE_TTL:
                 return list(cached.get("data") or [])
         if self._initialized and self.client:
@@ -462,7 +474,8 @@ class NadoClient:
                         "product_id": product_id,
                         "product_name": get_product_name(product_id),
                     })
-                _open_orders_cache[cache_key] = {"data": orders, "ts": time.time()}
+                with _caches_lock:
+                    _open_orders_cache[cache_key] = {"data": orders, "ts": time.time()}
                 return orders
             except Exception as e:
                 logger.error(f"SDK get_open_orders failed: {e}")
@@ -511,11 +524,13 @@ class NadoClient:
                             "product_name": get_product_name(product_id),
                         }
                     )
-                _open_orders_cache[cache_key] = {"data": orders, "ts": time.time()}
+                with _caches_lock:
+                    _open_orders_cache[cache_key] = {"data": orders, "ts": time.time()}
                 return orders
         except Exception as e:
             logger.error("REST get_open_orders failed: %s", e)
-        _open_orders_cache[cache_key] = {"data": [], "ts": time.time()}
+        with _caches_lock:
+            _open_orders_cache[cache_key] = {"data": [], "ts": time.time()}
         return []
 
     def get_all_open_orders(self, refresh: bool = False) -> list[dict]:
@@ -2005,7 +2020,8 @@ class NadoClient:
 
     def get_all_funding_rates(self) -> dict:
         cache_key = f"{self.network}:funding"
-        cached = _FUNDING_CACHE.get(cache_key)
+        with _caches_lock:
+            cached = _FUNDING_CACHE.get(cache_key)
         if cached and (time.time() - cached["ts"] < _FUNDING_TTL):
             return cached["data"]
         try:
@@ -2016,7 +2032,8 @@ class NadoClient:
                     pid = prod.get("product_id")
                     funding = int(prod.get("cum_funding_x18", 0)) / 1e18
                     rates[pid] = {"product_id": pid, "funding_rate": funding}
-                _FUNDING_CACHE[cache_key] = {"data": rates, "ts": time.time()}
+                with _caches_lock:
+                    _FUNDING_CACHE[cache_key] = {"data": rates, "ts": time.time()}
                 return rates
         except Exception as e:
             logger.error(f"get_all_funding_rates failed: {e}")

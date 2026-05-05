@@ -999,7 +999,13 @@ async def _move_to_confirm(update, context, telegram_id, flow):
                     mp = client.get_market_price(pid)
                     price = mp.get("mid", 0)
     except Exception:
-        pass
+        # Preview falls through with price=0 and est_margin=None below — safe
+        # for the user, but we want a log line so a broken price endpoint
+        # isn't invisible to operators. (Audit 2026-05.)
+        logger.warning(
+            "trade preview: market-price fetch failed user=%s product=%s",
+            telegram_id, product, exc_info=True,
+        )
 
     est_margin = (size * price) / leverage if leverage > 0 and price else None
 
@@ -1229,7 +1235,12 @@ async def _handle_pending_trade(update, context, telegram_id, text):
                     mp = client.get_market_price(pid)
                     price = mp.get("mid", 0)
         except Exception:
-            pass
+            # Same fallback as the other preview branch — est_margin=None is
+            # safe; we only need the log line for visibility. (Audit 2026-05.)
+            logger.warning(
+                "trade preview: market-price fetch failed user=%s product=%s",
+                telegram_id, product, exc_info=True,
+            )
 
         est_margin = (size * price) / leverage if leverage > 0 and price else None
 
@@ -1416,7 +1427,22 @@ async def _handle_pending_alert(update, context, telegram_id, text):
         )
         return True
 
-    result = create_alert(telegram_id, product, condition, target)
+    # Defensive wrap: an unhandled exception here was the root cause of the
+    # "I can't create alerts" bug — any DB failure crashed the handler with
+    # no user-visible reply. (Audit 2026-05.)
+    try:
+        result = create_alert(telegram_id, product, condition, target)
+    except Exception:
+        logger.exception(
+            "alert create failed user=%s product=%s condition=%s",
+            telegram_id, product, condition,
+        )
+        await _reply_loc(update.message,
+            "❌ Could not create alert\\. Please try again in a moment\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=persistent_menu_kb(),
+        )
+        return True
     if result["success"]:
         if condition.startswith("funding"):
             target_str = f"{target:,.4f}%"
