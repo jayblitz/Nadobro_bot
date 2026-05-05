@@ -82,6 +82,7 @@ from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.invite_service import has_private_access
 from src.nadobro.services.perf import timed_metric, log_slow
 from src.nadobro.services.trading_readiness import check_trading_readiness
+from src.nadobro.studio import conversation as studio_conversation
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +378,10 @@ async def _handle_nav(query, data, telegram_id, context=None):
 
     clear_pending_user_state(context)
 
+    user = await run_blocking(get_user, telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    await run_blocking(studio_conversation.abandon_active_studio_sessions, telegram_id, network)
+
     if target in ("main", "refresh"):
         await _show_dashboard(query, telegram_id)
     elif target == "help":
@@ -396,6 +401,16 @@ async def _handle_nav(query, data, telegram_id, context=None):
             fmt_strategy_hub_intro(),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_hub_kb(),
+        )
+    elif target == "mode":
+        user = await run_blocking(get_user, telegram_id)
+        current_network = user.network_mode.value if user else "testnet"
+        network_label = "🧪 TESTNET" if current_network == "testnet" else "🌐 MAINNET"
+        await _edit_loc(query,
+            "🌐 *Execution Mode Control*\n\nCurrent Mode: *{label}*\n\nSwitch mode below:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=mode_kb(current_network),
+            label=escape_md(network_label),
         )
     elif target == "trade" and context is not None:
         if not is_new_onboarding_complete(telegram_id):
@@ -444,6 +459,13 @@ async def _handle_nav(query, data, telegram_id, context=None):
         await _handle_portfolio(query, target, telegram_id)
     elif target.startswith("refer:"):
         await _handle_referrals(query, target, telegram_id)
+    else:
+        logger.warning("nav: unknown target=%r telegram_id=%s", target, telegram_id)
+        await _edit_loc(query,
+            "⚠️ That navigation link is not available\\. Try *🏠 Home* from the menu\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=back_kb(),
+        )
 
 
 async def _handle_referrals(query, data, telegram_id):

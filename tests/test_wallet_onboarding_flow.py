@@ -98,10 +98,44 @@ class WalletOnboardingFlowTests(unittest.TestCase):
             }
         )
 
-        with patch.object(callbacks, "_show_dashboard", AsyncMock()):
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
+
+        async def mock_run_blocking(fn, *args, **kwargs):
+            if fn is callbacks.get_user:
+                return fake_user
+            if fn is callbacks.studio_conversation.abandon_active_studio_sessions:
+                return None
+            raise AssertionError(f"unexpected run_blocking target: {fn!r}")
+
+        with patch.object(callbacks, "_show_dashboard", AsyncMock()), patch.object(
+            callbacks, "run_blocking", side_effect=mock_run_blocking
+        ):
             asyncio.run(callbacks._handle_nav(query, "nav:main", 1, context))
 
         self.assertEqual(context.user_data, {})
+
+    def test_nav_unknown_target_shows_fallback_message(self):
+        query = SimpleNamespace(edit_message_text=AsyncMock())
+        context = SimpleNamespace(user_data={})
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
+
+        mock_edit = AsyncMock()
+
+        async def mock_run_blocking(fn, *args, **kwargs):
+            if fn is callbacks.get_user:
+                return fake_user
+            if fn is callbacks.studio_conversation.abandon_active_studio_sessions:
+                return None
+            raise AssertionError(f"unexpected run_blocking target: {fn!r}")
+
+        with patch.object(callbacks, "_edit_loc", mock_edit), patch.object(
+            callbacks, "run_blocking", side_effect=mock_run_blocking
+        ):
+            asyncio.run(callbacks._handle_nav(query, "nav:totally_unknown", 1, context))
+
+        mock_edit.assert_awaited()
+        arg_text = mock_edit.call_args[0][1]
+        self.assertIn("not available", arg_text.lower())
 
 
 if __name__ == "__main__":

@@ -54,6 +54,11 @@ def active_session(telegram_id: int, network: str) -> dict | None:
     return get_active_studio_session(telegram_id, network)
 
 
+def abandon_active_studio_sessions(telegram_id: int, network: str) -> None:
+    """Cancel in-progress studio rows for this user/network (memory lost, home nav, etc.)."""
+    cancel_active_studio_sessions(telegram_id, network)
+
+
 def get_studio_session_row(session_id: int) -> dict | None:
     return get_studio_session(session_id)
 
