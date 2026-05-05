@@ -20,6 +20,7 @@ from src.nadobro.studio.execution_bridge import execute_intent
 from src.nadobro.studio.extractor import extract
 
 _CANCEL_WORDS = {"cancel", "nevermind", "never mind", "stop"}
+_STUDIO_LIVE_MODE_KEY = "studio_live_mode"
 
 
 _STUDIO_HOME_TEXT = (
@@ -48,6 +49,7 @@ _STUDIO_EXAMPLES_TEXT = (
 
 async def handle_studio_home(query, context: CallbackContext) -> bool:
     """Strategy Studio home card — entry point from the strategy hub button."""
+    context.user_data[_STUDIO_LIVE_MODE_KEY] = True
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📚 More Examples", callback_data="studio:examples")],
         [InlineKeyboardButton("◀ Back", callback_data="nav:strategies")],
@@ -61,6 +63,7 @@ async def handle_studio_home(query, context: CallbackContext) -> bool:
 
 
 async def _handle_studio_examples(query, context: CallbackContext) -> bool:
+    context.user_data[_STUDIO_LIVE_MODE_KEY] = True
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("◀ Back", callback_data="studio:home")],
     ])
@@ -84,14 +87,20 @@ async def handle_studio_text(update: Update, context: CallbackContext) -> bool:
     network = await run_blocking(_network, telegram_id)
     raw = (update.message.text or "").strip()
     row = await run_blocking(conversation.active_session, telegram_id, network)
+    studio_live_mode = bool(context.user_data.get(_STUDIO_LIVE_MODE_KEY))
     if raw.lower() in _CANCEL_WORDS:
         if row:
             await run_blocking(conversation.save_turn, int(row["id"]), conversation.StudioState.CANCELLED, None, conversation.load_history(row))
             await update.message.reply_text("Strategy Studio cancelled.")
+            context.user_data.pop(_STUDIO_LIVE_MODE_KEY, None)
             return True
+        return False
+    if not row and not studio_live_mode:
+        # Free text should only enter Strategy Studio after an explicit user opt-in.
         return False
     if not row:
         row = await run_blocking(conversation.start_session, telegram_id, network, raw)
+        context.user_data[_STUDIO_LIVE_MODE_KEY] = True
     history = conversation.load_history(row)
     prior = conversation.load_intent(row) if row.get("intent_json") else None
     try:
@@ -142,6 +151,7 @@ async def handle_studio_callback(query, context: CallbackContext) -> bool:
     history = conversation.load_history(row)
     if action == "cancel":
         await run_blocking(conversation.save_turn, session_id, conversation.StudioState.CANCELLED, intent, history)
+        context.user_data.pop(_STUDIO_LIVE_MODE_KEY, None)
         await query.edit_message_text("Strategy Studio cancelled.")
         return True
     if action == "edit":
@@ -164,6 +174,8 @@ async def handle_studio_callback(query, context: CallbackContext) -> bool:
             history,
             result.get("strategy_session_id"),
         )
+        if result.get("success"):
+            context.user_data.pop(_STUDIO_LIVE_MODE_KEY, None)
         await query.edit_message_text(f"Strategy execution result:\n`{result}`")
         return True
     await query.edit_message_text("Studio action could not be completed.")

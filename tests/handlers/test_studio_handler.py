@@ -57,8 +57,29 @@ def test_studio_text_confirmation(monkeypatch):
     monkeypatch.setattr("src.nadobro.handlers.studio_handler.extract", fake_extract)
     msg = Msg()
     update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=1))
-    assert asyncio.run(handle_studio_text(update, SimpleNamespace())) is True
+    context = SimpleNamespace(user_data={"studio_live_mode": True})
+    assert asyncio.run(handle_studio_text(update, context)) is True
     assert "Strategy Summary" in msg.replies[0][0]
+
+
+def test_studio_text_requires_live_mode_without_active_session(monkeypatch):
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.studio_enabled", lambda: True)
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler._network", lambda uid: "mainnet")
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.conversation.active_session", lambda *a: None)
+
+    extracted = {"called": False}
+
+    async def fake_extract(*args, **kwargs):
+        extracted["called"] = True
+        return None
+
+    monkeypatch.setattr("src.nadobro.handlers.studio_handler.extract", fake_extract)
+    msg = Msg()
+    update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=1))
+    context = SimpleNamespace(user_data={})
+    assert asyncio.run(handle_studio_text(update, context)) is False
+    assert extracted["called"] is False
+    assert msg.replies == []
 
 
 def test_studio_callback_rejects_session_owned_by_another_user(monkeypatch):

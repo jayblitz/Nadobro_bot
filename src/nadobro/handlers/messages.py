@@ -1474,12 +1474,15 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     strategy = pending.get("strategy")
     field = pending.get("field")
     section = pending.get("section")
-    supported = ("grid", "rgrid", "dn", "vol")
+    supported = ("grid", "rgrid", "dgrid", "dn", "vol")
     supported_fields = (
         "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
         "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
         "cycle_notional_usd", "session_notional_cap_usd", "inventory_soft_limit_usd",
         "quote_ttl_seconds", "min_spread_bp", "max_spread_bp", "vol_sensitivity",
+        "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
+        "dgrid_min_spread_bp", "dgrid_max_spread_bp",
+        "dgrid_short_window_points", "dgrid_long_window_points",
         "grid_reset_threshold_pct", "grid_reset_timeout_seconds",
         "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
         "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
