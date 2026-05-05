@@ -7,8 +7,8 @@ Locks in:
   - state["leverage_mode"] is "MAX".
   - The user's notional_usd budget remains the per-cycle notional (no change
     to per-level sizing formula).
-  - min_budget_per_order_usd shrinks proportionally (1/max_lev) so smaller
-    chunks fit alongside open quotes.
+  - Grid depth is capped using venue min notional per quote (not min/leverage);
+    leverage reduces margin per dollar notional, not the exchange floor per order.
 """
 import unittest
 from unittest.mock import patch

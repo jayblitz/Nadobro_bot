@@ -722,9 +722,11 @@ def run_cycle(
         float(state.get("min_order_notional_usd") or DEFAULT_MIN_ORDER_NOTIONAL_USD),
     )
     leverage_for_budget = max(1.0, float(leverage or 1.0))
-    # Treat cycle budget as margin-like budget for strategy sizing. A higher
-    # leverage permits meeting the same exchange notional floor with less budget.
-    min_budget_per_order_usd = min_order_notional_usd / leverage_for_budget
+    # Venue min-notional is USD per resting quote after bumps — leverage reduces *margin*
+    # per dollar notional but does not shrink how much notional each quote carries.
+    # Grid depth must budget min_order_notional_usd per slot, not min/leverage (that
+    # allowed too many tiny quotes that were each bumped to the floor → account health 2006).
+    min_quote_notional_floor_usd = float(min_order_notional_usd)
     order_birth_ts = state.setdefault("mm_order_birth_ts", {})
     if not isinstance(order_birth_ts, dict):
         order_birth_ts = {}
@@ -1114,16 +1116,19 @@ def run_cycle(
     side_budget_weight_total = max(1e-9, buy_mult + sell_mult)
     buy_budget_usd = cycle_target_notional * (buy_mult / side_budget_weight_total)
     sell_budget_usd = cycle_target_notional * (sell_mult / side_budget_weight_total)
-    buy_levels = min(levels, int(buy_budget_usd // min_budget_per_order_usd))
-    sell_levels = min(levels, int(sell_budget_usd // min_budget_per_order_usd))
+    buy_levels = min(levels, int(buy_budget_usd // min_quote_notional_floor_usd))
+    sell_levels = min(levels, int(sell_budget_usd // min_quote_notional_floor_usd))
     if buy_levels <= 0 and sell_levels <= 0:
-        needed_cycle_notional = min_budget_per_order_usd * 2.0
+        needed_cycle_notional = min_quote_notional_floor_usd * 2.0
         return {
             "success": False,
             "error": (
-                f"MM cycle notional is too small for exchange minimum order size. "
-                f"Set cycle notional to at least ${needed_cycle_notional:.0f} "
-                f"at {leverage_for_budget:.1f}x leverage."
+                f"MM cycle notional is too small for venue minimum quote size "
+                f"(~${min_order_notional_usd:.0f} notional per resting order). "
+                f"Raise margin/cycle budget to at least ~${needed_cycle_notional:.0f} "
+                f"for a two-sided grid, or reduce levels / pick a market with lower minimums. "
+                f"Leverage ({leverage_for_budget:.1f}x) lowers margin per dollar but each quote "
+                f"still needs ~${min_order_notional_usd:.0f} notional."
             ),
             "orders_placed": 0,
             "orders_cancelled": orders_cancelled,
@@ -1177,6 +1182,7 @@ def run_cycle(
         size_to_use = per_level_buy_size if order_spec["is_long"] else per_level_sell_size
         if size_to_use <= 0:
             continue
+        size_to_use = max(float(size_to_use), min_order_notional_usd / max(mid, 1e-12))
         result = execute_limit_order(
             telegram_id,
             product,

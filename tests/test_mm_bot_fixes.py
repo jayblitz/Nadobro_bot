@@ -256,5 +256,39 @@ class DynamicGridTests(unittest.TestCase):
         self.assertLessEqual(result["spread_bp"], 50.0)
 
 
+class GridBudgetVsMinNotionalTests(unittest.TestCase):
+    def test_small_cycle_returns_error_without_orders_when_below_venue_floor(self):
+        """Each quote slot must budget venue min USD notional; leverage does not shrink it."""
+        state = {
+            "product": "BTC",
+            "strategy": "grid",
+            "notional_usd": 64.0,
+            "cycle_notional_usd": 64.0,
+            "levels": 4,
+            "spread_bp": 8.0,
+            "min_order_notional_usd": 100.0,
+            "threshold_bp": 0.0,
+        }
+
+        class C:
+            def get_market_price(self, _pid):
+                return {"mid": 100000.0, "bid": 99990.0, "ask": 100010.0}
+
+            def get_open_orders(self, _pid):
+                return []
+
+            def get_all_positions(self):
+                return []
+
+        with patch.object(mm_bot, "get_product_id", return_value=90), patch.object(
+            mm_bot, "get_product_max_leverage", return_value=10.0
+        ), patch.object(mm_bot, "execute_limit_order") as m_exec:
+            out = mm_bot.run_cycle(1, "mainnet", state, client=C())
+
+        self.assertFalse(out.get("success", True))
+        self.assertIn("too small", (out.get("error") or "").lower())
+        m_exec.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1850,11 +1850,13 @@ async def _handle_strategy(query, data, context, telegram_id):
             await _edit_loc(
                 query,
                 "⚠️ *Cannot start strategy*\n\n"
-                f"Cycle budget is below exchange minimum requirements at *{escape_md(f'{float(strategy_leverage):.1f}x')}* leverage\\.\n"
+                f"Cycle budget is below venue minimum quote sizing\\. Each resting order needs roughly "
+                f"*{escape_md(f'${mm_min_order_notional:,.2f}')}* notional \\(venue floor\\)\\.\n"
                 f"Current cycle budget: *{escape_md(f'${mm_cycle_budget:,.2f}')}*\n"
-                f"Required minimum: *{escape_md(f'${mm_required_cycle_budget:,.2f}')}*\n"
-                f"Min order notional: *{escape_md(f'${mm_min_order_notional:,.2f}')}*\n\n"
-                "Increase margin/cycle budget or leverage, then try again\\.",
+                f"Recommended minimum: *{escape_md(f'${mm_required_cycle_budget:,.2f}')}* "
+                f"for a minimal two\\-sided grid\\. Leverage lowers margin per dollar but does not "
+                f"lower this notional floor\\.\n\n"
+                "Increase margin/cycle budget, reduce grid levels, or use a product with lower minimums\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=strategy_action_kb(
                     strategy_id,
@@ -2309,7 +2311,7 @@ def _get_user_settings(telegram_id: int, context: CallbackContext) -> dict:
     return shared_get_user_settings(telegram_id, context)
 
 
-def _mm_cycle_budget_preflight(strategy_id: str, strategy_conf: dict, leverage: float) -> tuple[bool, float, float, float]:
+def _mm_cycle_budget_preflight(strategy_id: str, strategy_conf: dict, _leverage: float) -> tuple[bool, float, float, float]:
     if strategy_id not in ("grid", "rgrid", "dgrid"):
         return True, 0.0, 0.0, 0.0
 
@@ -2318,12 +2320,12 @@ def _mm_cycle_budget_preflight(strategy_id: str, strategy_conf: dict, leverage: 
     margin_usd = max(0.0, float(strategy_conf.get("notional_usd", 100.0) or 0.0))
     cycle_cfg = max(0.0, float(strategy_conf.get("cycle_notional_usd", margin_usd) or 0.0))
     cycle_budget = max(cycle_cfg, margin_usd)
-    lev = max(1.0, float(leverage or 1.0))
     min_order_notional = max(
         1.0,
         float(strategy_conf.get("min_order_notional_usd") or DEFAULT_MIN_ORDER_NOTIONAL_USD),
     )
-    required = 2.0 * (min_order_notional / lev)
+    # Need enough USD cycle budget that both sides can place at least one quote at venue min notional.
+    required = 2.0 * min_order_notional
     return cycle_budget >= required, cycle_budget, required, min_order_notional
 
 
@@ -3203,9 +3205,8 @@ def _build_strategy_preview_text(
             )
         if not mm_budget_ok:
             warning = (
-                f"⚠️ Cycle budget too low for exchange minimums at {escape_md(f'{leverage:.1f}x')} leverage\\. "
-                f"Current: {escape_md(_fmt_usd(mm_cycle_budget))} · Required: {escape_md(_fmt_usd(mm_required_cycle_budget))} "
-                f"\\(min order {escape_md(_fmt_usd(mm_min_order_notional))}\\)\\."
+                f"⚠️ Cycle budget too low for venue min quote size \\(~*{escape_md(_fmt_usd(mm_min_order_notional))}* per order\\)\\.\n"
+                f"Current: {escape_md(_fmt_usd(mm_cycle_budget))} · Recommended min: {escape_md(_fmt_usd(mm_required_cycle_budget))}\\."
             )
         return (
             "⚡ *Dynamic GRID Dashboard*\n"
@@ -3248,9 +3249,8 @@ def _build_strategy_preview_text(
             )
         if not mm_budget_ok:
             warning = (
-                f"⚠️ Cycle budget too low for exchange minimums at {escape_md(f'{leverage:.1f}x')} leverage\\. "
-                f"Current: {escape_md(_fmt_usd(mm_cycle_budget))} · Required: {escape_md(_fmt_usd(mm_required_cycle_budget))} "
-                f"\\(min order {escape_md(_fmt_usd(mm_min_order_notional))}\\)\\."
+                f"⚠️ Cycle budget too low for venue min quote size \\(~*{escape_md(_fmt_usd(mm_min_order_notional))}* per order\\)\\.\n"
+                f"Current: {escape_md(_fmt_usd(mm_cycle_budget))} · Recommended min: {escape_md(_fmt_usd(mm_required_cycle_budget))}\\."
             )
         return (
             "📊 *GRID Dashboard*\n"
