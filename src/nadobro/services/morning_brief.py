@@ -80,13 +80,14 @@ def _serialize_snapshot(snapshot) -> dict:
             "high_24h": r.high_24h,
             "low_24h": r.low_24h,
         })
+    network_value = getattr(snapshot.network, "value", snapshot.network)
     return {
         "rows": rows,
         "fear_greed": {
             "value": snapshot.fear_greed_value,
             "label": snapshot.fear_greed_label,
         },
-        "network": snapshot.network,
+        "network": str(network_value),
     }
 
 
@@ -121,7 +122,9 @@ def _serialize_edges(edges: list[dict]) -> list[dict]:
 
 
 def _build_messages(payload: dict, *, today_str: str) -> list[dict]:
-    user_payload = json.dumps(payload, ensure_ascii=False)[:14000]
+    # `default=str` is a defensive net: any future enum or dataclass leaking into
+    # the payload renders as its string repr instead of crashing the brief.
+    user_payload = json.dumps(payload, ensure_ascii=False, default=str)[:14000]
     user_message = (
         f"Today is {today_str}. Compose a Morning Brief from the market_data, news_bundle, and edge_findings below.\n\n"
         f"INPUT:\n{user_payload}\n\n"

@@ -151,7 +151,13 @@ def _gather_sync(network: str) -> SnapshotPayload:
     )
 
 
+def _normalize_network(value) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "mainnet").lower() or "mainnet"
+
+
 async def gather_snapshot(network: str = "mainnet", *, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> SnapshotPayload:
+    network = _normalize_network(network)
     now = time.time()
     cached = _SNAPSHOT_CACHE.get(network)
     if cached and (now - cached[0]) < ttl_seconds:
