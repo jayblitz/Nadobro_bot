@@ -38,7 +38,10 @@ def _mark_used(context: CallbackContext) -> None:
 def _network_for(telegram_id: int) -> str:
     try:
         user = get_or_create_user(telegram_id, None)[0]
-        return getattr(user, "network_mode", None) or "mainnet"
+        mode = getattr(user, "network_mode", None) or "mainnet"
+        # Coerce enum (NetworkMode.MAINNET) → "mainnet"; passes plain strings through.
+        value = getattr(mode, "value", mode)
+        return str(value).lower() or "mainnet"
     except Exception:
         return "mainnet"
 

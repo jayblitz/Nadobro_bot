@@ -105,6 +105,39 @@ def test_brief_renders_with_canned_grok_json(monkeypatch):
     assert text.count("\n") < 25
 
 
+def test_brief_handles_enum_network(monkeypatch):
+    """Regression: prod passed user.network_mode (a NetworkMode enum) into render.
+    json.dumps blew up with 'Object of type NetworkMode is not JSON serializable'.
+    """
+    import enum
+
+    class FakeNetworkMode(enum.Enum):
+        MAINNET = "mainnet"
+        TESTNET = "testnet"
+
+    async def _enum_snap(network, **_kwargs):
+        snap = (await _stub_snapshot())
+        snap.network = FakeNetworkMode.MAINNET  # simulate enum leaking to SnapshotPayload
+        return snap
+
+    monkeypatch.setattr(market_snapshot, "gather_snapshot", _enum_snap)
+
+    async def _fake_news(**_kwargs):
+        return _stub_news_bundle()
+
+    monkeypatch.setattr(news_aggregator, "fetch_news_bundle", _fake_news)
+
+    def fake_chat_json(messages, schema=None, model=None):
+        return {"snapshot_lines": ["BTC: $1"], "news_drivers": [], "insight": "ok"}, "grok"
+
+    import src.nadobro.services.bro_llm as bro_llm
+    monkeypatch.setattr(bro_llm, "chat_json", fake_chat_json)
+
+    # Before fix this raised: TypeError: Object of type FakeNetworkMode is not JSON serializable
+    text, _ = asyncio.run(morning_brief.render_morning_brief(network=FakeNetworkMode.MAINNET))
+    assert "Market Snapshot" in text
+
+
 def test_brief_falls_back_when_llm_fails(monkeypatch):
     monkeypatch.setattr(market_snapshot, "gather_snapshot", _stub_snapshot)
 
