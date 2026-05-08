@@ -1094,8 +1094,8 @@ def run_cycle(
         threshold_wait_result["orders_cancelled"] = int(orders_cancelled)
         return threshold_wait_result
 
-    available_slots = max(0, max_orders - len(open_orders))
-    if available_slots == 0:
+    max_open_order_slots = max(0, max_orders - len(open_orders))
+    if max_open_order_slots == 0:
         return {
             "success": True,
             "orders_placed": 0,
@@ -1217,17 +1217,23 @@ def run_cycle(
     max_by_collateral = (
         int(effective_collateral / margin_per_quote_est) if margin_per_quote_est > 0 else 0
     )
-    max_resting_quotes = max(0, min(max_orders, max_by_collateral))
+    gross_resting_cap = max(0, min(max_orders, max_by_collateral))
+    max_resting_quotes = gross_resting_cap
+    cycle_slot_cap = None
     if session_cap_notional > 0:
         cycle_slot_cap = int(cycle_target_notional // min_order_notional_usd)
         max_resting_quotes = min(max_resting_quotes, cycle_slot_cap)
+    available_collateral_slots = max(0, gross_resting_cap - len(open_orders))
+    quote_slot_budget = min(max_open_order_slots, available_collateral_slots)
+    if cycle_slot_cap is not None:
+        quote_slot_budget = min(quote_slot_budget, cycle_slot_cap)
 
     state["mm_effective_collateral_usd"] = round(effective_collateral, 6)
     state["mm_margin_per_quote_est_usd"] = round(margin_per_quote_est, 6)
     state["mm_max_resting_quotes_cap"] = int(max_resting_quotes)
 
     if max_resting_quotes <= 0:
-        if session_cap_notional > 0 and cycle_target_notional > 0:
+        if session_cap_notional > 0 and (cycle_slot_cap or 0) <= 0:
             return {
                 "success": True,
                 "orders_placed": 0,
@@ -1258,9 +1264,21 @@ def run_cycle(
             "mm_margin_per_quote_est_usd": round(margin_per_quote_est, 4),
             "mm_max_resting_quotes_cap": 0,
         }
+    if quote_slot_budget <= 0:
+        return {
+            "success": True,
+            "orders_placed": 0,
+            "orders_cancelled": orders_cancelled,
+            "reason": "max collateral-backed quote slots reached",
+            "spread_bp": dynamic_spread_bp,
+            "reference_price": reference_price,
+            "mm_effective_collateral_usd": round(effective_collateral, 4),
+            "mm_margin_per_quote_est_usd": round(margin_per_quote_est, 4),
+            "mm_max_resting_quotes_cap": int(max_resting_quotes),
+        }
 
     buy_levels, sell_levels = _mm_allocate_quote_levels(
-        max_resting_quotes, levels, buy_mult, sell_mult
+        quote_slot_budget, levels, buy_mult, sell_mult
     )
     if buy_levels <= 0 and sell_levels <= 0:
         return {
@@ -1299,7 +1317,7 @@ def run_cycle(
         price_increment = 0.0
 
     for order_spec in grid_orders:
-        if orders_placed >= available_slots:
+        if orders_placed >= quote_slot_budget:
             break
         order_price = order_spec["price"]
         # Use the larger of the relative 1e-6 or half a tick so orders that round

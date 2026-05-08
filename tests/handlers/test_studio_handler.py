@@ -29,6 +29,11 @@ class Query:
         self.edits.append((text, kwargs))
 
 
+class AlreadyAnsweredQuery(Query):
+    async def answer(self):
+        raise AssertionError("studio callbacks are acknowledged by the central dispatcher")
+
+
 def test_studio_text_disabled(monkeypatch):
     monkeypatch.setattr("src.nadobro.handlers.studio_handler.studio_enabled", lambda: False)
     update = SimpleNamespace(message=Msg(), effective_user=SimpleNamespace(id=1))
@@ -149,6 +154,17 @@ def test_studio_callback_rejects_session_owned_by_another_user(monkeypatch):
     query = Query("studio:confirm:7", user_id=222)
 
     assert asyncio.run(handle_studio_callback(query, SimpleNamespace())) is True
-    assert query.answered is True
+    assert query.answered is False
     assert query.edits[-1][0] == "Studio session not found."
     assert executed == {}
+
+
+def test_studio_callback_does_not_answer_query_twice(monkeypatch):
+    monkeypatch.setattr(
+        "src.nadobro.handlers.studio_handler.conversation.get_studio_session_row",
+        lambda session_id: None,
+    )
+    query = AlreadyAnsweredQuery("studio:confirm:7", user_id=222)
+
+    assert asyncio.run(handle_studio_callback(query, SimpleNamespace())) is True
+    assert query.edits[-1][0] == "Studio session not found."

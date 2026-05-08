@@ -131,7 +131,6 @@ async def handle_studio_callback(query, context: CallbackContext) -> bool:
     data = query.data or ""
     if not data.startswith("studio:"):
         return False
-    await query.answer()
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     session_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
