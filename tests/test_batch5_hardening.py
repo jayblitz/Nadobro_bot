@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import time
 import types
 from datetime import datetime, timezone
 
@@ -90,3 +91,55 @@ def test_points_relay_poll_uses_session_scoped_cursor(monkeypatch):
 
     assert captured == {"session_id": "sess_a", "cursor": "11"}
     assert bot_app.bot_data["lowiqpts_relay_cursor:sess_a"] == "12"
+
+
+def test_points_relay_polls_all_pending_sessions(monkeypatch):
+    from src.nadobro.services import points_service
+
+    calls: list[tuple[str, object]] = []
+
+    async def _poll_events(*, session_id, cursor):
+        calls.append((session_id, cursor))
+        return {"ok": True, "events": [], "next_cursor": None}
+
+    monkeypatch.setattr(points_service, "relay_is_configured", lambda: True)
+    monkeypatch.setattr(points_service, "relay_poll_events", _poll_events)
+    bot_app = type("BotApp", (), {"bot_data": {
+        "lowiqpts_pending_queue": [
+            {"relay_session_id": "sess_a"},
+            {"relay_session_id": "sess_b"},
+        ],
+    }})()
+
+    asyncio.run(points_service.poll_lowiqpts_relay_events(bot_app))
+
+    assert calls == [("sess_a", None), ("sess_b", None)]
+
+
+def test_claim_pending_never_fallback_to_foreign_queue():
+    """Dropped queue[0] fallback: unattributed relay text must not bind another user's pending row."""
+    from src.nadobro.services import points_service
+
+    w = "0x" + "ab" * 20
+    row = {"req_id": "a", "chat_id": 1, "telegram_id": 1, "wallet": w, "ts": time.time(), "relay_session_id": ""}
+    bd = {
+        points_service._PENDING_QUEUE_KEY: [row],
+        points_service._PENDING_BY_WALLET_KEY: {},
+    }
+
+    assert points_service._claim_pending_for_event(bd, "", "LOWIQPTS said something with no wallet and no session") is None
+
+
+def test_claim_pending_matches_wallet_in_reply_text():
+    from src.nadobro.services import points_service
+
+    w = "0x" + "cd" * 20
+    row = {"req_id": "b", "chat_id": 2, "telegram_id": 99, "wallet": w, "ts": time.time(), "relay_session_id": ""}
+    wl = str(w).lower()
+    bd = {
+        points_service._PENDING_QUEUE_KEY: [row],
+        points_service._PENDING_BY_WALLET_KEY: {wl: [row]},
+    }
+
+    claimed = points_service._claim_pending_for_event(bd, "", f"Points overview for {w}")
+    assert claimed is row
