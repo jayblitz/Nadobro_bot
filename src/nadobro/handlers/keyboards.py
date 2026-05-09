@@ -809,17 +809,9 @@ def strategy_hub_kb():
     ])
 
 
-def points_scope_kb(scope: str = "week"):
-    scope_norm = (scope or "week").lower()
-    week_label = "✅ 7d" if scope_norm == "week" else "7d"
-    month_label = "✅ 30d" if scope_norm == "month" else "30d"
-    all_label = "✅ All" if scope_norm == "all" else "All"
+def points_scope_kb() -> InlineKeyboardMarkup:
+    """LOWIQPTS flow: only weekly snapshot via relay; no period toggles in UI."""
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(week_label, callback_data="points:scope:week"),
-            InlineKeyboardButton(month_label, callback_data="points:scope:month"),
-            InlineKeyboardButton(all_label, callback_data="points:scope:all"),
-        ],
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="points:refresh"),
             InlineKeyboardButton("❌ Cancel", callback_data="points:cancel"),

@@ -279,7 +279,7 @@ async def _view_portfolio_text(telegram_id: int):
 
 def _view_points_text(telegram_id: int):
     payload = get_points_dashboard(telegram_id, scope="week")
-    return fmt_points_dashboard(payload), points_scope_kb("week")
+    return fmt_points_dashboard(payload), points_scope_kb()
 
 
 def _view_referral_text(telegram_id: int):

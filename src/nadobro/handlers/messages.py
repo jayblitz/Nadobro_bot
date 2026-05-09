@@ -468,15 +468,6 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     if await _handle_pending_admin_copy_wallet(update, context, telegram_id, text):
         return
 
-    if await _handle_pending_strategy_input(update, context, telegram_id, text):
-        return
-
-    if await _handle_pending_bro_input(update, context, telegram_id, text):
-        return
-
-    if await _handle_pending_question(update, context, telegram_id, text):
-        return
-
     relay_result = await relay_user_reply_to_lowiqpts(context, update.effective_chat.id, text)
     if relay_result.get("handled"):
         if relay_result.get("cancelled"):
@@ -484,15 +475,24 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
                 update.message,
                 "✅ Points request closed\\. Tap *🔄 Refresh* to start again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=points_scope_kb("week"),
+                reply_markup=points_scope_kb(),
             )
         elif not relay_result.get("ok", False):
             await _reply_loc(
                 update.message,
                 escape_md(relay_result.get("error", "Could not relay your reply right now.")),
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=points_scope_kb("week"),
+                reply_markup=points_scope_kb(),
             )
+        return
+
+    if await _handle_pending_strategy_input(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_bro_input(update, context, telegram_id, text):
+        return
+
+    if await _handle_pending_question(update, context, telegram_id, text):
         return
 
     from src.nadobro.handlers.studio_handler import handle_studio_text
@@ -668,7 +668,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
             update.message,
             fmt_points_dashboard(payload),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(points_scope_kb("week"), lang),
+            reply_markup=localize_markup(points_scope_kb(), lang),
         )
         return
 
@@ -691,14 +691,14 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
                 update.message,
                 "⏳ Refresh requested\\. I will post your points update as soon as LOWIQPTS replies\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=localize_markup(points_scope_kb("week"), lang),
+                reply_markup=localize_markup(points_scope_kb(), lang),
             )
         else:
             await _reply_loc(
                 update.message,
                 escape_md(result.get("error", "Could not refresh points right now.")),
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=localize_markup(points_scope_kb("week"), lang),
+                reply_markup=localize_markup(points_scope_kb(), lang),
             )
         return
 
