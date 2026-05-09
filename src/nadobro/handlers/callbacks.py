@@ -1172,7 +1172,6 @@ async def _handle_wallet(query, data, telegram_id, context):
 async def _handle_points(query, data, telegram_id, context):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "view"
-    scope = parts[2] if len(parts) > 2 else "week"
 
     if action == "view":
         payload = await run_blocking(get_points_dashboard, telegram_id, "week")
@@ -1180,17 +1179,18 @@ async def _handle_points(query, data, telegram_id, context):
             query,
             fmt_points_dashboard(payload),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=points_scope_kb("week"),
+            reply_markup=points_scope_kb(),
         )
         return
 
     if action == "scope":
-        payload = await run_blocking(get_points_dashboard, telegram_id, scope)
+        # Legacy keyboards used points:scope:*; relay is week-only.
+        payload = await run_blocking(get_points_dashboard, telegram_id, "week")
         await _edit_loc(
             query,
             fmt_points_dashboard(payload),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=points_scope_kb(scope),
+            reply_markup=points_scope_kb(),
         )
         return
 
@@ -1201,19 +1201,23 @@ async def _handle_points(query, data, telegram_id, context):
                 query,
                 "✅ Points request closed\\. Tap *🔄 Refresh* to start again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=points_scope_kb("week"),
+                reply_markup=points_scope_kb(),
             )
             return
         await _edit_loc(
             query,
             escape_md(relay_result.get("error", "No active LOWIQPTS request to close.")),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=points_scope_kb("week"),
+            reply_markup=points_scope_kb(),
         )
         return
 
     if action == "replyopt":
-        option_index = parts[2] if len(parts) > 2 else "-1"
+        raw_idx = parts[2] if len(parts) > 2 else "-1"
+        try:
+            option_index = int(raw_idx)
+        except (TypeError, ValueError):
+            option_index = -1
         relay_result = await relay_option_reply_to_lowiqpts(context, query.message.chat.id, option_index)
         if relay_result.get("ok"):
             choice = str(relay_result.get("choice", "")).strip()
@@ -1236,14 +1240,14 @@ async def _handle_points(query, data, telegram_id, context):
                 query,
                 "⏳ Refresh requested\\. I will post your points update when LOWIQPTS replies\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=points_scope_kb("week"),
+                reply_markup=points_scope_kb(),
             )
             return
         await _edit_loc(
             query,
             escape_md(result.get("error", "Could not refresh points right now.")),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=points_scope_kb("week"),
+            reply_markup=points_scope_kb(),
         )
         return
 

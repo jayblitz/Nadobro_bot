@@ -45,9 +45,15 @@ async def _relay_with_retry(func, *args, **kwargs):
 _POINTS_CACHE: dict[int, dict] = {}
 _POINTS_CACHE_TTL_SECONDS = 3600
 _POINTS_WINDOW_LABEL = "Last 7 Days"
+# LOWIQPTS can take minutes per step; short timeouts dropped pending state so plain
+# replies ("0", "Yes") were handled by other bots instead of the relay.
 _POINTS_REPLY_TIMEOUT_SECONDS = max(
-    5,
-    int(os.environ.get("LOWIQPTS_REPLY_TIMEOUT_SECONDS", "25") or "25"),
+    60,
+    int(os.environ.get("LOWIQPTS_REPLY_TIMEOUT_SECONDS", "900") or "900"),
+)
+_LOWIQPTS_PENDING_TTL_SECONDS = max(
+    300,
+    int(os.environ.get("LOWIQPTS_PENDING_TTL_SECONDS", "1800") or "1800"),
 )
 
 POINTS_RELAY_TIMEOUT = int(os.environ.get("POINTS_RELAY_TIMEOUT", "30"))
@@ -129,7 +135,9 @@ def _touch_pending_request(req: dict) -> None:
     req["ts"] = time.time()
 
 
-def _prune_stale_pending(bot_data: dict, ttl_seconds: int = 120) -> None:
+def _prune_stale_pending(bot_data: dict, ttl_seconds: int | None = None) -> None:
+    if ttl_seconds is None:
+        ttl_seconds = _LOWIQPTS_PENDING_TTL_SECONDS
     now = time.time()
     queue, by_wallet = _pending_maps(bot_data)
     fresh = [req for req in queue if now - float(req.get("ts", 0)) <= ttl_seconds]
@@ -435,7 +443,10 @@ async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict
     if not cleaned:
         return {"ok": True, "handled": True}
 
-    if cleaned.lower() in {"cancel", "stop", "exit", "quit"}:
+    cancel_key = cleaned.lower().strip()
+    if cancel_key.startswith("/"):
+        cancel_key = cancel_key[1:].strip()
+    if cancel_key in {"cancel", "stop", "exit", "quit"}:
         session_id = str(req.get("relay_session_id", "")).strip()
         if session_id:
             await relay_close_session(session_id=session_id, reason="cancelled_by_user")
@@ -471,11 +482,13 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     options = _extract_event_options(event)
     source_message_id = _extract_event_source_message_id(event)
     if options:
-        req["relay_options"] = options
-        req["relay_options_source_message_id"] = source_message_id
-    else:
-        req.pop("relay_options", None)
-        req.pop("relay_options_source_message_id", None)
+        req["relay_options"] = [str(o).strip() for o in options if str(o).strip()]
+        if source_message_id is not None:
+            req["relay_options_source_message_id"] = int(source_message_id)
+        else:
+            req.pop("relay_options_source_message_id", None)
+    # Do NOT clear relay_options on text-only lines: LOWIQPTS often sends prose after a
+    # button row; wiping here made Yes/No clicks no-op ("No selectable options").
     await bot_app.bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -495,7 +508,7 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
             chat_id=chat_id,
             text=dash_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=points_scope_kb("week"),
+            reply_markup=points_scope_kb(),
         )
     except BadRequest as e:
         if "Can't parse entities" not in str(e):
@@ -504,7 +517,7 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
         await bot_app.bot.send_message(
             chat_id=chat_id,
             text=plain_text_fallback(dash_text),
-            reply_markup=points_scope_kb("week"),
+            reply_markup=points_scope_kb(),
         )
 
     session_id = str(req.get("relay_session_id", "")).strip()
@@ -512,7 +525,7 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
         await relay_close_session(session_id=session_id, reason="completed")
 
 
-async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: int) -> dict:
+async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: int | str) -> dict:
     req = get_active_pending_request(context.application.bot_data, chat_id)
     if not req:
         return {"ok": False, "error": "No active LOWIQPTS request."}
@@ -537,13 +550,34 @@ async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: in
         relay_result = await relay_user_reply_to_lowiqpts(context, chat_id, choice)
         relay_result["choice"] = choice
         return relay_result
-    relay_result = await relay_send_user_reply_option(
-        session_id=session_id,
-        option_text=choice,
-        source_message_id=int(source_message_id),
-    )
+    try:
+        relay_result = await _relay_with_retry(
+            relay_send_user_reply_option,
+            session_id=session_id,
+            option_text=choice,
+            source_message_id=int(source_message_id),
+        )
+    except RuntimeError as e:
+        logger.warning("LOWIQPTS option relay failed after retries: %s", e)
+        relay_result = {"ok": False, "error": str(e)}
     if not relay_result.get("ok"):
-        return {"ok": False, "error": "Could not click LOWIQPTS option right now."}
+        logger.warning(
+            "LOWIQPTS inline click failed (%s); sending choice as plain relay text",
+            relay_result.get("error"),
+        )
+        try:
+            relay_result = await _relay_with_retry(
+                relay_send_user_reply,
+                session_id=session_id,
+                text=choice,
+            )
+        except RuntimeError as e:
+            return {"ok": False, "error": f"Could not reach LOWIQPTS relay: {e}"}
+        if not relay_result.get("ok"):
+            return {
+                "ok": False,
+                "error": "Could not relay your button choice to LOWIQPTS. Try typing it in chat.",
+            }
     _touch_pending_request(req)
     _schedule_timeout(context.application, str(req.get("req_id", "")))
     relay_result["choice"] = choice
@@ -555,6 +589,10 @@ async def poll_lowiqpts_relay_events(bot_app) -> None:
         return
     bot_data = bot_app.bot_data
     queue, _ = _pending_maps(bot_data)
+    # Heartbeat: keep pending rows alive while we wait on a slow LOWIQPTS session.
+    for req in queue:
+        if str(req.get("relay_session_id", "")).strip():
+            _touch_pending_request(req)
     seen_sessions: set[str] = set()
     session_ids: list[str] = []
     for req in queue:
@@ -609,7 +647,7 @@ async def _on_points_refresh_timeout(context) -> None:
                 "⏱ Points refresh is taking longer than expected.\n"
                 "Please tap Refresh to retry."
             ),
-            reply_markup=points_scope_kb("week"),
+            reply_markup=points_scope_kb(),
         )
     except Exception as e:
         logger.warning("Failed to deliver points timeout banner: %s", e)
