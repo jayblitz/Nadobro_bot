@@ -201,6 +201,10 @@ class MmProfitabilityTests(unittest.TestCase):
         self.assertGreater(quotes["buy"], quotes["sell"])
 
     def test_grid_soft_reset_triggers_behind_leg_mid_quote(self):
+        # rgrid_stop_loss_pct kept large here so the new margin-based SL formula
+        # (max_loss = pct × notional/leverage) does not trip on the seeded -$1 PnL
+        # before soft-reset logic gets a chance to arm. This test asserts soft-reset,
+        # not stop-loss; SL behavior is locked in test_grid_pnl_stop_loss_triggers_action.
         state = {
             "strategy": "rgrid",
             "product": "BTC",
@@ -209,7 +213,7 @@ class MmProfitabilityTests(unittest.TestCase):
             "notional_usd": 100.0,
             "cycle_notional_usd": 100.0,
             "min_order_notional_usd": 20.0,
-            "rgrid_stop_loss_pct": 5.0,
+            "rgrid_stop_loss_pct": 100.0,
             "rgrid_reset_threshold_pct": 1.0,
             "rgrid_reset_timeout_seconds": 120,
             "grid_anchor_price": 100.0,

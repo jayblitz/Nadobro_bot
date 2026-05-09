@@ -686,7 +686,7 @@ def start_user_bot(
             "runs": 0,
         }
     )
-    if strategy in ("grid", "rgrid", "dgrid"):
+    if strategy in ("grid", "rgrid", "dgrid", "mid"):
         mm_ok, mm_msg = _run_mm_start_guard(telegram_id, network, product.upper(), float(state.get("leverage") or leverage or 1.0), state)
         if not mm_ok:
             return False, mm_msg
@@ -760,7 +760,7 @@ def start_user_bot(
             f"VOL bot started on {str(product).upper()}-PERP ({network}) "
             f"| Direction {direction} | Margin $100 @ 1x | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
         )
-    if strategy in ("grid", "rgrid", "dgrid"):
+    if strategy in ("grid", "rgrid", "dgrid", "mid"):
         spread_key = "rgrid_spread_bp" if strategy == "rgrid" else "spread_bp"
         margin_usd = float(state.get("notional_usd") or 0.0)
         cycle_notional_cfg = float(state.get("cycle_notional_usd") or margin_usd or 0.0)
@@ -886,6 +886,19 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
     if stop_errors:
         return False, f"No strategy bot was fully stopped. Errors: {'; '.join(stop_errors)}"
     return False, "No running strategy bot found."
+
+
+def get_user_bot_state(telegram_id: int, network: str | None = None) -> dict:
+    """Public accessor for the persisted strategy state dict.
+
+    Used by the Phase 3 /mm_status and /mm_fills handlers so they can read
+    long-lived counters (mm_session_notional_done_usd, grid_*_fills, etc.)
+    without going through the full status enrichment pipeline.
+    """
+    if not network:
+        user = get_user(telegram_id)
+        network = user.network_mode.value if user else "mainnet"
+    return _load_state(telegram_id, network)
 
 
 def get_user_bot_status(telegram_id: int) -> dict:
@@ -1446,7 +1459,7 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
                        client, mid: float, product_id: int, product: str, open_orders: list) -> dict:
     from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
 
-    if strategy in ("grid", "rgrid", "dgrid"):
+    if strategy in ("grid", "rgrid", "dgrid", "mid"):
         return mm_bot.run_cycle(
             telegram_id, network, state,
             client=client, mid=mid, open_orders=open_orders,
@@ -1684,7 +1697,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
-    if strategy not in ("grid", "rgrid", "dgrid", "dn", "vol"):
+    if strategy not in ("grid", "rgrid", "dgrid", "mid", "dn", "vol"):
         move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
         sl_pct = float(state.get("sl_pct") or 0.0)
         tp_pct = float(state.get("tp_pct") or 0.0)
@@ -1775,7 +1788,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 client, mid, product_id, product, open_orders,
             )
 
-    if strategy in ("grid", "rgrid", "dgrid") and result.get("action") == "grid_stop_loss_hit":
+    if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("action") == "grid_stop_loss_hit":
         _finalize_session(state, stop_reason="grid_sl_hit")
         state["running"] = False
         strategy_label = _strategy_display_name(strategy)
@@ -1805,7 +1818,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
         return True, None
-    if strategy in ("grid", "rgrid", "dgrid") and result.get("action") == "grid_take_profit_hit":
+    if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("action") == "grid_take_profit_hit":
         _finalize_session(state, stop_reason="tp_hit")
         state["running"] = False
         strategy_label = _strategy_display_name(strategy)
@@ -1835,7 +1848,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 product=product, network=network, error=close_res.get("error", "unknown"),
             )
         return True, None
-    if strategy in ("grid", "rgrid", "dgrid") and result.get("action") == "circuit_breaker":
+    if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("action") == "circuit_breaker":
         _finalize_session(state, stop_reason="circuit_breaker")
         state["running"] = False
         strategy_label = _strategy_display_name(strategy)
@@ -1861,7 +1874,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 error=close_res.get("error", "unknown"),
             )
         return True, None
-    if strategy in ("grid", "rgrid", "dgrid") and result.get("done") and str(result.get("reason") or "") == "session notional cap reached":
+    if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("done") and str(result.get("reason") or "") == "session notional cap reached":
         _finalize_session(state, stop_reason="session_cap_hit")
         state["running"] = False
         strategy_label = _strategy_display_name(strategy)

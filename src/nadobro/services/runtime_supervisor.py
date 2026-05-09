@@ -14,6 +14,7 @@ _WORKER_GROUP_MAP = {
     "grid": "mm_grid",
     "rgrid": "mm_grid",
     "dgrid": "mm_grid",
+    "mid": "mm_grid",
     "dn": "dn",
     "vol": "vol",
     "bro": "bro",

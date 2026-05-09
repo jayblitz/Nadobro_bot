@@ -8,7 +8,14 @@ import logging
 import math
 import time
 from src.nadobro.config import get_product_id, get_product_max_leverage
+from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
 from src.nadobro.services.trade_service import execute_limit_order
+from src.nadobro.services import pov_engine
+from src.nadobro.services.nado_archive import get_pair_24h_volume_usd
+from src.nadobro.services.rate_limit import (
+    call_with_retry,
+    market_price_is_empty,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +25,10 @@ GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
 GRID_MIN_SPREAD_BP = 8.0
 DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
-# Rough cushion vs venue maintenance / account-health buffers when translating
-# per-quote notional into a collateral budget (tunable via state mm_collateral_safety_factor).
-MM_COLLATERAL_SAFETY_FACTOR = 1.75
+# Cushion vs venue maintenance / account-health buffers when translating per-quote
+# notional into a collateral budget (tunable via state mm_collateral_safety_factor).
+# 1.25 leaves enough headroom for funding/fees while not over-reserving budget.
+MM_COLLATERAL_SAFETY_FACTOR = 1.25
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
 POST_ONLY_REPRICE_MAX_RETRIES = 3
 POST_ONLY_REPRICE_STEP_BP = 0.5
@@ -28,6 +36,23 @@ DGRID_TREND_ON_VARIANCE_RATIO = 1.25
 DGRID_RANGE_ON_VARIANCE_RATIO = 1.15
 DGRID_MAX_SPREAD_BP = 50.0
 DGRID_RESET_OPTIONS_BP = (5.0, 12.5, 25.0, 50.0, 100.0)
+
+# Phase 4 reliability: track which strategy_session_ids we've already
+# reconciled in *this* Python process. Persisted state survives a kill+restart,
+# so a saved ``mm_resume_reconcile_session_id`` matching the live
+# ``strategy_session_id`` is NOT a signal that we already reconciled in the
+# current process — it just means the previous process did. We therefore key
+# off this in-memory set so the resume marker re-stamps after every restart.
+# Tests can clear this set to simulate a fresh process.
+_PROCESS_RECONCILED_SESSIONS: set[str] = set()
+
+# Tread Mid Mode parity. Mid Mode quotes pure mid ± spread×level with no anchor
+# logic, no soft-reset, and accepts a continuous directional_bias in [-1.0, +1.0].
+MID_DEFAULT_SPREAD_BP = 5.0
+MID_MIN_SPREAD_BP = -10.0
+MID_MAX_SPREAD_BP = 100.0
+MID_BIAS_ALPHA_TILT = 0.20  # ±0.2 side multiplier per unit of bias.
+MID_FULL_BIAS_MARGIN_UPLIFT = 0.20  # +20% margin requirement when |bias|=1.0.
 
 
 MOMENTUM_EMA_CROSSOVER_BP = 5.0       # EMA fast-slow divergence threshold (bp)
@@ -190,8 +215,51 @@ def _compute_reference_price(state: dict, mid: float, mode: str, ema_fast_alpha:
     return mid
 
 
-def _resolve_side_multipliers(directional_bias: str, net_units: float, inv_soft_usd: float, mid: float) -> tuple[float, float, bool, str]:
-    bias = (directional_bias or "neutral").lower().strip()
+def _resolve_directional_bias_value(directional_bias) -> float:
+    """Convert a directional_bias config value into a float in [-1.0, +1.0].
+
+    Mid Mode (Tread parity) accepts a continuous float; legacy GRID/RGRID/DGRID
+    accept the strings ``neutral``, ``long_bias``, ``short_bias`` and map them to
+    discrete ±1 / 0 values for the purpose of margin uplift accounting. Side-
+    multiplier shaping for the legacy string form preserves the old discrete
+    1.15/0.85 magnitudes — see _resolve_side_multipliers.
+    """
+    if directional_bias is None:
+        return 0.0
+    if isinstance(directional_bias, (int, float)) and not isinstance(directional_bias, bool):
+        try:
+            return _clamp(float(directional_bias), -1.0, 1.0)
+        except (TypeError, ValueError):
+            return 0.0
+    text = str(directional_bias).lower().strip()
+    if text in ("long_bias", "long", "+long"):
+        return 1.0
+    if text in ("short_bias", "short", "-short"):
+        return -1.0
+    if text in ("neutral", "", "none", "off"):
+        return 0.0
+    # Numeric strings ("0.4", "-0.7") are accepted too.
+    try:
+        return _clamp(float(text), -1.0, 1.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _resolve_side_multipliers(
+    directional_bias,
+    net_units: float,
+    inv_soft_usd: float,
+    mid: float,
+    *,
+    use_continuous_bias: bool = False,
+) -> tuple[float, float, bool, str]:
+    """Resolve buy/sell quote-budget multipliers.
+
+    ``directional_bias`` may be a legacy string (``neutral`` / ``long_bias`` /
+    ``short_bias``) — used by GRID/RGRID/DGRID — or a float in [-1, +1] — used
+    by Mid Mode. Pass ``use_continuous_bias=True`` to apply the Tread Mid Mode
+    linear ±0.2 alpha tilt instead of the discrete legacy mapping.
+    """
     buy_mult = 1.0
     sell_mult = 1.0
     inv_usd = abs(net_units) * mid
@@ -199,12 +267,22 @@ def _resolve_side_multipliers(directional_bias: str, net_units: float, inv_soft_
     pause_reason = ""
     inv_hard_usd = max(inv_soft_usd * 1.8, inv_soft_usd + 1.0)
 
-    if bias == "long_bias":
-        buy_mult *= 1.15
-        sell_mult *= 0.85
-    elif bias == "short_bias":
-        buy_mult *= 0.85
-        sell_mult *= 1.15
+    if use_continuous_bias:
+        # Tread Mid Mode: bias in [-1, +1] → ±0.2 linear tilt per side.
+        # Positive bias front-loads buys, back-loads sells.
+        bias_value = _resolve_directional_bias_value(directional_bias)
+        buy_mult *= max(0.0, 1.0 + MID_BIAS_ALPHA_TILT * bias_value)
+        sell_mult *= max(0.0, 1.0 - MID_BIAS_ALPHA_TILT * bias_value)
+    else:
+        # Legacy discrete mapping for GRID/RGRID/DGRID — preserved exactly so the
+        # previously-locked 1.15/0.85 side weights do not shift under live users.
+        bias = (str(directional_bias) if directional_bias is not None else "").lower().strip()
+        if bias == "long_bias":
+            buy_mult *= 1.15
+            sell_mult *= 0.85
+        elif bias == "short_bias":
+            buy_mult *= 0.85
+            sell_mult *= 1.15
 
     if inv_usd >= inv_hard_usd:
         pause_to_flatten_only = True
@@ -718,6 +796,11 @@ def run_cycle(
     # the SAME cycle when both the crossover detector and the reference-price
     # path want the latest EMAs).
     state.pop("_mm_ema_updated_mid", None)
+    # F7 (Phase 5 audit): clear last cycle's skipped-levels marker up-front so
+    # any early-return path (cycle-notional exhausted / max-orders reached /
+    # threshold wait / etc.) leaves the dashboard with an empty list rather
+    # than stale skips from the previous cycle's placement loop.
+    state["mm_skipped_levels"] = []
 
     product = state.get("product", "BTC")
     strategy = str(state.get("strategy", "grid") or "grid").lower()
@@ -758,7 +841,29 @@ def run_cycle(
                 "cumulative_pnl": mm_cumulative_pnl,
             }
 
-    mp = client.get_market_price(product_id) or {}
+    # Phase 4: bounded retry around the gateway market_price call so a transient
+    # 429 / blip doesn't kill the cycle. Empty-result predicate also catches the
+    # nado_client's swallowed-exception sentinel ({"bid":0,"ask":0,"mid":0}).
+    mp_errors: list[str] = []
+    try:
+        mp, mp_errors = call_with_retry(
+            client.get_market_price,
+            product_id,
+            max_retries=2,
+            is_empty_result=market_price_is_empty,
+            label="get_market_price",
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"market_price unavailable after retries: {exc}",
+            "orders_placed": 0,
+        }
+    mp = mp or {}
+    if mp_errors:
+        state["mm_market_price_retries"] = list(mp_errors[-3:])
+    else:
+        state.pop("mm_market_price_retries", None)
     if mid <= 0:
         mid = float(mp.get("mid") or 0.0)
     if mid <= 0:
@@ -767,20 +872,55 @@ def run_cycle(
     best_ask = float(mp.get("ask") or 0.0)
 
     if open_orders is None:
-        open_orders = client.get_open_orders(product_id)
+        try:
+            open_orders, oo_errors = call_with_retry(
+                client.get_open_orders,
+                product_id,
+                max_retries=2,
+                label="get_open_orders",
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"open_orders unavailable after retries: {exc}",
+                "orders_placed": 0,
+            }
+        if oo_errors:
+            state["mm_open_orders_retries"] = list(oo_errors[-3:])
+        else:
+            state.pop("mm_open_orders_retries", None)
+        open_orders = open_orders or []
 
     spread_bp = float(state.get("spread_bp") or 5.0)
     notional = float(state.get("notional_usd") or 100.0)
-    # CEO directive: MM strategies always run at per-asset MAX leverage so margin
-    # shrinks proportionally and post-only refresh quotes can sit alongside closing
-    # legs. The user-configured leverage in state is overwritten here for transparency.
+    # MM strategies normally run at per-asset MAX leverage so margin shrinks
+    # proportionally and post-only refresh quotes can sit alongside closing legs.
+    # The Tiny Budget Preset overrides this with the minimum leverage needed to
+    # clear the venue min_size floor (state["mm_leverage_override"] set by the
+    # preset handler — see handlers.callbacks).
+    leverage_override = state.get("mm_leverage_override")
+    leverage_mode = "MAX"
     try:
-        leverage = float(get_product_max_leverage(product, network=network, client=client))
+        max_leverage = float(get_product_max_leverage(product, network=network, client=client))
     except Exception:
-        # Defensive fallback: keep prior behavior if catalog is unavailable.
-        leverage = max(1.0, float(state.get("leverage") or 3.0))
+        max_leverage = max(1.0, float(state.get("leverage") or 3.0))
+    if leverage_override is not None:
+        try:
+            requested_lev = max(1.0, float(leverage_override))
+            leverage = min(requested_lev, max_leverage)
+            # F10 (Phase 5 audit): when the user's override exceeds the pair's
+            # cap we clamp silently — surface that in the mode label so the
+            # dashboard doesn't claim "TINY_BUDGET" while the engine ran at MAX.
+            if requested_lev > max_leverage:
+                leverage_mode = "TINY_BUDGET_CAPPED"
+            else:
+                leverage_mode = "TINY_BUDGET"
+        except (TypeError, ValueError):
+            leverage = max_leverage
+    else:
+        leverage = max_leverage
     state["leverage"] = leverage
-    state["leverage_mode"] = "MAX"
+    state["leverage_mode"] = leverage_mode
     max_orders = int(state.get("max_open_orders", 6))
     min_range_pct = float(state.get("min_range_pct") or 1.0)
     max_range_pct = float(state.get("max_range_pct") or 1.0)
@@ -788,7 +928,56 @@ def run_cycle(
     close_offset_bp = float(state.get("close_offset_bp") or 0.0)
     interval_seconds = max(1, int(state.get("interval_seconds") or 60))
     quote_ttl_seconds = max(0, int(state.get("quote_ttl_seconds") or (interval_seconds * 2)))
-    directional_bias = str(state.get("directional_bias") or "neutral")
+
+    # Phase 2: Tread Fi POV / participation engine. When the user opts into a
+    # preset (Aggressive / Normal / Passive), derive interval cadence and
+    # per-cycle notional from the pair's rolling 24h volume on the Nado archive.
+    # Falls back transparently to user-pinned values if the archive is offline.
+    participation_preset_raw = state.get("participation_preset")
+    pov_cycle_notional_override: float | None = None
+    if participation_preset_raw:
+        preset_resolved = pov_engine.normalize_preset(str(participation_preset_raw))
+        pair_24h_volume_usd: float | None = None
+        try:
+            pair_24h_volume_usd = get_pair_24h_volume_usd(
+                network=network, product_id=product_id
+            )
+        except Exception:
+            pair_24h_volume_usd = None
+        if pair_24h_volume_usd and pair_24h_volume_usd > 0:
+            pov_meta = pov_engine.compute_pov_duration(
+                notional_usd=notional,
+                preset=preset_resolved,
+                pair_24h_volume_usd=pair_24h_volume_usd,
+            )
+            interval_seconds = max(1, int(pov_meta["interval_seconds"]))
+            pov_cycle_notional_override = max(0.0, float(pov_meta["cycle_notional_usd"]))
+            if not state.get("quote_ttl_seconds"):
+                quote_ttl_seconds = max(0, interval_seconds * 2)
+            state["mm_pov_engine"] = {
+                "preset": pov_meta["preset"],
+                "multiplier": pov_meta["multiplier"],
+                "duration_minutes": round(pov_meta["duration_minutes"], 4),
+                "interval_seconds": int(pov_meta["interval_seconds"]),
+                "cycle_notional_usd": round(pov_meta["cycle_notional_usd"], 6),
+                "pair_24h_volume_usd": round(pov_meta["pair_24h_volume_usd"], 2),
+            }
+            state.pop("mm_pov_engine_warning", None)
+        else:
+            state["mm_pov_engine_warning"] = (
+                f"Nado archive returned no 24h volume for product_id={product_id} "
+                f"on {network}; participation preset '{preset_resolved}' inactive this cycle."
+            )
+            state.pop("mm_pov_engine", None)
+    else:
+        state.pop("mm_pov_engine", None)
+        state.pop("mm_pov_engine_warning", None)
+    # GRID/RGRID/DGRID retain string semantics; Mid Mode reads the same field as a
+    # float in [-1, +1] (see _resolve_directional_bias_value). Don't coerce here —
+    # _resolve_side_multipliers branches on use_continuous_bias so both shapes work.
+    directional_bias = state.get("directional_bias")
+    if directional_bias is None:
+        directional_bias = "neutral" if configured_strategy != "mid" else 0.0
     reference_mode = str(state.get("reference_mode") or "mid")
     ema_fast_alpha = _clamp(float(state.get("ema_fast_alpha") or 0.45), 0.05, 0.95)
     ema_slow_alpha = _clamp(float(state.get("ema_slow_alpha") or 0.20), 0.05, 0.95)
@@ -802,22 +991,57 @@ def run_cycle(
     # directly. Leverage is applied separately at place-order (per Nado risk weights);
     # multiplying it in here would double-count margin and blow through level sizing.
     cycle_notional = max(cycle_notional_cfg, notional)
+    if pov_cycle_notional_override is not None:
+        # POV scheduling: each cycle should slice the target into the
+        # pov-engine-computed chunk, not the user's full notional. Floor at the
+        # venue minimum so the bot still places at least one quote per cycle if
+        # the schedule rounds below it.
+        cycle_notional = max(pov_cycle_notional_override, 0.0)
     session_cap_notional = max(0.0, float(state.get("session_notional_cap_usd") or 0.0))
     carry_notional = max(0.0, float(state.get("mm_notional_carry_usd") or 0.0))
     session_done = max(0.0, float(state.get("mm_session_notional_done_usd") or 0.0))
-    min_order_notional_usd = max(
-        1.0,
-        float(state.get("min_order_notional_usd") or DEFAULT_MIN_ORDER_NOTIONAL_USD),
-    )
+    # Resolve venue minimum notional. Priority:
+    # 1) Caller override (state["min_order_notional_usd"]) — for tests / power users.
+    # 2) Live Nado `symbols` payload (canonical, per-pair, x18 USDT0 floor).
+    # 3) Static fallback so a transient catalog miss does not crash the cycle.
+    state_min = state.get("min_order_notional_usd")
+    catalog_min = None
+    try:
+        catalog_min = get_product_min_quote_notional_usd(product, network=network, client=client)
+    except Exception:
+        catalog_min = None
+    if state_min:
+        try:
+            min_order_notional_usd = max(1.0, float(state_min))
+        except (TypeError, ValueError):
+            min_order_notional_usd = float(catalog_min or DEFAULT_MIN_ORDER_NOTIONAL_USD)
+    elif catalog_min and catalog_min > 0:
+        min_order_notional_usd = float(catalog_min)
+    else:
+        min_order_notional_usd = DEFAULT_MIN_ORDER_NOTIONAL_USD
+    state["mm_min_order_notional_usd_resolved"] = round(float(min_order_notional_usd), 6)
     leverage_for_budget = max(1.0, float(leverage or 1.0))
-    # Venue min-notional is USD per resting quote after bumps — leverage reduces *margin*
-    # per dollar notional but does not shrink how much notional each quote carries.
+    # Venue min-notional is the hard USD floor on *order value* per resting quote.
+    # Leverage does not reduce the floor — it lets a small collateral wallet *reach*
+    # the floor (notional = collateral × leverage). Per-quote *margin* requirement
+    # is min_notional / leverage × safety_factor.
     order_birth_ts = state.setdefault("mm_order_birth_ts", {})
     if not isinstance(order_birth_ts, dict):
         order_birth_ts = {}
         state["mm_order_birth_ts"] = order_birth_ts
 
-    if strategy == "dgrid":
+    if strategy == "mid":
+        levels = max(1, int(state.get("levels", MM_DEFAULT_LEVELS)))
+        # Mid Mode: spread is signed, default 5 bps, range [-10, +100] per Tread.
+        spread_bp = float(state.get("spread_bp") or MID_DEFAULT_SPREAD_BP)
+        spread_bp = _clamp(spread_bp, MID_MIN_SPREAD_BP, MID_MAX_SPREAD_BP)
+        # Mid Mode tightens its own min/max envelope so dgrid-style realized-vol
+        # widening cannot push beyond the documented Tread range.
+        min_spread_bp = max(MID_MIN_SPREAD_BP, float(state.get("min_spread_bp") or MID_MIN_SPREAD_BP))
+        max_spread_bp = min(MID_MAX_SPREAD_BP, float(state.get("max_spread_bp") or MID_MAX_SPREAD_BP))
+        if min_spread_bp > max_spread_bp:
+            min_spread_bp, max_spread_bp = MID_MIN_SPREAD_BP, MID_MAX_SPREAD_BP
+    elif strategy == "dgrid":
         levels = max(1, int(state.get("levels", GRID_DEFAULT_LEVELS)))
         spread_bp = max(float(state.get("spread_bp") or GRID_MIN_SPREAD_BP), MM_MIN_SPREAD_BP)
     elif strategy == "rgrid":
@@ -964,38 +1188,86 @@ def run_cycle(
     inv_usd = abs(net_units) * mid
 
     cancelled_digests = set(str(d) for d in (state.get("mm_recently_cancelled_digests") or []))
+    # Phase 4: resume reconciliation. ``_reconcile_executed_quotes`` already
+    # queries the archive for any tracked digest that is no longer in the open-
+    # orders list (Phase 0 work). On the *first cycle of this Python process*
+    # for a given strategy_session_id we additionally stamp
+    # ``mm_resume_reconciled_*`` so /mm_status can show that we ran the
+    # reconcile pass before re-quoting (no orphan orders, no double-quoting).
+    #
+    # We key this off ``_PROCESS_RECONCILED_SESSIONS`` rather than the
+    # persisted ``mm_resume_reconcile_session_id`` because the latter survives
+    # restarts — comparing it against the live session_id would always show
+    # equality after a kill+restart and the marker would never re-stamp.
+    session_id = state.get("strategy_session_id")
+    session_key = str(session_id) if session_id is not None else ""
+    is_resume_first_cycle = bool(
+        session_key
+        and session_key not in _PROCESS_RECONCILED_SESSIONS
+        and (state.get("mm_tracked_quotes") or state.get("grid_buy_fills") or state.get("grid_sell_fills"))
+    )
+    pre_reconcile_tracked = len(state.get("mm_tracked_quotes") or {})
     executed_quotes = _reconcile_executed_quotes(state, network, open_orders, cancelled_digests)
     state["mm_recently_cancelled_digests"] = []
     if executed_quotes:
         for q in executed_quotes:
             _append_grid_exposure_fill(state, q)
-    grid_anchor_price = float(state.get("grid_anchor_price") or 0.0)
-    discretion = _clamp(float(state.get("rgrid_discretion") or state.get("grid_discretion") or 0.06), 0.01, 0.5)
-    recent_fraction = _clamp(discretion * 2.0, 0.02, 0.5)
-    buy_exposure = _rolling_vwap_recent_fraction(state.get("grid_buy_fills") or [], recent_fraction)
-    sell_exposure = _rolling_vwap_recent_fraction(state.get("grid_sell_fills") or [], recent_fraction)
-    if buy_exposure > 0 and sell_exposure > 0:
-        grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
-    elif buy_exposure > 0:
-        grid_anchor_price = buy_exposure
-    elif sell_exposure > 0:
-        grid_anchor_price = sell_exposure
-    if grid_anchor_price <= 0:
-        grid_anchor_price = float(state.get("grid_last_fill_price") or 0.0)
-    if grid_anchor_price <= 0:
-        grid_anchor_price = reference_price
-    if executed_quotes:
-        last_exec = executed_quotes[-1]
-        exec_price = float(last_exec.get("price") or 0.0)
-        if exec_price > 0:
-            state["grid_last_fill_price"] = exec_price
-            grid_anchor_price = exec_price
-    elif float(state.get("grid_last_fill_price") or 0.0) <= 0 and grid_anchor_price > 0:
-        state["grid_last_fill_price"] = grid_anchor_price
-    state["grid_prev_net_units"] = net_units
-    state["grid_anchor_price"] = grid_anchor_price
-    state["grid_buy_exposure_price"] = round(buy_exposure, 8) if buy_exposure > 0 else 0.0
-    state["grid_sell_exposure_price"] = round(sell_exposure, 8) if sell_exposure > 0 else 0.0
+    if session_key:
+        # Mark this session as reconciled-in-this-process unconditionally on
+        # the first cycle we see it, even if there was no persisted state to
+        # reconcile. That way we don't repeat the bookkeeping on every cycle.
+        _PROCESS_RECONCILED_SESSIONS.add(session_key)
+    if is_resume_first_cycle:
+        state["mm_resume_reconciled_at"] = time.time()
+        state["mm_resume_reconcile_session_id"] = session_key
+        state["mm_resume_tracked_count"] = pre_reconcile_tracked
+        state["mm_resume_executed_count"] = len(executed_quotes)
+        logger.info(
+            "MM resume reconcile complete: session=%s tracked=%d executed=%d (user=%s)",
+            session_key,
+            pre_reconcile_tracked,
+            len(executed_quotes),
+            telegram_id,
+        )
+    if configured_strategy == "mid":
+        # Mid Mode (Tread parity) intentionally ignores grid_anchor_price,
+        # discretion, and the rolling-VWAP exposure anchor. The centerline is
+        # purely _compute_reference_price(mid) — no fill-following, no soft-reset.
+        grid_anchor_price = 0.0
+        buy_exposure = 0.0
+        sell_exposure = 0.0
+        state["grid_prev_net_units"] = net_units
+        state["grid_anchor_price"] = 0.0
+        state["grid_buy_exposure_price"] = 0.0
+        state["grid_sell_exposure_price"] = 0.0
+    else:
+        grid_anchor_price = float(state.get("grid_anchor_price") or 0.0)
+        discretion = _clamp(float(state.get("rgrid_discretion") or state.get("grid_discretion") or 0.06), 0.01, 0.5)
+        recent_fraction = _clamp(discretion * 2.0, 0.02, 0.5)
+        buy_exposure = _rolling_vwap_recent_fraction(state.get("grid_buy_fills") or [], recent_fraction)
+        sell_exposure = _rolling_vwap_recent_fraction(state.get("grid_sell_fills") or [], recent_fraction)
+        if buy_exposure > 0 and sell_exposure > 0:
+            grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
+        elif buy_exposure > 0:
+            grid_anchor_price = buy_exposure
+        elif sell_exposure > 0:
+            grid_anchor_price = sell_exposure
+        if grid_anchor_price <= 0:
+            grid_anchor_price = float(state.get("grid_last_fill_price") or 0.0)
+        if grid_anchor_price <= 0:
+            grid_anchor_price = reference_price
+        if executed_quotes:
+            last_exec = executed_quotes[-1]
+            exec_price = float(last_exec.get("price") or 0.0)
+            if exec_price > 0:
+                state["grid_last_fill_price"] = exec_price
+                grid_anchor_price = exec_price
+        elif float(state.get("grid_last_fill_price") or 0.0) <= 0 and grid_anchor_price > 0:
+            state["grid_last_fill_price"] = grid_anchor_price
+        state["grid_prev_net_units"] = net_units
+        state["grid_anchor_price"] = grid_anchor_price
+        state["grid_buy_exposure_price"] = round(buy_exposure, 8) if buy_exposure > 0 else 0.0
+        state["grid_sell_exposure_price"] = round(sell_exposure, 8) if sell_exposure > 0 else 0.0
     if strategy == "rgrid":
         reference_price = grid_anchor_price
 
@@ -1019,8 +1291,14 @@ def run_cycle(
             or 0.0
         ),
     )
-    max_loss_usd = (pnl_stop_pct / 100.0) * max(0.0, notional)
-    max_profit_usd = (pnl_take_pct / 100.0) * max(0.0, notional)
+    # SL/TP percentages are applied to *margin* (notional / leverage), matching the
+    # log message "of margin" below and Tread Fi's documented perp formula:
+    #   Max Loss = (SL% / 100) × (Notional / Leverage)
+    # Earlier code applied the percentage to raw notional, which made stops fire at
+    # a much larger absolute drawdown than the user configured for leveraged pairs.
+    margin_for_pnl = max(0.0, notional) / max(1.0, float(leverage or 1.0))
+    max_loss_usd = (pnl_stop_pct / 100.0) * margin_for_pnl
+    max_profit_usd = (pnl_take_pct / 100.0) * margin_for_pnl
     grid_cycle_pnl = _compute_grid_cycle_pnl_usd(positions, product_id)
     state["grid_last_cycle_pnl_usd"] = round(grid_cycle_pnl, 6)
     if max_loss_usd > 0 and grid_cycle_pnl <= (-max_loss_usd):
@@ -1057,7 +1335,11 @@ def run_cycle(
         }
 
     buy_mult, sell_mult, pause_flatten_only, pause_reason = _resolve_side_multipliers(
-        directional_bias, net_units, inv_soft_limit_usd, mid
+        directional_bias,
+        net_units,
+        inv_soft_limit_usd,
+        mid,
+        use_continuous_bias=(configured_strategy == "mid"),
     )
     if pause_flatten_only:
         state["mm_paused"] = True
@@ -1088,7 +1370,23 @@ def run_cycle(
         state["mm_recently_cancelled_digests"] = list(cancelled_digests)
 
     if orders_cancelled > 0:
-        open_orders = client.get_open_orders(product_id)
+        try:
+            # F4 (Phase 5 audit): bypass nado_client's open-orders cache after a
+            # cancel — otherwise the post-cancel snapshot can return the cached
+            # pre-cancel list (or, on a transient 429 the SDK swallowed
+            # internally, an empty list cached for the TTL window) and the
+            # placement loop would believe quotes are gone when they aren't.
+            open_orders, _refresh_errors = call_with_retry(
+                client.get_open_orders,
+                product_id,
+                max_retries=1,
+                label="get_open_orders.refresh",
+                refresh=True,
+            )
+            open_orders = open_orders or []
+        except Exception:
+            # Soft-fail: fall back to the pre-cancel snapshot rather than aborting.
+            logger.warning("post-cancel open_orders refresh failed; using stale list", exc_info=True)
 
     if threshold_wait_result is not None:
         threshold_wait_result["orders_cancelled"] = int(orders_cancelled)
@@ -1208,6 +1506,13 @@ def run_cycle(
     margin_per_quote_est = _mm_margin_per_quote_estimate_usd(
         min_order_notional_usd, leverage_for_budget, safety_mm
     )
+    if configured_strategy == "mid":
+        # Tread Mid Mode: linear margin uplift up to +20% at |bias|=1.0.
+        bias_value = _resolve_directional_bias_value(directional_bias)
+        bias_margin_uplift = 1.0 + (MID_FULL_BIAS_MARGIN_UPLIFT * abs(bias_value))
+        margin_per_quote_est *= bias_margin_uplift
+        state["mm_bias_margin_uplift"] = round(bias_margin_uplift, 6)
+        state["mm_directional_bias_resolved"] = round(bias_value, 6)
     collateral_budget_cfg = max(0.0, float(notional))
     spot_usdt = _mm_spot_usdt_balance(client)
     effective_collateral = collateral_budget_cfg
@@ -1240,14 +1545,35 @@ def run_cycle(
                 "mm_max_resting_quotes_cap": 0,
             }
         need = margin_per_quote_est
+        # Compute the leverage that *would* let this collateral reach the venue floor,
+        # so the user gets actionable guidance instead of a dead-end error.
+        try:
+            required_lev = max(1.0, math.ceil(min_order_notional_usd / max(1.0, effective_collateral)))
+            try:
+                lev_cap = float(get_product_max_leverage(product, network=network, client=client))
+            except Exception:
+                lev_cap = float(leverage_for_budget)
+        except Exception:
+            required_lev = leverage_for_budget
+            lev_cap = leverage_for_budget
+        if required_lev > lev_cap:
+            guidance = (
+                f"This pair's max leverage ({lev_cap:.0f}x) cannot lift ${effective_collateral:.0f} "
+                f"to the ${min_order_notional_usd:.0f} venue floor — pick a pair with a smaller min_size "
+                f"or add collateral to ${math.ceil(min_order_notional_usd / lev_cap):.0f}+."
+            )
+        else:
+            guidance = (
+                f"Increase leverage to >= {required_lev:.0f}x via the Tiny Budget Preset to reach the "
+                f"${min_order_notional_usd:.0f} venue floor, or pick a pair with a smaller min_size."
+            )
         return {
             "success": False,
             "error": (
                 f"MM collateral budget (~${effective_collateral:.0f}) is too small for even one "
                 f"venue-sized quote at ~${min_order_notional_usd:.0f} notional with "
                 f"{leverage_for_budget:.1f}x leverage (~${need:.2f} estimated margin per quote "
-                f"including safety buffer). Add collateral, raise configured margin, or use a "
-                f"market with lower minimum size."
+                f"including safety buffer). {guidance}"
             ),
             "orders_placed": 0,
             "orders_cancelled": orders_cancelled,
@@ -1281,6 +1607,10 @@ def run_cycle(
     errors = []
     quote_distances_bp = []
     placed_notional_usd = 0.0
+    # Phase 4: levels whose post-only retry ladder exhausted are tracked here so
+    # /mm_status and the cycle result can surface the skip rather than dropping
+    # silently. Reset every cycle.
+    skipped_levels: list[dict] = []
     # Maker-only mandate: every quote is post-only. The retry ladder below
     # already uses post_only=True; aligning the first attempt prevents the
     # RGRID-concede branch (negative dynamic_spread_bp) from ever taking
@@ -1345,7 +1675,9 @@ def run_cycle(
                 # book. A single 0.2-bp nudge used to silently lose the quote whenever
                 # the book flickered during repricing.
                 last_price = order_price
+                retry_attempts_used = 0
                 for retry_attempt in range(POST_ONLY_REPRICE_MAX_RETRIES):
+                    retry_attempts_used = retry_attempt + 1
                     retry_price = _reprice_post_only_quote(
                         client,
                         product_id,
@@ -1380,6 +1712,18 @@ def run_cycle(
                     retry_err = str(result.get("error") or "").lower()
                     if "post-only" not in retry_err or "crosses the book" not in retry_err:
                         break
+                # Phase 4: if all retries failed with the same post-only error,
+                # surface this as a "skipped" level rather than a silent drop.
+                if not result.get("success"):
+                    skipped_levels.append({
+                        "level": int(order_spec["level"]),
+                        "side": "BUY" if order_spec["is_long"] else "SELL",
+                        "intended_price": float(order_spec["price"]),
+                        "last_attempted_price": float(last_price),
+                        "attempts": int(retry_attempts_used),
+                        "reason": "post_only_retries_exhausted",
+                        "error": str(result.get("error") or "")[:200],
+                    })
 
         if result.get("success"):
             orders_placed += 1
@@ -1409,7 +1753,17 @@ def run_cycle(
         else:
             errors.append(f"L{order_spec['level']} {'BUY' if order_spec['is_long'] else 'SELL'}: {result.get('error', 'unknown')}")
 
-    final_open_orders = client.get_open_orders(product_id)
+    try:
+        final_open_orders, _final_errors = call_with_retry(
+            client.get_open_orders,
+            product_id,
+            max_retries=1,
+            label="get_open_orders.final",
+        )
+    except Exception:
+        # Final post-cycle measurement is for analytics; degrade gracefully.
+        logger.warning("final open_orders fetch failed; using empty list", exc_info=True)
+        final_open_orders = []
     final_open_count = len(final_open_orders or [])
     est_fills = max(0, (len(open_orders) + orders_placed) - final_open_count)
     maker_fill_ratio = est_fills / max(1, est_fills + orders_placed)
@@ -1438,6 +1792,9 @@ def run_cycle(
         "open_orders_after": int(final_open_count),
         "session_notional_done_usd": round(new_session_done, 4),
     }
+    # Phase 4: persist this cycle's skipped levels (cleared each cycle so the
+    # dashboard always shows the latest state, not stale skips).
+    state["mm_skipped_levels"] = list(skipped_levels)
 
     state["mm_paused"] = bool(pause_flatten_only)
     if pause_flatten_only:
@@ -1475,6 +1832,8 @@ def run_cycle(
         "grid_reset_active": bool(state.get("grid_reset_active", False)) if strategy in ("grid", "rgrid") else None,
         "grid_reset_side": state.get("grid_reset_side") if strategy in ("grid", "rgrid") else None,
         "grid_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd") if strategy in ("grid", "rgrid") else None,
+        "skipped_levels": list(skipped_levels) if skipped_levels else [],
+        "skipped_levels_count": len(skipped_levels),
     }
     if configured_strategy == "dgrid":
         result.update({

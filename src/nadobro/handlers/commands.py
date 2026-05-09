@@ -284,3 +284,107 @@ async def cmd_revoke(update: Update, context: CallbackContext):
         )
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: Tread-style live MM dashboard.
+# ---------------------------------------------------------------------------
+
+# Strategy IDs the MM dashboard supports (mid mode shipped in Phase 1).
+MM_STRATEGIES = ("grid", "rgrid", "dgrid", "mid")
+
+
+def _mm_dashboard_keyboard():
+    """Inline keyboard with Refresh + Fills shortcuts. Imported lazily so the
+    module stays importable in tests without telegram primitives."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data="mm:status:refresh"),
+            InlineKeyboardButton("🧾 Fills", callback_data="mm:fills"),
+        ],
+    ])
+
+
+def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
+    """Build the /mm_status body. Returns ``(plain_text, is_mm_active)``.
+
+    Caller is responsible for MarkdownV2-escaping when sending to Telegram.
+    """
+    from src.nadobro.services.bot_runtime import get_user_bot_state, get_user_bot_status
+    from src.nadobro.services import mm_dashboard
+
+    status = get_user_bot_status(telegram_id) or {}
+    state = get_user_bot_state(telegram_id) or {}
+    strategy_id = str(status.get("strategy") or state.get("strategy") or "").lower()
+    if strategy_id not in MM_STRATEGIES:
+        return (
+            "No MM strategy is currently active.\n\n"
+            "Start GRID, Reverse GRID, Dynamic GRID, or Mid Mode from the strategy hub "
+            "and re-run /mm_status.",
+            False,
+        )
+    network = str(status.get("network") or state.get("network") or "mainnet")
+    product = str(status.get("product") or state.get("product") or "BTC").upper()
+    open_orders_count = int(status.get("open_orders_count") or 0)
+
+    snapshot = mm_dashboard.build_status_snapshot(
+        state=state,
+        strategy_id=strategy_id,
+        network=network,
+        product=product,
+        open_orders_count=open_orders_count,
+    )
+    lines = mm_dashboard.render_status_lines(snapshot)
+    return ("\n".join(lines), True)
+
+
+def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:
+    from src.nadobro.services.bot_runtime import get_user_bot_state
+    from src.nadobro.services import mm_dashboard
+
+    state = get_user_bot_state(telegram_id) or {}
+    lines = mm_dashboard.render_fills_lines(state, limit=limit)
+    header = f"🧾 Last {limit} fills"
+    return header + "\n" + "\n".join(lines)
+
+
+async def cmd_mm_status(update: Update, context: CallbackContext):
+    telegram_id = update.effective_user.id
+    if not await _ensure_private_access(update, telegram_id):
+        return
+    text, is_active = await run_blocking(build_mm_status_text, telegram_id)
+    try:
+        from src.nadobro.handlers.formatters import escape_md
+        body = escape_md(text)
+        markup = _mm_dashboard_keyboard() if is_active else None
+        await update.message.reply_text(
+            f"📊 *MM Status*\n\n{body}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=markup,
+        )
+    except Exception:
+        # Plain-text fallback so the user always gets a readable response.
+        await update.message.reply_text(text)
+
+
+async def cmd_mm_fills(update: Update, context: CallbackContext):
+    telegram_id = update.effective_user.id
+    if not await _ensure_private_access(update, telegram_id):
+        return
+    limit = 10
+    if context and getattr(context, "args", None):
+        try:
+            limit = max(1, min(50, int(context.args[0])))
+        except (TypeError, ValueError):
+            pass
+    text = await run_blocking(build_mm_fills_text, telegram_id, limit)
+    try:
+        # Code-fence renders columnar fills evenly; inside ``` only ` and \\ need
+        # escaping — render_fills_lines emits neither, so no escape pass needed.
+        await update.message.reply_text(
+            f"```\n{text}\n```",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+    except Exception:
+        await update.message.reply_text(text)
+
+

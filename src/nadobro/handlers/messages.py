@@ -1484,7 +1484,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     strategy = pending.get("strategy")
     field = pending.get("field")
     section = pending.get("section")
-    supported = ("grid", "rgrid", "dgrid", "dn", "vol")
+    supported = ("grid", "rgrid", "dgrid", "mid", "dn", "vol")
     supported_fields = (
         "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
         "levels", "min_range_pct", "max_range_pct", "threshold_bp", "close_offset_bp",
@@ -1496,23 +1496,36 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "grid_reset_threshold_pct", "grid_reset_timeout_seconds",
         "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
         "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
+        # Mid Mode accepts directional_bias as a continuous float in [-1, +1].
+        "directional_bias",
     )
     if strategy not in supported or field not in supported_fields:
+        context.user_data.pop("pending_strategy_input", None)
+        return False
+    # directional_bias is only a numeric field for Mid Mode; other strategies
+    # use the discrete neutral/long/short string set via set_text.
+    if field == "directional_bias" and strategy != "mid":
         context.user_data.pop("pending_strategy_input", None)
         return False
 
     try:
         value = float(text.strip())
     except (TypeError, ValueError):
-        await _reply_loc(update.message, 
+        await _reply_loc(update.message,
             "⚠️ Invalid value\\. Please enter a number\\. Example: `1\\.2`",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return True
 
+    # Mid Mode allows negative spread (concede pricing) per Tread docs.
+    if field == "spread_bp" and strategy == "mid":
+        spread_lo, spread_hi = -10.0, 100.0
+    else:
+        spread_lo, spread_hi = 0.1, 200.0
     limits = {
         "notional_usd": (1, 1000000),
-        "spread_bp": (0.1, 200),
+        "spread_bp": (spread_lo, spread_hi),
+        "directional_bias": (-1.0, 1.0),
         "interval_seconds": (10, 3600),
         "tp_pct": (0.05, 100),
         "sl_pct": (0.05, 100),
