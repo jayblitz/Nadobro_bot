@@ -328,6 +328,50 @@ class GridBudgetVsMinNotionalTests(unittest.TestCase):
         self.assertGreater(out.get("orders_placed", 0), 0)
         self.assertGreaterEqual(out.get("mm_buy_quote_levels", 0) + out.get("mm_sell_quote_levels", 0), 1)
 
+    def test_existing_resting_quotes_consume_collateral_slots(self):
+        """A three-quote collateral cap with two live quotes may add only one more."""
+        state = {
+            "product": "BTC",
+            "strategy": "grid",
+            "notional_usd": 64.0,
+            "cycle_notional_usd": 64.0,
+            "levels": 4,
+            "spread_bp": 8.0,
+            "min_order_notional_usd": 100.0,
+            "threshold_bp": 0.0,
+            "max_open_orders": 6,
+        }
+
+        class C:
+            def get_market_price(self, _pid):
+                return {"mid": 100000.0, "bid": 99990.0, "ask": 100010.0}
+
+            def get_open_orders(self, _pid):
+                return [
+                    {"digest": "open-1", "price": 100000.0},
+                    {"digest": "open-2", "price": 100001.0},
+                ]
+
+            def get_all_positions(self):
+                return []
+
+            def get_balance(self):
+                return {"exists": True, "balances": {0: 1_000_000.0}}
+
+        with patch.object(mm_bot, "get_product_id", return_value=90), patch.object(
+            mm_bot, "get_product_max_leverage", return_value=10.0
+        ), patch.object(
+            mm_bot,
+            "execute_limit_order",
+            return_value={"success": True, "digest": "new-quote"},
+        ) as m_exec:
+            out = mm_bot.run_cycle(1, "mainnet", state, client=C())
+
+        self.assertTrue(out.get("success"))
+        self.assertEqual(out.get("mm_max_resting_quotes_cap"), 3)
+        self.assertEqual(out.get("orders_placed"), 1)
+        self.assertEqual(m_exec.call_count, 1)
+
 
 class MmCollateralEstimateTests(unittest.TestCase):
     def test_estimate_quote_capacity_respects_leverage(self):
