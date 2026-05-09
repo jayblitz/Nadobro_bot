@@ -27,6 +27,20 @@ _dn_pair_cache: dict[str, dict] = {}
 _rest_session = requests.Session()
 
 
+def _first_present(*candidates):
+    """Return the first non-``None`` candidate, or ``None`` if all are ``None``.
+
+    Unlike ``a or b or c``, this preserves legitimate falsy values like ``0``
+    or empty strings. Phase 5 audit (F9) — used by the catalog field-merge
+    pass so a venue payload with e.g. ``maker_fee_rate_x18 = 0`` (a real
+    "0% maker" pair) doesn't fall through to the next source.
+    """
+    for c in candidates:
+        if c is not None:
+            return c
+    return None
+
+
 def _as_bool(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -421,6 +435,48 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
             or product_book.get("isolated_only")
         )
 
+        # Venue trading floors / increments. min_size is x18-scaled USDT0
+        # notional per Nado docs and is the canonical hard venue floor on order
+        # value (it is NOT divided by leverage — leverage lets a small wallet
+        # *reach* the floor by raising the order's notional via collateral × lev).
+        # F9 (Phase 5 audit): use ``_first_present`` everywhere so legitimate
+        # ``0`` values (e.g. a "0% maker" pair) aren't dropped by ``or``-chain
+        # fall-through. Same pattern previously applied only to fees; extending
+        # to size / price increments for consistency.
+        min_size_x18_raw = _first_present(
+            row.get("min_size"),
+            book_info.get("min_size"),
+            product_row.get("min_size"),
+            product_book.get("min_size"),
+        )
+        size_increment_x18_raw = _first_present(
+            row.get("size_increment"),
+            book_info.get("size_increment"),
+            product_row.get("size_increment"),
+            product_book.get("size_increment"),
+        )
+        price_increment_x18_raw = _first_present(
+            row.get("price_increment_x18"),
+            book_info.get("price_increment_x18"),
+            product_row.get("price_increment_x18"),
+            product_book.get("price_increment_x18"),
+        )
+        # Maker / taker rebate-or-fee from Nado `symbols`. x18-scaled signed
+        # decimal (negative on most majors — venue rebates the maker). Phase 3
+        # uses this in the pre-trade card and the /mm_status fee preview.
+        maker_fee_rate_x18_raw = _first_present(
+            row.get("maker_fee_rate_x18"),
+            book_info.get("maker_fee_rate_x18"),
+            product_row.get("maker_fee_rate_x18"),
+            product_book.get("maker_fee_rate_x18"),
+        )
+        taker_fee_rate_x18_raw = _first_present(
+            row.get("taker_fee_rate_x18"),
+            book_info.get("taker_fee_rate_x18"),
+            product_row.get("taker_fee_rate_x18"),
+            product_book.get("taker_fee_rate_x18"),
+        )
+
         key = base.upper().strip()
         perps[key] = {
             "id": pid,
@@ -430,6 +486,11 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
             "dynamic": True,
             "max_leverage": int(max_lev),
             "isolated_only": isolated_only,
+            "min_size_x18": str(min_size_x18_raw) if min_size_x18_raw is not None else None,
+            "size_increment_x18": str(size_increment_x18_raw) if size_increment_x18_raw is not None else None,
+            "price_increment_x18": str(price_increment_x18_raw) if price_increment_x18_raw is not None else None,
+            "maker_fee_rate_x18": str(maker_fee_rate_x18_raw) if maker_fee_rate_x18_raw is not None else None,
+            "taker_fee_rate_x18": str(taker_fee_rate_x18_raw) if taker_fee_rate_x18_raw is not None else None,
         }
         by_id[pid] = key
         aliases[key.lower()] = key
@@ -674,6 +735,107 @@ def get_product_max_leverage(
         return max(1, int(row.get("max_leverage", _DYNAMIC_DEFAULT_MAX_LEVERAGE)))
     except (TypeError, ValueError):
         return max(1, int(_DYNAMIC_DEFAULT_MAX_LEVERAGE))
+
+
+def _x18_to_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(int(str(value))) / 1e18
+    except (TypeError, ValueError):
+        try:
+            return float(value) / 1e18
+        except (TypeError, ValueError):
+            return None
+
+
+def _resolve_perp_row(
+    product: str,
+    network: str,
+    client,
+    refresh: bool,
+) -> Optional[dict]:
+    """F12 (Phase 5 audit): single perp lookup helper used by every accessor.
+
+    Mirrors ``get_product_max_leverage``'s lookup order: try the uppercase
+    base key directly against the perps map, then fall back to the alias
+    table. Returns the perp row dict or ``None`` when unresolved.
+    """
+    key = (product or "").upper().strip()
+    if not key:
+        return None
+    catalog = get_catalog(network=network, client=client, refresh=refresh)
+    perps_map = catalog.get("perps") or {}
+    row = perps_map.get(key)
+    if not row:
+        resolved = (catalog.get("aliases") or {}).get(key.lower())
+        row = perps_map.get(resolved) if resolved else None
+    return row or None
+
+
+def get_product_min_quote_notional_usd(
+    product: str,
+    network: str = "mainnet",
+    client=None,
+    refresh: bool = False,
+) -> Optional[float]:
+    row = _resolve_perp_row(product, network, client, refresh)
+    if not row:
+        return None
+    return _x18_to_float(row.get("min_size_x18"))
+
+
+def get_product_size_increment(
+    product: str,
+    network: str = "mainnet",
+    client=None,
+    refresh: bool = False,
+) -> Optional[float]:
+    row = _resolve_perp_row(product, network, client, refresh)
+    if not row:
+        return None
+    return _x18_to_float(row.get("size_increment_x18"))
+
+
+def get_product_price_increment(
+    product: str,
+    network: str = "mainnet",
+    client=None,
+    refresh: bool = False,
+) -> Optional[float]:
+    row = _resolve_perp_row(product, network, client, refresh)
+    if not row:
+        return None
+    return _x18_to_float(row.get("price_increment_x18"))
+
+
+def get_product_maker_fee_rate(
+    product: str,
+    network: str = "mainnet",
+    client=None,
+    refresh: bool = False,
+) -> Optional[float]:
+    """Return the maker fee rate as a *fraction* (e.g. -0.0003 = -3 bps rebate).
+
+    Returns ``None`` if the catalog has not seen a value yet (caller decides
+    whether to use a defensive default).
+    """
+    row = _resolve_perp_row(product, network, client, refresh)
+    if not row:
+        return None
+    return _x18_to_float(row.get("maker_fee_rate_x18"))
+
+
+def get_product_taker_fee_rate(
+    product: str,
+    network: str = "mainnet",
+    client=None,
+    refresh: bool = False,
+) -> Optional[float]:
+    row = _resolve_perp_row(product, network, client, refresh)
+    if not row:
+        return None
+    return _x18_to_float(row.get("taker_fee_rate_x18"))
 
 
 def get_product_metadata(product: str, network: str = "mainnet", client=None, refresh: bool = False) -> dict:

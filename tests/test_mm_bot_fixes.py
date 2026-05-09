@@ -293,7 +293,11 @@ class GridBudgetVsMinNotionalTests(unittest.TestCase):
         m_exec.assert_not_called()
 
     def test_modest_collateral_caps_resting_quotes_and_places_orders(self):
-        """$64 collateral / ~$17.5 est margin per $100-notional quote @ 10x yields ~3 slots."""
+        """$64 collateral / ~$12.5 est margin per $100-notional quote @ 10x yields ~5 slots.
+
+        Margin per quote = (min_notional / leverage) × MM_COLLATERAL_SAFETY_FACTOR
+        = ($100 / 10) × 1.25 = $12.50. $64 / $12.50 = 5.12, floored to 5.
+        """
         state = {
             "product": "BTC",
             "strategy": "grid",
@@ -324,7 +328,7 @@ class GridBudgetVsMinNotionalTests(unittest.TestCase):
         ), patch.object(mm_bot, "execute_limit_order", return_value={"success": True, "digest": "abc"}):
             out = mm_bot.run_cycle(1, "mainnet", state, client=C())
 
-        self.assertEqual(out.get("mm_max_resting_quotes_cap"), 3)
+        self.assertEqual(out.get("mm_max_resting_quotes_cap"), 5)
         self.assertGreater(out.get("orders_placed", 0), 0)
         self.assertGreaterEqual(out.get("mm_buy_quote_levels", 0) + out.get("mm_sell_quote_levels", 0), 1)
 
@@ -375,8 +379,10 @@ class GridBudgetVsMinNotionalTests(unittest.TestCase):
 
 class MmCollateralEstimateTests(unittest.TestCase):
     def test_estimate_quote_capacity_respects_leverage(self):
+        # $50 / (($100 / 10) × 1.25) = $50 / $12.50 = 4 resting quotes at the
+        # current MM_COLLATERAL_SAFETY_FACTOR=1.25.
         cap = mm_bot.estimate_mm_quote_capacity(50.0, 100.0, 10.0, max_open_orders=6)
-        self.assertEqual(cap["max_resting_quotes"], 2)
+        self.assertEqual(cap["max_resting_quotes"], 4)
 
     def test_allocate_quote_levels_splits_neutral_three_slots(self):
         buy_l, sell_l = mm_bot._mm_allocate_quote_levels(3, 4, 1.0, 1.0)

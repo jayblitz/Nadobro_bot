@@ -69,6 +69,57 @@ class MmLeverageCoercionTests(unittest.TestCase):
         self.assertEqual(state["leverage"], 50.0)
         self.assertEqual(state["leverage_mode"], "MAX")
 
+    def test_tiny_budget_preset_overrides_max_leverage(self):
+        # Tiny Budget Preset writes state["mm_leverage_override"] (set by the
+        # callback handler). On a $50 collateral wallet against e.g. a $100 venue
+        # min, ceil(100/50)=2x is enough — we should NOT silently coerce up to MAX.
+        state = {
+            "product": "BTC",
+            "strategy": "grid",
+            "leverage": 5.0,
+            "notional_usd": 50.0,
+            "levels": 2,
+            "spread_bp": 10.0,
+            "min_order_notional_usd": 100.0,
+            "mm_leverage_override": 2,
+        }
+        client = _MmClient(mid=10000.0, balance=10000.0)
+        with patch.object(mm_bot, "get_product_id", return_value=2), patch.object(
+            mm_bot, "get_product_max_leverage", return_value=50.0
+        ), patch.object(
+            mm_bot, "execute_limit_order", return_value={"success": True, "digest": "d"}
+        ):
+            mm_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
+
+        # Override applied, capped to max_leverage but not coerced up to it.
+        self.assertEqual(state["leverage"], 2.0)
+        self.assertEqual(state["leverage_mode"], "TINY_BUDGET")
+
+    def test_tiny_budget_override_is_capped_to_pair_max(self):
+        # If a stale preset writes a leverage above the pair cap, mm_bot must clamp.
+        # F10 (Phase 5 audit): when the override is clamped, the mode label
+        # surfaces the truth (``TINY_BUDGET_CAPPED``) rather than misleading
+        # the dashboard with ``TINY_BUDGET``.
+        state = {
+            "product": "BTC",
+            "strategy": "grid",
+            "notional_usd": 50.0,
+            "levels": 2,
+            "spread_bp": 10.0,
+            "min_order_notional_usd": 100.0,
+            "mm_leverage_override": 999,
+        }
+        client = _MmClient(mid=10000.0, balance=10000.0)
+        with patch.object(mm_bot, "get_product_id", return_value=2), patch.object(
+            mm_bot, "get_product_max_leverage", return_value=20.0
+        ), patch.object(
+            mm_bot, "execute_limit_order", return_value={"success": True, "digest": "d"}
+        ):
+            mm_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
+
+        self.assertEqual(state["leverage"], 20.0)
+        self.assertEqual(state["leverage_mode"], "TINY_BUDGET_CAPPED")
+
     def test_max_lev_falls_back_when_catalog_unavailable(self):
         state = {
             "product": "BTC",

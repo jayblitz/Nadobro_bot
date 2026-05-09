@@ -61,6 +61,22 @@ class DynamicProductCatalogTests(unittest.TestCase):
         pid = product_catalog.get_product_id("BTC", network="mainnet", refresh=True)
         self.assertEqual(pid, PRODUCTS["BTC"]["id"])
 
+    def test_x18_to_float_handles_str_int_and_invalid(self):
+        # Used by min_size / size_increment / price_increment accessors.
+        self.assertEqual(product_catalog._x18_to_float(str(100 * 10**18)), 100.0)
+        self.assertEqual(product_catalog._x18_to_float(50 * 10**18), 50.0)
+        self.assertIsNone(product_catalog._x18_to_float(None))
+        self.assertIsNone(product_catalog._x18_to_float("not-a-number"))
+
+    def test_min_quote_notional_accessor_returns_none_or_float(self):
+        # Hits the live catalog path. Either the gateway returned a min_size
+        # (giving a positive float) or the static fallback was used (giving None).
+        # Either is acceptable; the contract is "never raise, never return junk".
+        val = product_catalog.get_product_min_quote_notional_usd("BTC", network="mainnet")
+        if val is not None:
+            self.assertIsInstance(val, float)
+            self.assertGreater(val, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

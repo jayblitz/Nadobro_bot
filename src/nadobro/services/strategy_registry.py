@@ -14,6 +14,7 @@ from typing import Mapping
 STRATEGY_GRID = "grid"
 STRATEGY_RGRID = "rgrid"
 STRATEGY_DGRID = "dgrid"
+STRATEGY_MID = "mid"
 STRATEGY_DN = "dn"
 STRATEGY_VOL = "vol"
 STRATEGY_BRO = "bro"
@@ -22,12 +23,18 @@ SUPPORTED_STRATEGIES: tuple[str, ...] = (
     STRATEGY_GRID,
     STRATEGY_RGRID,
     STRATEGY_DGRID,
+    STRATEGY_MID,
     STRATEGY_DN,
     STRATEGY_VOL,
     STRATEGY_BRO,
 )
 
-MARKET_MAKING_STRATEGIES: tuple[str, ...] = (STRATEGY_GRID, STRATEGY_RGRID, STRATEGY_DGRID)
+MARKET_MAKING_STRATEGIES: tuple[str, ...] = (
+    STRATEGY_GRID,
+    STRATEGY_RGRID,
+    STRATEGY_DGRID,
+    STRATEGY_MID,
+)
 
 STRATEGY_ALIASES: Mapping[str, str] = {
     "mm": STRATEGY_GRID,
@@ -39,6 +46,9 @@ STRATEGY_ALIASES: Mapping[str, str] = {
     "dynamic_grid": STRATEGY_DGRID,
     "dynamic-grid": STRATEGY_DGRID,
     "d-grid": STRATEGY_DGRID,
+    "mid_mode": STRATEGY_MID,
+    "mid-mode": STRATEGY_MID,
+    "midmode": STRATEGY_MID,
     "delta-neutral": STRATEGY_DN,
     "delta_neutral": STRATEGY_DN,
     "volume": STRATEGY_VOL,
@@ -53,6 +63,7 @@ STRATEGY_DISPLAY_NAMES: Mapping[str, str] = {
     STRATEGY_GRID: "GRID",
     STRATEGY_RGRID: "REVERSE GRID",
     STRATEGY_DGRID: "DYNAMIC GRID",
+    STRATEGY_MID: "MID MODE",
     STRATEGY_DN: "DELTA NEUTRAL",
     STRATEGY_VOL: "VOLUME",
     STRATEGY_BRO: "BRO MODE",
@@ -71,6 +82,9 @@ NATURAL_LANGUAGE_STRATEGY_PHRASES: tuple[StrategyPhrase, ...] = (
     StrategyPhrase(STRATEGY_VOL, ("volume bot", "vol bot", " vol ")),
     StrategyPhrase(STRATEGY_RGRID, ("r-grid", "rgrid", "reverse grid", "reverse-grid")),
     StrategyPhrase(STRATEGY_DGRID, ("dynamic grid", "dgrid", "d-grid")),
+    # Mid Mode must be matched before plain "grid" so phrases like "mid mode"
+    # don't fall through to the GRID branch.
+    StrategyPhrase(STRATEGY_MID, ("mid mode", "mid-mode", " mid ")),
     StrategyPhrase(STRATEGY_GRID, ("grid",)),
 )
 
@@ -118,6 +132,29 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "rgrid_reset_threshold_pct": 0.2,
         "grid_reset_timeout_seconds": 120,
         "rgrid_reset_timeout_seconds": 120,
+    },
+    "mid": {
+        # Tread Mid Mode parity: pure mid ± spread×level pricing, no anchor logic,
+        # no soft-reset. Spread default 5 bps; user-tunable in [-10, +100].
+        "notional_usd": 100.0,
+        "cycle_notional_usd": 100.0,
+        "spread_bp": 5.0,
+        "interval_seconds": 60,
+        "tp_pct": 0.6,
+        "sl_pct": 0.5,
+        "levels": 2,
+        "min_spread_bp": -10.0,
+        "max_spread_bp": 100.0,
+        "reference_mode": "mid",
+        "ema_fast_alpha": 0.45,
+        "ema_slow_alpha": 0.20,
+        "vol_window_points": 12,
+        "vol_sensitivity": 0.0,
+        "quote_ttl_seconds": 90,
+        # Mid Mode accepts directional_bias as a float in [-1.0, +1.0] (Tread spec).
+        # 0.0 == neutral; ±1.0 maxes the side tilt and triggers the +20% margin uplift.
+        "directional_bias": 0.0,
+        "inventory_soft_limit_usd": 60.0,
     },
     "dn": {
         "notional_usd": 50.0, "spread_bp": 3.0, "interval_seconds": 90, "tp_pct": 0.8, "sl_pct": 0.6,
@@ -210,6 +247,25 @@ RUNTIME_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "rgrid_reset_threshold_pct": 0.2,
         "grid_reset_timeout_seconds": 120,
         "rgrid_reset_timeout_seconds": 120,
+    },
+    "mid": {
+        "notional_usd": 100.0,
+        "cycle_notional_usd": 100.0,
+        "spread_bp": 5.0,
+        "interval_seconds": 60,
+        "levels": 2,
+        "tp_pct": 0.6,
+        "sl_pct": 0.5,
+        "min_spread_bp": -10.0,
+        "max_spread_bp": 100.0,
+        "reference_mode": "mid",
+        "ema_fast_alpha": 0.45,
+        "ema_slow_alpha": 0.20,
+        "vol_window_points": 12,
+        "vol_sensitivity": 0.0,
+        "quote_ttl_seconds": 90,
+        "directional_bias": 0.0,
+        "inventory_soft_limit_usd": 60.0,
     },
     "dn": {
         "notional_usd": 50.0,
