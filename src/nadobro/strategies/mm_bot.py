@@ -1604,7 +1604,7 @@ def run_cycle(
         }
 
     buy_levels, sell_levels = _mm_allocate_quote_levels(
-        quote_slot_budget, levels, buy_mult, sell_mult
+        max_resting_quotes, levels, buy_mult, sell_mult
     )
     if buy_levels <= 0 and sell_levels <= 0:
         return {

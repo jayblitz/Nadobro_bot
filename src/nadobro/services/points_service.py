@@ -282,11 +282,6 @@ def _claim_pending_for_event(bot_data: dict, session_id: str, text: str) -> Opti
         _touch_pending_request(req)
         _set_active_req_for_chat(bot_data, int(req.get("chat_id")), str(req.get("req_id", "")))
         return req
-    if queue:
-        req = queue[0]
-        _touch_pending_request(req)
-        _set_active_req_for_chat(bot_data, int(req.get("chat_id")), str(req.get("req_id", "")))
-        return req
     return None
 
 
@@ -366,7 +361,15 @@ def save_points_snapshot(telegram_id: int, payload: dict) -> None:
 
 
 def get_points_dashboard(telegram_id: int, scope: str = "week") -> dict:
-    _ = scope  # week-only source by design
+    scope_norm = str(scope or "week").strip().lower()
+    if scope_norm not in ("week", "wk", ""):
+        return {
+            "ok": False,
+            "error": (
+                "LOWIQPTS returns a last-week snapshot only. Use the Week button; "
+                "Month/All are not available through this relay yet."
+            ),
+        }
     cached = _POINTS_CACHE.get(int(telegram_id))
     if cached and (time.time() - float(cached.get("ts", 0)) < _POINTS_CACHE_TTL_SECONDS):
         return cached["data"]
@@ -552,27 +555,33 @@ async def poll_lowiqpts_relay_events(bot_app) -> None:
         return
     bot_data = bot_app.bot_data
     queue, _ = _pending_maps(bot_data)
-    session_id = ""
+    seen_sessions: set[str] = set()
+    session_ids: list[str] = []
     for req in queue:
-        session_id = str(req.get("relay_session_id", "")).strip()
-        if session_id:
-            break
-    if not session_id:
+        sid = str(req.get("relay_session_id", "")).strip()
+        if sid and sid not in seen_sessions:
+            seen_sessions.add(sid)
+            session_ids.append(sid)
+    if not session_ids:
         return
-    cursor_key = f"{_RELAY_CURSOR_KEY}:{session_id}"
-    cursor = bot_data.get(cursor_key)
-    response = await relay_poll_events(session_id=session_id, cursor=str(cursor) if cursor else None)
-    if not response.get("ok"):
-        return
+    for session_id in session_ids:
+        cursor_key = f"{_RELAY_CURSOR_KEY}:{session_id}"
+        cursor = bot_data.get(cursor_key)
+        response = await relay_poll_events(session_id=session_id, cursor=str(cursor) if cursor else None)
+        if not response.get("ok"):
+            continue
 
-    events, next_cursor = _extract_events_response(response)
-    if next_cursor:
-        bot_data[cursor_key] = next_cursor
-    for event in events:
-        try:
-            await _process_relay_event(bot_app, bot_data, event)
-        except Exception:
-            logger.warning("Failed to process lowiq relay event", exc_info=True)
+        events, next_cursor = _extract_events_response(response)
+        if next_cursor:
+            bot_data[cursor_key] = next_cursor
+        for raw in events:
+            event = dict(raw) if isinstance(raw, dict) else {}
+            if not _extract_event_session_id(event):
+                event["session_id"] = session_id
+            try:
+                await _process_relay_event(bot_app, bot_data, event)
+            except Exception:
+                logger.warning("Failed to process lowiq relay event", exc_info=True)
 
 
 async def _on_points_refresh_timeout(context) -> None:
