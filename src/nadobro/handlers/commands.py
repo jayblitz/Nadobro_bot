@@ -1,6 +1,6 @@
 import logging
 import os
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
@@ -23,6 +23,7 @@ from src.nadobro.handlers.keyboards import (
     onboarding_accept_tos_kb,
     home_card_kb,
     status_kb,
+    compose_status_overview_kb,
     private_access_kb,
 )
 from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_automation_for_user
@@ -40,6 +41,42 @@ from src.nadobro.handlers.home_card import (
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.invite_service import has_private_access, redeem_invite_code
 logger = logging.getLogger(__name__)
+
+
+async def build_status_dashboard_parts(
+    telegram_id: int,
+    *,
+    studio_page: int = 0,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """MarkdownV2 source text plus merged keyboard (English markup labels).
+
+    Caller localizes text/markup with the user's active language.
+    """
+    status = await run_blocking(get_user_bot_status, telegram_id)
+    onboarding = await run_blocking(evaluate_readiness, telegram_id)
+    text = fmt_status_overview(status, onboarding)
+    studio_markup = None
+    try:
+        from src.nadobro.services.feature_flags import studio_enabled
+        from src.nadobro.studio.status import build_status_cards
+
+        if studio_enabled():
+            studio_text, studio_markup = await run_blocking(
+                build_status_cards,
+                telegram_id,
+                onboarding.get("network"),
+                studio_page,
+            )
+            text = f"{text}\n\n{studio_text}"
+    except Exception as e:
+        logger.warning("Studio status render failed: %s", e)
+
+    merged = compose_status_overview_kb(
+        studio_markup,
+        is_running=bool(status.get("running")),
+        strategy_label=str(status.get("strategy") or "").upper() or None,
+    )
+    return text, merged
 
 
 def _safe_text(text: str | None, fallback: str) -> str:
@@ -181,35 +218,11 @@ async def cmd_status(update: Update, context: CallbackContext):
     if not await _ensure_private_access(update, telegram_id):
         return
     with language_context(get_user_language(telegram_id)):
-        status = await run_blocking(get_user_bot_status, telegram_id)
-        onboarding = await run_blocking(evaluate_readiness, telegram_id)
-        text = fmt_status_overview(status, onboarding)
-        try:
-            from src.nadobro.services.feature_flags import studio_enabled
-            from src.nadobro.studio.status import build_status_cards
-
-            if studio_enabled():
-                studio_text, studio_markup = await run_blocking(
-                    build_status_cards,
-                    telegram_id,
-                    onboarding.get("network"),
-                )
-                text = f"{text}\n\n{studio_text}"
-            else:
-                studio_markup = None
-        except Exception as e:
-            logger.warning("Studio status render failed: %s", e)
-            studio_markup = None
+        text, merged_kb = await build_status_dashboard_parts(telegram_id)
 
         lang = get_active_language()
         localized = localize_text(text, lang)
-        reply_markup = studio_markup or localize_markup(
-            status_kb(
-                is_running=bool(status.get("running")),
-                strategy_label=str(status.get("strategy") or "").upper() or None,
-            ),
-            lang,
-        )
+        reply_markup = localize_markup(merged_kb, lang)
         # Always send a visible reply so /status works even when the home card is off-screen
         # or edit-in-place fails (webhook / concurrent updates).
         try:
@@ -306,7 +319,7 @@ def _mm_dashboard_keyboard():
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔄 Refresh", callback_data="mm:status:refresh"),
+            InlineKeyboardButton("📊 Refresh MM board", callback_data="mm:status:refresh"),
             InlineKeyboardButton("🧾 Fills", callback_data="mm:fills"),
         ],
     ])

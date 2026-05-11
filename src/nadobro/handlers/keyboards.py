@@ -208,9 +208,22 @@ def bro_answer_kb(mode: str | None = None):
     return InlineKeyboardMarkup(rows)
 
 
+def compose_status_overview_kb(
+    studio_markup: InlineKeyboardMarkup | None,
+    *,
+    is_running: bool,
+    strategy_label: str | None,
+) -> InlineKeyboardMarkup:
+    """Stack Strategy Studio pagination above primary /status controls so Refresh/Stop stay usable."""
+    base_rows = list(status_kb(is_running=is_running, strategy_label=strategy_label).inline_keyboard)
+    if studio_markup and isinstance(studio_markup, InlineKeyboardMarkup) and studio_markup.inline_keyboard:
+        return InlineKeyboardMarkup(list(studio_markup.inline_keyboard) + base_rows)
+    return InlineKeyboardMarkup(base_rows)
+
+
 def status_kb(is_running: bool = False, strategy_label: str | None = None):
     """Inline actions for /status with strategy-aware stop control."""
-    rows = [[InlineKeyboardButton("🔄 Refresh", callback_data="status:refresh")]]
+    rows = [[InlineKeyboardButton("📊 Refresh status", callback_data="status:refresh")]]
     if is_running:
         stop_label = "🛑 Stop Strategy"
         if strategy_label:
@@ -228,7 +241,7 @@ def portfolio_kb(has_positions: bool = False):
         ],
         [
             InlineKeyboardButton("📊 Performance", callback_data="portfolio:analytics"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
+            InlineKeyboardButton("📊 Refresh portfolio", callback_data="portfolio:refresh"),
         ],
     ]
     if has_positions:
@@ -242,7 +255,7 @@ def referral_kb(can_generate: bool = False):
     if can_generate:
         rows.append([InlineKeyboardButton("🎟 Generate Invite Code", callback_data="refer:generate")])
     rows.append([
-        InlineKeyboardButton("🔄 Refresh", callback_data="refer:view"),
+        InlineKeyboardButton("🔗 Refresh referrals", callback_data="refer:view"),
         InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -585,7 +598,7 @@ def trade_confirm_kb(trade_id="pending"):
 
 def positions_kb(positions):
     rows = [
-        [InlineKeyboardButton("🔄 Refresh", callback_data="pos:view")],
+        [InlineKeyboardButton("📌 Reload positions", callback_data="pos:view")],
     ]
     seen = set()
     for p in positions:
@@ -814,8 +827,8 @@ def points_scope_kb() -> InlineKeyboardMarkup:
     """LOWIQPTS flow: only weekly snapshot via relay; no period toggles in UI."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔄 Refresh", callback_data="points:refresh"),
-            InlineKeyboardButton("❌ Cancel", callback_data="points:cancel"),
+            InlineKeyboardButton("🏆 Refresh points", callback_data="points:refresh"),
+            InlineKeyboardButton("❌ Cancel LOWIQPTS", callback_data="points:cancel"),
         ],
         [
             InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
@@ -832,7 +845,7 @@ def points_followup_options_kb(options: list[str]):
             row.append(InlineKeyboardButton(label[:32], callback_data=f"points:replyopt:{i + j}"))
         if row:
             rows.append(row)
-    rows.append([InlineKeyboardButton("❌ Cancel Request", callback_data="points:cancel")])
+    rows.append([InlineKeyboardButton("❌ Cancel LOWIQPTS", callback_data="points:cancel")])
     rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
 
@@ -914,7 +927,7 @@ def strategy_action_kb(
         ]
     if is_running:
         rows.insert(0, [
-            InlineKeyboardButton("🔄 Refresh", callback_data="strategy:status"),
+            InlineKeyboardButton("📊 Strategy snapshot", callback_data="strategy:status"),
             InlineKeyboardButton(f"🛑 Stop {strategy_id.upper()[:8]}", callback_data="strategy:stop"),
         ])
     rows.append([
@@ -978,7 +991,7 @@ def bro_action_kb(is_running: bool = False):
     ]
     if is_running:
         rows.insert(0, [
-            InlineKeyboardButton("🔄 Refresh", callback_data="strategy:status"),
+            InlineKeyboardButton("📊 Strategy snapshot", callback_data="strategy:status"),
             InlineKeyboardButton("🛑 Stop BRO", callback_data="strategy:stop"),
         ])
     rows.append([
@@ -1239,7 +1252,7 @@ def copy_dashboard_kb(mirrors: list, lang: str = "en"):
     if not mirrors:
         rows.append([InlineKeyboardButton(localize_label("ℹ️ No active copies", lang), callback_data="copy:hub")])
     rows.append([
-        InlineKeyboardButton(localize_label("🔄 Refresh", lang), callback_data="copy:dashboard"),
+        InlineKeyboardButton(localize_label("📊 Refresh copy dashboard", lang), callback_data="copy:dashboard"),
         InlineKeyboardButton(localize_label("◀ Back", lang), callback_data="copy:hub"),
     ])
     return InlineKeyboardMarkup(rows)

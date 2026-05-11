@@ -1417,6 +1417,18 @@ class NadoClient:
                 "3. If already linked and funded, the bot's server IP may be restricted by the exchange."
                 + diag
             )
+        compact_json = error_str.replace(" ", "")
+        if (
+            "account health" in err_lower
+            or '"error_code":2006' in compact_json.lower()
+            or "'error_code':2006" in compact_json.lower()
+        ):
+            return (
+                "The exchange rejected this order because projected account health would fall "
+                "below its required threshold. That depends on isolated margin, leverage, open "
+                "positions and fees — not only raw wallet balance. Try reducing order size or "
+                "leverage, add collateral on Nado, or close risk elsewhere."
+            )
         if "insufficient" in err_lower or "margin" in err_lower:
             return "Insufficient margin. Please deposit more funds."
         if "product" in err_lower and "not found" in err_lower:
@@ -1834,7 +1846,7 @@ class NadoClient:
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
-                        logger.error(f"place_order retry failed: {retry_e}")
+                        logger.error("place_order retry failed: %s", retry_e)
                         return {"success": False, "error": self._friendly_error(str(retry_e))}
 
             # Retry with bumped size when exchange enforces min notional.
@@ -1869,7 +1881,7 @@ class NadoClient:
                                 _retry_count=_retry_count + 1,
                             )
                         except Exception as retry_e:
-                            logger.error(f"place_order min-notional retry failed: {retry_e}")
+                            logger.error("place_order min-notional retry failed: %s", retry_e)
                             return {"success": False, "error": self._friendly_error(str(retry_e))}
 
             # Some exchange error payloads truncate size_increment value. In that case
@@ -1900,7 +1912,7 @@ class NadoClient:
                         if retry_result.get("success"):
                             return retry_result
                     except Exception as retry_e:
-                        logger.error(f"place_order fallback retry failed: {retry_e}")
+                        logger.error("place_order fallback retry failed: %s", retry_e)
                     # Keep trying broader candidate increments until one succeeds.
                     continue
 
@@ -1928,10 +1940,10 @@ class NadoClient:
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
-                        logger.error(f"place_order retry failed: {retry_e}")
+                        logger.error("place_order aligned-price retry failed: %s", retry_e)
                         return {"success": False, "error": self._friendly_error(str(retry_e))}
 
-            logger.error(f"place_order failed: {e}")
+            logger.error("place_order failed: %s", err_str)
             return {"success": False, "error": self._friendly_error(err_str)}
 
     def place_market_order(

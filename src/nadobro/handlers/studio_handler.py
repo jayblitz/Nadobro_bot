@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -18,6 +19,29 @@ from src.nadobro.studio.clarifier import next_question
 from src.nadobro.studio.confirmation import build_confirmation_card
 from src.nadobro.studio.execution_bridge import execute_intent
 from src.nadobro.studio.extractor import extract
+
+logger = logging.getLogger(__name__)
+
+
+def _studio_execution_user_summary(result: dict) -> str:
+    """Short user-visible outcome — never dump raw API payloads or repr(dict)."""
+    from src.nadobro.services.log_redaction import redact_sensitive_text
+
+    if not isinstance(result, dict):
+        return redact_sensitive_text(str(result))[:600]
+    if result.get("success"):
+        bits = []
+        if result.get("conditional_order_id") is not None:
+            bits.append("Conditional order armed.")
+        if result.get("digest"):
+            bits.append("Exchange acknowledged the order.")
+        sid = result.get("strategy_session_id")
+        if sid is not None:
+            bits.append(f"Strategy session #{sid}.")
+        return "✅ " + (" ".join(bits) if bits else "Execution completed.")
+    err = redact_sensitive_text(str(result.get("error") or "Execution failed."))[:450]
+    return f"⚠️ {err}"
+
 
 _CANCEL_WORDS = {"cancel", "nevermind", "never mind", "stop"}
 _STUDIO_LIVE_MODE_KEY = "studio_live_mode"
@@ -112,7 +136,11 @@ async def handle_studio_text(update: Update, context: CallbackContext) -> bool:
         if intent.network is None:
             intent.network = network
     except Exception as e:
-        await update.message.reply_text(f"I couldn't parse that strategy yet. Raw error: `{str(e)[:300]}`")
+        logger.warning("Studio extract failed: %s", e, exc_info=True)
+        await update.message.reply_text(
+            "I couldn't parse that strategy yet. Try naming the asset, side (buy/sell), size, "
+            "and leverage more explicitly — or type cancel."
+        )
         return True
     history.append({"role": "user", "content": raw})
     question = next_question(intent)
@@ -179,7 +207,7 @@ async def handle_studio_callback(query, context: CallbackContext) -> bool:
         )
         if result.get("success"):
             context.user_data.pop(_STUDIO_LIVE_MODE_KEY, None)
-        await query.edit_message_text(f"Strategy execution result:\n`{result}`")
+        await query.edit_message_text(_studio_execution_user_summary(result))
         return True
     await query.edit_message_text("Studio action could not be completed.")
     return True
