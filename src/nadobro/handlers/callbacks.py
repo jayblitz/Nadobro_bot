@@ -1176,12 +1176,6 @@ async def _handle_points(query, data, telegram_id, context):
             option_index = -1
         relay_result = await relay_option_reply_to_lowiqpts(context, query.message.chat.id, option_index)
         if relay_result.get("ok"):
-            choice = str(relay_result.get("choice", "")).strip()
-            if choice:
-                await context.bot.send_message(
-                    chat_id=query.message.chat.id,
-                    text=f"↪️ Sent to LOWIQPTS: {choice}",
-                )
             return
         await context.bot.send_message(
             chat_id=query.message.chat.id,

@@ -57,6 +57,8 @@ def test_relay_poll_events_is_scoped_to_session(monkeypatch):
                     "text": "hello",
                     "options_json": None,
                     "source_message_id": None,
+                    "photo_bytes": None,
+                    "photo_mime": None,
                     "created_at": datetime.now(timezone.utc),
                 }
             ]
@@ -143,3 +145,21 @@ def test_claim_pending_matches_wallet_in_reply_text():
 
     claimed = points_service._claim_pending_for_event(bd, "", f"Points overview for {w}")
     assert claimed is row
+
+
+def test_parse_lowiq_points_reply_handles_markdown_volume_lines():
+    from src.nadobro.services import points_service
+
+    blob = """📊 NADO REPORT
+Period: 1 May - 8 May Epoch 14
+**Core:**
+**Volume:** 1 134.62
+**Points:** 502.14
+**Cost/Point:** -0.03
+"""
+    parsed = points_service.parse_lowiq_points_reply(blob)
+    assert parsed is not None
+    assert abs(parsed["volume_usd"] - 1134.62) < 0.01
+    assert abs(parsed["points"] - 502.14) < 0.01
+    assert abs(parsed["cost_per_point"] - (-0.03)) < 0.0001
+    assert points_service._looks_like_nado_report_summary_text(blob)

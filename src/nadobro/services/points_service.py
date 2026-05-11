@@ -1,16 +1,13 @@
 import asyncio
+import base64
 import logging
 import os
 import re
 import secrets
 import time
+from io import BytesIO
 from typing import Optional
 
-from telegram.constants import ParseMode
-from telegram.error import BadRequest
-
-from src.nadobro.handlers.formatters import fmt_points_dashboard
-from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.keyboards import points_followup_options_kb, points_scope_kb
 from src.nadobro.services.lowiq_relay_client import (
     close_session as relay_close_session,
@@ -245,6 +242,44 @@ def _extract_event_options(event: dict) -> list[str]:
     return out
 
 
+def _extract_event_photo(event: dict) -> tuple[Optional[bytes], Optional[str]]:
+    if not isinstance(event, dict):
+        return None, None
+    b64 = event.get("photo_base64")
+    if not b64 or not isinstance(b64, str):
+        return None, None
+    try:
+        raw = base64.b64decode(b64.encode("ascii"))
+    except Exception:
+        logger.warning("Invalid LOWIQPTS relay photo payload")
+        return None, None
+    if not raw:
+        return None, None
+    mime = str(event.get("photo_mime") or "image/jpeg").strip() or "image/jpeg"
+    return raw, mime
+
+
+def _relay_photo_filename(mime: Optional[str]) -> str:
+    m = (mime or "").lower()
+    if "png" in m:
+        return "nado_points.png"
+    if "webp" in m:
+        return "nado_points.webp"
+    return "nado_points.jpg"
+
+
+def _looks_like_nado_report_summary_text(text: str) -> bool:
+    """Block-shaped LOWIQPTS report (forwarded as text before the image card)."""
+    if not text or len(text) < 100:
+        return False
+    upper = text.upper()
+    if "NADO REPORT" in upper:
+        return True
+    if "📊" in text and "EPOCH" in upper and ("POINTS" in upper or "CORE" in upper):
+        return True
+    return False
+
+
 def _extract_event_source_message_id(event: dict) -> Optional[int]:
     if not isinstance(event, dict):
         return None
@@ -296,9 +331,13 @@ def _claim_pending_for_event(bot_data: dict, session_id: str, text: str) -> Opti
 def parse_lowiq_points_reply(text: str) -> Optional[dict]:
     if not text:
         return None
-    points_match = re.search(r"points?\s*[:\-]\s*([\d,]+(?:\.\d+)?)", text, re.IGNORECASE)
-    volume_match = re.search(r"volume\s*[:\-]\s*\$?\s*([\d,]+(?:\.\d+)?)", text, re.IGNORECASE)
-    cpp_match = re.search(r"(?:cost\s*/\s*point|cost\s+per\s+point)\s*[:\-]\s*\$?\s*([\d,]+(?:\.\d+)?)", text, re.IGNORECASE)
+    num = r"([\-]?[\d\s,\.]+)"
+    points_match = re.search(r"(?i)(?:\*{0,2}\s*)?points?\s*:\s*(?:\*{0,2}\s*)?(?:\x24)?\s*" + num, text)
+    volume_match = re.search(r"(?i)(?:\*{0,2}\s*)?volume\s*:\s*(?:\*{0,2}\s*)?(?:\x24)?\s*" + num, text)
+    cpp_match = re.search(
+        r"(?i)(?:\*{0,2}\s*)?(?:cost\s*/\s*point|cost\s+per\s+point)\s*:\s*(?:\*{0,2}\s*)?(?:\x24)?\s*" + num,
+        text,
+    )
     explicit_fields = bool(points_match or volume_match or cpp_match)
     if not explicit_fields and _NO_POINTS_HINT_RE.search(text):
         return {
@@ -313,7 +352,11 @@ def parse_lowiq_points_reply(text: str) -> Optional[dict]:
     def _to_float(match_obj) -> float:
         if not match_obj:
             return 0.0
-        return float(match_obj.group(1).replace(",", ""))
+        raw = match_obj.group(1).replace(",", "").replace(" ", "").replace("$", "")
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.0
 
     points = _to_float(points_match)
     volume = _to_float(volume_match)
@@ -470,8 +513,10 @@ async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict
 
 async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     text = _extract_event_text(event)
-    if not text:
+    photo_bytes, photo_mime = _extract_event_photo(event)
+    if not text.strip() and not photo_bytes:
         return
+
     session_id = _extract_event_session_id(event)
     req = _claim_pending_for_event(bot_data, session_id, text)
     if not req:
@@ -481,20 +526,49 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     telegram_id = int(req.get("telegram_id"))
     options = _extract_event_options(event)
     source_message_id = _extract_event_source_message_id(event)
+
     if options:
         req["relay_options"] = [str(o).strip() for o in options if str(o).strip()]
         if source_message_id is not None:
             req["relay_options_source_message_id"] = int(source_message_id)
         else:
             req.pop("relay_options_source_message_id", None)
-    # Do NOT clear relay_options on text-only lines: LOWIQPTS often sends prose after a
-    # button row; wiping here made Yes/No clicks no-op ("No selectable options").
-    await bot_app.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=points_followup_options_kb(options) if options else None,
-    )
-    parsed = parse_lowiq_points_reply(text)
+
+    parsed = parse_lowiq_points_reply(text) if text else None
+    summary_block = _looks_like_nado_report_summary_text(text)
+
+    if summary_block and parsed:
+        payload = build_dashboard_payload(parsed)
+        save_points_snapshot(telegram_id, payload)
+
+    if photo_bytes:
+        try:
+            await bot_app.bot.send_photo(
+                chat_id=chat_id,
+                photo=BytesIO(photo_bytes),
+                filename=_relay_photo_filename(photo_mime),
+                reply_markup=points_scope_kb(),
+            )
+        except Exception as e:
+            logger.warning("LOWIQPTS relay: send_photo failed: %s", e)
+        complete_pending_request(bot_data, req)
+        relay_sid = str(req.get("relay_session_id", "")).strip()
+        if relay_sid:
+            await relay_close_session(session_id=relay_sid, reason="completed")
+        return
+
+    if summary_block:
+        _touch_pending_request(req)
+        _schedule_timeout(bot_app, str(req.get("req_id", "")))
+        return
+
+    if text.strip():
+        await bot_app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=points_followup_options_kb(options) if options else None,
+        )
+
     if not parsed:
         _schedule_timeout(bot_app, str(req.get("req_id", "")))
         return
@@ -502,27 +576,9 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     payload = build_dashboard_payload(parsed)
     save_points_snapshot(telegram_id, payload)
     complete_pending_request(bot_data, req)
-    dash_text = fmt_points_dashboard(payload)
-    try:
-        await bot_app.bot.send_message(
-            chat_id=chat_id,
-            text=dash_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=points_scope_kb(),
-        )
-    except BadRequest as e:
-        if "Can't parse entities" not in str(e):
-            raise
-        logger.warning("Points dashboard MarkdownV2 failed; sending plain text: %s", e)
-        await bot_app.bot.send_message(
-            chat_id=chat_id,
-            text=plain_text_fallback(dash_text),
-            reply_markup=points_scope_kb(),
-        )
-
-    session_id = str(req.get("relay_session_id", "")).strip()
-    if session_id:
-        await relay_close_session(session_id=session_id, reason="completed")
+    relay_sid = str(req.get("relay_session_id", "")).strip()
+    if relay_sid:
+        await relay_close_session(session_id=relay_sid, reason="completed")
 
 
 async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: int | str) -> dict:

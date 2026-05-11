@@ -48,12 +48,21 @@ async def _on_lowiqpts_message(
     text: str,
     options: Optional[list[str]] = None,
     source_message_id: Optional[int] = None,
+    photo_bytes: Optional[bytes] = None,
+    photo_mime: Optional[str] = None,
 ) -> None:
     session_id = await find_session_for_incoming(sender_id)
     if not session_id:
         logger.debug("No active session for sender_id=%s, dropping message", sender_id)
         return
-    await store_event(session_id, text, options=options, source_message_id=source_message_id)
+    await store_event(
+        session_id,
+        text or "",
+        options=options,
+        source_message_id=source_message_id,
+        photo_bytes=photo_bytes,
+        photo_mime=photo_mime,
+    )
 
 
 @asynccontextmanager
