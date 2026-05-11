@@ -57,9 +57,11 @@ async def main():
         CREATE INDEX IF NOT EXISTS idx_relay_sessions_request_id
         ON relay_sessions (request_id);
     """)
+    await conn.execute("DROP INDEX IF EXISTS idx_relay_sessions_single_active;")
     await conn.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_sessions_single_active
-        ON relay_sessions (status) WHERE status = 'active';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_sessions_active_per_user
+        ON relay_sessions (telegram_user_id)
+        WHERE status = 'active';
     """)
 
     await conn.close()

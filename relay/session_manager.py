@@ -5,6 +5,7 @@ from typing import Optional
 import asyncpg
 
 from relay.db import get_pool
+from relay import lowiq_turn
 from relay.telegram_client import click_message_button, get_lowiqpts_entity, send_message
 
 logger = logging.getLogger("relay.sessions")
@@ -29,11 +30,34 @@ async def create_session(
         if existing:
             return {"ok": True, "session_id": existing}
 
-        active_count = await conn.fetchval(
-            "SELECT count(*) FROM relay_sessions WHERE status = 'active'"
+        busy_user = await conn.fetchval(
+            """
+            SELECT id FROM relay_sessions
+            WHERE telegram_user_id = $1 AND status = 'active'
+            LIMIT 1
+            """,
+            telegram_user_id,
         )
-        if active_count and active_count > 0:
-            return {"ok": False, "error": "busy", "detail": "Another session is active. Close it first or wait for idle expiry."}
+        if busy_user:
+            await conn.execute(
+                """
+                UPDATE relay_sessions
+                SET request_id = $2, chat_id = $3, wallet = $4, updated_at = now()
+                WHERE id = $1 AND status = 'active'
+                """,
+                busy_user,
+                request_id,
+                chat_id,
+                wallet,
+            )
+            return {"ok": True, "session_id": busy_user}
+
+    if not await lowiq_turn.acquire_turn():
+        return {
+            "ok": False,
+            "error": "channel_busy",
+            "detail": "LOWIQPTS relay channel is busy with another refresh. Try again in a minute.",
+        }
 
     session_id = _generate_session_id()
     entity = await get_lowiqpts_entity()
@@ -41,30 +65,60 @@ async def create_session(
 
     try:
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                existing = await conn.fetchval(
-                    "SELECT id FROM relay_sessions WHERE request_id = $1 AND status = 'active'",
-                    request_id,
-                )
-                if existing:
-                    return {"ok": True, "session_id": existing}
+            existing = await conn.fetchval(
+                "SELECT id FROM relay_sessions WHERE request_id = $1 AND status = 'active'",
+                request_id,
+            )
+            if existing:
+                await lowiq_turn.release_unbound_turn()
+                return {"ok": True, "session_id": existing}
+            try:
                 await conn.execute(
                     """
                     INSERT INTO relay_sessions
                         (id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id, status)
                     VALUES ($1, $2, $3, $4, $5, $6, 'active')
                     """,
-                    session_id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id,
+                    session_id,
+                    telegram_user_id,
+                    chat_id,
+                    wallet,
+                    request_id,
+                    lowiqpts_chat_id,
                 )
-    except asyncpg.UniqueViolationError:
-        async with pool.acquire() as conn:
-            existing = await conn.fetchval(
-                "SELECT id FROM relay_sessions WHERE request_id = $1 AND status = 'active'",
-                request_id,
-            )
-        if existing:
-            return {"ok": True, "session_id": existing}
-        return {"ok": False, "error": "busy", "detail": "Another session is active. Close it first or wait for idle expiry."}
+            except asyncpg.UniqueViolationError:
+                existing_uid = await conn.fetchval(
+                    """
+                    SELECT id FROM relay_sessions
+                    WHERE telegram_user_id = $1 AND status = 'active'
+                    LIMIT 1
+                    """,
+                    telegram_user_id,
+                )
+                await lowiq_turn.release_unbound_turn()
+                if existing_uid:
+                    await conn.execute(
+                        """
+                        UPDATE relay_sessions
+                        SET request_id = $2, chat_id = $3, wallet = $4, updated_at = now()
+                        WHERE id = $1 AND status = 'active'
+                        """,
+                        existing_uid,
+                        request_id,
+                        chat_id,
+                        wallet,
+                    )
+                    return {"ok": True, "session_id": existing_uid}
+                return {
+                    "ok": False,
+                    "error": "session_race",
+                    "detail": "Could not claim LOWIQPTS session; retry shortly.",
+                }
+    except Exception:
+        await lowiq_turn.release_unbound_turn()
+        raise
+
+    await lowiq_turn.bind_turn(session_id)
 
     try:
         await send_message(entity, f"/nado {wallet}")
@@ -75,6 +129,7 @@ async def create_session(
                 "UPDATE relay_sessions SET status = 'failed', updated_at = now() WHERE id = $1",
                 session_id,
             )
+        await lowiq_turn.release_turn(session_id)
         raise
 
     logger.info("Session %s created for wallet=%s req=%s", session_id, wallet[:10], request_id)
@@ -116,6 +171,7 @@ async def close_session(session_id: str, reason: Optional[str] = None) -> dict:
     if result == "UPDATE 0":
         return {"ok": False, "error": "session_not_found_or_already_closed"}
 
+    await lowiq_turn.release_turn(session_id)
     logger.info("Session %s closed (reason=%s)", session_id, reason or "none")
     return {"ok": True}
 
@@ -157,15 +213,20 @@ async def get_active_session_ids() -> list[str]:
 async def cleanup_idle_sessions() -> int:
     pool = get_pool()
     async with pool.acquire() as conn:
-        result = await conn.execute(
+        rows = await conn.fetch(
             """
             UPDATE relay_sessions
             SET status = 'expired', updated_at = now()
             WHERE status = 'active'
               AND updated_at < now() - interval '5 minutes'
+            RETURNING id
             """
         )
-    count = int(result.split()[-1]) if result else 0
+    for row in rows or []:
+        sid = str(row.get("id") or "").strip()
+        if sid:
+            await lowiq_turn.release_turn(sid)
+    count = len(rows or [])
     if count > 0:
         logger.info("Cleaned up %d idle sessions", count)
     return count

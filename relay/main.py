@@ -11,7 +11,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from relay.db import close_db, init_db
-from relay.event_store import find_session_for_incoming, poll_events, store_event
+from relay.event_store import (
+    find_session_for_incoming,
+    poll_events,
+    purge_old_relay_events,
+    store_event,
+)
 from relay.session_manager import (
     cleanup_idle_sessions,
     close_session,
@@ -28,13 +33,22 @@ logging.basicConfig(
 logger = logging.getLogger("relay")
 
 _cleanup_task: Optional[asyncio.Task] = None
+_cleanup_ticks = 0
 
 
 async def _periodic_cleanup() -> None:
+    global _cleanup_ticks
+    retention_days = int(os.environ.get("RELAY_EVENTS_RETENTION_DAYS", "30") or "30")
+    purge_every_n_ticks = max(1, int(os.environ.get("RELAY_EVENTS_PURGE_EVERY_N_CLEANUPS", "15") or "15"))
     while True:
         try:
             await asyncio.sleep(60)
             await cleanup_idle_sessions()
+            _cleanup_ticks += 1
+            if _cleanup_ticks % purge_every_n_ticks == 0:
+                deleted = await purge_old_relay_events(retention_days=retention_days)
+                if deleted:
+                    logger.info("Purged %d relay_events older than %d days", deleted, retention_days)
         except asyncio.CancelledError:
             break
         except Exception:
@@ -154,8 +168,6 @@ async def start_session_endpoint(
             wallet=_normalize_wallet(body.wallet),
             request_id=body.request_id,
         )
-        if not result.get("ok") and result.get("error") == "busy":
-            raise HTTPException(status_code=409, detail=result.get("detail", "Another session is active"))
         return result
     except HTTPException:
         raise

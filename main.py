@@ -164,8 +164,17 @@ def _runtime_health_payload() -> dict:
 
 
 def setup_bot():
-    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, filters
+    from telegram.ext import (
+        Application,
+        ApplicationHandlerStop,
+        CommandHandler,
+        MessageHandler,
+        CallbackQueryHandler,
+        TypeHandler,
+        filters,
+    )
     from telegram import Update
+    from telegram.constants import ChatType
 
     from src.nadobro.config import BOT_USERNAME
     from src.nadobro.handlers.commands import (
@@ -182,6 +191,12 @@ def setup_bot():
     from src.nadobro.handlers.brief_commands import cmd_market_news, cmd_morning_brief
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
+    from src.nadobro.handlers.update_serialization import with_user_serialized
+
+    async def _private_chat_only(update: Update, context):
+        chat = update.effective_chat
+        if chat is None or chat.type != ChatType.PRIVATE:
+            raise ApplicationHandlerStop()
 
     async def _language_middleware(update: Update, context):
         user = update.effective_user
@@ -215,6 +230,7 @@ def setup_bot():
         .build()
     )
 
+    app.add_handler(TypeHandler(Update, _private_chat_only), group=-2)
     app.add_handler(TypeHandler(Update, _language_middleware), group=-1)
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -236,8 +252,8 @@ def setup_bot():
     app.add_handler(CommandHandler("mm_status", cmd_mm_status))
     app.add_handler(CommandHandler("mm_fills", cmd_mm_fills))
 
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(with_user_serialized(handle_callback)))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, with_user_serialized(handle_message)))
     app.add_error_handler(_error_handler)
 
     logger.info("Bot handlers registered (pure bot mode, language middleware active)")

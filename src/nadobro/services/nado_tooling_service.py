@@ -9,6 +9,12 @@ from typing import Any
 
 from src.nadobro.services.execution_queue import get_queue_diagnostics
 from src.nadobro.services.perf import snapshot as perf_snapshot
+from src.nadobro.config import (
+    get_dn_products,
+    get_perp_products,
+    get_product_id,
+    list_volume_spot_product_names,
+)
 from src.nadobro.services.user_service import (
     get_runtime_wallet_readiness,
     get_user,
@@ -34,6 +40,20 @@ def trigger_preview_enabled() -> bool:
 
 def _network_to_data_env(network: str) -> str:
     return "nadoMainnet" if str(network or "").lower() == "mainnet" else "nadoTestnet"
+
+
+def _catalog_symbols_for_network(network: str, client) -> set[str]:
+    out: set[str] = set()
+    for batch in (
+        get_perp_products(network=network, client=client) or [],
+        get_dn_products(network=network, client=client) or [],
+        list_volume_spot_product_names(network=network, client=client) or [],
+    ):
+        for name in batch:
+            n = str(name).upper().strip()
+            if n:
+                out.add(n)
+    return out
 
 
 def _cli_env_for_user(telegram_id: int) -> dict[str, str] | None:
@@ -129,16 +149,19 @@ def get_market_snapshot(telegram_id: int, product: str, prefer_cli: bool = False
     if not symbol:
         return {"success": False, "error": "product is required"}
 
+    client = get_user_readonly_client(telegram_id)
+    if not client:
+        return {"success": False, "source": "sdk", "error": "readonly client unavailable"}
+
+    allowed = _catalog_symbols_for_network(client.network, client)
+    if symbol not in allowed:
+        return {"success": False, "error": f"unknown product {symbol}"}
+
     env = _cli_env_for_user(telegram_id)
     if prefer_cli and env:
         via_cli = _run_cli_json(["market", "price", symbol], env=env)
         if via_cli.get("success"):
             return via_cli
-
-    client = get_user_readonly_client(telegram_id)
-    if not client:
-        return {"success": False, "source": "sdk", "error": "readonly client unavailable"}
-    from src.nadobro.config import get_product_id
 
     pid = get_product_id(symbol, network=client.network, client=client)
     if pid is None:

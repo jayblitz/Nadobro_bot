@@ -53,7 +53,10 @@ _LOWIQPTS_PENDING_TTL_SECONDS = max(
     int(os.environ.get("LOWIQPTS_PENDING_TTL_SECONDS", "1800") or "1800"),
 )
 
-POINTS_RELAY_TIMEOUT = int(os.environ.get("POINTS_RELAY_TIMEOUT", "30"))
+POINTS_RELAY_TIMEOUT = max(
+    210,
+    int(os.environ.get("POINTS_RELAY_TIMEOUT", "210") or "210"),
+)
 POINTS_MAX_RETRIES = int(os.environ.get("POINTS_MAX_RETRIES", "3"))
 
 _PENDING_QUEUE_KEY = "lowiqpts_pending_queue"
@@ -461,18 +464,33 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
             wallet=wallet,
             request_id=req_id,
         )
-        if not relay_resp.get("ok"):
-            raise RuntimeError(relay_resp.get("error") or "relay_start_failed")
-        session_id = _extract_session_id(relay_resp)
-        if not session_id:
-            raise RuntimeError("relay_session_missing")
-        req["relay_session_id"] = session_id
-        _schedule_timeout(context.application, req_id)
-        return {"ok": True, "timeout_seconds": _POINTS_REPLY_TIMEOUT_SECONDS}
     except Exception as e:
         _remove_pending_req(bot_data, req)
         logger.warning("Failed to start lowiq relay session: %s", e)
         return {"ok": False, "error": "❌ Could not reach LOWIQPTS relay. Try again shortly."}
+
+    if not relay_resp.get("ok"):
+        _remove_pending_req(bot_data, req)
+        err = str(relay_resp.get("error") or "")
+        if err == "channel_busy":
+            return {
+                "ok": False,
+                "error": "⏳ LOWIQPTS is busy with another refresh right now. Try again in a minute.",
+            }
+        if err == "session_race":
+            return {"ok": False, "error": "⚠️ Points refresh conflict. Tap Refresh again."}
+        logger.warning("relay_start_session logical failure: %s", relay_resp)
+        return {"ok": False, "error": "❌ Could not start LOWIQPTS session. Try again shortly."}
+
+    session_id = _extract_session_id(relay_resp)
+    if not session_id:
+        _remove_pending_req(bot_data, req)
+        logger.warning("relay_start_session missing session_id: %s", relay_resp)
+        return {"ok": False, "error": "❌ Could not start LOWIQPTS session. Try again shortly."}
+
+    req["relay_session_id"] = session_id
+    _schedule_timeout(context.application, req_id)
+    return {"ok": True, "timeout_seconds": _POINTS_REPLY_TIMEOUT_SECONDS}
 
 
 async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict:
