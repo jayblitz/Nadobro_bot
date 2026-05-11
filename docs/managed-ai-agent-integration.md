@@ -46,7 +46,7 @@ When a user runs `/agent_on`:
 - Managed mode intercepts text after existing pending-flow and intent handlers.
 - Strategy launch/stop requests are routed into existing backend services:
   - Strategy launch -> `start_user_bot(...)`
-  - Stop all strategies -> `stop_all_user_bots(...)`
+  - Stop all strategies -> `stop_all_automation_for_user(...)` (strategy loops + copy mirrors, with Nado cleanup)
 - Non-action Q&A/analysis requests are delegated to existing `knowledge_service` (`answer_nado_question`), preserving tool access and external-source parsing.
 
 When a user runs `/agent_off`:

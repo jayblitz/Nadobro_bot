@@ -25,7 +25,7 @@ from src.nadobro.handlers.keyboards import (
     status_kb,
     private_access_kb,
 )
-from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_user_bots
+from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_automation_for_user
 from src.nadobro.services.nado_tooling_service import get_ops_diagnostics
 from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
@@ -262,10 +262,18 @@ async def cmd_stop_all(update: Update, context: CallbackContext):
         return
     with language_context(get_user_language(telegram_id)):
         lang = get_active_language()
-        ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
-        close_msg = localize_text("To close open positions, use the Positions menu.", lang)
+        ok, msg = stop_all_automation_for_user(telegram_id)
+        hint_ok = localize_text(
+            "Give Nado a few seconds to sync, then confirm open orders and positions in Positions.",
+            lang,
+        )
+        hint_fail = localize_text(
+            "Nothing was active to stop, or exchange cleanup reported errors. Check Positions if exposure remains.",
+            lang,
+        )
+        footer = hint_ok if ok else hint_fail
         await update.message.reply_text(
-            localize_text(fmt_stop_all_result(ok, msg, close_msg), lang),
+            localize_text(fmt_stop_all_result(ok, msg, footer), lang),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(persistent_menu_kb(), lang),
         )

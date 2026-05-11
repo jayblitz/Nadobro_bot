@@ -266,6 +266,36 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIn("No strategy bot was fully stopped", msg)
         self.assertIn("mainnet", msg)
 
+    def test_stop_all_automation_for_user_merges_messages(self):
+        telegram_id = 99
+        with patch.object(bot_runtime, "stop_all_user_bots", return_value=(True, "Stopped 1 running strategy loop(s).")), patch(
+            "src.nadobro.services.copy_service.stop_all_copies", return_value=(True, "Stopped 1 copy mirror(s).")
+        ):
+            ok, msg = bot_runtime.stop_all_automation_for_user(telegram_id)
+        self.assertTrue(ok)
+        self.assertIn("strategy loop", msg)
+        self.assertIn("copy mirror", msg)
+
+    def test_stop_all_automation_for_user_ok_when_only_copy_stops(self):
+        with patch.object(bot_runtime, "stop_all_user_bots", return_value=(False, "No running strategy bot found.")), patch(
+            "src.nadobro.services.copy_service.stop_all_copies", return_value=(True, "Stopped 1 copy mirror(s).")
+        ):
+            ok, msg = bot_runtime.stop_all_automation_for_user(42)
+        self.assertTrue(ok)
+        self.assertIn("No running strategy", msg)
+        self.assertIn("copy mirror", msg)
+
+    def test_stop_all_user_bots_defaults_cancel_orders_true(self):
+        telegram_id = 42
+        rows = [
+            {"key": f"{bot_runtime.STATE_PREFIX}{telegram_id}:mainnet", "value": json.dumps({"running": True})},
+        ]
+        with patch.object(bot_runtime, "query_all", return_value=rows), patch.object(bot_runtime, "set_bot_state"), patch.object(
+            bot_runtime, "_finalize_session"
+        ), patch.object(bot_runtime, "cleanup_strategy_positions", return_value={"success": True}) as cleanup:
+            bot_runtime.stop_all_user_bots(telegram_id)
+        cleanup.assert_called_once()
+
     def test_cleanup_strategy_positions_normalizes_strategy_aliases(self):
         calls = []
 

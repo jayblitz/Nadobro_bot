@@ -842,7 +842,7 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
     return True, "Strategy bot stopped. Open orders cancellation requested."
 
 
-def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[bool, str]:
+def stop_all_user_bots(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, str]:
     stopped = 0
     close_errors: list[str] = []
     stop_errors: list[str] = []
@@ -880,12 +880,34 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = False) -> tuple[b
             continue
     if stopped > 0:
         all_errors = [*close_errors, *stop_errors]
+        cleanup_note = ""
+        if cancel_orders and not close_errors and not stop_errors:
+            cleanup_note = (
+                " Open resting orders were cancelled and positions closed on Nado per stopped strategy "
+                "(same behavior as single-bot stop)."
+            )
         if all_errors:
-            return True, f"Stopped {stopped} running strategy loop(s). Some stop/cleanup actions failed: {'; '.join(all_errors)}"
-        return True, f"Stopped {stopped} running strategy loop(s)."
+            return True, (
+                f"Stopped {stopped} running strategy loop(s). Some stop/cleanup actions failed: "
+                f"{'; '.join(all_errors)}{cleanup_note}"
+            )
+        return True, f"Stopped {stopped} running strategy loop(s).{cleanup_note}"
     if stop_errors:
         return False, f"No strategy bot was fully stopped. Errors: {'; '.join(stop_errors)}"
     return False, "No running strategy bot found."
+
+
+def stop_all_automation_for_user(telegram_id: int) -> tuple[bool, str]:
+    """Stop strategy loops (with Nado cleanup) and halt active copy mirrors."""
+    ok_bot, msg_bot = stop_all_user_bots(telegram_id, cancel_orders=True)
+    from src.nadobro.services.copy_service import stop_all_copies
+
+    ok_copy, msg_copy = stop_all_copies(telegram_id)
+    parts = [msg_bot]
+    if ok_copy:
+        parts.append(msg_copy)
+    combined = " ".join(parts)
+    return bool(ok_bot or ok_copy), combined
 
 
 def get_user_bot_status(telegram_id: int) -> dict:

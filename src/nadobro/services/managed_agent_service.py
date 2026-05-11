@@ -3,7 +3,7 @@ import re
 from typing import NotRequired, TypedDict
 
 from src.nadobro.config import get_perp_products
-from src.nadobro.services.bot_runtime import start_user_bot, stop_all_user_bots
+from src.nadobro.services.bot_runtime import start_user_bot, stop_all_automation_for_user
 from src.nadobro.services.conversation_intent import classify_conversation_intent, is_educational_request
 from src.nadobro.services.strategy_registry import infer_strategy_from_text
 from src.nadobro.services.trading_bro_service import answer_trading_bro_question
@@ -104,7 +104,7 @@ async def handle_managed_agent_turn(
     conversation_intent = classify_conversation_intent(prompt_text)
 
     if _is_strategy_stop_request(prompt_text):
-        ok, msg = stop_all_user_bots(telegram_id, cancel_orders=False)
+        ok, msg = stop_all_automation_for_user(telegram_id)
         prefix = "Done boss." if ok else "Quick heads-up."
         return {
             "handled": True,
