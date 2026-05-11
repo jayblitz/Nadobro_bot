@@ -549,7 +549,36 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
 
     req["relay_session_id"] = session_id
     _schedule_timeout(context.application, req_id)
-    return {"ok": True, "timeout_seconds": _POINTS_REPLY_TIMEOUT_SECONDS}
+    return {
+        "ok": True,
+        "req_id": req_id,
+        "timeout_seconds": _POINTS_REPLY_TIMEOUT_SECONDS,
+    }
+
+
+def set_pending_banner_message(
+    bot_data: dict,
+    req_id: str,
+    chat_id: int | None,
+    message_id: int | None,
+) -> None:
+    """Anchor the timeout banner to the user's original "Refresh requested" card.
+
+    Without this, ``_on_points_refresh_timeout`` posts a fresh chat message 15
+    minutes later — which surfaces inside whatever flow the user has since
+    moved to (strategy work, trade flow, etc.) and looks like the bot just
+    "brought up the Points buttons" out of nowhere.
+    """
+    if not req_id or chat_id is None or message_id is None:
+        return
+    req = _pending_req_by_id(bot_data, str(req_id))
+    if not req:
+        return
+    try:
+        req["banner_chat_id"] = int(chat_id)
+        req["banner_message_id"] = int(message_id)
+    except (TypeError, ValueError):
+        return
 
 
 async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict:
@@ -793,13 +822,31 @@ async def _on_points_refresh_timeout(context) -> None:
     if session_id:
         await relay_close_session(session_id=session_id, reason="timeout")
 
+    banner_chat_id = req.get("banner_chat_id")
+    banner_message_id = req.get("banner_message_id")
+    banner_text = (
+        "⏱ Points refresh is taking longer than expected.\n"
+        "Please tap Refresh to retry."
+    )
+    # Edit the original "⏳ Refresh requested" card in place so the timeout
+    # message stays where the user filed the request — not at the bottom of
+    # whatever flow they are in 15 minutes later.
+    if banner_chat_id and banner_message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=int(banner_chat_id),
+                message_id=int(banner_message_id),
+                text=banner_text,
+                reply_markup=points_scope_kb(),
+            )
+            return
+        except Exception as e:
+            logger.debug("Points timeout edit-in-place failed (%s); falling back to chat message", e)
+
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=(
-                "⏱ Points refresh is taking longer than expected.\n"
-                "Please tap Refresh to retry."
-            ),
+            text=banner_text,
             reply_markup=points_scope_kb(),
         )
     except Exception as e:

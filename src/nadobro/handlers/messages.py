@@ -53,6 +53,7 @@ from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
     get_points_dashboard,
     request_points_refresh,
+    set_pending_banner_message,
     relay_user_reply_to_lowiqpts,
 )
 from src.nadobro.services.strategy_pending_input import (
@@ -691,12 +692,21 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "points:refresh":
         result = await request_points_refresh(context, telegram_id, update.effective_chat.id)
         if result.get("ok"):
-            await _reply_loc(
+            banner = await _reply_loc(
                 update.message,
                 "⏳ Refresh requested\\. I will post your points update as soon as LOWIQPTS replies\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=localize_markup(points_scope_kb(), lang),
             )
+            # Anchor the 15-min timeout banner to this card so the timeout
+            # edits this same message instead of posting fresh chat noise.
+            if banner is not None:
+                set_pending_banner_message(
+                    context.application.bot_data,
+                    str(result.get("req_id") or ""),
+                    getattr(banner.chat, "id", None),
+                    getattr(banner, "message_id", None),
+                )
         else:
             await _reply_loc(
                 update.message,
