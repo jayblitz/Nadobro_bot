@@ -1,4 +1,5 @@
 import logging
+import os
 import secrets
 from typing import Optional
 
@@ -52,84 +53,92 @@ async def create_session(
             )
             return {"ok": True, "session_id": busy_user}
 
-    if not await lowiq_turn.acquire_turn():
-        return {
-            "ok": False,
-            "error": "channel_busy",
-            "detail": "LOWIQPTS relay channel is busy with another refresh. Try again in a minute.",
-        }
-
     session_id = _generate_session_id()
     entity = await get_lowiqpts_entity()
     lowiqpts_chat_id = entity.id
+    wait_sec = float(os.environ.get("RELAY_LOWIQ_CHANNEL_WAIT_SECONDS", "180") or "180")
 
-    try:
-        async with pool.acquire() as conn:
-            existing = await conn.fetchval(
-                "SELECT id FROM relay_sessions WHERE request_id = $1 AND status = 'active'",
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            "SELECT id FROM relay_sessions WHERE request_id = $1 AND status = 'active'",
+            request_id,
+        )
+        if existing:
+            return {"ok": True, "session_id": existing}
+        try:
+            await conn.execute(
+                """
+                INSERT INTO relay_sessions
+                    (id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id, status)
+                VALUES ($1, $2, $3, $4, $5, $6, 'active')
+                """,
+                session_id,
+                telegram_user_id,
+                chat_id,
+                wallet,
                 request_id,
+                lowiqpts_chat_id,
             )
-            if existing:
-                await lowiq_turn.release_unbound_turn()
-                return {"ok": True, "session_id": existing}
-            try:
+        except asyncpg.UniqueViolationError:
+            existing_uid = await conn.fetchval(
+                """
+                SELECT id FROM relay_sessions
+                WHERE telegram_user_id = $1 AND status = 'active'
+                LIMIT 1
+                """,
+                telegram_user_id,
+            )
+            if existing_uid:
                 await conn.execute(
                     """
-                    INSERT INTO relay_sessions
-                        (id, telegram_user_id, chat_id, wallet, request_id, lowiqpts_chat_id, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, 'active')
+                    UPDATE relay_sessions
+                    SET request_id = $2, chat_id = $3, wallet = $4, updated_at = now()
+                    WHERE id = $1 AND status = 'active'
                     """,
-                    session_id,
-                    telegram_user_id,
+                    existing_uid,
+                    request_id,
                     chat_id,
                     wallet,
-                    request_id,
-                    lowiqpts_chat_id,
                 )
-            except asyncpg.UniqueViolationError:
-                existing_uid = await conn.fetchval(
-                    """
-                    SELECT id FROM relay_sessions
-                    WHERE telegram_user_id = $1 AND status = 'active'
-                    LIMIT 1
-                    """,
-                    telegram_user_id,
-                )
-                await lowiq_turn.release_unbound_turn()
-                if existing_uid:
-                    await conn.execute(
-                        """
-                        UPDATE relay_sessions
-                        SET request_id = $2, chat_id = $3, wallet = $4, updated_at = now()
-                        WHERE id = $1 AND status = 'active'
-                        """,
-                        existing_uid,
-                        request_id,
-                        chat_id,
-                        wallet,
-                    )
-                    return {"ok": True, "session_id": existing_uid}
-                return {
-                    "ok": False,
-                    "error": "session_race",
-                    "detail": "Could not claim LOWIQPTS session; retry shortly.",
-                }
-    except Exception:
-        await lowiq_turn.release_unbound_turn()
-        raise
+                return {"ok": True, "session_id": existing_uid}
+            return {
+                "ok": False,
+                "error": "session_race",
+                "detail": "Could not claim LOWIQPTS session; retry shortly.",
+            }
 
-    await lowiq_turn.bind_turn(session_id)
+    async def _send_nado():
+        await send_message(entity, f"/nado {wallet}")
 
     try:
-        await send_message(entity, f"/nado {wallet}")
+        ok = await lowiq_turn.run_exclusive_lowiq_channel(
+            pool,
+            timeout_seconds=wait_sec,
+            coro=_send_nado,
+        )
+        if not ok:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE relay_sessions SET status = 'failed', updated_at = now() WHERE id = $1",
+                    session_id,
+                )
+            return {
+                "ok": False,
+                "error": "channel_busy",
+                "detail": "LOWIQPTS relay channel is busy with another refresh. Try again in a minute.",
+            }
     except Exception as e:
-        logger.error("Telegram send failed for session %s, cleaning up: %s", session_id, e)
+        logger.error(
+            "Telegram send failed for session %s, cleaning up: %s",
+            session_id,
+            e,
+            exc_info=True,
+        )
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE relay_sessions SET status = 'failed', updated_at = now() WHERE id = $1",
                 session_id,
             )
-        await lowiq_turn.release_turn(session_id)
         raise
 
     logger.info("Session %s created for wallet=%s req=%s", session_id, wallet[:10], request_id)
@@ -138,6 +147,7 @@ async def create_session(
 
 async def reply_to_session(session_id: str, text: str) -> dict:
     pool = get_pool()
+    wait_sec = float(os.environ.get("RELAY_LOWIQ_CHANNEL_WAIT_SECONDS", "180") or "180")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, status FROM relay_sessions WHERE id = $1",
@@ -149,7 +159,21 @@ async def reply_to_session(session_id: str, text: str) -> dict:
         return {"ok": False, "error": "session_closed"}
 
     entity = await get_lowiqpts_entity()
-    await send_message(entity, text)
+
+    async def _send_reply():
+        await send_message(entity, text)
+
+    ok = await lowiq_turn.run_exclusive_lowiq_channel(
+        pool,
+        timeout_seconds=wait_sec,
+        coro=_send_reply,
+    )
+    if not ok:
+        return {
+            "ok": False,
+            "error": "channel_busy",
+            "detail": "LOWIQPTS relay channel is busy; retry shortly.",
+        }
 
     async with pool.acquire() as conn:
         await conn.execute(
@@ -171,13 +195,13 @@ async def close_session(session_id: str, reason: Optional[str] = None) -> dict:
     if result == "UPDATE 0":
         return {"ok": False, "error": "session_not_found_or_already_closed"}
 
-    await lowiq_turn.release_turn(session_id)
     logger.info("Session %s closed (reason=%s)", session_id, reason or "none")
     return {"ok": True}
 
 
 async def reply_option_to_session(session_id: str, option_text: str, source_message_id: int) -> dict:
     pool = get_pool()
+    wait_sec = float(os.environ.get("RELAY_LOWIQ_CHANNEL_WAIT_SECONDS", "180") or "180")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, status FROM relay_sessions WHERE id = $1",
@@ -189,7 +213,21 @@ async def reply_option_to_session(session_id: str, option_text: str, source_mess
         return {"ok": False, "error": "session_closed"}
 
     entity = await get_lowiqpts_entity()
-    await click_message_button(entity, int(source_message_id), str(option_text))
+
+    async def _click_option():
+        await click_message_button(entity, int(source_message_id), str(option_text))
+
+    ok = await lowiq_turn.run_exclusive_lowiq_channel(
+        pool,
+        timeout_seconds=wait_sec,
+        coro=_click_option,
+    )
+    if not ok:
+        return {
+            "ok": False,
+            "error": "channel_busy",
+            "detail": "LOWIQPTS relay channel is busy; retry shortly.",
+        }
 
     async with pool.acquire() as conn:
         await conn.execute(
@@ -222,10 +260,6 @@ async def cleanup_idle_sessions() -> int:
             RETURNING id
             """
         )
-    for row in rows or []:
-        sid = str(row.get("id") or "").strip()
-        if sid:
-            await lowiq_turn.release_turn(sid)
     count = len(rows or [])
     if count > 0:
         logger.info("Cleaned up %d idle sessions", count)

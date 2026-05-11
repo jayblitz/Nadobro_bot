@@ -1,52 +1,68 @@
-"""Serialize access to the shared @lowiqpts DM — one multi-turn flow at a time."""
+"""Serialize LOWIQPTS Telegram traffic across relay replicas via Postgres advisory locks."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from typing import Optional
+import time
+from collections.abc import Awaitable, Callable
+
+import asyncpg
 
 logger = logging.getLogger("relay.lowiq_turn")
 
-_SEM = asyncio.Semaphore(1)
-_holder_sid: Optional[str] = None
-_holder_guard = asyncio.Lock()
+# Stable int32 pair — one global LOWIQPTS outbound serialization slot for all relay processes.
+_LOWIQ_ADV_LOCK_K1 = 0x4C4F5751
+_LOWIQ_ADV_LOCK_K2 = 0x49505453
 
-_WAIT_SECONDS = float(os.environ.get("RELAY_LOWIQ_CHANNEL_WAIT_SECONDS", "180") or "180")
-
-
-async def acquire_turn() -> bool:
-    """Block up to RELAY_LOWIQ_CHANNEL_WAIT_SECONDS for exclusive LOWIQPTS channel access."""
-    try:
-        await asyncio.wait_for(_SEM.acquire(), timeout=max(1.0, _WAIT_SECONDS))
-        return True
-    except asyncio.TimeoutError:
-        logger.info("LOWIQPTS channel busy (wait %.1fs timed out)", _WAIT_SECONDS)
-        return False
+_DEFAULT_WAIT_SECONDS = float(os.environ.get("RELAY_LOWIQ_CHANNEL_WAIT_SECONDS", "180") or "180")
 
 
-async def bind_turn(session_id: str) -> None:
-    global _holder_sid
-    async with _holder_guard:
-        _holder_sid = session_id
+async def run_exclusive_lowiq_channel(
+    pool: asyncpg.Pool,
+    *,
+    timeout_seconds: float | None = None,
+    coro: Callable[[], Awaitable[None]],
+) -> bool:
+    """Run ``coro`` while holding a Postgres session advisory lock.
 
+    Between attempts the pool connection is released so waiters do not pin the pool.
 
-async def release_unbound_turn() -> None:
-    """Release semaphore when turn was acquired but no session owns it yet (early-return paths)."""
-    _SEM.release()
+    Returns True after ``coro`` completes. Returns False if the lock could not be
+    acquired before ``timeout_seconds``. Propagates any exception raised by ``coro``
+    after releasing the lock.
+    """
+    wait_budget = max(1.0, float(timeout_seconds if timeout_seconds is not None else _DEFAULT_WAIT_SECONDS))
+    deadline = time.monotonic() + wait_budget
+    k1, k2 = _LOWIQ_ADV_LOCK_K1, _LOWIQ_ADV_LOCK_K2
 
+    while True:
+        async with pool.acquire() as conn:
+            locked = await conn.fetchval(
+                "SELECT pg_try_advisory_lock($1::int, $2::int)",
+                k1,
+                k2,
+            )
+            if locked:
+                try:
+                    await coro()
+                finally:
+                    unlocked = await conn.fetchval(
+                        "SELECT pg_advisory_unlock($1::int, $2::int)",
+                        k1,
+                        k2,
+                    )
+                    if not unlocked:
+                        logger.warning(
+                            "LOWIQPTS advisory unlock returned false (unexpected lock state)"
+                        )
+                return True
 
-async def release_turn(session_id: str) -> None:
-    """Release LOWIQPTS channel for sessions that finished normally."""
-    global _holder_sid
-    release_sem = False
-    async with _holder_guard:
-        if _holder_sid == session_id:
-            _holder_sid = None
-            release_sem = True
-    if release_sem:
-        try:
-            _SEM.release()
-        except ValueError:
-            logger.warning("LOWIQPTS channel semaphore over-release (ignored)", exc_info=True)
+        if time.monotonic() >= deadline:
+            logger.info(
+                "LOWIQPTS channel busy (advisory lock wait %.1fs timed out)",
+                wait_budget,
+            )
+            return False
+        await asyncio.sleep(0.05)

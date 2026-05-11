@@ -183,6 +183,8 @@ async def reply_session_endpoint(
 ):
     result = await reply_to_session(body.session_id, body.text)
     if not result.get("ok"):
+        if result.get("error") == "channel_busy":
+            return result
         raise HTTPException(status_code=404, detail=result.get("error", "session_error"))
     return result
 
@@ -219,6 +221,8 @@ async def reply_option_endpoint(
         body.source_message_id,
     )
     if not result.get("ok"):
+        if result.get("error") == "channel_busy":
+            return result
         raise HTTPException(status_code=404, detail=result.get("error", "session_error"))
     return result
 
