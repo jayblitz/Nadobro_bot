@@ -136,6 +136,24 @@ def _remove_pending_req(bot_data: dict, req: dict) -> None:
             active.pop(chat_id, None)
 
 
+def _drain_pending_points_for_chat(bot_data: dict, chat_id: int) -> list[str]:
+    """Remove all queued LOWIQPTS pending rows for this chat; return relay session ids to close."""
+    queue, _ = _pending_maps(bot_data)
+    stale_sids: list[str] = []
+    cid = int(chat_id)
+    for r in list(queue):
+        try:
+            if int(r.get("chat_id", 0)) != cid:
+                continue
+        except (TypeError, ValueError):
+            continue
+        sid = str(r.get("relay_session_id", "")).strip()
+        if sid:
+            stale_sids.append(sid)
+        _remove_pending_req(bot_data, r)
+    return stale_sids
+
+
 def _pending_req_by_id(bot_data: dict, req_id: str) -> Optional[dict]:
     if not req_id:
         return None
@@ -176,14 +194,33 @@ def _prune_stale_pending(bot_data: dict, ttl_seconds: int | None = None) -> None
 
 
 def get_active_pending_request(bot_data: dict, chat_id: int) -> Optional[dict]:
+    """Resolve pending LOWIQPTS row for this chat, repairing stale active pointers."""
     _prune_stale_pending(bot_data)
-    req_id = str(_active_map(bot_data).get(int(chat_id), "")).strip()
-    if not req_id:
+    cid = int(chat_id)
+    active = _active_map(bot_data)
+    req_id = str(active.get(cid, "")).strip()
+    if req_id:
+        req = _pending_req_by_id(bot_data, req_id)
+        if req:
+            return req
+        active.pop(cid, None)
+
+    queue, _ = _pending_maps(bot_data)
+    candidates: list[dict] = []
+    for r in queue:
+        try:
+            if int(r.get("chat_id", 0)) == cid:
+                candidates.append(r)
+        except (TypeError, ValueError):
+            continue
+    if not candidates:
         return None
-    req = _pending_req_by_id(bot_data, req_id)
-    if not req:
-        _active_map(bot_data).pop(int(chat_id), None)
-    return req
+    candidates.sort(key=lambda r: float(r.get("ts", 0)), reverse=True)
+    best = candidates[0]
+    rid = str(best.get("req_id", "")).strip()
+    if rid:
+        _set_active_req_for_chat(bot_data, cid, rid)
+    return best
 
 
 def complete_pending_request(bot_data: dict, req: dict) -> None:
@@ -343,7 +380,7 @@ def _claim_pending_for_event(bot_data: dict, session_id: str, text: str) -> Opti
                 return req
     wallet = _extract_wallet(text)
     if wallet and by_wallet.get(wallet):
-        req = by_wallet[wallet][0]
+        req = by_wallet[wallet][-1]
         _touch_pending_request(req)
         _set_active_req_for_chat(bot_data, int(req.get("chat_id")), str(req.get("req_id", "")))
         return req
@@ -462,6 +499,13 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
     wallet = str(user.main_address).lower()
     bot_data = context.application.bot_data
     _prune_stale_pending(bot_data)
+    stale_sessions = _drain_pending_points_for_chat(bot_data, int(chat_id))
+    for sid in stale_sessions:
+        try:
+            await relay_close_session(session_id=sid, reason="superseded_by_refresh")
+        except Exception:
+            logger.debug("Could not close superseded LOWIQPTS session %s", sid, exc_info=True)
+
     queue, by_wallet = _pending_maps(bot_data)
     req_id = secrets.token_urlsafe(12)
     req = {
@@ -610,6 +654,11 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
             text=text,
             reply_markup=points_followup_options_kb(options) if options else None,
         )
+
+    if options:
+        _touch_pending_request(req)
+        _schedule_timeout(bot_app, str(req.get("req_id", "")))
+        return
 
     if not parsed:
         _schedule_timeout(bot_app, str(req.get("req_id", "")))

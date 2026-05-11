@@ -3,6 +3,8 @@ import sys
 import time
 import types
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from _stubs import install_test_stubs
 
@@ -145,6 +147,63 @@ def test_claim_pending_matches_wallet_in_reply_text():
 
     claimed = points_service._claim_pending_for_event(bd, "", f"Points overview for {w}")
     assert claimed is row
+
+
+def test_claim_pending_prefers_newest_wallet_row_when_stacked():
+    """Multiple pending rows for one wallet: wallet fallback must bind to latest refresh, not queue[0]."""
+    from src.nadobro.services import points_service
+
+    w = "0x" + "ee" * 20
+    wl = str(w).lower()
+    now = time.time()
+    old = {"req_id": "old", "chat_id": 1, "telegram_id": 1, "wallet": w, "ts": now - 30.0, "relay_session_id": ""}
+    new = {"req_id": "new", "chat_id": 2, "telegram_id": 2, "wallet": w, "ts": now, "relay_session_id": ""}
+    bd = {
+        points_service._PENDING_QUEUE_KEY: [old, new],
+        points_service._PENDING_BY_WALLET_KEY: {wl: [old, new]},
+    }
+
+    claimed = points_service._claim_pending_for_event(bd, "", f"Status for {w}")
+    assert claimed is new
+
+
+def test_lowiqpts_option_prompt_does_not_complete_pending_when_parse_matches(monkeypatch):
+    """Regression: metrics embedded alongside Yes/No options must not drop pending before the user taps."""
+    from src.nadobro.services import points_service
+
+    completed: list[dict] = []
+    monkeypatch.setattr(points_service, "_schedule_timeout", lambda *a, **k: None)
+    monkeypatch.setattr(
+        points_service,
+        "complete_pending_request",
+        lambda bd, req: completed.append(req),
+    )
+
+    wallet = "0x" + "de" * 20
+    req_row = {
+        "req_id": "req1",
+        "chat_id": 42,
+        "telegram_id": 7,
+        "wallet": wallet.lower(),
+        "ts": time.time(),
+        "relay_session_id": "sess_z",
+    }
+    bot_data = {
+        points_service._PENDING_QUEUE_KEY: [req_row],
+        points_service._ACTIVE_BY_CHAT_KEY: {42: "req1"},
+    }
+    send_mock = AsyncMock()
+    bot_app = SimpleNamespace(bot=SimpleNamespace(send_message=send_mock))
+    event = {
+        "session_id": "sess_z",
+        "text": "Include extras?\n\nPoints: 100\nVolume: $50",
+        "options": ["Yes", "No"],
+    }
+
+    asyncio.run(points_service._process_relay_event(bot_app, bot_data, event))
+
+    assert completed == []
+    assert send_mock.await_count == 1
 
 
 def test_parse_lowiq_points_reply_handles_markdown_volume_lines():
