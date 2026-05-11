@@ -1286,6 +1286,20 @@ _TEXTS = {
         "ru": "Чтобы закрыть позиции, используйте меню позиций.",
         "ko": "포지션 종료는 포지션 메뉴를 사용하세요.",
     },
+    "Give Nado a few seconds to sync, then confirm open orders and positions in Positions.": {
+        "zh": "等待几秒让 Nado 同步，然后在持仓中确认挂单与仓位。",
+        "fr": "Laissez quelques secondes à Nado pour se synchroniser, puis vérifiez ordres et positions dans Positions.",
+        "ar": "أعط Nado بضع ثوانٍ للمزامنة، ثم تأكد من الطلبات والمراكز في قائمة المراكز.",
+        "ru": "Подождите несколько секунд для синхронизации с Nado, затем проверьте ордера и позиции в разделе Positions.",
+        "ko": "Nado 동기화를 위해 잠시 기다린 뒤 포지션에서 미체결 주문과 포지션을 확인하세요.",
+    },
+    "Nothing was active to stop, or exchange cleanup reported errors. Check Positions if exposure remains.": {
+        "zh": "没有正在运行的自动化，或交易所清理报错。若仍有敞口请在持仓中检查。",
+        "fr": "Rien n'était actif à arrêter, ou le nettoyage bourse a signalé des erreurs. Vérifiez Positions si une exposition reste.",
+        "ar": "لا يوجد شيء نشط للإيقاف، أو أبلغ تنظيف المنصة عن أخطاء. راجع المراكز إذا بقي تعرض.",
+        "ru": "Нечего было останавливать или очистка на бирже завершилась с ошибками. Проверьте Positions, если осталась экспозиция.",
+        "ko": "중지할 활성 자동화가 없거나 거래소 정리 중 오류가 있었습니다. 노출이 남아 있으면 포지션에서 확인하세요.",
+    },
     "👛 *Wallet Connect Guide*": {
         "zh": "👛 *钱包连接指南*",
         "fr": "👛 *Guide de connexion wallet*",

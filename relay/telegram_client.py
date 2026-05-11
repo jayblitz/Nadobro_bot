@@ -1,10 +1,10 @@
-import asyncio
 import logging
 import os
+from io import BytesIO
 from typing import Callable, Coroutine, Optional
 
 from telethon import TelegramClient, events
-from telethon.tl.types import User
+from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, User
 
 logger = logging.getLogger("relay.telegram")
 
@@ -94,6 +94,9 @@ async def click_message_button(entity, message_id: int, button_text: str):
     return await msg.click(text=str(button_text))
 
 
+_MAX_PHOTO_BYTES = int(os.environ.get("LOWIQPTS_RELAY_MAX_PHOTO_BYTES", str(10 * 1024 * 1024)) or str(10 * 1024 * 1024))
+
+
 async def _handle_incoming(event: events.NewMessage.Event) -> None:
     if _on_message_callback is None:
         return
@@ -117,6 +120,40 @@ async def _handle_incoming(event: events.NewMessage.Event) -> None:
     except Exception:
         options = []
 
+    photo_bytes: Optional[bytes] = None
+    photo_mime: Optional[str] = None
+    media = event.message.media
+    if media:
+        try:
+            buf = BytesIO()
+            if isinstance(media, MessageMediaPhoto):
+                await event.message.download_media(file=buf)
+                raw = buf.getvalue()
+                if raw and len(raw) <= _MAX_PHOTO_BYTES:
+                    photo_bytes = raw
+                    photo_mime = "image/jpeg"
+                elif raw:
+                    logger.warning("LOWIQPTS photo too large (%s bytes); dropping", len(raw))
+            elif isinstance(media, MessageMediaDocument):
+                doc = getattr(media, "document", None)
+                mime = getattr(doc, "mime_type", None) if doc else None
+                mime_str = str(mime or "").strip().lower()
+                if mime_str.startswith("image/"):
+                    buf = BytesIO()
+                    await event.message.download_media(file=buf)
+                    raw = buf.getvalue()
+                    if raw and len(raw) <= _MAX_PHOTO_BYTES:
+                        photo_bytes = raw
+                        photo_mime = mime_str or "image/png"
+                    elif raw:
+                        logger.warning("LOWIQPTS document image too large (%s bytes); dropping", len(raw))
+        except Exception:
+            logger.warning("Failed to download LOWIQPTS media", exc_info=True)
+
+    if not (text.strip() or photo_bytes):
+        logger.debug("Skipping empty LOWIQPTS message (no text and no photo)")
+        return
+
     chat_id = event.chat_id
     logger.debug("Incoming from @%s (chat=%s): %s", _lowiqpts_username(), chat_id, text[:80])
     try:
@@ -126,6 +163,8 @@ async def _handle_incoming(event: events.NewMessage.Event) -> None:
             text=text,
             options=options,
             source_message_id=int(event.message.id),
+            photo_bytes=photo_bytes,
+            photo_mime=photo_mime,
         )
     except Exception:
         logger.warning("Error in message callback", exc_info=True)

@@ -1247,7 +1247,7 @@ def fmt_strategy_hub_intro() -> str:
 def fmt_stop_all_result(ok: bool, backend_msg: str, hint: str) -> str:
     """Stop\\_all command reply (MarkdownV2)."""
     icon = "🛑" if ok else "⚠️"
-    title = "All strategies stopped" if ok else "Stop strategies"
+    title = "Automation stopped" if ok else "Stop automation"
     return (
         f"{icon} *{escape_md(title)}*\n"
         f"{md2_rule()}\n\n"

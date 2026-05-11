@@ -1,3 +1,4 @@
+import base64
 import logging
 import json
 from typing import Optional
@@ -12,6 +13,8 @@ async def store_event(
     text: str,
     options: Optional[list[str]] = None,
     source_message_id: Optional[int] = None,
+    photo_bytes: Optional[bytes] = None,
+    photo_mime: Optional[str] = None,
 ) -> Optional[int]:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -32,11 +35,16 @@ async def store_event(
 
         cursor_id = await conn.fetchval(
             """
-            INSERT INTO relay_events (session_id, text, options_json, source_message_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO relay_events (session_id, text, options_json, source_message_id, photo_bytes, photo_mime)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING cursor_id
             """,
-            session_id, text, options_json, int(source_message_id) if source_message_id else None,
+            session_id,
+            text or "",
+            options_json,
+            int(source_message_id) if source_message_id else None,
+            photo_bytes,
+            photo_mime,
         )
 
         await conn.execute(
@@ -60,7 +68,8 @@ async def poll_events(session_id: str, cursor: Optional[str] = None, limit: int 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT e.cursor_id, e.session_id, e.text, e.options_json, e.source_message_id, e.created_at
+            SELECT e.cursor_id, e.session_id, e.text, e.options_json, e.source_message_id,
+                   e.photo_bytes, e.photo_mime, e.created_at
             FROM relay_events e
             JOIN relay_sessions s ON s.id = e.session_id
             WHERE e.session_id = $1
@@ -90,6 +99,14 @@ async def poll_events(session_id: str, cursor: Optional[str] = None, limit: int 
             "text": row["text"],
             "created_at": row["created_at"].isoformat(),
         }
+        pb = row.get("photo_bytes")
+        if pb:
+            try:
+                event_item["photo_base64"] = base64.b64encode(bytes(pb)).decode("ascii")
+                pm = row.get("photo_mime") or "image/jpeg"
+                event_item["photo_mime"] = str(pm)
+            except Exception:
+                logger.warning("relay event cursor=%s: failed to encode photo", row["cursor_id"], exc_info=True)
         if options:
             event_item["options"] = options
         if row.get("source_message_id"):
