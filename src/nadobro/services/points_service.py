@@ -59,6 +59,25 @@ POINTS_RELAY_TIMEOUT = max(
 )
 POINTS_MAX_RETRIES = int(os.environ.get("POINTS_MAX_RETRIES", "3"))
 
+
+def _friendly_lowiqpts_relay_failure(code: str | None, *, for_refresh: bool) -> str | None:
+    """User-visible copy for structured LOWIQPTS relay errors (HTTP 200, ok=false)."""
+    err = str(code or "").strip()
+    if err == "channel_busy":
+        return (
+            "⏳ LOWIQPTS is busy with another refresh right now. Try again in a minute."
+            if for_refresh
+            else "⏳ LOWIQPTS is busy right now. Try again in a moment."
+        )
+    if err == "session_race":
+        return (
+            "⚠️ Points refresh conflict. Tap Refresh again."
+            if for_refresh
+            else "⚠️ Points flow conflict. Tap Refresh or try again shortly."
+        )
+    return None
+
+
 _PENDING_QUEUE_KEY = "lowiqpts_pending_queue"
 _PENDING_BY_WALLET_KEY = "lowiqpts_pending_by_wallet"
 _ACTIVE_BY_CHAT_KEY = "lowiqpts_active_by_chat"
@@ -472,13 +491,9 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
     if not relay_resp.get("ok"):
         _remove_pending_req(bot_data, req)
         err = str(relay_resp.get("error") or "")
-        if err == "channel_busy":
-            return {
-                "ok": False,
-                "error": "⏳ LOWIQPTS is busy with another refresh right now. Try again in a minute.",
-            }
-        if err == "session_race":
-            return {"ok": False, "error": "⚠️ Points refresh conflict. Tap Refresh again."}
+        friendly = _friendly_lowiqpts_relay_failure(err, for_refresh=True)
+        if friendly:
+            return {"ok": False, "error": friendly}
         logger.warning("relay_start_session logical failure: %s", relay_resp)
         return {"ok": False, "error": "❌ Could not start LOWIQPTS session. Try again shortly."}
 
@@ -514,19 +529,28 @@ async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict
         complete_pending_request(context.application.bot_data, req)
         return {"ok": True, "handled": True, "cancelled": True}
 
+    session_id = str(req.get("relay_session_id", "")).strip()
+    if not session_id:
+        return {"ok": False, "handled": True, "error": "❌ LOWIQPTS relay session is missing."}
+
     try:
-        session_id = str(req.get("relay_session_id", "")).strip()
-        if not session_id:
-            return {"ok": False, "handled": True, "error": "❌ LOWIQPTS relay session is missing."}
-        relay_resp = await _relay_with_retry(relay_send_user_reply, session_id=session_id, text=cleaned)
-        if not relay_resp.get("ok"):
-            raise RuntimeError(relay_resp.get("error") or "relay_send_failed")
-        _touch_pending_request(req)
-        _schedule_timeout(context.application, str(req.get("req_id", "")))
-        return {"ok": True, "handled": True}
+        relay_resp = await _relay_with_retry(
+            relay_send_user_reply, session_id=session_id, text=cleaned
+        )
     except Exception as e:
         logger.warning("Failed to relay user reply to lowiqpts relay: %s", e)
         return {"ok": False, "handled": True, "error": "❌ Could not relay your reply to LOWIQPTS right now."}
+
+    if not relay_resp.get("ok"):
+        friendly = _friendly_lowiqpts_relay_failure(relay_resp.get("error"), for_refresh=False)
+        if friendly:
+            return {"ok": False, "handled": True, "error": friendly}
+        logger.warning("relay_send_user_reply logical failure: %s", relay_resp)
+        return {"ok": False, "handled": True, "error": "❌ Could not relay your reply to LOWIQPTS right now."}
+
+    _touch_pending_request(req)
+    _schedule_timeout(context.application, str(req.get("req_id", "")))
+    return {"ok": True, "handled": True}
 
 
 async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
@@ -635,6 +659,9 @@ async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: in
         logger.warning("LOWIQPTS option relay failed after retries: %s", e)
         relay_result = {"ok": False, "error": str(e)}
     if not relay_result.get("ok"):
+        friendly = _friendly_lowiqpts_relay_failure(relay_result.get("error"), for_refresh=False)
+        if friendly:
+            return {"ok": False, "error": friendly}
         logger.warning(
             "LOWIQPTS inline click failed (%s); sending choice as plain relay text",
             relay_result.get("error"),
@@ -648,6 +675,9 @@ async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: in
         except RuntimeError as e:
             return {"ok": False, "error": f"Could not reach LOWIQPTS relay: {e}"}
         if not relay_result.get("ok"):
+            friendly_fb = _friendly_lowiqpts_relay_failure(relay_result.get("error"), for_refresh=False)
+            if friendly_fb:
+                return {"ok": False, "error": friendly_fb}
             return {
                 "ok": False,
                 "error": "Could not relay your button choice to LOWIQPTS. Try typing it in chat.",
