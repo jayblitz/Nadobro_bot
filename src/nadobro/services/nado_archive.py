@@ -359,6 +359,141 @@ def query_matches_by_subaccount(
     return [_parse_match(m) for m in matches_raw if isinstance(m, dict)]
 
 
+# ---------------------------------------------------------------------------
+# Market snapshots: rolling 24h volume per pair (Phase 2 / POV engine).
+# ---------------------------------------------------------------------------
+
+# (network, product_id) -> (timestamp, value)
+_VOLUME_CACHE: dict[tuple[str, int], tuple[float, float]] = {}
+_VOLUME_CACHE_TTL_SECONDS = 60.0
+
+
+def _cumulative_volumes_from_snapshot(snapshot, product_id: int) -> Optional[float]:
+    """Pull the x18 cumulative-volume entry for ``product_id`` from a snapshot.
+
+    The archive accepts a few response shapes; ``cumulative_volumes`` may be
+    keyed by the int product_id, the string form, or wrapped in a list of
+    ``{"product_id": ..., "cumulative_volume_x18": ...}`` rows.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    cv = snapshot.get("cumulative_volumes") or snapshot.get("cumulativeVolumes")
+    if isinstance(cv, dict):
+        candidate = cv.get(product_id)
+        if candidate is None:
+            candidate = cv.get(str(product_id))
+        if candidate is None:
+            return None
+        try:
+            return float(candidate)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(cv, list):
+        for row in cv:
+            if not isinstance(row, dict):
+                continue
+            try:
+                pid = int(row.get("product_id") or row.get("productId") or -1)
+            except (TypeError, ValueError):
+                continue
+            if pid != int(product_id):
+                continue
+            value = (
+                row.get("cumulative_volume_x18")
+                or row.get("cumulativeVolumeX18")
+                or row.get("cumulative_volume")
+                or row.get("volume_x18")
+                or row.get("value")
+            )
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _snapshots_list_from_response(result) -> list:
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    if not isinstance(result, dict):
+        return []
+    snaps = result.get("snapshots") or result.get("market_snapshots") or result.get("marketSnapshots")
+    if isinstance(snaps, list):
+        return snaps
+    data = result.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        inner = data.get("snapshots") or data.get("market_snapshots") or data.get("marketSnapshots")
+        if isinstance(inner, list):
+            return inner
+    return []
+
+
+def get_pair_24h_volume_usd(
+    network: str,
+    product_id: int,
+    *,
+    refresh: bool = False,
+) -> Optional[float]:
+    """Return the rolling 24h USD volume for ``product_id`` from Nado archive.
+
+    Calls ``POST [ARCHIVE]/market_snapshots`` with ``interval.granularity=3600``
+    and ``interval.count=24`` and returns
+    ``(latest.cumulative_volumes - oldest.cumulative_volumes) / 1e18``.
+
+    Cached per (network, product_id) for 60 seconds. Returns ``None`` when the
+    archive does not respond with a parseable snapshot pair (caller should fall
+    back to a sensible default rather than crash the cycle).
+    """
+    try:
+        pid = int(product_id)
+    except (TypeError, ValueError):
+        return None
+    if pid < 0:
+        return None
+    network = network or "mainnet"
+    key = (network, pid)
+    now = time.time()
+    if not refresh:
+        cached = _VOLUME_CACHE.get(key)
+        if cached and (now - cached[0] < _VOLUME_CACHE_TTL_SECONDS):
+            return cached[1]
+
+    url = archive_url_for_network(network)
+    payload = {
+        "market_snapshots": {
+            "interval": {"granularity": 3600, "count": 24},
+            "product_ids": [pid],
+        }
+    }
+    result = _post(url, payload)
+    snapshots = _snapshots_list_from_response(result)
+    if len(snapshots) < 2:
+        return None
+
+    # Snapshots may be returned newest-first or oldest-first; normalize by the
+    # archive's ``timestamp`` field when present, otherwise trust the order.
+    def _ts(s):
+        try:
+            return float(s.get("timestamp") or s.get("time") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    ordered = sorted(snapshots, key=_ts)
+    oldest_v = _cumulative_volumes_from_snapshot(ordered[0], pid)
+    latest_v = _cumulative_volumes_from_snapshot(ordered[-1], pid)
+    if oldest_v is None or latest_v is None:
+        return None
+
+    delta_x18 = max(0.0, float(latest_v) - float(oldest_v))
+    volume_usd = delta_x18 / 1e18
+    _VOLUME_CACHE[key] = (now, volume_usd)
+    return volume_usd
+
+
 def query_funding_payments(
     network: str,
     subaccount_hex: str,

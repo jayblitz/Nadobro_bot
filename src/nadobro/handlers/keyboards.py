@@ -792,6 +792,7 @@ def strategy_hub_kb():
         ],
         [
             InlineKeyboardButton("⚡ Dynamic GRID", callback_data="strategy:preview:dgrid"),
+            InlineKeyboardButton("🎯 Mid Mode", callback_data="strategy:preview:mid"),
         ],
         [
             InlineKeyboardButton("⚖️ Mirror DN", callback_data="strategy:preview:dn"),

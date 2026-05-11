@@ -168,7 +168,10 @@ def setup_bot():
     from telegram import Update
 
     from src.nadobro.config import BOT_USERNAME
-    from src.nadobro.handlers.commands import cmd_start, cmd_help, cmd_status, cmd_ops, cmd_stop_all, cmd_revoke
+    from src.nadobro.handlers.commands import (
+        cmd_start, cmd_help, cmd_status, cmd_ops, cmd_stop_all, cmd_revoke,
+        cmd_mm_status, cmd_mm_fills,
+    )
     from src.nadobro.handlers.managed_agent import cmd_agent_on, cmd_agent_off, cmd_agent_status
     from src.nadobro.handlers.admin_invites import (
         cmd_invite_generate,
@@ -229,6 +232,9 @@ def setup_bot():
     app.add_handler(CommandHandler("invite_grant", cmd_invite_grant))
     app.add_handler(CommandHandler("brief", cmd_morning_brief))
     app.add_handler(CommandHandler("news", cmd_market_news))
+    # Phase 3: Tread-style live MM dashboard.
+    app.add_handler(CommandHandler("mm_status", cmd_mm_status))
+    app.add_handler(CommandHandler("mm_fills", cmd_mm_fills))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -366,6 +372,8 @@ async def run_bot():
         BotCommand("help", "Show guide and examples"),
         BotCommand("status", "View bot and strategy status"),
         BotCommand("ops", "View runtime diagnostics"),
+        BotCommand("mm_status", "Live MM strategy dashboard"),
+        BotCommand("mm_fills", "Recent MM fills"),
         BotCommand("revoke", "Show signer revoke steps"),
         BotCommand("stop_all", "Stop automation and flatten bot exposure on Nado"),
         BotCommand("agent_on", "Enable managed AI mode"),

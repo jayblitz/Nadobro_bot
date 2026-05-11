@@ -116,6 +116,49 @@ def _strategy_available_products(strategy_id: str, network: str, vol_market: str
     return tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
 
 
+# F6 (Phase 5 audit): tiny per-process TTL cache for ``client.get_balance()``.
+# A strategy preview render calls _build_strategy_preview_text and (for MM
+# strategies) _append_mm_pretrade_breakdown back-to-back via run_blocking; both
+# need the wallet balance and previously hit the SDK twice. Cache TTL is small
+# (3s) so balance changes still propagate quickly. Race-safe under asyncio:
+# Python dict ops are atomic at the GIL level, and a duplicate concurrent fetch
+# is idempotent.
+_BALANCE_CACHE_TTL_SECONDS = 3.0
+_balance_cache: dict[int, tuple[float, dict]] = {}
+
+
+def _cached_user_balance(telegram_id: int) -> dict:
+    now = time.time()
+    cached = _balance_cache.get(int(telegram_id))
+    if cached and (now - cached[0]) < _BALANCE_CACHE_TTL_SECONDS:
+        return cached[1]
+    client = get_user_readonly_client(telegram_id)
+    bal: dict = {}
+    if client:
+        try:
+            bal = client.get_balance() or {}
+        except Exception:
+            bal = {}
+    _balance_cache[int(telegram_id)] = (now, bal)
+    return bal
+
+
+def _wallet_collateral_usd_from_balance(bal: dict) -> float:
+    if not isinstance(bal, dict) or not bal.get("exists"):
+        return 0.0
+    bals = bal.get("balances") or {}
+    try:
+        v = float(bals.get(0, 0) or 0.0)
+    except (TypeError, ValueError):
+        v = 0.0
+    if v == 0.0:
+        try:
+            v = float(bals.get("0", 0) or 0.0)
+        except (TypeError, ValueError):
+            v = 0.0
+    return v
+
+
 def _vol_market_pref(context) -> str:
     m = str(context.user_data.get("vol_market:vol") or "perp").strip().lower()
     return m if m in ("perp", "spot") else "perp"
@@ -242,6 +285,8 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
             )
         elif data.startswith("mode:"):
             await _handle_mode(query, data, telegram_id, context)
+        elif data.startswith("mm:"):
+            await _handle_mm_dashboard(query, data, telegram_id)
         else:
             await _edit_loc(query,
                 "Unknown action\\.",
@@ -1409,7 +1454,7 @@ async def _handle_settings(query, data, telegram_id, context):
 
 
 async def _handle_strategy(query, data, context, telegram_id):
-    supported = ("grid", "rgrid", "dgrid", "dn", "vol", "bro")
+    supported = ("grid", "rgrid", "dgrid", "mid", "dn", "vol", "bro")
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     strategy_id = parts[2] if len(parts) > 2 else ""
@@ -1484,6 +1529,16 @@ async def _handle_strategy(query, data, context, telegram_id):
                 selected_product,
                 vkb_prev,
             )
+        # Phase 3: append Tread-style breakdown for MM strategies. Built off the
+        # mm_dashboard module so the pre-trade card and /mm_status share math.
+        if strategy_id in ("grid", "rgrid", "dgrid", "mid"):
+            preview_text = await run_blocking(
+                _append_mm_pretrade_breakdown,
+                telegram_id,
+                strategy_id,
+                selected_product,
+                preview_text,
+            )
         bot_status = get_user_bot_status(telegram_id) or {}
         is_running = bool(
             bot_status.get("running")
@@ -1551,13 +1606,21 @@ async def _handle_strategy(query, data, context, telegram_id):
                 selected_product,
                 vkb_pair,
             )
+        if strategy_id in ("grid", "rgrid", "dgrid", "mid"):
+            preview_text = await run_blocking(
+                _append_mm_pretrade_breakdown,
+                telegram_id,
+                strategy_id,
+                selected_product,
+                preview_text,
+            )
         bot_status = get_user_bot_status(telegram_id) or {}
         is_running = bool(
             bot_status.get("running")
             and str(bot_status.get("strategy") or "").lower() == strategy_id
         )
         vkb = _vol_market_pref(context) if strategy_id == "vol" else "perp"
-        await _edit_loc(query, 
+        await _edit_loc(query,
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_action_kb(
@@ -1595,6 +1658,114 @@ async def _handle_strategy(query, data, context, telegram_id):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=_strategy_config_section_kb(strategy_id, section),
         )
+    elif action == "preset" and len(parts) >= 4:
+        # MM Tiny Budget / Standard preset.
+        # Tiny Budget Preset auto-derives the leverage required to clear the venue
+        # min_size floor for the selected pair and pins a tight safety factor so a
+        # small wallet (e.g. $50) can quote on pairs that would otherwise reject.
+        # Standard Preset clears those overrides and returns to per-asset MAX leverage
+        # with the legacy safety cushion.
+        strategy_id = parts[2]
+        preset_name = parts[3]
+        if strategy_id not in {"grid", "rgrid", "dgrid", "mid"} or preset_name not in {"tiny", "standard"}:
+            return
+        network, settings = get_user_settings(telegram_id)
+        cfg_now = settings.get("strategies", {}).get(strategy_id, {}) or {}
+        # Selected product for the strategy was set during preview; default to BTC.
+        selected_product = str(
+            context.user_data.get(f"strategy_pair:{strategy_id}", "BTC") or "BTC"
+        ).upper()
+        if preset_name == "standard":
+            def _mutate_std(s):
+                strategies = s.setdefault("strategies", {})
+                cfg = strategies.setdefault(strategy_id, {})
+                cfg.pop("mm_leverage_override", None)
+                cfg.pop("min_order_notional_usd", None)
+                cfg.pop("mm_collateral_safety_factor", None)
+                cfg["mm_preset"] = "standard"
+
+            network, settings = update_user_settings(telegram_id, _mutate_std)
+            conf = settings.get("strategies", {}).get(strategy_id, {})
+            section = "setup"
+            context.user_data[f"strategy_config_section:{strategy_id}"] = section
+            await _edit_loc(
+                query,
+                _strategy_config_section_text(strategy_id, conf, network, section),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=_strategy_config_section_kb(strategy_id, section),
+            )
+            return
+
+        # Tiny Budget — resolve venue minimum and required leverage.
+        try:
+            from src.nadobro.services.product_catalog import (
+                get_product_min_quote_notional_usd,
+            )
+            venue_min = get_product_min_quote_notional_usd(selected_product, network=network)
+            lev_cap = float(get_product_max_leverage(selected_product, network=network))
+        except Exception:
+            venue_min = None
+            lev_cap = 1.0
+        try:
+            collateral = float(cfg_now.get("notional_usd") or 0.0)
+        except (TypeError, ValueError):
+            collateral = 0.0
+        if not venue_min or venue_min <= 0:
+            await _edit_loc(
+                query,
+                "⚠️ *Tiny Budget Preset*\n\nVenue minimum could not be resolved for "
+                f"`{escape_md(selected_product)}` from Nado catalog\\. Try again in a moment\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=_strategy_config_section_kb(strategy_id, "setup"),
+            )
+            return
+        if collateral <= 0:
+            await _edit_loc(
+                query,
+                "⚠️ *Tiny Budget Preset*\n\nSet your margin first \\(Custom Margin\\), "
+                "then press Tiny Budget Preset to fit leverage to the venue floor\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=_strategy_config_section_kb(strategy_id, "setup"),
+            )
+            return
+        import math as _math
+        required_lev = max(1.0, _math.ceil(venue_min / collateral))
+        # 1.1× cushion to absorb the 1.10 safety factor without overshooting cap.
+        target_lev = min(_math.ceil(required_lev * 1.1), int(lev_cap))
+        target_lev = max(int(required_lev), int(target_lev))
+        target_lev = min(int(target_lev), int(lev_cap))
+
+        def _mutate_tiny(s):
+            strategies = s.setdefault("strategies", {})
+            cfg = strategies.setdefault(strategy_id, {})
+            cfg["mm_leverage_override"] = int(target_lev)
+            cfg["min_order_notional_usd"] = float(venue_min)
+            cfg["mm_collateral_safety_factor"] = 1.10
+            cfg["mm_preset"] = "tiny"
+
+        network, settings = update_user_settings(telegram_id, _mutate_tiny)
+        conf = settings.get("strategies", {}).get(strategy_id, {})
+        section = "setup"
+        context.user_data[f"strategy_config_section:{strategy_id}"] = section
+        notional_after = collateral * float(target_lev)
+        if notional_after >= venue_min:
+            preflight_note = (
+                f"✅ ${collateral:.0f} × {int(target_lev)}× \\= ${notional_after:.0f} notional "
+                f"≥ pair minimum ${venue_min:.0f} \\(USDT0\\)\\. Cleared to quote\\."
+            )
+        else:
+            preflight_note = (
+                f"⚠️ ${collateral:.0f} × {int(target_lev)}× \\= ${notional_after:.0f} notional "
+                f"< pair minimum ${venue_min:.0f}\\. Add collateral or pick a smaller-min pair\\."
+            )
+        body = _strategy_config_section_text(strategy_id, conf, network, section)
+        await _edit_loc(
+            query,
+            f"{body}\n\n*Tiny Budget Preset applied for {escape_md(selected_product)}*\n{preflight_note}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_strategy_config_section_kb(strategy_id, section),
+        )
+        return
     elif action == "set" and len(parts) >= 5:
         strategy_id = parts[2]
         field = parts[3]
@@ -1615,16 +1786,29 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
             "auto_close_on_maintenance", "is_long_bias",
+            # Mid Mode accepts directional_bias as a continuous float in [-1, +1].
+            "directional_bias",
         }
         if field not in allowed_numeric_fields:
+            return
+        # Mid Mode: directional_bias is only valid as a number for the mid strategy
+        # (other strategies still use the set_text path with neutral/long/short).
+        if field == "directional_bias" and strategy_id != "mid":
             return
         try:
             value = float(raw_value)
         except (TypeError, ValueError):
             return
+        # Mid Mode allows negative spread (concede pricing) per Tread docs.
+        # Other strategies stay on the legacy positive-only range.
+        if field == "spread_bp" and strategy_id == "mid":
+            spread_lo, spread_hi = -10.0, 100.0
+        else:
+            spread_lo, spread_hi = 0.1, 200.0
         limits = {
             "notional_usd": (1, 1000000),
-            "spread_bp": (0.1, 200),
+            "spread_bp": (spread_lo, spread_hi),
+            "directional_bias": (-1.0, 1.0),
             "interval_seconds": (10, 3600),
             "tp_pct": (0.05, 100),
             "sl_pct": (0.05, 100),
@@ -1697,15 +1881,23 @@ async def _handle_strategy(query, data, context, telegram_id):
             "directional_bias": {"neutral", "long_bias", "short_bias"},
             "vol_direction": {"long", "short"},
             "funding_entry_mode": {"wait", "enter_anyway"},
+            # Phase 2: Tread Fi POV / participation preset.
+            "participation_preset": {"aggressive", "normal", "passive", "off"},
         }
         allowed_vals = allowed_text.get(field, set())
         if raw_value not in allowed_vals:
+            return
+        # participation_preset is only meaningful for the MM family.
+        if field == "participation_preset" and strategy_id not in ("grid", "rgrid", "dgrid", "mid"):
             return
 
         def _mutate(s):
             strategies = s.setdefault("strategies", {})
             cfg = strategies.setdefault(strategy_id, {})
-            cfg[field] = raw_value
+            if field == "participation_preset" and raw_value == "off":
+                cfg.pop("participation_preset", None)
+            else:
+                cfg[field] = raw_value
 
         network, settings = update_user_settings(telegram_id, _mutate)
         conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -1731,6 +1923,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
             "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
+            "directional_bias",
         )
         if strategy_id == "vol" and field not in {"tp_pct", "sl_pct"}:
             return
@@ -2345,7 +2538,7 @@ def _mm_cycle_budget_preflight(
         ok, collateral_budget, required_min_collateral_1q, min_order_notional,
         max_resting_quotes_est, margin_per_quote_est
     """
-    if strategy_id not in ("grid", "rgrid", "dgrid"):
+    if strategy_id not in ("grid", "rgrid", "dgrid", "mid"):
         return True, 0.0, 0.0, 0.0, 0, 0.0
 
     from src.nadobro.strategies.mm_bot import DEFAULT_MIN_ORDER_NOTIONAL_USD, estimate_mm_quote_capacity
@@ -2485,6 +2678,10 @@ def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
         return [("setup", "⚙️ Core"), ("risk", "🛡 Risk"), ("reset", "🔄 Reset")]
     if strategy == "dgrid":
         return [("setup", "⚙️ Core"), ("regime", "⚡ Regime"), ("risk", "🛡 Risk")]
+    if strategy == "mid":
+        # Mid Mode is intentionally lean (Tread parity): Core (margin/spread/levels)
+        # + Risk (TP/SL). No regime, no momentum, no soft-reset, no anchor.
+        return [("setup", "⚙️ Core"), ("risk", "🛡 Risk")]
     if strategy == "dn":
         return [("setup", "⚙️ Core"), ("safety", "🛡 Safety")]
     return [("setup", "⚙️ Core")]
@@ -2494,7 +2691,7 @@ def _strategy_section_for_field(strategy: str, field: str) -> str:
     if strategy == "vol":
         return "direction" if field == "vol_direction" else "risk"
     if strategy == "grid":
-        if field in {"threshold_bp", "close_offset_bp", "reference_mode", "directional_bias"}:
+        if field in {"threshold_bp", "close_offset_bp", "reference_mode", "directional_bias", "participation_preset"}:
             return "execution"
         if field in {"cycle_notional_usd", "inventory_soft_limit_usd", "quote_ttl_seconds", "session_notional_cap_usd", "min_spread_bp", "max_spread_bp", "vol_sensitivity"}:
             return "risk"
@@ -2511,6 +2708,10 @@ def _strategy_section_for_field(strategy: str, field: str) -> str:
         if field in {"rgrid_stop_loss_pct", "rgrid_take_profit_pct", "tp_pct", "sl_pct"}:
             return "risk"
         return "setup"
+    if strategy == "mid":
+        if field in {"tp_pct", "sl_pct", "rgrid_stop_loss_pct", "rgrid_take_profit_pct"}:
+            return "risk"
+        return "setup"
     if strategy == "dn":
         return "safety" if field in {"auto_close_on_maintenance", "funding_entry_mode"} else "setup"
     return "setup"
@@ -2521,7 +2722,7 @@ def _strategy_config_menu_text(strategy: str, conf: dict, network: str) -> str:
         "grid": "GRID",
         "rgrid": "Reverse GRID",
         "dgrid": "Dynamic GRID",
-        "dgrid": "Dynamic GRID",
+        "mid": "Mid Mode",
         "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",
     }
@@ -2574,12 +2775,14 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             close_offset_str = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
             ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
             bias = str(conf.get("directional_bias", "neutral")).upper()
+            pov_label = str(conf.get("participation_preset") or "OFF").upper()
             return (
                 "⚙️ *GRID · Execution*\n\n"
                 f"Threshold: *{escape_md(threshold_str)}* \\| "
                 f"Close offset: *{escape_md(close_offset_str)}*\n"
                 f"Reference: *{escape_md(ref_mode)}* \\| "
-                f"Bias: *{escape_md(bias)}*\n\n"
+                f"Bias: *{escape_md(bias)}*\n"
+                f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n\n"
                 "Tune how quotes react to the market\\."
             )
         if section == "risk":
@@ -2626,10 +2829,12 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             )
         levels = str(int(conf.get("levels", 4)))
         rgrid_spread = f"{float(conf.get('rgrid_spread_bp', spread_bp)):.1f} bp"
+        pov_label = str(conf.get("participation_preset") or "OFF").upper()
         return (
             "⚙️ *Reverse GRID · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
-            f"Levels: *{escape_md(levels)}* \\| Spread: *{escape_md(rgrid_spread)}*\n\n"
+            f"Levels: *{escape_md(levels)}* \\| Spread: *{escape_md(rgrid_spread)}*\n"
+            f"POV: *{escape_md(pov_label)}*\n\n"
             "Set the basic breakout loop here\\."
         )
 
@@ -2655,11 +2860,40 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 "GRID phase watches realized PnL; RGRID phase watches open exposure risk\\."
             )
         levels = str(int(conf.get("levels", 4)))
+        pov_label = str(conf.get("participation_preset") or "OFF").upper()
         return (
             "⚡ *Dynamic GRID · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
-            f"Levels: *{escape_md(levels)}* \\| Starting spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n\n"
+            f"Levels: *{escape_md(levels)}* \\| Starting spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
+            f"POV: *{escape_md(pov_label)}*\n\n"
             "DGRID automatically switches between GRID and RGRID while resizing spread from realized movement\\."
+        )
+
+    if strategy == "mid":
+        # Mid Mode: lean Tread parity — pure mid ± spread×level. No anchor /
+        # no soft-reset. Bias is a continuous float; we render it numerically.
+        levels = str(int(conf.get("levels", 2)))
+        ref_mode = str(conf.get("reference_mode", "mid")).upper()
+        try:
+            bias_val = float(conf.get("directional_bias", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            bias_val = 0.0
+        bias_str = f"{bias_val:+.2f}"
+        if section == "risk":
+            return (
+                "⚙️ *MID MODE · Risk*\n\n"
+                f"PnL TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}* of margin\n\n"
+                "Stops are applied to *margin* \\(notional / leverage\\) per Tread spec\\."
+            )
+        pov_label = str(conf.get("participation_preset") or "OFF").upper()
+        return (
+            "⚙️ *MID MODE · Core*\n\n"
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"Spread: *{escape_md(f'{spread_bp:+.1f} bp')}* \\| Levels: *{escape_md(levels)}*\n"
+            f"Reference: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias_str)}*\n"
+            f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n\n"
+            "Pure mid ± spread×level\\. No anchor, no soft\\-reset\\. "
+            "Bias range −1\\.0 → \\+1\\.0; \\|1\\.0\\| adds 20% margin\\."
         )
 
     if strategy == "dn":
@@ -2715,6 +2949,10 @@ def _strategy_config_section_kb(strategy: str, section: str):
         if section == "setup":
             rows = [
                 [
+                    InlineKeyboardButton("🎯 Tiny Budget Preset", callback_data="strategy:preset:grid:tiny"),
+                    InlineKeyboardButton("Standard", callback_data="strategy:preset:grid:standard"),
+                ],
+                [
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:grid:notional_usd:50"),
                     InlineKeyboardButton("Margin $100", callback_data="strategy:set:grid:notional_usd:100"),
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:grid:notional_usd:250"),
@@ -2754,6 +2992,14 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Bias Neutral", callback_data="strategy:set_text:grid:directional_bias:neutral"),
                     InlineKeyboardButton("Bias Long", callback_data="strategy:set_text:grid:directional_bias:long_bias"),
                     InlineKeyboardButton("Bias Short", callback_data="strategy:set_text:grid:directional_bias:short_bias"),
+                ],
+                [
+                    InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:grid:participation_preset:aggressive"),
+                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:grid:participation_preset:normal"),
+                ],
+                [
+                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:grid:participation_preset:passive"),
+                    InlineKeyboardButton("POV Off", callback_data="strategy:set_text:grid:participation_preset:off"),
                 ],
                 [
                     InlineKeyboardButton("Custom Threshold", callback_data="strategy:input:grid:threshold_bp"),
@@ -2803,6 +3049,10 @@ def _strategy_config_section_kb(strategy: str, section: str):
         if section == "setup":
             rows = [
                 [
+                    InlineKeyboardButton("🎯 Tiny Budget Preset", callback_data="strategy:preset:dgrid:tiny"),
+                    InlineKeyboardButton("Standard", callback_data="strategy:preset:dgrid:standard"),
+                ],
+                [
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:dgrid:notional_usd:50"),
                     InlineKeyboardButton("Margin $100", callback_data="strategy:set:dgrid:notional_usd:100"),
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:dgrid:notional_usd:250"),
@@ -2815,6 +3065,14 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("30s", callback_data="strategy:set:dgrid:interval_seconds:30"),
                     InlineKeyboardButton("60s", callback_data="strategy:set:dgrid:interval_seconds:60"),
+                ],
+                [
+                    InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:dgrid:participation_preset:aggressive"),
+                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:dgrid:participation_preset:normal"),
+                ],
+                [
+                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:dgrid:participation_preset:passive"),
+                    InlineKeyboardButton("POV Off", callback_data="strategy:set_text:dgrid:participation_preset:off"),
                 ],
                 [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:dgrid:notional_usd"),
@@ -2859,6 +3117,10 @@ def _strategy_config_section_kb(strategy: str, section: str):
         if section == "setup":
             rows = [
                 [
+                    InlineKeyboardButton("🎯 Tiny Budget Preset", callback_data="strategy:preset:rgrid:tiny"),
+                    InlineKeyboardButton("Standard", callback_data="strategy:preset:rgrid:standard"),
+                ],
+                [
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:rgrid:notional_usd:50"),
                     InlineKeyboardButton("Margin $100", callback_data="strategy:set:rgrid:notional_usd:100"),
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:rgrid:notional_usd:250"),
@@ -2876,6 +3138,14 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("60s", callback_data="strategy:set:rgrid:interval_seconds:60"),
                     InlineKeyboardButton("120s", callback_data="strategy:set:rgrid:interval_seconds:120"),
+                ],
+                [
+                    InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:rgrid:participation_preset:aggressive"),
+                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:rgrid:participation_preset:normal"),
+                ],
+                [
+                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:rgrid:participation_preset:passive"),
+                    InlineKeyboardButton("POV Off", callback_data="strategy:set_text:rgrid:participation_preset:off"),
                 ],
                 [
                     InlineKeyboardButton("Custom Levels", callback_data="strategy:input:rgrid:levels"),
@@ -2918,6 +3188,77 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("Custom Reset", callback_data="strategy:input:rgrid:rgrid_reset_threshold_pct"),
                     InlineKeyboardButton("Custom Disc", callback_data="strategy:input:rgrid:rgrid_discretion"),
+                ],
+            ]
+    elif strategy == "mid":
+        if section == "risk":
+            rows = [
+                [
+                    InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:mid:tp_pct:0.5"),
+                    InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:mid:tp_pct:1.0"),
+                    InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:mid:tp_pct:2.0"),
+                ],
+                [
+                    InlineKeyboardButton("SL 0.25%", callback_data="strategy:set:mid:sl_pct:0.25"),
+                    InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:mid:sl_pct:0.5"),
+                    InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:mid:sl_pct:1.0"),
+                ],
+                [
+                    InlineKeyboardButton("Custom TP", callback_data="strategy:input:mid:tp_pct"),
+                    InlineKeyboardButton("Custom SL", callback_data="strategy:input:mid:sl_pct"),
+                ],
+            ]
+        else:
+            # Setup: Tiny Budget Preset, margin, spread (signed), levels, reference, bias.
+            rows = [
+                [
+                    InlineKeyboardButton("🎯 Tiny Budget Preset", callback_data="strategy:preset:mid:tiny"),
+                    InlineKeyboardButton("Standard", callback_data="strategy:preset:mid:standard"),
+                ],
+                [
+                    InlineKeyboardButton("Margin $50", callback_data="strategy:set:mid:notional_usd:50"),
+                    InlineKeyboardButton("Margin $100", callback_data="strategy:set:mid:notional_usd:100"),
+                    InlineKeyboardButton("Margin $250", callback_data="strategy:set:mid:notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("Spread −5bp", callback_data="strategy:set:mid:spread_bp:-5"),
+                    InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:mid:spread_bp:5"),
+                    InlineKeyboardButton("Spread 25bp", callback_data="strategy:set:mid:spread_bp:25"),
+                ],
+                [
+                    InlineKeyboardButton("Levels 1", callback_data="strategy:set:mid:levels:1"),
+                    InlineKeyboardButton("Levels 2", callback_data="strategy:set:mid:levels:2"),
+                    InlineKeyboardButton("Levels 3", callback_data="strategy:set:mid:levels:3"),
+                ],
+                [
+                    InlineKeyboardButton("30s", callback_data="strategy:set:mid:interval_seconds:30"),
+                    InlineKeyboardButton("60s", callback_data="strategy:set:mid:interval_seconds:60"),
+                    InlineKeyboardButton("120s", callback_data="strategy:set:mid:interval_seconds:120"),
+                ],
+                [
+                    InlineKeyboardButton("Ref MID", callback_data="strategy:set_text:mid:reference_mode:mid"),
+                    InlineKeyboardButton("EMA Fast", callback_data="strategy:set_text:mid:reference_mode:ema_fast"),
+                    InlineKeyboardButton("EMA Slow", callback_data="strategy:set_text:mid:reference_mode:ema_slow"),
+                ],
+                [
+                    InlineKeyboardButton("Bias −0.5", callback_data="strategy:set:mid:directional_bias:-0.5"),
+                    InlineKeyboardButton("Bias 0", callback_data="strategy:set:mid:directional_bias:0"),
+                    InlineKeyboardButton("Bias +0.5", callback_data="strategy:set:mid:directional_bias:0.5"),
+                ],
+                [
+                    InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:mid:participation_preset:aggressive"),
+                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:mid:participation_preset:normal"),
+                ],
+                [
+                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:mid:participation_preset:passive"),
+                    InlineKeyboardButton("POV Off", callback_data="strategy:set_text:mid:participation_preset:off"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Margin", callback_data="strategy:input:mid:notional_usd"),
+                    InlineKeyboardButton("Custom Spread", callback_data="strategy:input:mid:spread_bp"),
+                ],
+                [
+                    InlineKeyboardButton("Custom Bias", callback_data="strategy:input:mid:directional_bias"),
                 ],
             ]
     elif strategy == "dn":
@@ -3048,6 +3389,96 @@ def _build_bro_preview_text(telegram_id: int) -> str:
     )
 
 
+async def _handle_mm_dashboard(query, data: str, telegram_id: int):
+    """Phase 3 callback dispatcher for the live MM dashboard.
+
+    ``mm:status:refresh`` re-renders the /mm_status snapshot in place.
+    ``mm:fills`` shows the most recent fills.
+    """
+    from src.nadobro.handlers.commands import build_mm_status_text, build_mm_fills_text
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "status":
+        text, is_active = await run_blocking(build_mm_status_text, telegram_id)
+        body = escape_md(text)
+        markup = None
+        if is_active:
+            from src.nadobro.handlers.commands import _mm_dashboard_keyboard
+            markup = _mm_dashboard_keyboard()
+        await _edit_loc(
+            query,
+            f"📊 *MM Status*\n\n{body}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=markup,
+        )
+        return
+    if action == "fills":
+        text = await run_blocking(build_mm_fills_text, telegram_id, 10)
+        # Use a fenced block so the columnar fills render evenly.
+        await _edit_loc(
+            query,
+            f"```\n{text}\n```",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+
+def _append_mm_pretrade_breakdown(
+    telegram_id: int,
+    strategy_id: str,
+    product: str,
+    base_preview: str,
+) -> str:
+    """Phase 3 pre-trade card: appends a Tread-style breakdown for MM strategies.
+
+    Numbers come from ``mm_dashboard.build_pretrade_breakdown`` so the preview
+    and the live ``/mm_status`` command stay in sync.
+    """
+    try:
+        from src.nadobro.services import mm_dashboard
+        from src.nadobro.services.nado_archive import get_pair_24h_volume_usd
+
+        network, settings = get_user_settings(telegram_id)
+        conf = settings.get("strategies", {}).get(strategy_id, {})
+        try:
+            from src.nadobro.config import get_product_max_leverage as _gpml
+            leverage = float(_gpml(product, network=network))
+        except Exception:
+            leverage = float(settings.get("default_leverage", 3))
+        wallet_collateral = None
+        try:
+            # F6: read from the per-process TTL cache so we don't double-fetch
+            # the balance after _build_strategy_preview_text just fetched it.
+            v = _wallet_collateral_usd_from_balance(_cached_user_balance(telegram_id))
+            wallet_collateral = v if v > 0 else None
+        except Exception:
+            wallet_collateral = None
+        pair_volume = None
+        if conf.get("participation_preset"):
+            try:
+                pid = get_product_id(product, network=network)
+                if pid is not None:
+                    pair_volume = get_pair_24h_volume_usd(network=network, product_id=int(pid))
+            except Exception:
+                pair_volume = None
+        breakdown = mm_dashboard.build_pretrade_breakdown(
+            strategy_id=strategy_id,
+            conf=conf,
+            network=network,
+            product=product,
+            leverage=leverage,
+            wallet_collateral_usd=wallet_collateral,
+            pair_24h_volume_usd=pair_volume,
+        )
+        lines = mm_dashboard.render_pretrade_card_lines(breakdown)
+    except Exception:
+        logger.warning("Failed to render pre-trade breakdown for user=%s strategy=%s", telegram_id, strategy_id, exc_info=True)
+        return base_preview
+
+    body = "\n".join(f"• {escape_md(line)}" for line in lines)
+    return f"{base_preview}\n\n📐 *Tread Breakdown*\n{body}"
+
+
 def _build_strategy_preview_text(
     telegram_id: int,
     strategy_id: str,
@@ -3058,6 +3489,7 @@ def _build_strategy_preview_text(
         "grid": "GRID",
         "rgrid": "Reverse GRID",
         "dgrid": "Dynamic GRID",
+        "mid": "Mid Mode",
         "dn": "Mirror Delta Neutral",
         "vol": "Volume Bot",
     }
@@ -3074,22 +3506,17 @@ def _build_strategy_preview_text(
     available_margin = 0.0
     mid = 0.0
     funding_rate = 0.0
+    # F6: route through the per-process TTL balance cache so the immediate
+    # follow-up call from _append_mm_pretrade_breakdown reuses this fetch.
+    bal = _cached_user_balance(telegram_id)
+    available_margin = _wallet_collateral_usd_from_balance(bal)
     client = get_user_readonly_client(telegram_id)
-    if client:
-        try:
-            bal = client.get_balance()
-            if bal and bal.get("exists"):
-                available_margin = float((bal.get("balances", {}) or {}).get(0, 0) or 0.0)
-                if available_margin == 0:
-                    available_margin = float((bal.get("balances", {}) or {}).get("0", 0) or 0.0)
-        except Exception:
-            pass
 
     # CEO directive (2026-05): MM family and Volume Perp run at per-asset MAX
     # leverage at runtime (mm_bot.py / volume_bot.py overwrite state["leverage"]
     # at cycle start). Reflect that in the preview so the dashboard shows what
     # the bot will actually use, and so the budget preflight uses the real value.
-    if strategy_id in ("grid", "rgrid", "dgrid"):
+    if strategy_id in ("grid", "rgrid", "dgrid", "mid"):
         try:
             from src.nadobro.config import get_product_max_leverage as _gpml
             leverage = float(_gpml(product, network=network))
@@ -3167,10 +3594,10 @@ def _build_strategy_preview_text(
 
     cycle_notional = (
         max(cycle_notional_cfg, margin_usd * max(1.0, leverage))
-        if strategy_id in ("grid", "rgrid")
+        if strategy_id in ("grid", "rgrid", "mid")
         else cycle_notional_cfg
     )
-    required_margin = margin_usd if strategy_id in ("grid", "rgrid") else (cycle_notional / leverage if leverage > 0 else cycle_notional)
+    required_margin = margin_usd if strategy_id in ("grid", "rgrid", "mid") else (cycle_notional / leverage if leverage > 0 else cycle_notional)
     inventory_soft_limit = float(conf.get("inventory_soft_limit_usd", margin_usd * 0.6))
     recommended_buffer = max(5.0, required_margin * 0.20)
     recommended_available = required_margin + (inventory_soft_limit / max(leverage, 1.0)) + recommended_buffer
