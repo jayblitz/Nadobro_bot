@@ -4,15 +4,20 @@ from typing import Any
 
 
 _BOT_TOKEN_RE = re.compile(r"/bot\d+:[A-Za-z0-9_-]+(?=/|\s|$)")
-_HEX_SECRET_RE = re.compile(r"\b0x[a-fA-F0-9]{40,128}\b")
+_HEX_LONG_RE = re.compile(r"\b0x[a-fA-F0-9]{40,}\b")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}")
 _ACCOUNT_ID_RE = re.compile(r'(?i)("?account_id"?\s*[:=]\s*)\d{8,}')
+_SUBACCOUNT_FIELD_RE = re.compile(
+    r"(?i)\b(subaccount(?:_hex)?=)(0x[a-fA-F0-9]+|[a-fA-F0-9]{16,})"
+)
+_ELLIPSIS_HEX_ADDR_RE = re.compile(r"\b0x[a-fA-F0-9]{4,}\.{3}[a-fA-F0-9]{4,}\b")
 _BARE_LONG_ID_RE = re.compile(r"(?<![\w.-])\d{8,}(?![\w.-])")
-_LONG_HEX_RE = re.compile(r"\b[a-fA-F0-9]{14,128}\b")
+_LONG_HEX_RE = re.compile(r"\b[a-fA-F0-9]{14,256}\b")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _IPV6_RE = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,}[a-fA-F0-9:]{1,}\b")
 _SUPABASE_HOST_RE = re.compile(r"\b[a-z0-9-]+\.pooler\.supabase\.com\b", re.IGNORECASE)
 _FLY_INTERNAL_RE = re.compile(r"\bfdaa:[a-fA-F0-9:]+\b")
+_PINECONE_URL_RE = re.compile(r'https?://[^\s"\'<>]+pinecone\.io[^\s"\'<>]*', re.IGNORECASE)
 _URL_CREDENTIALS_RE = re.compile(r"([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@", re.IGNORECASE)
 _PRIVATE_KEY_FIELD_RE = re.compile(
     r"(?i)\b(private[_-]?key|secret|api[_-]?key|authorization|bearer|token)\b"
@@ -30,9 +35,12 @@ def redact_sensitive_text(value: Any) -> Any:
         return value
 
     text = _URL_CREDENTIALS_RE.sub(r"\1<REDACTED>:<REDACTED>@", value)
+    text = _PINECONE_URL_RE.sub("<REDACTED_PINECONE_URL>", text)
     text = _BOT_TOKEN_RE.sub("/bot<REDACTED>", text)
     text = _BEARER_RE.sub("Bearer <REDACTED>", text)
-    text = _HEX_SECRET_RE.sub("0x<REDACTED>", text)
+    text = _SUBACCOUNT_FIELD_RE.sub(lambda m: f"{m.group(1)}<REDACTED>", text)
+    text = _ELLIPSIS_HEX_ADDR_RE.sub("0x<REDACTED>...<REDACTED>", text)
+    text = _HEX_LONG_RE.sub("0x<REDACTED>", text)
     text = _ACCOUNT_ID_RE.sub(lambda m: f"{m.group(1)}<REDACTED>", text)
     text = _PRIVATE_KEY_FIELD_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<REDACTED>", text)
     text = _SUPABASE_HOST_RE.sub("<REDACTED_DB_HOST>", text)

@@ -38,7 +38,17 @@ class LogRedactionTests(unittest.TestCase):
         self.assertNotIn("fdaa:4b:a29c:a7b:4d6:fafa:718b:2", redacted)
         self.assertNotIn("f5f2a2a50e6e9226fcede55cf72a0f5fd9ff898bba6d80a25b86e84805a76219", redacted)
 
-    def test_redacting_formatter_sanitizes_exception_text(self):
+    def test_redacts_secp256k1_signatures_and_pinecone_hosts(self):
+        sig = "0x" + "ab" * 65
+        url = "https://nadobro-test.svc.region.pinecone.io/v1/whatever"
+        text = f'place_order failed {{"signature":"{sig}","status":"failure"}} host={url} short=0xabc1...9def'
+        redacted = redact_sensitive_text(text)
+        self.assertIn("<REDACTED_PINECONE_URL>", redacted)
+        self.assertNotIn(url, redacted)
+        self.assertNotIn(sig, redacted)
+        self.assertIn("0x<REDACTED>...<REDACTED>", redacted)
+
+    def test_redacts_plaintext_logs_via_filter(self):
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
         handler.addFilter(SensitiveDataRedactFilter())

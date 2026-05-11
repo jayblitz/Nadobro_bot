@@ -12,7 +12,7 @@ from src.nadobro.handlers.formatters import (
     fmt_trade_preview, fmt_trade_result,
     fmt_wallet_balance_card, fmt_wallet_balance_error, fmt_wallet_connect_card,
     fmt_wallet_info, fmt_alerts, fmt_portfolio, fmt_wallet_revoke_steps_card,
-    fmt_settings, fmt_help, fmt_price, fmt_status_overview, fmt_points_dashboard,
+    fmt_settings, fmt_help, fmt_price, fmt_points_dashboard,
     fmt_trade_history, fmt_analytics, fmt_strategy_hub_intro,
     fmt_referral_dashboard,
 )
@@ -38,6 +38,7 @@ from src.nadobro.handlers.home_card import (
     build_home_card_text_async,
     build_positions_view,
 )
+from src.nadobro.handlers.commands import build_status_dashboard_parts
 from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_readonly_client, get_user_wallet_info,
@@ -213,7 +214,9 @@ async def handle_callback(update: Update, context: CallbackContext):
 async def _handle_callback_inner(update, context, query, data, telegram_id, started):
     try:
         try:
-            await query.answer()
+            # LOWIQPTS cancel needs a targeted answer (e.g. show_alert) when nothing is pending.
+            if data != "points:cancel":
+                await query.answer()
         except BadRequest as e:
             # Callback queries expire quickly; ignore stale answers and continue.
             if "Query is too old" not in str(e) and "query id is invalid" not in str(e):
@@ -1013,73 +1016,40 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
     action = parts[1] if len(parts) > 1 else "refresh"
     if action == "studio":
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-        from src.nadobro.studio.status import build_status_cards
-
-        status = await run_blocking(get_user_bot_status, telegram_id)
-        onboarding = await run_blocking(evaluate_readiness, telegram_id)
-        base = fmt_status_overview(status, onboarding)
-        studio_text, markup = await run_blocking(build_status_cards, telegram_id, onboarding.get("network"), page)
-        await query.edit_message_text(f"{base}\n\n{studio_text}", reply_markup=markup)
-        return
-    if action == "stop":
-        ok, msg = await run_blocking(stop_user_bot, telegram_id, True)
-        status = await run_blocking(get_user_bot_status, telegram_id)
-        onboarding = await run_blocking(evaluate_readiness, telegram_id)
-        text = fmt_status_overview(status, onboarding)
-        prefix = "🛑" if ok else "⚠️"
-        text += f"\n\n{prefix} {escape_md(msg)}"
+        body, merged_kb = await build_status_dashboard_parts(telegram_id, studio_page=page)
         with language_context(get_user_language(telegram_id)):
             await _edit_loc(
                 query,
-                text,
+                body,
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=status_kb(
-                    is_running=bool(status.get("running")),
-                    strategy_label=str(status.get("strategy") or "").upper() or None,
-                ),
+                reply_markup=merged_kb,
+            )
+        return
+    if action == "stop":
+        ok, msg = await run_blocking(stop_user_bot, telegram_id, True)
+        body, merged_kb = await build_status_dashboard_parts(telegram_id)
+        prefix = "🛑" if ok else "⚠️"
+        with language_context(get_user_language(telegram_id)):
+            await _edit_loc(
+                query,
+                "{body}\n\n{prefix} {msg}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=merged_kb,
+                body=body,
+                prefix=prefix,
+                msg=escape_md(msg),
             )
         return
     if action != "refresh":
         return
+    body, merged_kb = await build_status_dashboard_parts(telegram_id)
     with language_context(get_user_language(telegram_id)):
-        lang = get_active_language()
-        status = await run_blocking(get_user_bot_status, telegram_id)
-        onboarding = await run_blocking(evaluate_readiness, telegram_id)
-        text = fmt_status_overview(status, onboarding)
-        localized = localize_text(text, lang)
-        try:
-            await query.edit_message_text(
-                localized,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=localize_markup(
-                    status_kb(
-                        is_running=bool(status.get("running")),
-                        strategy_label=str(status.get("strategy") or "").upper() or None,
-                    ),
-                    lang,
-                ),
-            )
-        except BadRequest as e:
-            if "Message is not modified" in str(e):
-                return
-            if "Can't parse entities" in str(e):
-                try:
-                    await query.edit_message_text(
-                        plain_text_fallback(localized),
-                        reply_markup=localize_markup(
-                            status_kb(
-                                is_running=bool(status.get("running")),
-                                strategy_label=str(status.get("strategy") or "").upper() or None,
-                            ),
-                            lang,
-                        ),
-                    )
-                except BadRequest as e2:
-                    if "Message is not modified" in str(e2):
-                        return
-                    raise
-                return
-            raise
+        await _edit_loc(
+            query,
+            body,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=merged_kb,
+        )
 
 
 async def _handle_wallet(query, data, telegram_id, context):
@@ -1198,16 +1168,33 @@ async def _handle_points(query, data, telegram_id, context):
     if action == "cancel":
         relay_result = await relay_user_reply_to_lowiqpts(context, query.message.chat.id, "/cancel")
         if relay_result.get("cancelled"):
+            try:
+                await query.answer()
+            except BadRequest:
+                pass
             await _edit_loc(
                 query,
-                "✅ Points request closed\\. Tap *🔄 Refresh* to start again\\.",
+                "✅ Points request closed\\. Tap *🏆 Refresh points* to start again\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=points_scope_kb(),
             )
             return
+        if relay_result.get("handled") is False:
+            try:
+                await query.answer(
+                    relay_result.get("error") or "No active LOWIQPTS request to close.",
+                    show_alert=True,
+                )
+            except BadRequest:
+                pass
+            return
+        try:
+            await query.answer()
+        except BadRequest:
+            pass
         await _edit_loc(
             query,
-            escape_md(relay_result.get("error", "No active LOWIQPTS request to close.")),
+            escape_md(relay_result.get("error", "Could not cancel LOWIQPTS request.")),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=points_scope_kb(),
         )
@@ -2095,31 +2082,27 @@ async def _handle_strategy(query, data, context, telegram_id):
             start_payload["vol_market"] = vol_m
         await execute_action_directly(query, context, telegram_id, start_payload)
     elif action == "status":
-        st = await run_blocking(get_user_bot_status, telegram_id)
-        readiness = await run_blocking(evaluate_readiness, telegram_id)
-        text = fmt_status_overview(st, readiness)
-        await _edit_loc(query, 
-            text,
+        # Same merged dashboard as /status (Strategy Studio pagination + Refresh/Stop),
+        # whether opened from strategy cards (GRID/RGRID/DGRID/MID/DN/VOL/BRO) or commands.
+        body, merged_kb = await build_status_dashboard_parts(telegram_id)
+        await _edit_loc(
+            query,
+            body,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=status_kb(
-                is_running=bool(st.get("running")),
-                strategy_label=str(st.get("strategy") or "").upper() or None,
-            ),
+            reply_markup=merged_kb,
         )
     elif action == "stop":
         ok, msg = await run_blocking(stop_user_bot, telegram_id, True)
-        st = await run_blocking(get_user_bot_status, telegram_id)
-        readiness = await run_blocking(evaluate_readiness, telegram_id)
-        text = fmt_status_overview(st, readiness)
+        body, merged_kb = await build_status_dashboard_parts(telegram_id)
         prefix = "🛑" if ok else "⚠️"
-        text += f"\n\n{prefix} {escape_md(msg)}"
-        await _edit_loc(query, 
-            text,
+        await _edit_loc(
+            query,
+            "{body}\n\n{prefix} {msg}",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=status_kb(
-                is_running=bool(st.get("running")),
-                strategy_label=str(st.get("strategy") or "").upper() or None,
-            ),
+            reply_markup=merged_kb,
+            body=body,
+            prefix=prefix,
+            msg=escape_md(msg),
         )
 
 
@@ -3414,11 +3397,30 @@ async def _handle_mm_dashboard(query, data: str, telegram_id: int):
         return
     if action == "fills":
         text = await run_blocking(build_mm_fills_text, telegram_id, 10)
+        _, is_mm_active = await run_blocking(build_mm_status_text, telegram_id)
+        from src.nadobro.handlers.commands import _mm_dashboard_keyboard
+
+        markup = (
+            _mm_dashboard_keyboard()
+            if is_mm_active
+            else InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📊 Refresh MM board",
+                            callback_data="mm:status:refresh",
+                        ),
+                    ],
+                    [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+                ]
+            )
+        )
         # Use a fenced block so the columnar fills render evenly.
         await _edit_loc(
             query,
             f"```\n{text}\n```",
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=markup,
         )
         return
 

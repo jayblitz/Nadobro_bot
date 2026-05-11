@@ -22,7 +22,7 @@ def portfolio_deck_kb(has_positions: bool = False, has_orders: bool = False) -> 
             InlineKeyboardButton("📈 Performance", callback_data="portfolio:performance"),
             InlineKeyboardButton("📜 History", callback_data="portfolio:history"),
         ],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")],
+        [InlineKeyboardButton("📊 Refresh portfolio", callback_data="portfolio:refresh")],
     ]
     if has_positions:
         rows.append([InlineKeyboardButton("❌ Close All", callback_data="portfolio:close_all_confirm")])
