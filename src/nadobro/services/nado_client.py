@@ -1726,6 +1726,8 @@ class NadoClient:
                 price_x18 = self._align_x18_to_increment(price_x18, int(price_increment_x18))
 
             # Proactively enforce exchange minimum notional before submission.
+            pre_bump_size = float(size)
+            size_bumped = False
             if min_size_x18 and min_size_x18 > 0 and price_x18 > 0 and amount_x18 != 0:
                 min_notional_x36 = int(min_size_x18) * (10 ** 18)
                 current_notional_x36 = abs(int(amount_x18)) * int(price_x18)
@@ -1747,11 +1749,18 @@ class NadoClient:
                         )
                         amount_x18 = int(bumped_amount_x18)
                         size = abs(float(amount_x18) / 1e18)
+                        size_bumped = True
 
             isolated_margin_x6 = 0
             if isolated_only:
                 if isolated_margin is None:
                     isolated_margin = abs(float(size) * float(price))
+                elif size_bumped and pre_bump_size > 0:
+                    # Caller computed isolated_margin against the pre-bump size.
+                    # Scale it up by the same ratio so margin_x6 still covers the
+                    # bumped notional — otherwise the venue rejects with
+                    # error_code 2006 ("account health below threshold").
+                    isolated_margin = float(isolated_margin) * (float(size) / pre_bump_size)
                 isolated_margin_x6 = max(0, self._to_x6_int(float(isolated_margin)))
 
             order = OrderParams(
