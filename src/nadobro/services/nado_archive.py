@@ -179,10 +179,14 @@ def query_isolated_subaccounts_for_parent(
     if not parent:
         return []
     url = archive_url_for_network(network)
-    # Archive indexer expects `subaccount` as a hex array (even for one parent).
+    # Archive indexer expects ``subaccount`` (singular) as a single bytes32 hex
+    # string — not a list. Wrapping it in ``[parent]`` triggers
+    # ``invalid type: string ..., expected u8`` because the deserializer reads
+    # the array as bytes. Plural ``subaccounts`` (matches/orders endpoints)
+    # does take a list of hex strings; this endpoint does not.
     payload = {
         "isolated_subaccounts": {
-            "subaccount": [parent],
+            "subaccount": parent,
             "limit": min(max(1, int(limit)), 500),
         }
     }

@@ -125,7 +125,13 @@ def _dn_underlying_key(symbol: str) -> str:
 
 
 def _derive_max_leverage_from_weight_x18(weight_x18) -> Optional[int]:
-    """Derive max leverage from initial asset weight: lev = 1 / (1 - w)."""
+    """Derive max leverage from initial asset weight: lev = 1 / (1 - w).
+
+    Floor (not round) so the bot never advertises more leverage than the venue
+    actually allows. Rounding up can produce a derived cap above the protocol
+    cap, which makes ``isolated_margin = notional / leverage`` fall below the
+    initial-margin requirement and trips error_code 2006 at place_order.
+    """
     try:
         w = float(int(weight_x18)) / 1e18
     except (TypeError, ValueError):
@@ -138,7 +144,7 @@ def _derive_max_leverage_from_weight_x18(weight_x18) -> Optional[int]:
         return None
     if lev <= 0:
         return None
-    return max(1, int(round(lev)))
+    return max(1, int(lev))
 
 
 def _build_static_catalog() -> dict:
