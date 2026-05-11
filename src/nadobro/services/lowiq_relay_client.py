@@ -6,7 +6,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT_SECONDS = float(os.environ.get("LOWIQPTS_RELAY_TIMEOUT_SECONDS", "15") or "15")
+_DEFAULT_TIMEOUT_SECONDS = float(os.environ.get("LOWIQPTS_RELAY_TIMEOUT_SECONDS", "210") or "210")
 _DEFAULT_POLL_LIMIT = int(os.environ.get("LOWIQPTS_RELAY_POLL_LIMIT", "25") or "25")
 
 _shared_client: Optional[httpx.AsyncClient] = None

@@ -135,3 +135,21 @@ async def find_session_for_incoming(sender_id: int) -> Optional[str]:
             sender_id,
         )
     return row["id"] if row else None
+
+
+async def purge_old_relay_events(retention_days: int = 30) -> int:
+    """Delete relay_events older than retention window (does not touch relay_sessions)."""
+    from datetime import datetime, timedelta, timezone
+
+    days = max(1, int(retention_days or 30))
+    pool = get_pool()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM relay_events WHERE created_at < $1",
+            cutoff,
+        )
+    try:
+        return int(str(result).split()[-1])
+    except (TypeError, ValueError, IndexError):
+        return 0

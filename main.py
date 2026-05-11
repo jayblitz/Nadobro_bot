@@ -164,8 +164,17 @@ def _runtime_health_payload() -> dict:
 
 
 def setup_bot():
-    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, filters
+    from telegram.ext import (
+        Application,
+        ApplicationHandlerStop,
+        CommandHandler,
+        MessageHandler,
+        CallbackQueryHandler,
+        TypeHandler,
+        filters,
+    )
     from telegram import Update
+    from telegram.constants import ChatType
 
     from src.nadobro.config import BOT_USERNAME
     from src.nadobro.handlers.commands import (
@@ -182,6 +191,12 @@ def setup_bot():
     from src.nadobro.handlers.brief_commands import cmd_market_news, cmd_morning_brief
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
+    from src.nadobro.handlers.update_serialization import with_user_serialized
+
+    async def _private_chat_only(update: Update, context):
+        chat = update.effective_chat
+        if chat is None or chat.type != ChatType.PRIVATE:
+            raise ApplicationHandlerStop()
 
     async def _language_middleware(update: Update, context):
         user = update.effective_user
@@ -215,29 +230,30 @@ def setup_bot():
         .build()
     )
 
+    app.add_handler(TypeHandler(Update, _private_chat_only), group=-2)
     app.add_handler(TypeHandler(Update, _language_middleware), group=-1)
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("ops", cmd_ops))
-    app.add_handler(CommandHandler("stop_all", cmd_stop_all))
-    app.add_handler(CommandHandler("revoke", cmd_revoke))
-    app.add_handler(CommandHandler("agent_on", cmd_agent_on))
-    app.add_handler(CommandHandler("agent_off", cmd_agent_off))
-    app.add_handler(CommandHandler("agent_status", cmd_agent_status))
-    app.add_handler(CommandHandler("invite_generate", cmd_invite_generate))
-    app.add_handler(CommandHandler("invite_status", cmd_invite_status))
-    app.add_handler(CommandHandler("invite_revoke", cmd_invite_revoke))
-    app.add_handler(CommandHandler("invite_grant", cmd_invite_grant))
-    app.add_handler(CommandHandler("brief", cmd_morning_brief))
-    app.add_handler(CommandHandler("news", cmd_market_news))
+    app.add_handler(CommandHandler("start", with_user_serialized(cmd_start)))
+    app.add_handler(CommandHandler("help", with_user_serialized(cmd_help)))
+    app.add_handler(CommandHandler("status", with_user_serialized(cmd_status)))
+    app.add_handler(CommandHandler("ops", with_user_serialized(cmd_ops)))
+    app.add_handler(CommandHandler("stop_all", with_user_serialized(cmd_stop_all)))
+    app.add_handler(CommandHandler("revoke", with_user_serialized(cmd_revoke)))
+    app.add_handler(CommandHandler("agent_on", with_user_serialized(cmd_agent_on)))
+    app.add_handler(CommandHandler("agent_off", with_user_serialized(cmd_agent_off)))
+    app.add_handler(CommandHandler("agent_status", with_user_serialized(cmd_agent_status)))
+    app.add_handler(CommandHandler("invite_generate", with_user_serialized(cmd_invite_generate)))
+    app.add_handler(CommandHandler("invite_status", with_user_serialized(cmd_invite_status)))
+    app.add_handler(CommandHandler("invite_revoke", with_user_serialized(cmd_invite_revoke)))
+    app.add_handler(CommandHandler("invite_grant", with_user_serialized(cmd_invite_grant)))
+    app.add_handler(CommandHandler("brief", with_user_serialized(cmd_morning_brief)))
+    app.add_handler(CommandHandler("news", with_user_serialized(cmd_market_news)))
     # Phase 3: Tread-style live MM dashboard.
-    app.add_handler(CommandHandler("mm_status", cmd_mm_status))
-    app.add_handler(CommandHandler("mm_fills", cmd_mm_fills))
+    app.add_handler(CommandHandler("mm_status", with_user_serialized(cmd_mm_status)))
+    app.add_handler(CommandHandler("mm_fills", with_user_serialized(cmd_mm_fills)))
 
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(with_user_serialized(handle_callback)))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, with_user_serialized(handle_message)))
     app.add_error_handler(_error_handler)
 
     logger.info("Bot handlers registered (pure bot mode, language middleware active)")

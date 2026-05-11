@@ -28,6 +28,12 @@ if "telethon" not in sys.modules:
     class _User:
         pass
 
+    class _MessageMediaDocument:
+        pass
+
+    class _MessageMediaPhoto:
+        pass
+
     class _NewMessage:
         class Event:
             pass
@@ -36,6 +42,8 @@ if "telethon" not in sys.modules:
     telethon_mod.events = telethon_events
     telethon_events.NewMessage = _NewMessage
     telethon_tl_types.User = _User
+    telethon_tl_types.MessageMediaDocument = _MessageMediaDocument
+    telethon_tl_types.MessageMediaPhoto = _MessageMediaPhoto
     sys.modules["telethon"] = telethon_mod
     sys.modules["telethon.events"] = telethon_events
     sys.modules["telethon.tl.types"] = telethon_tl_types
@@ -70,8 +78,8 @@ class _Conn:
     async def fetchval(self, *_args):
         return self.fetch_values.pop(0)
 
-    async def execute(self, *_args):
-        if self.execute_error:
+    async def execute(self, sql, *args):
+        if self.execute_error and isinstance(sql, str) and "INSERT INTO relay_sessions" in sql:
             raise self.execute_error
 
     def transaction(self):
@@ -91,7 +99,7 @@ class RelaySessionManagerTests(unittest.IsolatedAsyncioTestCase):
         class _UniqueViolation(Exception):
             pass
 
-        conn = _Conn([None, 0, None, "sess_existing"], execute_error=_UniqueViolation())
+        conn = _Conn([None, None, None, "sess_existing"], execute_error=_UniqueViolation())
         pool = _Pool(conn)
 
         with patch.object(session_manager, "get_pool", return_value=pool), patch.object(
