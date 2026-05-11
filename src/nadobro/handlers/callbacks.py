@@ -58,6 +58,7 @@ from src.nadobro.services.points_service import (
     request_points_refresh,
 )
 from src.nadobro.services.referral_service import generate_referral_invite_code, get_referral_dashboard
+from src.nadobro.services.strategy_pending_input import persist_strategy_pending_input
 from src.nadobro.services.onboarding_service import (
     get_resume_step,
     evaluate_readiness,
@@ -421,7 +422,7 @@ async def _handle_mode(query, data, telegram_id, context=None):
 async def _handle_nav(query, data, telegram_id, context=None):
     target = data.split(":", 1)[1] if ":" in data else "main"
 
-    clear_pending_user_state(context)
+    clear_pending_user_state(context, telegram_id)
 
     user = await run_blocking(get_user, telegram_id)
     network = user.network_mode.value if user else "mainnet"
@@ -1941,6 +1942,11 @@ async def _handle_strategy(query, data, context, telegram_id):
             "field": field,
             "section": section,
         }
+        await run_blocking(
+            persist_strategy_pending_input,
+            int(telegram_id),
+            {"strategy": strategy_id, "field": field, "section": section},
+        )
         help_text = {
             "notional_usd": "Enter margin in USD \\(example: `150`\\)",
             "spread_bp": "Enter spread in bps \\(example: `6`\\)",

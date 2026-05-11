@@ -55,6 +55,10 @@ from src.nadobro.services.points_service import (
     request_points_refresh,
     relay_user_reply_to_lowiqpts,
 )
+from src.nadobro.services.strategy_pending_input import (
+    clear_strategy_pending_input,
+    load_strategy_pending_input,
+)
 from src.nadobro.services.referral_service import get_referral_dashboard
 from src.nadobro.services.managed_agent_state import is_managed_agent_enabled
 from src.nadobro.services.managed_agent_service import handle_managed_agent_turn
@@ -441,6 +445,15 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
                     pass
             return
 
+    # Strategy Lab / Bro FAQ / support-question text beats trade-card numerics, LOWIQPTS relay,
+    # and chat agents. Hydrate from bot_state when user_data was lost (multi-worker webhooks).
+    if await _handle_pending_strategy_input(update, context, telegram_id, text):
+        return
+    if await _handle_pending_bro_input(update, context, telegram_id, text):
+        return
+    if await _handle_pending_question(update, context, telegram_id, text):
+        return
+
     if await handle_trade_card_text_input(update, context, telegram_id, text):
         return
 
@@ -486,15 +499,6 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
             )
         return
 
-    if await _handle_pending_strategy_input(update, context, telegram_id, text):
-        return
-
-    if await _handle_pending_bro_input(update, context, telegram_id, text):
-        return
-
-    if await _handle_pending_question(update, context, telegram_id, text):
-        return
-
     from src.nadobro.handlers.studio_handler import handle_studio_text
     if await handle_studio_text(update, context):
         return
@@ -529,7 +533,7 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         callback_data = "points:view"
 
     if callback_data == "nav:main":
-        clear_pending_user_state(context)
+        clear_pending_user_state(context, telegram_id)
         if is_trade_card_mode_enabled():
             await open_home_card_view_from_message(update, context, telegram_id, "nav:main")
             return
@@ -551,13 +555,13 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
         "settings:view",
         "nav:mode",
     ):
-        clear_pending_user_state(context)
+        clear_pending_user_state(context, telegram_id)
         target = "home:mode" if callback_data == "nav:mode" else callback_data
         await open_home_card_view_from_message(update, context, telegram_id, target)
         return
 
     if callback_data == "nav:trade":
-        clear_pending_user_state(context)
+        clear_pending_user_state(context, telegram_id)
         if not is_new_onboarding_complete(telegram_id):
             await _reply_loc(update.message,
                 "⚠️ Complete setup first (language + accept terms).",
@@ -1479,6 +1483,10 @@ async def _handle_pending_alert(update, context, telegram_id, text):
 async def _handle_pending_strategy_input(update, context, telegram_id, text):
     pending = context.user_data.get("pending_strategy_input")
     if not pending:
+        pending = await run_blocking(load_strategy_pending_input, int(telegram_id))
+        if pending:
+            context.user_data["pending_strategy_input"] = pending
+    if not pending:
         return False
 
     strategy = pending.get("strategy")
@@ -1501,6 +1509,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     )
     if strategy not in supported or field not in supported_fields:
         context.user_data.pop("pending_strategy_input", None)
+        await run_blocking(clear_strategy_pending_input, int(telegram_id))
         return False
     # directional_bias is only a numeric field for Mid Mode; other strategies
     # use the discrete neutral/long/short string set via set_text.
@@ -1549,7 +1558,22 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "rgrid_reset_threshold_pct": (0.05, 20),
         "rgrid_reset_timeout_seconds": (15, 86400),
         "rgrid_discretion": (0.01, 0.5),
+        "dgrid_trend_on_variance_ratio": (1.0, 5.0),
+        "dgrid_range_on_variance_ratio": (0.1, 2.0),
+        "dgrid_min_spread_bp": (0.0, 50.0),
+        "dgrid_max_spread_bp": (1.0, 200.0),
+        "dgrid_short_window_points": (2, 50),
+        "dgrid_long_window_points": (4, 200),
     }
+    if field not in limits:
+        logger.error("Missing strategy limit for field=%s (strategy=%s)", field, strategy)
+        await _reply_loc(
+            update.message,
+            "⚠️ This setting is not wired for chat input yet\\. Use the buttons or report to support\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return True
+
     lo, hi = limits[field]
     if value < lo or value > hi:
         await _reply_loc(update.message, 
@@ -1563,6 +1587,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         cfg = strategies.setdefault(strategy, {})
         int_fields = {
             "interval_seconds", "levels", "quote_ttl_seconds", "rgrid_reset_timeout_seconds",
+            "grid_reset_timeout_seconds", "dgrid_short_window_points", "dgrid_long_window_points",
         }
         if field in int_fields:
             cfg[field] = int(value)
@@ -1576,6 +1601,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
     network, settings = update_user_settings(telegram_id, _mutate)
     conf = settings.get("strategies", {}).get(strategy, {})
     context.user_data.pop("pending_strategy_input", None)
+    await run_blocking(clear_strategy_pending_input, int(telegram_id))
     continue_callback = f"strategy:config:{strategy}"
     if section:
         continue_callback = f"strategy:config_section:{strategy}:{section}"
