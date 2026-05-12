@@ -79,7 +79,7 @@ WHITE = (255, 255, 255)
 LIGHT_GREY = (185, 192, 199)
 SALMON = (255, 138, 138)        # "Net Fees" label
 RED = (255, 76, 76)             # negative values
-GREEN = (60, 230, 110)          # positive values / paper-plane glyph
+GREEN = (31, 157, 85)           # positive values / paper-plane glyph (brand --nb-green-500)
 PILL_BG = (32, 44, 56)
 PILL_FG = (210, 222, 232)
 
@@ -100,6 +100,7 @@ _BG_CANDIDATES: tuple[str, ...] = (
 )
 
 _LOGO_CANDIDATES: tuple[Path, ...] = (
+    LOGOS_DIR / "nadobro_glyph_transparent.png",
     LOGOS_DIR / "nadobro_nb_logo.png",
     LOGOS_DIR / "nadobro_glyph.png",
     LOGOS_DIR / "nadobro.png",

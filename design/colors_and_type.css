@@ -1,0 +1,204 @@
+/* ==========================================================================
+   NadoBro — Colors & Type Tokens
+   --------------------------------------------------------------------------
+   Sampled from the codebase (services/pnl_card.py colour constants),
+   the chat-card formatters, the PnL share card master, and the brand logo.
+   Use the CSS vars in --foo form for raw tokens; use the semantic vars
+   (--bg, --fg, --accent, --bro-pill-*) in product code.
+   ========================================================================== */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap");
+
+:root {
+  /* ---------- Brand core — official palette ---------------------------- */
+  /* Brand is DEEP GREEN + WHITE + BLACK. Cyan from the logo is retained
+     only as a logo-internal accent — never used in product chrome. */
+  --nb-black:      #000000;     /* PRIMARY surface */
+  --nb-white:      #FFFFFF;     /* PRIMARY foreground */
+
+  --nb-green-50:   #E8FBEF;
+  --nb-green-100:  #C9F4D8;
+  --nb-green-300:  #6FD89A;
+  --nb-green-500:  #1F9D55;     /* DEEP GREEN — primary brand colour */
+  --nb-green-600:  #167A41;     /* deeper, hover/press */
+  --nb-green-700:  #0E5A2F;
+  --nb-green-900:  #062817;
+
+  /* Logo-only accents (do not introduce in new surfaces) */
+  --nb-logo-cyan:  #29D7E6;
+  --nb-logo-green: #44EE94;
+
+  /* Back-compat aliases for older preview files (do not use in new code) */
+  --nb-cyan-100: #C7F4FB;
+  --nb-cyan-300: var(--nb-green-300);
+  --nb-cyan-500: var(--nb-green-500);
+
+  /* ---------- Surfaces — black-first scale ---------------------------- */
+  --nb-ink-1000: #000000;      /* page bleed — pure black */
+  --nb-ink-900:  #050706;      /* page background */
+  --nb-ink-800:  #0B0F0D;      /* card / panel */
+  --nb-ink-700:  #141916;      /* raised pill, input fill */
+  --nb-ink-600:  #1E2521;
+  --nb-ink-500:  #2C342F;
+  --nb-ink-400:  #4A5550;
+
+  /* Telegram dark surface (where the bot lives) */
+  --tg-bg:        #17212B;
+  --tg-bg-bubble: #182533;
+  --tg-bg-bubble-out: #2B5278;  /* user-sent message */
+  --tg-divider:   #0F1923;
+
+  /* ---------- Text ----------------------------------------------------- */
+  --nb-fg-1:    #FFFFFF;       /* values, headlines (WHITE in pnl_card) */
+  --nb-fg-2:    #BCC4D0;       /* labels (LABEL_GREY in pnl_card)       */
+  --nb-fg-3:    #7C8AA0;       /* meta, source line                     */
+  --nb-fg-4:    #4D5E78;       /* placeholder                           */
+  --nb-fg-on-pill: #0A1A0E;    /* PILL_FG — dark text on bright pill    */
+
+  /* ---------- Semantic / trading -------------------------------------- */
+  --nb-buy:    var(--nb-green-500);    /* 🟢 Long  */
+  --nb-sell:   #FF4C4C;                /* 🔴 Short / liq / RED in pnl_card */
+  --nb-warn:   #FFB547;
+  --nb-info:   var(--nb-green-300);
+  --nb-link:   var(--nb-green-300);
+
+  /* ---------- Aliases used in product code ---------------------------- */
+  --bg:           var(--nb-ink-900);
+  --bg-elevated:  var(--nb-ink-800);
+  --bg-pill:      var(--nb-ink-700);
+  --fg:           var(--nb-fg-1);
+  --fg-muted:     var(--nb-fg-2);
+  --fg-subtle:    var(--nb-fg-3);
+  --accent:       var(--nb-green-500);   /* DEEP GREEN */
+  --accent-hover: var(--nb-green-600);
+  --rule:         rgba(255,255,255,0.06);
+  --border:       rgba(255,255,255,0.10);
+  --border-strong:rgba(255,255,255,0.22);
+
+  /* "Bro Mode" pill — copy/paste these for any green CTA pill */
+  --bro-pill-bg: var(--nb-green-500);
+  --bro-pill-fg: var(--nb-fg-on-pill);
+
+  /* ---------- Radius / spacing / shadow ------------------------------- */
+  --r-xs:  4px;
+  --r-sm:  8px;
+  --r-md:  12px;
+  --r-lg:  16px;
+  --r-xl:  20px;
+  --r-2xl: 28px;     /* big share-card pill */
+  --r-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  --shadow-pill:   0 1px 0 rgba(255,255,255,0.05) inset, 0 8px 20px -8px rgba(34,230,109,0.45);
+  --shadow-card:   0 1px 0 rgba(255,255,255,0.04) inset, 0 12px 32px -12px rgba(0,0,0,0.6);
+  --shadow-glow-cyan:  0 0 0 1px rgba(41,215,230,0.35), 0 0 24px -2px rgba(41,215,230,0.45);
+  --shadow-glow-green: 0 0 0 1px rgba(68,238,148,0.35), 0 0 24px -2px rgba(68,238,148,0.45);
+
+  /* ---------- Type ---------------------------------------------------- */
+  --font-display: "Space Grotesk", "Outfit", "Inter", system-ui, sans-serif;
+  --font-body:    "Inter", "SF Pro Text", system-ui, -apple-system, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Telegram chat-message body uses the system stack inside Telegram, but in
+     our HTML mocks we approximate it with Inter. */
+}
+
+/* -------- Type scale ------------------------------------------------- */
+/* Display is reserved for share cards / hero / wordmark moments.
+   Body covers chat bubbles, lists, button text. Mono = addresses, code,
+   PnL numbers in dense rows. */
+
+.h-display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 56px;
+  line-height: 1.05;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--fg);
+}
+.h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 32px;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+  color: var(--fg);
+}
+.h2 {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 22px;
+  line-height: 1.25;
+  color: var(--fg);
+}
+.h3 { /* card header — "📊 Trading Bro" */
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 17px;
+  line-height: 1.3;
+  color: var(--fg);
+}
+.body {
+  font-family: var(--font-body);
+  font-weight: 400;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--fg);
+}
+.body-strong { font-weight: 600; }
+.label {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--fg-muted);
+  letter-spacing: 0.01em;
+}
+.meta {
+  font-family: var(--font-body);
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--fg-subtle);
+}
+.value-xl { /* PnL / Volume number on share card */
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: 56px;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+.value-lg {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 32px;
+  line-height: 1.05;
+  letter-spacing: -0.005em;
+  color: var(--fg);
+}
+.mono {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 13px;
+  letter-spacing: 0;
+  color: var(--fg);
+}
+.mono-strong { font-family: var(--font-mono); font-weight: 600; }
+
+/* Common element bindings — apply when no class is set */
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); }
+h1   { font: 700 32px/1.15 var(--font-display); letter-spacing: 0.01em; }
+h2   { font: 700 22px/1.25 var(--font-body); }
+h3   { font: 700 17px/1.3 var(--font-body); }
+p    { font: 400 15px/1.45 var(--font-body); }
+code, pre { font-family: var(--font-mono); }

@@ -1,0 +1,12 @@
+@import url("../colors_and_type.css");
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  background: var(--nb-ink-900);
+  color: var(--fg);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+body { padding: 18px 22px; }
+.row { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; }
+.col { display: flex; flex-direction: column; gap: 10px; }
+.spacer { flex: 1; }

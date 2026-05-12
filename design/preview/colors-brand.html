@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_base.css"><style>
+body { padding: 14px 16px; background: #050706; }
+.grid { display:grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.sw { aspect-ratio: 4/3; border-radius: 10px; padding: 10px; display:flex; flex-direction:column; justify-content:flex-end; font: 600 12px/1.1 var(--font-body); border: 1px solid rgba(255,255,255,0.08); }
+.sw .name { font-weight: 700; }
+.sw .hex { font: 500 10.5px/1 var(--font-mono); opacity: 0.75; margin-top: 2px; }
+.sw.light { color: #050706; }
+.sw.dark  { color: #fff; }
+</style></head><body>
+<div class="grid">
+  <div class="sw light" style="background:#FFFFFF"><div class="name">white ●</div><div class="hex">#FFFFFF · primary fg</div></div>
+  <div class="sw dark"  style="background:#000000"><div class="name">black ●</div><div class="hex">#000000 · primary bg</div></div>
+  <div class="sw dark"  style="background:#1F9D55"><div class="name">green-500 ●</div><div class="hex">#1F9D55 · brand</div></div>
+  <div class="sw dark"  style="background:#167A41"><div class="name">green-600</div><div class="hex">#167A41 · hover</div></div>
+  <div class="sw light" style="background:#E8FBEF"><div class="name">green-50</div><div class="hex">#E8FBEF · tint</div></div>
+  <div class="sw light" style="background:#C9F4D8"><div class="name">green-100</div><div class="hex">#C9F4D8</div></div>
+  <div class="sw light" style="background:#6FD89A"><div class="name">green-300</div><div class="hex">#6FD89A</div></div>
+  <div class="sw dark"  style="background:#0E5A2F"><div class="name">green-700</div><div class="hex">#0E5A2F</div></div>
+</div>
+</body></html>
