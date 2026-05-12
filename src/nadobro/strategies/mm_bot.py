@@ -17,8 +17,29 @@ from src.nadobro.services.rate_limit import (
     call_with_retry,
     market_price_is_empty,
 )
+# --- D-Grid intelligence upgrade (additive) ---
+# These three modules are no-ops when ``state["dgrid_intelligence_enabled"]``
+# is False, so importing them at top-level is safe for existing GRID/RGRID
+# users. See docs/dynamic_grid_strategy.md (upgrade section) for the full plan.
+from src.nadobro.strategies import _regime as _dgrid_regime
+from src.nadobro.strategies import _layer_sizing as _dgrid_layer_sizing
+from src.nadobro.strategies import _position_manager as _dgrid_pm
+
+try:
+    from src.nadobro.services.feature_flags import dgrid_intelligence_enabled as _dgi_env_default
+except Exception:
+    def _dgi_env_default() -> bool:
+        return False
 
 logger = logging.getLogger(__name__)
+
+
+def _dgrid_intelligence_on(state: dict) -> bool:
+    """Per-session flag with env-var default. State overrides env."""
+    val = state.get("dgrid_intelligence_enabled")
+    if val is None:
+        return bool(_dgi_env_default())
+    return bool(val)
 
 STALE_DRIFT_MULTIPLIER = 2.0
 # Floor for the stale-quote drift threshold. Without this, ``spread_bp=0`` (or
@@ -1105,6 +1126,23 @@ def run_cycle(
     dynamic_spread_bp = spread_bp * (1.0 + (vol_bp * vol_sensitivity / 100.0))
     if configured_strategy == "dgrid":
         dynamic_spread_bp = float(spread_bp)
+
+    # --- DGRID intelligence: regime classifier (Layer B) ----------------
+    regime_info: dict = {}
+    if configured_strategy == "dgrid" and _dgrid_intelligence_on(state):
+        ema_fast_now, ema_slow_now = _update_both_emas(state, mid, ema_fast_alpha, ema_slow_alpha)
+        regime_info = _dgrid_regime.classify_regime(
+            state,
+            history,
+            product=str(product),
+            variance_ratio=float(state.get("dgrid_variance_ratio") or 1.0),
+            realized_vol_bp=float(state.get("dgrid_realized_move_bp") or vol_bp),
+            ema_fast=ema_fast_now,
+            ema_slow=ema_slow_now,
+            short_window=int(state.get("dgrid_short_window_points") or 4),
+            long_window=int(state.get("dgrid_long_window_points") or 12),
+            config=state,
+        )
     if strategy == "rgrid":
         max_abs = max(abs(min_spread_bp), abs(max_spread_bp))
         dynamic_spread_bp = _clamp(dynamic_spread_bp, -max_abs, max_abs)
@@ -1198,6 +1236,45 @@ def run_cycle(
         inventory_source = "fills" if abs(net_units) > 0 else "none"
     inv_usd = abs(net_units) * mid
 
+    # --- DGRID intelligence: position manager (Layer C) -----------------
+    pm_summary: dict = {"enabled": False, "actions": [], "size_dampener": 1.0,
+                        "cooldown_active": False}
+    if configured_strategy == "dgrid" and _dgrid_intelligence_on(state):
+        try:
+            pm_summary = _dgrid_pm.manage_positions(
+                telegram_id=telegram_id,
+                product=str(product),
+                product_id=product_id,
+                state=state,
+                positions=positions,
+                regime_info=regime_info or {},
+                enabled=bool(state.get("pm_enabled", True)),
+            )
+        except Exception as _pm_exc:
+            logger.exception("dgrid PM cycle failed: %s", _pm_exc)
+            pm_summary = {"enabled": False, "actions": [],
+                          "size_dampener": 1.0, "cooldown_active": False,
+                          "error": str(_pm_exc)}
+        # Re-read positions after any PM-driven closes so subsequent sizing
+        # sees the new inventory.
+        if pm_summary.get("actions"):
+            try:
+                positions = client.get_all_positions() or []
+            except Exception:
+                pass
+            live_position_rows = []
+            net_units = 0.0
+            for p in positions:
+                if int(p.get("product_id", -1)) != product_id:
+                    continue
+                amt = abs(float(p.get("amount", 0) or 0))
+                side = str(p.get("side", "") or "").upper()
+                if amt <= 0 or side not in {"LONG", "SHORT"}:
+                    continue
+                live_position_rows.append(p)
+                net_units += amt if side == "LONG" else -amt
+            inv_usd = abs(net_units) * mid
+
     cancelled_digests = set(str(d) for d in (state.get("mm_recently_cancelled_digests") or []))
     # Phase 4: resume reconciliation. ``_reconcile_executed_quotes`` already
     # queries the archive for any tracked digest that is no longer in the open-
@@ -1223,6 +1300,8 @@ def run_cycle(
     if executed_quotes:
         for q in executed_quotes:
             _append_grid_exposure_fill(state, q)
+        # Track last fill timestamp so the PM's stale-flatten rule has a clock.
+        state["grid_last_fill_ts"] = float(executed_quotes[-1].get("placed_ts") or time.time())
     if session_key:
         # Mark this session as reconciled-in-this-process unconditionally on
         # the first cycle we see it, even if there was no persisted state to
@@ -1313,6 +1392,10 @@ def run_cycle(
     grid_cycle_pnl = _compute_grid_cycle_pnl_usd(positions, product_id)
     state["grid_last_cycle_pnl_usd"] = round(grid_cycle_pnl, 6)
     if max_loss_usd > 0 and grid_cycle_pnl <= (-max_loss_usd):
+        # DGRID intelligence: instead of just halting, fire PM cooldown so the
+        # next cycle re-engages at reduced size rather than slamming back in.
+        if configured_strategy == "dgrid" and _dgrid_intelligence_on(state):
+            _dgrid_pm.trigger_cooldown(state, reason="grid_stop_loss_hit")
         return {
             "success": True,
             "orders_placed": 0,
@@ -1327,8 +1410,11 @@ def run_cycle(
             "grid_max_loss_usd": max_loss_usd,
             "reference_price": reference_price,
             "spread_bp": dynamic_spread_bp,
+            "pm_cooldown_until": state.get("pm_cooldown_until"),
         }
     if max_profit_usd > 0 and grid_cycle_pnl >= max_profit_usd:
+        if configured_strategy == "dgrid" and _dgrid_intelligence_on(state):
+            _dgrid_pm.trigger_cooldown(state, reason="grid_take_profit_hit")
         return {
             "success": True,
             "orders_placed": 0,
@@ -1343,6 +1429,7 @@ def run_cycle(
             "grid_take_profit_usd": max_profit_usd,
             "reference_price": reference_price,
             "spread_bp": dynamic_spread_bp,
+            "pm_cooldown_until": state.get("pm_cooldown_until"),
         }
 
     buy_mult, sell_mult, pause_flatten_only, pause_reason = _resolve_side_multipliers(
@@ -1632,6 +1719,40 @@ def run_cycle(
     per_level_buy_size = float(min_quote_size) if buy_levels > 0 else 0.0
     per_level_sell_size = float(min_quote_size) if sell_levels > 0 else 0.0
 
+    # --- DGRID intelligence: per-level adaptive sizing (Layer A) --------
+    # When enabled, ``_dgrid_layer_size_for`` below is called per order spec
+    # and overrides ``per_level_*_size``. We only set up the helper here so
+    # the placement loop below stays tidy.
+    _intel_on = (configured_strategy == "dgrid" and _dgrid_intelligence_on(state))
+    _pm_dampener = float(pm_summary.get("size_dampener") or 1.0) if _intel_on else 1.0
+    _max_per_level_usd = float(state.get("layer_max_per_level_usd") or (notional * 3.0))
+    _layer_regime = str((regime_info or {}).get("regime") or _dgrid_regime.REGIME_RANGE_WIDE)
+    _layer_realized_vol_bp = float((regime_info or {}).get("realized_vol_bp") or vol_bp or 0.0)
+
+    def _dgrid_layer_size_for(is_long: bool, level: int) -> float:
+        if not _intel_on:
+            return per_level_buy_size if is_long else per_level_sell_size
+        side = "buy" if is_long else "sell"
+        res = _dgrid_layer_sizing.size_quote_level(
+            side=side,
+            level=level,
+            base_notional_usd=float(notional),
+            mid_price=float(mid),
+            inv_usd=float(inv_usd),
+            net_units=float(net_units),
+            inv_soft_usd=float(inv_soft_limit_usd),
+            regime=_layer_regime,
+            realized_vol_bp=_layer_realized_vol_bp,
+            min_order_notional_usd=float(min_order_notional_usd),
+            max_per_level_usd=_max_per_level_usd,
+            state=state,
+            config=state,
+        )
+        size_base = float(res["size_base"]) * _pm_dampener
+        # Floor at venue minimum, ceiling at config max.
+        floor_base = float(min_order_notional_usd) / max(float(mid), 1e-12)
+        return max(floor_base, size_base)
+
     orders_placed = 0
     errors = []
     quote_distances_bp = []
@@ -1676,7 +1797,10 @@ def run_cycle(
         if (not order_spec["is_long"]) and order_spec["level"] > sell_levels:
             continue
 
-        size_to_use = per_level_buy_size if order_spec["is_long"] else per_level_sell_size
+        if _intel_on:
+            size_to_use = _dgrid_layer_size_for(bool(order_spec["is_long"]), int(order_spec["level"]))
+        else:
+            size_to_use = per_level_buy_size if order_spec["is_long"] else per_level_sell_size
         if size_to_use <= 0:
             continue
         size_to_use = max(float(size_to_use), min_order_notional_usd / max(mid, 1e-12))
@@ -1872,6 +1996,19 @@ def run_cycle(
             "dgrid_reset_threshold_bp": state.get("dgrid_reset_threshold_bp"),
             "dgrid_phase_changed": state.get("dgrid_phase_changed"),
         })
+        if _dgrid_intelligence_on(state):
+            result.update({
+                "dgrid_intelligence_enabled": True,
+                "regime": (regime_info or {}).get("regime"),
+                "regime_confidence": (regime_info or {}).get("confidence"),
+                "regime_drift_bp": (regime_info or {}).get("drift_bp"),
+                "regime_votes": (regime_info or {}).get("votes"),
+                "regime_changed": (regime_info or {}).get("regime_changed"),
+                "pm_actions": pm_summary.get("actions"),
+                "pm_cooldown_active": pm_summary.get("cooldown_active"),
+                "pm_size_dampener": pm_summary.get("size_dampener"),
+                "layer_sizing_telemetry": (state.get("mm_layer_sizing_telemetry") or [])[-8:],
+            })
 
     # Update cumulative PnL tracking. Previously this only worked for RGRID; GRID
     # fell through to `result.get("pnl", 0)` on a dict that never had a "pnl" key,

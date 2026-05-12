@@ -50,3 +50,15 @@ def portfolio_sync_interval_seconds() -> int:
         return max(5, int(float(raw)))
     except ValueError:
         return 30
+
+
+def dgrid_intelligence_enabled() -> bool:
+    """Master switch for the D-Grid intelligence upgrade.
+
+    When True, mm_bot.run_cycle activates the regime classifier
+    (_regime.py), the adaptive layer-sizing engine (_layer_sizing.py), and
+    the active position manager (_position_manager.py) for any session whose
+    ``strategy == "dgrid"``. Individual sessions can override by setting
+    ``state["dgrid_intelligence_enabled"]`` (True/False).
+    """
+    return env_flag("NADO_DGRID_INTELLIGENCE", False)
