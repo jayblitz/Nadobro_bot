@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_base.css"><style>
+.grid { display:grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+.cell { background: var(--nb-ink-800); border: 1px solid rgba(110,226,240,0.18); border-radius: 16px; height: 110px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding: 10px; }
+.cell .name { font: 600 12px/1 var(--font-body); color: #fff; }
+.cell .px   { font: 500 11px/1.3 var(--font-mono); color: var(--fg-subtle); text-align:center; }
+.s-card { box-shadow: 0 12px 32px -12px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.04); }
+.s-pill { box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset, 0 8px 20px -8px rgba(34,230,109,0.45); border-color: rgba(68,238,148,0.4); }
+.s-cyan { box-shadow: 0 0 0 1px rgba(41,215,230,0.35), 0 0 24px -2px rgba(41,215,230,0.45); border-color: transparent; }
+</style></head><body>
+<div class="grid">
+  <div class="cell s-card"><div class="name">Card · soft drop</div><div class="px">0 12 32 -12 / .6 + inset 1px hi</div></div>
+  <div class="cell s-pill"><div class="name">Bro pill · green glow</div><div class="px">0 8 20 -8 / .45 green</div></div>
+  <div class="cell s-cyan"><div class="name">Strategy · cyan glow</div><div class="px">0 0 24 -2 / .45 cyan</div></div>
+</div>
+</body></html>

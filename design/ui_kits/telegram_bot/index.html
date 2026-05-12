@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NadoBro · Telegram UI Kit</title>
+<link rel="stylesheet" href="../../colors_and_type.css">
+<style>
+  html, body { margin: 0; padding: 0; background: #04090E; color: #fff; font-family: var(--font-body); -webkit-font-smoothing: antialiased; }
+  body { display:flex; align-items:flex-start; justify-content:center; padding: 24px 16px 80px; min-height: 100vh; }
+
+  /* Phone frame */
+  .tg-frame { width: 412px; min-height: 880px; background: #17212B; border-radius: 28px; overflow: hidden; box-shadow: 0 24px 80px -20px rgba(0,0,0,0.7), 0 0 0 8px #04090E, 0 0 0 9px rgba(110,226,240,0.18); display:flex; flex-direction:column; position: relative; }
+  .tg-status { display:flex; justify-content:space-between; align-items:center; padding: 12px 22px 6px; font: 600 13px/1 var(--font-body); color: #fff; background: #17212B; }
+  .tg-icons { font: 500 11px/1 var(--font-mono); color: rgba(255,255,255,0.65); }
+
+  /* Header */
+  .tg-header { display:flex; align-items:center; gap: 10px; padding: 8px 12px 10px; background: #17212B; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .tg-back, .tg-menu { background: transparent; border: 0; color: #6EB8FF; font: 600 18px/1 var(--font-body); cursor: pointer; }
+  .tg-avatar { width: 36px; height: 36px; border-radius: 50%; background: #04090E; }
+  .tg-title { flex: 1; }
+  .tg-name { font: 700 15px/1.2 var(--font-body); color: #fff; }
+  .tg-sub  { font: 500 12px/1.2 var(--font-body); color: var(--nb-cyan-300); }
+
+  /* Stream */
+  .tg-body { flex: 1; display:flex; flex-direction:column; min-height: 0; }
+  .chat-stream { flex: 1; overflow-y: auto; padding: 12px; display:flex; flex-direction:column; gap: 8px; background:
+    radial-gradient(circle at 20% 0%, rgba(41,215,230,0.06), transparent 40%),
+    radial-gradient(circle at 80% 100%, rgba(68,238,148,0.05), transparent 40%),
+    #17212B; }
+
+  /* Bubbles */
+  .b-row { display:flex; }
+  .b-row.b-out { justify-content: flex-end; }
+  .bubble { max-width: 86%; padding: 8px 12px 6px; border-radius: 14px; font: 400 14px/1.42 var(--font-body); position: relative; }
+  .bubble.b-in  { background: #182533; color: #fff; border-bottom-left-radius: 4px; }
+  .bubble.b-out { background: #2B5278; color: #fff; border-bottom-right-radius: 4px; }
+  .bubble-time { font: 500 10px/1 var(--font-mono); color: rgba(255,255,255,0.5); text-align:right; margin-top: 4px; }
+  .bubble .mono { font-family: var(--font-mono); background: rgba(0,0,0,0.25); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+
+  /* Bro card */
+  .card-row { display:flex; }
+  .bro-card { background: #182533; color: #fff; max-width: 92%; padding: 12px 14px 10px; border-radius: 14px; border-bottom-left-radius: 4px; border: 1px solid rgba(110,226,240,0.10); }
+  .bro-hd { font: 700 16px/1.2 var(--font-body); }
+  .bro-rule { color: rgba(255,255,255,0.32); letter-spacing: -1px; font-family: var(--font-mono); margin: 4px 0 8px; user-select: none; font-size: 12px; }
+  .bro-section { margin: 8px 0 4px; }
+  .bro-sec-title { font: 700 13px/1.2 var(--font-body); color: var(--nb-cyan-300); margin-bottom: 4px; }
+  .tree-row { font: 400 14px/1.5 var(--font-body); color: #E6ECF2; display:flex; gap: 8px; }
+  .tree-tick { color: rgba(255,255,255,0.4); font-family: var(--font-mono); }
+  .bro-insight { margin-top: 10px; font: 400 14px/1.45 var(--font-body); color: #fff; padding: 8px 10px; background: rgba(68,238,148,0.08); border: 1px solid rgba(68,238,148,0.25); border-radius: 10px; }
+  .bro-sources { margin-top: 8px; font: 400 11.5px/1.3 var(--font-body); color: var(--fg-subtle); }
+  .bro-footer { margin-top: 8px; }
+  .pos { color: var(--nb-green-500); font-weight: 700; }
+  .neg { color: #FF4C4C; font-weight: 700; }
+  .mono { font-family: var(--font-mono); }
+
+  /* Position rows */
+  .pos-row { padding: 6px 0; border-top: 1px dashed rgba(255,255,255,0.06); }
+  .pos-row:first-child { border-top: 0; }
+  .pos-hd { display:flex; justify-content:space-between; align-items:center; gap: 8px; font: 600 14px/1.3 var(--font-body); }
+  .pos-side.long { color: var(--nb-green-500); }
+  .pos-side.short { color: #FF4C4C; }
+  .pos-prod { color: #fff; flex:1; margin-left: 8px; }
+  .pos-pnl.pos { color: var(--nb-green-500); }
+  .pos-pnl.neg { color: #FF4C4C; }
+  .pos-meta { display:grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font: 400 12px/1.4 var(--font-body); color: var(--fg-muted); margin-top: 4px; }
+  .pos-meta .mono { color: #fff; font-weight: 600; }
+
+  /* Inline keyboard */
+  .ikb { display:flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+  .ikb-row { display:grid; gap: 4px; }
+  .ikb-btn { background: rgba(255,255,255,0.05); color: #fff; border: 0; border-radius: 10px; padding: 10px 8px; font: 600 13px/1.1 var(--font-body); cursor: pointer; transition: filter .15s cubic-bezier(.2,.8,.2,1), transform .12s; }
+  .ikb-btn:hover { filter: brightness(1.18); }
+  .ikb-btn:active { transform: scale(0.97); }
+
+  /* Pills */
+  .pill { display:inline-flex; align-items:center; gap: 4px; padding: 3px 10px; border-radius: 999px; font: 600 12.5px/1.2 var(--font-body); }
+  .pill.bro-pill { background: var(--nb-green-500); color: var(--nb-fg-on-pill); box-shadow: 0 6px 16px -8px rgba(34,230,109,0.6); }
+  .pill.pill-success { background: rgba(68,238,148,0.14); color: var(--nb-green-500); border:1px solid rgba(68,238,148,0.4); }
+  .pill.pill-warn    { background: rgba(255,181,71,0.14); color: #FFB547; border:1px solid rgba(255,181,71,0.4); }
+  .pill.pill-info    { background: rgba(110,226,240,0.10); color: var(--nb-cyan-300); border:1px solid rgba(110,226,240,0.3); }
+
+  /* Composer */
+  .composer { display:flex; align-items:center; gap: 8px; padding: 8px 10px; background: #17212B; border-top: 1px solid rgba(255,255,255,0.04); }
+  .cmp-btn { background: transparent; border: 0; color: var(--nb-cyan-300); font-size: 18px; cursor: pointer; padding: 6px; }
+  .cmp-input { flex: 1; background: #242F3D; border: 0; border-radius: 18px; padding: 10px 14px; color: #fff; font: 400 14px/1.2 var(--font-body); outline: none; }
+  .cmp-input::placeholder { color: rgba(255,255,255,0.4); }
+
+  /* Reply keyboard */
+  .rkb { background: #0F1923; padding: 6px; display:flex; flex-direction: column; gap: 4px; }
+  .rkb-row { display:flex; gap: 4px; }
+  .rkb-btn { flex: 1; background: #3A4756; color: #fff; border: 0; border-radius: 6px; padding: 11px 6px; font: 600 13.5px/1.1 var(--font-body); cursor: pointer; }
+  .rkb-btn:hover { background: #475563; }
+  .rkb-btn:active { transform: scale(0.98); }
+
+  .hint { font: 500 11px/1.2 var(--font-mono); color: var(--nb-cyan-300); text-align:center; padding: 4px; }
+
+  /* Share card */
+  .share-card { width: 100%; max-width: 360px; aspect-ratio: 1366/768; position: relative; border-radius: 14px; overflow: hidden; box-shadow: 0 12px 32px -12px rgba(0,0,0,0.6); }
+  .share-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+  /* Side label */
+  .side-label { position: fixed; left: 24px; top: 24px; max-width: 240px; color: var(--fg-muted); font: 400 13px/1.45 var(--font-body); }
+  .side-label h1 { font: 700 22px/1.15 var(--font-display); color: #fff; margin: 0 0 6px; letter-spacing: 0.01em; text-transform: uppercase; }
+  .side-label .meta { font-family: var(--font-mono); color: var(--fg-subtle); font-size: 11px; }
+  .side-label code { background: rgba(110,226,240,0.10); padding: 1px 5px; border-radius: 4px; color: var(--nb-cyan-300); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<aside class="side-label">
+  <h1>NadoBro · UI Kit</h1>
+  <p>Interactive Telegram-bot recreation. Tap any reply key (bottom) or inline button (inside cards). Type <code>long BTC</code> to trigger a trade preview, <code>share</code> for the PnL card.</p>
+  <p class="meta">ui_kits / telegram_bot</p>
+</aside>
+
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<style>
+  /* Share card overlay positioning — done after frame so we can measure */
+  .share-overlay { position: absolute; inset: 0; padding: 6.5% 8% 6%; display:flex; flex-direction: column; gap: 1.2%; }
+  .share-pill-row { display:flex; gap: 8px; align-items: center; }
+  .share-symbol { color: #fff; font: 800 22px/1 var(--font-body); margin-left: 3%; margin-top: 4%; }
+  .share-bro { background: #44EE94; color: #0A1A0E; padding: 4px 10px; border-radius: 999px; font: 700 11.5px/1 var(--font-body); margin-top: 4%; }
+  .share-vol { margin-top: auto; padding-left: 1%; }
+  .share-lbl { font: 500 11px/1 var(--font-body); color: #BCC4D0; }
+  .share-val { font: 800 28px/1 var(--font-body); color: #fff; margin-top: 2px; }
+  .share-onnado { font: 500 11px/1 var(--font-body); color: #BCC4D0; margin-top: 6px; }
+  .share-row { display:flex; gap: 16%; padding-left: 1%; margin-top: 4%; }
+  .share-num { font: 800 22px/1 var(--font-body); margin-top: 2px; }
+  .share-num.pos { color: #44EE94; }
+  .share-ref { position: absolute; right: 6%; bottom: 6%; background: rgba(110,226,240,0.18); border: 1px solid rgba(110,226,240,0.4); color: #C7F4FB; padding: 4px 10px; border-radius: 999px; font: 700 10px/1 var(--font-body); }
+</style>
+
+<script type="text/babel" src="components.jsx"></script>
+<script type="text/babel" src="screens.jsx"></script>
+<script type="text/babel">
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
