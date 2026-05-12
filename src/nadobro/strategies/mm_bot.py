@@ -6,6 +6,7 @@ Cancels stale orders that drift beyond threshold from current mid.
 """
 import logging
 import math
+import os
 import time
 from src.nadobro.config import get_product_id, get_product_max_leverage
 from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
@@ -20,6 +21,12 @@ from src.nadobro.services.rate_limit import (
 logger = logging.getLogger(__name__)
 
 STALE_DRIFT_MULTIPLIER = 2.0
+# Floor for the stale-quote drift threshold. Without this, ``spread_bp=0`` (or
+# a tiny dgrid-internal spread) collapses ``max_offset`` to 0, and every
+# resting order gets cancel-and-replaced every cycle — see the production
+# logs that showed ``drift 0.0007% > 0.0000%`` triggering nonstop. 3 bp ~
+# round-trip taker fee; cancelling below that is never economical.
+STALE_DRIFT_FLOOR_BP = float(os.environ.get("NADO_STALE_DRIFT_FLOOR_BP", "3.0") or "3.0")
 MM_DEFAULT_LEVELS = 2
 GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
@@ -574,6 +581,10 @@ def _cancel_stale_orders(
     max_offset = (abs(spread_bp) / 10000.0) * levels * STALE_DRIFT_MULTIPLIER
     if close_offset_bp > 0:
         max_offset = max(max_offset, close_offset_bp / 10000.0)
+    # Enforce the configured floor (default 3 bp). DGRID can collapse spread_bp
+    # toward zero in tight regimes, which made every resting order qualify as
+    # stale and got cancel-and-replaced every cycle.
+    max_offset = max(max_offset, STALE_DRIFT_FLOOR_BP / 10000.0)
     cancelled = 0
     now_ts = time.time()
     for order in open_orders:

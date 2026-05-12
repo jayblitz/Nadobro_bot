@@ -265,10 +265,19 @@ class NadoClientReliabilityTests(unittest.TestCase):
             captured["payload"] = payload
             return {"isolated_subaccounts": []}
 
+        # bytes32: 20-byte address + 12-byte subaccount identifier.
+        parent_hex = "0x" + "ab" * 20 + "00" * 12
         with patch("src.nadobro.services.nado_archive._post", side_effect=_fake_post):
-            query_isolated_subaccounts_for_parent("mainnet", "0xparent")
+            query_isolated_subaccounts_for_parent("mainnet", parent_hex)
 
-        self.assertEqual(captured["payload"]["isolated_subaccounts"]["subaccount"], "0xparent")
+        # Nado archive expects ``subaccount`` as a 32-element ``u8`` array
+        # decoded from the hex (not a hex string and not a list of hex strings).
+        sent = captured["payload"]["isolated_subaccounts"]["subaccount"]
+        self.assertIsInstance(sent, list)
+        self.assertEqual(len(sent), 32)
+        self.assertTrue(all(isinstance(b, int) and 0 <= b <= 255 for b in sent))
+        self.assertEqual(sent[:20], [0xAB] * 20)
+        self.assertEqual(sent[20:], [0] * 12)
 
     def test_archive_unwraps_orders_under_data(self):
         from src.nadobro.services.nado_archive import _orders_list_from_archive_response
