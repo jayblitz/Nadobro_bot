@@ -80,7 +80,7 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
         "cooldown_size_dampener": 0.50,
     },
     "grid": {
-        # Reserved for future use.
+        # Classic symmetric grid — same conservative profile as D-Grid.
         "partial_tp_bp": 8.0,
         "partial_tp_fraction": 0.33,
         "cut_confidence": 0.65,
@@ -89,6 +89,23 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
         "trail_give_back_fraction": 0.50,
         "stale_hold_seconds": 30 * 60,
         "cooldown_seconds": 300,
+        "cooldown_size_dampener": 0.50,
+    },
+    "mid": {
+        # Mid Mode (Tread parity) quotes tighter spreads, so partial-TP bp
+        # threshold is lower — wins are smaller per round-turn. The user's
+        # continuous directional_bias signals conviction, so we don't cut
+        # against them too eagerly (cut_confidence sits between dgrid and
+        # rgrid). Stale hold is short because Mid Mode is built for high
+        # turnover.
+        "partial_tp_bp": 5.0,
+        "partial_tp_fraction": 0.33,
+        "cut_confidence": 0.70,
+        "cut_fraction": 0.50,
+        "trail_arm_usd": 0.30,
+        "trail_give_back_fraction": 0.50,
+        "stale_hold_seconds": 20 * 60,
+        "cooldown_seconds": 240,
         "cooldown_size_dampener": 0.50,
     },
 }

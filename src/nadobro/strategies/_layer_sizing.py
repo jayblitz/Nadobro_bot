@@ -59,7 +59,24 @@ STRATEGY_REGIME_TABLES: dict[str, dict[str, dict[str, float]]] = {
         REGIME_TREND_DOWN:  {"buy": 0.40, "sell": 1.30},
         REGIME_CHOP_HIGH_VOL: {"buy": 0.30, "sell": 0.30},
     },
+    "mid": {
+        # Mid Mode quotes tight ±spread × level with no anchor. The user's
+        # directional bias is layered separately via ``bias_tilt`` (so this
+        # table is symmetric on the regime axis). Lower trend penalty than
+        # dgrid because Mid Mode runs higher turnover.
+        REGIME_RANGE_TIGHT: {"buy": 1.30, "sell": 1.30},
+        REGIME_RANGE_WIDE:  {"buy": 1.00, "sell": 1.00},
+        REGIME_TREND_UP:    {"buy": 1.00, "sell": 0.65},
+        REGIME_TREND_DOWN:  {"buy": 0.65, "sell": 1.00},
+        REGIME_CHOP_HIGH_VOL: {"buy": 0.50, "sell": 0.50},
+    },
 }
+
+
+# Mid Mode user-bias alpha tilt magnitude. Matches mm_bot.MID_BIAS_ALPHA_TILT
+# so the per-level size tilt is consistent with the legacy slot-allocation
+# tilt the Tread Mid Mode docs describe.
+MID_BIAS_ALPHA_TILT = 0.20
 
 
 def _resolve_regime_table(
@@ -210,6 +227,7 @@ def size_quote_level(
     max_per_level_usd: float,
     state: dict | None = None,
     config: dict | None = None,
+    bias_value: float = 0.0,
 ) -> dict[str, Any]:
     """Return per-level sizing decision.
 
@@ -246,7 +264,21 @@ def size_quote_level(
     m_fillperf = _fill_performance_mult(s, side, fp_lookback, fp_min, fp_max)
     m_vol = _volatility_scaling(realized_vol_bp, target_vol_bp)
 
-    size_usd = float(base_notional_usd) * m_inv * m_regime * m_taper * m_fillperf * m_vol
+    # Mid Mode (and any caller that passes a non-zero bias_value) applies a
+    # multiplicative directional tilt that layers on top of the symmetric
+    # regime table. +1.0 bias = +20% buy, -20% sell. -1.0 = inverse. Clamped.
+    m_bias = 1.0
+    if bias_value:
+        bv = _clamp(float(bias_value), -1.0, 1.0)
+        if side == "buy":
+            m_bias = max(0.0, 1.0 + MID_BIAS_ALPHA_TILT * bv)
+        else:
+            m_bias = max(0.0, 1.0 - MID_BIAS_ALPHA_TILT * bv)
+
+    size_usd = (
+        float(base_notional_usd)
+        * m_inv * m_regime * m_taper * m_fillperf * m_vol * m_bias
+    )
     size_usd = _clamp(size_usd, float(min_order_notional_usd), float(max_per_level_usd))
     size_base = size_usd / max(float(mid_price), 1e-12)
 
@@ -256,8 +288,9 @@ def size_quote_level(
         "level_taper": round(m_taper, 4),
         "fill_perf_mult": round(m_fillperf, 4),
         "vol_scaling": round(m_vol, 4),
+        "bias_tilt": round(m_bias, 4),
         "raw_size_usd_before_clamp": round(
-            float(base_notional_usd) * m_inv * m_regime * m_taper * m_fillperf * m_vol, 6
+            float(base_notional_usd) * m_inv * m_regime * m_taper * m_fillperf * m_vol * m_bias, 6
         ),
     }
 

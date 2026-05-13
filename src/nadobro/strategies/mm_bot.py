@@ -1153,10 +1153,12 @@ def run_cycle(
         dynamic_spread_bp = float(spread_bp)
 
     # --- MM intelligence: regime classifier (Layer B) -------------------
-    # Fires for DGRID and R-GRID when intelligence is enabled. The same
-    # classifier output is consumed by sizing (Layer A) and PM (Layer C).
+    # Fires for DGRID, R-GRID, Classic GRID, and MID Mode when intelligence is
+    # enabled. The same classifier output is consumed by sizing (Layer A) and
+    # PM (Layer C). Each strategy gets its own size table and PM defaults via
+    # _layer_sizing.STRATEGY_REGIME_TABLES and _position_manager.STRATEGY_DEFAULTS.
     regime_info: dict = {}
-    _intel_strategy = configured_strategy if configured_strategy in ("dgrid", "rgrid") else ""
+    _intel_strategy = configured_strategy if configured_strategy in ("dgrid", "rgrid", "grid", "mid") else ""
     _intel_active = bool(_intel_strategy) and _strategy_intelligence_on(state, _intel_strategy)
     if _intel_active:
         ema_fast_now, ema_slow_now = _update_both_emas(state, mid, ema_fast_alpha, ema_slow_alpha)
@@ -1802,6 +1804,17 @@ def run_cycle(
     _layer_regime = str((regime_info or {}).get("regime") or _dgrid_regime.REGIME_RANGE_WIDE)
     _layer_realized_vol_bp = float((regime_info or {}).get("realized_vol_bp") or vol_bp or 0.0)
 
+    # Mid Mode resolves directional_bias to a float in [-1, +1] and passes it
+    # to size_quote_level as ``bias_value``. The result is a multiplicative
+    # tilt of +/- 20% per side that LAYERS on top of the regime size mult.
+    # Other strategies pass 0.0 so the bias term is neutral.
+    _intel_bias_value = 0.0
+    if _intel_on and configured_strategy == "mid":
+        try:
+            _intel_bias_value = _resolve_directional_bias_value(directional_bias)
+        except Exception:
+            _intel_bias_value = 0.0
+
     def _dgrid_layer_size_for(is_long: bool, level: int) -> float:
         if not _intel_on:
             return per_level_buy_size if is_long else per_level_sell_size
@@ -1820,6 +1833,7 @@ def run_cycle(
             max_per_level_usd=_max_per_level_usd,
             state=state,
             config=state,
+            bias_value=_intel_bias_value,
         )
         size_base = float(res["size_base"]) * _pm_dampener
         # Floor at venue minimum, ceiling at config max.

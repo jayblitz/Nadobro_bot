@@ -112,8 +112,12 @@ def test_pm_partial_tp_threshold_higher_for_rgrid(monkeypatch):
     SHOULD trigger it (D-Grid's threshold is 8 bp).
     """
     fake_mod = types.ModuleType("src.nadobro.services.trade_service")
-    fake_mod.execute_market_order = lambda *a, **k: {"success": True}  # type: ignore
-    sys.modules["src.nadobro.services.trade_service"] = fake_mod
+    _stub = lambda *a, **k: {"success": True}
+    fake_mod.execute_market_order = _stub  # type: ignore
+    fake_mod.execute_limit_order = _stub  # type: ignore
+    fake_mod.execute_spot_limit_order = _stub  # type: ignore
+    fake_mod.execute_spot_market_order = _stub  # type: ignore
+    monkeypatch.setitem(sys.modules, "src.nadobro.services.trade_service", fake_mod)
 
     positions = [{"product_id": 1, "side": "LONG", "amount": 1.0, "unrealized_pnl": 0.10}]
 
@@ -141,8 +145,12 @@ def test_rgrid_cut_requires_higher_confidence(monkeypatch):
     (R-Grid requires 0.75), but D-Grid (requires 0.65) WOULD be cut.
     """
     fake_mod = types.ModuleType("src.nadobro.services.trade_service")
-    fake_mod.execute_market_order = lambda *a, **k: {"success": True}  # type: ignore
-    sys.modules["src.nadobro.services.trade_service"] = fake_mod
+    _stub = lambda *a, **k: {"success": True}
+    fake_mod.execute_market_order = _stub  # type: ignore
+    fake_mod.execute_limit_order = _stub  # type: ignore
+    fake_mod.execute_spot_limit_order = _stub  # type: ignore
+    fake_mod.execute_spot_market_order = _stub  # type: ignore
+    monkeypatch.setitem(sys.modules, "src.nadobro.services.trade_service", fake_mod)
 
     positions = [{"product_id": 1, "side": "LONG", "amount": 1.0, "unrealized_pnl": -2.0}]
     regime = {"regime": _regime.REGIME_TREND_DOWN, "confidence": 0.70}
