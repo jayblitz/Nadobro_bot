@@ -195,6 +195,16 @@ DEFAULT_VOL_HOLD_MIN_SECONDS = 60.0
 DEFAULT_VOL_HOLD_MAX_SECONDS = 540.0
 DEFAULT_VOL_MAX_SPREAD_BP = 12.0
 DEFAULT_VOL_MIN_EDGE_BP = 12.0
+# Phase 2 — universal exit rails for Volume Bot.
+# Breakeven stop: once trade reaches +arm_pct% in our favor, lock it in;
+# if it then rolls back to +exit_pct% or worse, close instead of waiting
+# for hold_expired to take us back through zero into negative territory.
+DEFAULT_VOL_BREAKEVEN_ARM_PCT = 0.20
+DEFAULT_VOL_BREAKEVEN_EXIT_PCT = 0.03
+# Time-in-loss stop: if the trade has been continuously underwater for
+# > max_underwater_seconds, force a close. Slightly less than the default
+# hold_max so this fires before "hold_expired" when the trade is bad.
+DEFAULT_VOL_MAX_UNDERWATER_SECONDS = 420.0
 
 # Max seconds a post-only close is allowed to rest before we cancel-and-retry
 # with a wider limit. After CLOSE_ESCALATE_AFTER_SECONDS we'll force-close
@@ -384,6 +394,40 @@ def _volume_exit_reason(state: dict, mid: float, now_ts: float, direction: str) 
         return True, "trade_tp_hit"
     if trade_sl_pct > 0 and pnl_pct <= -trade_sl_pct:
         return True, "trade_sl_hit"
+
+    # Phase 2: universal exit rails for Volume Bot.
+    #
+    # Breakeven stop — once the trade has been in profit by >= arm_pct, lock
+    # it in. If price rolls back to entry + exit_offset, close instead of
+    # waiting for hold_expired to take us back through zero.
+    be_arm_pct = float(state.get("vol_breakeven_arm_pct") or DEFAULT_VOL_BREAKEVEN_ARM_PCT)
+    be_exit_pct = float(state.get("vol_breakeven_exit_pct") or DEFAULT_VOL_BREAKEVEN_EXIT_PCT)
+    if be_arm_pct > 0:
+        armed = bool(state.get("vol_breakeven_armed"))
+        if not armed and pnl_pct >= be_arm_pct:
+            state["vol_breakeven_armed"] = True
+            armed = True
+        if armed and pnl_pct <= be_exit_pct:
+            return True, "breakeven_stop_hit"
+
+    # Time-in-loss stop — if the position has been continuously underwater
+    # longer than max_underwater_seconds we force-close. Separate from
+    # hold_expired which fires regardless of PnL.
+    max_underwater = float(
+        state.get("vol_max_underwater_seconds") or DEFAULT_VOL_MAX_UNDERWATER_SECONDS
+    )
+    if max_underwater > 0:
+        if pnl_pct < 0:
+            loss_since = float(state.get("vol_loss_since_ts") or 0.0)
+            if loss_since <= 0:
+                state["vol_loss_since_ts"] = float(now_ts)
+                loss_since = float(now_ts)
+            under_age = max(0.0, now_ts - loss_since)
+            if under_age >= max_underwater:
+                return True, "time_in_loss_stop_hit"
+        else:
+            state["vol_loss_since_ts"] = 0.0
+
     if held >= max(hold_min, hold_max):
         return True, "hold_expired"
     return False, "min_hold" if held < hold_min else "waiting_edge"
@@ -660,6 +704,9 @@ def _run_volume_spot_cycle(
         state["vol_entry_fill_ts"] = 0.0
         state["vol_entry_fill_price"] = 0.0
         state["vol_entry_size"] = 0.0
+        # Phase 2 — reset universal exit-rail latches when the position closes.
+        state["vol_breakeven_armed"] = False
+        state["vol_loss_since_ts"] = 0.0
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
         state["vol_close_posted_ts"] = 0.0
@@ -1397,6 +1444,9 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_entry_fill_ts"] = 0.0
         state["vol_entry_fill_price"] = 0.0
         state["vol_entry_size"] = 0.0
+        # Phase 2 — reset universal exit-rail latches when the position closes.
+        state["vol_breakeven_armed"] = False
+        state["vol_loss_since_ts"] = 0.0
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
         state["vol_close_posted_ts"] = 0.0
