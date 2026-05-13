@@ -43,6 +43,36 @@ DEFAULT_REGIME_SIZE_TABLE: dict[str, dict[str, float]] = {
     REGIME_CHOP_HIGH_VOL: {"buy": 0.40, "sell": 0.40},
 }
 
+# Per-strategy regime size tables. The R-Grid table leans INTO trends because
+# R-Grid's "reversed" mode is intentionally trend-following — once the strategy
+# is in that mode the trend side is the side we want to fill. Both sides are
+# slightly punished in CHOP_HIGH_VOL since R-Grid's reversed mode loses badly
+# when there's no follow-through.
+STRATEGY_REGIME_TABLES: dict[str, dict[str, dict[str, float]]] = {
+    "dgrid": DEFAULT_REGIME_SIZE_TABLE,
+    "grid": DEFAULT_REGIME_SIZE_TABLE,
+    "rgrid": {
+        REGIME_RANGE_TIGHT: {"buy": 1.20, "sell": 1.20},
+        REGIME_RANGE_WIDE:  {"buy": 1.00, "sell": 1.00},
+        # Lean into trend sides more than dgrid's table.
+        REGIME_TREND_UP:    {"buy": 1.30, "sell": 0.40},
+        REGIME_TREND_DOWN:  {"buy": 0.40, "sell": 1.30},
+        REGIME_CHOP_HIGH_VOL: {"buy": 0.30, "sell": 0.30},
+    },
+}
+
+
+def _resolve_regime_table(
+    config: dict | None, state: dict | None
+) -> dict[str, dict[str, float]]:
+    """Pick the right regime table: explicit config > strategy default > module default."""
+    cfg = config or {}
+    explicit = cfg.get("layer_regime_size_table")
+    if explicit:
+        return explicit
+    strategy = str((state or {}).get("strategy") or cfg.get("strategy") or "dgrid").lower()
+    return STRATEGY_REGIME_TABLES.get(strategy) or DEFAULT_REGIME_SIZE_TABLE
+
 DEFAULT_LAYER_TAPER_RATIO = 0.7        # geometric across levels
 DEFAULT_LAYER_TAPER_FLOOR = 0.30       # never below this
 DEFAULT_TARGET_VOL_BP = 30.0           # daily realized vol the engine sizes toward
@@ -201,7 +231,7 @@ def size_quote_level(
     fp_lookback = int(cfg.get("layer_fill_perf_lookback") or DEFAULT_FILL_PERF_LOOKBACK)
     fp_min = float(cfg.get("layer_fill_perf_min_mult") or DEFAULT_FILL_PERF_MIN_MULT)
     fp_max = float(cfg.get("layer_fill_perf_max_mult") or DEFAULT_FILL_PERF_MAX_MULT)
-    table = cfg.get("layer_regime_size_table") or DEFAULT_REGIME_SIZE_TABLE
+    table = _resolve_regime_table(cfg, s)
 
     m_inv = _inventory_brake(
         side=side,

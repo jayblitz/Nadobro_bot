@@ -49,6 +49,51 @@ DEFAULT_COOLDOWN_SIZE_DAMPENER = 0.5
 DEFAULT_COOLDOWN_REGAIN_SECONDS = 30 * 60
 
 
+# Per-strategy default overrides. R-Grid intentionally rides momentum, so it
+# wants: (a) higher partial_tp_bp — don't clip profitable trend captures early,
+# (b) higher cut_confidence — don't cut against the trend the strategy is built
+# to ride, (c) MORE aggressive trail give-back fraction — lock in more of HWM
+# once the trend rolls over.
+STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
+    "dgrid": {
+        "partial_tp_bp": 8.0,
+        "partial_tp_fraction": 0.33,
+        "cut_confidence": 0.65,
+        "cut_fraction": 0.50,
+        "trail_arm_usd": 0.50,
+        "trail_give_back_fraction": 0.50,
+        "stale_hold_seconds": 30 * 60,
+        "cooldown_seconds": 300,
+        "cooldown_size_dampener": 0.50,
+    },
+    "rgrid": {
+        # R-Grid rides momentum — keep winners longer, cut against the trend
+        # only when we're really sure, and trail tighter once HWM is set.
+        "partial_tp_bp": 15.0,
+        "partial_tp_fraction": 0.25,
+        "cut_confidence": 0.75,
+        "cut_fraction": 0.50,
+        "trail_arm_usd": 0.75,
+        "trail_give_back_fraction": 0.70,  # close once PnL drops below 70% of HWM
+        "stale_hold_seconds": 45 * 60,     # R-Grid expects longer holds
+        "cooldown_seconds": 240,
+        "cooldown_size_dampener": 0.50,
+    },
+    "grid": {
+        # Reserved for future use.
+        "partial_tp_bp": 8.0,
+        "partial_tp_fraction": 0.33,
+        "cut_confidence": 0.65,
+        "cut_fraction": 0.50,
+        "trail_arm_usd": 0.50,
+        "trail_give_back_fraction": 0.50,
+        "stale_hold_seconds": 30 * 60,
+        "cooldown_seconds": 300,
+        "cooldown_size_dampener": 0.50,
+    },
+}
+
+
 # Action types
 ACTION_PARTIAL_TP = "partial_tp"
 ACTION_ADVERSE_CUT = "adverse_cut"
@@ -57,26 +102,51 @@ ACTION_STALE_FLATTEN = "stale_flatten"
 
 
 def _pm_config(state: dict) -> dict[str, float]:
+    """Resolve PM config from state, honoring per-strategy defaults.
+
+    Precedence (highest first):
+      1. Explicit ``state["pm_*"]`` value set by the user.
+      2. Per-strategy default from STRATEGY_DEFAULTS based on
+         ``state["strategy"]`` (or "dgrid" as the universal default).
+      3. Module-level DEFAULT_* constant.
+    """
+    strategy = str(state.get("strategy") or "dgrid").lower()
+    strat_defaults = STRATEGY_DEFAULTS.get(strategy) or STRATEGY_DEFAULTS["dgrid"]
+
+    def _pick(state_key: str, defaults_key: str, fallback: float) -> float:
+        sv = state.get(state_key)
+        if sv is not None and sv != "":
+            try:
+                return float(sv)
+            except (TypeError, ValueError):
+                pass
+        return float(strat_defaults.get(defaults_key, fallback))
+
     return {
-        "partial_tp_bp": float(state.get("pm_partial_tp_bp") or DEFAULT_PARTIAL_TP_BP),
-        "partial_tp_fraction": float(state.get("pm_partial_tp_fraction") or DEFAULT_PARTIAL_TP_FRACTION),
-        "cut_confidence": float(state.get("pm_cut_confidence_threshold") or DEFAULT_CUT_CONFIDENCE),
-        "cut_fraction": float(state.get("pm_cut_fraction") or DEFAULT_CUT_FRACTION),
-        "trail_arm_usd": float(state.get("pm_trail_arm_usd") or DEFAULT_TRAIL_ARM_USD),
-        "trail_give_back_fraction": float(
-            state.get("pm_trail_give_back_fraction") or DEFAULT_TRAIL_GIVE_BACK_FRACTION
+        "partial_tp_bp": _pick("pm_partial_tp_bp", "partial_tp_bp", DEFAULT_PARTIAL_TP_BP),
+        "partial_tp_fraction": _pick("pm_partial_tp_fraction", "partial_tp_fraction", DEFAULT_PARTIAL_TP_FRACTION),
+        "cut_confidence": _pick("pm_cut_confidence_threshold", "cut_confidence", DEFAULT_CUT_CONFIDENCE),
+        "cut_fraction": _pick("pm_cut_fraction", "cut_fraction", DEFAULT_CUT_FRACTION),
+        "trail_arm_usd": _pick("pm_trail_arm_usd", "trail_arm_usd", DEFAULT_TRAIL_ARM_USD),
+        "trail_give_back_fraction": _pick(
+            "pm_trail_give_back_fraction", "trail_give_back_fraction",
+            DEFAULT_TRAIL_GIVE_BACK_FRACTION,
         ),
-        "stale_hold_seconds": float(state.get("pm_stale_hold_seconds") or DEFAULT_STALE_HOLD_SECONDS),
-        "stale_vol_expansion_ratio": float(
-            state.get("pm_stale_vol_expansion_ratio") or DEFAULT_STALE_VOL_EXPANSION_RATIO
+        "stale_hold_seconds": _pick("pm_stale_hold_seconds", "stale_hold_seconds", DEFAULT_STALE_HOLD_SECONDS),
+        "stale_vol_expansion_ratio": _pick(
+            "pm_stale_vol_expansion_ratio", "stale_vol_expansion_ratio",
+            DEFAULT_STALE_VOL_EXPANSION_RATIO,
         ),
-        "cooldown_seconds": float(state.get("pm_cooldown_seconds") or DEFAULT_COOLDOWN_SECONDS),
-        "cooldown_size_dampener": float(
-            state.get("pm_cooldown_size_dampener") or DEFAULT_COOLDOWN_SIZE_DAMPENER
+        "cooldown_seconds": _pick("pm_cooldown_seconds", "cooldown_seconds", DEFAULT_COOLDOWN_SECONDS),
+        "cooldown_size_dampener": _pick(
+            "pm_cooldown_size_dampener", "cooldown_size_dampener",
+            DEFAULT_COOLDOWN_SIZE_DAMPENER,
         ),
-        "cooldown_regain_seconds": float(
-            state.get("pm_cooldown_regain_seconds") or DEFAULT_COOLDOWN_REGAIN_SECONDS
+        "cooldown_regain_seconds": _pick(
+            "pm_cooldown_regain_seconds", "cooldown_regain_seconds",
+            DEFAULT_COOLDOWN_REGAIN_SECONDS,
         ),
+        "strategy": strategy,
     }
 
 
