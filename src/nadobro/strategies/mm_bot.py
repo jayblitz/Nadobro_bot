@@ -35,11 +35,36 @@ logger = logging.getLogger(__name__)
 
 
 def _dgrid_intelligence_on(state: dict) -> bool:
-    """Per-session flag with env-var default. State overrides env."""
+    """Per-session flag with env-var default. State overrides env.
+
+    Kept for backward compatibility with the original D-Grid wiring;
+    new call sites should use ``_strategy_intelligence_on(state, strategy)``.
+    """
     val = state.get("dgrid_intelligence_enabled")
     if val is None:
         return bool(_dgi_env_default())
     return bool(val)
+
+
+def _strategy_intelligence_on(state: dict, strategy: str) -> bool:
+    """Per-strategy intelligence flag check.
+
+    Resolution order (highest first):
+      1. ``state["<strategy>_intelligence_enabled"]`` — strategy-specific override.
+      2. ``state["dgrid_intelligence_enabled"]`` — legacy global override (covers
+         dgrid and any strategy that opts into the same flag).
+      3. ``NADO_DGRID_INTELLIGENCE`` env var via feature_flags.
+    """
+    strategy = str(strategy or "").lower()
+    if not strategy:
+        return False
+    explicit = state.get(f"{strategy}_intelligence_enabled")
+    if explicit is not None:
+        return bool(explicit)
+    legacy = state.get("dgrid_intelligence_enabled")
+    if legacy is not None:
+        return bool(legacy)
+    return bool(_dgi_env_default())
 
 STALE_DRIFT_MULTIPLIER = 2.0
 # Floor for the stale-quote drift threshold. Without this, ``spread_bp=0`` (or
@@ -1127,16 +1152,35 @@ def run_cycle(
     if configured_strategy == "dgrid":
         dynamic_spread_bp = float(spread_bp)
 
-    # --- DGRID intelligence: regime classifier (Layer B) ----------------
+    # --- MM intelligence: regime classifier (Layer B) -------------------
+    # Fires for DGRID, R-GRID, Classic GRID, and MID Mode when intelligence is
+    # enabled. The same classifier output is consumed by sizing (Layer A) and
+    # PM (Layer C). Each strategy gets its own size table and PM defaults via
+    # _layer_sizing.STRATEGY_REGIME_TABLES and _position_manager.STRATEGY_DEFAULTS.
     regime_info: dict = {}
-    if configured_strategy == "dgrid" and _dgrid_intelligence_on(state):
+    _intel_strategy = configured_strategy if configured_strategy in ("dgrid", "rgrid", "grid", "mid") else ""
+    _intel_active = bool(_intel_strategy) and _strategy_intelligence_on(state, _intel_strategy)
+    if _intel_active:
         ema_fast_now, ema_slow_now = _update_both_emas(state, mid, ema_fast_alpha, ema_slow_alpha)
+        # For dgrid, use the variance ratio computed by _apply_dgrid_controls.
+        # For rgrid, compute it inline against the same mid history because the
+        # rgrid path doesn't call _apply_dgrid_controls.
+        _vr = float(state.get("dgrid_variance_ratio") or 0.0)
+        if _vr <= 0:
+            _vr = _compute_variance_ratio(
+                history,
+                short_window=int(state.get("dgrid_short_window_points") or 4),
+                long_window=int(state.get("dgrid_long_window_points") or 12),
+            )
+        _realized_move = float(state.get("dgrid_realized_move_bp") or 0.0)
+        if _realized_move <= 0:
+            _realized_move = _compute_realized_vol_bp(history)
         regime_info = _dgrid_regime.classify_regime(
             state,
             history,
             product=str(product),
-            variance_ratio=float(state.get("dgrid_variance_ratio") or 1.0),
-            realized_vol_bp=float(state.get("dgrid_realized_move_bp") or vol_bp),
+            variance_ratio=_vr,
+            realized_vol_bp=_realized_move if _realized_move > 0 else vol_bp,
             ema_fast=ema_fast_now,
             ema_slow=ema_slow_now,
             short_window=int(state.get("dgrid_short_window_points") or 4),
@@ -1153,7 +1197,36 @@ def run_cycle(
             client=client, product_id=product_id,
         )
         rgrid_mode = str(state.get("rgrid_active_mode") or "classic")
-        if momentum["momentum_break"] and rgrid_mode == "classic":
+        # R-GRID intelligence veto: when the legacy 2-of-3 momentum-break rule
+        # says "flip to reversed" but the regime classifier disagrees with
+        # high confidence (range_tight / chop_high_vol), suppress the flip.
+        # This catches the case where 2 signals fire but the broader regime
+        # context shows we're not actually in a directional trend.
+        _veto_flip = False
+        _veto_reason = ""
+        if _intel_active and momentum["momentum_break"] and rgrid_mode == "classic":
+            _veto_regimes = {
+                _dgrid_regime.REGIME_RANGE_TIGHT,
+                _dgrid_regime.REGIME_CHOP_HIGH_VOL,
+            }
+            _veto_confidence_min = float(state.get("rgrid_veto_confidence_min") or 0.60)
+            _veto_strategy_confidence = float((regime_info or {}).get("confidence") or 0.0)
+            _veto_regime_label = str((regime_info or {}).get("regime") or "")
+            if _veto_regime_label in _veto_regimes and _veto_strategy_confidence >= _veto_confidence_min:
+                _veto_flip = True
+                _veto_reason = (
+                    f"regime={_veto_regime_label} conf={_veto_strategy_confidence:.2f} "
+                    f">= veto_min={_veto_confidence_min:.2f}"
+                )
+                state["rgrid_momentum_veto_count"] = int(state.get("rgrid_momentum_veto_count") or 0) + 1
+                state["rgrid_momentum_veto_last_ts"] = time.time()
+                state["rgrid_momentum_veto_last_reason"] = _veto_reason
+                logger.info(
+                    "RGRID intelligence veto: momentum break suppressed (signals=%d/3, %s)",
+                    momentum["signals_active"], _veto_reason,
+                )
+
+        if momentum["momentum_break"] and rgrid_mode == "classic" and not _veto_flip:
             # Momentum break detected — switch to reversed mode
             rgrid_mode = "reversed"
             state["rgrid_active_mode"] = "reversed"
@@ -1236,10 +1309,12 @@ def run_cycle(
         inventory_source = "fills" if abs(net_units) > 0 else "none"
     inv_usd = abs(net_units) * mid
 
-    # --- DGRID intelligence: position manager (Layer C) -----------------
+    # --- MM intelligence: position manager (Layer C) --------------------
+    # Fires for DGRID and R-GRID. Per-strategy defaults (e.g., R-Grid's higher
+    # partial_tp_bp and trail_give_back_fraction) live in _position_manager.STRATEGY_DEFAULTS.
     pm_summary: dict = {"enabled": False, "actions": [], "size_dampener": 1.0,
                         "cooldown_active": False}
-    if configured_strategy == "dgrid" and _dgrid_intelligence_on(state):
+    if _intel_active:
         try:
             pm_summary = _dgrid_pm.manage_positions(
                 telegram_id=telegram_id,
@@ -1392,9 +1467,9 @@ def run_cycle(
     grid_cycle_pnl = _compute_grid_cycle_pnl_usd(positions, product_id)
     state["grid_last_cycle_pnl_usd"] = round(grid_cycle_pnl, 6)
     if max_loss_usd > 0 and grid_cycle_pnl <= (-max_loss_usd):
-        # DGRID intelligence: instead of just halting, fire PM cooldown so the
+        # MM intelligence: instead of just halting, fire PM cooldown so the
         # next cycle re-engages at reduced size rather than slamming back in.
-        if configured_strategy == "dgrid" and _dgrid_intelligence_on(state):
+        if _intel_active:
             _dgrid_pm.trigger_cooldown(state, reason="grid_stop_loss_hit")
         return {
             "success": True,
@@ -1413,7 +1488,7 @@ def run_cycle(
             "pm_cooldown_until": state.get("pm_cooldown_until"),
         }
     if max_profit_usd > 0 and grid_cycle_pnl >= max_profit_usd:
-        if configured_strategy == "dgrid" and _dgrid_intelligence_on(state):
+        if _intel_active:
             _dgrid_pm.trigger_cooldown(state, reason="grid_take_profit_hit")
         return {
             "success": True,
@@ -1719,15 +1794,26 @@ def run_cycle(
     per_level_buy_size = float(min_quote_size) if buy_levels > 0 else 0.0
     per_level_sell_size = float(min_quote_size) if sell_levels > 0 else 0.0
 
-    # --- DGRID intelligence: per-level adaptive sizing (Layer A) --------
-    # When enabled, ``_dgrid_layer_size_for`` below is called per order spec
-    # and overrides ``per_level_*_size``. We only set up the helper here so
-    # the placement loop below stays tidy.
-    _intel_on = (configured_strategy == "dgrid" and _dgrid_intelligence_on(state))
+    # --- MM intelligence: per-level adaptive sizing (Layer A) -----------
+    # When enabled (DGRID or R-GRID), ``_dgrid_layer_size_for`` below is called
+    # per order spec and overrides ``per_level_*_size``. R-Grid pulls its own
+    # regime table via _layer_sizing.STRATEGY_REGIME_TABLES["rgrid"].
+    _intel_on = bool(_intel_active)
     _pm_dampener = float(pm_summary.get("size_dampener") or 1.0) if _intel_on else 1.0
     _max_per_level_usd = float(state.get("layer_max_per_level_usd") or (notional * 3.0))
     _layer_regime = str((regime_info or {}).get("regime") or _dgrid_regime.REGIME_RANGE_WIDE)
     _layer_realized_vol_bp = float((regime_info or {}).get("realized_vol_bp") or vol_bp or 0.0)
+
+    # Mid Mode resolves directional_bias to a float in [-1, +1] and passes it
+    # to size_quote_level as ``bias_value``. The result is a multiplicative
+    # tilt of +/- 20% per side that LAYERS on top of the regime size mult.
+    # Other strategies pass 0.0 so the bias term is neutral.
+    _intel_bias_value = 0.0
+    if _intel_on and configured_strategy == "mid":
+        try:
+            _intel_bias_value = _resolve_directional_bias_value(directional_bias)
+        except Exception:
+            _intel_bias_value = 0.0
 
     def _dgrid_layer_size_for(is_long: bool, level: int) -> float:
         if not _intel_on:
@@ -1747,6 +1833,7 @@ def run_cycle(
             max_per_level_usd=_max_per_level_usd,
             state=state,
             config=state,
+            bias_value=_intel_bias_value,
         )
         size_base = float(res["size_base"]) * _pm_dampener
         # Floor at venue minimum, ceiling at config max.
@@ -1996,18 +2083,28 @@ def run_cycle(
             "dgrid_reset_threshold_bp": state.get("dgrid_reset_threshold_bp"),
             "dgrid_phase_changed": state.get("dgrid_phase_changed"),
         })
-        if _dgrid_intelligence_on(state):
+
+    # Intelligence telemetry: same fields for DGRID and R-GRID so the
+    # dashboard renders identically. R-Grid also gets the veto counters.
+    if _intel_active:
+        result.update({
+            f"{_intel_strategy}_intelligence_enabled": True,
+            "intelligence_strategy": _intel_strategy,
+            "regime": (regime_info or {}).get("regime"),
+            "regime_confidence": (regime_info or {}).get("confidence"),
+            "regime_drift_bp": (regime_info or {}).get("drift_bp"),
+            "regime_votes": (regime_info or {}).get("votes"),
+            "regime_changed": (regime_info or {}).get("regime_changed"),
+            "pm_actions": pm_summary.get("actions"),
+            "pm_cooldown_active": pm_summary.get("cooldown_active"),
+            "pm_size_dampener": pm_summary.get("size_dampener"),
+            "layer_sizing_telemetry": (state.get("mm_layer_sizing_telemetry") or [])[-8:],
+        })
+        if _intel_strategy == "rgrid":
             result.update({
-                "dgrid_intelligence_enabled": True,
-                "regime": (regime_info or {}).get("regime"),
-                "regime_confidence": (regime_info or {}).get("confidence"),
-                "regime_drift_bp": (regime_info or {}).get("drift_bp"),
-                "regime_votes": (regime_info or {}).get("votes"),
-                "regime_changed": (regime_info or {}).get("regime_changed"),
-                "pm_actions": pm_summary.get("actions"),
-                "pm_cooldown_active": pm_summary.get("cooldown_active"),
-                "pm_size_dampener": pm_summary.get("size_dampener"),
-                "layer_sizing_telemetry": (state.get("mm_layer_sizing_telemetry") or [])[-8:],
+                "rgrid_momentum_veto_count": state.get("rgrid_momentum_veto_count") or 0,
+                "rgrid_momentum_veto_last_reason": state.get("rgrid_momentum_veto_last_reason"),
+                "rgrid_momentum_veto_last_ts": state.get("rgrid_momentum_veto_last_ts"),
             })
 
     # Update cumulative PnL tracking. Previously this only worked for RGRID; GRID

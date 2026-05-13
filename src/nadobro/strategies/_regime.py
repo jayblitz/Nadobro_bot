@@ -75,6 +75,52 @@ def _drift_bp(history: list[float], window: int) -> float:
     return (cur - old) / old * 1e4
 
 
+def _variance_ratio_from_history(
+    history: list[float], short_window: int, long_window: int
+) -> float:
+    """Compute a variance ratio (short-window var / long-window var) of returns.
+
+    Mirrors mm_bot._compute_variance_ratio so this module is self-sufficient
+    when callers don't have a precomputed value to pass in.
+    """
+    returns: list[float] = []
+    for i in range(1, len(history or [])):
+        prev = float(history[i - 1] or 0.0)
+        cur = float(history[i] or 0.0)
+        if prev <= 0 or cur <= 0:
+            continue
+        returns.append((cur - prev) / prev)
+    if len(returns) < max(3, short_window):
+        return 1.0
+    short = returns[-max(2, short_window):]
+    long = returns[-max(short_window, long_window):]
+
+    def _variance(values: list[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        return sum((v - mean) ** 2 for v in values) / max(1, len(values) - 1)
+
+    long_var = _variance(long)
+    if long_var <= 1e-18:
+        return 1.0
+    return max(0.0, _variance(short) / long_var)
+
+
+def _realized_vol_bp_from_history(history: list[float]) -> float:
+    """Average absolute return in bp. Mirrors mm_bot._compute_realized_vol_bp."""
+    returns: list[float] = []
+    for i in range(1, len(history or [])):
+        prev = float(history[i - 1] or 0.0)
+        cur = float(history[i] or 0.0)
+        if prev <= 0 or cur <= 0:
+            continue
+        returns.append(abs((cur - prev) / prev))
+    if not returns:
+        return 0.0
+    return (sum(returns) / len(returns)) * 1e4
+
+
 def _range_expansion_bp(history: list[float], window: int) -> float:
     """Recent (high - low) / mid in bp over the last ``window`` mid points."""
     if not history or window <= 0:
@@ -277,6 +323,15 @@ def classify_regime(
     )
     min_agreement = int(cfg.get("regime_min_signal_agreement") or DEFAULT_MIN_AGREEMENT)
 
+    # Self-sufficient input handling: if the caller passes vr <= 0 or
+    # realized_vol_bp <= 0, compute them from the history we have. Lets the
+    # classifier be called from contexts that don't already maintain those
+    # numbers (volume_bot, ad-hoc dashboards, tests).
+    if not variance_ratio or float(variance_ratio) <= 0:
+        variance_ratio = _variance_ratio_from_history(history, short_window, long_window)
+    if not realized_vol_bp or float(realized_vol_bp) <= 0:
+        realized_vol_bp = _realized_vol_bp_from_history(history)
+
     drift_bp = _drift_bp(history, short_window)
     range_exp_bp = _range_expansion_bp(history, long_window)
     fill_asym = _fill_asymmetry(state)
@@ -326,7 +381,34 @@ def classify_regime(
     if regime not in ALL_REGIMES:
         regime = REGIME_RANGE_WIDE
 
-    if primary_trend:
+    # Strong-drift override. A smooth multiplicative trend (steady gain/loss
+    # per bar) produces near-constant returns and therefore a variance ratio
+    # around 1.0 — which would otherwise wrongly classify as range. When drift
+    # is much larger than the trend threshold AND at least one aligned vote
+    # agrees, declare trend regardless of vr. This is the case that caught
+    # us on WTI (169 bp move with low vr).
+    strong_drift_min = drift_min * 3.0  # default 24 bp
+    if abs(drift_bp) >= strong_drift_min:
+        if drift_bp > 0 and bullish_votes >= 1 and bearish_votes == 0:
+            regime = REGIME_TREND_UP
+            primary_trend = True  # affects vr_aligned for confidence calc
+        elif drift_bp < 0 and bearish_votes >= 1 and bullish_votes == 0:
+            regime = REGIME_TREND_DOWN
+            primary_trend = True
+        elif drift_bp > 0:
+            # No conflicting votes? Still call trend on raw drift magnitude.
+            if bearish_votes == 0:
+                regime = REGIME_TREND_UP
+                primary_trend = True
+        elif drift_bp < 0:
+            if bullish_votes == 0:
+                regime = REGIME_TREND_DOWN
+                primary_trend = True
+        if regime in (REGIME_TREND_UP, REGIME_TREND_DOWN):
+            # Skip the normal decision tree — we've already decided.
+            primary_range = False
+
+    if primary_trend and regime not in (REGIME_TREND_UP, REGIME_TREND_DOWN, REGIME_CHOP_HIGH_VOL):
         # In a trend regime, prefer trend_up/down if direction agrees,
         # otherwise call it chop_high_vol.
         if net >= 2 and bullish_votes >= min_agreement:
@@ -361,7 +443,27 @@ def classify_regime(
         (regime in (REGIME_TREND_UP, REGIME_TREND_DOWN) and primary_trend)
         or (regime in (REGIME_RANGE_TIGHT, REGIME_RANGE_WIDE) and primary_range)
     )
-    confidence = min(1.0, 0.4 * agreement + 0.3 * (available / max(1, len(votes))) + (0.3 if vr_aligned else 0.0))
+    confidence = (
+        0.4 * agreement
+        + 0.3 * (available / max(1, len(votes)))
+        + (0.3 if vr_aligned else 0.0)
+    )
+
+    # Range-expansion confidence boost: a wide intra-window range is itself
+    # evidence of chop, AND amplifies trend confidence when drift is strong.
+    # range_expand_trend is the threshold (default 25 bp); we treat 4x that
+    # as full confidence saturation for this signal.
+    if regime == REGIME_CHOP_HIGH_VOL:
+        chop_evidence = min(1.0, range_exp_bp / max(1e-9, range_expand_trend * 4.0))
+        confidence = max(confidence, 0.4 + 0.5 * chop_evidence)
+    elif regime in (REGIME_TREND_UP, REGIME_TREND_DOWN):
+        # When drift is much larger than the trend min, that alone is strong
+        # evidence the regime is real even if external indicators (RSI/MACD)
+        # haven't warmed up.
+        drift_evidence = min(1.0, abs(drift_bp) / max(1e-9, drift_min * 6.0))
+        confidence = max(confidence, 0.35 + 0.55 * drift_evidence)
+
+    confidence = min(1.0, max(0.0, confidence))
 
     previous = str(state.get("regime") or "")
     regime_changed = bool(previous and previous != regime)

@@ -16,19 +16,35 @@ from src.nadobro.strategies import _regime
 
 @pytest.fixture
 def fake_execute(monkeypatch):
-    """Patch the execute_market_order import inside _position_manager."""
+    """Patch the execute_market_order import inside _position_manager.
+
+    Restores the original (or absent) trade_service module after each test so
+    we don't pollute sibling test files that may legitimately import the real
+    or stubbed trade_service (e.g. volume_bot tests).
+    """
     calls: list[dict] = []
 
     def _stub(*args, **kwargs):
         calls.append({"args": args, "kwargs": kwargs})
         return {"success": True, "digest": "0xfake"}
 
-    # Inject a fake services.trade_service module
     import sys
-    fake_module = types.ModuleType("src.nadobro.services.trade_service")
+    key = "src.nadobro.services.trade_service"
+    saved = sys.modules.get(key)
+    fake_module = types.ModuleType(key)
     fake_module.execute_market_order = _stub  # type: ignore
-    sys.modules["src.nadobro.services.trade_service"] = fake_module
-    yield calls
+    # Add the spot variants so a sibling import that lists them still works.
+    fake_module.execute_limit_order = _stub  # type: ignore
+    fake_module.execute_spot_limit_order = _stub  # type: ignore
+    fake_module.execute_spot_market_order = _stub  # type: ignore
+    sys.modules[key] = fake_module
+    try:
+        yield calls
+    finally:
+        if saved is None:
+            sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = saved
 
 
 def _pos(side: str, amount: float, unrealized: float = 0.0, product_id: int = 1) -> dict:

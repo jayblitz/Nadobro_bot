@@ -26,8 +26,146 @@ from src.nadobro.services.trade_service import (
     execute_spot_market_order,
 )
 from src.nadobro.services.user_service import get_user_readonly_client
+# --- Volume Bot intelligence (additive) ---
+# Light-touch upgrade: regime-aware pause + chop notional dampener. No PM,
+# no per-level sizing — Volume Bot's design intent is *volume generation*,
+# not spread capture, so we only veto entry on adverse trend regimes and
+# scale notional down in high-vol chop.
+from src.nadobro.strategies import _regime as _vol_regime
+try:
+    from src.nadobro.services.feature_flags import dgrid_intelligence_enabled as _vol_intel_env_default
+except Exception:
+    def _vol_intel_env_default() -> bool:
+        return False
 
 logger = logging.getLogger(__name__)
+
+
+def _vol_intelligence_on(state: dict) -> bool:
+    """Volume Bot uses its own session flag, falling back to the master flag."""
+    explicit = state.get("vol_intelligence_enabled")
+    if explicit is not None:
+        return bool(explicit)
+    legacy = state.get("dgrid_intelligence_enabled")
+    if legacy is not None:
+        return bool(legacy)
+    return bool(_vol_intel_env_default())
+
+
+# Tunable thresholds — exposed as state keys with these defaults.
+_VOL_REGIME_ADVERSE_CONFIDENCE = 0.65
+_VOL_REGIME_CHOP_CONFIDENCE = 0.50
+_VOL_REGIME_CHOP_NOTIONAL_MULT = 0.5
+
+
+def _vol_regime_gate(
+    *,
+    signal: dict,
+    state: dict,
+    history: list[float],
+    mid: float,
+    product: str,
+) -> tuple[dict, float]:
+    """Apply the regime gate to a Volume Bot signal.
+
+    Returns ``(possibly-modified-signal, notional_multiplier)``.
+
+    Behavior:
+      * If intelligence is OFF, returns signal unchanged with mult=1.0.
+      * If the signal isn't entering (`signal["ok"] is False`), pass through.
+      * If regime is ``trend_up`` and direction is ``short`` (or trend_down /
+        long) with confidence >= adverse_conf, mark signal not-ok with reason
+        ``regime_against_signal`` so the cycle skips entry.
+      * If regime is ``chop_high_vol`` with confidence >= chop_conf, halve
+        the target notional (keeps the entry but reduces size).
+    """
+    if not _vol_intelligence_on(state):
+        return signal, 1.0
+    if not signal or not signal.get("ok"):
+        return signal, 1.0
+
+    try:
+        # Pass 0 for variance_ratio and realized_vol_bp — the classifier
+        # auto-computes them from history when not provided. Volume Bot doesn't
+        # already maintain those values like mm_bot.py's dgrid path does.
+        regime_info = _vol_regime.classify_regime(
+            state,
+            list(history or []),
+            product=str(product),
+            variance_ratio=float(state.get("dgrid_variance_ratio") or 0.0),
+            realized_vol_bp=float(state.get("dgrid_realized_move_bp") or 0.0),
+            ema_fast=0.0,
+            ema_slow=0.0,
+            short_window=int(state.get("dgrid_short_window_points") or 4),
+            long_window=int(state.get("dgrid_long_window_points") or 12),
+            config=state,
+        )
+    except Exception as exc:
+        logger.warning("vol regime gate failed: %s — passing through", exc)
+        return signal, 1.0
+
+    state["vol_regime_info"] = {
+        "regime": regime_info.get("regime"),
+        "confidence": regime_info.get("confidence"),
+        "drift_bp": regime_info.get("drift_bp"),
+    }
+
+    confidence = float(regime_info.get("confidence") or 0.0)
+    regime = str(regime_info.get("regime") or "")
+    direction = str(signal.get("direction") or "").lower()
+
+    adverse_conf = float(state.get("vol_regime_adverse_confidence") or _VOL_REGIME_ADVERSE_CONFIDENCE)
+    chop_conf = float(state.get("vol_regime_chop_confidence") or _VOL_REGIME_CHOP_CONFIDENCE)
+    chop_mult = float(state.get("vol_regime_chop_notional_mult") or _VOL_REGIME_CHOP_NOTIONAL_MULT)
+
+    # Adverse-direction veto
+    if confidence >= adverse_conf:
+        if regime == _vol_regime.REGIME_TREND_UP and direction == "short":
+            blocked = dict(signal)
+            blocked["ok"] = False
+            blocked["reason"] = "regime_against_signal"
+            blocked["regime"] = regime
+            blocked["regime_confidence"] = confidence
+            state["vol_regime_veto_count"] = int(state.get("vol_regime_veto_count") or 0) + 1
+            logger.info(
+                "Volume regime veto: short blocked in %s (conf=%.2f)", regime, confidence,
+            )
+            return blocked, 1.0
+        if regime == _vol_regime.REGIME_TREND_DOWN and direction == "long":
+            blocked = dict(signal)
+            blocked["ok"] = False
+            blocked["reason"] = "regime_against_signal"
+            blocked["regime"] = regime
+            blocked["regime_confidence"] = confidence
+            state["vol_regime_veto_count"] = int(state.get("vol_regime_veto_count") or 0) + 1
+            logger.info(
+                "Volume regime veto: long blocked in %s (conf=%.2f)", regime, confidence,
+            )
+            return blocked, 1.0
+
+    # Chop notional dampener
+    if regime == _vol_regime.REGIME_CHOP_HIGH_VOL and confidence >= chop_conf:
+        state["vol_regime_chop_dampen_count"] = int(state.get("vol_regime_chop_dampen_count") or 0) + 1
+        logger.info(
+            "Volume chop dampener: target notional x%.2f (conf=%.2f)", chop_mult, confidence,
+        )
+        return signal, max(0.05, min(1.0, chop_mult))
+
+    return signal, 1.0
+
+
+def _vol_mid_history(product: str, state: dict, limit_points: int = 24) -> list[float]:
+    """Pull recent mid history from price_tracker for the regime classifier.
+
+    Falls back to state['vol_mid_history'] if price_tracker isn't available.
+    """
+    try:
+        from src.nadobro.services.price_tracker import get_mids  # type: ignore
+        mids = get_mids(product) or []
+        return [float(m) for m in mids[-limit_points:] if float(m) > 0]
+    except Exception:
+        seed = state.get("vol_mid_history") or []
+        return [float(m) for m in seed if float(m) > 0]
 
 # Position notional per Volume trade (the "position value" in CEO terms).
 # User-overridable via state["target_notional_usd"] (legacy: state["fixed_margin_usd"]).
@@ -749,6 +887,19 @@ def _run_volume_spot_cycle(
         signal_state["vol_direction_mode"] = "fixed"
         signal_state["vol_direction"] = "long"
         signal = _volume_signal(product, mid, signal_state)
+        # Volume intelligence: regime gate. Skip entry on adverse trend
+        # regime; dampen notional in chop_high_vol.
+        signal, _notional_mult = _vol_regime_gate(
+            signal=signal,
+            state=state,
+            history=_vol_mid_history(product, state),
+            mid=mid,
+            product=product,
+        )
+        if _notional_mult != 1.0:
+            target_notional = max(MIN_NOTIONAL_USD, target_notional * _notional_mult)
+            state["vol_regime_notional_mult"] = round(_notional_mult, 4)
+            state["target_notional_usd"] = round(target_notional, 4)
         state["vol_signal"] = {
             "ok": bool(signal.get("ok")),
             "reason": signal.get("reason"),
@@ -757,6 +908,8 @@ def _run_volume_spot_cycle(
             "rsi": round(float(signal.get("rsi") or 0.0), 4),
             "edge_bp": round(float(signal.get("edge_bp") or 0.0), 4),
             "direction_mode": "spot_long",
+            "regime": signal.get("regime"),
+            "regime_confidence": signal.get("regime_confidence"),
         }
         if not signal.get("ok"):
             return {
@@ -1472,6 +1625,19 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             }
 
         signal = _volume_signal(product, mid, state)
+        # Volume intelligence: regime gate (perp path). Skip entry on adverse
+        # trend regime; dampen notional in chop_high_vol.
+        signal, _notional_mult = _vol_regime_gate(
+            signal=signal,
+            state=state,
+            history=_vol_mid_history(product, state),
+            mid=mid,
+            product=product,
+        )
+        if _notional_mult != 1.0:
+            target_notional = max(MIN_NOTIONAL_USD, target_notional * _notional_mult)
+            state["vol_regime_notional_mult"] = round(_notional_mult, 4)
+            state["target_notional_usd"] = round(target_notional, 4)
         state["vol_signal"] = {
             "ok": bool(signal.get("ok")),
             "reason": signal.get("reason"),
@@ -1480,6 +1646,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             "rsi": round(float(signal.get("rsi") or 0.0), 4),
             "edge_bp": round(float(signal.get("edge_bp") or 0.0), 4),
             "direction_mode": signal.get("direction_mode"),
+            "regime": signal.get("regime"),
+            "regime_confidence": signal.get("regime_confidence"),
         }
         if not signal.get("ok"):
             return {
