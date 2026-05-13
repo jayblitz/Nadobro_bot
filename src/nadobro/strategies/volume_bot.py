@@ -182,14 +182,19 @@ MIN_EFFECTIVE_MARGIN_USD = 10.0
 DEFAULT_TARGET_VOLUME_USD = 10000.0
 DEFAULT_VOL_EMA_LEN = 50
 DEFAULT_VOL_RSI_LEN = 14
-DEFAULT_VOL_RSI_LONG_MAX = 50.0
-DEFAULT_VOL_RSI_SHORT_MIN = 50.0
+# Entry gates. RSI 50/50 was the prior default; in practice that opened longs
+# into slight weakness and shorts into slight strength — i.e. the bot leaned
+# against short-term momentum at the worst possible moment. Tighten to
+# 40 / 60 so we only fade real extremes. Min edge raised from 4 bp to 12 bp
+# so the entry edge is greater than the round-trip fee+slippage cost.
+DEFAULT_VOL_RSI_LONG_MAX = 40.0
+DEFAULT_VOL_RSI_SHORT_MIN = 60.0
 DEFAULT_VOL_TRADE_TP_PCT = 0.40
 DEFAULT_VOL_TRADE_SL_PCT = 0.20
 DEFAULT_VOL_HOLD_MIN_SECONDS = 60.0
 DEFAULT_VOL_HOLD_MAX_SECONDS = 540.0
 DEFAULT_VOL_MAX_SPREAD_BP = 12.0
-DEFAULT_VOL_MIN_EDGE_BP = 4.0
+DEFAULT_VOL_MIN_EDGE_BP = 12.0
 
 # Max seconds a post-only close is allowed to rest before we cancel-and-retry
 # with a wider limit. After CLOSE_ESCALATE_AFTER_SECONDS we'll force-close
