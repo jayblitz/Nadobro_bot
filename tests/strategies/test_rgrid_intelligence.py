@@ -107,9 +107,9 @@ def test_explicit_table_overrides_strategy_default():
 # ---------------------------------------------------------------------------
 
 def test_pm_partial_tp_threshold_higher_for_rgrid(monkeypatch):
-    """An R-Grid position at 10 bp profit should NOT trigger partial TP
-    (R-Grid's threshold is 15 bp), but a D-Grid position at the same profit
-    SHOULD trigger it (D-Grid's threshold is 8 bp).
+    """Phase 1 retune: D-Grid threshold raised 8 → 18 bp, R-Grid 15 → 25 bp.
+    A position at 20 bp profit should trigger partial TP on D-Grid (>= 18 bp)
+    but NOT on R-Grid (< 25 bp).
     """
     fake_mod = types.ModuleType("src.nadobro.services.trade_service")
     _stub = lambda *a, **k: {"success": True}
@@ -119,7 +119,8 @@ def test_pm_partial_tp_threshold_higher_for_rgrid(monkeypatch):
     fake_mod.execute_spot_market_order = _stub  # type: ignore
     monkeypatch.setitem(sys.modules, "src.nadobro.services.trade_service", fake_mod)
 
-    positions = [{"product_id": 1, "side": "LONG", "amount": 1.0, "unrealized_pnl": 0.10}]
+    # unrealized_pnl=0.20 on cost_basis=100 → 20 bp.
+    positions = [{"product_id": 1, "side": "LONG", "amount": 1.0, "unrealized_pnl": 0.20}]
 
     dgrid_state = {"strategy": "dgrid", "grid_buy_exposure_price": 100.0}
     dgrid_out = pm.manage_positions(
@@ -128,7 +129,7 @@ def test_pm_partial_tp_threshold_higher_for_rgrid(monkeypatch):
         regime_info={"regime": _regime.REGIME_RANGE_WIDE, "confidence": 0.5},
     )
     dgrid_tps = [a for a in dgrid_out["actions"] if a["type"] == pm.ACTION_PARTIAL_TP]
-    assert dgrid_tps, "D-Grid should partial TP at 10 bp (>= 8 bp threshold)"
+    assert dgrid_tps, "D-Grid should partial TP at 20 bp (>= 18 bp threshold)"
 
     rgrid_state = {"strategy": "rgrid", "grid_buy_exposure_price": 100.0}
     rgrid_out = pm.manage_positions(
@@ -137,7 +138,7 @@ def test_pm_partial_tp_threshold_higher_for_rgrid(monkeypatch):
         regime_info={"regime": _regime.REGIME_RANGE_WIDE, "confidence": 0.5},
     )
     rgrid_tps = [a for a in rgrid_out["actions"] if a["type"] == pm.ACTION_PARTIAL_TP]
-    assert not rgrid_tps, "R-Grid should NOT partial TP at 10 bp (< 15 bp threshold)"
+    assert not rgrid_tps, "R-Grid should NOT partial TP at 20 bp (< 25 bp threshold)"
 
 
 def test_rgrid_cut_requires_higher_confidence(monkeypatch):

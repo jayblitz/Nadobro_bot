@@ -83,6 +83,11 @@ DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
 # 1.25 leaves enough headroom for funding/fees while not over-reserving budget.
 MM_COLLATERAL_SAFETY_FACTOR = 1.25
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
+# Minimum edge (bp) the soft-reset unwind rungs must keep vs the original
+# entry VWAP. Prevents the "buy low, sell below entry" pattern where a
+# soft reset replaced sell rungs with top-of-book and printed guaranteed
+# losses. Configurable via state["grid_soft_reset_min_exit_edge_bp"].
+GRID_SOFT_RESET_MIN_EXIT_EDGE_BP = 3.0
 POST_ONLY_REPRICE_MAX_RETRIES = 3
 POST_ONLY_REPRICE_STEP_BP = 0.5
 DGRID_TREND_ON_VARIANCE_RATIO = 1.25
@@ -573,6 +578,9 @@ def _compute_grid_prices(
     soft_reset_side: str | None = None,
     min_range_pct: float = 1.0,
     max_range_pct: float = 1.0,
+    exit_floor_buy_vwap: float | None = None,
+    exit_floor_sell_vwap: float | None = None,
+    min_exit_edge_bp: float = GRID_SOFT_RESET_MIN_EXIT_EDGE_BP,
 ) -> list[dict]:
     # GRID and RGRID share one price shape under POSITIVE spread: buys BELOW
     # anchor, sells ABOVE anchor. RGRID's "reversal" is applied via the
@@ -584,8 +592,19 @@ def _compute_grid_prices(
     # trade by crossing the book (buys ABOVE anchor, sells BELOW anchor). In
     # that mode we deliberately skip the post-only clamp; we're not trying to
     # be a maker.
+    #
+    # Soft-reset (when inventory is heavy on one side and the market drifted
+    # away from our anchor): the historical behaviour was to replace the rungs
+    # on the unwind side with top-of-book — i.e. dump long inventory at
+    # ``best_ask`` even when ``best_ask`` was *below* the average entry. That
+    # baked the "buy low, sell below entry" pattern into every grid strategy.
+    # We now clamp the unwind rungs to ``entry_vwap +/- min_exit_edge_bp`` so
+    # the soft reset can chase the market *toward* breakeven without ever
+    # printing a guaranteed-loss exit. If the market never revisits that
+    # range, the session-level SL still fires as a true backstop.
     signed_half_spread = float(spread_bp) / 10000.0
     is_concede = signed_half_spread < 0.0
+    exit_edge = max(0.0, float(min_exit_edge_bp)) / 10000.0
     orders = []
     for i in range(1, levels + 1):
         offset = signed_half_spread * i
@@ -594,9 +613,21 @@ def _compute_grid_prices(
         if soft_reset_side and mid_price and mid_price > 0:
             reset_nudge = (0.1 * i) / 10000.0
             if soft_reset_side == "buy":
-                buy_price = float(best_bid or (mid_price * (1.0 - reset_nudge)))
+                market_chase = float(best_bid or (mid_price * (1.0 - reset_nudge)))
+                if exit_floor_sell_vwap and exit_floor_sell_vwap > 0:
+                    # Closing a short: never buy back above sell_vwap - exit edge.
+                    max_exit = exit_floor_sell_vwap * (1.0 - exit_edge)
+                    buy_price = min(market_chase, max_exit)
+                else:
+                    buy_price = market_chase
             elif soft_reset_side == "sell":
-                sell_price = float(best_ask or (mid_price * (1.0 + reset_nudge)))
+                market_chase = float(best_ask or (mid_price * (1.0 + reset_nudge)))
+                if exit_floor_buy_vwap and exit_floor_buy_vwap > 0:
+                    # Closing a long: never sell below buy_vwap + exit edge.
+                    min_exit = exit_floor_buy_vwap * (1.0 + exit_edge)
+                    sell_price = max(market_chase, min_exit)
+                else:
+                    sell_price = market_chase
         # Post-only safety (positive-spread maker mode only): buys can't sit
         # at/above best_bid, sells can't sit at/below best_ask.
         if not is_concede:
@@ -1411,12 +1442,35 @@ def run_cycle(
         recent_fraction = _clamp(discretion * 2.0, 0.02, 0.5)
         buy_exposure = _rolling_vwap_recent_fraction(state.get("grid_buy_fills") or [], recent_fraction)
         sell_exposure = _rolling_vwap_recent_fraction(state.get("grid_sell_fills") or [], recent_fraction)
-        if buy_exposure > 0 and sell_exposure > 0:
-            grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
-        elif buy_exposure > 0:
-            grid_anchor_price = buy_exposure
-        elif sell_exposure > 0:
-            grid_anchor_price = sell_exposure
+        # Anchor resolution.
+        #
+        # Legacy behaviour ("fill_vwap"): the anchor was whichever side had the
+        # most recent fills. In a one-sided drift this dragged the anchor in
+        # the same direction as the trend — RGRID's "reference_price" then
+        # pointed *down* in a downtrend, sells got re-centered onto the new
+        # lower anchor, and the bot booked guaranteed losses.
+        #
+        # Default ("ema_mid"): when only one side has filled, hold the prior
+        # anchor (or fall back to the externally-computed EMA reference_price)
+        # so the anchor doesn't chase the trend that is filling the bot. Only
+        # blend in the two-sided fill center when *both* sides have traded —
+        # that's a genuine range center, not a one-sided drift.
+        anchor_mode = str(state.get("anchor_mode") or "ema_mid").strip().lower()
+        if anchor_mode not in ("fill_vwap", "ema_mid"):
+            anchor_mode = "ema_mid"
+        state["anchor_mode_resolved"] = anchor_mode
+        if anchor_mode == "fill_vwap":
+            if buy_exposure > 0 and sell_exposure > 0:
+                grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
+            elif buy_exposure > 0:
+                grid_anchor_price = buy_exposure
+            elif sell_exposure > 0:
+                grid_anchor_price = sell_exposure
+        else:
+            if buy_exposure > 0 and sell_exposure > 0:
+                grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
+            # One-sided fills: keep the previous anchor; fall through to the
+            # cold-start fallback chain below when there is no prior anchor.
         if grid_anchor_price <= 0:
             grid_anchor_price = float(state.get("grid_last_fill_price") or 0.0)
         if grid_anchor_price <= 0:
@@ -1426,7 +1480,11 @@ def run_cycle(
             exec_price = float(last_exec.get("price") or 0.0)
             if exec_price > 0:
                 state["grid_last_fill_price"] = exec_price
-                grid_anchor_price = exec_price
+                # In fill_vwap mode the anchor jumps to the last fill (legacy).
+                # In ema_mid mode we deliberately do NOT jump — the two-sided
+                # VWAP center already adapts to the genuine range.
+                if anchor_mode == "fill_vwap":
+                    grid_anchor_price = exec_price
         elif float(state.get("grid_last_fill_price") or 0.0) <= 0 and grid_anchor_price > 0:
             state["grid_last_fill_price"] = grid_anchor_price
         state["grid_prev_net_units"] = net_units
@@ -1434,7 +1492,17 @@ def run_cycle(
         state["grid_buy_exposure_price"] = round(buy_exposure, 8) if buy_exposure > 0 else 0.0
         state["grid_sell_exposure_price"] = round(sell_exposure, 8) if sell_exposure > 0 else 0.0
     if strategy == "rgrid":
-        reference_price = grid_anchor_price
+        # Legacy: RGRID used the fill-VWAP anchor directly as reference_price.
+        # In ema_mid mode we keep the EMA-derived reference and only let the
+        # fill-VWAP center *nudge* it on confirmed two-sided fills — that
+        # preserves R-Grid's "anchor near the recent trade range" intent
+        # without dragging the anchor in a one-sided drift.
+        rgrid_anchor_mode = str(state.get("anchor_mode") or "ema_mid").strip().lower()
+        if rgrid_anchor_mode == "fill_vwap":
+            reference_price = grid_anchor_price
+        elif grid_anchor_price > 0 and buy_exposure > 0 and sell_exposure > 0:
+            blend = _clamp(float(state.get("rgrid_anchor_blend") or 0.30), 0.0, 1.0)
+            reference_price = (1.0 - blend) * reference_price + blend * grid_anchor_price
 
     pnl_stop_pct = max(
         0.0,
@@ -1605,17 +1673,24 @@ def run_cycle(
         reset_active = bool(state.get("grid_reset_active"))
         reset_started = float(state.get("grid_reset_started_ts") or 0.0)
         now_ts = time.time()
+        # Drift / soft-reset trigger compares mid vs the *persistent* grid
+        # anchor — not the cycle's quote reference. In ema_mid anchor mode the
+        # quote reference is the slow EMA of mid (so quote prices don't drag
+        # with fills), but the soft-reset arm/disarm still needs the sticky
+        # anchor as its "where the grid was centered" reference. Falling back
+        # to reference_price keeps cold-start behaviour intact.
+        drift_anchor = float(grid_anchor_price or reference_price or 0.0)
         drift_from_anchor_pct = 0.0
-        if reference_price > 0:
-            drift_from_anchor_pct = abs(mid - reference_price) / reference_price * 100.0
+        if drift_anchor > 0:
+            drift_from_anchor_pct = abs(mid - drift_anchor) / drift_anchor * 100.0
         state["grid_drift_from_anchor_pct"] = round(drift_from_anchor_pct, 6)
-        if reset_threshold_pct > 0 and reference_price > 0 and inv_usd > 0:
-            if net_units > 0 and ((reference_price - mid) / reference_price * 100.0 >= reset_threshold_pct):
+        if reset_threshold_pct > 0 and drift_anchor > 0 and inv_usd > 0:
+            if net_units > 0 and ((drift_anchor - mid) / drift_anchor * 100.0 >= reset_threshold_pct):
                 reset_active = True
                 if not reset_started:
                     reset_started = now_ts
                 soft_reset_side = "sell"
-            elif net_units < 0 and ((mid - reference_price) / reference_price * 100.0 >= reset_threshold_pct):
+            elif net_units < 0 and ((mid - drift_anchor) / drift_anchor * 100.0 >= reset_threshold_pct):
                 reset_active = True
                 if not reset_started:
                     reset_started = now_ts
@@ -1638,6 +1713,15 @@ def run_cycle(
         state["grid_reset_side"] = soft_reset_side or ""
         state["grid_reset_started_ts"] = float(reset_started or 0.0)
 
+    # Pass the per-side entry VWAPs so the soft-reset unwind never prints a
+    # guaranteed-loss exit (see _compute_grid_prices for the floor logic).
+    # Mid Mode runs without grid VWAP bookkeeping, so these stay None.
+    exit_floor_buy_vwap = float(state.get("grid_buy_exposure_price") or 0.0) or None
+    exit_floor_sell_vwap = float(state.get("grid_sell_exposure_price") or 0.0) or None
+    soft_reset_exit_edge_bp = float(
+        state.get("grid_soft_reset_min_exit_edge_bp")
+        or GRID_SOFT_RESET_MIN_EXIT_EDGE_BP
+    )
     grid_orders = _compute_grid_prices(
         reference_price,
         dynamic_spread_bp,
@@ -1650,6 +1734,9 @@ def run_cycle(
         soft_reset_side=soft_reset_side,
         min_range_pct=min_range_pct,
         max_range_pct=max_range_pct,
+        exit_floor_buy_vwap=exit_floor_buy_vwap,
+        exit_floor_sell_vwap=exit_floor_sell_vwap,
+        min_exit_edge_bp=soft_reset_exit_edge_bp,
     )
     if session_cap_notional > 0:
         available_session = max(0.0, session_cap_notional - session_done)

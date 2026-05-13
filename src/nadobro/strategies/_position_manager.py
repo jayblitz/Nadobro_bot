@@ -41,6 +41,12 @@ DEFAULT_PARTIAL_TP_FRACTION = 0.33
 DEFAULT_CUT_CONFIDENCE = 0.65
 DEFAULT_CUT_FRACTION = 0.50
 DEFAULT_TRAIL_ARM_USD = 0.50
+# Trail arm as a % of position margin. The legacy arm at $0.50 fires on tiny
+# unrealized P&L when position size is small (your $108-notional WTI fills
+# armed at +0.5% unrealized and exited at +0.25% — net negative after fees).
+# When pm_trail_arm_usd is not explicitly set, manage_positions scales the
+# arm to ``trail_arm_pct / 100 * margin_per_side_usd`` instead.
+DEFAULT_TRAIL_ARM_PCT = 0.60
 DEFAULT_TRAIL_GIVE_BACK_FRACTION = 0.5  # close when current PnL < 0.5 * HWM
 DEFAULT_STALE_HOLD_SECONDS = 30 * 60     # 30 min
 DEFAULT_STALE_VOL_EXPANSION_RATIO = 2.0  # current vol > 2x rolling normal
@@ -56,12 +62,17 @@ DEFAULT_COOLDOWN_REGAIN_SECONDS = 30 * 60
 # once the trend rolls over.
 STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
     "dgrid": {
-        "partial_tp_bp": 8.0,
+        # partial_tp_bp raised from 8 → 18 so we don't skim 33% of every
+        # winner at half a fee. trail_give_back tightened from 0.50 → 0.30
+        # so we keep more of HWM before triggering an exit. trail_arm now
+        # scales with margin via trail_arm_pct (legacy USD floor preserved).
+        "partial_tp_bp": 18.0,
         "partial_tp_fraction": 0.33,
         "cut_confidence": 0.65,
         "cut_fraction": 0.50,
         "trail_arm_usd": 0.50,
-        "trail_give_back_fraction": 0.50,
+        "trail_arm_pct": 0.60,
+        "trail_give_back_fraction": 0.30,
         "stale_hold_seconds": 30 * 60,
         "cooldown_seconds": 300,
         "cooldown_size_dampener": 0.50,
@@ -69,11 +80,14 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
     "rgrid": {
         # R-Grid rides momentum — keep winners longer, cut against the trend
         # only when we're really sure, and trail tighter once HWM is set.
-        "partial_tp_bp": 15.0,
+        # partial_tp_bp raised 15 → 25 in lockstep with D-Grid's 8 → 18 so the
+        # "R-Grid lets winners run further than D-Grid" hierarchy is preserved.
+        "partial_tp_bp": 25.0,
         "partial_tp_fraction": 0.25,
         "cut_confidence": 0.75,
         "cut_fraction": 0.50,
         "trail_arm_usd": 0.75,
+        "trail_arm_pct": 0.80,
         "trail_give_back_fraction": 0.70,  # close once PnL drops below 70% of HWM
         "stale_hold_seconds": 45 * 60,     # R-Grid expects longer holds
         "cooldown_seconds": 240,
@@ -81,12 +95,13 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
     },
     "grid": {
         # Classic symmetric grid — same conservative profile as D-Grid.
-        "partial_tp_bp": 8.0,
+        "partial_tp_bp": 18.0,
         "partial_tp_fraction": 0.33,
         "cut_confidence": 0.65,
         "cut_fraction": 0.50,
         "trail_arm_usd": 0.50,
-        "trail_give_back_fraction": 0.50,
+        "trail_arm_pct": 0.60,
+        "trail_give_back_fraction": 0.30,
         "stale_hold_seconds": 30 * 60,
         "cooldown_seconds": 300,
         "cooldown_size_dampener": 0.50,
@@ -103,6 +118,7 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
         "cut_confidence": 0.70,
         "cut_fraction": 0.50,
         "trail_arm_usd": 0.30,
+        "trail_arm_pct": 0.40,
         "trail_give_back_fraction": 0.50,
         "stale_hold_seconds": 20 * 60,
         "cooldown_seconds": 240,
@@ -139,12 +155,20 @@ def _pm_config(state: dict) -> dict[str, float]:
                 pass
         return float(strat_defaults.get(defaults_key, fallback))
 
+    # Track whether the user explicitly set pm_trail_arm_usd so manage_positions
+    # knows whether to override the pct-of-margin calculation.
+    trail_arm_usd_explicit = state.get("pm_trail_arm_usd")
+    trail_arm_usd_explicit = (
+        trail_arm_usd_explicit is not None and trail_arm_usd_explicit != ""
+    )
     return {
         "partial_tp_bp": _pick("pm_partial_tp_bp", "partial_tp_bp", DEFAULT_PARTIAL_TP_BP),
         "partial_tp_fraction": _pick("pm_partial_tp_fraction", "partial_tp_fraction", DEFAULT_PARTIAL_TP_FRACTION),
         "cut_confidence": _pick("pm_cut_confidence_threshold", "cut_confidence", DEFAULT_CUT_CONFIDENCE),
         "cut_fraction": _pick("pm_cut_fraction", "cut_fraction", DEFAULT_CUT_FRACTION),
         "trail_arm_usd": _pick("pm_trail_arm_usd", "trail_arm_usd", DEFAULT_TRAIL_ARM_USD),
+        "trail_arm_usd_explicit": bool(trail_arm_usd_explicit),
+        "trail_arm_pct": _pick("pm_trail_arm_pct", "trail_arm_pct", DEFAULT_TRAIL_ARM_PCT),
         "trail_give_back_fraction": _pick(
             "pm_trail_give_back_fraction", "trail_give_back_fraction",
             DEFAULT_TRAIL_GIVE_BACK_FRACTION,
@@ -297,9 +321,29 @@ def _evaluate_partial_tp(side: str, inv_u: float, pnl_usd: float, vwap: float,
     }
 
 
+def _resolve_trail_arm_usd(cfg: dict, inv_u: float, vwap: float, leverage: float) -> float:
+    """Effective trail-arm threshold in USD.
+
+    If the user explicitly set ``pm_trail_arm_usd`` we honour it verbatim (legacy
+    behaviour). Otherwise we scale the arm by margin so a $1k notional doesn't
+    arm at the same $0.50 as a $100k notional: arm = trail_arm_pct% * margin.
+    """
+    if cfg.get("trail_arm_usd_explicit"):
+        return float(cfg.get("trail_arm_usd") or 0.0)
+    pct = float(cfg.get("trail_arm_pct") or 0.0)
+    margin_usd = abs(inv_u) * float(vwap or 0.0) / max(1.0, float(leverage or 1.0))
+    pct_arm = pct / 100.0 * margin_usd
+    # Fall back to the legacy USD floor when pct-of-margin is too small to
+    # cover even one fee tick (e.g. very small positions on cheap markets).
+    return max(pct_arm, float(cfg.get("trail_arm_usd") or 0.0))
+
+
 def _evaluate_trail(side: str, inv_u: float, pnl_usd: float, hwm: float,
-                    cfg: dict) -> Optional[dict]:
-    if inv_u <= 0 or hwm <= cfg["trail_arm_usd"]:
+                    cfg: dict, *, vwap: float = 0.0, leverage: float = 1.0) -> Optional[dict]:
+    if inv_u <= 0:
+        return None
+    arm_usd = _resolve_trail_arm_usd(cfg, inv_u, vwap, leverage)
+    if hwm <= arm_usd:
         return None
     threshold = cfg["trail_give_back_fraction"] * hwm
     if pnl_usd >= threshold:
@@ -308,7 +352,7 @@ def _evaluate_trail(side: str, inv_u: float, pnl_usd: float, hwm: float,
         "type": ACTION_TRAIL_CLOSE,
         "side": side,
         "size_base": inv_u,
-        "reason": f"hwm={hwm:.2f} pnl={pnl_usd:.2f} threshold={threshold:.2f}",
+        "reason": f"hwm={hwm:.2f} pnl={pnl_usd:.2f} threshold={threshold:.2f} arm={arm_usd:.2f}",
     }
 
 
@@ -405,11 +449,13 @@ def manage_positions(
     if a:
         actions.append(a)
 
-    # Rule 3: trailing close
-    a = _evaluate_trail("long", long_u, long_pnl, hwm_long, cfg)
+    # Rule 3: trailing close. Pass per-side VWAP + leverage so the arm
+    # threshold scales with margin (see _resolve_trail_arm_usd).
+    leverage = max(1.0, float(state.get("leverage") or 1.0))
+    a = _evaluate_trail("long", long_u, long_pnl, hwm_long, cfg, vwap=vwap_buy, leverage=leverage)
     if a:
         actions.append(a)
-    a = _evaluate_trail("short", short_u, short_pnl, hwm_short, cfg)
+    a = _evaluate_trail("short", short_u, short_pnl, hwm_short, cfg, vwap=vwap_sell, leverage=leverage)
     if a:
         actions.append(a)
 

@@ -92,9 +92,14 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     fr_data = client.get_funding_rate(product_id) or {}
     funding_rate = float(fr_data.get("funding_rate", 0) or 0)
     state["dn_last_funding_rate"] = funding_rate
-    funding_entry_mode = str(state.get("funding_entry_mode") or "enter_anyway").strip().lower()
+    # Default is now ``wait`` (Phase 1 retune). The legacy ``enter_anyway``
+    # default opened spot+perp hedges even when funding was paying us
+    # negatively, so the carry-trade ran in reverse and the user paid both
+    # leg fees plus adverse funding. Existing configs with an explicit
+    # ``enter_anyway`` setting are preserved.
+    funding_entry_mode = str(state.get("funding_entry_mode") or "wait").strip().lower()
     if funding_entry_mode not in ("wait", "enter_anyway"):
-        funding_entry_mode = "enter_anyway"
+        funding_entry_mode = "wait"
     state["dn_mode"] = funding_entry_mode
 
     unfavorable_count = int(state.get("dn_unfavorable_count") or 0)
