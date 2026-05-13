@@ -54,6 +54,32 @@ DEFAULT_COOLDOWN_SECONDS = 300
 DEFAULT_COOLDOWN_SIZE_DAMPENER = 0.5
 DEFAULT_COOLDOWN_REGAIN_SECONDS = 30 * 60
 
+# Phase 2 — universal exit rails.
+#
+# Breakeven stop: once unrealized PnL exceeds ``breakeven_arm_bp`` of cost
+# basis, mark the side as "BE armed". On subsequent cycles, if the PnL
+# rolls back through zero we close the whole side at breakeven — locks in
+# the trip from red to green into something that can't go back to red.
+# Different from trail: trail waits for a HWM and give-back fraction; BE
+# only needs one "we were green, now we're not" round-trip.
+DEFAULT_BREAKEVEN_ARM_BP = 10.0
+DEFAULT_BREAKEVEN_EXIT_OFFSET_BP = 2.0  # exit at entry + 2 bp so we cover fees
+# Time-in-loss stop: if a side has been continuously underwater for more
+# than ``max_underwater_seconds`` we force-close it. Independent of stale
+# flatten which requires age + vol expansion — this is just "we've been
+# wrong for too long."
+DEFAULT_MAX_UNDERWATER_SECONDS = 25 * 60
+# Momentum-reversal close: if the regime flips against a *winning* side
+# with high confidence, take everything (don't trail). Inverse of
+# adverse_cut which trims 50% of a losing side on regime against.
+DEFAULT_MOM_REV_CONFIDENCE = 0.75
+# Mid Mode inventory cap: Mid intentionally disables grid anchor + soft
+# reset, so inventory can accumulate unbounded. The cap fires a
+# reduce-only close on whichever side breached |inv_usd| > cap.
+# Per-strategy default lives in STRATEGY_DEFAULTS; module default is
+# "unbounded" so the rule is a no-op outside Mid.
+DEFAULT_INVENTORY_CAP_USD = 0.0
+
 
 # Per-strategy default overrides. R-Grid intentionally rides momentum, so it
 # wants: (a) higher partial_tp_bp — don't clip profitable trend captures early,
@@ -76,6 +102,12 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
         "stale_hold_seconds": 30 * 60,
         "cooldown_seconds": 300,
         "cooldown_size_dampener": 0.50,
+        # Phase 2 exit rails.
+        "breakeven_arm_bp": 10.0,
+        "breakeven_exit_offset_bp": 2.0,
+        "max_underwater_seconds": 25 * 60,
+        "mom_rev_confidence": 0.75,
+        "inventory_cap_usd": 0.0,
     },
     "rgrid": {
         # R-Grid rides momentum — keep winners longer, cut against the trend
@@ -92,6 +124,16 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
         "stale_hold_seconds": 45 * 60,     # R-Grid expects longer holds
         "cooldown_seconds": 240,
         "cooldown_size_dampener": 0.50,
+        # Phase 2 exit rails. R-Grid sits on momentum trades longer, so we
+        # arm breakeven a bit further out and let the position sit underwater
+        # longer than D-Grid before forcing a close. Momentum-reversal close
+        # threshold matches the higher cut_confidence — R-Grid only cuts on
+        # high-conviction reversals.
+        "breakeven_arm_bp": 18.0,
+        "breakeven_exit_offset_bp": 3.0,
+        "max_underwater_seconds": 40 * 60,
+        "mom_rev_confidence": 0.80,
+        "inventory_cap_usd": 0.0,
     },
     "grid": {
         # Classic symmetric grid — same conservative profile as D-Grid.
@@ -105,6 +147,12 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
         "stale_hold_seconds": 30 * 60,
         "cooldown_seconds": 300,
         "cooldown_size_dampener": 0.50,
+        # Phase 2 exit rails. Same defaults as D-Grid.
+        "breakeven_arm_bp": 10.0,
+        "breakeven_exit_offset_bp": 2.0,
+        "max_underwater_seconds": 25 * 60,
+        "mom_rev_confidence": 0.75,
+        "inventory_cap_usd": 0.0,
     },
     "mid": {
         # Mid Mode (Tread parity) quotes tighter spreads, so partial-TP bp
@@ -123,6 +171,16 @@ STRATEGY_DEFAULTS: dict[str, dict[str, float]] = {
         "stale_hold_seconds": 20 * 60,
         "cooldown_seconds": 240,
         "cooldown_size_dampener": 0.50,
+        # Phase 2 exit rails. Mid Mode disables anchor + soft-reset by
+        # design, so inventory can accumulate unbounded without intervention.
+        # An inventory cap (in USD; 0 = disabled) provides the hard rail.
+        # Tight breakeven/time-in-loss thresholds reflect Mid's high
+        # turnover — winners and losers don't sit long under normal flow.
+        "breakeven_arm_bp": 6.0,
+        "breakeven_exit_offset_bp": 1.5,
+        "max_underwater_seconds": 15 * 60,
+        "mom_rev_confidence": 0.70,
+        "inventory_cap_usd": 5000.0,
     },
 }
 
@@ -132,6 +190,10 @@ ACTION_PARTIAL_TP = "partial_tp"
 ACTION_ADVERSE_CUT = "adverse_cut"
 ACTION_TRAIL_CLOSE = "trail_close"
 ACTION_STALE_FLATTEN = "stale_flatten"
+ACTION_BREAKEVEN_STOP = "breakeven_stop"
+ACTION_TIME_IN_LOSS_STOP = "time_in_loss_stop"
+ACTION_MOM_REVERSAL_CLOSE = "momentum_reversal_close"
+ACTION_INVENTORY_CAP = "inventory_cap_flatten"
 
 
 def _pm_config(state: dict) -> dict[str, float]:
@@ -186,6 +248,26 @@ def _pm_config(state: dict) -> dict[str, float]:
         "cooldown_regain_seconds": _pick(
             "pm_cooldown_regain_seconds", "cooldown_regain_seconds",
             DEFAULT_COOLDOWN_REGAIN_SECONDS,
+        ),
+        # Phase 2 exit rails.
+        "breakeven_arm_bp": _pick(
+            "pm_breakeven_arm_bp", "breakeven_arm_bp", DEFAULT_BREAKEVEN_ARM_BP
+        ),
+        "breakeven_exit_offset_bp": _pick(
+            "pm_breakeven_exit_offset_bp", "breakeven_exit_offset_bp",
+            DEFAULT_BREAKEVEN_EXIT_OFFSET_BP,
+        ),
+        "max_underwater_seconds": _pick(
+            "pm_max_underwater_seconds", "max_underwater_seconds",
+            DEFAULT_MAX_UNDERWATER_SECONDS,
+        ),
+        "mom_rev_confidence": _pick(
+            "pm_mom_rev_confidence", "mom_rev_confidence",
+            DEFAULT_MOM_REV_CONFIDENCE,
+        ),
+        "inventory_cap_usd": _pick(
+            "pm_inventory_cap_usd", "inventory_cap_usd",
+            DEFAULT_INVENTORY_CAP_USD,
         ),
         "strategy": strategy,
     }
@@ -380,6 +462,158 @@ def _evaluate_stale(state: dict, regime_info: dict, side: str, inv_u: float,
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 — universal exit rails
+# ---------------------------------------------------------------------------
+
+
+def _update_breakeven_arm(state: dict, side: str, pnl_usd: float, inv_u: float,
+                          vwap: float, cfg: dict) -> bool:
+    """Track per-side "have we ever been above the BE arm threshold this trade?".
+
+    Once armed, the flag stays set until the side flattens. Returns True when
+    the BE stop should fire (we were green, now we're back to / below entry).
+    """
+    armed_map = state.setdefault("pm_be_armed", {"long": False, "short": False})
+    if not isinstance(armed_map, dict):
+        armed_map = {"long": False, "short": False}
+        state["pm_be_armed"] = armed_map
+    if inv_u <= 0:
+        # Side flat: reset arm so the next trade starts clean.
+        armed_map[side] = False
+        return False
+    arm_bp = float(cfg.get("breakeven_arm_bp") or 0.0)
+    if arm_bp <= 0:
+        return False
+    pnl_bp = _pnl_bp_on_inventory(pnl_usd, inv_u, vwap)
+    if not armed_map.get(side):
+        if pnl_bp >= arm_bp:
+            armed_map[side] = True
+        return False
+    # Already armed. Trigger when PnL drops to (or below) the exit floor —
+    # entry + exit_offset_bp so we cover round-trip fees, not literally zero.
+    exit_offset_bp = float(cfg.get("breakeven_exit_offset_bp") or 0.0)
+    return pnl_bp <= exit_offset_bp
+
+
+def _evaluate_breakeven_stop(state: dict, side: str, inv_u: float,
+                             pnl_usd: float, vwap: float, cfg: dict) -> Optional[dict]:
+    # Always call the arm-tracker so a flatten on this side resets the latch
+    # for the next trade (it returns False when inv_u <= 0).
+    if not _update_breakeven_arm(state, side, pnl_usd, inv_u, vwap, cfg):
+        return None
+    pnl_bp = _pnl_bp_on_inventory(pnl_usd, inv_u, vwap)
+    return {
+        "type": ACTION_BREAKEVEN_STOP,
+        "side": side,
+        "size_base": inv_u,
+        "reason": (
+            f"pnl_bp={pnl_bp:.1f} arm_bp={float(cfg['breakeven_arm_bp']):.1f} "
+            f"exit_offset_bp={float(cfg['breakeven_exit_offset_bp']):.1f}"
+        ),
+    }
+
+
+def _update_time_in_loss_ts(state: dict, side: str, pnl_usd: float, inv_u: float,
+                            now: float) -> float:
+    """Track "underwater since" timestamp per side.
+
+    Returns the seconds the side has been continuously underwater (0 if not
+    currently in loss or just flipped).
+    """
+    ts_map = state.setdefault("pm_loss_since_ts", {"long": 0.0, "short": 0.0})
+    if not isinstance(ts_map, dict):
+        ts_map = {"long": 0.0, "short": 0.0}
+        state["pm_loss_since_ts"] = ts_map
+    if inv_u <= 0:
+        ts_map[side] = 0.0
+        return 0.0
+    if pnl_usd >= 0:
+        ts_map[side] = 0.0
+        return 0.0
+    if float(ts_map.get(side) or 0.0) <= 0:
+        ts_map[side] = float(now)
+        return 0.0
+    return max(0.0, float(now) - float(ts_map.get(side) or 0.0))
+
+
+def _evaluate_time_in_loss(state: dict, side: str, inv_u: float, pnl_usd: float,
+                           cfg: dict, now: float) -> Optional[dict]:
+    if inv_u <= 0:
+        return None
+    max_underwater = float(cfg.get("max_underwater_seconds") or 0.0)
+    if max_underwater <= 0:
+        return None
+    age = _update_time_in_loss_ts(state, side, pnl_usd, inv_u, now)
+    if age < max_underwater:
+        return None
+    return {
+        "type": ACTION_TIME_IN_LOSS_STOP,
+        "side": side,
+        "size_base": inv_u,
+        "reason": f"underwater_seconds={age:.0f} max={max_underwater:.0f} pnl={pnl_usd:.2f}",
+    }
+
+
+def _evaluate_momentum_reversal(regime: str, confidence: float,
+                                long_u: float, short_u: float,
+                                long_pnl: float, short_pnl: float,
+                                cfg: dict) -> Optional[dict]:
+    """Take everything on a *winning* side when the regime flips against it.
+
+    Different from adverse_cut (which trims 50% of a *losing* side under
+    similar conditions). This locks in profit before the reversal eats it.
+    """
+    threshold = float(cfg.get("mom_rev_confidence") or 0.0)
+    if threshold <= 0 or confidence < threshold:
+        return None
+    if regime == REGIME_TREND_DOWN and long_u > 0 and long_pnl > 0:
+        return {
+            "type": ACTION_MOM_REVERSAL_CLOSE,
+            "side": "long",
+            "size_base": long_u,
+            "reason": f"regime={regime} conf={confidence:.2f} long_pnl={long_pnl:.2f}",
+        }
+    if regime == REGIME_TREND_UP and short_u > 0 and short_pnl > 0:
+        return {
+            "type": ACTION_MOM_REVERSAL_CLOSE,
+            "side": "short",
+            "size_base": short_u,
+            "reason": f"regime={regime} conf={confidence:.2f} short_pnl={short_pnl:.2f}",
+        }
+    return None
+
+
+def _evaluate_inventory_cap(side: str, inv_u: float, vwap: float,
+                            mid: float, cfg: dict) -> Optional[dict]:
+    """Hard cap: when |inv_usd| > cap, flatten the side breaching it.
+
+    Per-strategy default lives in STRATEGY_DEFAULTS (Mid carries a non-zero
+    cap; the other strategies default to 0 = disabled). Notional is
+    measured at mid so a sudden price move on a thin product can't sit
+    underweight forever.
+    """
+    cap = float(cfg.get("inventory_cap_usd") or 0.0)
+    if cap <= 0 or inv_u <= 0:
+        return None
+    ref_price = float(mid or vwap or 0.0)
+    if ref_price <= 0:
+        return None
+    inv_usd = inv_u * ref_price
+    if inv_usd <= cap:
+        return None
+    overflow = inv_usd - cap
+    # Close enough size to bring inventory back under the cap. Round up
+    # slightly so we don't end up just over after the close.
+    size_base = min(inv_u, overflow / ref_price * 1.05)
+    return {
+        "type": ACTION_INVENTORY_CAP,
+        "side": side,
+        "size_base": size_base,
+        "reason": f"inv_usd={inv_usd:.2f} cap={cap:.2f} overflow={overflow:.2f}",
+    }
+
+
 def manage_positions(
     *,
     telegram_id: int,
@@ -389,12 +623,17 @@ def manage_positions(
     positions: list[dict],
     regime_info: dict[str, Any],
     enabled: bool = True,
+    mid: float = 0.0,
 ) -> dict[str, Any]:
     """Run all PM rules. Issues reduce-only market closes for any actions found.
 
     Returns a summary dict suitable for inclusion in run_cycle's result row.
     Idempotent enough for safe replay: tracks the last-action timestamp per
     type so we don't repeatedly fire the same partial close in adjacent cycles.
+
+    ``mid`` is only used by the Phase 2 inventory_cap rule. It defaults to 0
+    so existing callers without mid still work — the cap is also gated by a
+    non-zero ``inventory_cap_usd`` (only Mid Mode carries a non-zero default).
     """
     out: dict[str, Any] = {
         "enabled": bool(enabled),
@@ -467,14 +706,68 @@ def manage_positions(
     if a:
         actions.append(a)
 
-    # De-dup: don't fire the same {type, side} twice in the same cycle.
+    # Rule 5: breakeven stop (Phase 2). Per-side latch — once unrealized
+    # PnL crosses the arm threshold we lock in "never let it go red." Fires
+    # the full-close when PnL rolls back through entry + exit_offset.
+    a = _evaluate_breakeven_stop(state, "long", long_u, long_pnl, vwap_buy, cfg)
+    if a:
+        actions.append(a)
+    a = _evaluate_breakeven_stop(state, "short", short_u, short_pnl, vwap_sell, cfg)
+    if a:
+        actions.append(a)
+
+    # Rule 6: time-in-loss stop (Phase 2). Closes any side that has been
+    # continuously underwater longer than max_underwater_seconds.
+    a = _evaluate_time_in_loss(state, "long", long_u, long_pnl, cfg, now)
+    if a:
+        actions.append(a)
+    a = _evaluate_time_in_loss(state, "short", short_u, short_pnl, cfg, now)
+    if a:
+        actions.append(a)
+
+    # Rule 7: momentum-reversal close (Phase 2). Take everything on a
+    # *winning* side when the regime flips against it with high confidence.
+    a = _evaluate_momentum_reversal(
+        regime, confidence, long_u, short_u, long_pnl, short_pnl, cfg
+    )
+    if a:
+        actions.append(a)
+
+    # Rule 8: inventory cap (Phase 2). Mid Mode hard rail since it disables
+    # anchor + soft reset. No-op for strategies with cap_usd = 0.
+    a = _evaluate_inventory_cap("long", long_u, vwap_buy, mid, cfg)
+    if a:
+        actions.append(a)
+    a = _evaluate_inventory_cap("short", short_u, vwap_sell, mid, cfg)
+    if a:
+        actions.append(a)
+
+    # De-dup. Two passes:
+    #   1) Drop duplicates of the same (type, side).
+    #   2) A full-close action on a side suppresses any partial close action
+    #      on that same side — otherwise we'd ask the exchange to close 100%
+    #      of the side and then ask it to partial close 33% of (now-empty)
+    #      inventory, which spends an order slot for no reason.
     seen: set[tuple[str, str]] = set()
-    pruned = []
+    deduped: list[dict] = []
     for a in actions:
         k = (a["type"], a["side"])
         if k in seen:
             continue
         seen.add(k)
+        deduped.append(a)
+    full_close_types = {
+        ACTION_TRAIL_CLOSE,
+        ACTION_STALE_FLATTEN,
+        ACTION_BREAKEVEN_STOP,
+        ACTION_TIME_IN_LOSS_STOP,
+        ACTION_MOM_REVERSAL_CLOSE,
+    }
+    full_closed_sides = {a["side"] for a in deduped if a["type"] in full_close_types}
+    pruned: list[dict] = []
+    for a in deduped:
+        if a["type"] not in full_close_types and a["side"] in full_closed_sides:
+            continue
         pruned.append(a)
 
     # --- Execute closes ----------------------------------------------------

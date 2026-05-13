@@ -1355,6 +1355,7 @@ def run_cycle(
                 positions=positions,
                 regime_info=regime_info or {},
                 enabled=bool(state.get("pm_enabled", True)),
+                mid=mid,
             )
         except Exception as _pm_exc:
             logger.exception("dgrid PM cycle failed: %s", _pm_exc)
