@@ -86,6 +86,12 @@ async def poll_events(session_id: str, cursor: Optional[str] = None, limit: int 
             "UPDATE relay_sessions SET last_polled_at = now() WHERE id = $1",
             str(session_id),
         )
+        # Surface session liveness so the bot can stop polling and notify the user
+        # when a session was expired/closed/failed underneath it.
+        status_row = await conn.fetchrow(
+            "SELECT status FROM relay_sessions WHERE id = $1",
+            str(session_id),
+        )
 
     events = []
     next_cursor = None
@@ -125,6 +131,7 @@ async def poll_events(session_id: str, cursor: Optional[str] = None, limit: int 
         "ok": True,
         "events": events,
         "next_cursor": next_cursor,
+        "session_status": (status_row["status"] if status_row else "not_found"),
     }
 
 
