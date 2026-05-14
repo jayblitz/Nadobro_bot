@@ -57,6 +57,7 @@ from src.nadobro.services.points_service import (
     relay_option_reply_to_lowiqpts,
     relay_user_reply_to_lowiqpts,
     request_points_refresh,
+    set_pending_banner_message,
 )
 from src.nadobro.services.referral_service import generate_referral_invite_code, get_referral_dashboard
 from src.nadobro.services.strategy_pending_input import persist_strategy_pending_input
@@ -1208,14 +1209,32 @@ async def _handle_points(query, data, telegram_id, context):
             option_index = -1
         relay_result = await relay_option_reply_to_lowiqpts(context, query.message.chat.id, option_index)
         if relay_result.get("ok"):
-            try:
-                await query.answer()
-            except BadRequest:
-                pass
+            # Replace the Yes/No card with confirmation so the user sees their
+            # tap registered — otherwise the next LOWIQPTS reply takes seconds
+            # to minutes, and the click looks like a no-op.
+            choice = str(relay_result.get("choice", "")).strip() or "Sent"
+            await _edit_loc(
+                query,
+                "✅ Sent: *{choice}*\\. Waiting for LOWIQPTS to reply…",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=points_scope_kb(),
+                choice=escape_md(choice),
+            )
             return
-        err_text = str(relay_result.get("error") or "Could not send selection.")[:200]
+        # Failure path: surface a toast (one-shot) and strip the stale options
+        # keyboard so the user can't keep clicking a dead button.
+        error_text = str(relay_result.get("error", "Could not send selection."))[:180]
         try:
-            await query.answer(err_text, show_alert=True)
+            await query.answer(error_text, show_alert=True)
+        except BadRequest:
+            pass
+        try:
+            await _edit_loc(
+                query,
+                escape_md(error_text),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=points_scope_kb(),
+            )
         except BadRequest:
             pass
         return
@@ -1228,6 +1247,15 @@ async def _handle_points(query, data, telegram_id, context):
                 "⏳ Refresh requested\\. I will post your points update when LOWIQPTS replies\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=points_scope_kb(),
+            )
+            # Anchor the timeout banner to this card so the 15-min timeout
+            # edits this same message instead of popping up at the bottom of
+            # whatever flow the user is in by then.
+            set_pending_banner_message(
+                context.application.bot_data,
+                str(result.get("req_id") or ""),
+                query.message.chat.id,
+                query.message.message_id,
             )
             return
         await _edit_loc(

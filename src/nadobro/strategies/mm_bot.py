@@ -6,6 +6,7 @@ Cancels stale orders that drift beyond threshold from current mid.
 """
 import logging
 import math
+import os
 import time
 from src.nadobro.config import get_product_id, get_product_max_leverage
 from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
@@ -16,10 +17,79 @@ from src.nadobro.services.rate_limit import (
     call_with_retry,
     market_price_is_empty,
 )
+# --- D-Grid intelligence upgrade (additive) ---
+# These three modules are no-ops when ``state["dgrid_intelligence_enabled"]``
+# is False, so importing them at top-level is safe for existing GRID/RGRID
+# users. See docs/dynamic_grid_strategy.md (upgrade section) for the full plan.
+from src.nadobro.strategies import _regime as _dgrid_regime
+from src.nadobro.strategies import _layer_sizing as _dgrid_layer_sizing
+from src.nadobro.strategies import _position_manager as _dgrid_pm
+from src.nadobro.strategies import _quote_gate
+from src.nadobro.strategies import _quote_economics
+from src.nadobro.services import risk_budget as _risk_budget
+
+try:
+    from src.nadobro.services.feature_flags import dgrid_intelligence_enabled as _dgi_env_default
+except Exception:
+    def _dgi_env_default() -> bool:
+        return False
 
 logger = logging.getLogger(__name__)
 
+
+def _dgrid_intelligence_on(state: dict) -> bool:
+    """Per-session flag with env-var default. State overrides env.
+
+    Kept for backward compatibility with the original D-Grid wiring;
+    new call sites should use ``_strategy_intelligence_on(state, strategy)``.
+    """
+    val = state.get("dgrid_intelligence_enabled")
+    if val is None:
+        return bool(_dgi_env_default())
+    return bool(val)
+
+
+def _strategy_intelligence_on(state: dict, strategy: str) -> bool:
+    """Per-strategy intelligence flag check.
+
+    Resolution order (highest first):
+      1. ``state["<strategy>_intelligence_enabled"]`` — strategy-specific override.
+      2. ``state["dgrid_intelligence_enabled"]`` — legacy global override (covers
+         dgrid and any strategy that opts into the same flag).
+      3. ``NADO_DGRID_INTELLIGENCE`` env var via feature_flags.
+    """
+    strategy = str(strategy or "").lower()
+    if not strategy:
+        return False
+    explicit = state.get(f"{strategy}_intelligence_enabled")
+    if explicit is not None:
+        return bool(explicit)
+    legacy = state.get("dgrid_intelligence_enabled")
+    if legacy is not None:
+        return bool(legacy)
+    return bool(_dgi_env_default())
+
+
+def _risk_budget_on(state: dict, intel_active: bool) -> bool:
+    """Phase 5 risk budget flag.
+
+    Defaults to following the intelligence flag (the whole Phase 1-5 risk
+    suite is opt-in together), but ``state["risk_budget_enabled"]`` can
+    force it on or off independently.
+    """
+    explicit = state.get("risk_budget_enabled")
+    if explicit is not None and explicit != "":
+        return bool(explicit)
+    return bool(intel_active)
+
+
 STALE_DRIFT_MULTIPLIER = 2.0
+# Floor for the stale-quote drift threshold. Without this, ``spread_bp=0`` (or
+# a tiny dgrid-internal spread) collapses ``max_offset`` to 0, and every
+# resting order gets cancel-and-replaced every cycle — see the production
+# logs that showed ``drift 0.0007% > 0.0000%`` triggering nonstop. 3 bp ~
+# round-trip taker fee; cancelling below that is never economical.
+STALE_DRIFT_FLOOR_BP = float(os.environ.get("NADO_STALE_DRIFT_FLOOR_BP", "3.0") or "3.0")
 MM_DEFAULT_LEVELS = 2
 GRID_DEFAULT_LEVELS = 4
 MM_MIN_SPREAD_BP = 2.0
@@ -30,6 +100,11 @@ DEFAULT_MIN_ORDER_NOTIONAL_USD = 100.0
 # 1.25 leaves enough headroom for funding/fees while not over-reserving budget.
 MM_COLLATERAL_SAFETY_FACTOR = 1.25
 GRID_SOFT_RESET_MIN_TIMEOUT_SECONDS = 15
+# Minimum edge (bp) the soft-reset unwind rungs must keep vs the original
+# entry VWAP. Prevents the "buy low, sell below entry" pattern where a
+# soft reset replaced sell rungs with top-of-book and printed guaranteed
+# losses. Configurable via state["grid_soft_reset_min_exit_edge_bp"].
+GRID_SOFT_RESET_MIN_EXIT_EDGE_BP = 3.0
 POST_ONLY_REPRICE_MAX_RETRIES = 3
 POST_ONLY_REPRICE_STEP_BP = 0.5
 DGRID_TREND_ON_VARIANCE_RATIO = 1.25
@@ -520,6 +595,9 @@ def _compute_grid_prices(
     soft_reset_side: str | None = None,
     min_range_pct: float = 1.0,
     max_range_pct: float = 1.0,
+    exit_floor_buy_vwap: float | None = None,
+    exit_floor_sell_vwap: float | None = None,
+    min_exit_edge_bp: float = GRID_SOFT_RESET_MIN_EXIT_EDGE_BP,
 ) -> list[dict]:
     # GRID and RGRID share one price shape under POSITIVE spread: buys BELOW
     # anchor, sells ABOVE anchor. RGRID's "reversal" is applied via the
@@ -531,8 +609,19 @@ def _compute_grid_prices(
     # trade by crossing the book (buys ABOVE anchor, sells BELOW anchor). In
     # that mode we deliberately skip the post-only clamp; we're not trying to
     # be a maker.
+    #
+    # Soft-reset (when inventory is heavy on one side and the market drifted
+    # away from our anchor): the historical behaviour was to replace the rungs
+    # on the unwind side with top-of-book — i.e. dump long inventory at
+    # ``best_ask`` even when ``best_ask`` was *below* the average entry. That
+    # baked the "buy low, sell below entry" pattern into every grid strategy.
+    # We now clamp the unwind rungs to ``entry_vwap +/- min_exit_edge_bp`` so
+    # the soft reset can chase the market *toward* breakeven without ever
+    # printing a guaranteed-loss exit. If the market never revisits that
+    # range, the session-level SL still fires as a true backstop.
     signed_half_spread = float(spread_bp) / 10000.0
     is_concede = signed_half_spread < 0.0
+    exit_edge = max(0.0, float(min_exit_edge_bp)) / 10000.0
     orders = []
     for i in range(1, levels + 1):
         offset = signed_half_spread * i
@@ -541,9 +630,21 @@ def _compute_grid_prices(
         if soft_reset_side and mid_price and mid_price > 0:
             reset_nudge = (0.1 * i) / 10000.0
             if soft_reset_side == "buy":
-                buy_price = float(best_bid or (mid_price * (1.0 - reset_nudge)))
+                market_chase = float(best_bid or (mid_price * (1.0 - reset_nudge)))
+                if exit_floor_sell_vwap and exit_floor_sell_vwap > 0:
+                    # Closing a short: never buy back above sell_vwap - exit edge.
+                    max_exit = exit_floor_sell_vwap * (1.0 - exit_edge)
+                    buy_price = min(market_chase, max_exit)
+                else:
+                    buy_price = market_chase
             elif soft_reset_side == "sell":
-                sell_price = float(best_ask or (mid_price * (1.0 + reset_nudge)))
+                market_chase = float(best_ask or (mid_price * (1.0 + reset_nudge)))
+                if exit_floor_buy_vwap and exit_floor_buy_vwap > 0:
+                    # Closing a long: never sell below buy_vwap + exit edge.
+                    min_exit = exit_floor_buy_vwap * (1.0 + exit_edge)
+                    sell_price = max(market_chase, min_exit)
+                else:
+                    sell_price = market_chase
         # Post-only safety (positive-spread maker mode only): buys can't sit
         # at/above best_bid, sells can't sit at/below best_ask.
         if not is_concede:
@@ -574,6 +675,10 @@ def _cancel_stale_orders(
     max_offset = (abs(spread_bp) / 10000.0) * levels * STALE_DRIFT_MULTIPLIER
     if close_offset_bp > 0:
         max_offset = max(max_offset, close_offset_bp / 10000.0)
+    # Enforce the configured floor (default 3 bp). DGRID can collapse spread_bp
+    # toward zero in tight regimes, which made every resting order qualify as
+    # stale and got cancel-and-replaced every cycle.
+    max_offset = max(max_offset, STALE_DRIFT_FLOOR_BP / 10000.0)
     cancelled = 0
     now_ts = time.time()
     for order in open_orders:
@@ -1094,6 +1199,42 @@ def run_cycle(
     dynamic_spread_bp = spread_bp * (1.0 + (vol_bp * vol_sensitivity / 100.0))
     if configured_strategy == "dgrid":
         dynamic_spread_bp = float(spread_bp)
+
+    # --- MM intelligence: regime classifier (Layer B) -------------------
+    # Fires for DGRID, R-GRID, Classic GRID, and MID Mode when intelligence is
+    # enabled. The same classifier output is consumed by sizing (Layer A) and
+    # PM (Layer C). Each strategy gets its own size table and PM defaults via
+    # _layer_sizing.STRATEGY_REGIME_TABLES and _position_manager.STRATEGY_DEFAULTS.
+    regime_info: dict = {}
+    _intel_strategy = configured_strategy if configured_strategy in ("dgrid", "rgrid", "grid", "mid") else ""
+    _intel_active = bool(_intel_strategy) and _strategy_intelligence_on(state, _intel_strategy)
+    if _intel_active:
+        ema_fast_now, ema_slow_now = _update_both_emas(state, mid, ema_fast_alpha, ema_slow_alpha)
+        # For dgrid, use the variance ratio computed by _apply_dgrid_controls.
+        # For rgrid, compute it inline against the same mid history because the
+        # rgrid path doesn't call _apply_dgrid_controls.
+        _vr = float(state.get("dgrid_variance_ratio") or 0.0)
+        if _vr <= 0:
+            _vr = _compute_variance_ratio(
+                history,
+                short_window=int(state.get("dgrid_short_window_points") or 4),
+                long_window=int(state.get("dgrid_long_window_points") or 12),
+            )
+        _realized_move = float(state.get("dgrid_realized_move_bp") or 0.0)
+        if _realized_move <= 0:
+            _realized_move = _compute_realized_vol_bp(history)
+        regime_info = _dgrid_regime.classify_regime(
+            state,
+            history,
+            product=str(product),
+            variance_ratio=_vr,
+            realized_vol_bp=_realized_move if _realized_move > 0 else vol_bp,
+            ema_fast=ema_fast_now,
+            ema_slow=ema_slow_now,
+            short_window=int(state.get("dgrid_short_window_points") or 4),
+            long_window=int(state.get("dgrid_long_window_points") or 12),
+            config=state,
+        )
     if strategy == "rgrid":
         max_abs = max(abs(min_spread_bp), abs(max_spread_bp))
         dynamic_spread_bp = _clamp(dynamic_spread_bp, -max_abs, max_abs)
@@ -1104,7 +1245,36 @@ def run_cycle(
             client=client, product_id=product_id,
         )
         rgrid_mode = str(state.get("rgrid_active_mode") or "classic")
-        if momentum["momentum_break"] and rgrid_mode == "classic":
+        # R-GRID intelligence veto: when the legacy 2-of-3 momentum-break rule
+        # says "flip to reversed" but the regime classifier disagrees with
+        # high confidence (range_tight / chop_high_vol), suppress the flip.
+        # This catches the case where 2 signals fire but the broader regime
+        # context shows we're not actually in a directional trend.
+        _veto_flip = False
+        _veto_reason = ""
+        if _intel_active and momentum["momentum_break"] and rgrid_mode == "classic":
+            _veto_regimes = {
+                _dgrid_regime.REGIME_RANGE_TIGHT,
+                _dgrid_regime.REGIME_CHOP_HIGH_VOL,
+            }
+            _veto_confidence_min = float(state.get("rgrid_veto_confidence_min") or 0.60)
+            _veto_strategy_confidence = float((regime_info or {}).get("confidence") or 0.0)
+            _veto_regime_label = str((regime_info or {}).get("regime") or "")
+            if _veto_regime_label in _veto_regimes and _veto_strategy_confidence >= _veto_confidence_min:
+                _veto_flip = True
+                _veto_reason = (
+                    f"regime={_veto_regime_label} conf={_veto_strategy_confidence:.2f} "
+                    f">= veto_min={_veto_confidence_min:.2f}"
+                )
+                state["rgrid_momentum_veto_count"] = int(state.get("rgrid_momentum_veto_count") or 0) + 1
+                state["rgrid_momentum_veto_last_ts"] = time.time()
+                state["rgrid_momentum_veto_last_reason"] = _veto_reason
+                logger.info(
+                    "RGRID intelligence veto: momentum break suppressed (signals=%d/3, %s)",
+                    momentum["signals_active"], _veto_reason,
+                )
+
+        if momentum["momentum_break"] and rgrid_mode == "classic" and not _veto_flip:
             # Momentum break detected — switch to reversed mode
             rgrid_mode = "reversed"
             state["rgrid_active_mode"] = "reversed"
@@ -1187,6 +1357,48 @@ def run_cycle(
         inventory_source = "fills" if abs(net_units) > 0 else "none"
     inv_usd = abs(net_units) * mid
 
+    # --- MM intelligence: position manager (Layer C) --------------------
+    # Fires for DGRID and R-GRID. Per-strategy defaults (e.g., R-Grid's higher
+    # partial_tp_bp and trail_give_back_fraction) live in _position_manager.STRATEGY_DEFAULTS.
+    pm_summary: dict = {"enabled": False, "actions": [], "size_dampener": 1.0,
+                        "cooldown_active": False}
+    if _intel_active:
+        try:
+            pm_summary = _dgrid_pm.manage_positions(
+                telegram_id=telegram_id,
+                product=str(product),
+                product_id=product_id,
+                state=state,
+                positions=positions,
+                regime_info=regime_info or {},
+                enabled=bool(state.get("pm_enabled", True)),
+                mid=mid,
+            )
+        except Exception as _pm_exc:
+            logger.exception("dgrid PM cycle failed: %s", _pm_exc)
+            pm_summary = {"enabled": False, "actions": [],
+                          "size_dampener": 1.0, "cooldown_active": False,
+                          "error": str(_pm_exc)}
+        # Re-read positions after any PM-driven closes so subsequent sizing
+        # sees the new inventory.
+        if pm_summary.get("actions"):
+            try:
+                positions = client.get_all_positions() or []
+            except Exception:
+                pass
+            live_position_rows = []
+            net_units = 0.0
+            for p in positions:
+                if int(p.get("product_id", -1)) != product_id:
+                    continue
+                amt = abs(float(p.get("amount", 0) or 0))
+                side = str(p.get("side", "") or "").upper()
+                if amt <= 0 or side not in {"LONG", "SHORT"}:
+                    continue
+                live_position_rows.append(p)
+                net_units += amt if side == "LONG" else -amt
+            inv_usd = abs(net_units) * mid
+
     cancelled_digests = set(str(d) for d in (state.get("mm_recently_cancelled_digests") or []))
     # Phase 4: resume reconciliation. ``_reconcile_executed_quotes`` already
     # queries the archive for any tracked digest that is no longer in the open-
@@ -1212,6 +1424,8 @@ def run_cycle(
     if executed_quotes:
         for q in executed_quotes:
             _append_grid_exposure_fill(state, q)
+        # Track last fill timestamp so the PM's stale-flatten rule has a clock.
+        state["grid_last_fill_ts"] = float(executed_quotes[-1].get("placed_ts") or time.time())
     if session_key:
         # Mark this session as reconciled-in-this-process unconditionally on
         # the first cycle we see it, even if there was no persisted state to
@@ -1246,12 +1460,35 @@ def run_cycle(
         recent_fraction = _clamp(discretion * 2.0, 0.02, 0.5)
         buy_exposure = _rolling_vwap_recent_fraction(state.get("grid_buy_fills") or [], recent_fraction)
         sell_exposure = _rolling_vwap_recent_fraction(state.get("grid_sell_fills") or [], recent_fraction)
-        if buy_exposure > 0 and sell_exposure > 0:
-            grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
-        elif buy_exposure > 0:
-            grid_anchor_price = buy_exposure
-        elif sell_exposure > 0:
-            grid_anchor_price = sell_exposure
+        # Anchor resolution.
+        #
+        # Legacy behaviour ("fill_vwap"): the anchor was whichever side had the
+        # most recent fills. In a one-sided drift this dragged the anchor in
+        # the same direction as the trend — RGRID's "reference_price" then
+        # pointed *down* in a downtrend, sells got re-centered onto the new
+        # lower anchor, and the bot booked guaranteed losses.
+        #
+        # Default ("ema_mid"): when only one side has filled, hold the prior
+        # anchor (or fall back to the externally-computed EMA reference_price)
+        # so the anchor doesn't chase the trend that is filling the bot. Only
+        # blend in the two-sided fill center when *both* sides have traded —
+        # that's a genuine range center, not a one-sided drift.
+        anchor_mode = str(state.get("anchor_mode") or "ema_mid").strip().lower()
+        if anchor_mode not in ("fill_vwap", "ema_mid"):
+            anchor_mode = "ema_mid"
+        state["anchor_mode_resolved"] = anchor_mode
+        if anchor_mode == "fill_vwap":
+            if buy_exposure > 0 and sell_exposure > 0:
+                grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
+            elif buy_exposure > 0:
+                grid_anchor_price = buy_exposure
+            elif sell_exposure > 0:
+                grid_anchor_price = sell_exposure
+        else:
+            if buy_exposure > 0 and sell_exposure > 0:
+                grid_anchor_price = (buy_exposure + sell_exposure) / 2.0
+            # One-sided fills: keep the previous anchor; fall through to the
+            # cold-start fallback chain below when there is no prior anchor.
         if grid_anchor_price <= 0:
             grid_anchor_price = float(state.get("grid_last_fill_price") or 0.0)
         if grid_anchor_price <= 0:
@@ -1261,7 +1498,11 @@ def run_cycle(
             exec_price = float(last_exec.get("price") or 0.0)
             if exec_price > 0:
                 state["grid_last_fill_price"] = exec_price
-                grid_anchor_price = exec_price
+                # In fill_vwap mode the anchor jumps to the last fill (legacy).
+                # In ema_mid mode we deliberately do NOT jump — the two-sided
+                # VWAP center already adapts to the genuine range.
+                if anchor_mode == "fill_vwap":
+                    grid_anchor_price = exec_price
         elif float(state.get("grid_last_fill_price") or 0.0) <= 0 and grid_anchor_price > 0:
             state["grid_last_fill_price"] = grid_anchor_price
         state["grid_prev_net_units"] = net_units
@@ -1269,7 +1510,17 @@ def run_cycle(
         state["grid_buy_exposure_price"] = round(buy_exposure, 8) if buy_exposure > 0 else 0.0
         state["grid_sell_exposure_price"] = round(sell_exposure, 8) if sell_exposure > 0 else 0.0
     if strategy == "rgrid":
-        reference_price = grid_anchor_price
+        # Legacy: RGRID used the fill-VWAP anchor directly as reference_price.
+        # In ema_mid mode we keep the EMA-derived reference and only let the
+        # fill-VWAP center *nudge* it on confirmed two-sided fills — that
+        # preserves R-Grid's "anchor near the recent trade range" intent
+        # without dragging the anchor in a one-sided drift.
+        rgrid_anchor_mode = str(state.get("anchor_mode") or "ema_mid").strip().lower()
+        if rgrid_anchor_mode == "fill_vwap":
+            reference_price = grid_anchor_price
+        elif grid_anchor_price > 0 and buy_exposure > 0 and sell_exposure > 0:
+            blend = _clamp(float(state.get("rgrid_anchor_blend") or 0.30), 0.0, 1.0)
+            reference_price = (1.0 - blend) * reference_price + blend * grid_anchor_price
 
     pnl_stop_pct = max(
         0.0,
@@ -1302,6 +1553,10 @@ def run_cycle(
     grid_cycle_pnl = _compute_grid_cycle_pnl_usd(positions, product_id)
     state["grid_last_cycle_pnl_usd"] = round(grid_cycle_pnl, 6)
     if max_loss_usd > 0 and grid_cycle_pnl <= (-max_loss_usd):
+        # MM intelligence: instead of just halting, fire PM cooldown so the
+        # next cycle re-engages at reduced size rather than slamming back in.
+        if _intel_active:
+            _dgrid_pm.trigger_cooldown(state, reason="grid_stop_loss_hit")
         return {
             "success": True,
             "orders_placed": 0,
@@ -1316,8 +1571,11 @@ def run_cycle(
             "grid_max_loss_usd": max_loss_usd,
             "reference_price": reference_price,
             "spread_bp": dynamic_spread_bp,
+            "pm_cooldown_until": state.get("pm_cooldown_until"),
         }
     if max_profit_usd > 0 and grid_cycle_pnl >= max_profit_usd:
+        if _intel_active:
+            _dgrid_pm.trigger_cooldown(state, reason="grid_take_profit_hit")
         return {
             "success": True,
             "orders_placed": 0,
@@ -1332,6 +1590,7 @@ def run_cycle(
             "grid_take_profit_usd": max_profit_usd,
             "reference_price": reference_price,
             "spread_bp": dynamic_spread_bp,
+            "pm_cooldown_until": state.get("pm_cooldown_until"),
         }
 
     buy_mult, sell_mult, pause_flatten_only, pause_reason = _resolve_side_multipliers(
@@ -1432,17 +1691,24 @@ def run_cycle(
         reset_active = bool(state.get("grid_reset_active"))
         reset_started = float(state.get("grid_reset_started_ts") or 0.0)
         now_ts = time.time()
+        # Drift / soft-reset trigger compares mid vs the *persistent* grid
+        # anchor — not the cycle's quote reference. In ema_mid anchor mode the
+        # quote reference is the slow EMA of mid (so quote prices don't drag
+        # with fills), but the soft-reset arm/disarm still needs the sticky
+        # anchor as its "where the grid was centered" reference. Falling back
+        # to reference_price keeps cold-start behaviour intact.
+        drift_anchor = float(grid_anchor_price or reference_price or 0.0)
         drift_from_anchor_pct = 0.0
-        if reference_price > 0:
-            drift_from_anchor_pct = abs(mid - reference_price) / reference_price * 100.0
+        if drift_anchor > 0:
+            drift_from_anchor_pct = abs(mid - drift_anchor) / drift_anchor * 100.0
         state["grid_drift_from_anchor_pct"] = round(drift_from_anchor_pct, 6)
-        if reset_threshold_pct > 0 and reference_price > 0 and inv_usd > 0:
-            if net_units > 0 and ((reference_price - mid) / reference_price * 100.0 >= reset_threshold_pct):
+        if reset_threshold_pct > 0 and drift_anchor > 0 and inv_usd > 0:
+            if net_units > 0 and ((drift_anchor - mid) / drift_anchor * 100.0 >= reset_threshold_pct):
                 reset_active = True
                 if not reset_started:
                     reset_started = now_ts
                 soft_reset_side = "sell"
-            elif net_units < 0 and ((mid - reference_price) / reference_price * 100.0 >= reset_threshold_pct):
+            elif net_units < 0 and ((mid - drift_anchor) / drift_anchor * 100.0 >= reset_threshold_pct):
                 reset_active = True
                 if not reset_started:
                     reset_started = now_ts
@@ -1465,6 +1731,151 @@ def run_cycle(
         state["grid_reset_side"] = soft_reset_side or ""
         state["grid_reset_started_ts"] = float(reset_started or 0.0)
 
+    # Phase 5: per-product daily loss budget + cross-strategy exposure registry.
+    # Runs before the quote gates so the budget is the outermost rail. The PM
+    # (which already ran above) keeps managing existing inventory in every
+    # stop state — the budget only blocks *new* quoting. A hard stop also
+    # fires the PM cooldown so re-engagement after the cooldown window is
+    # gradual. The SL/TP protective block above has already had its chance.
+    if _risk_budget_on(state, _intel_active):
+        try:
+            # Use configured_strategy (the user-facing identity) — `strategy`
+            # is reassigned to the D-Grid sub-phase ("grid"/"rgrid") above.
+            _risk_budget.record_strategy_exposure(
+                telegram_id, network, str(product), configured_strategy,
+                net_units, inv_usd,
+            )
+            _risk_budget.record_pnl_snapshot(
+                telegram_id, network, str(product), grid_cycle_pnl,
+            )
+            _rb_soft, _rb_hard, _rb_cooldown = _risk_budget.resolve_budget_thresholds(
+                state, notional,
+            )
+            _rb_status = _risk_budget.check_budget(
+                telegram_id, network, str(product),
+                soft_stop_usd=_rb_soft, hard_stop_usd=_rb_hard,
+                cooldown_seconds=_rb_cooldown,
+            )
+        except Exception:
+            logger.exception(
+                "risk budget check failed for %s/%s — allowing cycle to proceed",
+                network, product,
+            )
+            _rb_status = {"status": "ok"}
+        state["mm_risk_budget"] = _rb_status
+        if _rb_status.get("status") in ("soft_stopped", "hard_stopped"):
+            if _rb_status["status"] == "hard_stopped" and _intel_active:
+                _dgrid_pm.trigger_cooldown(state, reason="risk_budget_hard_stop")
+            logger.info(
+                "Risk budget %s (%s/%s): %s — skipping new quotes this cycle",
+                _rb_status["status"], network, product,
+                _rb_status.get("reason", ""),
+            )
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": orders_cancelled,
+                "action": f"risk_budget_{_rb_status['status']}",
+                "reason": _rb_status.get("reason", ""),
+                "spread_bp": dynamic_spread_bp,
+                "reference_price": reference_price,
+                "risk_budget": _rb_status,
+            }
+    else:
+        state.pop("mm_risk_budget", None)
+
+    # Phase 3: regime-aware quote gate. Veto entire-cycle quoting in regimes
+    # where the math is structurally negative (REGIME_RANGE_TIGHT with high
+    # confidence), cap levels + widen spread in CHOP_HIGH_VOL, and skip the
+    # adverse side in confirmed trends. Existing PM rules continue to manage
+    # inventory either way. Quote-gate is a no-op when intelligence is off.
+    quote_gate_decision = _quote_gate.QuoteGateDecision()
+    if _intel_active:
+        quote_gate_decision = _quote_gate.evaluate_quote_gate(
+            strategy=strategy,
+            regime_info=regime_info,
+            state=state,
+        )
+    if quote_gate_decision.active:
+        state["mm_quote_gate"] = quote_gate_decision.to_dict()
+        if quote_gate_decision.spread_widen_mult > 1.0:
+            dynamic_spread_bp = dynamic_spread_bp * float(
+                quote_gate_decision.spread_widen_mult
+            )
+        if quote_gate_decision.skip_buy and quote_gate_decision.skip_sell:
+            logger.info(
+                "Quote gate veto (%s): %s — skipping new quotes this cycle",
+                strategy, quote_gate_decision.reason,
+            )
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": orders_cancelled,
+                "action": "quote_gate_veto",
+                "reason": quote_gate_decision.reason,
+                "spread_bp": dynamic_spread_bp,
+                "reference_price": reference_price,
+                "quote_gate": quote_gate_decision.to_dict(),
+            }
+    else:
+        state.pop("mm_quote_gate", None)
+
+    # Phase 4: per-quote expectancy filter. The regime gate above stops
+    # quoting when the *market state* is wrong; this stops quoting (or
+    # auto-widens) when the *spread itself* is too tight to clear
+    # fees + slippage + funding + a minimum required edge. Funding is
+    # read from the rgrid funding cache when present; absent that, the
+    # funding leg is 0 and the fee/slippage legs drive the decision.
+    if _intel_active:
+        _funding_bp_per_hour = 0.0
+        _funding_cached = state.get("rgrid_prev_funding_bp")
+        if _funding_cached is not None:
+            try:
+                # rgrid_prev_funding_bp is the funding rate in bp. Treat it
+                # as a per-hour magnitude (conservative — Nado funding
+                # accrues continuously); the expected-hold scaling in
+                # _quote_economics keeps this bounded.
+                _funding_bp_per_hour = abs(float(_funding_cached))
+            except (TypeError, ValueError):
+                _funding_bp_per_hour = 0.0
+        quote_econ = _quote_economics.evaluate_quote_economics(
+            strategy=strategy,
+            spread_bp=dynamic_spread_bp,
+            regime=str((regime_info or {}).get("regime") or ""),
+            funding_bp_per_hour=_funding_bp_per_hour,
+            max_spread_bp=max_spread_bp,
+            state=state,
+        )
+        state["mm_quote_economics"] = quote_econ.to_dict()
+        if quote_econ.widened and quote_econ.recommended_spread_bp > dynamic_spread_bp:
+            dynamic_spread_bp = float(quote_econ.recommended_spread_bp)
+        if not quote_econ.viable:
+            logger.info(
+                "Quote economics veto (%s): %s — skipping new quotes this cycle",
+                strategy, quote_econ.reason,
+            )
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": orders_cancelled,
+                "action": "quote_economics_skip",
+                "reason": quote_econ.reason,
+                "spread_bp": dynamic_spread_bp,
+                "reference_price": reference_price,
+                "quote_economics": quote_econ.to_dict(),
+            }
+    else:
+        state.pop("mm_quote_economics", None)
+
+    # Pass the per-side entry VWAPs so the soft-reset unwind never prints a
+    # guaranteed-loss exit (see _compute_grid_prices for the floor logic).
+    # Mid Mode runs without grid VWAP bookkeeping, so these stay None.
+    exit_floor_buy_vwap = float(state.get("grid_buy_exposure_price") or 0.0) or None
+    exit_floor_sell_vwap = float(state.get("grid_sell_exposure_price") or 0.0) or None
+    soft_reset_exit_edge_bp = float(
+        state.get("grid_soft_reset_min_exit_edge_bp")
+        or GRID_SOFT_RESET_MIN_EXIT_EDGE_BP
+    )
     grid_orders = _compute_grid_prices(
         reference_price,
         dynamic_spread_bp,
@@ -1477,7 +1888,12 @@ def run_cycle(
         soft_reset_side=soft_reset_side,
         min_range_pct=min_range_pct,
         max_range_pct=max_range_pct,
+        exit_floor_buy_vwap=exit_floor_buy_vwap,
+        exit_floor_sell_vwap=exit_floor_sell_vwap,
+        min_exit_edge_bp=soft_reset_exit_edge_bp,
     )
+    if quote_gate_decision.active:
+        grid_orders = _quote_gate.apply_gate_to_orders(quote_gate_decision, grid_orders)
     if session_cap_notional > 0:
         available_session = max(0.0, session_cap_notional - session_done)
     else:
@@ -1621,6 +2037,52 @@ def run_cycle(
     per_level_buy_size = float(min_quote_size) if buy_levels > 0 else 0.0
     per_level_sell_size = float(min_quote_size) if sell_levels > 0 else 0.0
 
+    # --- MM intelligence: per-level adaptive sizing (Layer A) -----------
+    # When enabled (DGRID or R-GRID), ``_dgrid_layer_size_for`` below is called
+    # per order spec and overrides ``per_level_*_size``. R-Grid pulls its own
+    # regime table via _layer_sizing.STRATEGY_REGIME_TABLES["rgrid"].
+    _intel_on = bool(_intel_active)
+    _pm_dampener = float(pm_summary.get("size_dampener") or 1.0) if _intel_on else 1.0
+    _max_per_level_usd = float(state.get("layer_max_per_level_usd") or (notional * 3.0))
+    _layer_regime = str((regime_info or {}).get("regime") or _dgrid_regime.REGIME_RANGE_WIDE)
+    _layer_realized_vol_bp = float((regime_info or {}).get("realized_vol_bp") or vol_bp or 0.0)
+
+    # Mid Mode resolves directional_bias to a float in [-1, +1] and passes it
+    # to size_quote_level as ``bias_value``. The result is a multiplicative
+    # tilt of +/- 20% per side that LAYERS on top of the regime size mult.
+    # Other strategies pass 0.0 so the bias term is neutral.
+    _intel_bias_value = 0.0
+    if _intel_on and configured_strategy == "mid":
+        try:
+            _intel_bias_value = _resolve_directional_bias_value(directional_bias)
+        except Exception:
+            _intel_bias_value = 0.0
+
+    def _dgrid_layer_size_for(is_long: bool, level: int) -> float:
+        if not _intel_on:
+            return per_level_buy_size if is_long else per_level_sell_size
+        side = "buy" if is_long else "sell"
+        res = _dgrid_layer_sizing.size_quote_level(
+            side=side,
+            level=level,
+            base_notional_usd=float(notional),
+            mid_price=float(mid),
+            inv_usd=float(inv_usd),
+            net_units=float(net_units),
+            inv_soft_usd=float(inv_soft_limit_usd),
+            regime=_layer_regime,
+            realized_vol_bp=_layer_realized_vol_bp,
+            min_order_notional_usd=float(min_order_notional_usd),
+            max_per_level_usd=_max_per_level_usd,
+            state=state,
+            config=state,
+            bias_value=_intel_bias_value,
+        )
+        size_base = float(res["size_base"]) * _pm_dampener
+        # Floor at venue minimum, ceiling at config max.
+        floor_base = float(min_order_notional_usd) / max(float(mid), 1e-12)
+        return max(floor_base, size_base)
+
     orders_placed = 0
     errors = []
     quote_distances_bp = []
@@ -1665,7 +2127,10 @@ def run_cycle(
         if (not order_spec["is_long"]) and order_spec["level"] > sell_levels:
             continue
 
-        size_to_use = per_level_buy_size if order_spec["is_long"] else per_level_sell_size
+        if _intel_on:
+            size_to_use = _dgrid_layer_size_for(bool(order_spec["is_long"]), int(order_spec["level"]))
+        else:
+            size_to_use = per_level_buy_size if order_spec["is_long"] else per_level_sell_size
         if size_to_use <= 0:
             continue
         size_to_use = max(float(size_to_use), min_order_notional_usd / max(mid, 1e-12))
@@ -1861,6 +2326,32 @@ def run_cycle(
             "dgrid_reset_threshold_bp": state.get("dgrid_reset_threshold_bp"),
             "dgrid_phase_changed": state.get("dgrid_phase_changed"),
         })
+
+    # Intelligence telemetry: same fields for DGRID and R-GRID so the
+    # dashboard renders identically. R-Grid also gets the veto counters.
+    if _intel_active:
+        result.update({
+            f"{_intel_strategy}_intelligence_enabled": True,
+            "intelligence_strategy": _intel_strategy,
+            "regime": (regime_info or {}).get("regime"),
+            "regime_confidence": (regime_info or {}).get("confidence"),
+            "regime_drift_bp": (regime_info or {}).get("drift_bp"),
+            "regime_votes": (regime_info or {}).get("votes"),
+            "regime_changed": (regime_info or {}).get("regime_changed"),
+            "pm_actions": pm_summary.get("actions"),
+            "pm_cooldown_active": pm_summary.get("cooldown_active"),
+            "pm_size_dampener": pm_summary.get("size_dampener"),
+            "layer_sizing_telemetry": (state.get("mm_layer_sizing_telemetry") or [])[-8:],
+            "quote_gate": state.get("mm_quote_gate"),
+            "quote_economics": state.get("mm_quote_economics"),
+            "risk_budget": state.get("mm_risk_budget"),
+        })
+        if _intel_strategy == "rgrid":
+            result.update({
+                "rgrid_momentum_veto_count": state.get("rgrid_momentum_veto_count") or 0,
+                "rgrid_momentum_veto_last_reason": state.get("rgrid_momentum_veto_last_reason"),
+                "rgrid_momentum_veto_last_ts": state.get("rgrid_momentum_veto_last_ts"),
+            })
 
     # Update cumulative PnL tracking. Previously this only worked for RGRID; GRID
     # fell through to `result.get("pnl", 0)` on a dict that never had a "pnl" key,

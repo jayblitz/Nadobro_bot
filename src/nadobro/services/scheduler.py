@@ -385,8 +385,20 @@ async def _notify_limit_order_cancelled_once(
         logger.warning("Failed to send limit-cancel notification: %s", e)
 
 
+_FILL_SYNC_BATCH_SIZE = int(os.environ.get("NADO_FILL_SYNC_BATCH_SIZE", "20"))
+_FILL_SYNC_CONCURRENCY = max(1, int(os.environ.get("NADO_FILL_SYNC_CONCURRENCY", "5")))
+
+
 async def sync_pending_fills():
-    """Background job: resolve pending fills via Nado archive API."""
+    """Background job: resolve pending fills via Nado archive API.
+
+    Each entry can spend up to ``_FILL_SYNC_DIGEST_WAIT`` seconds polling the
+    archive. With 20+ pending fills sequential processing took longer than the
+    30s tick interval, choking subsequent runs ("maximum number of running
+    instances reached"). We bound the per-tick claim size and fan out the
+    per-entry work with a bounded semaphore so a single tick finishes inside
+    its window even when the archive is lagging.
+    """
     try:
         from src.nadobro.models.database import (
             claim_pending_fill_syncs, update_trade, resolve_fill_sync,
@@ -398,50 +410,176 @@ async def sync_pending_fills():
         from src.nadobro.services.trade_service import reconcile_close_trade_fill
         from src.nadobro.services.user_service import update_trade_stats
 
-        pending = await run_blocking(claim_pending_fill_syncs, 50)
+        pending = await run_blocking(claim_pending_fill_syncs, _FILL_SYNC_BATCH_SIZE)
         if not pending:
             return
 
-        resolved_count = 0
-        for entry in pending:
-            try:
-                sync_id = entry["id"]
-                trade_id = entry["trade_id"]
-                network = entry["network"]
-                digest = entry["order_digest"]
-                attempts = int(entry.get("attempts", 0))
-                trade_row = await run_blocking(get_trade_by_id, trade_id, network)
+        semaphore = asyncio.Semaphore(_FILL_SYNC_CONCURRENCY)
 
-                # Expire old entries
-                created = entry.get("created_at")
-                if created and attempts >= 10:
-                    from datetime import datetime as dt
+        async def _process_entry(entry: dict) -> bool:
+            """Return True if the entry was resolved/closed; False if released for retry."""
+            async with semaphore:
+                try:
+                    sync_id = entry["id"]
+                    trade_id = entry["trade_id"]
+                    network = entry["network"]
+                    digest = entry["order_digest"]
+                    attempts = int(entry.get("attempts", 0))
+                    trade_row = await run_blocking(get_trade_by_id, trade_id, network)
 
-                    if isinstance(created, str):
-                        # Keep explicit timezone offsets (including trailing Z -> UTC).
-                        created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
-                    else:
-                        created_dt = created
+                    # Expire old entries
+                    created = entry.get("created_at")
+                    if created and attempts >= 10:
+                        from datetime import datetime as dt
 
-                    # Normalize both sides to aware UTC before comparing.
-                    if created_dt.tzinfo is None:
-                        created_dt = created_dt.replace(tzinfo=timezone.utc)
-                    age_seconds = (dt.now(timezone.utc) - created_dt.astimezone(timezone.utc)).total_seconds()
-                    if age_seconds > 7200:  # 2 hours
-                        await run_blocking(expire_fill_sync, sync_id)
-                        continue
+                        if isinstance(created, str):
+                            # Keep explicit timezone offsets (including trailing Z -> UTC).
+                            created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
+                        else:
+                            created_dt = created
 
-                fill_data = await run_blocking(
-                    query_order_by_digest,
-                    network,
-                    digest,
-                    _FILL_SYNC_DIGEST_WAIT,
-                    _FILL_SYNC_DIGEST_POLL,
-                )
-                if not fill_data or not fill_data.get("is_filled"):
-                    # Check if order was cancelled only after enough retries to avoid
-                    # misclassifying late archive indexing as cancellation.
-                    if attempts >= 8:
+                        # Normalize both sides to aware UTC before comparing.
+                        if created_dt.tzinfo is None:
+                            created_dt = created_dt.replace(tzinfo=timezone.utc)
+                        age_seconds = (dt.now(timezone.utc) - created_dt.astimezone(timezone.utc)).total_seconds()
+                        if age_seconds > 7200:  # 2 hours
+                            await run_blocking(expire_fill_sync, sync_id)
+                            return False
+
+                    fill_data = await run_blocking(
+                        query_order_by_digest,
+                        network,
+                        digest,
+                        _FILL_SYNC_DIGEST_WAIT,
+                        _FILL_SYNC_DIGEST_POLL,
+                    )
+                    if not fill_data or not fill_data.get("is_filled"):
+                        # Check if order was cancelled only after enough retries to avoid
+                        # misclassifying late archive indexing as cancellation.
+                        if attempts >= 8:
+                            try:
+                                from src.nadobro.services.user_service import get_user_nado_client
+                                user_id = entry["user_id"]
+                                product_id = entry["product_id"]
+                                client = await run_blocking(get_user_nado_client, int(user_id), network=network)
+                                if client:
+                                    open_orders = await run_blocking(client.get_open_orders, product_id, refresh=True) or []
+                                    digest_still_open = any(
+                                        str(o.get("digest")) == digest for o in open_orders
+                                    )
+                                    if not digest_still_open:
+                                        recent_orders = await run_blocking(
+                                            query_orders_by_subaccount,
+                                            network,
+                                            entry["subaccount_hex"],
+                                            [product_id],
+                                            100,
+                                            None,
+                                        )
+                                        archive_hit = next(
+                                            (o for o in (recent_orders or []) if str(o.get("digest") or "") == digest and o.get("is_filled")),
+                                            None,
+                                        )
+                                        if archive_hit:
+                                            fill_data = archive_hit
+                                            digest_still_open = True
+                                    if not digest_still_open:
+                                        if attempts < 20:
+                                            await run_blocking(release_fill_sync, sync_id)
+                                            return False
+                                        await run_blocking(
+                                            update_trade, trade_id,
+                                            {"status": "cancelled"}, network,
+                                        )
+                                        refreshed_trade = await run_blocking(get_trade_by_id, trade_id, network)
+                                        trade_for_notify = refreshed_trade or trade_row
+                                        await _notify_limit_order_cancelled_once(
+                                            trade_for_notify,
+                                            network,
+                                            cancel_source=_infer_cancel_source(trade_for_notify or {}),
+                                        )
+                                        await run_blocking(resolve_fill_sync, sync_id)
+                                        return True
+                            except Exception:
+                                pass
+                        if not fill_data or not fill_data.get("is_filled"):
+                            await run_blocking(release_fill_sync, sync_id)
+                            return False
+
+                    requested_size = abs(float((trade_row or {}).get("size") or 0))
+                    filled_size = abs(float(fill_data.get("fill_size") or 0))
+                    is_partial = _is_partial_fill(requested_size, filled_size)
+
+                    # Fill resolved — update trade. Keep queue pending for partial fills.
+                    total_fee = float(fill_data.get("fee", 0) or 0.0) + float(fill_data.get("builder_fee", 0) or 0.0)
+                    is_close_trade = (
+                        "CLOSE" in str((trade_row or {}).get("order_type") or "").upper()
+                        or bool((trade_row or {}).get("open_trade_id"))
+                    )
+                    update_data = {
+                        "status": "partially_filled" if is_partial else ("closed" if is_close_trade else "filled"),
+                        "fill_price": fill_data["fill_price"],
+                        "price": fill_data["fill_price"],
+                        "fill_size": fill_data.get("fill_size"),
+                        "fill_fee": total_fee,
+                        "builder_fee": float(fill_data.get("builder_fee", 0) or 0.0),
+                        "fees": total_fee,
+                        "realized_pnl": fill_data.get("realized_pnl", 0),
+                        "is_taker": fill_data.get("is_taker"),
+                    }
+                    if fill_data.get("first_fill_ts"):
+                        from datetime import datetime as dt
+                        try:
+                            update_data["filled_at"] = dt.utcfromtimestamp(
+                                int(fill_data["first_fill_ts"])
+                            ).isoformat()
+                        except Exception:
+                            pass
+
+                    await run_blocking(update_trade, trade_id, update_data, network)
+                    previous_fill_size = abs(float((trade_row or {}).get("fill_size") or 0.0))
+                    current_fill_size = abs(float(fill_data.get("fill_size") or 0.0))
+                    delta_fill_size = max(0.0, current_fill_size - previous_fill_size)
+                    if delta_fill_size > 0:
+                        try:
+                            await run_blocking(
+                                update_trade_stats,
+                                int(entry["user_id"]),
+                                delta_fill_size * float(fill_data.get("fill_price") or 0.0),
+                                False,
+                            )
+                        except Exception:
+                            pass
+                        session_id = int((trade_row or {}).get("strategy_session_id") or 0)
+                        if session_id > 0:
+                            try:
+                                previous_fees = float((trade_row or {}).get("fees") or 0.0)
+                                current_fees = float(total_fee or 0.0)
+                                fee_delta = max(0.0, current_fees - previous_fees)
+                                previous_pnl = float((trade_row or {}).get("realized_pnl") or 0.0)
+                                current_pnl = float(fill_data.get("realized_pnl") or 0.0)
+                                pnl_delta = current_pnl - previous_pnl
+                                await run_blocking(
+                                    increment_session_metrics,
+                                    session_id,
+                                    0,
+                                    0,
+                                    1 if previous_fill_size <= 0 else 0,
+                                    0,
+                                    pnl_delta,
+                                    fee_delta,
+                                    delta_fill_size * float(fill_data.get("fill_price") or 0.0),
+                                    0.0,
+                                )
+                            except Exception:
+                                pass
+                    if not is_partial and is_close_trade:
+                        try:
+                            await run_blocking(reconcile_close_trade_fill, trade_id, network, fill_data)
+                        except Exception:
+                            logger.warning("Close-trade reconciliation failed for trade %s", trade_id)
+                    if is_partial:
+                        digest_still_open = True
                         try:
                             from src.nadobro.services.user_service import get_user_nado_client
                             user_id = entry["user_id"]
@@ -449,164 +587,46 @@ async def sync_pending_fills():
                             client = await run_blocking(get_user_nado_client, int(user_id), network=network)
                             if client:
                                 open_orders = await run_blocking(client.get_open_orders, product_id, refresh=True) or []
-                                digest_still_open = any(
-                                    str(o.get("digest")) == digest for o in open_orders
-                                )
-                                if not digest_still_open:
-                                    recent_orders = await run_blocking(
-                                        query_orders_by_subaccount,
-                                        network,
-                                        entry["subaccount_hex"],
-                                        [product_id],
-                                        100,
-                                        None,
-                                    )
-                                    archive_hit = next(
-                                        (o for o in (recent_orders or []) if str(o.get("digest") or "") == digest and o.get("is_filled")),
-                                        None,
-                                    )
-                                    if archive_hit:
-                                        fill_data = archive_hit
-                                        digest_still_open = True
-                                if not digest_still_open:
-                                    if attempts < 20:
-                                        await run_blocking(release_fill_sync, sync_id)
-                                        continue
-                                    await run_blocking(
-                                        update_trade, trade_id,
-                                        {"status": "cancelled"}, network,
-                                    )
-                                    refreshed_trade = await run_blocking(get_trade_by_id, trade_id, network)
-                                    trade_for_notify = refreshed_trade or trade_row
-                                    await _notify_limit_order_cancelled_once(
-                                        trade_for_notify,
-                                        network,
-                                        cancel_source=_infer_cancel_source(trade_for_notify or {}),
-                                    )
-                                    await run_blocking(resolve_fill_sync, sync_id)
-                                    resolved_count += 1
-                                    continue
+                                digest_still_open = any(str(o.get("digest")) == digest for o in open_orders)
                         except Exception:
-                            pass
-                    if not fill_data or not fill_data.get("is_filled"):
-                        await run_blocking(release_fill_sync, sync_id)
-                        continue
-
-                requested_size = abs(float((trade_row or {}).get("size") or 0))
-                filled_size = abs(float(fill_data.get("fill_size") or 0))
-                is_partial = _is_partial_fill(requested_size, filled_size)
-
-                # Fill resolved — update trade. Keep queue pending for partial fills.
-                total_fee = float(fill_data.get("fee", 0) or 0.0) + float(fill_data.get("builder_fee", 0) or 0.0)
-                is_close_trade = (
-                    "CLOSE" in str((trade_row or {}).get("order_type") or "").upper()
-                    or bool((trade_row or {}).get("open_trade_id"))
-                )
-                update_data = {
-                    "status": "partially_filled" if is_partial else ("closed" if is_close_trade else "filled"),
-                    "fill_price": fill_data["fill_price"],
-                    "price": fill_data["fill_price"],
-                    "fill_size": fill_data.get("fill_size"),
-                    "fill_fee": total_fee,
-                    "builder_fee": float(fill_data.get("builder_fee", 0) or 0.0),
-                    "fees": total_fee,
-                    "realized_pnl": fill_data.get("realized_pnl", 0),
-                    "is_taker": fill_data.get("is_taker"),
-                }
-                if fill_data.get("first_fill_ts"):
-                    from datetime import datetime as dt
-                    try:
-                        update_data["filled_at"] = dt.utcfromtimestamp(
-                            int(fill_data["first_fill_ts"])
-                        ).isoformat()
-                    except Exception:
-                        pass
-
-                await run_blocking(update_trade, trade_id, update_data, network)
-                previous_fill_size = abs(float((trade_row or {}).get("fill_size") or 0.0))
-                current_fill_size = abs(float(fill_data.get("fill_size") or 0.0))
-                delta_fill_size = max(0.0, current_fill_size - previous_fill_size)
-                if delta_fill_size > 0:
-                    try:
-                        await run_blocking(
-                            update_trade_stats,
-                            int(entry["user_id"]),
-                            delta_fill_size * float(fill_data.get("fill_price") or 0.0),
-                            False,
+                            digest_still_open = True
+                        resolved_partial = False
+                        if not digest_still_open:
+                            await run_blocking(resolve_fill_sync, sync_id)
+                            resolved_partial = True
+                        else:
+                            await run_blocking(release_fill_sync, sync_id)
+                        logger.info(
+                            "Fill sync partial trade #%s: filled=%.6f/%.6f price=%.6f",
+                            trade_id,
+                            filled_size,
+                            requested_size,
+                            fill_data["fill_price"],
                         )
-                    except Exception:
-                        pass
-                    session_id = int((trade_row or {}).get("strategy_session_id") or 0)
-                    if session_id > 0:
-                        try:
-                            previous_fees = float((trade_row or {}).get("fees") or 0.0)
-                            current_fees = float(total_fee or 0.0)
-                            fee_delta = max(0.0, current_fees - previous_fees)
-                            previous_pnl = float((trade_row or {}).get("realized_pnl") or 0.0)
-                            current_pnl = float(fill_data.get("realized_pnl") or 0.0)
-                            pnl_delta = current_pnl - previous_pnl
-                            await run_blocking(
-                                increment_session_metrics,
-                                session_id,
-                                0,
-                                0,
-                                1 if previous_fill_size <= 0 else 0,
-                                0,
-                                pnl_delta,
-                                fee_delta,
-                                delta_fill_size * float(fill_data.get("fill_price") or 0.0),
-                                0.0,
-                            )
-                        except Exception:
-                            pass
-                if not is_partial and is_close_trade:
-                    try:
-                        await run_blocking(reconcile_close_trade_fill, trade_id, network, fill_data)
-                    except Exception:
-                        logger.warning("Close-trade reconciliation failed for trade %s", trade_id)
-                if is_partial:
-                    digest_still_open = True
-                    try:
-                        from src.nadobro.services.user_service import get_user_nado_client
-                        user_id = entry["user_id"]
-                        product_id = entry["product_id"]
-                        client = await run_blocking(get_user_nado_client, int(user_id), network=network)
-                        if client:
-                            open_orders = await run_blocking(client.get_open_orders, product_id, refresh=True) or []
-                            digest_still_open = any(str(o.get("digest")) == digest for o in open_orders)
-                    except Exception:
-                        digest_still_open = True
-                    if not digest_still_open:
-                        await run_blocking(resolve_fill_sync, sync_id)
-                        resolved_count += 1
-                    else:
-                        await run_blocking(release_fill_sync, sync_id)
-                    logger.info(
-                        "Fill sync partial trade #%s: filled=%.6f/%.6f price=%.6f",
-                        trade_id,
-                        filled_size,
-                        requested_size,
-                        fill_data["fill_price"],
-                    )
-                else:
+                        return resolved_partial
+
                     await run_blocking(resolve_fill_sync, sync_id)
-                    resolved_count += 1
                     refreshed_trade = await run_blocking(get_trade_by_id, trade_id, network)
                     await _notify_limit_order_filled_once(refreshed_trade or trade_row, network)
-
-                if not is_partial:
                     logger.info(
                         "Fill sync resolved trade #%s: price=%.6f fee=%.6f pnl=%.6f",
                         trade_id, fill_data["fill_price"],
                         fill_data.get("fee", 0), fill_data.get("realized_pnl", 0),
                     )
-            except Exception as e:
-                logger.warning("Fill sync error for entry %s: %s", entry.get("id"), e)
-                try:
-                    await run_blocking(release_fill_sync, entry.get("id"))
-                except Exception:
-                    pass
-                continue
+                    return True
+                except Exception as e:
+                    logger.warning("Fill sync error for entry %s: %s", entry.get("id"), e)
+                    try:
+                        await run_blocking(release_fill_sync, entry.get("id"))
+                    except Exception:
+                        pass
+                    return False
+
+        results = await asyncio.gather(
+            *(_process_entry(entry) for entry in pending),
+            return_exceptions=True,
+        )
+        resolved_count = sum(1 for r in results if r is True)
 
         if resolved_count > 0:
             logger.info("Fill sync: resolved %d/%d pending fills", resolved_count, len(pending))
@@ -672,10 +692,27 @@ def start_scheduler():
     )
     from src.nadobro.services.time_limit_watcher import time_limit_tick
 
-    scheduler.add_job(check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS, id="check_alerts", replace_existing=True)
-    scheduler.add_job(tick_price_tracker, "interval", seconds=60, id="price_tracker", replace_existing=True)
+    # Misfire / coalesce tuning. The event loop occasionally blocks for 5-20s
+    # (slow callback, archive 422 retries, place_order chains) and short-tick
+    # jobs were emitting "Run time of job ... was missed by Ns" warnings. We
+    # don't care about a missed alert tick — coalesce stacked misses into one
+    # and give the scheduler a grace window before logging.
+    _SHORT_TICK = {"misfire_grace_time": 30, "coalesce": True}
+    _LONG_TICK = {"misfire_grace_time": 120, "coalesce": True}
+
+    scheduler.add_job(
+        check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS,
+        id="check_alerts", replace_existing=True, **_SHORT_TICK,
+    )
+    scheduler.add_job(
+        tick_price_tracker, "interval", seconds=60,
+        id="price_tracker", replace_existing=True, **_SHORT_TICK,
+    )
     if time_limit_enabled():
-        scheduler.add_job(time_limit_tick, "interval", seconds=60, id="time_limit_watcher", replace_existing=True)
+        scheduler.add_job(
+            time_limit_tick, "interval", seconds=60,
+            id="time_limit_watcher", replace_existing=True, **_SHORT_TICK,
+        )
     if studio_enabled():
         scheduler.add_job(
             condition_tick,
@@ -683,6 +720,7 @@ def start_scheduler():
             seconds=studio_condition_interval_seconds(),
             id="condition_watcher",
             replace_existing=True,
+            **_SHORT_TICK,
         )
     if portfolio_sync_enabled():
         from src.nadobro.services.nado_sync import sync_active_users
@@ -694,12 +732,30 @@ def start_scheduler():
             id="portfolio_sync",
             replace_existing=True,
             kwargs={"reason": "poll"},
+            **_LONG_TICK,
         )
-    scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True)
-    scheduler.add_job(poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds, id="lowiqpts_relay_poll", replace_existing=True)
-    scheduler.add_job(sync_pending_fills, "interval", seconds=30, id="fill_sync", replace_existing=True)
-    scheduler.add_job(tick_edge_scanner, "interval", seconds=_EDGE_SCAN_SECONDS, id="edge_scanner", replace_existing=True)
-    scheduler.add_job(tick_news_warmup, "interval", minutes=_NEWS_WARMUP_MINUTES, id="news_warmup", replace_existing=True)
+    scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True, **_LONG_TICK)
+    scheduler.add_job(
+        poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds,
+        id="lowiqpts_relay_poll", replace_existing=True, **_SHORT_TICK,
+    )
+    # sync_pending_fills can legitimately take longer than its 30s interval
+    # when the archive lags. Allow up to 2 concurrent runs so a slow tick
+    # doesn't starve every subsequent tick (previously every run was
+    # "skipped: maximum number of running instances reached (1)").
+    scheduler.add_job(
+        sync_pending_fills, "interval", seconds=30,
+        id="fill_sync", replace_existing=True,
+        max_instances=2, misfire_grace_time=60, coalesce=True,
+    )
+    scheduler.add_job(
+        tick_edge_scanner, "interval", seconds=_EDGE_SCAN_SECONDS,
+        id="edge_scanner", replace_existing=True, **_LONG_TICK,
+    )
+    scheduler.add_job(
+        tick_news_warmup, "interval", minutes=_NEWS_WARMUP_MINUTES,
+        id="news_warmup", replace_existing=True, **_LONG_TICK,
+    )
     scheduler.add_job(initial_ai_setup, "date", id="initial_ai_setup", replace_existing=True)
     scheduler.start()
     logger.info(

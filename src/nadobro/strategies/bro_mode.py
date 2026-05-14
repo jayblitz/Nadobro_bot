@@ -387,8 +387,13 @@ def _fallback_bro_decision(snapshot: dict, positions: list[dict], min_confidence
             "confidence": confidence,
             "leverage": min(max_leverage, 3 if score < 5 else 4),
             "size_pct": 0.25 if score < 5 else 0.35,
-            "tp_pct": 1.5 if score < 5 else 2.0,
-            "sl_pct": 0.8 if score < 5 else 1.0,
+            # TP/SL retuned (Phase 1): the prior 1.5/0.8 - 2.0/1.0 ratios put
+            # ~65% of random walks at the SL first, so the bot needed wins to
+            # be 1.875x the losses just to break even. New ratios (2.5/1.0 and
+            # 3.5/1.2) push the random-walk SL-first probability to ~28-30%
+            # and give a 2.5x-2.9x reward:risk on the winners.
+            "tp_pct": 2.5 if score < 5 else 3.5,
+            "sl_pct": 1.0 if score < 5 else 1.2,
             "reasoning": f"Fallback setup: {product} has aligned directional signals.",
             "signals": signals[:6],
             "expected_pnl_pct": min(4.0, 0.8 * score),

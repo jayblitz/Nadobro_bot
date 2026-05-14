@@ -553,6 +553,17 @@ def init_db():
             ("realized_pnl", "DOUBLE PRECISION"),
             ("is_taker", "BOOLEAN"),
             ("funding_paid", "DOUBLE PRECISION DEFAULT 0"),
+            # Portfolio rebuild columns (migrations/0004_portfolio_rebuild.sql).
+            # Added here too so the column ships with the bot — production was
+            # hitting `column "submission_idx" does not exist` because the SQL
+            # migration was never applied out-of-band.
+            ("submission_idx", "NUMERIC(78,0)"),
+            ("isolated", "BOOLEAN"),
+            ("realized_pnl_x18", "NUMERIC(78,0)"),
+            ("fee_x18", "NUMERIC(78,0)"),
+            ("base_filled_x18", "NUMERIC(78,0)"),
+            ("quote_filled_x18", "NUMERIC(78,0)"),
+            ("filled_at", "TIMESTAMPTZ"),
         ]
         with conn.cursor() as cur:
             for net in ("testnet", "mainnet"):
@@ -564,6 +575,15 @@ def init_db():
                         logger.info("Added column %s.%s", table, col)
                     except Exception:
                         conn.rollback()
+                # Unique index used by nado_sync._write_matches to dedupe fills.
+                try:
+                    cur.execute(
+                        f"CREATE UNIQUE INDEX IF NOT EXISTS trades_{net}_submission_idx "
+                        f"ON trades_{net} (submission_idx) WHERE submission_idx IS NOT NULL"
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
             # Also add to the legacy trades table for backwards compat
             for col, col_type in _NEW_TRADE_COLS:
                 try:

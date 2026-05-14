@@ -26,8 +26,179 @@ from src.nadobro.services.trade_service import (
     execute_spot_market_order,
 )
 from src.nadobro.services.user_service import get_user_readonly_client
+from src.nadobro.services import risk_budget as _risk_budget
+# --- Volume Bot intelligence (additive) ---
+# Light-touch upgrade: regime-aware pause + chop notional dampener. No PM,
+# no per-level sizing — Volume Bot's design intent is *volume generation*,
+# not spread capture, so we only veto entry on adverse trend regimes and
+# scale notional down in high-vol chop.
+from src.nadobro.strategies import _regime as _vol_regime
+try:
+    from src.nadobro.services.feature_flags import dgrid_intelligence_enabled as _vol_intel_env_default
+except Exception:
+    def _vol_intel_env_default() -> bool:
+        return False
 
 logger = logging.getLogger(__name__)
+
+
+def _vol_intelligence_on(state: dict) -> bool:
+    """Volume Bot uses its own session flag, falling back to the master flag."""
+    explicit = state.get("vol_intelligence_enabled")
+    if explicit is not None:
+        return bool(explicit)
+    legacy = state.get("dgrid_intelligence_enabled")
+    if legacy is not None:
+        return bool(legacy)
+    return bool(_vol_intel_env_default())
+
+
+def _risk_budget_on(state: dict) -> bool:
+    """Phase 5 risk budget flag for Volume Bot.
+
+    Defaults to following the Volume Bot intelligence flag, but
+    ``state["risk_budget_enabled"]`` can force it on or off independently.
+    """
+    explicit = state.get("risk_budget_enabled")
+    if explicit is not None and explicit != "":
+        return bool(explicit)
+    return bool(_vol_intelligence_on(state))
+
+
+# Tunable thresholds — exposed as state keys with these defaults.
+_VOL_REGIME_ADVERSE_CONFIDENCE = 0.65
+_VOL_REGIME_CHOP_CONFIDENCE = 0.50
+_VOL_REGIME_CHOP_NOTIONAL_MULT = 0.5
+# Phase 3: tight-range veto for Volume Bot. The bot's edge requires a
+# minimum directional move per trade; in REGIME_RANGE_TIGHT realized vol
+# is below the round-trip fee cost so the math is structurally negative
+# regardless of which direction we enter. Veto entries with high
+# regime confidence.
+_VOL_REGIME_TIGHT_CONFIDENCE = 0.60
+
+
+def _vol_regime_gate(
+    *,
+    signal: dict,
+    state: dict,
+    history: list[float],
+    mid: float,
+    product: str,
+) -> tuple[dict, float]:
+    """Apply the regime gate to a Volume Bot signal.
+
+    Returns ``(possibly-modified-signal, notional_multiplier)``.
+
+    Behavior:
+      * If intelligence is OFF, returns signal unchanged with mult=1.0.
+      * If the signal isn't entering (`signal["ok"] is False`), pass through.
+      * If regime is ``trend_up`` and direction is ``short`` (or trend_down /
+        long) with confidence >= adverse_conf, mark signal not-ok with reason
+        ``regime_against_signal`` so the cycle skips entry.
+      * If regime is ``chop_high_vol`` with confidence >= chop_conf, halve
+        the target notional (keeps the entry but reduces size).
+    """
+    if not _vol_intelligence_on(state):
+        return signal, 1.0
+    if not signal or not signal.get("ok"):
+        return signal, 1.0
+
+    try:
+        # Pass 0 for variance_ratio and realized_vol_bp — the classifier
+        # auto-computes them from history when not provided. Volume Bot doesn't
+        # already maintain those values like mm_bot.py's dgrid path does.
+        regime_info = _vol_regime.classify_regime(
+            state,
+            list(history or []),
+            product=str(product),
+            variance_ratio=float(state.get("dgrid_variance_ratio") or 0.0),
+            realized_vol_bp=float(state.get("dgrid_realized_move_bp") or 0.0),
+            ema_fast=0.0,
+            ema_slow=0.0,
+            short_window=int(state.get("dgrid_short_window_points") or 4),
+            long_window=int(state.get("dgrid_long_window_points") or 12),
+            config=state,
+        )
+    except Exception as exc:
+        logger.warning("vol regime gate failed: %s — passing through", exc)
+        return signal, 1.0
+
+    state["vol_regime_info"] = {
+        "regime": regime_info.get("regime"),
+        "confidence": regime_info.get("confidence"),
+        "drift_bp": regime_info.get("drift_bp"),
+    }
+
+    confidence = float(regime_info.get("confidence") or 0.0)
+    regime = str(regime_info.get("regime") or "")
+    direction = str(signal.get("direction") or "").lower()
+
+    adverse_conf = float(state.get("vol_regime_adverse_confidence") or _VOL_REGIME_ADVERSE_CONFIDENCE)
+    chop_conf = float(state.get("vol_regime_chop_confidence") or _VOL_REGIME_CHOP_CONFIDENCE)
+    chop_mult = float(state.get("vol_regime_chop_notional_mult") or _VOL_REGIME_CHOP_NOTIONAL_MULT)
+    tight_conf = float(state.get("vol_regime_tight_confidence") or _VOL_REGIME_TIGHT_CONFIDENCE)
+
+    # Tight-range veto: no edge available, skip entry entirely.
+    if regime == _vol_regime.REGIME_RANGE_TIGHT and confidence >= tight_conf:
+        blocked = dict(signal)
+        blocked["ok"] = False
+        blocked["reason"] = "regime_range_tight_no_edge"
+        blocked["regime"] = regime
+        blocked["regime_confidence"] = confidence
+        state["vol_regime_tight_veto_count"] = int(state.get("vol_regime_tight_veto_count") or 0) + 1
+        logger.info(
+            "Volume regime veto: tight range, no edge (conf=%.2f)", confidence,
+        )
+        return blocked, 1.0
+
+    # Adverse-direction veto
+    if confidence >= adverse_conf:
+        if regime == _vol_regime.REGIME_TREND_UP and direction == "short":
+            blocked = dict(signal)
+            blocked["ok"] = False
+            blocked["reason"] = "regime_against_signal"
+            blocked["regime"] = regime
+            blocked["regime_confidence"] = confidence
+            state["vol_regime_veto_count"] = int(state.get("vol_regime_veto_count") or 0) + 1
+            logger.info(
+                "Volume regime veto: short blocked in %s (conf=%.2f)", regime, confidence,
+            )
+            return blocked, 1.0
+        if regime == _vol_regime.REGIME_TREND_DOWN and direction == "long":
+            blocked = dict(signal)
+            blocked["ok"] = False
+            blocked["reason"] = "regime_against_signal"
+            blocked["regime"] = regime
+            blocked["regime_confidence"] = confidence
+            state["vol_regime_veto_count"] = int(state.get("vol_regime_veto_count") or 0) + 1
+            logger.info(
+                "Volume regime veto: long blocked in %s (conf=%.2f)", regime, confidence,
+            )
+            return blocked, 1.0
+
+    # Chop notional dampener
+    if regime == _vol_regime.REGIME_CHOP_HIGH_VOL and confidence >= chop_conf:
+        state["vol_regime_chop_dampen_count"] = int(state.get("vol_regime_chop_dampen_count") or 0) + 1
+        logger.info(
+            "Volume chop dampener: target notional x%.2f (conf=%.2f)", chop_mult, confidence,
+        )
+        return signal, max(0.05, min(1.0, chop_mult))
+
+    return signal, 1.0
+
+
+def _vol_mid_history(product: str, state: dict, limit_points: int = 24) -> list[float]:
+    """Pull recent mid history from price_tracker for the regime classifier.
+
+    Falls back to state['vol_mid_history'] if price_tracker isn't available.
+    """
+    try:
+        from src.nadobro.services.price_tracker import get_mids  # type: ignore
+        mids = get_mids(product) or []
+        return [float(m) for m in mids[-limit_points:] if float(m) > 0]
+    except Exception:
+        seed = state.get("vol_mid_history") or []
+        return [float(m) for m in seed if float(m) > 0]
 
 # Position notional per Volume trade (the "position value" in CEO terms).
 # User-overridable via state["target_notional_usd"] (legacy: state["fixed_margin_usd"]).
@@ -44,14 +215,29 @@ MIN_EFFECTIVE_MARGIN_USD = 10.0
 DEFAULT_TARGET_VOLUME_USD = 10000.0
 DEFAULT_VOL_EMA_LEN = 50
 DEFAULT_VOL_RSI_LEN = 14
-DEFAULT_VOL_RSI_LONG_MAX = 50.0
-DEFAULT_VOL_RSI_SHORT_MIN = 50.0
+# Entry gates. RSI 50/50 was the prior default; in practice that opened longs
+# into slight weakness and shorts into slight strength — i.e. the bot leaned
+# against short-term momentum at the worst possible moment. Tighten to
+# 40 / 60 so we only fade real extremes. Min edge raised from 4 bp to 12 bp
+# so the entry edge is greater than the round-trip fee+slippage cost.
+DEFAULT_VOL_RSI_LONG_MAX = 40.0
+DEFAULT_VOL_RSI_SHORT_MIN = 60.0
 DEFAULT_VOL_TRADE_TP_PCT = 0.40
 DEFAULT_VOL_TRADE_SL_PCT = 0.20
 DEFAULT_VOL_HOLD_MIN_SECONDS = 60.0
 DEFAULT_VOL_HOLD_MAX_SECONDS = 540.0
 DEFAULT_VOL_MAX_SPREAD_BP = 12.0
-DEFAULT_VOL_MIN_EDGE_BP = 4.0
+DEFAULT_VOL_MIN_EDGE_BP = 12.0
+# Phase 2 — universal exit rails for Volume Bot.
+# Breakeven stop: once trade reaches +arm_pct% in our favor, lock it in;
+# if it then rolls back to +exit_pct% or worse, close instead of waiting
+# for hold_expired to take us back through zero into negative territory.
+DEFAULT_VOL_BREAKEVEN_ARM_PCT = 0.20
+DEFAULT_VOL_BREAKEVEN_EXIT_PCT = 0.03
+# Time-in-loss stop: if the trade has been continuously underwater for
+# > max_underwater_seconds, force a close. Slightly less than the default
+# hold_max so this fires before "hold_expired" when the trade is bad.
+DEFAULT_VOL_MAX_UNDERWATER_SECONDS = 420.0
 
 # Max seconds a post-only close is allowed to rest before we cancel-and-retry
 # with a wider limit. After CLOSE_ESCALATE_AFTER_SECONDS we'll force-close
@@ -241,6 +427,40 @@ def _volume_exit_reason(state: dict, mid: float, now_ts: float, direction: str) 
         return True, "trade_tp_hit"
     if trade_sl_pct > 0 and pnl_pct <= -trade_sl_pct:
         return True, "trade_sl_hit"
+
+    # Phase 2: universal exit rails for Volume Bot.
+    #
+    # Breakeven stop — once the trade has been in profit by >= arm_pct, lock
+    # it in. If price rolls back to entry + exit_offset, close instead of
+    # waiting for hold_expired to take us back through zero.
+    be_arm_pct = float(state.get("vol_breakeven_arm_pct") or DEFAULT_VOL_BREAKEVEN_ARM_PCT)
+    be_exit_pct = float(state.get("vol_breakeven_exit_pct") or DEFAULT_VOL_BREAKEVEN_EXIT_PCT)
+    if be_arm_pct > 0:
+        armed = bool(state.get("vol_breakeven_armed"))
+        if not armed and pnl_pct >= be_arm_pct:
+            state["vol_breakeven_armed"] = True
+            armed = True
+        if armed and pnl_pct <= be_exit_pct:
+            return True, "breakeven_stop_hit"
+
+    # Time-in-loss stop — if the position has been continuously underwater
+    # longer than max_underwater_seconds we force-close. Separate from
+    # hold_expired which fires regardless of PnL.
+    max_underwater = float(
+        state.get("vol_max_underwater_seconds") or DEFAULT_VOL_MAX_UNDERWATER_SECONDS
+    )
+    if max_underwater > 0:
+        if pnl_pct < 0:
+            loss_since = float(state.get("vol_loss_since_ts") or 0.0)
+            if loss_since <= 0:
+                state["vol_loss_since_ts"] = float(now_ts)
+                loss_since = float(now_ts)
+            under_age = max(0.0, now_ts - loss_since)
+            if under_age >= max_underwater:
+                return True, "time_in_loss_stop_hit"
+        else:
+            state["vol_loss_since_ts"] = 0.0
+
     if held >= max(hold_min, hold_max):
         return True, "hold_expired"
     return False, "min_hold" if held < hold_min else "waiting_edge"
@@ -509,6 +729,15 @@ def _run_volume_spot_cycle(
         volume_done += traded_notional
         session_pnl += cycle_pnl
         _record_volume_cycle_metrics(state, cycle_pnl)
+        # Phase 5: feed the realized round-turn PnL into the daily risk
+        # budget. Volume Bot fully realizes each cycle, so this is exact.
+        if _risk_budget_on(state):
+            try:
+                _risk_budget.record_realized_pnl(
+                    telegram_id, network, str(product), float(cycle_pnl or 0.0),
+                )
+            except Exception:
+                logger.exception("risk budget record_realized_pnl failed")
         state["volume_done_usd"] = round(volume_done, 4)
         state["volume_remaining_usd"] = round(max(0.0, target_volume - volume_done), 4)
         state["session_realized_pnl_usd"] = round(session_pnl, 6)
@@ -517,6 +746,9 @@ def _run_volume_spot_cycle(
         state["vol_entry_fill_ts"] = 0.0
         state["vol_entry_fill_price"] = 0.0
         state["vol_entry_size"] = 0.0
+        # Phase 2 — reset universal exit-rail latches when the position closes.
+        state["vol_breakeven_armed"] = False
+        state["vol_loss_since_ts"] = 0.0
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
         state["vol_close_posted_ts"] = 0.0
@@ -704,6 +936,41 @@ def _run_volume_spot_cycle(
         }
 
     # idle
+    # Phase 5: per-product daily loss budget (spot path). Block new spot
+    # entries when the day's budget is soft- or hard-stopped on this product.
+    if _risk_budget_on(state):
+        try:
+            _rb_soft, _rb_hard, _rb_cooldown = _risk_budget.resolve_budget_thresholds(
+                state, target_notional,
+            )
+            _rb_status = _risk_budget.check_budget(
+                telegram_id, network, str(product),
+                soft_stop_usd=_rb_soft, hard_stop_usd=_rb_hard,
+                cooldown_seconds=_rb_cooldown,
+            )
+        except Exception:
+            logger.exception(
+                "vol spot risk budget check failed for %s/%s — allowing entry",
+                network, product,
+            )
+            _rb_status = {"status": "ok"}
+        state["vol_risk_budget"] = _rb_status
+        if _rb_status.get("status") in ("soft_stopped", "hard_stopped"):
+            logger.info(
+                "Volume spot risk budget %s (%s/%s): %s — skipping entry",
+                _rb_status["status"], network, product,
+                _rb_status.get("reason", ""),
+            )
+            return {
+                "success": True,
+                "done": False,
+                "action": f"risk_budget_{_rb_status['status']}",
+                "detail": _rb_status.get("reason", ""),
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "risk_budget": _rb_status,
+            }
+
     if target_notional < MIN_NOTIONAL_USD:
         return {
             "success": False,
@@ -749,6 +1016,19 @@ def _run_volume_spot_cycle(
         signal_state["vol_direction_mode"] = "fixed"
         signal_state["vol_direction"] = "long"
         signal = _volume_signal(product, mid, signal_state)
+        # Volume intelligence: regime gate. Skip entry on adverse trend
+        # regime; dampen notional in chop_high_vol.
+        signal, _notional_mult = _vol_regime_gate(
+            signal=signal,
+            state=state,
+            history=_vol_mid_history(product, state),
+            mid=mid,
+            product=product,
+        )
+        if _notional_mult != 1.0:
+            target_notional = max(MIN_NOTIONAL_USD, target_notional * _notional_mult)
+            state["vol_regime_notional_mult"] = round(_notional_mult, 4)
+            state["target_notional_usd"] = round(target_notional, 4)
         state["vol_signal"] = {
             "ok": bool(signal.get("ok")),
             "reason": signal.get("reason"),
@@ -757,6 +1037,8 @@ def _run_volume_spot_cycle(
             "rsi": round(float(signal.get("rsi") or 0.0), 4),
             "edge_bp": round(float(signal.get("edge_bp") or 0.0), 4),
             "direction_mode": "spot_long",
+            "regime": signal.get("regime"),
+            "regime_confidence": signal.get("regime_confidence"),
         }
         if not signal.get("ok"):
             return {
@@ -1231,6 +1513,15 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         volume_done += traded_notional
         session_pnl += cycle_pnl
         _record_volume_cycle_metrics(state, cycle_pnl)
+        # Phase 5: feed the realized round-turn PnL into the daily risk
+        # budget. Volume Bot fully realizes each cycle, so this is exact.
+        if _risk_budget_on(state):
+            try:
+                _risk_budget.record_realized_pnl(
+                    telegram_id, network, str(product), float(cycle_pnl or 0.0),
+                )
+            except Exception:
+                logger.exception("risk budget record_realized_pnl failed")
         state["volume_done_usd"] = round(volume_done, 4)
         state["volume_remaining_usd"] = round(max(0.0, target_volume - volume_done), 4)
         state["session_realized_pnl_usd"] = round(session_pnl, 6)
@@ -1239,6 +1530,9 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         state["vol_entry_fill_ts"] = 0.0
         state["vol_entry_fill_price"] = 0.0
         state["vol_entry_size"] = 0.0
+        # Phase 2 — reset universal exit-rail latches when the position closes.
+        state["vol_breakeven_armed"] = False
+        state["vol_loss_since_ts"] = 0.0
         state["vol_close_digest"] = None
         state["vol_close_size"] = 0.0
         state["vol_close_posted_ts"] = 0.0
@@ -1429,6 +1723,46 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         }
 
     # phase == idle
+    # Phase 5: per-product daily loss budget. We're about to open a *new*
+    # position — if the day's budget is soft- or hard-stopped on this
+    # product, skip the entry. Existing positions (handled in the phases
+    # above) are unaffected; the budget only blocks new size.
+    if _risk_budget_on(state):
+        try:
+            _risk_budget.record_strategy_exposure(
+                telegram_id, network, str(product), "vol", 0.0, 0.0,
+            )
+            _rb_soft, _rb_hard, _rb_cooldown = _risk_budget.resolve_budget_thresholds(
+                state, target_notional,
+            )
+            _rb_status = _risk_budget.check_budget(
+                telegram_id, network, str(product),
+                soft_stop_usd=_rb_soft, hard_stop_usd=_rb_hard,
+                cooldown_seconds=_rb_cooldown,
+            )
+        except Exception:
+            logger.exception(
+                "vol risk budget check failed for %s/%s — allowing entry",
+                network, product,
+            )
+            _rb_status = {"status": "ok"}
+        state["vol_risk_budget"] = _rb_status
+        if _rb_status.get("status") in ("soft_stopped", "hard_stopped"):
+            logger.info(
+                "Volume risk budget %s (%s/%s): %s — skipping entry",
+                _rb_status["status"], network, product,
+                _rb_status.get("reason", ""),
+            )
+            return {
+                "success": True,
+                "done": False,
+                "action": f"risk_budget_{_rb_status['status']}",
+                "detail": _rb_status.get("reason", ""),
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "risk_budget": _rb_status,
+            }
+
     if target_notional < MIN_NOTIONAL_USD:
         return {
             "success": False,
@@ -1472,6 +1806,19 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             }
 
         signal = _volume_signal(product, mid, state)
+        # Volume intelligence: regime gate (perp path). Skip entry on adverse
+        # trend regime; dampen notional in chop_high_vol.
+        signal, _notional_mult = _vol_regime_gate(
+            signal=signal,
+            state=state,
+            history=_vol_mid_history(product, state),
+            mid=mid,
+            product=product,
+        )
+        if _notional_mult != 1.0:
+            target_notional = max(MIN_NOTIONAL_USD, target_notional * _notional_mult)
+            state["vol_regime_notional_mult"] = round(_notional_mult, 4)
+            state["target_notional_usd"] = round(target_notional, 4)
         state["vol_signal"] = {
             "ok": bool(signal.get("ok")),
             "reason": signal.get("reason"),
@@ -1480,6 +1827,8 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
             "rsi": round(float(signal.get("rsi") or 0.0), 4),
             "edge_bp": round(float(signal.get("edge_bp") or 0.0), 4),
             "direction_mode": signal.get("direction_mode"),
+            "regime": signal.get("regime"),
+            "regime_confidence": signal.get("regime_confidence"),
         }
         if not signal.get("ok"):
             return {

@@ -32,6 +32,38 @@ logger = logging.getLogger(__name__)
 _submit_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="nadobro-submit")
 
 
+def _isolated_margin_safety_multiplier() -> float:
+    """Headroom multiplier applied on top of the bare initial-margin requirement.
+
+    ``isolated_margin = notional / leverage`` is the venue's exact initial-margin
+    floor. Signing exactly that leaves zero room for fees, the next price tick,
+    or the cross-account's simultaneous reservations across other resting
+    quotes, so isolated-only markets (equities, commodities) reject with
+    error_code 2006 ("account health below threshold") almost immediately.
+    Default 1.20 covers ~1.5 bp taker fee + 1 tick + a small maintenance
+    cushion; override via NADO_ISOLATED_MARGIN_SAFETY for tuning.
+    """
+    raw = (os.environ.get("NADO_ISOLATED_MARGIN_SAFETY") or "1.20").strip()
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 1.20
+    return max(1.0, val)
+
+
+def _compute_isolated_margin(size: float, price: float, leverage: float) -> float | None:
+    """Initial-margin requirement plus the safety buffer, or None on bad inputs."""
+    try:
+        size_f = abs(float(size))
+        price_f = float(price)
+        lev_f = float(leverage)
+    except (TypeError, ValueError):
+        return None
+    if size_f <= 0 or price_f <= 0 or lev_f <= 0:
+        return None
+    return (size_f * price_f) / max(1.0, lev_f) * _isolated_margin_safety_multiplier()
+
+
 def _order_submit_timeout_seconds() -> float:
     raw = (os.environ.get("NADO_ORDER_SUBMIT_TIMEOUT_SECONDS") or "25").strip()
     try:
@@ -580,7 +612,7 @@ def execute_market_order(
             mp = client.get_market_price(product_id)
             mid = float(mp.get("mid", 0) or 0)
             if mid > 0 and float(leverage or 0) > 0:
-                isolated_margin = (float(size) * mid) / max(1.0, float(leverage))
+                isolated_margin = _compute_isolated_margin(size, mid, leverage)
         except Exception:
             isolated_margin = None
 
@@ -1288,7 +1320,7 @@ def execute_limit_order(
     isolated_only = is_product_isolated_only(product, network=network, client=client)
     isolated_margin = None
     if isolated_only and float(leverage or 0) > 0:
-        isolated_margin = (float(size) * float(price)) / max(1.0, float(leverage))
+        isolated_margin = _compute_isolated_margin(size, price, leverage)
     logger.debug(
         "execute_limit_order place_limit_order isolated_margin=%s size=%.8f price=%.6f leverage=%.2f post_only=%s reduce_only=%s",
         isolated_margin,
@@ -1491,7 +1523,7 @@ def apply_tp_sl_to_open_position(
         mp = client.get_market_price(product_id)
         mid = float(mp.get("mid", 0) or 0)
         if mid > 0:
-            isolated_margin = (float(pos_size) * mid) / leverage
+            isolated_margin = _compute_isolated_margin(pos_size, mid, leverage)
 
     out: dict = {
         "product": product_name,
@@ -1617,7 +1649,7 @@ def limit_close_position(
         mp = client.get_market_price(product_id)
         mid = float(mp.get("mid", 0) or 0)
         if mid > 0:
-            isolated_margin = (float(close_sz) * mid) / leverage
+            isolated_margin = _compute_isolated_margin(close_sz, mid, leverage)
 
     r = client.place_limit_order(
         product_id,
@@ -2114,7 +2146,7 @@ def close_position(
                 mp = client.get_market_price(product_id)
                 mid = float(mp.get("mid", 0) or 0)
                 if mid > 0:
-                    iso_margin = (float(this_close_size) * mid) / leverage
+                    iso_margin = _compute_isolated_margin(this_close_size, mid, leverage)
 
             r = client.place_market_order(
                 product_id,

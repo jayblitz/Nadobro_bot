@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_base.css"><style>
+.grid { display:grid; grid-template-columns: repeat(6,1fr); gap: 12px; }
+.cell { background: var(--nb-ink-700); border: 1px solid rgba(110,226,240,0.18); height: 88px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; }
+.cell .name { font: 600 12px/1 var(--font-body); color: #fff; }
+.cell .px   { font: 500 11px/1 var(--font-mono); color: var(--fg-subtle); }
+</style></head><body>
+<div class="grid">
+  <div class="cell" style="border-radius:4px"><div class="name">xs</div><div class="px">4</div></div>
+  <div class="cell" style="border-radius:8px"><div class="name">sm</div><div class="px">8</div></div>
+  <div class="cell" style="border-radius:12px"><div class="name">md</div><div class="px">12</div></div>
+  <div class="cell" style="border-radius:16px"><div class="name">lg · card</div><div class="px">16</div></div>
+  <div class="cell" style="border-radius:20px"><div class="name">xl · panel</div><div class="px">20</div></div>
+  <div class="cell" style="border-radius:28px"><div class="name">2xl · share</div><div class="px">28</div></div>
+</div>
+</body></html>

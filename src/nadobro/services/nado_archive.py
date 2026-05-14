@@ -164,6 +164,31 @@ def isolated_subaccount_from_row(row: dict, parent_subaccount_hex: str = "") -> 
     return ""
 
 
+def _bytes32_hex_to_u8_array(hex_value: str) -> list[int] | None:
+    """Decode a bytes32 hex string into a 32-element ``u8`` array.
+
+    The archive ``isolated_subaccounts`` endpoint deserializes ``subaccount``
+    as ``[u8; 32]`` directly (not as a hex string and not as a list of hex
+    strings). Two previous attempts confirmed this empirically via the 422
+    payload:
+      * ``[parent_hex]`` -> ``subaccount[0]: invalid type: string, expected u8``
+      * ``parent_hex``   -> ``subaccount: invalid type: string, expected an array``
+    Returns ``None`` on malformed input so the caller can skip the request.
+    """
+    if not hex_value:
+        return None
+    h = hex_value.strip().lower()
+    if h.startswith("0x"):
+        h = h[2:]
+    if len(h) > 64 or any(c not in "0123456789abcdef" for c in h):
+        return None
+    h = h.rjust(64, "0")
+    try:
+        return list(bytes.fromhex(h))
+    except ValueError:
+        return None
+
+
 def query_isolated_subaccounts_for_parent(
     network: str,
     parent_subaccount_hex: str,
@@ -178,11 +203,14 @@ def query_isolated_subaccounts_for_parent(
     parent = (parent_subaccount_hex or "").strip()
     if not parent:
         return []
+    subaccount_bytes = _bytes32_hex_to_u8_array(parent)
+    if subaccount_bytes is None:
+        logger.warning("isolated_subaccounts: invalid parent subaccount hex %s", parent[:12])
+        return []
     url = archive_url_for_network(network)
-    # Archive indexer expects `subaccount` as a hex array (even for one parent).
     payload = {
         "isolated_subaccounts": {
-            "subaccount": [parent],
+            "subaccount": subaccount_bytes,
             "limit": min(max(1, int(limit)), 500),
         }
     }

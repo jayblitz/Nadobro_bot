@@ -75,6 +75,31 @@ _rest_session.mount(
 _open_orders_cache: dict[tuple[str, str, int], dict] = {}
 _positions_fallback_cache: dict[tuple[str, str], dict] = {}
 
+# verify_linked_signer is called on every order placement via
+# ensure_active_wallet_ready. The result is stable across a session and the
+# REST round-trip costs ~500-700ms — repeated checks before each order add up
+# to multiple seconds of avoidable latency per DGRID cycle. Cache successful
+# verifications for a short window; failures and errors bypass the cache.
+_linked_signer_cache: dict[tuple[str, str, str], dict] = {}
+_LINKED_SIGNER_CACHE_TTL_SECONDS = float(
+    os.environ.get("NADO_LINKED_SIGNER_CACHE_SECONDS", "60") or "60"
+)
+
+# Window applied to ``recvTime`` on signed query/execute payloads. The value
+# is a *deadline* — Nado rejects the request with error_code 2011 ("Request
+# received after 'recv_time'") if the server processes it after this stamp.
+# Setting recv_time = now() leaves zero room for network latency, signing, or
+# host clock drift; production logs showed 2011 on get_trigger_orders.
+_RECV_TIME_WINDOW_SECONDS = max(
+    5.0,
+    float(os.environ.get("NADO_RECV_TIME_WINDOW_SECONDS", "60") or "60"),
+)
+
+
+def _recv_time_ms() -> int:
+    """``recvTime`` deadline (ms epoch) padded by ``_RECV_TIME_WINDOW_SECONDS``."""
+    return int((time.time() + _RECV_TIME_WINDOW_SECONDS) * 1000)
+
 
 def _mask_address(value: str) -> str:
     text = str(value or "").strip()
@@ -730,7 +755,7 @@ class NadoClient:
             )
 
             params = ListTriggerOrdersParams(
-                tx=ListTriggerOrdersTx(sender=self.subaccount_hex, recvTime=int(time.time() * 1000)),
+                tx=ListTriggerOrdersTx(sender=self.subaccount_hex, recvTime=_recv_time_ms()),
                 product_ids=product_ids,
                 status_types=[
                     TriggerOrderStatusType.WAITING_PRICE,
@@ -1216,8 +1241,11 @@ class NadoClient:
                 sdk_positions = self._extract_positions_from_sdk_info(info)
                 if sdk_positions:
                     return sdk_positions
-                logger.info(
-                    "SDK subaccount_info returned no parseable positions; trying REST (subaccount=%s)",
+                # Drop to REST silently — this fires every cycle for users on
+                # isolated-only products (no positions in the parent
+                # subaccount) and was flooding the logs.
+                logger.debug(
+                    "SDK subaccount_info: no positions in parent subaccount; trying REST (subaccount=%s)",
                     subaccount_hex[:22],
                 )
             except Exception as e:
@@ -1241,8 +1269,10 @@ class NadoClient:
             logger.warning("REST positions for subaccount failed: %s", e)
 
         if subaccount_info_succeeded:
-            logger.info(
-                "Subaccount info succeeded but zero positions parsed (subaccount=%s)",
+            # Expected for users with no positions in this subaccount. Demoted
+            # from INFO so the per-cycle DGRID/strategy logs are readable.
+            logger.debug(
+                "Subaccount info empty (no positions for %s)",
                 subaccount_hex[:22],
             )
 
@@ -1301,8 +1331,18 @@ class NadoClient:
 
         return merged
 
-    def verify_linked_signer(self, expected_signer_address: str = None) -> dict:
+    def verify_linked_signer(self, expected_signer_address: str = None, *, use_cache: bool = True) -> dict:
         expected = (expected_signer_address or self.address or "").lower()
+        cache_key = (self.network, str(self.subaccount_hex or ""), expected)
+        if use_cache and _LINKED_SIGNER_CACHE_TTL_SECONDS > 0:
+            cached = _linked_signer_cache.get(cache_key)
+            if cached and (time.time() - float(cached.get("ts", 0))) < _LINKED_SIGNER_CACHE_TTL_SECONDS:
+                # Only serve verified results from cache. Failures bypass so we
+                # immediately re-check if the user re-links / fixes the wallet.
+                payload = cached.get("payload") or {}
+                if payload.get("verified") and not payload.get("error"):
+                    return dict(payload)
+
         result = {
             "verified": False,
             "current_signer": None,
@@ -1322,6 +1362,8 @@ class NadoClient:
                     result["verified"] = current.lower() == expected[:42].lower()
                 logger.info("Linked signer check via SDK: current=%s expected=%s verified=%s",
                             current, expected, result["verified"])
+                if result["verified"]:
+                    _linked_signer_cache[cache_key] = {"ts": time.time(), "payload": dict(result)}
                 return result
             except Exception as e:
                 logger.warning("SDK get_linked_signer failed: %s", e)
@@ -1348,6 +1390,8 @@ class NadoClient:
             result["error"] = str(e)
             logger.warning("REST get_linked_signer failed: %s", e)
 
+        if result["verified"] and not result["error"]:
+            _linked_signer_cache[cache_key] = {"ts": time.time(), "payload": dict(result)}
         return result
 
     @staticmethod
@@ -1726,6 +1770,8 @@ class NadoClient:
                 price_x18 = self._align_x18_to_increment(price_x18, int(price_increment_x18))
 
             # Proactively enforce exchange minimum notional before submission.
+            pre_bump_size = float(size)
+            size_bumped = False
             if min_size_x18 and min_size_x18 > 0 and price_x18 > 0 and amount_x18 != 0:
                 min_notional_x36 = int(min_size_x18) * (10 ** 18)
                 current_notional_x36 = abs(int(amount_x18)) * int(price_x18)
@@ -1747,11 +1793,18 @@ class NadoClient:
                         )
                         amount_x18 = int(bumped_amount_x18)
                         size = abs(float(amount_x18) / 1e18)
+                        size_bumped = True
 
             isolated_margin_x6 = 0
             if isolated_only:
                 if isolated_margin is None:
                     isolated_margin = abs(float(size) * float(price))
+                elif size_bumped and pre_bump_size > 0:
+                    # Caller computed isolated_margin against the pre-bump size.
+                    # Scale it up by the same ratio so margin_x6 still covers the
+                    # bumped notional — otherwise the venue rejects with
+                    # error_code 2006 ("account health below threshold").
+                    isolated_margin = float(isolated_margin) * (float(size) / pre_bump_size)
                 isolated_margin_x6 = max(0, self._to_x6_int(float(isolated_margin)))
 
             order = OrderParams(

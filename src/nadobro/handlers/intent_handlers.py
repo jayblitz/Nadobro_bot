@@ -37,6 +37,13 @@ from src.nadobro.services.nado_tooling_service import (
     preview_twap_plan,
     tooling_enabled,
 )
+from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.text_trade_pending import (
+    clear_text_trade_pending,
+    load_text_trade_pending,
+    persist_text_close_all_pending,
+    persist_text_trade_pending,
+)
 
 PENDING_TEXT_TRADE_KEY = "pending_text_trade"
 logger = logging.getLogger(__name__)
@@ -151,12 +158,17 @@ def _execute_trade_payload(telegram_id: int, payload: dict, **kwargs) -> dict:
 async def handle_pending_text_trade_confirmation(update, context: CallbackContext, telegram_id: int, text: str) -> bool:
     pending = context.user_data.get(PENDING_TEXT_TRADE_KEY)
     if not pending:
+        pending = await run_blocking(load_text_trade_pending, int(telegram_id))
+        if pending:
+            context.user_data[PENDING_TEXT_TRADE_KEY] = pending
+    if not pending:
         return False
 
     lang = get_active_language()
     normalized = text.strip().lower()
     if normalized in ("cancel", "no", "n", "abort"):
         context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
+        await run_blocking(clear_text_trade_pending, int(telegram_id))
         await _reply_md_safe(update.message, localize_text("❌ Trade cancelled\\.", lang))
         return True
 
@@ -167,7 +179,6 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
         )
         return True
 
-    context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
     if is_trading_paused():
         await _reply_md_safe(update.message, localize_text("⏸ Trading is temporarily paused by admin\\.", lang))
         return True
@@ -176,6 +187,8 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
         await _reply_md_safe(update.message, f"⚠️ {escape_md(wallet_msg)}")
         return True
 
+    context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
+    await run_blocking(clear_text_trade_pending, int(telegram_id))
     from src.nadobro.handlers.messages import execute_action_directly
     await execute_action_directly(update, context, telegram_id, {"type": "execute_trade", "payload": pending})
     return True
@@ -318,6 +331,10 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
         return True
 
     context.user_data[PENDING_TEXT_TRADE_KEY] = payload
+    try:
+        await run_blocking(persist_text_trade_pending, int(telegram_id), payload)
+    except Exception:
+        logger.exception("Failed to persist pending text trade for uid=%s", telegram_id)
     confirm_prompt = localize_text("Type `confirm` to execute or `cancel` to discard\\.", lang)
     await _reply_md_safe(update.message, f"{preview}\n\n{confirm_prompt}")
     return True
@@ -361,6 +378,10 @@ async def handle_position_management_intent(update, context: CallbackContext, te
             return True
         context.user_data["pending_text_close_all"] = True
         try:
+            await run_blocking(persist_text_close_all_pending, int(telegram_id))
+        except Exception:
+            logger.exception("Failed to persist pending text close_all for uid=%s", telegram_id)
+        try:
             await update.message.reply_text(
                 fmt_close_all_confirm() + "\n\nType `confirm` to execute or `cancel` to discard\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
@@ -376,8 +397,6 @@ async def handle_position_management_intent(update, context: CallbackContext, te
     if is_trading_paused():
         await _reply_md_safe(update.message, localize_text("⏸ Trading is temporarily paused by admin\\.", lang))
         return True
-
-    from src.nadobro.services.async_utils import run_blocking
 
     if action == "set_tp_sl":
         tp = intent.get("tp_price")
