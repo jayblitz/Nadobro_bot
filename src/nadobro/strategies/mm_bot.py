@@ -24,6 +24,7 @@ from src.nadobro.services.rate_limit import (
 from src.nadobro.strategies import _regime as _dgrid_regime
 from src.nadobro.strategies import _layer_sizing as _dgrid_layer_sizing
 from src.nadobro.strategies import _position_manager as _dgrid_pm
+from src.nadobro.strategies import _quote_gate
 
 try:
     from src.nadobro.services.feature_flags import dgrid_intelligence_enabled as _dgi_env_default
@@ -1714,6 +1715,42 @@ def run_cycle(
         state["grid_reset_side"] = soft_reset_side or ""
         state["grid_reset_started_ts"] = float(reset_started or 0.0)
 
+    # Phase 3: regime-aware quote gate. Veto entire-cycle quoting in regimes
+    # where the math is structurally negative (REGIME_RANGE_TIGHT with high
+    # confidence), cap levels + widen spread in CHOP_HIGH_VOL, and skip the
+    # adverse side in confirmed trends. Existing PM rules continue to manage
+    # inventory either way. Quote-gate is a no-op when intelligence is off.
+    quote_gate_decision = _quote_gate.QuoteGateDecision()
+    if _intel_active:
+        quote_gate_decision = _quote_gate.evaluate_quote_gate(
+            strategy=strategy,
+            regime_info=regime_info,
+            state=state,
+        )
+    if quote_gate_decision.active:
+        state["mm_quote_gate"] = quote_gate_decision.to_dict()
+        if quote_gate_decision.spread_widen_mult > 1.0:
+            dynamic_spread_bp = dynamic_spread_bp * float(
+                quote_gate_decision.spread_widen_mult
+            )
+        if quote_gate_decision.skip_buy and quote_gate_decision.skip_sell:
+            logger.info(
+                "Quote gate veto (%s): %s — skipping new quotes this cycle",
+                strategy, quote_gate_decision.reason,
+            )
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": orders_cancelled,
+                "action": "quote_gate_veto",
+                "reason": quote_gate_decision.reason,
+                "spread_bp": dynamic_spread_bp,
+                "reference_price": reference_price,
+                "quote_gate": quote_gate_decision.to_dict(),
+            }
+    else:
+        state.pop("mm_quote_gate", None)
+
     # Pass the per-side entry VWAPs so the soft-reset unwind never prints a
     # guaranteed-loss exit (see _compute_grid_prices for the floor logic).
     # Mid Mode runs without grid VWAP bookkeeping, so these stay None.
@@ -1739,6 +1776,8 @@ def run_cycle(
         exit_floor_sell_vwap=exit_floor_sell_vwap,
         min_exit_edge_bp=soft_reset_exit_edge_bp,
     )
+    if quote_gate_decision.active:
+        grid_orders = _quote_gate.apply_gate_to_orders(quote_gate_decision, grid_orders)
     if session_cap_notional > 0:
         available_session = max(0.0, session_cap_notional - session_done)
     else:

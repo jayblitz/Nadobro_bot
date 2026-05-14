@@ -56,6 +56,12 @@ def _vol_intelligence_on(state: dict) -> bool:
 _VOL_REGIME_ADVERSE_CONFIDENCE = 0.65
 _VOL_REGIME_CHOP_CONFIDENCE = 0.50
 _VOL_REGIME_CHOP_NOTIONAL_MULT = 0.5
+# Phase 3: tight-range veto for Volume Bot. The bot's edge requires a
+# minimum directional move per trade; in REGIME_RANGE_TIGHT realized vol
+# is below the round-trip fee cost so the math is structurally negative
+# regardless of which direction we enter. Veto entries with high
+# regime confidence.
+_VOL_REGIME_TIGHT_CONFIDENCE = 0.60
 
 
 def _vol_regime_gate(
@@ -117,6 +123,20 @@ def _vol_regime_gate(
     adverse_conf = float(state.get("vol_regime_adverse_confidence") or _VOL_REGIME_ADVERSE_CONFIDENCE)
     chop_conf = float(state.get("vol_regime_chop_confidence") or _VOL_REGIME_CHOP_CONFIDENCE)
     chop_mult = float(state.get("vol_regime_chop_notional_mult") or _VOL_REGIME_CHOP_NOTIONAL_MULT)
+    tight_conf = float(state.get("vol_regime_tight_confidence") or _VOL_REGIME_TIGHT_CONFIDENCE)
+
+    # Tight-range veto: no edge available, skip entry entirely.
+    if regime == _vol_regime.REGIME_RANGE_TIGHT and confidence >= tight_conf:
+        blocked = dict(signal)
+        blocked["ok"] = False
+        blocked["reason"] = "regime_range_tight_no_edge"
+        blocked["regime"] = regime
+        blocked["regime_confidence"] = confidence
+        state["vol_regime_tight_veto_count"] = int(state.get("vol_regime_tight_veto_count") or 0) + 1
+        logger.info(
+            "Volume regime veto: tight range, no edge (conf=%.2f)", confidence,
+        )
+        return blocked, 1.0
 
     # Adverse-direction veto
     if confidence >= adverse_conf:
