@@ -80,6 +80,10 @@ async def _ensure_tables() -> None:
             ADD COLUMN IF NOT EXISTS photo_mime TEXT;
         """)
         await conn.execute("""
+            ALTER TABLE relay_sessions
+            ADD COLUMN IF NOT EXISTS last_polled_at TIMESTAMPTZ;
+        """)
+        await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_relay_events_session
             ON relay_events (session_id, cursor_id);
         """)

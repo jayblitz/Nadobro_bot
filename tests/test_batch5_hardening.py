@@ -65,6 +65,9 @@ def test_relay_poll_events_is_scoped_to_session(monkeypatch):
                 }
             ]
 
+        async def execute(self, sql, *params):
+            captured.setdefault("executed", []).append((sql, params))
+
     monkeypatch.setattr(event_store, "get_pool", lambda: _Pool(_Conn()))
 
     result = asyncio.run(event_store.poll_events(session_id="sess_a", cursor="10", limit=5))
@@ -72,6 +75,11 @@ def test_relay_poll_events_is_scoped_to_session(monkeypatch):
     assert result["events"][0]["session_id"] == "sess_a"
     assert "e.session_id = $1" in captured["sql"]
     assert captured["params"] == ("sess_a", 10, 5)
+    # Polling records liveness so cleanup_idle_sessions does not expire a session still in use.
+    assert any(
+        "last_polled_at = now()" in sql and params == ("sess_a",)
+        for sql, params in captured.get("executed", [])
+    )
 
 
 def test_points_relay_poll_uses_session_scoped_cursor(monkeypatch):
@@ -260,6 +268,78 @@ def test_parse_lowiq_points_reply_no_infer_zero_from_no_trades_phrase():
         )
         is None
     )
+
+
+def test_points_refresh_timeout_rearms_while_heartbeat_keeps_request_fresh(monkeypatch):
+    """LOWIQPTS takes 20+ min per step; the poll heartbeat keeps req['ts'] fresh, so the
+    timeout job must re-arm instead of dropping a still-live pending request."""
+    from src.nadobro.services import points_service
+
+    rescheduled: list[str] = []
+    monkeypatch.setattr(
+        points_service,
+        "_schedule_timeout",
+        lambda app, req_id: rescheduled.append(req_id),
+    )
+
+    req_row = {
+        "req_id": "req_live",
+        "chat_id": 42,
+        "telegram_id": 7,
+        "wallet": ("0x" + "ab" * 20),
+        "ts": time.time(),  # heartbeat touched it this cycle
+        "relay_session_id": "sess_live",
+    }
+    bot_data = {
+        points_service._PENDING_QUEUE_KEY: [req_row],
+        points_service._ACTIVE_BY_CHAT_KEY: {42: "req_live"},
+    }
+    send_mock = AsyncMock()
+    context = SimpleNamespace(
+        job=SimpleNamespace(data={"req_id": "req_live"}),
+        application=SimpleNamespace(bot_data=bot_data),
+        bot=SimpleNamespace(send_message=send_mock),
+    )
+
+    asyncio.run(points_service._on_points_refresh_timeout(context))
+
+    assert rescheduled == ["req_live"]
+    assert req_row in bot_data[points_service._PENDING_QUEUE_KEY]
+    assert send_mock.await_count == 0
+
+
+def test_points_refresh_timeout_drops_request_when_genuinely_stale(monkeypatch):
+    """No heartbeat for the full window: the request is expired and the user is notified."""
+    from src.nadobro.services import points_service
+
+    monkeypatch.setattr(points_service, "_schedule_timeout", lambda *a, **k: None)
+    close_mock = AsyncMock()
+    monkeypatch.setattr(points_service, "relay_close_session", close_mock)
+
+    req_row = {
+        "req_id": "req_stale",
+        "chat_id": 42,
+        "telegram_id": 7,
+        "wallet": ("0x" + "cd" * 20),
+        "ts": time.time() - points_service._POINTS_REPLY_TIMEOUT_SECONDS - 60,
+        "relay_session_id": "sess_stale",
+    }
+    bot_data = {
+        points_service._PENDING_QUEUE_KEY: [req_row],
+        points_service._ACTIVE_BY_CHAT_KEY: {42: "req_stale"},
+    }
+    send_mock = AsyncMock()
+    context = SimpleNamespace(
+        job=SimpleNamespace(data={"req_id": "req_stale"}),
+        application=SimpleNamespace(bot_data=bot_data),
+        bot=SimpleNamespace(send_message=send_mock),
+    )
+
+    asyncio.run(points_service._on_points_refresh_timeout(context))
+
+    assert req_row not in bot_data[points_service._PENDING_QUEUE_KEY]
+    close_mock.assert_awaited_once()
+    assert send_mock.await_count == 1
 
 
 def test_parse_lowiq_points_reply_handles_markdown_volume_lines():
