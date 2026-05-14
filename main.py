@@ -225,6 +225,8 @@ def setup_bot():
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
+        # LOWIQPTS pending rows live in Application.bot_data (process memory). Run one primary bot
+        # instance per Telegram bot token, or Points refresh mid-flow breaks across workers.
         .concurrent_updates(True)
         .post_init(_post_init)
         .build()

@@ -51,6 +51,7 @@ from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.handlers.wallet_view import build_wallet_view_payload
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
+    get_active_pending_request,
     get_points_dashboard,
     request_points_refresh,
     set_pending_banner_message,
@@ -449,6 +450,25 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
                     )
                 except Exception:
                     pass
+            return
+
+    if get_active_pending_request(context.application.bot_data, update.effective_chat.id):
+        relay_result = await relay_user_reply_to_lowiqpts(context, update.effective_chat.id, text)
+        if relay_result.get("handled"):
+            if relay_result.get("cancelled"):
+                await _reply_loc(
+                    update.message,
+                    "✅ Points request closed\\. Tap *🔄 Refresh* to start again\\.",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=points_scope_kb(),
+                )
+            elif not relay_result.get("ok", False):
+                await _reply_loc(
+                    update.message,
+                    escape_md(relay_result.get("error", "Could not relay your reply right now.")),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=points_scope_kb(),
+                )
             return
 
     # Strategy Lab / Bro FAQ / support-question text beats trade-card numerics, LOWIQPTS relay,
