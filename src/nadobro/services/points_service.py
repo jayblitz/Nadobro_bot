@@ -17,6 +17,8 @@ from src.nadobro.services.lowiq_relay_client import (
     send_user_reply as relay_send_user_reply,
     start_session as relay_start_session,
 )
+from src.nadobro.models.database import get_bot_state, set_bot_state
+from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.user_service import get_user
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,9 @@ _PENDING_QUEUE_KEY = "lowiqpts_pending_queue"
 _PENDING_BY_WALLET_KEY = "lowiqpts_pending_by_wallet"
 _ACTIVE_BY_CHAT_KEY = "lowiqpts_active_by_chat"
 _RELAY_CURSOR_KEY = "lowiqpts_relay_cursor"
+# bot_data is process memory; persist the pending queue + cursors here so a bot
+# restart mid-refresh can resume instead of silently dropping the user's request.
+_RELAY_STATE_KEY = "lowiqpts_relay_state"
 
 _WALLET_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 # Mid-flow LOWIQPTS prompts often embed Points:/Volume: previews; never treat those as terminal.
@@ -245,6 +250,114 @@ def _schedule_timeout(application, req_id: str) -> None:
     )
 
 
+def _serialize_relay_state(bot_data: dict) -> dict:
+    queue, _ = _pending_maps(bot_data)
+    cursors: dict[str, str] = {}
+    prefix = _RELAY_CURSOR_KEY + ":"
+    for key, value in bot_data.items():
+        if isinstance(key, str) and key.startswith(prefix) and value:
+            cursors[key[len(prefix):]] = str(value)
+    return {"queue": [dict(req) for req in queue], "cursors": cursors}
+
+
+def _write_relay_state_sync(state: dict) -> None:
+    try:
+        set_bot_state(_RELAY_STATE_KEY, state)
+    except Exception:
+        logger.warning("Failed to persist LOWIQPTS relay state", exc_info=True)
+
+
+async def _persist_relay_state(bot_data: dict) -> None:
+    """Mirror the in-memory pending queue to bot_state so a restart can resume mid-flow."""
+    # Serialize on the event loop (no awaits here) so we never iterate bot_data
+    # while another coroutine mutates it; hand only the DB write to a worker thread.
+    state = _serialize_relay_state(bot_data)
+    await run_blocking(_write_relay_state_sync, state)
+
+
+def _drop_relay_cursor(bot_data: dict, session_id: str) -> None:
+    sid = str(session_id or "").strip()
+    if sid:
+        bot_data.pop(f"{_RELAY_CURSOR_KEY}:{sid}", None)
+
+
+def rehydrate_lowiqpts_pending_state(application) -> None:
+    """Restore the pending LOWIQPTS queue + relay cursors after a process restart.
+
+    bot_data is process memory: without this, a deploy or crash mid-refresh silently
+    drops the user's pending request, and their next "0"/"Yes" falls through to chat.
+    """
+    bot_data = getattr(application, "bot_data", None)
+    if bot_data is None:
+        return
+    try:
+        state = get_bot_state(_RELAY_STATE_KEY)
+    except Exception:
+        logger.warning("Failed to load persisted LOWIQPTS relay state", exc_info=True)
+        return
+    if not isinstance(state, dict):
+        return
+
+    raw_queue = state.get("queue")
+    cursors = state.get("cursors")
+    queue, by_wallet = _pending_maps(bot_data)
+    queue.clear()
+    by_wallet.clear()
+    active = _active_map(bot_data)
+    active.clear()
+
+    now = time.time()
+    restored = 0
+    if isinstance(raw_queue, list):
+        for raw in raw_queue:
+            if not isinstance(raw, dict):
+                continue
+            req_id = str(raw.get("req_id", "")).strip()
+            session_id = str(raw.get("relay_session_id", "")).strip()
+            chat_id = raw.get("chat_id")
+            # No relay session => the req was mid-start when we crashed: unrecoverable.
+            if not req_id or not session_id or chat_id is None:
+                continue
+            req = dict(raw)
+            # Grace period: the restart was not the user's fault — do not let prune or
+            # the timeout job immediately drop a flow that was healthy before the bounce.
+            req["ts"] = now
+            queue.append(req)
+            wallet = str(req.get("wallet", "")).lower()
+            if wallet:
+                by_wallet.setdefault(wallet, []).append(req)
+            restored += 1
+
+    # Rebuild active-by-chat as newest req per chat; get_active_pending_request self-heals.
+    newest_by_chat: dict[int, dict] = {}
+    for req in queue:
+        try:
+            cid = int(req.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+        current = newest_by_chat.get(cid)
+        if current is None or float(req.get("ts", 0)) >= float(current.get("ts", 0)):
+            newest_by_chat[cid] = req
+    for cid, req in newest_by_chat.items():
+        active[cid] = str(req.get("req_id", ""))
+
+    if isinstance(cursors, dict):
+        live_sessions = {str(req.get("relay_session_id", "")).strip() for req in queue}
+        for sid, cursor in cursors.items():
+            sid = str(sid).strip()
+            # Only restore cursors for sessions we are actually resuming, so a stale
+            # cursor cannot shadow a fresh session and replay old events.
+            if sid and cursor and sid in live_sessions:
+                bot_data[f"{_RELAY_CURSOR_KEY}:{sid}"] = str(cursor)
+
+    # Re-arm the timeout job for each rehydrated flow so it stays bounded.
+    for req in queue:
+        _schedule_timeout(application, str(req.get("req_id", "")))
+
+    if restored:
+        logger.info("Rehydrated %d pending LOWIQPTS request(s) after restart", restored)
+
+
 def _extract_session_id(payload: dict) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -367,6 +480,15 @@ def _extract_events_response(payload: dict) -> tuple[list[dict], Optional[str]]:
     if not next_cursor:
         next_cursor = payload.get("cursor")
     return [e for e in events if isinstance(e, dict)], (str(next_cursor) if next_cursor else None)
+
+
+def _extract_session_status(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    status = payload.get("session_status")
+    if not status and isinstance(payload.get("data"), dict):
+        status = payload["data"].get("session_status")
+    return str(status or "").strip().lower()
 
 
 def _claim_pending_for_event(bot_data: dict, session_id: str, text: str) -> Optional[dict]:
@@ -500,6 +622,7 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
             await relay_close_session(session_id=sid, reason="superseded_by_refresh")
         except Exception:
             logger.debug("Could not close superseded LOWIQPTS session %s", sid, exc_info=True)
+        _drop_relay_cursor(bot_data, sid)
 
     queue, by_wallet = _pending_maps(bot_data)
     req_id = secrets.token_urlsafe(12)
@@ -524,11 +647,13 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
         )
     except Exception as e:
         _remove_pending_req(bot_data, req)
+        await _persist_relay_state(bot_data)
         logger.warning("Failed to start lowiq relay session: %s", e)
         return {"ok": False, "error": "❌ Could not reach LOWIQPTS relay. Try again shortly."}
 
     if not relay_resp.get("ok"):
         _remove_pending_req(bot_data, req)
+        await _persist_relay_state(bot_data)
         err = str(relay_resp.get("error") or "")
         friendly = _friendly_lowiqpts_relay_failure(err, for_refresh=True)
         if friendly:
@@ -539,11 +664,13 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
     session_id = _extract_session_id(relay_resp)
     if not session_id:
         _remove_pending_req(bot_data, req)
+        await _persist_relay_state(bot_data)
         logger.warning("relay_start_session missing session_id: %s", relay_resp)
         return {"ok": False, "error": "❌ Could not start LOWIQPTS session. Try again shortly."}
 
     req["relay_session_id"] = session_id
     _schedule_timeout(context.application, req_id)
+    await _persist_relay_state(bot_data)
     return {
         "ok": True,
         "req_id": req_id,
@@ -595,6 +722,8 @@ async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict
         if session_id:
             await relay_close_session(session_id=session_id, reason="cancelled_by_user")
         complete_pending_request(context.application.bot_data, req)
+        _drop_relay_cursor(context.application.bot_data, session_id)
+        await _persist_relay_state(context.application.bot_data)
         return {"ok": True, "handled": True, "cancelled": True}
 
     session_id = str(req.get("relay_session_id", "")).strip()
@@ -618,6 +747,7 @@ async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict
 
     _touch_pending_request(req)
     _schedule_timeout(context.application, str(req.get("req_id", "")))
+    await _persist_relay_state(context.application.bot_data)
     return {"ok": True, "handled": True}
 
 
@@ -665,6 +795,7 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
         relay_sid = str(req.get("relay_session_id", "")).strip()
         if relay_sid:
             await relay_close_session(session_id=relay_sid, reason="completed")
+        _drop_relay_cursor(bot_data, relay_sid)
         return
 
     if summary_block:
@@ -699,6 +830,7 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     relay_sid = str(req.get("relay_session_id", "")).strip()
     if relay_sid:
         await relay_close_session(session_id=relay_sid, reason="completed")
+    _drop_relay_cursor(bot_data, relay_sid)
 
 
 async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: int | str) -> dict:
@@ -762,8 +894,42 @@ async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: in
             }
     _touch_pending_request(req)
     _schedule_timeout(context.application, str(req.get("req_id", "")))
+    await _persist_relay_state(context.application.bot_data)
     relay_result["choice"] = choice
     return relay_result
+
+
+async def _finalize_dead_session(bot_app, bot_data: dict, session_id: str, status: str) -> None:
+    """Relay reports the session is no longer active — stop polling it and tell the user.
+
+    Without this the bot keeps polling an expired/closed/failed relay session forever
+    (the heartbeat keeps re-arming the timeout), and the user's flow hangs silently.
+    """
+    queue, _ = _pending_maps(bot_data)
+    affected = [
+        r for r in queue
+        if str(r.get("relay_session_id", "")).strip() == str(session_id)
+    ]
+    _drop_relay_cursor(bot_data, session_id)
+    if not affected:
+        return
+    logger.info(
+        "LOWIQPTS session %s no longer active (status=%s); finalizing %d request(s)",
+        session_id, status, len(affected),
+    )
+    for req in affected:
+        complete_pending_request(bot_data, req)
+        try:
+            await bot_app.bot.send_message(
+                chat_id=int(req.get("chat_id")),
+                text=(
+                    "⚠️ Your points refresh session ended before completing.\n"
+                    "Tap 🏆 Refresh points to try again."
+                ),
+                reply_markup=points_scope_kb(),
+            )
+        except Exception as e:
+            logger.warning("Failed to deliver LOWIQPTS session-ended notice: %s", e)
 
 
 async def poll_lowiqpts_relay_events(bot_app) -> None:
@@ -803,6 +969,19 @@ async def poll_lowiqpts_relay_events(bot_app) -> None:
             except Exception:
                 logger.warning("Failed to process lowiq relay event", exc_info=True)
 
+        # Reconcile liveness: a relay session the bot is still polling can be
+        # expired/closed/failed underneath it (e.g. the bot was down past the
+        # relay idle window). Stop polling it and notify the user instead of
+        # hanging forever on a dead session.
+        status = _extract_session_status(response)
+        if status and status != "active":
+            try:
+                await _finalize_dead_session(bot_app, bot_data, session_id, status)
+            except Exception:
+                logger.warning("Failed to finalize dead LOWIQPTS session", exc_info=True)
+
+    await _persist_relay_state(bot_data)
+
 
 async def _on_points_refresh_timeout(context) -> None:
     data = getattr(context.job, "data", {}) or {}
@@ -830,6 +1009,8 @@ async def _on_points_refresh_timeout(context) -> None:
     session_id = str(req.get("relay_session_id", "")).strip()
     if session_id:
         await relay_close_session(session_id=session_id, reason="timeout")
+    _drop_relay_cursor(bot_data, session_id)
+    await _persist_relay_state(bot_data)
 
     banner_chat_id = req.get("banner_chat_id")
     banner_message_id = req.get("banner_message_id")
