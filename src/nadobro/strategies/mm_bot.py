@@ -25,6 +25,7 @@ from src.nadobro.strategies import _regime as _dgrid_regime
 from src.nadobro.strategies import _layer_sizing as _dgrid_layer_sizing
 from src.nadobro.strategies import _position_manager as _dgrid_pm
 from src.nadobro.strategies import _quote_gate
+from src.nadobro.strategies import _quote_economics
 
 try:
     from src.nadobro.services.feature_flags import dgrid_intelligence_enabled as _dgi_env_default
@@ -1751,6 +1752,53 @@ def run_cycle(
     else:
         state.pop("mm_quote_gate", None)
 
+    # Phase 4: per-quote expectancy filter. The regime gate above stops
+    # quoting when the *market state* is wrong; this stops quoting (or
+    # auto-widens) when the *spread itself* is too tight to clear
+    # fees + slippage + funding + a minimum required edge. Funding is
+    # read from the rgrid funding cache when present; absent that, the
+    # funding leg is 0 and the fee/slippage legs drive the decision.
+    if _intel_active:
+        _funding_bp_per_hour = 0.0
+        _funding_cached = state.get("rgrid_prev_funding_bp")
+        if _funding_cached is not None:
+            try:
+                # rgrid_prev_funding_bp is the funding rate in bp. Treat it
+                # as a per-hour magnitude (conservative — Nado funding
+                # accrues continuously); the expected-hold scaling in
+                # _quote_economics keeps this bounded.
+                _funding_bp_per_hour = abs(float(_funding_cached))
+            except (TypeError, ValueError):
+                _funding_bp_per_hour = 0.0
+        quote_econ = _quote_economics.evaluate_quote_economics(
+            strategy=strategy,
+            spread_bp=dynamic_spread_bp,
+            regime=str((regime_info or {}).get("regime") or ""),
+            funding_bp_per_hour=_funding_bp_per_hour,
+            max_spread_bp=max_spread_bp,
+            state=state,
+        )
+        state["mm_quote_economics"] = quote_econ.to_dict()
+        if quote_econ.widened and quote_econ.recommended_spread_bp > dynamic_spread_bp:
+            dynamic_spread_bp = float(quote_econ.recommended_spread_bp)
+        if not quote_econ.viable:
+            logger.info(
+                "Quote economics veto (%s): %s — skipping new quotes this cycle",
+                strategy, quote_econ.reason,
+            )
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": orders_cancelled,
+                "action": "quote_economics_skip",
+                "reason": quote_econ.reason,
+                "spread_bp": dynamic_spread_bp,
+                "reference_price": reference_price,
+                "quote_economics": quote_econ.to_dict(),
+            }
+    else:
+        state.pop("mm_quote_economics", None)
+
     # Pass the per-side entry VWAPs so the soft-reset unwind never prints a
     # guaranteed-loss exit (see _compute_grid_prices for the floor logic).
     # Mid Mode runs without grid VWAP bookkeeping, so these stay None.
@@ -2226,6 +2274,8 @@ def run_cycle(
             "pm_cooldown_active": pm_summary.get("cooldown_active"),
             "pm_size_dampener": pm_summary.get("size_dampener"),
             "layer_sizing_telemetry": (state.get("mm_layer_sizing_telemetry") or [])[-8:],
+            "quote_gate": state.get("mm_quote_gate"),
+            "quote_economics": state.get("mm_quote_economics"),
         })
         if _intel_strategy == "rgrid":
             result.update({
