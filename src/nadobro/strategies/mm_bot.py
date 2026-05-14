@@ -26,6 +26,7 @@ from src.nadobro.strategies import _layer_sizing as _dgrid_layer_sizing
 from src.nadobro.strategies import _position_manager as _dgrid_pm
 from src.nadobro.strategies import _quote_gate
 from src.nadobro.strategies import _quote_economics
+from src.nadobro.services import risk_budget as _risk_budget
 
 try:
     from src.nadobro.services.feature_flags import dgrid_intelligence_enabled as _dgi_env_default
@@ -67,6 +68,20 @@ def _strategy_intelligence_on(state: dict, strategy: str) -> bool:
     if legacy is not None:
         return bool(legacy)
     return bool(_dgi_env_default())
+
+
+def _risk_budget_on(state: dict, intel_active: bool) -> bool:
+    """Phase 5 risk budget flag.
+
+    Defaults to following the intelligence flag (the whole Phase 1-5 risk
+    suite is opt-in together), but ``state["risk_budget_enabled"]`` can
+    force it on or off independently.
+    """
+    explicit = state.get("risk_budget_enabled")
+    if explicit is not None and explicit != "":
+        return bool(explicit)
+    return bool(intel_active)
+
 
 STALE_DRIFT_MULTIPLIER = 2.0
 # Floor for the stale-quote drift threshold. Without this, ``spread_bp=0`` (or
@@ -1716,6 +1731,59 @@ def run_cycle(
         state["grid_reset_side"] = soft_reset_side or ""
         state["grid_reset_started_ts"] = float(reset_started or 0.0)
 
+    # Phase 5: per-product daily loss budget + cross-strategy exposure registry.
+    # Runs before the quote gates so the budget is the outermost rail. The PM
+    # (which already ran above) keeps managing existing inventory in every
+    # stop state — the budget only blocks *new* quoting. A hard stop also
+    # fires the PM cooldown so re-engagement after the cooldown window is
+    # gradual. The SL/TP protective block above has already had its chance.
+    if _risk_budget_on(state, _intel_active):
+        try:
+            # Use configured_strategy (the user-facing identity) — `strategy`
+            # is reassigned to the D-Grid sub-phase ("grid"/"rgrid") above.
+            _risk_budget.record_strategy_exposure(
+                telegram_id, network, str(product), configured_strategy,
+                net_units, inv_usd,
+            )
+            _risk_budget.record_pnl_snapshot(
+                telegram_id, network, str(product), grid_cycle_pnl,
+            )
+            _rb_soft, _rb_hard, _rb_cooldown = _risk_budget.resolve_budget_thresholds(
+                state, notional,
+            )
+            _rb_status = _risk_budget.check_budget(
+                telegram_id, network, str(product),
+                soft_stop_usd=_rb_soft, hard_stop_usd=_rb_hard,
+                cooldown_seconds=_rb_cooldown,
+            )
+        except Exception:
+            logger.exception(
+                "risk budget check failed for %s/%s — allowing cycle to proceed",
+                network, product,
+            )
+            _rb_status = {"status": "ok"}
+        state["mm_risk_budget"] = _rb_status
+        if _rb_status.get("status") in ("soft_stopped", "hard_stopped"):
+            if _rb_status["status"] == "hard_stopped" and _intel_active:
+                _dgrid_pm.trigger_cooldown(state, reason="risk_budget_hard_stop")
+            logger.info(
+                "Risk budget %s (%s/%s): %s — skipping new quotes this cycle",
+                _rb_status["status"], network, product,
+                _rb_status.get("reason", ""),
+            )
+            return {
+                "success": True,
+                "orders_placed": 0,
+                "orders_cancelled": orders_cancelled,
+                "action": f"risk_budget_{_rb_status['status']}",
+                "reason": _rb_status.get("reason", ""),
+                "spread_bp": dynamic_spread_bp,
+                "reference_price": reference_price,
+                "risk_budget": _rb_status,
+            }
+    else:
+        state.pop("mm_risk_budget", None)
+
     # Phase 3: regime-aware quote gate. Veto entire-cycle quoting in regimes
     # where the math is structurally negative (REGIME_RANGE_TIGHT with high
     # confidence), cap levels + widen spread in CHOP_HIGH_VOL, and skip the
@@ -2276,6 +2344,7 @@ def run_cycle(
             "layer_sizing_telemetry": (state.get("mm_layer_sizing_telemetry") or [])[-8:],
             "quote_gate": state.get("mm_quote_gate"),
             "quote_economics": state.get("mm_quote_economics"),
+            "risk_budget": state.get("mm_risk_budget"),
         })
         if _intel_strategy == "rgrid":
             result.update({
