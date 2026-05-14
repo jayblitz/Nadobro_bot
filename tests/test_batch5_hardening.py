@@ -206,6 +206,62 @@ def test_lowiqpts_option_prompt_does_not_complete_pending_when_parse_matches(mon
     assert send_mock.await_count == 1
 
 
+def test_lowiqpts_mid_prompt_metrics_without_options_or_hints_does_not_complete(monkeypatch):
+    """Extra-cost style prompts can embed Points:/Volume: without inline options; stay pending."""
+    from src.nadobro.services import points_service
+
+    completed: list[dict] = []
+    monkeypatch.setattr(points_service, "_schedule_timeout", lambda *a, **k: None)
+    monkeypatch.setattr(
+        points_service,
+        "complete_pending_request",
+        lambda bd, req: completed.append(req),
+    )
+
+    wallet = "0x" + "de" * 20
+    req_row = {
+        "req_id": "req_mid",
+        "chat_id": 42,
+        "telegram_id": 7,
+        "wallet": wallet.lower(),
+        "ts": time.time(),
+        "relay_session_id": "sess_mid",
+    }
+    bot_data = {
+        points_service._PENDING_QUEUE_KEY: [req_row],
+        points_service._ACTIVE_BY_CHAT_KEY: {42: "req_mid"},
+    }
+    send_mock = AsyncMock()
+    bot_app = SimpleNamespace(bot=SimpleNamespace(send_message=send_mock))
+    event = {
+        "session_id": "sess_mid",
+        "text": (
+            "🐝 Nado data is already fetched from API.\n"
+            "Points: 100\n"
+            "Volume: $50\n"
+            "Enter extra costs to include them in the report. If there were none, send 0."
+        ),
+        "options": [],
+    }
+
+    asyncio.run(points_service._process_relay_event(bot_app, bot_data, event))
+
+    assert completed == []
+    assert send_mock.await_count == 1
+
+
+def test_parse_lowiq_points_reply_no_infer_zero_from_no_trades_phrase():
+    """Loose 'no trades' copy must not produce a parsed snapshot (was prematurely completing relay)."""
+    from src.nadobro.services import points_service
+
+    assert (
+        points_service.parse_lowiq_points_reply(
+            "There were no trades last week.\nEnter extra costs.\nSend 0 if none."
+        )
+        is None
+    )
+
+
 def test_parse_lowiq_points_reply_handles_markdown_volume_lines():
     from src.nadobro.services import points_service
 

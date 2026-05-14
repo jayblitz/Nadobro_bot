@@ -84,9 +84,9 @@ _ACTIVE_BY_CHAT_KEY = "lowiqpts_active_by_chat"
 _RELAY_CURSOR_KEY = "lowiqpts_relay_cursor"
 
 _WALLET_RE = re.compile(r"0x[a-fA-F0-9]{40}")
-_NO_POINTS_HINT_RE = re.compile(
-    r"(no\s+points|no\s+data|no\s+trades|nothing\s+found|not\s+found|0\s*points?)",
-    re.IGNORECASE,
+# Mid-flow LOWIQPTS prompts often embed Points:/Volume: previews; never treat those as terminal.
+_LOWIQPTS_INTERACTIVE_PROMPT_RE = re.compile(
+    r"(?i)(\bextra\s+costs?\b|\bsend\s+0\b|\balready\s+fetched\s+from\s+api\b|\benter\s+(your\s+)?extras?\b)",
 )
 
 
@@ -398,13 +398,8 @@ def parse_lowiq_points_reply(text: str) -> Optional[dict]:
         text,
     )
     explicit_fields = bool(points_match or volume_match or cpp_match)
-    if not explicit_fields and _NO_POINTS_HINT_RE.search(text):
-        return {
-            "points": 0.0,
-            "volume_usd": 0.0,
-            "cost_per_point": 0.0,
-            "no_activity": True,
-        }
+    # Do not infer "zero activity" from loose phrases like "no trades" — LOWIQPTS sends those in
+    # mid-flow prompts and completing pending here drops relay state before "0" / Yes replies.
     if not explicit_fields:
         return None
 
@@ -661,6 +656,11 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
         return
 
     if not parsed:
+        _schedule_timeout(bot_app, str(req.get("req_id", "")))
+        return
+
+    if _LOWIQPTS_INTERACTIVE_PROMPT_RE.search(text):
+        _touch_pending_request(req)
         _schedule_timeout(bot_app, str(req.get("req_id", "")))
         return
 

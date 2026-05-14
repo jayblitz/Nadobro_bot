@@ -1208,11 +1208,16 @@ async def _handle_points(query, data, telegram_id, context):
             option_index = -1
         relay_result = await relay_option_reply_to_lowiqpts(context, query.message.chat.id, option_index)
         if relay_result.get("ok"):
+            try:
+                await query.answer()
+            except BadRequest:
+                pass
             return
-        await context.bot.send_message(
-            chat_id=query.message.chat.id,
-            text=str(relay_result.get("error", "Could not send selection."))[:180],
-        )
+        err_text = str(relay_result.get("error") or "Could not send selection.")[:200]
+        try:
+            await query.answer(err_text, show_alert=True)
+        except BadRequest:
+            pass
         return
 
     if action == "refresh":

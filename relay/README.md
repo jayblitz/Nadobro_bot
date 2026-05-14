@@ -10,6 +10,12 @@ A FastAPI + Telethon relay that proxies DM conversations between Nadobro users a
 4. Nadobro polls `GET /events/poll` to receive those replies
 5. When done, Nadobro sends `POST /sessions/close`
 
+## Operational constraints
+
+- **Nadobro side:** LOWIQPTS pending refresh state is stored in in-memory `bot_data`. Use **one running bot process per Telegram bot token** (single Fly Machine or one webhook worker group with sticky routing). Multiple unrelated processes backing the same token will drop pending rows so replies like `0` or inline **Yes** fall through to other handlers.
+
+- **Relay side:** Incoming @lowiqpts messages are routed to the single most recently touched active session when several users refresh close together (one Telethon account talks to @lowiqpts). Heavy concurrent usage can interleave conversations.
+
 ## Prerequisites
 
 ### 1. Get Telegram API Credentials
