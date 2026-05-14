@@ -79,6 +79,13 @@ async def poll_events(session_id: str, cursor: Optional[str] = None, limit: int 
             """,
             str(session_id), after_cursor, limit,
         )
+        # The bot polls every active session continuously; that polling is a
+        # liveness signal. Record it so cleanup_idle_sessions does not expire a
+        # session that is still in use while LOWIQPTS takes minutes to reply.
+        await conn.execute(
+            "UPDATE relay_sessions SET last_polled_at = now() WHERE id = $1",
+            str(session_id),
+        )
 
     events = []
     next_cursor = None

@@ -816,6 +816,15 @@ async def _on_points_refresh_timeout(context) -> None:
         # Already matched by relay response.
         return
 
+    # poll_lowiqpts_relay_events refreshes req["ts"] every cycle while the bot is
+    # actively polling a live LOWIQPTS session. LOWIQPTS routinely takes 20+ minutes
+    # per step, so a quiet stretch is normal mid-flow — only expire when the request
+    # has gone genuinely stale (heartbeat stopped: scheduler down or session dropped).
+    last_activity = float(req.get("ts", 0) or 0)
+    if last_activity and (time.time() - last_activity) < _POINTS_REPLY_TIMEOUT_SECONDS:
+        _schedule_timeout(context.application, req_id)
+        return
+
     _remove_pending_req(bot_data, req)
     chat_id = int(req.get("chat_id"))
     session_id = str(req.get("relay_session_id", "")).strip()
