@@ -26,6 +26,7 @@ from src.nadobro.services.trade_service import (
     execute_spot_market_order,
 )
 from src.nadobro.services.user_service import get_user_readonly_client
+from src.nadobro.services import risk_budget as _risk_budget
 # --- Volume Bot intelligence (additive) ---
 # Light-touch upgrade: regime-aware pause + chop notional dampener. No PM,
 # no per-level sizing — Volume Bot's design intent is *volume generation*,
@@ -50,6 +51,18 @@ def _vol_intelligence_on(state: dict) -> bool:
     if legacy is not None:
         return bool(legacy)
     return bool(_vol_intel_env_default())
+
+
+def _risk_budget_on(state: dict) -> bool:
+    """Phase 5 risk budget flag for Volume Bot.
+
+    Defaults to following the Volume Bot intelligence flag, but
+    ``state["risk_budget_enabled"]`` can force it on or off independently.
+    """
+    explicit = state.get("risk_budget_enabled")
+    if explicit is not None and explicit != "":
+        return bool(explicit)
+    return bool(_vol_intelligence_on(state))
 
 
 # Tunable thresholds — exposed as state keys with these defaults.
@@ -716,6 +729,15 @@ def _run_volume_spot_cycle(
         volume_done += traded_notional
         session_pnl += cycle_pnl
         _record_volume_cycle_metrics(state, cycle_pnl)
+        # Phase 5: feed the realized round-turn PnL into the daily risk
+        # budget. Volume Bot fully realizes each cycle, so this is exact.
+        if _risk_budget_on(state):
+            try:
+                _risk_budget.record_realized_pnl(
+                    telegram_id, network, str(product), float(cycle_pnl or 0.0),
+                )
+            except Exception:
+                logger.exception("risk budget record_realized_pnl failed")
         state["volume_done_usd"] = round(volume_done, 4)
         state["volume_remaining_usd"] = round(max(0.0, target_volume - volume_done), 4)
         state["session_realized_pnl_usd"] = round(session_pnl, 6)
@@ -914,6 +936,41 @@ def _run_volume_spot_cycle(
         }
 
     # idle
+    # Phase 5: per-product daily loss budget (spot path). Block new spot
+    # entries when the day's budget is soft- or hard-stopped on this product.
+    if _risk_budget_on(state):
+        try:
+            _rb_soft, _rb_hard, _rb_cooldown = _risk_budget.resolve_budget_thresholds(
+                state, target_notional,
+            )
+            _rb_status = _risk_budget.check_budget(
+                telegram_id, network, str(product),
+                soft_stop_usd=_rb_soft, hard_stop_usd=_rb_hard,
+                cooldown_seconds=_rb_cooldown,
+            )
+        except Exception:
+            logger.exception(
+                "vol spot risk budget check failed for %s/%s — allowing entry",
+                network, product,
+            )
+            _rb_status = {"status": "ok"}
+        state["vol_risk_budget"] = _rb_status
+        if _rb_status.get("status") in ("soft_stopped", "hard_stopped"):
+            logger.info(
+                "Volume spot risk budget %s (%s/%s): %s — skipping entry",
+                _rb_status["status"], network, product,
+                _rb_status.get("reason", ""),
+            )
+            return {
+                "success": True,
+                "done": False,
+                "action": f"risk_budget_{_rb_status['status']}",
+                "detail": _rb_status.get("reason", ""),
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "risk_budget": _rb_status,
+            }
+
     if target_notional < MIN_NOTIONAL_USD:
         return {
             "success": False,
@@ -1456,6 +1513,15 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         volume_done += traded_notional
         session_pnl += cycle_pnl
         _record_volume_cycle_metrics(state, cycle_pnl)
+        # Phase 5: feed the realized round-turn PnL into the daily risk
+        # budget. Volume Bot fully realizes each cycle, so this is exact.
+        if _risk_budget_on(state):
+            try:
+                _risk_budget.record_realized_pnl(
+                    telegram_id, network, str(product), float(cycle_pnl or 0.0),
+                )
+            except Exception:
+                logger.exception("risk budget record_realized_pnl failed")
         state["volume_done_usd"] = round(volume_done, 4)
         state["volume_remaining_usd"] = round(max(0.0, target_volume - volume_done), 4)
         state["session_realized_pnl_usd"] = round(session_pnl, 6)
@@ -1657,6 +1723,46 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         }
 
     # phase == idle
+    # Phase 5: per-product daily loss budget. We're about to open a *new*
+    # position — if the day's budget is soft- or hard-stopped on this
+    # product, skip the entry. Existing positions (handled in the phases
+    # above) are unaffected; the budget only blocks new size.
+    if _risk_budget_on(state):
+        try:
+            _risk_budget.record_strategy_exposure(
+                telegram_id, network, str(product), "vol", 0.0, 0.0,
+            )
+            _rb_soft, _rb_hard, _rb_cooldown = _risk_budget.resolve_budget_thresholds(
+                state, target_notional,
+            )
+            _rb_status = _risk_budget.check_budget(
+                telegram_id, network, str(product),
+                soft_stop_usd=_rb_soft, hard_stop_usd=_rb_hard,
+                cooldown_seconds=_rb_cooldown,
+            )
+        except Exception:
+            logger.exception(
+                "vol risk budget check failed for %s/%s — allowing entry",
+                network, product,
+            )
+            _rb_status = {"status": "ok"}
+        state["vol_risk_budget"] = _rb_status
+        if _rb_status.get("status") in ("soft_stopped", "hard_stopped"):
+            logger.info(
+                "Volume risk budget %s (%s/%s): %s — skipping entry",
+                _rb_status["status"], network, product,
+                _rb_status.get("reason", ""),
+            )
+            return {
+                "success": True,
+                "done": False,
+                "action": f"risk_budget_{_rb_status['status']}",
+                "detail": _rb_status.get("reason", ""),
+                "orders_placed": 0,
+                "placed_notional_usd": 0.0,
+                "risk_budget": _rb_status,
+            }
+
     if target_notional < MIN_NOTIONAL_USD:
         return {
             "success": False,
