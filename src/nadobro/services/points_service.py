@@ -307,11 +307,23 @@ def rehydrate_lowiqpts_pending_state(application) -> None:
     except Exception:
         logger.warning("Failed to load persisted LOWIQPTS relay state", exc_info=True)
         return
+    # Always log so deploy/runtime verification is unambiguous: the presence of
+    # this line confirms the P0 rehydration code is actually running in this image.
+    if state is None:
+        logger.info("LOWIQPTS rehydration: no persisted state (bot_state empty)")
+        return
     if not isinstance(state, dict):
+        logger.info("LOWIQPTS rehydration: persisted state has unexpected type %s", type(state).__name__)
         return
 
     raw_queue = state.get("queue")
     cursors = state.get("cursors")
+    raw_queue_count = len(raw_queue) if isinstance(raw_queue, list) else 0
+    raw_cursor_count = len(cursors) if isinstance(cursors, dict) else 0
+    logger.info(
+        "LOWIQPTS rehydration: bot_state has queue=%d cursors=%d",
+        raw_queue_count, raw_cursor_count,
+    )
     queue, by_wallet = _pending_maps(bot_data)
     queue.clear()
     by_wallet.clear()
@@ -366,8 +378,10 @@ def rehydrate_lowiqpts_pending_state(application) -> None:
     for req in queue:
         _schedule_timeout(application, str(req.get("req_id", "")))
 
-    if restored:
-        logger.info("Rehydrated %d pending LOWIQPTS request(s) after restart", restored)
+    logger.info(
+        "LOWIQPTS rehydration: restored=%d skipped_no_session=%d",
+        restored, raw_queue_count - restored,
+    )
 
 
 def _extract_session_id(payload: dict) -> str:
@@ -683,6 +697,12 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
     req["relay_session_id"] = session_id
     _schedule_timeout(context.application, req_id)
     await _persist_relay_state(bot_data)
+    # Deploy/runtime verification: this line + the rehydration log together prove
+    # that persistence is reaching bot_state on every refresh click.
+    logger.info(
+        "LOWIQPTS refresh requested: req_id=%s chat_id=%d session_id=%s",
+        req_id, int(chat_id), session_id,
+    )
     return {
         "ok": True,
         "req_id": req_id,
