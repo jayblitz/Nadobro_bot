@@ -186,9 +186,26 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
     try:
         return await query.edit_message_text(localized, **kwargs)
     except BadRequest as e:
-        if "Message is not modified" in str(e):
+        msg = str(e)
+        if "Message is not modified" in msg:
             return
-        if "Can't parse entities" in str(e) and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
+        # Telegram refuses to edit_message_text when the source is a photo/media
+        # card with no text (e.g. the LOWIQPTS report image, the home photo card).
+        # Send a new message instead so navigation still works.
+        if (
+            "no text in the message to edit" in msg
+            or "message can't be edited" in msg.lower()
+            or "message to edit not found" in msg.lower()
+        ):
+            try:
+                return await query.message.reply_text(localized, **kwargs)
+            except BadRequest as e_send:
+                if "Can't parse entities" in str(e_send) and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
+                    fallback_kwargs = dict(kwargs)
+                    fallback_kwargs.pop("parse_mode", None)
+                    return await query.message.reply_text(plain_text_fallback(localized), **fallback_kwargs)
+                raise
+        if "Can't parse entities" in msg and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
             fallback_kwargs = dict(kwargs)
             fallback_kwargs.pop("parse_mode", None)
             try:
