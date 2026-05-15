@@ -354,6 +354,16 @@ def test_points_refresh_timeout_drops_request_when_genuinely_stale(monkeypatch):
     assert send_mock.await_count == 1
 
 
+def test_orphan_lowiqpts_reply_pattern_matches_bare_number_and_yes_no():
+    """Safety net classifier for messages that almost certainly wanted to reach the relay."""
+    from src.nadobro.services.points_service import looks_like_orphan_lowiqpts_reply
+
+    for s in ["0", " 0 ", "12", "0.5", "yes", "Yes", "YES", "no", "n", "y"]:
+        assert looks_like_orphan_lowiqpts_reply(s), f"expected match: {s!r}"
+    for s in ["", "hello", "0 not", "yesplease", "no thanks", "/start", "buy 100"]:
+        assert not looks_like_orphan_lowiqpts_reply(s), f"expected no match: {s!r}"
+
+
 def test_serialize_relay_state_captures_queue_and_cursors():
     from src.nadobro.services import points_service
 

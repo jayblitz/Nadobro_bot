@@ -93,6 +93,18 @@ _WALLET_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 _LOWIQPTS_INTERACTIVE_PROMPT_RE = re.compile(
     r"(?i)(\bextra\s+costs?\b|\bsend\s+0\b|\balready\s+fetched\s+from\s+api\b|\benter\s+(your\s+)?extras?\b)",
 )
+# Bare numbers ("0", "0.5") and yes/no are the typical replies LOWIQPTS expects.
+# When persistence/rehydration ever misses an edge case, these would otherwise fall
+# through the message handler chain into the AI chat — surface "session expired"
+# instead of dumping the user into Trading Bro.
+_LOWIQPTS_ORPHAN_REPLY_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?|yes|no|y|n)\s*$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_orphan_lowiqpts_reply(text: str) -> bool:
+    return bool(_LOWIQPTS_ORPHAN_REPLY_RE.match(text or ""))
 
 
 def _pending_maps(bot_data: dict) -> tuple[list[dict], dict[str, list[dict]]]:
