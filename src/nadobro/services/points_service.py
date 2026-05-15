@@ -762,19 +762,34 @@ async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict
     if not session_id:
         return {"ok": False, "handled": True, "error": "❌ LOWIQPTS relay session is missing."}
 
+    # Diagnostic: which session does the user's reply hit? Pair this with the
+    # earlier "LOWIQPTS refresh requested" line; if the session_ids differ, two
+    # bot processes / stale rehydration are in play. If they match, the relay
+    # closed the session out from under us.
+    logger.info(
+        "LOWIQPTS user-reply: req_id=%s chat=%d session=%s text=%r",
+        req.get("req_id"), chat_id, session_id, cleaned[:40],
+    )
+
     try:
         relay_resp = await _relay_with_retry(
             relay_send_user_reply, session_id=session_id, text=cleaned
         )
     except Exception as e:
-        logger.warning("Failed to relay user reply to lowiqpts relay: %s", e)
+        logger.warning(
+            "Failed to relay user reply to lowiqpts relay (session=%s): %s",
+            session_id, e,
+        )
         return {"ok": False, "handled": True, "error": "❌ Could not relay your reply to LOWIQPTS right now."}
 
     if not relay_resp.get("ok"):
         friendly = _friendly_lowiqpts_relay_failure(relay_resp.get("error"), for_refresh=False)
         if friendly:
             return {"ok": False, "handled": True, "error": friendly}
-        logger.warning("relay_send_user_reply logical failure: %s", relay_resp)
+        logger.warning(
+            "relay_send_user_reply logical failure (session=%s req_id=%s): %s",
+            session_id, req.get("req_id"), relay_resp,
+        )
         return {"ok": False, "handled": True, "error": "❌ Could not relay your reply to LOWIQPTS right now."}
 
     _touch_pending_request(req)
