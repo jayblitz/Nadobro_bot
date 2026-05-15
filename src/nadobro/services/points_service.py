@@ -798,6 +798,13 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
     telegram_id = int(req.get("telegram_id"))
     options = _extract_event_options(event)
     source_message_id = _extract_event_source_message_id(event)
+    # Diagnostic: visibility on every event the bot acts on, so when a req
+    # disappears mid-flow we can see exactly which event preceded its removal.
+    logger.info(
+        "LOWIQPTS event: req_id=%s session=%s text_len=%d options=%d photo=%s preview=%r",
+        req.get("req_id"), session_id, len(text or ""), len(options or []),
+        bool(photo_bytes), (text or "")[:80],
+    )
 
     if options:
         req["relay_options"] = [str(o).strip() for o in options if str(o).strip()]
@@ -823,8 +830,12 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
             )
         except Exception as e:
             logger.warning("LOWIQPTS relay: send_photo failed: %s", e)
-        complete_pending_request(bot_data, req)
         relay_sid = str(req.get("relay_session_id", "")).strip()
+        logger.info(
+            "LOWIQPTS req_id=%s completed via PHOTO (session=%s)",
+            req.get("req_id"), relay_sid,
+        )
+        complete_pending_request(bot_data, req)
         if relay_sid:
             await relay_close_session(session_id=relay_sid, reason="completed")
         _drop_relay_cursor(bot_data, relay_sid)
@@ -858,8 +869,12 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
 
     payload = build_dashboard_payload(parsed)
     save_points_snapshot(telegram_id, payload)
-    complete_pending_request(bot_data, req)
     relay_sid = str(req.get("relay_session_id", "")).strip()
+    logger.info(
+        "LOWIQPTS req_id=%s completed via PARSED REPORT (session=%s, points=%s volume=%s)",
+        req.get("req_id"), relay_sid, parsed.get("points"), parsed.get("volume_usd"),
+    )
+    complete_pending_request(bot_data, req)
     if relay_sid:
         await relay_close_session(session_id=relay_sid, reason="completed")
     _drop_relay_cursor(bot_data, relay_sid)
@@ -1036,9 +1051,13 @@ async def _on_points_refresh_timeout(context) -> None:
         _schedule_timeout(context.application, req_id)
         return
 
-    _remove_pending_req(bot_data, req)
     chat_id = int(req.get("chat_id"))
     session_id = str(req.get("relay_session_id", "")).strip()
+    logger.info(
+        "LOWIQPTS req_id=%s expired by timeout (session=%s, idle=%.1fs)",
+        req_id, session_id, time.time() - last_activity,
+    )
+    _remove_pending_req(bot_data, req)
     if session_id:
         await relay_close_session(session_id=session_id, reason="timeout")
     _drop_relay_cursor(bot_data, session_id)
