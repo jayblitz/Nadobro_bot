@@ -53,6 +53,7 @@ from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
     get_active_pending_request,
     get_points_dashboard,
+    looks_like_orphan_lowiqpts_reply,
     request_points_refresh,
     set_pending_banner_message,
     relay_user_reply_to_lowiqpts,
@@ -144,6 +145,7 @@ _STATE_REQUIRED_ACTIONS = {
     "trade_flow:tpsl:done": "tpsl_edit",
     "trade_flow:confirm": "confirm",
 }
+
 
 
 def _is_contextual_button(callback_data: str, context) -> bool:
@@ -548,6 +550,19 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
         return
 
     if await _handle_managed_agent_message(update, context, telegram_id, username, text):
+        return
+
+    # Safety net: if every other handler refused the message and it looks like a
+    # LOWIQPTS reply (bare number / yes / no), the user almost certainly intended
+    # it for a points refresh whose pending state was lost. Surface that instead
+    # of dumping the user into the AI chat handler.
+    if looks_like_orphan_lowiqpts_reply(text):
+        await _reply_loc(
+            update.message,
+            "⚠️ No points refresh in progress\\. Tap *🏆 Refresh points* to start a new one\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=points_scope_kb(),
+        )
         return
 
     await _handle_nado_question(update, context, text)
