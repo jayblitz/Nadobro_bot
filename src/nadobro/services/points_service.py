@@ -881,12 +881,39 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
 
 
 async def relay_option_reply_to_lowiqpts(context, chat_id: int, option_index: int | str) -> dict:
-    req = get_active_pending_request(context.application.bot_data, chat_id)
+    bot_data = context.application.bot_data
+    req = get_active_pending_request(bot_data, chat_id)
     if not req:
+        # Diagnostic: dump every queued req so we can see WHY the active lookup
+        # missed the one with relay_options set.
+        queue, _ = _pending_maps(bot_data)
+        active = _active_map(bot_data)
+        logger.info(
+            "LOWIQPTS option-click MISS (no active req): chat=%d idx=%s "
+            "active_map=%r queue_size=%d queue_chat_ids=%r queue_req_ids=%r "
+            "queue_with_options=%r",
+            chat_id, option_index, dict(active), len(queue),
+            [r.get("chat_id") for r in queue],
+            [r.get("req_id") for r in queue],
+            [(r.get("req_id"), r.get("relay_options")) for r in queue if r.get("relay_options")],
+        )
         return {"ok": False, "error": "No active LOWIQPTS request."}
     options = req.get("relay_options")
     if not isinstance(options, list) or not options:
+        # Diagnostic: req exists but has no relay_options — show its full state
+        # so we can see which fields ARE set and pinpoint why options went missing.
+        logger.info(
+            "LOWIQPTS option-click MISS (no relay_options on req): chat=%d idx=%s "
+            "req_id=%s session=%s ts_age=%.1fs req_keys=%r relay_options=%r",
+            chat_id, option_index, req.get("req_id"), req.get("relay_session_id"),
+            time.time() - float(req.get("ts", 0) or 0),
+            sorted(req.keys()), options,
+        )
         return {"ok": False, "error": "No selectable options available right now."}
+    logger.info(
+        "LOWIQPTS option-click HIT: chat=%d idx=%s req_id=%s options=%r",
+        chat_id, option_index, req.get("req_id"), options,
+    )
     try:
         idx = int(option_index)
     except (TypeError, ValueError):
