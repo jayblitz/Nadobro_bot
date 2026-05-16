@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for nadobro-bot on 2026-05-16T08:35:50Z
+# fly.toml app configuration file generated for nadobro-bot on 2026-05-16T08:40:08Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -38,10 +38,10 @@ kill_timeout = 60
 
 [[vm]]
   memory = '4gb'
-  cpu_kind = 'performance'
-  cpus = 2
+  cpu_kind = 'shared'
+  cpus = 8
   memory_mb = 4096
-  size = 'performance-cpu-2x'
+  size = 'shared-cpu-8x'
 
 [[http_service.checks]]
   interval = "15s"
