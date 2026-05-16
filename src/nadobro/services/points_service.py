@@ -84,9 +84,9 @@ _ACTIVE_BY_CHAT_KEY = "lowiqpts_active_by_chat"
 _RELAY_CURSOR_KEY = "lowiqpts_relay_cursor"
 
 _WALLET_RE = re.compile(r"0x[a-fA-F0-9]{40}")
-# Mid-flow LOWIQPTS prompts often embed Points:/Volume: previews; never treat those as terminal.
-_LOWIQPTS_INTERACTIVE_PROMPT_RE = re.compile(
-    r"(?i)(\bextra\s+costs?\b|\bsend\s+0\b|\balready\s+fetched\s+from\s+api\b|\benter\s+(your\s+)?extras?\b)",
+_NO_POINTS_HINT_RE = re.compile(
+    r"(no\s+points|no\s+data|no\s+trades|nothing\s+found|not\s+found|0\s*points?)",
+    re.IGNORECASE,
 )
 
 
@@ -398,8 +398,13 @@ def parse_lowiq_points_reply(text: str) -> Optional[dict]:
         text,
     )
     explicit_fields = bool(points_match or volume_match or cpp_match)
-    # Do not infer "zero activity" from loose phrases like "no trades" — LOWIQPTS sends those in
-    # mid-flow prompts and completing pending here drops relay state before "0" / Yes replies.
+    if not explicit_fields and _NO_POINTS_HINT_RE.search(text):
+        return {
+            "points": 0.0,
+            "volume_usd": 0.0,
+            "cost_per_point": 0.0,
+            "no_activity": True,
+        }
     if not explicit_fields:
         return None
 
@@ -544,36 +549,7 @@ async def request_points_refresh(context, telegram_id: int, chat_id: int) -> dic
 
     req["relay_session_id"] = session_id
     _schedule_timeout(context.application, req_id)
-    return {
-        "ok": True,
-        "req_id": req_id,
-        "timeout_seconds": _POINTS_REPLY_TIMEOUT_SECONDS,
-    }
-
-
-def set_pending_banner_message(
-    bot_data: dict,
-    req_id: str,
-    chat_id: int | None,
-    message_id: int | None,
-) -> None:
-    """Anchor the timeout banner to the user's original "Refresh requested" card.
-
-    Without this, ``_on_points_refresh_timeout`` posts a fresh chat message 15
-    minutes later — which surfaces inside whatever flow the user has since
-    moved to (strategy work, trade flow, etc.) and looks like the bot just
-    "brought up the Points buttons" out of nowhere.
-    """
-    if not req_id or chat_id is None or message_id is None:
-        return
-    req = _pending_req_by_id(bot_data, str(req_id))
-    if not req:
-        return
-    try:
-        req["banner_chat_id"] = int(chat_id)
-        req["banner_message_id"] = int(message_id)
-    except (TypeError, ValueError):
-        return
+    return {"ok": True, "timeout_seconds": _POINTS_REPLY_TIMEOUT_SECONDS}
 
 
 async def relay_user_reply_to_lowiqpts(context, chat_id: int, text: str) -> dict:
@@ -685,11 +661,6 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
         return
 
     if not parsed:
-        _schedule_timeout(bot_app, str(req.get("req_id", "")))
-        return
-
-    if _LOWIQPTS_INTERACTIVE_PROMPT_RE.search(text):
-        _touch_pending_request(req)
         _schedule_timeout(bot_app, str(req.get("req_id", "")))
         return
 
@@ -822,31 +793,13 @@ async def _on_points_refresh_timeout(context) -> None:
     if session_id:
         await relay_close_session(session_id=session_id, reason="timeout")
 
-    banner_chat_id = req.get("banner_chat_id")
-    banner_message_id = req.get("banner_message_id")
-    banner_text = (
-        "⏱ Points refresh is taking longer than expected.\n"
-        "Please tap Refresh to retry."
-    )
-    # Edit the original "⏳ Refresh requested" card in place so the timeout
-    # message stays where the user filed the request — not at the bottom of
-    # whatever flow they are in 15 minutes later.
-    if banner_chat_id and banner_message_id:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=int(banner_chat_id),
-                message_id=int(banner_message_id),
-                text=banner_text,
-                reply_markup=points_scope_kb(),
-            )
-            return
-        except Exception as e:
-            logger.debug("Points timeout edit-in-place failed (%s); falling back to chat message", e)
-
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=banner_text,
+            text=(
+                "⏱ Points refresh is taking longer than expected.\n"
+                "Please tap Refresh to retry."
+            ),
             reply_markup=points_scope_kb(),
         )
     except Exception as e:

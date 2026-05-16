@@ -51,20 +51,13 @@ from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.handlers.wallet_view import build_wallet_view_payload
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
-    get_active_pending_request,
     get_points_dashboard,
     request_points_refresh,
-    set_pending_banner_message,
     relay_user_reply_to_lowiqpts,
 )
 from src.nadobro.services.strategy_pending_input import (
     clear_strategy_pending_input,
     load_strategy_pending_input,
-)
-from src.nadobro.services.text_trade_pending import (
-    clear_text_close_all_pending,
-    load_text_close_all_pending,
-    persist_text_close_all_pending,
 )
 from src.nadobro.services.referral_service import get_referral_dashboard
 from src.nadobro.services.managed_agent_state import is_managed_agent_enabled
@@ -452,25 +445,6 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
                     pass
             return
 
-    if get_active_pending_request(context.application.bot_data, update.effective_chat.id):
-        relay_result = await relay_user_reply_to_lowiqpts(context, update.effective_chat.id, text)
-        if relay_result.get("handled"):
-            if relay_result.get("cancelled"):
-                await _reply_loc(
-                    update.message,
-                    "✅ Points request closed\\. Tap *🔄 Refresh* to start again\\.",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=points_scope_kb(),
-                )
-            elif not relay_result.get("ok", False):
-                await _reply_loc(
-                    update.message,
-                    escape_md(relay_result.get("error", "Could not relay your reply right now.")),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=points_scope_kb(),
-                )
-            return
-
     # Strategy Lab / Bro FAQ / support-question text beats trade-card numerics, LOWIQPTS relay,
     # and chat agents. Hydrate from bot_state when user_data was lost (multi-worker webhooks).
     if await _handle_pending_strategy_input(update, context, telegram_id, text):
@@ -717,21 +691,12 @@ async def _dispatch_reply_button(update, context, telegram_id, callback_data, te
     if callback_data == "points:refresh":
         result = await request_points_refresh(context, telegram_id, update.effective_chat.id)
         if result.get("ok"):
-            banner = await _reply_loc(
+            await _reply_loc(
                 update.message,
                 "⏳ Refresh requested\\. I will post your points update as soon as LOWIQPTS replies\\.",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=localize_markup(points_scope_kb(), lang),
             )
-            # Anchor the 15-min timeout banner to this card so the timeout
-            # edits this same message instead of posting fresh chat noise.
-            if banner is not None:
-                set_pending_banner_message(
-                    context.application.bot_data,
-                    str(result.get("req_id") or ""),
-                    getattr(banner.chat, "id", None),
-                    getattr(banner, "message_id", None),
-                )
         else:
             await _reply_loc(
                 update.message,
@@ -1896,16 +1861,12 @@ async def _handle_managed_agent_message(update, context, telegram_id, username, 
 
 async def _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
     if not context.user_data.get(PENDING_TEXT_CLOSE_ALL_KEY):
-        if await run_blocking(load_text_close_all_pending, int(telegram_id)):
-            context.user_data[PENDING_TEXT_CLOSE_ALL_KEY] = True
-        else:
-            return False
+        return False
 
     normalized = (text or "").strip().lower()
     if normalized in ("cancel", "no", "n", "abort"):
         context.user_data.pop(PENDING_TEXT_CLOSE_ALL_KEY, None)
-        await run_blocking(clear_text_close_all_pending, int(telegram_id))
-        await _reply_loc(update.message,
+        await _reply_loc(update.message, 
             "❌ Close-all request cancelled\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
@@ -1913,7 +1874,7 @@ async def _handle_pending_text_close_all_confirmation(update, context, telegram_
         return True
 
     if normalized not in ("confirm", "yes", "y", "execute", "close all"):
-        await _reply_loc(update.message,
+        await _reply_loc(update.message, 
             "Type `confirm` to close all positions or `cancel` to discard\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
@@ -1921,7 +1882,6 @@ async def _handle_pending_text_close_all_confirmation(update, context, telegram_
         return True
 
     context.user_data.pop(PENDING_TEXT_CLOSE_ALL_KEY, None)
-    await run_blocking(clear_text_close_all_pending, int(telegram_id))
     await execute_action_directly(update, context, telegram_id, {"type": "close_all"})
     return True
 
@@ -1951,11 +1911,7 @@ async def _handle_interaction_intent_message(update, context, telegram_id, text)
 
     if action == "close_all":
         context.user_data[PENDING_TEXT_CLOSE_ALL_KEY] = True
-        try:
-            await run_blocking(persist_text_close_all_pending, int(telegram_id))
-        except Exception:
-            logger.exception("Failed to persist pending text close_all for uid=%s", telegram_id)
-        await _reply_loc(update.message,
+        await _reply_loc(update.message, 
             fmt_close_all_confirm() + "\n\nType `confirm` to execute or `cancel` to discard\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=confirm_close_all_kb(),
