@@ -69,3 +69,6 @@ relay/.fly-bootstrap.env
 # Cursor MCP config may contain local Nado signer keys.
 .cursor/mcp.json
 
+# Ad-hoc local trade exports from tooling (large / user-specific)
+*_trades_*.csv
+
