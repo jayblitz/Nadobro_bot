@@ -89,9 +89,9 @@ _RELAY_CURSOR_KEY = "lowiqpts_relay_cursor"
 _RELAY_STATE_KEY = "lowiqpts_relay_state"
 
 _WALLET_RE = re.compile(r"0x[a-fA-F0-9]{40}")
-# Mid-flow LOWIQPTS prompts often embed Points:/Volume: previews; never treat those as terminal.
-_LOWIQPTS_INTERACTIVE_PROMPT_RE = re.compile(
-    r"(?i)(\bextra\s+costs?\b|\bsend\s+0\b|\balready\s+fetched\s+from\s+api\b|\benter\s+(your\s+)?extras?\b)",
+_NO_POINTS_HINT_RE = re.compile(
+    r"(no\s+points|no\s+data|no\s+trades|nothing\s+found|not\s+found|0\s*points?)",
+    re.IGNORECASE,
 )
 # Bare numbers ("0", "0.5") and yes/no are the typical replies LOWIQPTS expects.
 # When persistence/rehydration ever misses an edge case, these would otherwise fall
@@ -546,8 +546,13 @@ def parse_lowiq_points_reply(text: str) -> Optional[dict]:
         text,
     )
     explicit_fields = bool(points_match or volume_match or cpp_match)
-    # Do not infer "zero activity" from loose phrases like "no trades" — LOWIQPTS sends those in
-    # mid-flow prompts and completing pending here drops relay state before "0" / Yes replies.
+    if not explicit_fields and _NO_POINTS_HINT_RE.search(text):
+        return {
+            "points": 0.0,
+            "volume_usd": 0.0,
+            "cost_per_point": 0.0,
+            "no_activity": True,
+        }
     if not explicit_fields:
         return None
 
@@ -877,11 +882,6 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
         _schedule_timeout(bot_app, str(req.get("req_id", "")))
         return
 
-    if _LOWIQPTS_INTERACTIVE_PROMPT_RE.search(text):
-        _touch_pending_request(req)
-        _schedule_timeout(bot_app, str(req.get("req_id", "")))
-        return
-
     payload = build_dashboard_payload(parsed)
     save_points_snapshot(telegram_id, payload)
     relay_sid = str(req.get("relay_session_id", "")).strip()
@@ -1105,31 +1105,13 @@ async def _on_points_refresh_timeout(context) -> None:
     _drop_relay_cursor(bot_data, session_id)
     await _persist_relay_state(bot_data)
 
-    banner_chat_id = req.get("banner_chat_id")
-    banner_message_id = req.get("banner_message_id")
-    banner_text = (
-        "⏱ Points refresh is taking longer than expected.\n"
-        "Please tap Refresh to retry."
-    )
-    # Edit the original "⏳ Refresh requested" card in place so the timeout
-    # message stays where the user filed the request — not at the bottom of
-    # whatever flow they are in 15 minutes later.
-    if banner_chat_id and banner_message_id:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=int(banner_chat_id),
-                message_id=int(banner_message_id),
-                text=banner_text,
-                reply_markup=points_scope_kb(),
-            )
-            return
-        except Exception as e:
-            logger.debug("Points timeout edit-in-place failed (%s); falling back to chat message", e)
-
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=banner_text,
+            text=(
+                "⏱ Points refresh is taking longer than expected.\n"
+                "Please tap Refresh to retry."
+            ),
             reply_markup=points_scope_kb(),
         )
     except Exception as e:
