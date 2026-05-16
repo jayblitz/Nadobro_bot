@@ -382,6 +382,15 @@ async def run_bot():
     await bot_app.initialize()
     await bot_app.start()
 
+    # bot_data is process memory: restore any LOWIQPTS points refresh that was
+    # in flight before this process (re)started so the user's flow resumes
+    # instead of silently dropping their pending request.
+    try:
+        from src.nadobro.services.points_service import rehydrate_lowiqpts_pending_state
+        rehydrate_lowiqpts_pending_state(bot_app)
+    except Exception as e:
+        logger.warning("LOWIQPTS pending-state rehydration failed (non-fatal): %s", e)
+
     from telegram import BotCommand
     await bot_app.bot.set_my_commands([
         BotCommand("start", "Open home dashboard"),

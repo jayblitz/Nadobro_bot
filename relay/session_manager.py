@@ -256,7 +256,8 @@ async def cleanup_idle_sessions() -> int:
             UPDATE relay_sessions
             SET status = 'expired', updated_at = now()
             WHERE status = 'active'
-              AND updated_at < now() - interval '5 minutes'
+              AND GREATEST(updated_at, COALESCE(last_polled_at, updated_at))
+                  < now() - interval '5 minutes'
             RETURNING id
             """
         )
