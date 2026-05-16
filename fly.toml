@@ -41,7 +41,7 @@ kill_timeout = 60
   cpu_kind = 'performance'
   cpus = 4
   memory_mb = 8192
-  size = 'performance-cpu-4x'
+  size = 'performance-4x'
 
 [[http_service.checks]]
   interval = "15s"
