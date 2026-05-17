@@ -1,0 +1,338 @@
+"""Telegram handlers for the Nado NLP Vault (deposit / withdraw flows).
+
+Surface area:
+  - vault:home                            → main vault card
+  - vault:refresh                         → refresh balances
+  - vault:deposit                         → deposit picker
+  - vault:deposit:preset:<amount>         → deposit with preset USDT0 amount
+  - vault:deposit:custom                  → prompt for custom amount in chat
+  - vault:deposit:confirm:<amount>        → execute mint
+  - vault:withdraw                        → withdraw picker
+  - vault:withdraw:pct:<pct>              → withdraw N% of NLP balance
+  - vault:withdraw:custom                 → prompt for custom NLP amount
+  - vault:withdraw:confirm:<nlp_amount>   → execute burn
+"""
+
+from __future__ import annotations
+
+import logging
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import CallbackContext
+
+from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.nlp_vault_service import (
+    PRIVATE_ALPHA_CAP_USDT0,
+    deposit_to_vault,
+    estimate_withdraw_fee_usdt0,
+    get_user_vault_snapshot,
+    withdraw_from_vault,
+)
+
+logger = logging.getLogger(__name__)
+
+_DEPOSIT_PENDING_KEY = "vault_pending_amount"  # value: "deposit" or "withdraw"
+
+DEPOSIT_PRESETS_USDT0 = (100.0, 500.0, 1_000.0, 5_000.0)
+WITHDRAW_PRESETS_PCT = (25, 50, 75, 100)
+
+
+def _fmt_usd(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def _fmt_lockup(seconds: int) -> str:
+    if seconds <= 0:
+        return "Unlocked"
+    hours = seconds / 3600.0
+    if hours >= 24:
+        return f"{hours / 24:.1f}d remaining"
+    return f"{hours:.1f}h remaining"
+
+
+def _vault_home_card(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
+    if snapshot.get("error"):
+        text = f"💰 *Nado Vault*\n\n⚠️ {snapshot['error']}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="vault:refresh")],
+            [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+        ])
+        return text, kb
+
+    usdt0 = float(snapshot.get("usdt0_balance") or 0.0)
+    lp_balance = float(snapshot.get("lp_balance") or 0.0)
+    lp_value = float(snapshot.get("lp_value_usdt0") or 0.0)
+    cap = float(snapshot.get("private_alpha_cap_usdt0") or PRIVATE_ALPHA_CAP_USDT0)
+    room = max(0.0, cap - lp_value)
+    lockup = int(snapshot.get("lockup_seconds_remaining") or 0)
+
+    lines = [
+        "💰 *Nado Vault — NLP*",
+        "",
+        f"NLP balance: `{lp_balance:.6f}`",
+        f"Vault value: `{_fmt_usd(lp_value)}` USDT0",
+        f"Idle USDT0: `{_fmt_usd(usdt0)}`",
+        f"Deposit room (cap {_fmt_usd(cap)}): `{_fmt_usd(room)}`",
+        f"Lockup: `{_fmt_lockup(lockup)}`",
+        "",
+        "USDT0 deposits earn yield from Nado's market-making sub-vaults. ",
+        "A 4-day post-mint lockup applies; small burn + sequencer fees apply on withdraw.",
+    ]
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⬇️ Deposit", callback_data="vault:deposit"),
+            InlineKeyboardButton("⬆️ Withdraw", callback_data="vault:withdraw"),
+        ],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="vault:refresh")],
+        [InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub")],
+    ])
+    return text, kb
+
+
+def _deposit_picker(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
+    usdt0 = float(snapshot.get("usdt0_balance") or 0.0)
+    cap = float(snapshot.get("private_alpha_cap_usdt0") or PRIVATE_ALPHA_CAP_USDT0)
+    room = max(0.0, cap - float(snapshot.get("lp_value_usdt0") or 0.0))
+    max_deposit = min(usdt0, room)
+    text = (
+        "⬇️ *Deposit USDT0 → NLP*\n\n"
+        f"Idle USDT0: `{_fmt_usd(usdt0)}`\n"
+        f"Room under Private Alpha cap: `{_fmt_usd(room)}`\n"
+        f"Max you can deposit now: `{_fmt_usd(max_deposit)}`\n\n"
+        "Choose an amount:"
+    )
+    rows = []
+    presets = [a for a in DEPOSIT_PRESETS_USDT0 if a <= max_deposit + 1e-9]
+    if presets:
+        row = []
+        for amt in presets:
+            row.append(InlineKeyboardButton(f"${int(amt):,}", callback_data=f"vault:deposit:preset:{amt}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+    if max_deposit > 0:
+        rows.append([InlineKeyboardButton(f"Max ({_fmt_usd(max_deposit)})", callback_data=f"vault:deposit:preset:{max_deposit}")])
+    rows.append([InlineKeyboardButton("✍️ Custom amount", callback_data="vault:deposit:custom")])
+    rows.append([InlineKeyboardButton("◀ Back", callback_data="vault:home")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _withdraw_picker(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
+    lp_balance = float(snapshot.get("lp_balance") or 0.0)
+    lockup = int(snapshot.get("lockup_seconds_remaining") or 0)
+    lines = [
+        "⬆️ *Withdraw NLP → USDT0*",
+        "",
+        f"NLP balance: `{lp_balance:.6f}`",
+        f"Lockup: `{_fmt_lockup(lockup)}`",
+    ]
+    if lockup > 0:
+        lines.append("")
+        lines.append("⏳ Burns are blocked until the 4-day post-mint lockup ends.")
+    else:
+        lines.append("")
+        lines.append("Fees on burn: $1 sequencer + max($1, 10 bps of withdrawn).")
+        lines.append("Choose a percentage:")
+    text = "\n".join(lines)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if lockup <= 0 and lp_balance > 0:
+        row = []
+        for pct in WITHDRAW_PRESETS_PCT:
+            row.append(InlineKeyboardButton(f"{pct}%", callback_data=f"vault:withdraw:pct:{pct}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton("✍️ Custom NLP amount", callback_data="vault:withdraw:custom")])
+    rows.append([InlineKeyboardButton("◀ Back", callback_data="vault:home")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _deposit_confirm_card(amount_usdt0: float) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "⬇️ *Confirm Deposit*\n\n"
+        f"Mint NLP using `{_fmt_usd(amount_usdt0)}` USDT0.\n"
+        "Borrow protection is on (`spot_leverage=false`) so this will be rejected "
+        "if it would force a margin borrow.\n\n"
+        "Proceed?"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirm", callback_data=f"vault:deposit:confirm:{amount_usdt0}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="vault:home"),
+        ],
+    ])
+    return text, kb
+
+
+def _withdraw_confirm_card(nlp_amount: float, usdt0_estimate: float, fee_estimate: float) -> tuple[str, InlineKeyboardMarkup]:
+    net = max(0.0, usdt0_estimate - fee_estimate)
+    text = (
+        "⬆️ *Confirm Withdraw*\n\n"
+        f"Burn `{nlp_amount:.6f}` NLP.\n"
+        f"Estimated USDT0 out (pre-fees): `{_fmt_usd(usdt0_estimate)}`\n"
+        f"Estimated fees: `{_fmt_usd(fee_estimate)}`\n"
+        f"Net to your account (approx.): `{_fmt_usd(net)}`\n\n"
+        "Final amount is settled at the vault's NAV at burn time."
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirm", callback_data=f"vault:withdraw:confirm:{nlp_amount}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="vault:home"),
+        ],
+    ])
+    return text, kb
+
+
+async def _show_home(query, telegram_id: int) -> None:
+    snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
+    text, kb = _vault_home_card(snapshot)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def handle_vault_callback(query, context: CallbackContext) -> bool:
+    data = (query.data or "").strip()
+    if not data.startswith("vault:"):
+        return False
+    telegram_id = int(query.from_user.id)
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else "home"
+
+    if action in ("home", "refresh"):
+        await _show_home(query, telegram_id)
+        return True
+
+    if action == "deposit":
+        snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
+        # vault:deposit         → picker
+        # vault:deposit:preset:<amount>  → confirm
+        # vault:deposit:custom  → prompt
+        # vault:deposit:confirm:<amount> → execute
+        sub = parts[2] if len(parts) > 2 else ""
+        if sub == "":
+            text, kb = _deposit_picker(snapshot)
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            return True
+        if sub == "preset" and len(parts) >= 4:
+            try:
+                amount = float(parts[3])
+            except ValueError:
+                amount = 0.0
+            text, kb = _deposit_confirm_card(amount)
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            return True
+        if sub == "custom":
+            context.user_data[_DEPOSIT_PENDING_KEY] = "deposit"
+            await query.edit_message_text(
+                "✍️ Reply with the USDT0 amount you want to deposit (e.g. `250`).",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Cancel", callback_data="vault:home")],
+                ]),
+            )
+            return True
+        if sub == "confirm" and len(parts) >= 4:
+            try:
+                amount = float(parts[3])
+            except ValueError:
+                amount = 0.0
+            result = await run_blocking(deposit_to_vault, telegram_id, amount)
+            await _show_result(query, telegram_id, result, default_success=f"Deposited ${amount:,.2f} USDT0.")
+            return True
+
+    if action == "withdraw":
+        snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
+        sub = parts[2] if len(parts) > 2 else ""
+        if sub == "":
+            text, kb = _withdraw_picker(snapshot)
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            return True
+        if sub == "pct" and len(parts) >= 4:
+            try:
+                pct = max(0, min(100, int(parts[3])))
+            except ValueError:
+                pct = 0
+            lp_balance = float(snapshot.get("lp_balance") or 0.0)
+            lp_value = float(snapshot.get("lp_value_usdt0") or 0.0)
+            nlp_amount = lp_balance * (pct / 100.0)
+            est_usdt0 = lp_value * (pct / 100.0)
+            est_fee = estimate_withdraw_fee_usdt0(est_usdt0)
+            text, kb = _withdraw_confirm_card(nlp_amount, est_usdt0, est_fee)
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            return True
+        if sub == "custom":
+            context.user_data[_DEPOSIT_PENDING_KEY] = "withdraw"
+            await query.edit_message_text(
+                "✍️ Reply with the NLP token amount to burn (e.g. `1.25`).",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Cancel", callback_data="vault:home")],
+                ]),
+            )
+            return True
+        if sub == "confirm" and len(parts) >= 4:
+            try:
+                nlp_amount = float(parts[3])
+            except ValueError:
+                nlp_amount = 0.0
+            result = await run_blocking(withdraw_from_vault, telegram_id, nlp_amount)
+            await _show_result(query, telegram_id, result, default_success=f"Burned {nlp_amount:.6f} NLP.")
+            return True
+
+    await _show_home(query, telegram_id)
+    return True
+
+
+async def _show_result(query, telegram_id: int, result: dict, *, default_success: str) -> None:
+    snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
+    body, kb = _vault_home_card(snapshot)
+    if result.get("success"):
+        flash = f"✅ {default_success}"
+        digest = result.get("digest")
+        if digest:
+            flash += f"\nDigest: `{str(digest)[:18]}…`"
+    else:
+        flash = f"⚠️ {result.get('error') or 'Operation failed.'}"
+    text = f"{flash}\n\n{body}"
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def handle_vault_text(update: Update, context: CallbackContext) -> bool:
+    """Free-text continuation for custom deposit/withdraw amounts."""
+    pending = (context.user_data.get(_DEPOSIT_PENDING_KEY) or "").strip()
+    if pending not in {"deposit", "withdraw"}:
+        return False
+    if not update.message or not update.effective_user:
+        return False
+    raw = (update.message.text or "").strip().lstrip("$").replace(",", "")
+    try:
+        amount = float(raw)
+    except ValueError:
+        await update.message.reply_text("Please reply with a positive number, e.g. `250`.")
+        return True
+    if amount <= 0:
+        await update.message.reply_text("Amount must be greater than zero.")
+        return True
+    context.user_data.pop(_DEPOSIT_PENDING_KEY, None)
+    telegram_id = int(update.effective_user.id)
+    if pending == "deposit":
+        text, kb = _deposit_confirm_card(amount)
+    else:
+        snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
+        lp_balance = float(snapshot.get("lp_balance") or 0.0)
+        lp_value = float(snapshot.get("lp_value_usdt0") or 0.0)
+        if lp_balance <= 0:
+            await update.message.reply_text("You don't have any NLP to burn yet.")
+            return True
+        est_usdt0 = lp_value * (amount / lp_balance) if lp_balance > 0 else 0.0
+        est_fee = estimate_withdraw_fee_usdt0(est_usdt0)
+        text, kb = _withdraw_confirm_card(amount, est_usdt0, est_fee)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    return True

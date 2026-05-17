@@ -6,7 +6,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from src.nadobro.models.database import fetch_due_time_limits, update_conditional_order
+from src.nadobro.models.database import fetch_due_time_limits
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.execution_queue import enqueue_strategy
 from src.nadobro.services.feature_flags import time_limit_enabled

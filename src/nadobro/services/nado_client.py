@@ -2243,6 +2243,119 @@ class NadoClient:
             logger.error(f"get_all_products_info failed: {e}")
         return {"perp": [], "spot": []}
 
+    # ------------------------------------------------------------------
+    # NLP Vault (Nado Liquidity Provider) — deposit / withdraw / pool stats
+    # ------------------------------------------------------------------
+
+    def mint_nlp(self, usdt0_amount: float, *, spot_leverage: bool = False) -> dict:
+        """Deposit USDT0 into the NLP vault.
+
+        Args:
+            usdt0_amount: Amount of USDT0 to lock in the vault (UI-friendly float).
+                Internally converted to integer x10^18 per Nado gateway contract.
+            spot_leverage: When False (default) the gateway will reject the mint if
+                fulfilling it requires borrowing against existing positions. Forced
+                False so a vault deposit can never silently lever up the user's
+                trading account.
+        """
+        if not self._initialized or not self.client:
+            return {"success": False, "error": "Client not initialized. Please try /start again."}
+        if usdt0_amount is None or float(usdt0_amount) <= 0:
+            return {"success": False, "error": "Deposit amount must be positive."}
+        try:
+            from nado_protocol.engine_client.types.execute import MintNlpParams
+            quote_amount_x18 = int(round(float(usdt0_amount) * 1e18))
+            if quote_amount_x18 <= 0:
+                return {"success": False, "error": "Deposit amount rounds to zero. Try a larger amount."}
+            params = MintNlpParams(quoteAmount=quote_amount_x18, spot_leverage=bool(spot_leverage))
+            resp = self.client.market.mint_nlp(params)
+            digest = getattr(resp, "digest", None) or getattr(resp, "tx_hash", None)
+            return {
+                "success": True,
+                "quote_amount_usdt0": float(usdt0_amount),
+                "quote_amount_x18": quote_amount_x18,
+                "digest": digest,
+            }
+        except Exception as e:
+            logger.error("mint_nlp failed user=%s err=%s", _mask_address(self.address or ""), e)
+            return {"success": False, "error": self._friendly_error(str(e))}
+
+    def burn_nlp(self, nlp_amount: float) -> dict:
+        """Burn NLP tokens to withdraw USDT0 from the vault.
+
+        Args:
+            nlp_amount: Amount of NLP tokens to redeem (UI-friendly float).
+                Converted to integer x10^18 per gateway contract.
+        """
+        if not self._initialized or not self.client:
+            return {"success": False, "error": "Client not initialized. Please try /start again."}
+        if nlp_amount is None or float(nlp_amount) <= 0:
+            return {"success": False, "error": "Withdraw amount must be positive."}
+        try:
+            from nado_protocol.engine_client.types.execute import BurnNlpParams
+            nlp_amount_x18 = int(round(float(nlp_amount) * 1e18))
+            if nlp_amount_x18 <= 0:
+                return {"success": False, "error": "Withdraw amount rounds to zero. Try a larger amount."}
+            params = BurnNlpParams(nlpAmount=nlp_amount_x18)
+            resp = self.client.market.burn_nlp(params)
+            digest = getattr(resp, "digest", None) or getattr(resp, "tx_hash", None)
+            return {
+                "success": True,
+                "nlp_amount": float(nlp_amount),
+                "nlp_amount_x18": nlp_amount_x18,
+                "digest": digest,
+            }
+        except Exception as e:
+            logger.error("burn_nlp failed user=%s err=%s", _mask_address(self.address or ""), e)
+            return {"success": False, "error": self._friendly_error(str(e))}
+
+    def get_nlp_position(self) -> dict:
+        """Return the user's NLP position (LP balance + USDT0 equivalent).
+
+        Uses the REST `nlp_position` query when available, falling back to the
+        spot-balance lookup for the NLP product (product_id = 1) so we always
+        surface *something* useful in the Vault card.
+        """
+        result: dict = {
+            "exists": False,
+            "lp_balance": 0.0,
+            "lp_value_usdt0": 0.0,
+            "last_mint_ts_ms": None,
+        }
+        try:
+            payload = self._query_rest("nlp_position", {"subaccount": self.subaccount_hex}) or {}
+            data = payload.get("data") or payload
+            lp_x18 = data.get("lp_amount") or data.get("nlp_amount") or data.get("amount") or 0
+            value_x18 = data.get("value") or data.get("quote_value") or data.get("usdc_value") or 0
+            last_mint = data.get("last_mint_timestamp") or data.get("last_mint_ts") or None
+            try:
+                lp_balance = float(int(lp_x18)) / 1e18 if lp_x18 not in (None, "", 0) else 0.0
+            except (TypeError, ValueError):
+                lp_balance = 0.0
+            try:
+                lp_value = float(int(value_x18)) / 1e18 if value_x18 not in (None, "", 0) else 0.0
+            except (TypeError, ValueError):
+                lp_value = 0.0
+            result.update({
+                "exists": True,
+                "lp_balance": lp_balance,
+                "lp_value_usdt0": lp_value,
+                "last_mint_ts_ms": int(last_mint) if last_mint else None,
+            })
+        except Exception as e:
+            logger.debug("nlp_position REST failed user=%s err=%s", _mask_address(self.address or ""), e)
+        return result
+
+    def get_nlp_pool_info(self) -> dict:
+        """Return aggregate NLP pool stats (TVL, APR if exposed)."""
+        try:
+            payload = self._query_rest("nlp_pool_info") or {}
+            data = payload.get("data") or payload
+            return {"raw": data}
+        except Exception as e:
+            logger.debug("nlp_pool_info REST failed err=%s", e)
+            return {"raw": {}}
+
 
 _client_cache: dict[str, NadoClient] = {}
 

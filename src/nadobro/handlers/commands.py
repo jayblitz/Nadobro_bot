@@ -45,8 +45,6 @@ logger = logging.getLogger(__name__)
 
 async def build_status_dashboard_parts(
     telegram_id: int,
-    *,
-    studio_page: int = 0,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """MarkdownV2 source text plus merged keyboard (English markup labels).
 
@@ -55,24 +53,7 @@ async def build_status_dashboard_parts(
     status = await run_blocking(get_user_bot_status, telegram_id)
     onboarding = await run_blocking(evaluate_readiness, telegram_id)
     text = fmt_status_overview(status, onboarding)
-    studio_markup = None
-    try:
-        from src.nadobro.services.feature_flags import studio_enabled
-        from src.nadobro.studio.status import build_status_cards
-
-        if studio_enabled():
-            studio_text, studio_markup = await run_blocking(
-                build_status_cards,
-                telegram_id,
-                onboarding.get("network"),
-                studio_page,
-            )
-            text = f"{text}\n\n{studio_text}"
-    except Exception as e:
-        logger.warning("Studio status render failed: %s", e)
-
     merged = compose_status_overview_kb(
-        studio_markup,
         is_running=bool(status.get("running")),
         strategy_label=str(status.get("strategy") or "").upper() or None,
     )

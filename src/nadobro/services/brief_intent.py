@@ -1,7 +1,6 @@
 """Detect when a user is asking for the morning brief / today's market news.
 
-Runs after the studio gate (so an active Studio session is not hijacked) and
-before `classify_conversation_intent` so brief requests bypass the generic
+Runs before `classify_conversation_intent` so brief requests bypass the generic
 Q&A path and go straight to the brief composer.
 """
 

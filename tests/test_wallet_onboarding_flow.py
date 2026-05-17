@@ -94,7 +94,7 @@ class WalletOnboardingFlowTests(unittest.TestCase):
                 "trade_flow": {"state": "size"},
                 "pending_copy_wallet": True,
                 "pending_admin_copy_wallet": True,
-                "studio_live_mode": True,
+                "vault_pending_amount": "deposit",
             }
         )
 
@@ -103,8 +103,6 @@ class WalletOnboardingFlowTests(unittest.TestCase):
         async def mock_run_blocking(fn, *args, **kwargs):
             if fn is callbacks.get_user:
                 return fake_user
-            if fn is callbacks.studio_conversation.abandon_active_studio_sessions:
-                return None
             raise AssertionError(f"unexpected run_blocking target: {fn!r}")
 
         with patch.object(callbacks, "_show_dashboard", AsyncMock()), patch.object(
@@ -124,8 +122,6 @@ class WalletOnboardingFlowTests(unittest.TestCase):
         async def mock_run_blocking(fn, *args, **kwargs):
             if fn is callbacks.get_user:
                 return fake_user
-            if fn is callbacks.studio_conversation.abandon_active_studio_sessions:
-                return None
             raise AssertionError(f"unexpected run_blocking target: {fn!r}")
 
         with patch.object(callbacks, "_edit_loc", mock_edit), patch.object(

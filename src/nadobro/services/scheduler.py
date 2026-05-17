@@ -682,12 +682,9 @@ async def tick_news_warmup() -> None:
 
 def start_scheduler():
     relay_poll_seconds = relay_poll_interval_seconds()
-    from src.nadobro.services.condition_watcher import condition_tick
     from src.nadobro.services.feature_flags import (
         portfolio_sync_enabled,
         portfolio_sync_interval_seconds,
-        studio_condition_interval_seconds,
-        studio_enabled,
         time_limit_enabled,
     )
     from src.nadobro.services.time_limit_watcher import time_limit_tick
@@ -712,15 +709,6 @@ def start_scheduler():
         scheduler.add_job(
             time_limit_tick, "interval", seconds=60,
             id="time_limit_watcher", replace_existing=True, **_SHORT_TICK,
-        )
-    if studio_enabled():
-        scheduler.add_job(
-            condition_tick,
-            "interval",
-            seconds=studio_condition_interval_seconds(),
-            id="condition_watcher",
-            replace_existing=True,
-            **_SHORT_TICK,
         )
     if portfolio_sync_enabled():
         from src.nadobro.services.nado_sync import sync_active_users

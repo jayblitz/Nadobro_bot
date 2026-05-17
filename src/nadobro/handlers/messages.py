@@ -501,8 +501,8 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
             )
         return
 
-    from src.nadobro.handlers.studio_handler import handle_studio_text
-    if await handle_studio_text(update, context):
+    from src.nadobro.handlers.vault_handler import handle_vault_text
+    if await handle_vault_text(update, context):
         return
 
     from src.nadobro.services.brief_intent import is_brief_request
