@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 STATE_PREFIX = "strategy_bot:"
 RUNTIME_TICK_SECONDS = 20
-BRO_MIGRATION_NOTICE = "Bro Mode is now Strategy Studio — describe your trade in chat and I'll handle it"
+BRO_MIGRATION_NOTICE = "Legacy Bro Mode has been retired. Pick a strategy from the Strategy hub or use the Nado Vault."
 
 
 def _strategy_cycle_timeout_seconds() -> float | None:
@@ -393,9 +393,9 @@ def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> No
     now = datetime.utcnow().isoformat()
     session_id = state.get("strategy_session_id")
     state["running"] = False
-    state["last_action"] = "migrated_to_studio"
+    state["last_action"] = "migrated_off_bro"
     state["last_action_detail"] = "Legacy Bro Mode autoloop retired."
-    state["bro_migrated_to_studio_at"] = state.get("bro_migrated_to_studio_at") or now
+    state["bro_migrated_at"] = state.get("bro_migrated_at") or now
     should_notify = not bool(state.get("bro_migration_notice_sent"))
     state["bro_migration_notice_sent"] = True
     _save_state(telegram_id, network, state)
@@ -406,7 +406,7 @@ def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> No
                 {
                     "status": "migrated",
                     "stopped_at": now,
-                    "stop_reason": "migrated_to_strategy_studio",
+                    "stop_reason": "bro_autoloop_retired",
                 },
             )
         else:
@@ -419,7 +419,7 @@ def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> No
                     {
                         "status": "migrated",
                         "stopped_at": now,
-                        "stop_reason": "migrated_to_strategy_studio",
+                        "stop_reason": "bro_autoloop_retired",
                     },
                 )
     except Exception as e:
@@ -572,7 +572,7 @@ def start_user_bot(
 
     if strategy == "bro":
         if not legacy_bro_autoloop_enabled():
-            return False, "Bro Mode is now Strategy Studio — describe your trade in chat and I'll handle it."
+            return False, "Legacy Bro Mode has been retired. Pick a strategy from the Strategy hub."
         _mark_previous_sessions_superseded(telegram_id, network)
         _, strat_cfg = get_strategy_settings(telegram_id, strategy)
         state = _default_state()
@@ -1159,10 +1159,9 @@ def restore_running_bots(enabled: bool = False):
                 if strategy == "bro" and not legacy_bro_autoloop_enabled():
                     _migrate_legacy_bro_state(user_id, network, state)
                     logger.info(
-                        "Migrated legacy Bro autoloop session user=%s network=%s",
+                        "Retired legacy Bro autoloop session user=%s network=%s",
                         user_id,
                         network,
-                        extra={"feature": "studio"},
                     )
                     continue
                 _ensure_task(user_id, network)
@@ -1260,8 +1259,9 @@ async def handle_strategy_job(payload: dict):
         await handle_time_limit_job(payload)
         return
     if kind == "condition_order":
-        from src.nadobro.services.condition_watcher import handle_condition_job
-        await handle_condition_job(payload)
+        # Conditional orders were owned by the retired Strategy Studio.
+        # Drop the job rather than dispatching to a deleted module.
+        logger.debug("Dropping legacy condition_order job: %s", payload)
         return
     telegram_id = int(payload.get("telegram_id"))
     network = str(payload.get("network"))

@@ -86,7 +86,8 @@ def test_strategy_label_mapping_canonical_keys():
     assert pc._strategy_label("mm") == "MM Mode"
     assert pc._strategy_label("delta_neutral") == "Delta Neutral"
     assert pc._strategy_label("copy_trading") == "Copy Mode"
-    assert pc._strategy_label("studio") == "Strategy Studio"
+    # ``studio`` is no longer a recognized strategy — falls through to Bro Mode.
+    assert pc._strategy_label("studio") == "Bro Mode"
 
 
 def test_strategy_label_unknown_falls_back_to_bro_mode():

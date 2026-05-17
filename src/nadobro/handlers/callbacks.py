@@ -84,7 +84,6 @@ from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.invite_service import has_private_access
 from src.nadobro.services.perf import timed_metric, log_slow
 from src.nadobro.services.trading_readiness import check_trading_readiness
-from src.nadobro.studio import conversation as studio_conversation
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +160,10 @@ def _wallet_collateral_usd_from_balance(bal: dict) -> float:
 
 
 def _vol_market_pref(context) -> str:
-    m = str(context.user_data.get("vol_market:vol") or "perp").strip().lower()
-    return m if m in ("perp", "spot") else "perp"
+    # Volume strategy is spot-only as of 2026-05. The user_data slot and
+    # ``strategy:volmarket`` callback are retained as no-ops only so cached
+    # menus / deep links don't crash; we always return "spot".
+    return "spot"
 
 
 async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
@@ -246,10 +247,14 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
 
         if data.startswith("onb:"):
             await _handle_onb_new(query, data, telegram_id, context)
-        elif data.startswith("studio:"):
-            from src.nadobro.handlers.studio_handler import handle_studio_callback
+        elif data.startswith("vault:"):
+            from src.nadobro.handlers.vault_handler import handle_vault_callback
 
-            await handle_studio_callback(query, context)
+            await handle_vault_callback(query, context)
+        elif data.startswith("resources:"):
+            from src.nadobro.handlers.resources_handler import handle_resources_callback
+
+            await handle_resources_callback(query, context)
         elif data.startswith("nav:"):
             await _handle_nav(query, data, telegram_id, context)
         elif data.startswith("card:trade:"):
@@ -446,7 +451,6 @@ async def _handle_nav(query, data, telegram_id, context=None):
 
     user = await run_blocking(get_user, telegram_id)
     network = user.network_mode.value if user else "mainnet"
-    await run_blocking(studio_conversation.abandon_active_studio_sessions, telegram_id, network)
 
     if target in ("main", "refresh"):
         await _show_dashboard(query, telegram_id)
@@ -1031,17 +1035,6 @@ async def _handle_portfolio(query, data, telegram_id):
 async def _handle_status_callback(query, data: str, telegram_id: int):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "refresh"
-    if action == "studio":
-        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-        body, merged_kb = await build_status_dashboard_parts(telegram_id, studio_page=page)
-        with language_context(get_user_language(telegram_id)):
-            await _edit_loc(
-                query,
-                body,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=merged_kb,
-            )
-        return
     if action == "stop":
         ok, msg = await run_blocking(stop_user_bot, telegram_id, True)
         body, merged_kb = await build_status_dashboard_parts(telegram_id)
@@ -1464,21 +1457,17 @@ async def _handle_strategy(query, data, context, telegram_id):
     strategy_id = parts[2] if len(parts) > 2 else ""
 
     if action == "volmarket" and len(parts) >= 4:
+        # Volume is now spot-only — coerce any legacy ``perp`` selection to spot
+        # and refresh the preview so cached menus reconverge.
         sid = parts[2]
-        market = str(parts[3] or "perp").strip().lower()
-        if sid != "vol" or market not in ("perp", "spot"):
+        if sid != "vol":
             return
-        context.user_data["vol_market:vol"] = market
+        context.user_data["vol_market:vol"] = "spot"
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        if market == "spot":
-            names = list_volume_spot_product_names(network=network)
-            if names:
-                context.user_data["strategy_pair:vol"] = names[0]
-        else:
-            perps = tuple(get_perp_products(network=network) or ("BTC", "ETH", "SOL"))
-            if perps:
-                context.user_data["strategy_pair:vol"] = perps[0]
+        names = list_volume_spot_product_names(network=network)
+        if names:
+            context.user_data["strategy_pair:vol"] = names[0]
         await _handle_strategy(query, f"strategy:preview:{sid}", context, telegram_id)
         return
 
@@ -1486,15 +1475,12 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id not in supported:
             return
         if strategy_id == "bro":
-            # CEO directive (2026-05): Bro Mode → Strategy Studio. The hub button now
-            # emits studio:home, but we keep this branch as a defensive fallback for
-            # any deep links / cached menus that still emit strategy:preview:bro.
             # Legacy Alpha Agent dashboard remains reachable only when the operator
             # has explicitly re-enabled the legacy autoloop via env var.
             from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
             if not legacy_bro_autoloop_enabled():
-                from src.nadobro.handlers.studio_handler import handle_studio_home
-                await handle_studio_home(query, context)
+                # Bro Mode has been retired; route back to the strategy hub.
+                await _handle_nav(query, "nav:strategy_hub", telegram_id, context)
                 return
             from src.nadobro.handlers.keyboards import bro_action_kb
             with timed_metric("cb.strategy.preview.bro"):
@@ -2099,8 +2085,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             start_payload["vol_market"] = vol_m
         await execute_action_directly(query, context, telegram_id, start_payload)
     elif action == "status":
-        # Same merged dashboard as /status (Strategy Studio pagination + Refresh/Stop),
-        # whether opened from strategy cards (GRID/RGRID/DGRID/MID/DN/VOL/BRO) or commands.
+        # Same merged dashboard as /status (Refresh/Stop) whether opened from
+        # strategy cards (GRID/RGRID/DGRID/MID/DN/VOL/BRO) or commands.
         body, merged_kb = await build_status_dashboard_parts(telegram_id)
         await _edit_loc(
             query,

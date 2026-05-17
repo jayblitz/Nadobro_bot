@@ -179,8 +179,6 @@ STRATEGY_LABELS: dict[str, str] = {
     "bro": "Bro Mode",
     "bro mode": "Bro Mode",
     "bro_mode": "Bro Mode",
-    "studio": "Strategy Studio",
-    "strategy studio": "Strategy Studio",
     "grid": "Grid Mode",
     "rgrid": "R-Grid Mode",
     "r-grid": "R-Grid Mode",
@@ -397,7 +395,7 @@ def generate_pnl_card(data: dict) -> bytes:
     * ``symbol`` (default ``"BTC-PERP"``)
     * ``strategy`` — ``"bro"``, ``"grid"``, ``"rgrid"``, ``"dgrid"``,
       ``"volume"``, ``"copy_trading"`` / ``"copy trading"``, ``"mm"``,
-      ``"delta_neutral"``, ``"studio"``; unknown → ``"Bro Mode"``
+      ``"delta_neutral"``; unknown → ``"Bro Mode"``
     * ``volume`` — e.g. ``"$1.23M"``
     * ``net_fees`` — signed string, e.g. ``"-$12.34"``
     * ``pnl`` — signed string, e.g. ``"+$234.56"``

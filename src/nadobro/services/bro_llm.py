@@ -58,10 +58,10 @@ def _get_openai_client() -> Optional[OpenAI]:
 
 
 def chat_json(messages: list[dict], schema: dict | None = None, model: str | None = None) -> tuple[dict, str]:
-    """Provider-selected JSON chat used by Strategy Studio without duplicating LLM clients."""
+    """Provider-selected JSON chat used by features that need structured LLM output."""
     providers = [
-        ("grok", _get_client(), model or os.environ.get("STUDIO_XAI_MODEL", "grok-3-mini-fast")),
-        ("openai", _get_openai_client(), os.environ.get("STUDIO_OPENAI_MODEL", "gpt-4o")),
+        ("grok", _get_client(), model or os.environ.get("NADO_LLM_XAI_MODEL", "grok-3-mini-fast")),
+        ("openai", _get_openai_client(), os.environ.get("NADO_LLM_OPENAI_MODEL", "gpt-4o")),
     ]
     last_error: Exception | None = None
     for provider, client, selected_model in providers:
@@ -79,16 +79,15 @@ def chat_json(messages: list[dict], schema: dict | None = None, model: str | Non
                 resp = client.chat.completions.create(**kwargs)
                 content = resp.choices[0].message.content or "{}"
                 parsed = json.loads(content)
-                logger.info("Strategy Studio extractor provider=%s", provider, extra={"feature": "studio"})
+                logger.info("chat_json provider=%s", provider)
                 return parsed, provider
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    "Strategy Studio JSON chat failed provider=%s attempt=%s: %s",
+                    "chat_json failed provider=%s attempt=%s: %s",
                     provider,
                     attempt + 1,
                     e,
-                    extra={"feature": "studio"},
                 )
                 continue
     raise RuntimeError(f"No LLM provider returned valid JSON: {last_error}")

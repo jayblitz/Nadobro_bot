@@ -176,10 +176,29 @@ def home_card_kb():
             InlineKeyboardButton("⚙️ Control Panel", callback_data="settings:view"),
         ],
         [
+            InlineKeyboardButton("💰 Nado Vault", callback_data="vault:home"),
+            InlineKeyboardButton("📚 Resources", callback_data="resources:home"),
+        ],
+        [
             InlineKeyboardButton("🌐 Execution Mode", callback_data="home:mode"),
         ],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+def resources_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📘 Nado Docs", url="https://docs.nado.xyz/")],
+        [InlineKeyboardButton("🛒 Nado Products", url="https://docs.nado.xyz/products")],
+        [InlineKeyboardButton("💧 NLP Vault Docs", url="https://docs.nado.xyz/nlp")],
+        [InlineKeyboardButton("🛠 Dev — Get Started", url="https://docs.nado.xyz/developer-resources/get-started")],
+        [InlineKeyboardButton("🔌 Dev — API", url="https://docs.nado.xyz/developer-resources/api")],
+        [InlineKeyboardButton("💻 Dev — CLI & MCP", url="https://docs.nado.xyz/developer-resources/cli-and-mcp-server")],
+        [InlineKeyboardButton("📦 Nado TS SDK", url="https://docs.nado.xyz/developer-resources/typescript-sdk")],
+        [InlineKeyboardButton("📖 NadoBro Docs", url="https://nadobro.gitbook.io/docs")],
+        [InlineKeyboardButton("𝕏  NadoBro on X", url="https://x.com/NBdotbot")],
+        [InlineKeyboardButton("◀ Back", callback_data="nav:main")],
+    ])
 
 
 def bro_answer_kb(mode: str | None = None):
@@ -209,15 +228,12 @@ def bro_answer_kb(mode: str | None = None):
 
 
 def compose_status_overview_kb(
-    studio_markup: InlineKeyboardMarkup | None,
     *,
     is_running: bool,
     strategy_label: str | None,
 ) -> InlineKeyboardMarkup:
-    """Stack Strategy Studio pagination above primary /status controls so Refresh/Stop stay usable."""
+    """Return the primary /status controls (Refresh/Stop/Home)."""
     base_rows = list(status_kb(is_running=is_running, strategy_label=strategy_label).inline_keyboard)
-    if studio_markup and isinstance(studio_markup, InlineKeyboardMarkup) and studio_markup.inline_keyboard:
-        return InlineKeyboardMarkup(list(studio_markup.inline_keyboard) + base_rows)
     return InlineKeyboardMarkup(base_rows)
 
 
@@ -812,7 +828,7 @@ def strategy_hub_kb():
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],
         [
-            InlineKeyboardButton("🧠 Strategy Studio", callback_data="studio:home"),
+            InlineKeyboardButton("💰 Nado Vault", callback_data="vault:home"),
         ],
         [
             InlineKeyboardButton("🔁 Copy Trading", callback_data="copy:hub"),
@@ -855,7 +871,7 @@ def strategy_action_kb(
     selected_product: str = "BTC",
     available_products: list[str] | None = None,
     is_running: bool = False,
-    vol_market: str = "perp",
+    vol_market: str = "spot",  # retained for signature compatibility; volume is spot-only.
 ):
     if strategy_id == "dn":
         products = [p.upper() for p in (available_products or ["BTC", "ETH"])]
@@ -877,34 +893,15 @@ def strategy_action_kb(
         for product in featured[:3]
     ]
     if strategy_id == "vol":
-        vm = str(vol_market or "perp").strip().lower()
-        if vm not in ("perp", "spot"):
-            vm = "perp"
-        if vm == "perp":
-            start_row = [
-                InlineKeyboardButton("▶ Start Long", callback_data=f"strategy:start:{strategy_id}:{selected}:long"),
-                InlineKeyboardButton("▶ Start Short", callback_data=f"strategy:start:{strategy_id}:{selected}:short"),
-            ]
-        else:
-            start_row = [
-                InlineKeyboardButton(
-                    f"▶ Start {strategy_id.upper()}",
-                    callback_data=f"strategy:start:{strategy_id}:{selected}",
-                ),
-            ]
-        market_row = [
+        # Volume is spot-only as of 2026-05; no perp/spot toggle, no Long/Short.
+        start_row = [
             InlineKeyboardButton(
-                ("✅ " if vm == "perp" else "") + "Perp",
-                callback_data="strategy:volmarket:vol:perp",
-            ),
-            InlineKeyboardButton(
-                ("✅ " if vm == "spot" else "") + "Spot",
-                callback_data="strategy:volmarket:vol:spot",
+                f"▶ Start {strategy_id.upper()} (Spot)",
+                callback_data=f"strategy:start:{strategy_id}:{selected}",
             ),
         ]
         rows = [
             start_row,
-            market_row,
             [
                 InlineKeyboardButton("🎯 Choose Asset", callback_data=f"strategy:custom:{strategy_id}:0"),
                 InlineKeyboardButton("⚙️ Advanced", callback_data=f"strategy:config:{strategy_id}"),

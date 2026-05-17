@@ -1,10 +1,9 @@
-"""Simple volume strategy: fixed-notional, max-leverage, timed close loop.
+"""Simple volume strategy: fixed-notional, timed close loop — spot only.
 
-CEO directive (2026-05): Volume strategy now sizes by NOTIONAL ($100 per trade by
-default) and uses per-asset MAX leverage on perp so margin shrinks proportionally
-and post-only refresh quotes can sit alongside closing legs. Spot stays at 1x.
-SL/TP percentages are applied to the position NOTIONAL (not margin), so a 5% SL
-at $100 notional triggers at -$5 PnL regardless of leverage.
+CEO directive (2026-05): Volume strategy is spot-only. It rotates USDT0 through
+a single Nado spot product (buy → 60s hold → sell) at 1x leverage. SL/TP
+percentages are applied to the notional value, not to margin, so a 5% SL on a
+$100 notional triggers at -$5 PnL.
 """
 import logging
 import time
@@ -249,16 +248,9 @@ SPOT_BALANCE_RACE_GRACE_SECONDS = 15.0
 FORCE_CLOSE_RETRY_COOLDOWN_SECONDS = 20.0
 
 
-def _resolve_max_leverage(product: str, network: str, client, *, vol_market: str) -> float:
-    """Per-asset max leverage for Volume. Spot is pinned to 1x (spot has no leverage)."""
-    if (vol_market or "perp").lower() == "spot":
-        return 1.0
-    try:
-        return float(get_product_max_leverage(product, network=network, client=client))
-    except Exception:
-        # Defensive: if catalog is unavailable, fall back to the legacy 1x so we
-        # never accidentally over-leverage when the resolver fails.
-        return 1.0
+def _resolve_max_leverage(product: str, network: str, client) -> float:
+    """Volume is spot-only; leverage is always 1x."""
+    return 1.0
 
 
 def _resolve_target_notional(state: dict) -> float:
@@ -1145,33 +1137,25 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
         return {"success": False, "error": f"Network mismatch: expected {network}, got {client.network}"}
 
     product = str(state.get("product") or "BTC").upper()
-    vol_market = str(state.get("vol_market") or "perp").strip().lower()
-    if vol_market not in ("perp", "spot"):
-        vol_market = "perp"
-    state["vol_market"] = vol_market
+    # Volume is spot-only (perp option retired 2026-05). Hard-pin the state so
+    # any legacy "perp" rows from previous deploys converge to the spot path on
+    # next tick.
+    state["vol_market"] = "spot"
+    vol_market = "spot"
+    product = normalize_volume_spot_symbol(product)
+    state["product"] = product
+    direction = "long"
+    state["vol_direction"] = "long"
+    state["direction"] = "long"
 
-    if vol_market == "spot":
-        product = normalize_volume_spot_symbol(product)
-        state["product"] = product
-        direction = "long"
-        state["vol_direction"] = "long"
-        state["direction"] = "long"
-    else:
-        direction = _normalize_direction(state.get("vol_direction") or state.get("direction") or "long")
-        state["vol_direction"] = direction
-        state["direction"] = direction
-
-    # CEO directive: Volume Perp now sizes by NOTIONAL ($100 default) at per-asset
-    # MAX leverage; margin shrinks proportionally so post-only refresh quotes can
-    # coexist with closing legs. Spot stays at 1x via _resolve_max_leverage.
     target_notional = _resolve_target_notional(state)
     state["target_notional_usd"] = round(target_notional, 4)
     # Legacy mirror — preview cards and copy-trade still read fixed_margin_usd.
     state["fixed_margin_usd"] = round(target_notional, 4)
     fixed_margin = target_notional  # alias retained for downstream call signatures
-    max_lev = _resolve_max_leverage(product, network, client, vol_market=vol_market)
+    max_lev = _resolve_max_leverage(product, network, client)
     state["leverage"] = max_lev
-    state["leverage_mode"] = "MAX"
+    state["leverage_mode"] = "SPOT_1X"
     required_margin = target_notional / max(1.0, max_lev)
     available_quote = _available_quote_balance(client)
     effective_margin = (
