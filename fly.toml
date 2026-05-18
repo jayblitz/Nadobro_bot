@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for nadobro-bot on 2026-03-03T16:53:30Z
+# fly.toml app configuration file generated for nadobro-bot on 2026-05-16T08:44:22Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -37,9 +37,12 @@ kill_timeout = 60
   processes = ['app']
 
 [[vm]]
+  memory = '8gb'
+  cpu_kind = 'performance'
+  cpus = 4
+  memory_mb = 8192
   size = 'performance-4x'
 
-# Bot-only ingress via nginx; /health returns static bot health payload.
 [[http_service.checks]]
   interval = "15s"
   timeout = "2s"
