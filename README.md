@@ -45,6 +45,10 @@ Nadobro is a Telegram-first Ink financial copilot for Nado DEX. It lets users as
 
 ## Deployment
 
-For Fly.io deployment instructions, see `deploy.md`.
+Production runs on Fly.io. See [`deploy.md`](deploy.md) for the step-by-step guide.
+
+---
+
+## Repo layout
 
 - Docs: [nadobro.gitbook.io/docs](https://nadobro.gitbook.io/docs)

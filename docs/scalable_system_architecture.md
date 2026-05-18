@@ -11,11 +11,11 @@ The product should be organized around a few durable backend capabilities rather
    - Should call service-layer read models and command handlers, not assemble exchange data inline.
 
 2. Read Model Services
-   - Portfolio, positions, order history, account health, strategy status, and market intelligence.
+   - Portfolio, positions, order history, account health, strategy status, NLP vault snapshot, and market intelligence.
    - These services merge live Nado data, archive/indexer data, local DB state, and cached snapshots.
 
 3. Execution Services
-   - Order validation, placement, cancellation, strategy lifecycle, and signer/key safety.
+   - Order validation, placement, cancellation, strategy lifecycle, NLP vault mint/burn, and signer/key safety.
    - Must remain idempotent and recoverable after process restarts.
 
 4. Intelligence and Workflow Services
@@ -37,7 +37,8 @@ Current active backend modules should move toward this ownership model:
 - `src/nadobro/handlers/`: Telegram presentation and interaction routing only.
 - `src/nadobro/services/portfolio_service.py`: portfolio snapshot read model.
 - `src/nadobro/services/trade_service.py`: trade commands and local trade ledger helpers.
-- `src/nadobro/services/nado_client.py`: Nado SDK/REST client, product and subaccount live state.
+- `src/nadobro/services/nlp_vault_service.py`: NLP vault snapshot and mint/burn orchestration (see `docs/nado_vault.md`).
+- `src/nadobro/services/nado_client.py`: Nado SDK/REST client, product and subaccount live state, NLP execute wrappers.
 - `src/nadobro/services/nado_archive.py`: archive/indexer query adapter.
 - `src/nadobro/services/bot_runtime.py`: strategy orchestration and lifecycle.
 - `src/nadobro/services/workflow_service.py`: n8n workflow generation/deployment.
