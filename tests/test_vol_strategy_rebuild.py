@@ -198,6 +198,8 @@ class VolStrategyRebuildTests(unittest.TestCase):
         ), patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
             bot_runtime, "get_user_nado_client", return_value=_RuntimeClient()
         ), patch.object(
+            bot_runtime, "get_spot_product_id", return_value=42
+        ), patch.object(
             bot_runtime, "_dispatch_strategy", return_value={"success": True, "done": True, "stop_reason": "tp_hit"}
         ), patch.object(
             bot_runtime, "_save_state", side_effect=_save_state_stub
