@@ -33,7 +33,7 @@ Nadobro is a Telegram-first Ink financial copilot for Nado DEX. It lets users as
    - `ENCRYPTION_KEY`
    - `XAI_API_KEY` (optional)
    - `OPENAI_API_KEY` (optional)
-   - `DMIND_API_KEY` (recommended for Minara-parity financial reasoning)
+   - `DMIND_API_KEY` (recommended for financial reasoning)
    - `N8N_BASE_URL`, `N8N_API_KEY`, `N8N_WEBHOOK_SECRET` (optional workflow engine)
    - Market-data provider keys such as `CMC_API_KEY`, `COINGECKO_API_KEY`, `COINGLASS_API_KEY`, `ARKHAM_API_KEY`, `GLASSNODE_API_KEY`, `ROOTDATA_API_KEY`, `GOPLUS_API_KEY`, `FMP_API_KEY`
    - `TELEGRAM_TRANSPORT` (`polling` or `webhook`, default `polling`)
@@ -46,13 +46,5 @@ Nadobro is a Telegram-first Ink financial copilot for Nado DEX. It lets users as
 ## Deployment
 
 For Fly.io deployment instructions, see `deploy.md`.
-
-## Minara-Parity Architecture
-
-See:
-
-- `docs/minara_for_ink_product_spec.md`
-- `docs/minara_parity_architecture.md`
-- `docs/dynamic_grid_strategy.md`
 
 - Docs: [nadobro.gitbook.io/docs](https://nadobro.gitbook.io/docs)
