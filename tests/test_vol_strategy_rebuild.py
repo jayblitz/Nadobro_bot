@@ -169,7 +169,8 @@ class VolStrategyRebuildTests(unittest.TestCase):
         state = {
             "running": True,
             "strategy": "vol",
-            "product": "BTC",
+            "product": "KBTC",
+            "vol_market": "spot",
             "tp_pct": 1.0,
             "sl_pct": 1.0,
             "interval_seconds": 10,
@@ -197,12 +198,16 @@ class VolStrategyRebuildTests(unittest.TestCase):
         ), patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
             bot_runtime, "get_user_nado_client", return_value=_RuntimeClient()
         ), patch.object(
+            bot_runtime, "get_spot_product_id", return_value=42
+        ), patch.object(
             bot_runtime, "_dispatch_strategy", return_value={"success": True, "done": True, "stop_reason": "tp_hit"}
         ), patch.object(
             bot_runtime, "_save_state", side_effect=_save_state_stub
         ), patch.object(
             bot_runtime, "_finalize_session"
         ) as finalize_mock, patch.object(
+            bot_runtime, "cleanup_strategy_positions", return_value={"success": True}
+        ) as cleanup_mock, patch.object(
             bot_runtime, "close_all_positions", return_value={"success": True}
         ) as close_mock, patch.object(
             bot_runtime, "_notify"
@@ -211,7 +216,11 @@ class VolStrategyRebuildTests(unittest.TestCase):
 
         self.assertEqual(result, (True, None))
         self.assertTrue(finalize_mock.called)
-        self.assertTrue(close_mock.called)
+        cleanup_mock.assert_called_once()
+        cleanup_args = cleanup_mock.call_args.args
+        self.assertEqual(cleanup_args[:2], (telegram_id, network))
+        self.assertEqual(cleanup_args[2].get("vol_market"), "spot")
+        close_mock.assert_not_called()
         self.assertTrue(any(s.get("running") is False for s in saved_states))
 
     def test_vol_spot_idle_places_spot_buy_limit(self):

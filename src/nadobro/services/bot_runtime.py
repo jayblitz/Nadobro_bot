@@ -1941,12 +1941,13 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             or f"Stopped by session SL ({float(state.get('session_realized_pnl_usd') or 0.0):.4f} USD)."
         )
         _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, network)
+        close_res = await run_blocking(cleanup_strategy_positions, telegram_id, network, state)
+        market_label = _market_label_for_strategy(strategy, product, state)
         if close_res.get("success"):
             await _notify(
                 telegram_id,
-                "✅ Volume strategy stopped on {product}-PERP ({network}) - {reason}.",
-                product=product,
+                "✅ Volume strategy stopped on {market} ({network}) - {reason}.",
+                market=market_label,
                 network=network,
                 reason=(
                     "session TP hit" if stop_reason == "tp_hit"
@@ -1957,8 +1958,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         else:
             await _notify(
                 telegram_id,
-                "⚠️ Volume strategy stop triggered on {product}-PERP ({network}), but cleanup failed. Error: {error}",
-                product=product,
+                "⚠️ Volume strategy stop triggered on {market} ({network}), but cleanup failed. Error: {error}",
+                market=market_label,
                 network=network,
                 error=close_res.get("error", "unknown"),
             )
