@@ -1762,7 +1762,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         raw_value = parts[4]
         if strategy_id not in supported:
             return
-        if strategy_id == "vol" and field not in {"tp_pct", "sl_pct"}:
+        if strategy_id == "vol" and field not in {"sl_pct", "session_margin_usd", "target_volume_usd"}:
             return
         allowed_numeric_fields = {
             "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
@@ -1778,6 +1778,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "auto_close_on_maintenance", "is_long_bias",
             # Mid Mode accepts directional_bias as a continuous float in [-1, +1].
             "directional_bias",
+            # Volume Bot (spot, 2026-05) accepts session margin + target volume.
+            "session_margin_usd", "target_volume_usd",
         }
         if field not in allowed_numeric_fields:
             return
@@ -1802,6 +1804,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "interval_seconds": (10, 3600),
             "tp_pct": (0.05, 100),
             "sl_pct": (0.05, 100),
+            "session_margin_usd": (10, 1000000),
+            "target_volume_usd": (100, 100000000),
             "levels": (1, 20),
             "min_range_pct": (0.1, 20),
             "max_range_pct": (0.1, 40),
@@ -1915,7 +1919,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_short_window_points", "dgrid_long_window_points",
             "directional_bias",
         )
-        if strategy_id == "vol" and field not in {"tp_pct", "sl_pct"}:
+        if strategy_id == "vol" and field not in {"sl_pct", "session_margin_usd", "target_volume_usd"}:
             return
         if field not in allowed_inputs:
             return
@@ -1963,6 +1967,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_max_spread_bp": "Enter DGRID maximum spread in bps \\(example: `50`\\)",
             "dgrid_short_window_points": "Enter DGRID short volatility window points \\(example: `4`\\)",
             "dgrid_long_window_points": "Enter DGRID long volatility window points \\(example: `12`\\)",
+            "session_margin_usd": "Enter session margin in USD \\(per\\-cycle notional, example: `500`\\)",
+            "target_volume_usd": "Enter target cumulative volume in USD \\(example: `25000`\\)",
         }
         await _edit_loc(query, 
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -2905,28 +2911,34 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
 
 def _strategy_config_section_kb(strategy: str, section: str):
     if strategy == "vol":
-        if section == "direction":
-            rows = [[
-                InlineKeyboardButton("LONG", callback_data="strategy:set_text:vol:vol_direction:long"),
-                InlineKeyboardButton("SHORT", callback_data="strategy:set_text:vol:vol_direction:short"),
-            ]]
-        else:
-            rows = [
-                [
-                    InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:vol:tp_pct:0.5"),
-                    InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:vol:tp_pct:1.0"),
-                    InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:vol:tp_pct:2.0"),
-                ],
-                [
-                    InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:vol:sl_pct:0.5"),
-                    InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:vol:sl_pct:1.0"),
-                    InlineKeyboardButton("SL 2.0%", callback_data="strategy:set:vol:sl_pct:2.0"),
-                ],
-                [
-                    InlineKeyboardButton("Custom TP", callback_data="strategy:input:vol:tp_pct"),
-                    InlineKeyboardButton("Custom SL", callback_data="strategy:input:vol:sl_pct"),
-                ],
-            ]
+        # Volume is spot-only as of 2026-05. The user-tunable params are:
+        # session margin (per-cycle notional), stop loss %, target volume.
+        rows = [
+            [
+                InlineKeyboardButton("Margin $100", callback_data="strategy:set:vol:session_margin_usd:100"),
+                InlineKeyboardButton("Margin $500", callback_data="strategy:set:vol:session_margin_usd:500"),
+                InlineKeyboardButton("Margin $1000", callback_data="strategy:set:vol:session_margin_usd:1000"),
+            ],
+            [
+                InlineKeyboardButton("✍️ Custom Margin", callback_data="strategy:input:vol:session_margin_usd"),
+            ],
+            [
+                InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:vol:sl_pct:0.5"),
+                InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:vol:sl_pct:1.0"),
+                InlineKeyboardButton("SL 2.0%", callback_data="strategy:set:vol:sl_pct:2.0"),
+            ],
+            [
+                InlineKeyboardButton("✍️ Custom SL", callback_data="strategy:input:vol:sl_pct"),
+            ],
+            [
+                InlineKeyboardButton("Target $10k", callback_data="strategy:set:vol:target_volume_usd:10000"),
+                InlineKeyboardButton("Target $25k", callback_data="strategy:set:vol:target_volume_usd:25000"),
+                InlineKeyboardButton("Target $100k", callback_data="strategy:set:vol:target_volume_usd:100000"),
+            ],
+            [
+                InlineKeyboardButton("✍️ Custom Target", callback_data="strategy:input:vol:target_volume_usd"),
+            ],
+        ]
         rows.append([InlineKeyboardButton("◀ Back", callback_data="strategy:config:vol")])
         return InlineKeyboardMarkup(rows)
 
@@ -3614,37 +3626,34 @@ def _build_strategy_preview_text(
     session_pnl = float(bot_status.get("session_analytics_pnl_usd") or 0.0)
 
     if strategy_id == "vol":
-        fixed_margin = float(conf.get("fixed_margin_usd") or 100.0)
+        # Volume is spot-only as of 2026-05. "Session margin" doubles as the
+        # per-cycle notional; the bot rotates that amount through one
+        # post-only buy → wait fill → post-only sell loop per cycle.
+        session_margin = float(conf.get("session_margin_usd") or conf.get("fixed_margin_usd") or 100.0)
         target_volume = float(conf.get("target_volume_usd") or 10000.0)
+        sl_pct_vol = float(conf.get("sl_pct") or 0.5)
+        from src.nadobro.config import EST_FEE_RATE as _SPOT_FEE_RATE_EST
+        maker_fee_bp = float(conf.get("vol_maker_fee_bp") or (_SPOT_FEE_RATE_EST * 10_000.0))
         volume_done = float(bot_status.get("volume_done_usd") or 0.0)
-        volume_remaining = float(bot_status.get("volume_remaining_usd") or max(0.0, target_volume - volume_done))
+        volume_remaining = float(
+            bot_status.get("volume_remaining_usd") or max(0.0, target_volume - volume_done)
+        )
         session_fees = float(bot_status.get("session_fees_usd") or session_fees)
         session_pnl = float(bot_status.get("session_realized_pnl_usd") or session_pnl)
-        vm_dash = str(vol_market or "perp").strip().lower()
-        if vm_dash not in ("perp", "spot"):
-            vm_dash = "perp"
-        if vm_dash == "spot":
-            direction_label = "Round-trip (buy → sell)"
-            market_label = f"{str(product).upper()} SPOT"
-            how_it_works = (
-                "Post\\-only spot buy at the bid, wait for fill, wait for the close timer, "
-                "then post\\-only sell at the ask\\. Session TP/SL apply to realized PnL\\."
-            )
-        else:
-            direction_label = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
-            market_label = f"{str(product).upper()}-PERP"
-            how_it_works = "Places maker-only entry and exit orders to build volume while enforcing session TP/SL\\."
+        # Each cycle pushes 2× session_margin of volume (buy leg + sell leg).
+        est_cycles = max(1, int((target_volume + (2 * session_margin) - 1) // (2 * session_margin))) if session_margin > 0 else 0
+        est_fees_usd = target_volume * (maker_fee_bp / 10_000.0)
+        est_pnl_at_sl_usd = -session_margin * (sl_pct_vol / 100.0) if sl_pct_vol > 0 else 0.0
+        market_label = f"{str(product).upper()} SPOT"
         phase = str(bot_status.get("vol_phase") or "idle").upper()
         warning = ""
         if not wallet_ready:
             warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
-        elif available_margin < fixed_margin:
-            warning = f"⚠️ Add margin before starting \\(need {escape_md(_fmt_usd(fixed_margin))}\\)\\."
-        # CEO directive: Volume Perp uses per-asset MAX leverage; spot stays at 1x.
-        _vol_lev_label = (
-            "1x \\(spot\\)" if (vol_market or "perp").lower() == "spot"
-            else f"MAX \\({leverage:.0f}x per\\-asset, perp\\)"
-        )
+        elif available_margin < session_margin:
+            warning = (
+                f"⚠️ Add margin before starting "
+                f"\\(need {escape_md(_fmt_usd(session_margin))}\\)\\."
+            )
         return (
             "🔁 *Volume Bot Dashboard*\n"
             f"Status: {status_emoji} *{status_label}*\n\n"
@@ -3654,20 +3663,24 @@ def _build_strategy_preview_text(
             f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
             "⚙️ *Configuration*\n"
             f"• Market: *{escape_md(market_label)}*\n"
-            f"• Notional per trade: *{escape_md(_fmt_usd(fixed_margin))}*\n"
-            f"• Leverage: *{_vol_lev_label}*\n"
-            f"• Direction: *{escape_md(direction_label)}*\n"
-            f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
-            f"• TP/SL: *{escape_md(f'{tp_pct:.1f}% / {sl_pct:.1f}%')}*\n\n"
-            "📊 *Statistics*\n"
-            f"• Target Volume: *{escape_md(_fmt_usd(target_volume))}*\n"
-            f"• Done: *{escape_md(_fmt_usd(volume_done))}*\n"
-            f"• Remaining: *{escape_md(_fmt_usd(volume_remaining))}*\n"
-            f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
-            f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n"
+            f"• Session margin: *{escape_md(_fmt_usd(session_margin))}*\n"
+            f"• Stop loss: *{escape_md(f'{sl_pct_vol:.2f}%')}*\n"
+            f"• Target volume: *{escape_md(_fmt_usd(target_volume))}*\n\n"
+            "🧮 *Pre\\-flight analytics*\n"
+            f"• Est\\. cycles to target: *{escape_md(str(est_cycles))}*\n"
+            f"• Est\\. fees \\(maker {escape_md(f'{maker_fee_bp:.1f}bp')}\\): *{escape_md(_fmt_usd(est_fees_usd))}*\n"
+            f"• Est\\. PnL if SL hits: *{escape_md(f'{est_pnl_at_sl_usd:+,.2f} USD')}*\n"
+            f"• Slippage: *post\\-only \\(maker fills only\\)*\n\n"
+            "📊 *Live statistics*\n"
+            f"• Volume done: *{escape_md(_fmt_usd(volume_done))}* / *{escape_md(_fmt_usd(target_volume))}*\n"
+            f"• Volume remaining: *{escape_md(_fmt_usd(volume_remaining))}*\n"
+            f"• Fees paid: *{escape_md(_fmt_usd(session_fees))}*\n"
+            f"• Realized PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n"
             f"• Phase: *{escape_md(phase)}*\n\n"
             "ℹ️ *How it works*\n"
-            f"{how_it_works}"
+            "Post\\-only spot buy at the bid → wait for fill → post\\-only sell at the ask\\. "
+            "Loop repeats until target volume is reached, or the session SL halts the bot at "
+            f"*{escape_md(f'{sl_pct_vol:.2f}%')}* of margin\\."
             + (f"\n\n{warning}" if warning else "")
         )
 
