@@ -174,6 +174,20 @@ def _strategy_display_name(strategy: str) -> str:
     return strategy_display_name(strategy)
 
 
+def _market_label_for_strategy(strategy: str, product: str, state: dict | None = None) -> str:
+    """Return a user-facing market label like 'KBTC SPOT' or 'BTC-PERP'.
+
+    Volume is spot-only as of 2026-05 — its alerts must not show '-PERP'. All
+    other strategies (GRID family, MM, MID, DN, BRO) trade perps and keep the
+    legacy '-PERP' suffix.
+    """
+    s = str(strategy or "").strip().lower()
+    p = str(product or "").upper()
+    if s == "vol":
+        return f"{p} SPOT"
+    return f"{p}-PERP"
+
+
 def _update_order_observability(state: dict, result: dict) -> None:
     obs = state.get("order_observability")
     if not isinstance(obs, dict):
@@ -748,17 +762,16 @@ def start_user_bot(
             f"| Funding mode {funding_label} | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}% | Leverage {state.get('leverage')}x",
         )
     if strategy == "vol":
-        direction = str(state.get("vol_direction") or "long").upper()
-        if str(state.get("vol_market") or "perp") == "spot":
-            return (
-                True,
-                f"VOL spot bot started on {str(product).upper()} spot ({network}) "
-                f"| Buy/sell limit loop | Margin $100 @ 1x | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
-            )
+        # Volume is spot-only as of 2026-05.
+        session_margin = float(
+            state.get("session_margin_usd") or state.get("fixed_margin_usd") or 100.0
+        )
+        target_volume = float(state.get("target_volume_usd") or 0.0)
         return (
             True,
-            f"VOL bot started on {str(product).upper()}-PERP ({network}) "
-            f"| Direction {direction} | Margin $100 @ 1x | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}%",
+            f"VOL spot bot started on {str(product).upper()} spot ({network}) "
+            f"| Post-only buy/sell loop | Margin ${session_margin:,.0f} @ 1x "
+            f"| Target volume ${target_volume:,.0f} | SL {state.get('sl_pct')}%",
         )
     if strategy in ("grid", "rgrid", "dgrid", "mid"):
         spread_key = "rgrid_spread_bp" if strategy == "rgrid" else "spread_bp"
@@ -1969,19 +1982,20 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     # Notify user on first successful cycle with order placement confirmation
     orders_placed = int(result.get("orders_placed", 0))
     if prev_runs == 0 and result.get("success", True):
+        market_label = _market_label_for_strategy(strategy, product, state)
         if orders_placed > 0:
             await _notify(
                 telegram_id,
-                "{strategy} is live on {product}-PERP ({network}) — {n} order(s) placed.",
-                strategy=_strategy_display_name(strategy), product=product,
+                "{strategy} is live on {market} ({network}) — {n} order(s) placed.",
+                strategy=_strategy_display_name(strategy), market=market_label,
                 network=network, n=orders_placed,
             )
         else:
             reason = result.get("reason") or result.get("detail") or result.get("action") or "waiting for conditions"
             await _notify(
                 telegram_id,
-                "{strategy} cycle #1 on {product}-PERP ({network}): no orders placed — {reason}",
-                strategy=_strategy_display_name(strategy), product=product,
+                "{strategy} cycle #1 on {market} ({network}): no orders placed — {reason}",
+                strategy=_strategy_display_name(strategy), market=market_label,
                 network=network, reason=str(reason)[:150],
             )
 

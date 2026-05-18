@@ -828,9 +828,6 @@ def strategy_hub_kb():
             InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
         ],
         [
-            InlineKeyboardButton("💰 Nado Vault", callback_data="vault:home"),
-        ],
-        [
             InlineKeyboardButton("🔁 Copy Trading", callback_data="copy:hub"),
         ],
         [

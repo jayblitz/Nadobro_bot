@@ -254,13 +254,17 @@ def _resolve_max_leverage(product: str, network: str, client) -> float:
 
 
 def _resolve_target_notional(state: dict) -> float:
-    """User-overridable position notional with $100 default.
+    """Resolve the per-cycle notional for Volume spot.
 
-    Reads state["target_notional_usd"] first (new key); falls back to legacy
-    state["fixed_margin_usd"] for backward compatibility with existing user configs.
-    Floored at MIN_NOTIONAL_USD; defaults to TARGET_NOTIONAL_USD ($100).
+    As of 2026-05 the Volume bot uses a single "session margin" parameter that
+    doubles as the per-cycle notional (spot, 1x leverage, one round-trip open
+    at a time). Reads keys in priority order: session_margin_usd → legacy
+    target_notional_usd → legacy fixed_margin_usd. Floored at
+    MIN_NOTIONAL_USD; defaults to TARGET_NOTIONAL_USD ($100).
     """
-    raw = state.get("target_notional_usd")
+    raw = state.get("session_margin_usd")
+    if raw is None:
+        raw = state.get("target_notional_usd")
     if raw is None:
         raw = state.get("fixed_margin_usd")
     try:
@@ -989,59 +993,16 @@ def _run_volume_spot_cycle(
             "vol_order_failures": 1,
             "last_order_error": "insufficient_margin_for_max_lev",
         }
-    if bool(state.get("vol_signal_filter_enabled", False)):
-        max_spread_bp = float(state.get("vol_max_spread_bp") or DEFAULT_VOL_MAX_SPREAD_BP)
-        quality_ok, spread_bp, quality_reason = _quote_quality(mp, mid, max_spread_bp)
-        state["vol_spread_bp"] = round(spread_bp, 4)
-        if not quality_ok:
-            return {
-                "success": True,
-                "done": False,
-                "action": quality_reason,
-                "detail": f"VOL spot skipped entry: {quality_reason} (spread {spread_bp:.2f} bp)",
-                "orders_placed": 0,
-                "placed_notional_usd": 0.0,
-                "vol_signal_reason": quality_reason,
-                "vol_spread_bp": round(spread_bp, 4),
-            }
-        signal_state = dict(state)
-        signal_state["vol_direction_mode"] = "fixed"
-        signal_state["vol_direction"] = "long"
-        signal = _volume_signal(product, mid, signal_state)
-        # Volume intelligence: regime gate. Skip entry on adverse trend
-        # regime; dampen notional in chop_high_vol.
-        signal, _notional_mult = _vol_regime_gate(
-            signal=signal,
-            state=state,
-            history=_vol_mid_history(product, state),
-            mid=mid,
-            product=product,
-        )
-        if _notional_mult != 1.0:
-            target_notional = max(MIN_NOTIONAL_USD, target_notional * _notional_mult)
-            state["vol_regime_notional_mult"] = round(_notional_mult, 4)
-            state["target_notional_usd"] = round(target_notional, 4)
-        state["vol_signal"] = {
-            "ok": bool(signal.get("ok")),
-            "reason": signal.get("reason"),
-            "direction": signal.get("direction"),
-            "ema": round(float(signal.get("ema") or 0.0), 6),
-            "rsi": round(float(signal.get("rsi") or 0.0), 4),
-            "edge_bp": round(float(signal.get("edge_bp") or 0.0), 4),
-            "direction_mode": "spot_long",
-            "regime": signal.get("regime"),
-            "regime_confidence": signal.get("regime_confidence"),
-        }
-        if not signal.get("ok"):
-            return {
-                "success": True,
-                "done": False,
-                "action": str(signal.get("reason") or "waiting_signal"),
-                "detail": "VOL spot skipped entry: long signal filter did not confirm setup.",
-                "orders_placed": 0,
-                "placed_notional_usd": 0.0,
-                "vol_signal": state["vol_signal"],
-            }
+    # Volume spot is a dumb maker-only buy→sell loop (2026-05 spec). No
+    # EMA/RSI/regime/signal-filter gating — every cycle attempts a post-only
+    # buy at the bid. Minimal safety: if the book is degenerate (no bid, zero
+    # mid) the earlier mid<=0 guard already returns. We do still record the
+    # spread for observability so the analytics card can display drift risk.
+    try:
+        _quality_ok, _spread_bp, _ = _quote_quality(mp, mid, max_spread_bp=10_000.0)
+        state["vol_spread_bp"] = round(float(_spread_bp or 0.0), 4)
+    except Exception:
+        state["vol_spread_bp"] = 0.0
     # Size by target NOTIONAL (USD) — spot leverage is always 1x so notional == margin here.
     size = max(target_notional / mid, MIN_SIZE)
     entry_limit = _maker_limit_price(mp, is_buy=True)
@@ -1149,8 +1110,11 @@ def run_cycle(telegram_id: int, network: str, state: dict, **kwargs) -> dict:
     state["direction"] = "long"
 
     target_notional = _resolve_target_notional(state)
+    # Spec (2026-05): the configured "session margin" is the per-cycle notional.
+    # Mirror it into legacy keys so preview cards, copy-trade replication, and
+    # any operator dashboards that read the old field names keep working.
+    state["session_margin_usd"] = round(target_notional, 4)
     state["target_notional_usd"] = round(target_notional, 4)
-    # Legacy mirror — preview cards and copy-trade still read fixed_margin_usd.
     state["fixed_margin_usd"] = round(target_notional, 4)
     fixed_margin = target_notional  # alias retained for downstream call signatures
     max_lev = _resolve_max_leverage(product, network, client)
