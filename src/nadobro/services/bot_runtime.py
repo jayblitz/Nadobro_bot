@@ -623,11 +623,11 @@ def start_user_bot(
         _ensure_task(telegram_id, network)
         return True, "Bro Mode activated 🧠"
 
-    vol_market_kw = "spot"
+    vol_market_kw = "perp"
     if strategy == "vol":
-        vol_market_kw = str(kwargs.get("vol_market") or "spot").strip().lower()
+        vol_market_kw = str(kwargs.get("vol_market") or "perp").strip().lower()
         if vol_market_kw not in ("perp", "spot"):
-            vol_market_kw = "spot"
+            vol_market_kw = "perp"
         if vol_market_kw == "spot":
             product = normalize_volume_spot_symbol(str(product or "").strip())
             allowed_vol_spot = list_volume_spot_product_names(network=network)

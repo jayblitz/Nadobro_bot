@@ -332,8 +332,8 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             "direction": direction,
         }
         if str(strategy or "").lower() == "vol":
-            vm = str(action_data.get("vol_market") or "spot").strip().lower()
-            start_kwargs["vol_market"] = vm if vm in ("perp", "spot") else "spot"
+            vm = str(action_data.get("vol_market") or "perp").strip().lower()
+            start_kwargs["vol_market"] = vm if vm in ("perp", "spot") else "perp"
         ok, msg = await run_blocking(
             start_user_bot,
             telegram_id,
