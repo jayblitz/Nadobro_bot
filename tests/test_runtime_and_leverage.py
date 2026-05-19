@@ -312,6 +312,50 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "dn")
         close_all.assert_not_called()
 
+    def test_cleanup_strategy_positions_treats_legacy_vol_as_spot(self):
+        state = {
+            "strategy": "vol",
+            "product": "KBTC",
+            "vol_market": "perp",
+            "vol_phase": "filled_wait_close",
+            "vol_entry_fill_ts": 123.0,
+            "vol_entry_size": 0.001,
+            "vol_close_size": 0.0005,
+            "strategy_session_id": 77,
+        }
+        with patch("src.nadobro.services.strategy_lifecycle.get_spot_product_id", return_value=42), patch(
+            "src.nadobro.services.strategy_lifecycle.get_spot_metadata", return_value={"symbol": "KBTC"}
+        ), patch(
+            "src.nadobro.services.strategy_lifecycle.stop_volume_spot_cleanup", return_value={"success": True}
+        ) as spot_cleanup, patch(
+            "src.nadobro.services.strategy_lifecycle.close_all_positions"
+        ) as close_all:
+            res = cleanup_strategy_positions(42, "mainnet", state)
+
+        self.assertTrue(res["success"])
+        spot_cleanup.assert_called_once()
+        self.assertEqual(spot_cleanup.call_args.kwargs["max_base_size"], 0.001)
+        close_all.assert_not_called()
+
+    def test_cleanup_strategy_positions_does_not_sell_unconfirmed_pending_entry(self):
+        state = {
+            "strategy": "vol",
+            "product": "KBTC",
+            "vol_market": "spot",
+            "vol_phase": "pending_fill",
+            "vol_entry_fill_ts": 0.0,
+            "vol_entry_size": 0.001,
+        }
+        with patch("src.nadobro.services.strategy_lifecycle.get_spot_product_id", return_value=42), patch(
+            "src.nadobro.services.strategy_lifecycle.get_spot_metadata", return_value={"symbol": "KBTC"}
+        ), patch(
+            "src.nadobro.services.strategy_lifecycle.stop_volume_spot_cleanup", return_value={"success": True}
+        ) as spot_cleanup:
+            res = cleanup_strategy_positions(42, "mainnet", state)
+
+        self.assertTrue(res["success"])
+        self.assertEqual(spot_cleanup.call_args.kwargs["max_base_size"], 0.0)
+
     def test_run_cycle_grid_price_move_does_not_trigger_generic_sl(self):
         telegram_id = 7
         network = "mainnet"
