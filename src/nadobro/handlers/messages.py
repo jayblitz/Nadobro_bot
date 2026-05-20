@@ -332,8 +332,9 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
             "direction": direction,
         }
         if str(strategy or "").lower() == "vol":
-            vm = str(action_data.get("vol_market") or "perp").strip().lower()
-            start_kwargs["vol_market"] = vm if vm in ("perp", "spot") else "perp"
+            # Volume is spot-only; stale NLP payloads may omit vol_market or carry
+            # the retired perp value from older prompts.
+            start_kwargs["vol_market"] = "spot"
         ok, msg = await run_blocking(
             start_user_bot,
             telegram_id,

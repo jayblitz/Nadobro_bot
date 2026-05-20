@@ -169,6 +169,10 @@ class RuntimeAndLeverageTests(unittest.TestCase):
     def test_start_user_bot_blocks_when_preflight_fails(self):
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
         with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
+            bot_runtime, "list_volume_spot_product_names", return_value=["KBTC"]
+        ), patch.object(
+            bot_runtime, "get_spot_product_id", return_value=42
+        ), patch.object(
             bot_runtime, "run_strategy_start_preflight", return_value=(False, "Wallet not linked")
         ):
             ok, msg = bot_runtime.start_user_bot(
@@ -180,6 +184,92 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             )
         self.assertFalse(ok)
         self.assertEqual(msg, "Wallet not linked")
+
+    def test_start_user_bot_forces_volume_spot_even_from_stale_perp_payload(self):
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
+        saved_states = []
+
+        with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
+            bot_runtime, "list_volume_spot_product_names", return_value=["KBTC"]
+        ), patch.object(
+            bot_runtime, "get_spot_product_id", return_value=42
+        ), patch.object(
+            bot_runtime, "run_strategy_start_preflight", return_value=(True, "")
+        ), patch.object(
+            bot_runtime, "_mark_previous_sessions_superseded"
+        ), patch.object(
+            bot_runtime, "get_strategy_settings", return_value=({}, {})
+        ), patch.object(
+            bot_runtime, "_create_session", return_value=123
+        ), patch.object(
+            bot_runtime, "_save_state", side_effect=lambda _uid, _network, state: saved_states.append(dict(state))
+        ), patch.object(
+            bot_runtime, "_ensure_task"
+        ):
+            ok, msg = bot_runtime.start_user_bot(
+                telegram_id=1,
+                strategy="vol",
+                product="BTC",
+                leverage=3,
+                slippage_pct=1,
+                vol_market="perp",
+            )
+
+        self.assertTrue(ok, msg)
+        self.assertTrue(saved_states)
+        state = saved_states[-1]
+        self.assertEqual(state.get("vol_market"), "spot")
+        self.assertEqual(state.get("product"), "KBTC")
+        self.assertEqual(state.get("direction"), "long")
+        self.assertEqual(state.get("leverage"), 1.0)
+
+    def test_run_cycle_retires_legacy_volume_perp_before_spot_dispatch(self):
+        telegram_id = 42
+        network = "mainnet"
+        state = {
+            "running": True,
+            "strategy": "vol",
+            "product": "BTC",
+            "vol_market": "perp",
+            "vol_phase": "filled_wait_close",
+            "interval_seconds": 1,
+            "last_run_ts": 0.0,
+            "strategy_session_id": 5,
+        }
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
+        saved_states = []
+
+        async def _run_blocking_stub(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch(
+            "src.nadobro.services.settings_service.get_strategy_settings",
+            return_value=({}, {}),
+        ), patch.object(
+            bot_runtime, "is_trading_paused", return_value=False
+        ), patch.object(
+            bot_runtime, "get_user", return_value=fake_user
+        ), patch.object(
+            bot_runtime, "run_blocking", side_effect=_run_blocking_stub
+        ), patch.object(
+            bot_runtime, "_save_state", side_effect=lambda _uid, _network, new_state: saved_states.append(dict(new_state))
+        ), patch.object(
+            bot_runtime, "_finalize_session"
+        ) as finalize_mock, patch.object(
+            bot_runtime, "close_all_positions", return_value={"success": True}
+        ) as close_mock, patch.object(
+            bot_runtime, "_dispatch_strategy"
+        ) as dispatch_mock, patch.object(
+            bot_runtime, "_notify", new=AsyncMock()
+        ):
+            result = asyncio.run(bot_runtime._run_cycle(telegram_id, network, state))
+
+        self.assertEqual(result, (True, None))
+        self.assertFalse(state.get("running"))
+        self.assertTrue(any(s.get("running") is False for s in saved_states))
+        finalize_mock.assert_called_once()
+        close_mock.assert_called_once_with(telegram_id, network)
+        dispatch_mock.assert_not_called()
 
     def test_stop_all_user_bots_closes_each_running_network(self):
         telegram_id = 42
@@ -979,6 +1069,12 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
         with patch.object(volume_bot, "_entry_fill_data", return_value={"fill_price": 100.0}), patch.object(
             volume_bot, "_close_realized_pnl", return_value=(-0.2, 0.0)
+        ), patch.object(
+            volume_bot, "list_volume_spot_product_names", return_value=["KBTC"]
+        ), patch.object(
+            volume_bot, "get_spot_product_id", return_value=42
+        ), patch.object(
+            volume_bot, "get_spot_metadata", return_value={"symbol": "KBTC"}
         ):
             result = volume_bot.run_cycle(
                 telegram_id=1,

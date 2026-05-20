@@ -442,6 +442,51 @@ def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> No
         _schedule_bro_migration_notice(telegram_id)
 
 
+def _is_legacy_vol_perp_state(state: dict) -> bool:
+    """Return True for persisted Volume sessions from before the spot-only cutover."""
+    strategy = _normalize_strategy_id(str(state.get("strategy") or ""))
+    if strategy != "vol":
+        return False
+    return str(state.get("vol_market") or "perp").strip().lower() != "spot"
+
+
+async def _retire_legacy_vol_perp_state(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
+    """Stop legacy VOL perp state before it can be interpreted as a spot cycle."""
+    product = str(state.get("product") or "?").upper()
+    _finalize_session(state, stop_reason="vol_perp_retired")
+    state["running"] = False
+    state["last_action"] = "vol_perp_retired"
+    state["last_action_detail"] = "Volume Perp was retired; legacy session stopped before spot migration."
+    state["last_error"] = "Volume Perp was retired; legacy session stopped and perp cleanup requested."
+    _save_state(telegram_id, network, state)
+
+    close_res = await run_blocking(close_all_positions, telegram_id, network)
+    if close_res.get("success"):
+        await _notify(
+            telegram_id,
+            "Volume Perp on {product}-PERP ({network}) was retired and has been stopped. "
+            "Perp cleanup was requested; start Volume again to use the spot loop.",
+            product=product,
+            network=network,
+        )
+        return True, None
+
+    error = str(close_res.get("error") or "close_all_positions failed")
+    latest = _load_state(telegram_id, network)
+    latest["running"] = False
+    latest["last_error"] = f"Legacy Volume Perp cleanup failed: {error[:220]}"
+    _save_state(telegram_id, network, latest)
+    await _notify(
+        telegram_id,
+        "Volume Perp on {product}-PERP ({network}) was retired and stopped, but cleanup failed. "
+        "Please check Nado for any remaining perp orders or positions. Error: {error}",
+        product=product,
+        network=network,
+        error=error[:180],
+    )
+    return False, latest["last_error"]
+
+
 def _create_session(telegram_id: int, strategy: str, product: str, network: str, state: dict) -> int | None:
     """Create a strategy_sessions row and return the session_id."""
     try:
@@ -625,19 +670,18 @@ def start_user_bot(
 
     vol_market_kw = "perp"
     if strategy == "vol":
-        vol_market_kw = str(kwargs.get("vol_market") or "perp").strip().lower()
-        if vol_market_kw not in ("perp", "spot"):
-            vol_market_kw = "perp"
-        if vol_market_kw == "spot":
-            product = normalize_volume_spot_symbol(str(product or "").strip())
-            allowed_vol_spot = list_volume_spot_product_names(network=network)
-            if product not in allowed_vol_spot:
-                return False, (
-                    f"Volume spot supports only {', '.join(allowed_vol_spot) or 'no resolved spot pairs'} on {network}."
-                )
-            dir_spot = str(kwargs.get("direction") or "long").strip().lower()
-            if dir_spot == "short":
-                return False, "Volume spot mode is buy-then-sell only (direction must be long)."
+        # Volume is spot-only as of 2026-05. Ignore stale callers that still pass
+        # vol_market="perp" so new sessions cannot persist the retired mode.
+        vol_market_kw = "spot"
+        product = normalize_volume_spot_symbol(str(product or "").strip())
+        allowed_vol_spot = list_volume_spot_product_names(network=network)
+        if product not in allowed_vol_spot:
+            return False, (
+                f"Volume spot supports only {', '.join(allowed_vol_spot) or 'no resolved spot pairs'} on {network}."
+            )
+        dir_spot = str(kwargs.get("direction") or "long").strip().lower()
+        if dir_spot == "short":
+            return False, "Volume spot mode is buy-then-sell only (direction must be long)."
 
     dn_pair = get_dn_pair(product, network=network) if strategy == "dn" else {}
     if strategy == "dn":
@@ -658,6 +702,7 @@ def start_user_bot(
         return False, str(dn_pair.get("entry_block_reason") or f"{product.upper()} is not currently tradable for Delta Neutral.")
     if strategy == "vol" and vol_market_kw == "spot":
         max_leverage = 1
+        leverage = 1.0
     else:
         max_leverage = get_product_max_leverage(product, network=network)
         if strategy == "dn":
@@ -995,7 +1040,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "global_pause_active": global_pause_active,
         "strategy": state.get("strategy"),
         "product": state.get("product"),
-        "vol_market": state.get("vol_market") or "perp",
+        "vol_market": state.get("vol_market") or ("spot" if str(state.get("strategy") or "").lower() == "vol" else "perp"),
         "notional_usd": state.get("notional_usd"),
         "cycle_notional_usd": state.get("cycle_notional_usd"),
         "spread_bp": state.get("spread_bp"),
@@ -1601,6 +1646,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     product = state.get("product", "BTC")
     strategy = _normalize_strategy_id(state.get("strategy"))
     state["strategy"] = strategy
+    if _is_legacy_vol_perp_state(state):
+        return await _retire_legacy_vol_perp_state(telegram_id, network, state)
 
     if strategy == "bro":
         client = await run_blocking(get_user_nado_client, telegram_id)
@@ -1693,7 +1740,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         return True, None
 
     dn_pair = get_dn_pair(product, network=network, client=None) if strategy == "dn" else {}
-    if strategy == "vol" and str(state.get("vol_market") or "perp") == "spot":
+    if strategy == "vol":
         prod = normalize_volume_spot_symbol(str(product or ""))
         product_id = get_spot_product_id(prod, network=network)
     else:

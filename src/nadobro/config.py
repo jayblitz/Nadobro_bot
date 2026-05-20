@@ -211,9 +211,9 @@ def normalize_volume_spot_symbol(name: str) -> str:
     if not raw:
         return ""
     low = raw.lower().replace(" ", "").replace("-", "")
-    if low in ("kbtc",):
+    if low in ("btc", "kbtc"):
         return "KBTC"
-    if low in ("weth",):
+    if low in ("eth", "weth"):
         return "WETH"
     if low in ("usdc",):
         return "USDC"
