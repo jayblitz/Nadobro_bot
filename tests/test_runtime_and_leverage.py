@@ -169,6 +169,10 @@ class RuntimeAndLeverageTests(unittest.TestCase):
     def test_start_user_bot_blocks_when_preflight_fails(self):
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
         with patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
+            bot_runtime, "list_volume_spot_product_names", return_value=["KBTC"]
+        ), patch.object(
+            bot_runtime, "get_spot_product_id", return_value=42
+        ), patch.object(
             bot_runtime, "run_strategy_start_preflight", return_value=(False, "Wallet not linked")
         ):
             ok, msg = bot_runtime.start_user_bot(
@@ -1065,6 +1069,12 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
         with patch.object(volume_bot, "_entry_fill_data", return_value={"fill_price": 100.0}), patch.object(
             volume_bot, "_close_realized_pnl", return_value=(-0.2, 0.0)
+        ), patch.object(
+            volume_bot, "list_volume_spot_product_names", return_value=["KBTC"]
+        ), patch.object(
+            volume_bot, "get_spot_product_id", return_value=42
+        ), patch.object(
+            volume_bot, "get_spot_metadata", return_value={"symbol": "KBTC"}
         ):
             result = volume_bot.run_cycle(
                 telegram_id=1,
