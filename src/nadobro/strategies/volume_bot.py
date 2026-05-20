@@ -488,6 +488,19 @@ def _spot_base_balance(client, spot_product_id: int) -> float:
         return 0.0
 
 
+def _spot_managed_base_size(state: dict, wallet_base: float) -> float:
+    """Cap spot cleanup to the inventory size this Volume cycle opened."""
+    managed = 0.0
+    for key in ("vol_close_size", "vol_entry_size"):
+        try:
+            managed = max(managed, float(state.get(key) or 0.0))
+        except (TypeError, ValueError):
+            continue
+    if managed <= 0:
+        return 0.0
+    return min(max(float(wallet_base or 0.0), 0.0), managed)
+
+
 def _compute_close_ttl_windows(state: dict, mp: dict, now_mid: float) -> tuple[float, float]:
     """Compute repost/escalate windows with optional adaptive widening.
 
@@ -631,12 +644,13 @@ def _run_volume_spot_cycle(
                         "VOL spot close cancel-before-escalate failed user=%s product=%s digest=%s err=%s",
                         telegram_id, product, close_digest[:16], cancel_err,
                     )
-                escalate_size = _spot_base_balance(client, spot_product_id)
+                base_balance = _spot_base_balance(client, spot_product_id)
+                escalate_size = _spot_managed_base_size(state, base_balance)
                 state["vol_last_force_close_attempt_ts"] = now_ts
                 if escalate_size >= MIN_SIZE * 2:
                     logger.warning(
-                        "VOL spot force-close (market sell) user=%s product=%s stuck_seconds=%.1f size=%.8f",
-                        telegram_id, product, stuck_since_entry, escalate_size,
+                        "VOL spot force-close (market sell) user=%s product=%s stuck_seconds=%.1f size=%.8f wallet_base=%.8f",
+                        telegram_id, product, stuck_since_entry, escalate_size, base_balance,
                     )
                     force_res = execute_spot_market_order(
                         telegram_id,

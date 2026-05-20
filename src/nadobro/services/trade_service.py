@@ -1135,6 +1135,7 @@ def stop_volume_spot_cleanup(
     network: str | None = None,
     slippage_pct: float = 1.0,
     strategy_session_id: int | None = None,
+    max_base_size: float | None = None,
 ) -> dict:
     """Cancel resting spot orders for one product and market-sell remaining base (Volume spot stop)."""
     user = get_user(telegram_id)
@@ -1149,12 +1150,19 @@ def stop_volume_spot_cleanup(
         bal = readonly.get_balance() or {}
         balances = bal.get("balances", {}) or {}
         base = float(balances.get(int(spot_product_id), balances.get(str(spot_product_id), 0)) or 0.0)
+    base_to_sell = base
+    if max_base_size is not None:
+        try:
+            cap = max(0.0, float(max_base_size or 0.0))
+        except (TypeError, ValueError):
+            cap = 0.0
+        base_to_sell = min(base, cap)
     spot_res: dict = {"success": True, "skipped": True}
-    if base > 1e-12:
+    if base_to_sell > 1e-12:
         spot_res = execute_spot_market_order(
             telegram_id,
             spot_symbol,
-            base,
+            base_to_sell,
             is_buy=False,
             enforce_rate_limit=False,
             slippage_pct=float(slippage_pct or 1.0),
@@ -1168,13 +1176,15 @@ def stop_volume_spot_cleanup(
     hard_errors: list[str] = []
     if order_errors:
         hard_errors.extend(order_errors)
-    if base > 1e-12 and not spot_res.get("success"):
+    if base_to_sell > 1e-12 and not spot_res.get("success"):
         hard_errors.append(str(spot_res.get("error") or "Spot flatten failed"))
     return {
         "success": len(hard_errors) == 0,
         "cancelled_orders": cancelled,
         "order_errors": order_errors or None,
         "spot_flatten": spot_res,
+        "spot_base_detected": base,
+        "spot_base_sold": base_to_sell,
         "errors": hard_errors or None,
     }
 

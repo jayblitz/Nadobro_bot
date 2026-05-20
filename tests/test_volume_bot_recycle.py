@@ -315,6 +315,44 @@ class SpotBalanceRaceTests(unittest.TestCase):
         self.assertEqual(state["vol_phase"], "filled_wait_close")
 
 
+class SpotForceCloseSizingTests(unittest.TestCase):
+    def test_spot_force_close_sells_only_bot_managed_size(self):
+        now = time.time()
+        state = {
+            "product": "KBTC",
+            "vol_market": "spot",
+            "vol_phase": "pending_close_fill",
+            "vol_direction": "long",
+            "vol_entry_fill_ts": now - 300.0,
+            "vol_entry_fill_price": 100000.0,
+            "vol_entry_size": 0.001,
+            "vol_close_digest": "d-stale-close",
+            "vol_close_size": 0.001,
+            "vol_close_posted_ts": now - 200.0,
+        }
+        # Wallet has the bot's 0.001 KBTC plus unrelated user-held KBTC.
+        client = _VolClient(
+            mid=100000.0,
+            open_orders=[{"digest": "d-stale-close", "price": 100000.0}],
+            spot_base_by_id={42: 0.011},
+        )
+        with patch.object(
+            volume_bot, "list_volume_spot_product_names", return_value=["KBTC"]
+        ), patch.object(volume_bot, "get_spot_product_id", return_value=42), patch.object(
+            volume_bot, "get_spot_metadata", return_value={"symbol": "KBTC"}
+        ), patch.object(
+            volume_bot,
+            "execute_spot_market_order",
+            return_value={"success": True, "digest": "d-force"},
+        ) as market_mock:
+            result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["action"], "close_escalated_force_close")
+        self.assertEqual(market_mock.call_args.args[2], 0.001)
+        self.assertIn((42, "d-stale-close"), client.cancelled)
+
+
 class AdaptiveCloseTtlTests(unittest.TestCase):
     def test_ttl_windows_widen_under_wide_spread_and_fast_move(self):
         state = {
