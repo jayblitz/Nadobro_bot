@@ -702,6 +702,7 @@ def start_user_bot(
         return False, str(dn_pair.get("entry_block_reason") or f"{product.upper()} is not currently tradable for Delta Neutral.")
     if strategy == "vol" and vol_market_kw == "spot":
         max_leverage = 1
+        leverage = 1.0
     else:
         max_leverage = get_product_max_leverage(product, network=network)
         if strategy == "dn":
