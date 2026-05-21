@@ -49,3 +49,50 @@ def test_only_adapter_may_import_connectors_nado() -> None:
         "Forbidden imports of connectors/nado outside engine/adapter/nado.py:\n  "
         + "\n  ".join(violations)
     )
+
+
+# --- Engine-scoped guard ---------------------------------------------------
+# ``connectors/nado`` does not exist in this repo; the live venue client is
+# ``services/nado_client``. Legacy code across the repo imports it freely, so
+# this guard is scoped to ``src/nadobro/engine`` only: within the engine, just
+# ``adapter/nado.py`` may touch the venue client (single source of truth for
+# the 1CT Linked Signer path).
+ENGINE_ROOT = SRC_ROOT / "engine"
+ENGINE_VENUE_FORBIDDEN = (
+    "nadobro.services.nado_client",
+    "src.nadobro.services.nado_client",
+    "services.nado_client",
+)
+
+
+def _imports_any(py_file: pathlib.Path, prefixes: tuple[str, ...]) -> bool:
+    try:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return False
+
+    def forbidden(name: str) -> bool:
+        return any(name == p or name.startswith(p + ".") for p in prefixes)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if forbidden(alias.name):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and forbidden(node.module):
+                return True
+    return False
+
+
+def test_only_engine_adapter_may_import_nado_client() -> None:
+    violations: list[str] = []
+    for py in ENGINE_ROOT.rglob("*.py"):
+        if py.resolve() == ALLOWED_IMPORTER.resolve():
+            continue
+        if _imports_any(py, ENGINE_VENUE_FORBIDDEN):
+            violations.append(str(py.relative_to(REPO_ROOT)))
+    assert not violations, (
+        "Engine modules other than adapter/nado.py import the venue client "
+        "(services/nado_client):\n  " + "\n  ".join(violations)
+    )
