@@ -176,9 +176,7 @@ def _get_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
 # Strategy → display label
 # ---------------------------------------------------------------------------
 STRATEGY_LABELS: dict[str, str] = {
-    "bro": "Bro Mode",
-    "bro mode": "Bro Mode",
-    "bro_mode": "Bro Mode",
+    "bro": "Alpha Agent",
     "grid": "Grid Mode",
     "rgrid": "R-Grid Mode",
     "r-grid": "R-Grid Mode",
@@ -202,11 +200,11 @@ STRATEGY_LABELS: dict[str, str] = {
 
 def _strategy_label(raw: object) -> str:
     if raw is None or (isinstance(raw, str) and not raw.strip()):
-        return "Bro Mode"
+        return "Alpha Agent"
     s = str(raw).strip().lower().replace("-", " ").replace("_", " ")
     s = " ".join(s.split())  # collapse whitespace
     # Try with spaces first then with underscores for the dict
-    return STRATEGY_LABELS.get(s, STRATEGY_LABELS.get(s.replace(" ", "_"), "Bro Mode"))
+    return STRATEGY_LABELS.get(s, STRATEGY_LABELS.get(s.replace(" ", "_"), "Alpha Agent"))
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +242,7 @@ def _draw_strategy_pill(
     padding_x: int = 14,
     padding_y: int = 7,
 ) -> int:
-    """Draw the rounded "Bro Mode" pill. Returns its right edge X coordinate."""
+    """Draw the rounded strategy label pill. Returns its right edge X coordinate."""
     x, y = xy
     bbox = draw.textbbox((0, 0), text, font=font)
     text_w = bbox[2] - bbox[0]
@@ -395,7 +393,7 @@ def generate_pnl_card(data: dict) -> bytes:
     * ``symbol`` (default ``"BTC-PERP"``)
     * ``strategy`` — ``"bro"``, ``"grid"``, ``"rgrid"``, ``"dgrid"``,
       ``"volume"``, ``"copy_trading"`` / ``"copy trading"``, ``"mm"``,
-      ``"delta_neutral"``; unknown → ``"Bro Mode"``
+      ``"delta_neutral"``; unknown → ``"Alpha Agent"``
     * ``volume`` — e.g. ``"$1.23M"``
     * ``net_fees`` — signed string, e.g. ``"-$12.34"``
     * ``pnl`` — signed string, e.g. ``"+$234.56"``

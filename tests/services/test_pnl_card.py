@@ -74,8 +74,7 @@ def test_strategy_key_changes_output():
 
 def test_strategy_label_mapping_canonical_keys():
     # The renderer accepts both "_" and "-" delimiters as well as raw words.
-    assert pc._strategy_label("bro") == "Bro Mode"
-    assert pc._strategy_label("Bro Mode") == "Bro Mode"
+    assert pc._strategy_label("bro") == "Alpha Agent"
     assert pc._strategy_label("grid") == "Grid Mode"
     assert pc._strategy_label("rgrid") == "R-Grid Mode"
     assert pc._strategy_label("r-grid") == "R-Grid Mode"
@@ -86,15 +85,15 @@ def test_strategy_label_mapping_canonical_keys():
     assert pc._strategy_label("mm") == "MM Mode"
     assert pc._strategy_label("delta_neutral") == "Delta Neutral"
     assert pc._strategy_label("copy_trading") == "Copy Mode"
-    # ``studio`` is no longer a recognized strategy — falls through to Bro Mode.
-    assert pc._strategy_label("studio") == "Bro Mode"
+    # ``studio`` is no longer a recognized strategy — falls through to Alpha Agent.
+    assert pc._strategy_label("studio") == "Alpha Agent"
 
 
-def test_strategy_label_unknown_falls_back_to_bro_mode():
-    assert pc._strategy_label(None) == "Bro Mode"
-    assert pc._strategy_label("") == "Bro Mode"
-    assert pc._strategy_label("   ") == "Bro Mode"
-    assert pc._strategy_label("totally-unknown") == "Bro Mode"
+def test_strategy_label_unknown_falls_back_to_alpha_agent():
+    assert pc._strategy_label(None) == "Alpha Agent"
+    assert pc._strategy_label("") == "Alpha Agent"
+    assert pc._strategy_label("   ") == "Alpha Agent"
+    assert pc._strategy_label("totally-unknown") == "Alpha Agent"
 
 
 def test_canvas_dimensions_match_master_image():

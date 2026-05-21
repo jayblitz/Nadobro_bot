@@ -18,7 +18,7 @@ survive restarts and are visible across workers:
        plus the day's low-water-mark. This catches the "holding a big
        loser" failure mode — the exact thing the audit flagged — without
        the telescoping bug that summing cycle-deltas would introduce.
-     * volume_bot / bro_mode feed *realized* PnL on each close
+     * volume_bot / alpha_agent feed *realized* PnL on each close
        (``record_realized_pnl``); those strategies fully realize each
        round-turn so the accumulation is exact.
    ``get_daily_pnl`` returns ``realized_accumulated + current_mtm`` — the
@@ -110,7 +110,7 @@ def record_realized_pnl(
 ) -> float:
     """Accumulate a realized PnL chunk into today's per-product budget.
 
-    Used by volume_bot / bro_mode which realize each round-turn fully.
+    Used by volume_bot / alpha_agent which realize each round-turn fully.
     Returns the combined daily PnL after the update.
     """
     row = _load_budget_row(telegram_id, network, product)

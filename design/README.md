@@ -6,7 +6,7 @@ Kraken). The product lives almost entirely inside the Telegram chat
 window: users talk to `@Nadbro_bot` to inspect markets, ask Trading-Bro
 questions, link a wallet, place perp trades by typing things like
 `long BTC 0.01 5x market`, run automated strategies (Market Making,
-Grid, Dynamic Grid, Delta Neutral, Volume, Bro Mode), share PnL cards,
+Grid, Dynamic Grid, Delta Neutral, Volume, Alpha Agent), share PnL cards,
 and refer friends.
 
 The brand persona is **"your trading buddy who happens to be a quant"** —
@@ -98,7 +98,7 @@ line. Casual chat takes neither.
 `🟢` bullish / Long · `🔴` bearish / Short · `⚠️` risk · `⚡` key info ·
 `💡` tip · `💰` money/profits · `🏆` rankings/points · `📈📉` direction ·
 `🔥` hot take · `🤖` bot/trade · `📁` portfolio · `💼` wallet · `🧠` strategy ·
-`🔔` alerts · `⚙️` settings · `🌐` mode · `🚀` Bro Mode · `✅` confirm · `❌` cancel.
+`🔔` alerts · `⚙️` settings · `🌐` mode · `🚀` Alpha Agent · `✅` confirm · `❌` cancel.
 
 **Microcopy examples** (lifted / adapted):
 - Greeting: *"What's up, fren — markets warming up. ☀️"*
@@ -193,7 +193,7 @@ surface*. In our HTML mocks, keep motion subtle:
 
 - Chat bubbles: `12–18px` (Telegram default — we don't redraw this).
 - Cards / panels: `16–20px` (`--r-lg` / `--r-xl`).
-- Pills (Bro Mode, mode toggle, referral pill): `999px` (`--r-pill`).
+- Pills (Alpha Agent, mode toggle, referral pill): `999px` (`--r-pill`).
 - Share-card pills: `28px` (`--r-2xl`) — measured from the master PNG.
 - Avatars / app icon: `22%` of size (Telegram-style squircle).
 

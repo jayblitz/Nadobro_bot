@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 STATE_PREFIX = "strategy_bot:"
 RUNTIME_TICK_SECONDS = 20
-BRO_MIGRATION_NOTICE = "Legacy Bro Mode has been retired. Pick a strategy from the Strategy hub or use the Nado Vault."
+BRO_MIGRATION_NOTICE = "Legacy Alpha Agent has been retired. Pick a strategy from the Strategy hub or use the Nado Vault."
 
 
 def _strategy_cycle_timeout_seconds() -> float | None:
@@ -408,7 +408,7 @@ def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> No
     session_id = state.get("strategy_session_id")
     state["running"] = False
     state["last_action"] = "migrated_off_bro"
-    state["last_action_detail"] = "Legacy Bro Mode autoloop retired."
+    state["last_action_detail"] = "Legacy Alpha Agent autoloop retired."
     state["bro_migrated_at"] = state.get("bro_migrated_at") or now
     should_notify = not bool(state.get("bro_migration_notice_sent"))
     state["bro_migration_notice_sent"] = True
@@ -631,7 +631,7 @@ def start_user_bot(
 
     if strategy == "bro":
         if not legacy_bro_autoloop_enabled():
-            return False, "Legacy Bro Mode has been retired. Pick a strategy from the Strategy hub."
+            return False, "Legacy Alpha Agent has been retired. Pick a strategy from the Strategy hub."
         _mark_previous_sessions_superseded(telegram_id, network)
         _, strat_cfg = get_strategy_settings(telegram_id, strategy)
         state = _default_state()
@@ -666,7 +666,7 @@ def start_user_bot(
             state["strategy_session_id"] = session_id
         _save_state(telegram_id, network, state)
         _ensure_task(telegram_id, network)
-        return True, "Bro Mode activated 🧠"
+        return True, "Alpha Agent activated 🧠"
 
     vol_market_kw = "perp"
     if strategy == "vol":
@@ -1559,11 +1559,9 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
     elif strategy == "bro":
         if not legacy_bro_autoloop_enabled():
             return {"success": True, "action": "skipped", "reason": "legacy_bro_autoloop_disabled"}
-        from src.nadobro.strategies import bro_mode
-        return bro_mode.run_cycle(
-            telegram_id, network, state,
-            client=client,
-        )
+        # Alpha Agent autoloop backend was removed; nothing to run even if the
+        # legacy flag is force-enabled.
+        return {"success": True, "action": "skipped", "reason": "alpha_agent_autoloop_removed"}
     else:
         return {"success": False, "error": f"Unknown strategy '{strategy}'"}
 
@@ -1678,7 +1676,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             if bro_action == "hold":
                 await _notify(
                     telegram_id,
-                    "🧠 Bro Mode cycle #{cycle} ({network}): "
+                    "🧠 Alpha Agent cycle #{cycle} ({network}): "
                     "HOLD — {detail}\n"
                     "Confidence: {confidence} | Next scan in {interval}s",
                     cycle=state['runs'], network=network, detail=bro_detail[:150],
@@ -1688,33 +1686,33 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 side_label = "LONG 📈" if bro_action == "open_long" else "SHORT 📉"
                 await _notify(
                     telegram_id,
-                    "🧠 Bro Mode cycle #{cycle} ({network}): "
+                    "🧠 Alpha Agent cycle #{cycle} ({network}): "
                     "{side} — {detail}",
                     cycle=state['runs'], network=network, side=side_label, detail=bro_detail[:150],
                 )
             elif bro_action == "blocked":
                 await _notify(
                     telegram_id,
-                    "🧠 Bro Mode cycle #{cycle} ({network}): "
+                    "🧠 Alpha Agent cycle #{cycle} ({network}): "
                     "Blocked — {detail}",
                     cycle=state['runs'], network=network, detail=bro_detail[:150],
                 )
             elif bro_action:
                 await _notify(
                     telegram_id,
-                    "🧠 Bro Mode cycle #{cycle} ({network}): "
+                    "🧠 Alpha Agent cycle #{cycle} ({network}): "
                     "{action} — {detail}",
                     cycle=state['runs'], network=network, action=bro_action.upper(), detail=bro_detail[:150],
                 )
         elif bro_action == "hold" and state["runs"] % 6 == 0:
             await _notify(
                 telegram_id,
-                "🧠 Bro Mode update ({network}): Still scanning, {cycles} cycles run. "
+                "🧠 Alpha Agent update ({network}): Still scanning, {cycles} cycles run. "
                 "Last: HOLD — {detail}",
                 network=network, cycles=state['runs'], detail=bro_detail[:100],
             )
         logger.info(
-            "Bro Mode cycle #%d for user %s: action=%s confidence=%.2f detail=%s",
+            "Alpha Agent cycle #%d for user %s: action=%s confidence=%.2f detail=%s",
             state["runs"], telegram_id, bro_action, bro_confidence, bro_detail[:100],
         )
 

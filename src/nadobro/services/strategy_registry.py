@@ -56,7 +56,6 @@ STRATEGY_ALIASES: Mapping[str, str] = {
     "vol-bot": STRATEGY_VOL,
     "alpha": STRATEGY_BRO,
     "alpha_agent": STRATEGY_BRO,
-    "bro_mode": STRATEGY_BRO,
 }
 
 STRATEGY_DISPLAY_NAMES: Mapping[str, str] = {
@@ -66,7 +65,7 @@ STRATEGY_DISPLAY_NAMES: Mapping[str, str] = {
     STRATEGY_MID: "MID MODE",
     STRATEGY_DN: "DELTA NEUTRAL",
     STRATEGY_VOL: "VOLUME",
-    STRATEGY_BRO: "BRO MODE",
+    STRATEGY_BRO: "ALPHA AGENT",
 }
 
 
@@ -77,7 +76,7 @@ class StrategyPhrase:
 
 
 NATURAL_LANGUAGE_STRATEGY_PHRASES: tuple[StrategyPhrase, ...] = (
-    StrategyPhrase(STRATEGY_BRO, ("alpha agent", "bro mode", "bro strategy", "alpha mode")),
+    StrategyPhrase(STRATEGY_BRO, ("alpha agent", "bro strategy", "alpha mode")),
     StrategyPhrase(STRATEGY_DN, ("delta neutral", "delta-neutral", " dn ")),
     StrategyPhrase(STRATEGY_VOL, ("volume bot", "vol bot", " vol ")),
     StrategyPhrase(STRATEGY_RGRID, ("r-grid", "rgrid", "reverse grid", "reverse-grid")),

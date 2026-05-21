@@ -14,7 +14,7 @@ Nadobro is a Telegram-first Ink financial copilot for Nado DEX. It lets users as
 - Natural-language trade parsing (for example: "long ETH 0.1 at 10x")
 - Wallet linking with secure signer-key encryption
 - Live market data, positions, and PnL views
-- Automated strategies: Market Making, Grid, Dynamic Grid, Delta Neutral, Volume Bot, and Bro Mode
+- Automated strategies: Market Making, Grid, Dynamic Grid, Delta Neutral, and Volume Bot
 - Price and funding alerts
 - Admin controls for trading safety and diagnostics
 - DMind financial expert layer for finance-native structuring, signal scoring, and strategy recommendations

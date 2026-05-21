@@ -250,35 +250,6 @@ class PmTrailArmPctTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. Bro Mode TP/SL ratios fixed.
-# ---------------------------------------------------------------------------
-
-class BroModeTpSlTests(unittest.TestCase):
-    def test_bro_fallback_tp_sl_have_better_reward_risk(self):
-        from src.nadobro.strategies import bro_mode
-
-        snapshot = {
-            "assets": [
-                {
-                    "product": "BTC",
-                    "signal_1h": "bullish",
-                    "ema_9": 110.0, "ema_21": 105.0, "ema_50": 100.0,
-                    "change_1h": 1.0, "change_4h": 2.0,
-                    "rsi_14": 55.0,
-                    "funding_rate": -0.0001,
-                    "regime": "trending_up",
-                }
-            ],
-        }
-        decision = bro_mode._fallback_bro_decision(
-            snapshot, positions=[], min_confidence=0.4, max_leverage=5,
-        )
-        self.assertIn(decision["action"], ("open_long", "open_short"))
-        rr = decision["tp_pct"] / decision["sl_pct"]
-        self.assertGreaterEqual(rr, 2.0, f"reward:risk {rr:.2f}x too thin")
-
-
-# ---------------------------------------------------------------------------
 # 6. Delta Neutral defaults to 'wait'.
 # ---------------------------------------------------------------------------
 

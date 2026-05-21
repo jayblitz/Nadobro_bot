@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS strategies (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
     strategy_type TEXT NOT NULL CHECK (
-        strategy_type IN ('grid', 'r_grid', 'd_grid', 'delta_neutral', 'volume_bot', 'bro_mode')
+        strategy_type IN ('grid', 'r_grid', 'd_grid', 'delta_neutral', 'volume_bot')
     ),
     name TEXT,
     network TEXT NOT NULL DEFAULT 'mainnet' CHECK (network IN ('testnet', 'mainnet')),

@@ -53,7 +53,6 @@ _STRATEGY_TERMS = (
     "delta neutral",
     "volume bot",
     "vol bot",
-    "bro mode",
     "alpha agent",
     "strategy",
 )
