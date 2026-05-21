@@ -116,7 +116,7 @@ function Composer({ onSend }) {
 }
 
 /* Pills ───────────────────────────────────────────────────────────── */
-function BroPill({ children = "🚀 Bro Mode" }) {
+function BroPill({ children = "🚀 Alpha Agent" }) {
   return <span className="pill bro-pill">{children}</span>;
 }
 function Pill({ tone = "info", children }) {
@@ -144,7 +144,7 @@ function PositionRow({ side, product, size, upnl, entry, mark, liq }) {
 }
 
 /* Share PnL card (uses master PNG) ────────────────────────────────── */
-function ShareCard({ symbol = "USDC", strategy = "Bro Mode", volume = "$12,480", pnl = "+$1,284.50", fees = "$184.20", referral = "K5CJBTEN" }) {
+function ShareCard({ symbol = "USDC", strategy = "Alpha Agent", volume = "$12,480", pnl = "+$1,284.50", fees = "$184.20", referral = "K5CJBTEN" }) {
   return (
     <div className="share-card">
       <img className="share-bg" src="../../assets/pnl_card_master.png" alt="" />

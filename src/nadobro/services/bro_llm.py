@@ -215,7 +215,7 @@ def make_decision(
         dmind = analyze_financial_context(
             "Score this autonomous Nado strategy decision context.",
             context=market_snapshot_text,
-            task="bro_mode_decision",
+            task="alpha_agent_decision",
             schema_hint={
                 "action_bias": "open_long|open_short|close|hold",
                 "confidence": "0..1",
@@ -345,7 +345,7 @@ def explain_position(
         return None
 
     prompt = (
-        f"Explain why Bro Mode is holding this position in plain language (2-3 sentences):\n\n"
+        f"Explain why the Alpha Agent is holding this position in plain language (2-3 sentences):\n\n"
         f"Position: {product} {side.upper()} from ${entry_price:,.2f} (now ${current_price:,.2f}, PnL=${pnl:+.2f})\n"
         f"Entry reasoning: {entry_reasoning}\n"
         f"Entry signals: {', '.join(entry_signals)}\n\n"
@@ -424,7 +424,7 @@ def analyze_for_howl(
     if not client:
         return None
 
-    system = """You are HOWL, the nightly optimization engine for Bro Mode autonomous trading.
+    system = """You are HOWL, the nightly optimization engine for Alpha Agent autonomous trading.
 
 Analyze the past 24 hours of trading performance and suggest parameter adjustments.
 

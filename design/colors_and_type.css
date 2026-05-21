@@ -75,7 +75,7 @@
   --border:       rgba(255,255,255,0.10);
   --border-strong:rgba(255,255,255,0.22);
 
-  /* "Bro Mode" pill — copy/paste these for any green CTA pill */
+  /* "Alpha Agent" pill — copy/paste these for any green CTA pill */
   --bro-pill-bg: var(--nb-green-500);
   --bro-pill-fg: var(--nb-fg-on-pill);
 

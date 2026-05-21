@@ -1479,7 +1479,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             # has explicitly re-enabled the legacy autoloop via env var.
             from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
             if not legacy_bro_autoloop_enabled():
-                # Bro Mode has been retired; route back to the strategy hub.
+                # Alpha Agent has been retired; route back to the strategy hub.
                 await _handle_nav(query, "nav:strategy_hub", telegram_id, context)
                 return
             from src.nadobro.handlers.keyboards import bro_action_kb
@@ -2204,7 +2204,7 @@ async def _handle_bro(query, data, telegram_id, context):
         from src.nadobro.handlers.keyboards import bro_config_section_kb
         context.user_data["bro_config_section"] = "risk"
         await _edit_loc(query, 
-            f"✅ Bro Mode risk set to *{escape_md(profile.upper())}*\n\n"
+            f"✅ Alpha Agent risk set to *{escape_md(profile.upper())}*\n\n"
             f"Leverage cap: {chosen['leverage_cap']}x \\| Confidence: {chosen['min_confidence']:.0%}\n"
             f"TP/SL: {chosen['tp_pct']:.1f}%/{chosen['sl_pct']:.1f}%\n"
             f"Max positions: {chosen['max_positions']}",
@@ -2285,7 +2285,7 @@ async def _handle_bro(query, data, telegram_id, context):
         profile_emoji = {"CHILL": "😎", "NORMAL": "🤙", "DEGEN": "🔥"}.get(b_profile, "🤙")
 
         text = (
-            f"📊 *Bro Mode Status*\n\n"
+            f"📊 *Alpha Agent Status*\n\n"
             f"Status: {escape_md(status_text)} \\| Profile: {profile_emoji} {escape_md(b_profile)}\n"
             f"Cycles: *{escape_md(str(runs))}*\n"
             f"Exposure: *{escape_md(f'${exposure:,.0f}')}* \\| Copy: *{escape_md(f'${copy_exp:,.0f}')}*\n"

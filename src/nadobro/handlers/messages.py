@@ -1664,10 +1664,10 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
         if section:
             continue_callback = f"bro:config_section:{section}"
         await _reply_loc(update.message, 
-            f"✅ Bro Mode TP/SL set to {tp:.1f}%/{sl:.1f}%",
+            f"✅ Alpha Agent TP/SL set to {tp:.1f}%/{sl:.1f}%",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⚙️ Continue Editing", callback_data=continue_callback)],
-                [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
+                [InlineKeyboardButton("🧠 Alpha Agent", callback_data="strategy:preview:bro")],
             ]),
         )
         return True
@@ -1684,10 +1684,10 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
         if section:
             continue_callback = f"bro:config_section:{section}"
         await _reply_loc(update.message, 
-            f"✅ Bro Mode risk set to {val.upper()}",
+            f"✅ Alpha Agent risk set to {val.upper()}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⚙️ Continue Editing", callback_data=continue_callback)],
-                [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
+                [InlineKeyboardButton("🧠 Alpha Agent", callback_data="strategy:preview:bro")],
             ]),
         )
         return True
@@ -1717,10 +1717,10 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
         if section:
             continue_callback = f"bro:config_section:{section}"
         await _reply_loc(update.message, 
-            f"✅ Bro Mode {field} set to {value}",
+            f"✅ Alpha Agent {field} set to {value}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⚙️ Continue Editing", callback_data=continue_callback)],
-                [InlineKeyboardButton("🧠 Bro Mode", callback_data="strategy:preview:bro")],
+                [InlineKeyboardButton("🧠 Alpha Agent", callback_data="strategy:preview:bro")],
             ]),
         )
         return True

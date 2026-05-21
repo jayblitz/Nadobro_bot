@@ -430,7 +430,6 @@ To keep scope bounded, the following are deliberately deferred:
 ```
 src/nadobro/strategies/
 ├── __init__.py
-├── bro_mode.py           (unchanged)
 ├── delta_neutral.py      (unchanged)
 ├── mm_bot.py             (~50 line diff: 4 call-site edits + 1 constant bump)
 ├── volume_bot.py         (unchanged)

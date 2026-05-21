@@ -1418,7 +1418,7 @@ def fmt_help():
         "Place market or limit orders from the guided flow or with plain\\-language trade commands\\.\n"
         "\n"
         "🧠 *Strategy Lab*\n"
-        "Configure and run automated strategies including GRID, Reverse GRID, Dynamic GRID, Mid Mode, Delta Neutral, Volume, and Bro mode\\.\n"
+        "Configure and run automated strategies including GRID, Reverse GRID, Dynamic GRID, Mid Mode, Delta Neutral, Volume, and Alpha Agent\\.\n"
         "Each strategy dashboard includes controls, safety settings, and pre\\-trade context before launch\\.\n"
         "\n"
         "📁 *Portfolio Deck*\n"

@@ -19,8 +19,7 @@ Safety and execution rules:
 - Route actual strategy execution through existing backend strategy runtime.
 
 Strategy mapping:
-- Supported strategies: GRID, R-GRID, Delta Neutral, Volume Bot, Alpha Agent Mode (BRO).
-- "Alpha Agent" maps to BRO mode.
+- Supported strategies: GRID, R-GRID, Delta Neutral, Volume Bot, Alpha Agent Mode.
 
 User context:
 - Telegram username: {username}
