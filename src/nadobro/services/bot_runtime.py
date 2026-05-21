@@ -402,13 +402,13 @@ def _schedule_bro_migration_notice(telegram_id: int) -> None:
         loop.create_task(_notify(telegram_id, BRO_MIGRATION_NOTICE))
 
 
-def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> None:
-    """Disable the retired Bro autoloop without touching positions or pending orders."""
+def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> dict:
+    """Disable the retired Bro autoloop and request the same cleanup as Stop."""
     now = datetime.utcnow().isoformat()
     session_id = state.get("strategy_session_id")
     state["running"] = False
     state["last_action"] = "migrated_off_bro"
-    state["last_action_detail"] = "Legacy Alpha Agent autoloop retired."
+    state["last_action_detail"] = "Legacy Alpha Agent autoloop retired; cleanup requested."
     state["bro_migrated_at"] = state.get("bro_migrated_at") or now
     should_notify = not bool(state.get("bro_migration_notice_sent"))
     state["bro_migration_notice_sent"] = True
@@ -438,8 +438,16 @@ def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> No
                 )
     except Exception as e:
         logger.warning("Could not mark Bro session migrated user=%s network=%s: %s", telegram_id, network, e)
+    try:
+        cleanup_res = cleanup_strategy_positions(telegram_id, network, state)
+    except Exception as e:
+        cleanup_res = {"success": False, "error": str(e)}
+    if not cleanup_res.get("success"):
+        state["last_error"] = f"Legacy Alpha Agent cleanup failed: {str(cleanup_res.get('error') or 'unknown')[:220]}"
+        _save_state(telegram_id, network, state)
     if should_notify:
         _schedule_bro_migration_notice(telegram_id)
+    return cleanup_res
 
 
 def _is_legacy_vol_perp_state(state: dict) -> bool:
@@ -630,43 +638,7 @@ def start_user_bot(
         network = "mainnet"
 
     if strategy == "bro":
-        if not legacy_bro_autoloop_enabled():
-            return False, "Legacy Alpha Agent has been retired. Pick a strategy from the Strategy hub."
-        _mark_previous_sessions_superseded(telegram_id, network)
-        _, strat_cfg = get_strategy_settings(telegram_id, strategy)
-        state = _default_state()
-        state.update(_strategy_defaults(strategy))
-        state.update(strat_cfg)
-        from src.nadobro.services.runtime_supervisor import strategy_worker_group
-
-        state.update(
-            {
-                "running": True,
-                "strategy": "bro",
-                "product": "MULTI",
-                "leverage": float(strat_cfg.get("leverage_cap", 5)),
-                "slippage_pct": float(slippage_pct or 1.0),
-                "reference_price": 0.0,
-                "started_at": datetime.utcnow().isoformat(),
-                "last_run_ts": 0.0,
-                "last_error": None,
-                "runs": 0,
-                "bro_state": {
-                    "started_at": datetime.utcnow().isoformat(),
-                    "total_pnl": 0.0,
-                    "trade_count": 0,
-                    "active_positions": [],
-                    "paused": False,
-                },
-            }
-        )
-        state["worker_group"] = strategy_worker_group("bro")
-        session_id = _create_session(telegram_id, "bro", "MULTI", network, state)
-        if session_id:
-            state["strategy_session_id"] = session_id
-        _save_state(telegram_id, network, state)
-        _ensure_task(telegram_id, network)
-        return True, "Alpha Agent activated 🧠"
+        return False, "Legacy Alpha Agent has been retired. Pick a strategy from the Strategy hub."
 
     vol_market_kw = "perp"
     if strategy == "vol":
@@ -1178,6 +1150,20 @@ def stop_all_strategies_for_user(telegram_id: int) -> None:
             task = _tasks.pop(tk, None)
             if task:
                 task.cancel()
+            close_res = cleanup_strategy_positions(telegram_id, network, state)
+            if not close_res.get("success"):
+                logger.warning(
+                    "Network switch cleanup failed for user=%s network=%s strategy=%s: %s",
+                    telegram_id,
+                    network,
+                    strategy,
+                    close_res.get("error", "unknown"),
+                )
+                state["last_error"] = (
+                    "Stopped due to network switch; cleanup failed: "
+                    f"{str(close_res.get('error') or 'unknown')[:180]}"
+                )
+                set_bot_state(key, state)
             stopped.append(f"{strategy}@{network}")
         except Exception as e:
             logger.warning("Error stopping strategy for user %s: %s", telegram_id, e)
@@ -1213,8 +1199,8 @@ def restore_running_bots(enabled: bool = False):
             user_id = int(user_id_str)
             state = json.loads(row.get("value") or "{}")
             if state.get("running"):
-                strategy = str(state.get("strategy") or "").lower().strip()
-                if strategy == "bro" and not legacy_bro_autoloop_enabled():
+                strategy = _normalize_strategy_id(state.get("strategy"))
+                if strategy == "bro":
                     _migrate_legacy_bro_state(user_id, network, state)
                     logger.info(
                         "Retired legacy Bro autoloop session user=%s network=%s",
@@ -1636,14 +1622,20 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         )
         return True, None
 
+    strategy = _normalize_strategy_id(state.get("strategy"))
+    state["strategy"] = strategy
+    if strategy == "bro":
+        cleanup_res = await run_blocking(_migrate_legacy_bro_state, telegram_id, network, state)
+        if not cleanup_res.get("success"):
+            return False, str(cleanup_res.get("error") or "Legacy Alpha Agent cleanup failed")[:300]
+        return True, None
+
     last_run = _safe_last_run_ts(state.get("last_run_ts"))
     interval = int(state.get("interval_seconds") or 60)
     if last_run > 0 and time.time() - last_run < interval:
         return True, "skipped_interval"
 
     product = state.get("product", "BTC")
-    strategy = _normalize_strategy_id(state.get("strategy"))
-    state["strategy"] = strategy
     if _is_legacy_vol_perp_state(state):
         return await _retire_legacy_vol_perp_state(telegram_id, network, state)
 
