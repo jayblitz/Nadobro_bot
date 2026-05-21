@@ -336,6 +336,19 @@ async def run_bot():
     except Exception as e:
         logger.warning("Could not schedule startup time-limit catch-up: %s", e)
 
+    portfolio_history_enabled = os.environ.get(
+        "NADO_PORTFOLIO_HISTORY", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if portfolio_history_enabled:
+        try:
+            from src.nadobro.services.portfolio_history_worker import (
+                start_portfolio_history_worker,
+            )
+
+            start_portfolio_history_worker()
+        except Exception as e:
+            logger.warning("Could not start portfolio history worker: %s", e)
+
     copy_enabled = os.environ.get("NADO_COPY_TRADING", "true").strip().lower() in ("1", "true", "yes", "on")
     if copy_enabled:
         await start_copy_polling()

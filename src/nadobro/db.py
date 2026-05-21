@@ -652,57 +652,80 @@ def init_db():
             conn.commit()
             logger.info("strategy_sessions table verified/created")
 
+        # --- Engine v2 tables (migrations/0007_engine_v2_tables.sql) ---
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS engine_executors (
+                    id               UUID PRIMARY KEY,
+                    user_id          BIGINT NOT NULL,
+                    controller_id    TEXT NOT NULL,
+                    strategy_type    TEXT NOT NULL,
+                    trading_pair     TEXT NOT NULL,
+                    side             TEXT NOT NULL,
+                    config_json      JSONB NOT NULL,
+                    state            TEXT NOT NULL,
+                    close_type       TEXT,
+                    net_pnl_quote    NUMERIC(38,18) DEFAULT 0,
+                    fees_paid_quote  NUMERIC(38,18) DEFAULT 0,
+                    volume_quote     NUMERIC(38,18) DEFAULT 0,
+                    duration_seconds INTEGER,
+                    keep_position    BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    terminated_at    TIMESTAMPTZ
+                );
+                CREATE INDEX IF NOT EXISTS ix_engine_executors_user_ctrl ON engine_executors(user_id, controller_id);
+                CREATE INDEX IF NOT EXISTS ix_engine_executors_pair ON engine_executors(trading_pair);
+                CREATE INDEX IF NOT EXISTS ix_engine_executors_state ON engine_executors(state);
+
+                CREATE TABLE IF NOT EXISTS engine_position_hold (
+                    user_id            BIGINT NOT NULL,
+                    trading_pair       TEXT NOT NULL,
+                    controller_id      TEXT NOT NULL,
+                    buy_amount_base    NUMERIC(38,18) NOT NULL DEFAULT 0,
+                    buy_amount_quote   NUMERIC(38,18) NOT NULL DEFAULT 0,
+                    sell_amount_base   NUMERIC(38,18) NOT NULL DEFAULT 0,
+                    sell_amount_quote  NUMERIC(38,18) NOT NULL DEFAULT 0,
+                    cum_fees_quote     NUMERIC(38,18) NOT NULL DEFAULT 0,
+                    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_id, trading_pair, controller_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS engine_portfolio_history (
+                    user_id           BIGINT NOT NULL,
+                    ts                TIMESTAMPTZ NOT NULL,
+                    total_value_quote NUMERIC(38,18) NOT NULL,
+                    by_account_json   JSONB NOT NULL,
+                    by_asset_json     JSONB NOT NULL,
+                    PRIMARY KEY (user_id, ts)
+                );
+
+                CREATE TABLE IF NOT EXISTS engine_strategy_sessions (
+                    id            UUID PRIMARY KEY,
+                    user_id       BIGINT NOT NULL,
+                    controller_id TEXT NOT NULL,
+                    session_n     INTEGER NOT NULL,
+                    started_at    TIMESTAMPTZ NOT NULL,
+                    ended_at      TIMESTAMPTZ,
+                    summary       TEXT,
+                    journal_path  TEXT NOT NULL,
+                    UNIQUE (user_id, controller_id, session_n)
+                );
+            """)
+            conn.commit()
+            logger.info("engine v2 tables verified/created")
+
         # --- fill_sync_queue table ---
         # --- Product database design tables: strategy configs, positions, orders, points, and analytics ---
         with conn.cursor() as cur:
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS strategies (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
-                    strategy_type TEXT NOT NULL CHECK (
-                        strategy_type IN ('grid', 'r_grid', 'd_grid', 'delta_neutral', 'volume_bot')
-                    ),
-                    name TEXT,
-                    network TEXT NOT NULL DEFAULT 'mainnet' CHECK (network IN ('testnet', 'mainnet')),
-                    pair TEXT NOT NULL,
-                    capital_usd NUMERIC(20, 8),
-                    leverage NUMERIC(10, 4) NOT NULL DEFAULT 1,
-                    risk_level TEXT NOT NULL DEFAULT 'medium',
-                    parameters JSONB NOT NULL DEFAULT '{}',
-                    status TEXT NOT NULL DEFAULT 'stopped' CHECK (status IN ('running', 'paused', 'stopped', 'failed')),
-                    started_at TIMESTAMPTZ,
-                    stopped_at TIMESTAMPTZ,
-                    last_run_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ DEFAULT now(),
-                    updated_at TIMESTAMPTZ DEFAULT now()
-                );
-                CREATE INDEX IF NOT EXISTS idx_strategies_user_status ON strategies (user_id, status);
-                CREATE INDEX IF NOT EXISTS idx_strategies_user_type_network_status
-                    ON strategies (user_id, strategy_type, network, status);
-                CREATE INDEX IF NOT EXISTS idx_strategies_type_pair ON strategies (strategy_type, pair);
-
-                CREATE TABLE IF NOT EXISTS strategy_performance_snapshots (
-                    id BIGSERIAL PRIMARY KEY,
-                    strategy_id BIGINT NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
-                    user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
-                    period TEXT NOT NULL CHECK (period IN ('daily', 'weekly', 'monthly')),
-                    period_start DATE NOT NULL,
-                    pnl_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
-                    fees_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
-                    volume_usd NUMERIC(20, 8) NOT NULL DEFAULT 0,
-                    trade_count INT NOT NULL DEFAULT 0,
-                    win_rate NUMERIC(8, 4),
-                    metadata JSONB NOT NULL DEFAULT '{}',
-                    created_at TIMESTAMPTZ DEFAULT now(),
-                    UNIQUE (strategy_id, period, period_start)
-                );
-                CREATE INDEX IF NOT EXISTS idx_strategy_perf_user_period
-                    ON strategy_performance_snapshots (user_id, period, period_start DESC);
-
+                -- NOTE: the legacy `strategies` and
+                -- `strategy_performance_snapshots` tables were dropped in
+                -- migration 0008 (Engine v2 Phase 2). They had no readers and
+                -- are replaced by engine_executors / engine_position_hold.
                 CREATE TABLE IF NOT EXISTS positions (
                     id BIGSERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
-                    strategy_id BIGINT REFERENCES strategies(id) ON DELETE SET NULL,
+                    strategy_id BIGINT,
                     network TEXT NOT NULL CHECK (network IN ('testnet', 'mainnet')),
                     pair TEXT NOT NULL,
                     side TEXT NOT NULL CHECK (side IN ('long', 'short')),
@@ -750,7 +773,7 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS open_orders (
                     id BIGSERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
-                    strategy_id BIGINT REFERENCES strategies(id) ON DELETE SET NULL,
+                    strategy_id BIGINT,
                     network TEXT NOT NULL CHECK (network IN ('testnet', 'mainnet')),
                     pair TEXT NOT NULL,
                     side TEXT NOT NULL,
