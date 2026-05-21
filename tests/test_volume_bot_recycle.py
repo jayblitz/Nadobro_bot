@@ -302,17 +302,37 @@ class SpotBalanceRaceTests(unittest.TestCase):
         ), patch.object(volume_bot, "get_spot_product_id", return_value=42), patch.object(
             volume_bot, "get_spot_metadata", return_value={"symbol": "KBTC"}
         ):
-            # Temporarily override the grace window so this test isn't racey:
-            # with default 15s and entry_ts = now - 61s we'd actually already be
-            # out of grace. Bump the grace to cover the 61s.
-            with patch.object(
-                volume_bot, "SPOT_BALANCE_RACE_GRACE_SECONDS", 120.0
-            ):
-                result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
+            result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
         self.assertTrue(result["success"])
         self.assertEqual(result["action"], "waiting_balance_settle")
         # State MUST still be `filled_wait_close` — NOT reset to idle.
         self.assertEqual(state["vol_phase"], "filled_wait_close")
+        self.assertGreater(state["vol_balance_missing_since_ts"], 0.0)
+
+    def test_spot_filled_wait_close_resets_after_missing_balance_grace(self):
+        now = time.time()
+        state = {
+            "product": "KBTC",
+            "vol_market": "spot",
+            "vol_phase": "filled_wait_close",
+            "vol_direction": "long",
+            "vol_entry_fill_ts": now - 61.0,
+            "vol_entry_fill_price": 100000.0,
+            "vol_entry_size": 0.001,
+            "vol_balance_missing_since_ts": now - volume_bot.SPOT_BALANCE_RACE_GRACE_SECONDS - 1.0,
+        }
+        client = _VolClient(mid=100000.0, spot_base_by_id={42: 0.0})
+        with patch.object(
+            volume_bot, "list_volume_spot_product_names", return_value=["KBTC"]
+        ), patch.object(volume_bot, "get_spot_product_id", return_value=42), patch.object(
+            volume_bot, "get_spot_metadata", return_value={"symbol": "KBTC"}
+        ):
+            result = volume_bot.run_cycle(telegram_id=1, network="mainnet", state=state, client=client)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["action"], "position_missing_reset")
+        self.assertEqual(state["vol_phase"], "idle")
+        self.assertEqual(state["vol_balance_missing_since_ts"], 0.0)
 
 
 class SpotForceCloseSizingTests(unittest.TestCase):

@@ -8,7 +8,16 @@ def test_bro_dispatch_skips_when_legacy_disabled(monkeypatch):
 
 
 def test_bro_start_rejected_when_legacy_disabled(monkeypatch):
+    monkeypatch.setattr("src.nadobro.services.bot_runtime.get_user", lambda _telegram_id: None)
     monkeypatch.setattr("src.nadobro.services.bot_runtime.legacy_bro_autoloop_enabled", lambda: False)
     ok, msg = bot_runtime.start_user_bot(1, "bro", "BTC")
     assert ok is False
-    assert "Strategy Studio" in msg
+    assert "retired" in msg
+
+
+def test_bro_start_rejected_even_when_legacy_enabled(monkeypatch):
+    monkeypatch.setattr("src.nadobro.services.bot_runtime.get_user", lambda _telegram_id: None)
+    monkeypatch.setattr("src.nadobro.services.bot_runtime.legacy_bro_autoloop_enabled", lambda: True)
+    ok, msg = bot_runtime.start_user_bot(1, "bro", "BTC")
+    assert ok is False
+    assert "retired" in msg

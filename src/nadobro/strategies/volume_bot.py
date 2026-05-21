@@ -595,6 +595,7 @@ def _run_volume_spot_cycle(
         state["vol_entry_fill_ts"] = now_ts
         state["vol_entry_fill_price"] = entry_price
         state["vol_entry_size"] = entry_size
+        state["vol_balance_missing_since_ts"] = 0.0
         hold_seed = int(now_ts) + int(telegram_id) + int(spot_product_id)
         state["vol_hold_seconds"] = _pseudo_random_hold_seconds(
             hold_seed,
@@ -848,12 +849,14 @@ def _run_volume_spot_cycle(
 
         base = _spot_base_balance(client, spot_product_id)
         if base < MIN_SIZE * 2:
-            # Guard against a balance-lookup race. If the entry was very recent and
-            # the balance endpoint simply hasn't indexed the fill yet, swallow this
-            # cycle and wait another tick rather than resetting to idle (which would
-            # cause a second entry while the first is still settling — the "margin
-            # stacks" symptom on spot).
-            if (now_ts - entry_ts) < SPOT_BALANCE_RACE_GRACE_SECONDS:
+            # Guard against a balance-lookup race at the close boundary. Measure
+            # from the first missing-balance observation, not the entry fill time,
+            # because the normal close timer fires after the entry grace has passed.
+            missing_since = float(state.get("vol_balance_missing_since_ts") or 0.0)
+            if missing_since <= 0:
+                missing_since = now_ts
+                state["vol_balance_missing_since_ts"] = missing_since
+            if (now_ts - missing_since) < SPOT_BALANCE_RACE_GRACE_SECONDS:
                 return {
                     "success": True,
                     "done": False,
@@ -866,7 +869,10 @@ def _run_volume_spot_cycle(
             state["vol_close_digest"] = None
             state["vol_close_posted_ts"] = 0.0
             state["vol_last_force_close_attempt_ts"] = 0.0
+            state["vol_balance_missing_since_ts"] = 0.0
             return {"success": True, "done": False, "action": "position_missing_reset", "orders_placed": 0, "placed_notional_usd": 0.0}
+
+        state["vol_balance_missing_since_ts"] = 0.0
 
         # Defensive: clear any stale close order before posting a fresh one.
         stale_close_digest = str(state.get("vol_close_digest") or "")
