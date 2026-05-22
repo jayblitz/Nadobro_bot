@@ -253,13 +253,10 @@ def _loads(value: object) -> Dict[str, object]:
 
 
 def build_db_portfolio() -> Portfolio:
-    from src.nadobro.engine.inventory import InventoryRepository
+    from src.nadobro.services.engine_persistence import DbInventoryRepository
 
-    # NOTE: a DB-backed holds source over engine_position_hold is wired in
-    # Phase 4 when executors begin writing holds; until then the sampler only
-    # needs account data, and per-controller PnL reads an empty hold set.
     return Portfolio(
-        inventory=InventoryRepository(),
+        inventory=DbInventoryRepository(),
         accounts_provider=SnapshotAccountProvider(),
         executors=DbExecutorsRepository(),
         history=DbPortfolioHistoryRepository(),
