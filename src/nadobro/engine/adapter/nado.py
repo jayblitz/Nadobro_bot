@@ -297,3 +297,26 @@ class NadoAdapter(NadoAdapterBase):
         if mid is None:
             raise AdapterError(f"no mid price for {trading_pair}")
         return mid
+
+    async def candles(
+        self, trading_pair: str, timeframe: str = "1h", limit: int = 200
+    ) -> list:
+        meta = self._meta(trading_pair)
+        try:
+            data = await asyncio.to_thread(
+                self._client.get_candlesticks, meta.product_id, timeframe, limit
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise AdapterError(f"candles failed: {exc}") from exc
+        return list(data or [])
+
+    async def funding_rate(self, trading_pair: str) -> Optional[Decimal]:
+        meta = self._meta(trading_pair)
+        try:
+            data = await asyncio.to_thread(self._client.get_funding_rate, meta.product_id)
+        except Exception as exc:  # noqa: BLE001
+            raise AdapterError(f"funding_rate failed: {exc}") from exc
+        if data is None:
+            return None
+        raw = _first(data, ("rate", "funding_rate", "funding", "hourly_funding")) if isinstance(data, dict) else data
+        return _to_dec(raw) if raw is not None else None

@@ -156,3 +156,13 @@ class NadoAdapterBase(abc.ABC):
     @abc.abstractmethod
     def min_notional(self, trading_pair: str) -> Decimal:
         ...
+
+    # Market-data reads (concrete defaults so test doubles need not implement
+    # them; the live adapter overrides). Consumed via the MarketData service.
+    async def candles(
+        self, trading_pair: str, timeframe: str = "1h", limit: int = 200
+    ) -> List[dict]:
+        raise NotImplementedError
+
+    async def funding_rate(self, trading_pair: str) -> Optional[Decimal]:
+        raise NotImplementedError
