@@ -1535,35 +1535,20 @@ async def _mark_cycle_error(telegram_id: int, network: str, error_msg: str):
 
 def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dict,
                        client, mid: float, product_id: int, product: str, open_orders: list) -> dict:
-    from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
-
-    if strategy in ("grid", "rgrid", "dgrid", "mid"):
-        return mm_bot.run_cycle(
-            telegram_id, network, state,
-            client=client, mid=mid, open_orders=open_orders,
-        )
-    elif strategy == "dn":
-        return delta_neutral.run_cycle(
-            telegram_id, network, state,
-            client=client, mid=mid, product_id=product_id,
-            product=product, open_orders=open_orders,
-        )
-    elif strategy == "vol":
-        return volume_bot.run_cycle(
-            telegram_id,
-            network,
-            state,
-            client=client,
-            mid=mid,
-        )
-    elif strategy == "bro":
+    if strategy == "bro":
         if not legacy_bro_autoloop_enabled():
             return {"success": True, "action": "skipped", "reason": "legacy_bro_autoloop_disabled"}
         # Alpha Agent autoloop backend was removed; nothing to run even if the
         # legacy flag is force-enabled.
         return {"success": True, "action": "skipped", "reason": "alpha_agent_autoloop_removed"}
-    else:
-        return {"success": False, "error": f"Unknown strategy '{strategy}'"}
+    # Engine v2: legacy run_cycle dispatch retired; strategies are managed by
+    # engine controllers via the orchestrator (see services/strategy_runtime).
+    from src.nadobro.services.strategy_runtime import dispatch_cycle
+
+    return dispatch_cycle(
+        strategy, telegram_id, network, state,
+        client=client, mid=mid, product_id=product_id, product=product, open_orders=open_orders,
+    )
 
 
 async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:

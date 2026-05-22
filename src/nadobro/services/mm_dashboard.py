@@ -19,7 +19,7 @@ from src.nadobro.services.product_catalog import (
     get_product_min_quote_notional_usd,
     get_product_taker_fee_rate,
 )
-from src.nadobro.strategies.mm_bot import (
+from src.nadobro.services.mm_quote_math import (
     DEFAULT_MIN_ORDER_NOTIONAL_USD,
     MID_FULL_BIAS_MARGIN_UPLIFT,
     MM_COLLATERAL_SAFETY_FACTOR,
