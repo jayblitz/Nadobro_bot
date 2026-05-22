@@ -215,11 +215,11 @@ class SnapshotAccountProvider(AccountProvider):
             pair = str(pos.get("product_name") or pos.get("pair") or "")
             if not pair:
                 continue
-            accounts["nado_perps"][pair] = {
-                "units": _dec(pos.get("signed_amount", pos.get("amount", 0))),
-                "mark": _dec(pos.get("mark_price", pos.get("price", 0))),
-                "value": _dec(pos.get("notional_value", 0)),
-            }
+            units = _dec(pos.get("signed_amount", pos.get("amount", 0)))
+            mark = _dec(pos.get("mark_price", pos.get("price", 0)))
+            # value: prefer the venue notional, else mark-to-market the units.
+            value = _dec(pos.get("notional_value", 0)) or (abs(units) * mark)
+            accounts["nado_perps"][pair] = {"units": units, "mark": mark, "value": value}
         return accounts
 
     async def mark_prices(self, user_id: int) -> Dict[str, Decimal]:
