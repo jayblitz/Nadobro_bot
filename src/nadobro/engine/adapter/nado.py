@@ -207,7 +207,7 @@ class NadoAdapter(NadoAdapterBase):
             filled_base = _to_dec(_first(resting, _OPEN_FILLED_KEYS))
             px = ref.price if ref.price is not None else _to_dec(_first(resting, _PRICE_KEYS))
             state = OrderState.PARTIALLY_FILLED if filled_base > 0 else OrderState.OPEN
-            return self._mk_order(ref, state, filled_base, filled_base * px, Decimal(0))
+            return self._mk_order(order_id, ref, state, filled_base, filled_base * px, Decimal(0))
 
         # No longer resting -> aggregate fills for this digest.
         filled_base, filled_quote, fee = await self._fills_for(ref.product_id, order_id)
@@ -217,14 +217,14 @@ class NadoAdapter(NadoAdapterBase):
             state = OrderState.PARTIALLY_FILLED  # gone from book but partially done
         else:
             state = OrderState.CANCELLED
-        return self._mk_order(ref, state, filled_base, filled_quote, fee)
+        return self._mk_order(order_id, ref, state, filled_base, filled_quote, fee)
 
     def _mk_order(
-        self, ref: _OrderRef, state: OrderState, filled_base: Decimal,
+        self, order_id: str, ref: _OrderRef, state: OrderState, filled_base: Decimal,
         filled_quote: Decimal, fee: Decimal,
     ) -> NadoOrder:
         return NadoOrder(
-            id="", trading_pair=ref.trading_pair, side=ref.side, order_type=ref.order_type,
+            id=order_id, trading_pair=ref.trading_pair, side=ref.side, order_type=ref.order_type,
             amount_base=ref.amount_base, price=ref.price, state=state,
             filled_base=filled_base, filled_quote=filled_quote, fee_quote=fee,
         )
