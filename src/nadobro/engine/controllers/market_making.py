@@ -56,6 +56,13 @@ class MarketMakingController(Controller):
         return self.inventory.get(self.user_id, self.trading_pair, self.id).unrealized_pnl(mid)
 
     async def on_tick(self) -> None:
+        # BUG-MM-1 fix: tick all child OrderExecutors FIRST so fills are
+        # absorbed into inventory before we read base_value for the
+        # inventory-skew decision. Without this, the MM controller is blind
+        # to its own fills and keeps stale quotes indefinitely.
+        for ex in self.my_executors(active_only=True):
+            await self.orchestrator.tick(ex.id)
+
         mid = await self.adapter.mid_price(self.trading_pair)
         base_value = self._base_value(mid)
         at_max = self.max_base_quote is not None and base_value >= self.max_base_quote
@@ -75,6 +82,15 @@ class MarketMakingController(Controller):
         cur_id = self._bid_id if is_bid else self._ask_id
         cur_price = self._bid_price if is_bid else self._ask_price
 
+        # BUG-MM-2 fix: if the recorded quote already terminated (filled or
+        # cancelled by the venue), forget it so we don't skip re-spawning a
+        # fresh one just because the stale price was "close enough".
+        if cur_id is not None:
+            ex_existing = self.orchestrator.get(cur_id)
+            if ex_existing is None or ex_existing.is_terminated:
+                self._set_quote(is_bid, None, None)
+                cur_id, cur_price = None, None
+
         if not allowed:
             if cur_id is not None:
                 await self.orchestrator.stop(cur_id)
@@ -84,10 +100,15 @@ class MarketMakingController(Controller):
         if cur_id is not None and cur_price is not None:
             ex = self.orchestrator.get(cur_id)
             if ex is not None and not ex.is_terminated:
-                if abs(target - cur_price) / cur_price <= self.price_distance_tolerance:
+                if cur_price > 0 and abs(target - cur_price) / cur_price <= self.price_distance_tolerance:
                     return  # within tolerance — leave the resting quote
                 await self.orchestrator.stop(cur_id)
+                self._set_quote(is_bid, None, None)
 
+        # BUG-MM-3 fix: guard against ZeroDivisionError when target collapses
+        # to 0 (e.g. mid feed returned 0 and spread_*_pct is 1).
+        if target <= 0:
+            return
         amount_base = self.order_amount_quote / target
         cfg = OrderExecutorConfig(
             self.trading_pair, side, amount_base, ExecutionStrategy.LIMIT_MAKER, price=target

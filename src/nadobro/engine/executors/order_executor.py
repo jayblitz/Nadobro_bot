@@ -203,13 +203,49 @@ class OrderExecutor(Executor):
             self.refreshes += 1
 
     async def on_stop(self, close_type: CloseType = CloseType.EARLY_STOP) -> None:
+        # BUG-CC-1 fix: cancel-on-stop must CONFIRM the venue side actually
+        # removed the order; previously any exception was swallowed and we
+        # terminated with the order still live. Now: attempt cancel, then
+        # poll order_status once. If the order is gone or terminal, ingest
+        # any final fills and terminate. If it's still open, we cannot
+        # cleanly terminate without leaking; surface FAILED so the
+        # controller's stop loop / operator can intervene.
         order = self.order
-        if order is not None and order.state is OrderState.OPEN:
-            try:
-                await self._guard(
-                    lambda: self.adapter.cancel_order(order.id),
-                    label="cancel_order",
-                )
-            except Exception:
-                pass
-        self._terminate(close_type)
+        if order is None or order.state in (
+            OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED,
+        ):
+            self._terminate(close_type)
+            return
+
+        try:
+            await self._guard(
+                lambda: self.adapter.cancel_order(order.id),
+                label="cancel_order_stop",
+            )
+        except Exception:  # noqa: BLE001 - venue cancel failure handled by status probe
+            pass
+
+        # Verify by polling status. Capture any final fills, then check.
+        try:
+            refreshed = await self._guard(
+                lambda: self.adapter.order_status(order.id),
+                label="cancel_confirm_status",
+            )
+            self.order = refreshed
+            self._ingest(refreshed)
+        except Exception:  # noqa: BLE001
+            # Lost network during confirmation. The order's state on the
+            # venue is unknown; mark FAILED so a human / controller stop
+            # loop reconciles it.
+            self._terminate(CloseType.FAILED)
+            return
+
+        if self.order is None or self.order.state in (
+            OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED,
+        ):
+            self._terminate(close_type)
+            return
+
+        # Order still resting after a cancel attempt + status confirm. This
+        # is the leak vector — surface FAILED instead of silently terminating.
+        self._terminate(CloseType.FAILED)

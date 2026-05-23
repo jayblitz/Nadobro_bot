@@ -10,7 +10,9 @@ Implemented in Phase 4 / production hardening (D).
 """
 from __future__ import annotations
 
+import asyncio
 import time
+from collections import OrderedDict
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -18,19 +20,65 @@ from src.nadobro.engine.adapter.base import NadoAdapterBase
 
 
 class MarketData:
-    def __init__(self, adapter: NadoAdapterBase, ttl_seconds: float = 5.0) -> None:
+    """LRU-bounded TTL cache for market data fetches.
+
+    BUG-MD-1 fix: cache is now bounded (LRU eviction at ``max_entries``) so
+    long-running deployments with many trading pairs don't accumulate stale
+    entries forever.
+
+    BUG-MD-2 fix: per-key locks ensure only one in-flight fetch per cache
+    key. Without this, concurrent ticks that miss the cache simultaneously
+    fan-out N identical requests to the venue (thundering-herd).
+    """
+
+    DEFAULT_MAX_ENTRIES = 1024
+
+    def __init__(
+        self,
+        adapter: NadoAdapterBase,
+        ttl_seconds: float = 5.0,
+        *,
+        max_entries: int = DEFAULT_MAX_ENTRIES,
+    ) -> None:
         self.adapter = adapter
         self.ttl = ttl_seconds
-        self._cache: Dict[Tuple[Any, ...], Tuple[float, Any]] = {}
+        self.max_entries = max(1, int(max_entries))
+        # OrderedDict gives O(1) LRU ordering via move_to_end / popitem.
+        self._cache: "OrderedDict[Tuple[Any, ...], Tuple[float, Any]]" = OrderedDict()
+        self._locks: Dict[Tuple[Any, ...], asyncio.Lock] = {}
+
+    def _evict_if_needed(self) -> None:
+        while len(self._cache) > self.max_entries:
+            self._cache.popitem(last=False)  # evict oldest
+
+    def _lock_for(self, key: Tuple[Any, ...]) -> asyncio.Lock:
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        return lock
 
     async def _cached(self, key: Tuple[Any, ...], fetch: Callable[[], Awaitable[Any]]) -> Any:
         now = time.time()
         hit = self._cache.get(key)
         if hit is not None and (now - hit[0]) < self.ttl:
+            self._cache.move_to_end(key)  # mark as recently used
             return hit[1]
-        value = await fetch()
-        self._cache[key] = (now, value)
-        return value
+
+        # Single-flight: only one coroutine performs the fetch per key.
+        lock = self._lock_for(key)
+        async with lock:
+            # Re-check inside the lock — another waiter may have populated.
+            hit = self._cache.get(key)
+            now = time.time()
+            if hit is not None and (now - hit[0]) < self.ttl:
+                self._cache.move_to_end(key)
+                return hit[1]
+            value = await fetch()
+            self._cache[key] = (time.time(), value)
+            self._cache.move_to_end(key)
+            self._evict_if_needed()
+            return value
 
     async def mid(self, trading_pair: str) -> Decimal:
         return await self._cached(("mid", trading_pair), lambda: self.adapter.mid_price(trading_pair))
@@ -50,6 +98,8 @@ class MarketData:
 
     def invalidate(self) -> None:
         self._cache.clear()
+        # Drop stale per-key locks too; they will be lazily recreated on demand.
+        self._locks.clear()
 
     # -- provider callables for controller configs ------------------------
     def candle_provider(

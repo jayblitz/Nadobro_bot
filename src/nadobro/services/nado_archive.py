@@ -23,7 +23,14 @@ _MAX_RETRIES = max(0, int(os.environ.get("NADO_ARCHIVE_MAX_RETRIES", "1")))
 _RETRY_BASE_SECONDS = float(os.environ.get("NADO_ARCHIVE_RETRY_BASE_SECONDS", "0.5"))
 _MAX_CONCURRENT = max(1, int(os.environ.get("NADO_ARCHIVE_MAX_CONCURRENT", "3")))
 _MIN_INTERVAL_SECONDS = max(0.0, float(os.environ.get("NADO_ARCHIVE_MIN_INTERVAL_SECONDS", "0.35")))
+# BUG-NAR-1 fix: 429 cooldown is now exponential, anchored on Retry-After
+# when provided. _429_COOLDOWN_SECONDS is the *base*; consecutive 429s within
+# a cooldown window double the wait (capped at _429_COOLDOWN_MAX_SECONDS).
 _429_COOLDOWN_SECONDS = max(1.0, float(os.environ.get("NADO_ARCHIVE_429_COOLDOWN_SECONDS", "12")))
+_429_COOLDOWN_MAX_SECONDS = max(
+    _429_COOLDOWN_SECONDS,
+    float(os.environ.get("NADO_ARCHIVE_429_COOLDOWN_MAX_SECONDS", "300")),
+)
 _POOL_SIZE = max(_MAX_CONCURRENT, int(os.environ.get("NADO_ARCHIVE_POOL_MAXSIZE", str(_MAX_CONCURRENT + 2))))
 
 _rate_lock = threading.RLock()
@@ -31,6 +38,10 @@ _request_semaphore = threading.Semaphore(_MAX_CONCURRENT)
 _last_request_at = 0.0
 _rate_limited_until = 0.0
 _last_429_log_at = 0.0
+# Track consecutive 429 occurrences within a cooldown window so the next
+# limit doubles the backoff (exponential decay back to base on first
+# successful request).
+_consecutive_429s = 0
 
 # Reuse the shared session from nado_client for connection pooling.
 _session: requests.Session | None = None
@@ -46,22 +57,81 @@ def archive_rate_limit_remaining() -> float:
         return max(0.0, _rate_limited_until - time.time())
 
 
-def _mark_rate_limited(status: int, body: str, attempt: int) -> None:
-    global _rate_limited_until, _last_429_log_at
+def _parse_retry_after(headers: object) -> float:
+    """Pull a Retry-After hint (seconds) from the venue response. Honors
+    both numeric and HTTP-date forms; returns 0.0 if absent or unparseable.
+    BUG-NAR-1 partial: lets the venue tell us exactly how long to wait
+    instead of guessing.
+    """
+    if not headers:
+        return 0.0
+    try:
+        raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+    except Exception:  # noqa: BLE001
+        return 0.0
+    if raw is None:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    # HTTP-date form
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(str(raw))
+        if dt is not None:
+            return max(0.0, dt.timestamp() - time.time())
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return 0.0
+
+
+def _mark_rate_limited(
+    status: int, body: str, attempt: int, retry_after: float = 0.0,
+) -> None:
+    """BUG-NAR-1 fix: exponential backoff (12s, 24s, 48s, …) capped at
+    _429_COOLDOWN_MAX_SECONDS. If the venue sent Retry-After we honor it
+    when it exceeds our computed wait.
+    """
+    global _rate_limited_until, _last_429_log_at, _consecutive_429s
     now = time.time()
     with _rate_lock:
-        _rate_limited_until = max(_rate_limited_until, now + _429_COOLDOWN_SECONDS)
+        # If we're still inside a cooldown when this 429 fires, it's a
+        # *consecutive* limit — escalate. If we're past the prior cooldown,
+        # reset to the base.
+        if now < _rate_limited_until:
+            _consecutive_429s += 1
+        else:
+            _consecutive_429s = 1
+        backoff = min(
+            _429_COOLDOWN_MAX_SECONDS,
+            _429_COOLDOWN_SECONDS * (2 ** max(0, _consecutive_429s - 1)),
+        )
+        wait = max(backoff, retry_after)
+        _rate_limited_until = max(_rate_limited_until, now + wait)
         should_log = (now - _last_429_log_at) >= 5.0
         if should_log:
             _last_429_log_at = now
     if should_log:
         logger.warning(
-            "Archive API HTTP %s (attempt %d): %s — backing off %.0fs",
+            "Archive API HTTP %s (attempt %d, consecutive %d, retry_after=%.1fs): %s "
+            "— backing off %.1fs",
             status,
             attempt,
+            _consecutive_429s,
+            retry_after,
             redact_sensitive_text(body),
-            _429_COOLDOWN_SECONDS,
+            wait,
         )
+
+
+def _reset_rate_limit_streak() -> None:
+    """Called after a successful response so the next 429 starts fresh
+    (not at an escalated backoff)."""
+    global _consecutive_429s
+    if _consecutive_429s != 0:
+        with _rate_lock:
+            _consecutive_429s = 0
 
 
 def _wait_for_request_slot() -> None:
@@ -111,11 +181,17 @@ def _from_x18(value) -> float:
 
 
 def _post(url: str, payload: dict) -> dict | list | None:
+    # BUG-NAR-3 partial: short-circuit *before* acquiring the semaphore so we
+    # don't hold a slot during cooldown.
     if is_archive_rate_limited():
         return None
 
     _request_semaphore.acquire()
     try:
+        # Re-check after acquiring the slot — another thread may have
+        # marked us rate-limited while we were waiting.
+        if is_archive_rate_limited():
+            return None
         _wait_for_request_slot()
         session = _get_session()
         for attempt in range(_MAX_RETRIES + 1):
@@ -123,17 +199,28 @@ def _post(url: str, payload: dict) -> dict | list | None:
                 _note_request_sent()
                 resp = session.post(url, json=payload, timeout=_REQUEST_TIMEOUT)
                 resp.raise_for_status()
+                _reset_rate_limit_streak()
                 return resp.json()
             except requests.HTTPError as e:
                 status = getattr(e.response, "status_code", "?")
                 body = ""
+                retry_after = 0.0
                 try:
                     body = (e.response.text or "")[:200]
-                except Exception:
+                    retry_after = _parse_retry_after(getattr(e.response, "headers", None))
+                except Exception:  # noqa: BLE001
                     pass
                 if status == 429:
-                    _mark_rate_limited(status, body, attempt + 1)
+                    _mark_rate_limited(status, body, attempt + 1, retry_after=retry_after)
                     return None
+                # Also honor Retry-After for 5xx; pause without escalating
+                # the 429 counter.
+                if isinstance(status, int) and 500 <= status < 600 and retry_after > 0:
+                    with _rate_lock:
+                        global _rate_limited_until
+                        _rate_limited_until = max(
+                            _rate_limited_until, time.time() + retry_after,
+                        )
                 logger.warning(
                     "Archive API HTTP %s (attempt %d): %s",
                     status,

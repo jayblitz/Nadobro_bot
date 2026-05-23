@@ -542,16 +542,30 @@ def _finalize_session(state: dict, stop_reason: str = "stopped"):
         logger.warning("Failed to finalize session #%s: %s", session_id, e)
 
 
-def _available_quote_balance_for_network(client) -> float:
+def _available_quote_balance_for_network(client) -> float | None:
+    """Return the available quote balance for ``client``.
+
+    BUG-CC-3 fix: distinguish "definitely zero" from "we couldn't read it".
+    Returning 0.0 on any exception silently masks API failures and would
+    trip start-guards (e.g. "insufficient margin -> deny start") that the
+    operator can't easily diagnose. We now return ``None`` on read failure
+    so callers can decide whether to fail loud or fall back.
+    """
     try:
         bal = client.get_balance() or {}
         balances = bal.get("balances", {}) or {}
         return float(balances.get(0, balances.get("0", 0.0)) or 0.0)
-    except Exception:
-        return 0.0
+    except Exception:  # noqa: BLE001 - intentional: surface read failures
+        logger.warning("get_balance failed during start guard", exc_info=True)
+        return None
 
 
-def _active_position_size_for_product(client, product_id: int) -> float:
+def _active_position_size_for_product(client, product_id: int) -> float | None:
+    """Return the position size for ``product_id`` or ``None`` on read
+    failure (BUG-CC-3 fix). Returning 0.0 on exception lets a stale API
+    error silently say "no position" and pass start-guards that should fail
+    closed.
+    """
     try:
         for pos in client.get_all_positions() or []:
             if int(pos.get("product_id", -1)) != int(product_id):
@@ -561,9 +575,13 @@ def _active_position_size_for_product(client, product_id: int) -> float:
             size = abs(signed_amount) if abs(signed_amount) > 0 else amount
             if size > 1e-9:
                 return size
-    except Exception:
         return 0.0
-    return 0.0
+    except Exception:  # noqa: BLE001 - surface read failures
+        logger.warning(
+            "get_all_positions failed during start guard for product %s",
+            product_id, exc_info=True,
+        )
+        return None
 
 
 def _run_mm_start_guard(telegram_id: int, network: str, product: str, leverage: float, state: dict) -> tuple[bool, str]:
@@ -576,6 +594,15 @@ def _run_mm_start_guard(telegram_id: int, network: str, product: str, leverage: 
         return False, f"Unknown product '{product}'."
 
     existing_position = _active_position_size_for_product(client, product_id)
+    if existing_position is None:
+        # BUG-CC-3 fix: fail closed when the position read failed. Previously
+        # the helper returned 0.0 on exception, which silently passed this
+        # guard and let MM start on top of a possibly-open position.
+        return (
+            False,
+            "Could not read existing positions from the venue (network/API error). "
+            "Please retry in a moment.",
+        )
     if existing_position > 0:
         return (
             False,
@@ -607,6 +634,13 @@ def _run_mm_start_guard(telegram_id: int, network: str, product: str, leverage: 
     safety_buffer = max(5.0, required_margin * 0.20)
     recommended_available = required_margin + rebalance_buffer + safety_buffer
     available_quote = _available_quote_balance_for_network(client)
+    if available_quote is None:
+        # BUG-CC-3 fix: fail closed if we couldn't read the wallet balance.
+        return (
+            False,
+            "Could not read your USDC balance from the venue (network/API error). "
+            "Please retry in a moment.",
+        )
     if available_quote + 1e-9 < recommended_available:
         return (
             False,
@@ -1833,6 +1867,22 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             result = await run_engine_cycle(
                 telegram_id, network, state, client, mid, product, product_id
             )
+    elif strategy in ENGINE_MAPPED_STRATEGIES:
+        # BUG-BR-1 fix: engine-mapped strategy but engine disabled. The
+        # legacy run_cycle path was removed, so this would silently no-op
+        # every cycle. Surface a clear error in the result + log so the
+        # operator notices.
+        logger.critical(
+            "engine-mapped strategy '%s' invoked with engine_v2 DISABLED for user %s on %s; "
+            "legacy dispatch path was removed — strategy will not place orders",
+            strategy, telegram_id, network,
+        )
+        result = {
+            "success": False,
+            "error": f"engine_v2 disabled and strategy '{strategy}' has no legacy dispatch path",
+            "action": "engine_disabled_noop",
+            "strategy": strategy,
+        }
     else:
         with timed_metric(f"runtime.strategy.dispatch.{strategy}"):
             if strategy == "vol":

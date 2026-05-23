@@ -47,10 +47,22 @@ class DeltaNeutralController(Controller):
         return ex.id if ok else None
 
     async def on_start(self) -> None:
+        # BUG-DN-2 fix: spawn both legs atomically. If the short leg fails to
+        # spawn, roll back the long leg so we don't carry unhedged exposure.
         self.long_id = await self._spawn_leg(self.long_pair, TradeType.BUY, self.leg_amount_quote)
+        if self.long_id is None:
+            return
         self.short_id = await self._spawn_leg(
             self.short_pair, TradeType.SELL, self.leg_amount_quote * self.hedge_ratio
         )
+        if self.short_id is None:
+            # Roll back the long leg: stop it with EARLY_STOP so its
+            # PositionExecutor's on_stop unwinds the just-opened position.
+            from src.nadobro.engine.types import CloseType
+
+            await self.orchestrator.stop(self.long_id, CloseType.EARLY_STOP)
+            self.long_id = None
+            raise RuntimeError("delta_neutral: short leg failed to spawn; long leg rolled back")
 
     async def _leg_value(self, pair: str) -> Decimal:
         if self.inventory is None:
@@ -64,10 +76,19 @@ class DeltaNeutralController(Controller):
             await self.orchestrator.tick(ex.id)
         long_value = await self._leg_value(self.long_pair)
         short_value = await self._leg_value(self.short_pair)
-        if short_value <= 0:
+        if short_value <= 0 or long_value <= 0:
             return
-        target_long = self.hedge_ratio * short_value
-        drift = abs(long_value - target_long) / short_value
+        # BUG-DN-1 fix: on_start sizes short_value = leg_amount_quote * hedge_ratio
+        # (so hedge_ratio is the short:long notional ratio). The target the
+        # drift check should compare against is therefore:
+        #   target_long_for_current_short = short_value / hedge_ratio
+        # The previous formula (target_long = hedge_ratio * short_value)
+        # implied the OPPOSITE relationship and tripped the drift gate on the
+        # first tick for any hedge_ratio != 1.
+        if self.hedge_ratio <= 0:
+            return
+        target_long = short_value / self.hedge_ratio
+        drift = abs(long_value - target_long) / max(long_value, target_long)
         if drift > self.max_drift_pct:
             self.hedge_broken = True
             from src.nadobro.engine.types import CloseType
