@@ -26,6 +26,20 @@ async def run(
     ema_slow_period: int = 50,
     trend_threshold: float = 0.002,
 ) -> Dict[str, object]:
+    # BUG-VOL-1 fix: explicitly require enough history. Without this, callers
+    # got "RANGING" on the first few candles regardless of actual price action
+    # because ema() (previously) returned values for short series and the
+    # separation check happened to be zero.
+    required = max(ema_slow_period, atr_window + 1)
+    if len(candles) < required:
+        return {
+            "regime": RANGING,
+            "atr_pct": 0.0,
+            "ema_fast": None,
+            "ema_slow": None,
+            "insufficient_history": True,
+            "required_candles": required,
+        }
     closes = _closes(candles)
     last = closes[-1] if closes else 0.0
     fast = ema(closes, ema_fast_period)

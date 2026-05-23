@@ -212,6 +212,16 @@ class PositionExecutor(Executor):
             self._ingest_entry(order)
             if order.state is OrderState.FILLED:
                 self._on_entry_filled()
+                return
+            # BUG-PE-3 fix: terminal non-FILLED states (CANCELLED, REJECTED)
+            # must not leave the executor stuck in OPENING forever.
+            if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
+                if self.entry_base > 0:
+                    # Partial fill before cancel/reject -> open the position
+                    # with what we got; barriers will close the rest.
+                    self._on_entry_filled()
+                else:
+                    self._terminate(CloseType.FAILED)
             return
         if self.position_state is PositionExecState.ACTIVE_POSITION:
             price = await self._guard(
@@ -219,9 +229,9 @@ class PositionExecutor(Executor):
             )
             hit = self._evaluate_barriers(price)
             if hit is not None:
-                close_type, order_type = hit
+                close_type, order_type, trigger_price = hit
                 self._pending_close_type = close_type
-                await self._open_close(order_type)
+                await self._open_close(order_type, trigger_price)
             return
         if self.position_state is PositionExecState.CLOSING:
             await self._poll_close()
@@ -229,7 +239,12 @@ class PositionExecutor(Executor):
     # -- barriers ---------------------------------------------------------
     def _evaluate_barriers(
         self, price: Decimal
-    ) -> Optional[Tuple[CloseType, OrderType]]:
+    ) -> Optional[Tuple[CloseType, OrderType, Decimal]]:
+        """Return (close_type, order_type, trigger_price) for the first
+        barrier hit, or None. The trigger_price is the actual barrier level
+        (not the current mid and not entry_price) so non-MARKET closes can
+        post a meaningful limit order — fixes BUG-PE-1.
+        """
         b = self.barriers
         e = self.entry_price
         if e <= 0:
@@ -238,24 +253,38 @@ class PositionExecutor(Executor):
         now = time.time()
         if b.time_limit is not None and self.opened_at is not None:
             if (now - self.opened_at) >= b.time_limit:
-                return CloseType.TIME_LIMIT, b.time_limit_order_type
+                # Time limit fires at the prevailing mid — fall back to mid
+                # because there's no "target price" for a time-based exit.
+                return CloseType.TIME_LIMIT, b.time_limit_order_type, price
         if b.stop_loss is not None:
-            if long and price <= e * (Decimal(1) - b.stop_loss):
-                return CloseType.STOP_LOSS, b.stop_loss_order_type
-            if not long and price >= e * (Decimal(1) + b.stop_loss):
-                return CloseType.STOP_LOSS, b.stop_loss_order_type
+            sl_long = e * (Decimal(1) - b.stop_loss)
+            sl_short = e * (Decimal(1) + b.stop_loss)
+            if long and price <= sl_long:
+                return CloseType.STOP_LOSS, b.stop_loss_order_type, sl_long
+            if not long and price >= sl_short:
+                return CloseType.STOP_LOSS, b.stop_loss_order_type, sl_short
         if b.trailing_stop is not None:
             self._update_trailing(price)
             if self.trailing_armed and self.trail_stop_level is not None:
                 if long and price <= self.trail_stop_level:
-                    return CloseType.TRAILING_STOP, b.trailing_stop_order_type
+                    return (
+                        CloseType.TRAILING_STOP,
+                        b.trailing_stop_order_type,
+                        self.trail_stop_level,
+                    )
                 if not long and price >= self.trail_stop_level:
-                    return CloseType.TRAILING_STOP, b.trailing_stop_order_type
+                    return (
+                        CloseType.TRAILING_STOP,
+                        b.trailing_stop_order_type,
+                        self.trail_stop_level,
+                    )
         if b.take_profit is not None:
-            if long and price >= e * (Decimal(1) + b.take_profit):
-                return CloseType.TAKE_PROFIT, b.take_profit_order_type
-            if not long and price <= e * (Decimal(1) - b.take_profit):
-                return CloseType.TAKE_PROFIT, b.take_profit_order_type
+            tp_long = e * (Decimal(1) + b.take_profit)
+            tp_short = e * (Decimal(1) - b.take_profit)
+            if long and price >= tp_long:
+                return CloseType.TAKE_PROFIT, b.take_profit_order_type, tp_long
+            if not long and price <= tp_short:
+                return CloseType.TAKE_PROFIT, b.take_profit_order_type, tp_short
         return None
 
     def _update_trailing(self, price: Decimal) -> None:
@@ -277,15 +306,30 @@ class PositionExecutor(Executor):
                 self.trail_stop_level = self.min_price * (Decimal(1) + ts.trailing_delta)
 
     # -- closing ----------------------------------------------------------
-    async def _open_close(self, order_type: OrderType) -> None:
+    async def _open_close(
+        self, order_type: OrderType, trigger_price: Optional[Decimal] = None
+    ) -> None:
+        """Place the close order. ``trigger_price`` is the barrier's target
+        price (e.g. TP/SL level) and is used as the limit price for non-MARKET
+        closes — BUG-PE-1 fix. Falls back to entry_price for callers that
+        don't supply one (only ``on_stop`` does that, and it uses MARKET).
+        """
         self.position_state = PositionExecState.CLOSING
+        remaining = self.entry_base - self.exit_base
+        if remaining <= 0:
+            self._finalize(self._pending_close_type or CloseType.COMPLETED)
+            return
+        if order_type is OrderType.MARKET:
+            limit_price: Optional[Decimal] = None
+        else:
+            limit_price = trigger_price if trigger_price is not None else self.entry_price
         order = await self._guard(
             lambda: self.adapter.place_order(
                 self.trading_pair,
                 self.exit_side,
                 order_type,
-                self.entry_base,
-                None if order_type is OrderType.MARKET else self.entry_price,
+                remaining,
+                limit_price,
                 self.config.order_config.leverage,
                 True,
             ),
@@ -295,6 +339,44 @@ class PositionExecutor(Executor):
         self._ingest_exit(order)
         if order.state is OrderState.FILLED:
             self._finalize(self._pending_close_type or CloseType.COMPLETED)
+            return
+        # BUG-PE-4 fix: a CANCELLED/REJECTED close order must not leave the
+        # executor stuck in CLOSING. Re-attempt a MARKET close to flatten the
+        # residual; if that also fails, mark FAILED so the controller can act.
+        if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
+            await self._escalate_close()
+
+    async def _escalate_close(self) -> None:
+        """Promote a stuck close to a MARKET order. Used when the venue
+        rejects/cancels a limit close (BUG-PE-4)."""
+        remaining = self.entry_base - self.exit_base
+        if remaining <= 0:
+            self._finalize(self._pending_close_type or CloseType.COMPLETED)
+            return
+        try:
+            order = await self._guard(
+                lambda: self.adapter.place_order(
+                    self.trading_pair,
+                    self.exit_side,
+                    OrderType.MARKET,
+                    remaining,
+                    None,
+                    self.config.order_config.leverage,
+                    True,
+                ),
+                label="escalate_close_market",
+            )
+        except Exception:  # noqa: BLE001
+            self._terminate(CloseType.FAILED)
+            return
+        self.close_order = order
+        self._ingest_exit(order)
+        if order.state is OrderState.FILLED:
+            self._finalize(self._pending_close_type or CloseType.COMPLETED)
+        else:
+            # Leave in CLOSING; subsequent ticks will poll. on_stop will
+            # re-confirm cancellation.
+            self.position_state = PositionExecState.CLOSING
 
     async def _poll_close(self) -> None:
         if self.close_order is None:
@@ -308,13 +390,25 @@ class PositionExecutor(Executor):
         self._ingest_exit(order)
         if order.state is OrderState.FILLED:
             self._finalize(self._pending_close_type or CloseType.COMPLETED)
+            return
+        if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
+            # BUG-PE-4 fix
+            await self._escalate_close()
 
     def _finalize(self, close_type: CloseType) -> None:
-        gross = (
-            (self.exit_quote - self.entry_quote)
-            if self.is_long
-            else (self.entry_quote - self.exit_quote)
-        )
+        # BUG-PE-5 fix: realized PnL must be proportional to closed base, not
+        # subtract the FULL entry_quote even when exit_base < entry_base.
+        # avg_entry_price = entry_quote / entry_base
+        # realized_pnl_long = exit_quote - avg_entry_price * exit_base
+        # (and the symmetric form for short positions)
+        if self.entry_base > 0:
+            avg_entry = self.entry_quote / self.entry_base
+        else:
+            avg_entry = Decimal(0)
+        if self.is_long:
+            gross = self.exit_quote - (avg_entry * self.exit_base)
+        else:
+            gross = (avg_entry * self.exit_base) - self.exit_quote
         self._net_pnl_quote = gross - self._fees_paid_quote
         self.position_state = PositionExecState.TERMINATED
         self._terminate(close_type)
@@ -322,6 +416,12 @@ class PositionExecutor(Executor):
     async def on_stop(self, close_type: CloseType = CloseType.EARLY_STOP) -> None:
         if self.is_terminated:
             return
+        # BUG-PE-6 fix: preserve any pending barrier-driven close_type rather
+        # than always overwriting with EARLY_STOP. If a barrier fired this tick
+        # and on_stop also fired (race), the audit log should reflect the
+        # barrier, not the stop.
+        if self._pending_close_type is None:
+            self._pending_close_type = close_type
         if self.position_state is PositionExecState.OPENING:
             entry = self.entry_order
             if entry is not None and entry.state is OrderState.OPEN:
@@ -330,7 +430,7 @@ class PositionExecutor(Executor):
                         lambda: self.adapter.cancel_order(entry.id),
                         label="cancel_entry",
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 - cancel failures handled by adapter
                     pass
             self._terminate(close_type)
             return
@@ -339,14 +439,39 @@ class PositionExecutor(Executor):
                 self.position_state = PositionExecState.TERMINATED
                 self._terminate(close_type)
                 return
-            self._pending_close_type = close_type
             await self._open_close(OrderType.MARKET)
             if not self.is_terminated:
-                self._terminate(close_type)
+                # Close did not fill synchronously; do not terminate now or we
+                # leak the open close order on the venue (BUG-PE-2). Leave in
+                # CLOSING; subsequent ticks (or the orchestrator's stop loop)
+                # will poll until terminal.
+                pass
             return
         if self.position_state is PositionExecState.CLOSING:
-            await self._poll_close()
+            # BUG-PE-2 fix: do NOT terminate if the close order is still open
+            # — that would leak the resting order on the venue. Cancel the
+            # existing close first, then escalate to MARKET. If MARKET also
+            # doesn't fill synchronously, leave CLOSING for subsequent polls.
+            existing = self.close_order
+            if existing is not None and existing.state in (OrderState.OPEN, OrderState.PARTIALLY_FILLED):
+                try:
+                    await self._guard(
+                        lambda: self.adapter.cancel_order(existing.id),
+                        label="cancel_close_on_stop",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                # Refresh state once after cancel
+                try:
+                    refreshed = await self._guard(
+                        lambda: self.adapter.order_status(existing.id),
+                        label="cancel_close_status",
+                    )
+                    self.close_order = refreshed
+                    self._ingest_exit(refreshed)
+                except Exception:  # noqa: BLE001
+                    pass
             if not self.is_terminated:
-                self._terminate(close_type)
+                await self._escalate_close()
             return
         self._terminate(close_type)

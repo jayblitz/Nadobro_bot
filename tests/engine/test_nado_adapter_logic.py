@@ -52,9 +52,31 @@ def _adapter():
 def test_place_registers_order_and_market_fills():
     async def body():
         a = _adapter()
+        # BUG-NA-2: venue may report "filled" without inline fill data.
+        # The adapter must follow up with a matches query, NOT synthesize.
+        a._client.matches = [{"digest": "m1", "amount": 1, "price": 100, "fee": "0.05"}]
         o = await a.place_order(PAIR, TradeType.BUY, OrderType.MARKET, Decimal(1))
         assert o.id == "m1" and o.state is OrderState.FILLED
+        assert o.filled_base == Decimal(1)
+        assert o.filled_quote == Decimal(100)
+        assert o.fee_quote == Decimal("0.05")
         assert o.id in a._orders
+
+    asyncio.run(body())
+
+
+def test_place_market_with_no_inline_or_match_data_downgrades_to_partial():
+    """BUG-NA-2 fix: when venue reports FILLED but no match data exists yet,
+    the adapter must NOT mark FILLED with synthesized base/quote. It must
+    downgrade to PARTIALLY_FILLED with zeros so the executor keeps polling.
+    """
+    async def body():
+        a = _adapter()
+        a._client.matches = []  # archive hasn't indexed the fill yet
+        o = await a.place_order(PAIR, TradeType.BUY, OrderType.MARKET, Decimal(1))
+        assert o.state is OrderState.PARTIALLY_FILLED
+        assert o.filled_base == Decimal(0)
+        assert o.filled_quote == Decimal(0)
 
     asyncio.run(body())
 

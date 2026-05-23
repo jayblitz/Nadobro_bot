@@ -580,6 +580,14 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             bot_runtime, "get_user_readonly_client", return_value=FakeClient()
         ), patch.object(
             bot_runtime, "get_user_nado_client", return_value=FakeClient()
+        ), patch(
+            # This test exercises the *legacy* SL/TP gate in _run_cycle.
+            # Bypass the engine-v2 mapping so it falls through to dispatch.
+            "src.nadobro.services.engine_runtime.engine_v2_enabled",
+            return_value=False,
+        ), patch(
+            "src.nadobro.services.engine_runtime.ENGINE_MAPPED_STRATEGIES",
+            set(),
         ), patch.object(
             bot_runtime, "_dispatch_strategy", return_value={"success": True, "orders_placed": 0}
         ), patch.object(
@@ -625,6 +633,13 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             bot_runtime, "get_user_readonly_client", return_value=FakeClient()
         ), patch.object(
             bot_runtime, "get_user_nado_client", return_value=FakeClient()
+        ), patch(
+            # See note above — force legacy dispatch path for this regression test.
+            "src.nadobro.services.engine_runtime.engine_v2_enabled",
+            return_value=False,
+        ), patch(
+            "src.nadobro.services.engine_runtime.ENGINE_MAPPED_STRATEGIES",
+            set(),
         ), patch.object(
             bot_runtime, "_dispatch_strategy", return_value={"success": True, "action": "grid_stop_loss_hit", "detail": "stop"}
         ), patch.object(

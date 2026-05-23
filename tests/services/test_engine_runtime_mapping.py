@@ -88,9 +88,13 @@ def test_build_product_meta_handles_bad_catalog():
 
 
 def test_engine_v2_enabled_gate(monkeypatch):
+    # BUG-SR-1 / BR-1 fix: default is now ON. The legacy dispatch path was
+    # retired, so unset must mean enabled to avoid silently no-opping.
     monkeypatch.delenv("NADO_ENGINE_V2_RUNTIME", raising=False)
-    assert er.engine_v2_enabled() is False
+    assert er.engine_v2_enabled() is True
     monkeypatch.setenv("NADO_ENGINE_V2_RUNTIME", "true")
     assert er.engine_v2_enabled() is True
     monkeypatch.setenv("NADO_ENGINE_V2_RUNTIME", "0")
+    assert er.engine_v2_enabled() is False
+    monkeypatch.setenv("NADO_ENGINE_V2_RUNTIME", "false")
     assert er.engine_v2_enabled() is False

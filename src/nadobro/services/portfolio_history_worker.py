@@ -153,39 +153,76 @@ class DbPortfolioHistoryRepository(PortfolioHistoryRepository):
         return out
 
     def prune(self, now: Optional[datetime] = None) -> int:
-        from src.nadobro.db import execute
+        """Atomically run the three retention DELETEs in a single transaction
+        (BUG-PHW-2) and return the total row count removed (BUG-PHW-3).
+        Uses a CTE-driven SELECT to identify rows to delete; this is O(N)
+        per band instead of the previous O(N²) correlated-subquery form
+        (BUG-PHW-4).
+        """
+        from src.nadobro.db import get_db, put_db
 
         now = now or datetime.now(timezone.utc)
         d7 = now - timedelta(days=7)
         d30 = now - timedelta(days=30)
         d365 = now - timedelta(days=365)
-        # Drop rows older than 1y.
-        execute("DELETE FROM engine_portfolio_history WHERE ts < %s", (d365,))
-        # 30d..1y: keep one per day.
-        execute(
-            """
-            DELETE FROM engine_portfolio_history h
-            WHERE h.ts >= %s AND h.ts < %s
-              AND h.ts <> (
-                SELECT max(h2.ts) FROM engine_portfolio_history h2
-                WHERE h2.user_id = h.user_id
-                  AND date_trunc('day', h2.ts) = date_trunc('day', h.ts))
-            """,
-            (d365, d30),
-        )
-        # 7d..30d: keep one per hour.
-        execute(
-            """
-            DELETE FROM engine_portfolio_history h
-            WHERE h.ts >= %s AND h.ts < %s
-              AND h.ts <> (
-                SELECT max(h2.ts) FROM engine_portfolio_history h2
-                WHERE h2.user_id = h.user_id
-                  AND date_trunc('hour', h2.ts) = date_trunc('hour', h.ts))
-            """,
-            (d30, d7),
-        )
-        return 0  # row counts not tracked for the DB path
+        conn = get_db()
+        removed = 0
+        try:
+            with conn.cursor() as cur:
+                # Drop rows older than 1y.
+                cur.execute(
+                    "DELETE FROM engine_portfolio_history WHERE ts < %s",
+                    (d365,),
+                )
+                removed += cur.rowcount or 0
+                # 30d..1y: keep one per (user, day). Pick the row with
+                # max(ts) per bucket via DISTINCT ON (CTE pattern, O(N)).
+                cur.execute(
+                    """
+                    WITH keep AS (
+                        SELECT DISTINCT ON (user_id, date_trunc('day', ts))
+                               user_id, ts
+                        FROM engine_portfolio_history
+                        WHERE ts >= %s AND ts < %s
+                        ORDER BY user_id, date_trunc('day', ts), ts DESC
+                    )
+                    DELETE FROM engine_portfolio_history h
+                    WHERE h.ts >= %s AND h.ts < %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM keep k
+                        WHERE k.user_id = h.user_id AND k.ts = h.ts
+                      )
+                    """,
+                    (d365, d30, d365, d30),
+                )
+                removed += cur.rowcount or 0
+                # 7d..30d: keep one per (user, hour).
+                cur.execute(
+                    """
+                    WITH keep AS (
+                        SELECT DISTINCT ON (user_id, date_trunc('hour', ts))
+                               user_id, ts
+                        FROM engine_portfolio_history
+                        WHERE ts >= %s AND ts < %s
+                        ORDER BY user_id, date_trunc('hour', ts), ts DESC
+                    )
+                    DELETE FROM engine_portfolio_history h
+                    WHERE h.ts >= %s AND h.ts < %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM keep k
+                        WHERE k.user_id = h.user_id AND k.ts = h.ts
+                      )
+                    """,
+                    (d30, d7, d30, d7),
+                )
+                removed += cur.rowcount or 0
+            conn.commit()
+            return removed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            put_db(conn)
 
 
 class DbExecutorsRepository(ExecutorsRepository):
@@ -225,6 +262,33 @@ class SnapshotAccountProvider(AccountProvider):
                 "mark": mark,
                 "value": value,
             }
+
+        # BUG-PHW-1 fix: also include spot balances so the portfolio history
+        # total reflects USDC/quote sitting in the trading account, not just
+        # the open perp positions. Best-effort; failure here must not break
+        # the perp snapshot.
+        try:
+            spot = await run_blocking(self._spot_balances, user_id)
+            for product_id, amount in (spot or {}).items():
+                key = f"spot:{product_id}"
+                value = _dec(amount)
+                # Spot product_id=0 is the USDC quote leg; its value IS the
+                # amount. For other spot legs, look up a mark price from the
+                # snapshot prices dict.
+                mark = self._mark_for_spot(snapshot, product_id)
+                if mark > 0 and product_id != 0:
+                    value = value * mark
+                accounts["nado_spot"][key] = {
+                    "units": _dec(amount),
+                    "mark": mark,
+                    "value": value,
+                }
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "spot balance fetch failed for user %s; snapshot will only include perps",
+                user_id, exc_info=True,
+            )
+
         return accounts
 
     async def mark_prices(self, user_id: int) -> Dict[str, Decimal]:
@@ -242,6 +306,34 @@ class SnapshotAccountProvider(AccountProvider):
         from src.nadobro.services.portfolio_service import get_portfolio_snapshot
 
         return get_portfolio_snapshot(user_id)
+
+    def _spot_balances(self, user_id: int) -> Dict[object, Decimal]:
+        from src.nadobro.services.user_service import get_user_readonly_client
+
+        client = get_user_readonly_client(user_id, network=self.network)
+        if client is None:
+            return {}
+        try:
+            payload = client.get_balance() or {}
+        except Exception:  # noqa: BLE001
+            return {}
+        balances = (payload.get("balances") or {}) if isinstance(payload, dict) else {}
+        return {pid: _dec(amount) for pid, amount in balances.items() if amount}
+
+    @staticmethod
+    def _mark_for_spot(snapshot: object, product_id: object) -> Decimal:
+        prices = getattr(snapshot, "prices", None) or {}
+        if not isinstance(prices, dict):
+            return Decimal(0)
+        # Try common keyings (int / str / dict-keyed-by-pair).
+        for k in (product_id, str(product_id), f"spot:{product_id}"):
+            v = prices.get(k)
+            if v is not None:
+                try:
+                    return _dec(v)
+                except Exception:  # noqa: BLE001
+                    continue
+        return Decimal(0)
 
 
 def _loads(value: object) -> Dict[str, object]:
