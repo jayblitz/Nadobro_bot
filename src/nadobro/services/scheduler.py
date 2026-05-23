@@ -18,8 +18,8 @@ _bot_app = None
 _check_client = None
 _ALERT_SCAN_SECONDS = int(os.environ.get("ALERT_SCAN_SECONDS", "5"))
 # Archive indexer can lag behind fills; allow longer polling than inline trade resolution.
-_FILL_SYNC_DIGEST_WAIT = float(os.environ.get("NADO_FILL_SYNC_DIGEST_WAIT_SECONDS", "12"))
-_FILL_SYNC_DIGEST_POLL = float(os.environ.get("NADO_FILL_SYNC_DIGEST_POLL_SECONDS", "0.45"))
+_FILL_SYNC_DIGEST_WAIT = float(os.environ.get("NADO_FILL_SYNC_DIGEST_WAIT_SECONDS", "8"))
+_FILL_SYNC_DIGEST_POLL = float(os.environ.get("NADO_FILL_SYNC_DIGEST_POLL_SECONDS", "1.0"))
 _MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SECONDS", "3.0"))
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
 
@@ -385,19 +385,22 @@ async def _notify_limit_order_cancelled_once(
         logger.warning("Failed to send limit-cancel notification: %s", e)
 
 
-_FILL_SYNC_BATCH_SIZE = int(os.environ.get("NADO_FILL_SYNC_BATCH_SIZE", "20"))
-_FILL_SYNC_CONCURRENCY = max(1, int(os.environ.get("NADO_FILL_SYNC_CONCURRENCY", "5")))
+_FILL_SYNC_BATCH_SIZE = int(os.environ.get("NADO_FILL_SYNC_BATCH_SIZE", "10"))
+_FILL_SYNC_CONCURRENCY = max(1, int(os.environ.get("NADO_FILL_SYNC_CONCURRENCY", "2")))
+_FILL_SYNC_DIGEST_BATCH = max(1, int(os.environ.get("NADO_FILL_SYNC_DIGEST_BATCH", "10")))
+
+
+def _chunked(items: list, size: int):
+    for idx in range(0, len(items), size):
+        yield items[idx: idx + size]
 
 
 async def sync_pending_fills():
     """Background job: resolve pending fills via Nado archive API.
 
     Each entry can spend up to ``_FILL_SYNC_DIGEST_WAIT`` seconds polling the
-    archive. With 20+ pending fills sequential processing took longer than the
-    30s tick interval, choking subsequent runs ("maximum number of running
-    instances reached"). We bound the per-tick claim size and fan out the
-    per-entry work with a bounded semaphore so a single tick finishes inside
-    its window even when the archive is lagging.
+    archive when a batch lookup misses. We prefetch digests in batches to keep
+    archive request volume low, then only poll individually for unresolved rows.
     """
     try:
         from src.nadobro.models.database import (
@@ -406,13 +409,37 @@ async def sync_pending_fills():
             increment_session_metrics,
             get_trade_by_id,
         )
-        from src.nadobro.services.nado_archive import query_order_by_digest, query_orders_by_subaccount
+        from src.nadobro.services.nado_archive import (
+            is_archive_rate_limited,
+            query_order_by_digest,
+            query_orders_by_digests,
+            query_orders_by_subaccount,
+        )
         from src.nadobro.services.trade_service import reconcile_close_trade_fill
         from src.nadobro.services.user_service import update_trade_stats
 
         pending = await run_blocking(claim_pending_fill_syncs, _FILL_SYNC_BATCH_SIZE)
         if not pending:
             return
+
+        prefetched: dict[tuple[str, str], dict] = {}
+        if not is_archive_rate_limited():
+            by_network: dict[str, list[str]] = {}
+            for entry in pending:
+                network = str(entry.get("network") or "mainnet")
+                digest = str(entry.get("order_digest") or "").strip()
+                if not digest:
+                    continue
+                by_network.setdefault(network, []).append(digest)
+
+            for network, digests in by_network.items():
+                unique_digests = list(dict.fromkeys(digests))
+                for batch in _chunked(unique_digests, _FILL_SYNC_DIGEST_BATCH):
+                    if is_archive_rate_limited():
+                        break
+                    batch_results = await run_blocking(query_orders_by_digests, network, batch)
+                    for digest, data in (batch_results or {}).items():
+                        prefetched[(network, str(digest))] = data
 
         semaphore = asyncio.Semaphore(_FILL_SYNC_CONCURRENCY)
 
@@ -446,13 +473,18 @@ async def sync_pending_fills():
                             await run_blocking(expire_fill_sync, sync_id)
                             return False
 
-                    fill_data = await run_blocking(
-                        query_order_by_digest,
-                        network,
-                        digest,
-                        _FILL_SYNC_DIGEST_WAIT,
-                        _FILL_SYNC_DIGEST_POLL,
-                    )
+                    fill_data = prefetched.get((network, str(digest)))
+                    if not fill_data or not fill_data.get("is_filled"):
+                        if is_archive_rate_limited():
+                            await run_blocking(release_fill_sync, sync_id)
+                            return False
+                        fill_data = await run_blocking(
+                            query_order_by_digest,
+                            network,
+                            digest,
+                            _FILL_SYNC_DIGEST_WAIT,
+                            _FILL_SYNC_DIGEST_POLL,
+                        )
                     if not fill_data or not fill_data.get("is_filled"):
                         # Check if order was cancelled only after enough retries to avoid
                         # misclassifying late archive indexing as cancellation.
@@ -728,13 +760,12 @@ def start_scheduler():
         id="lowiqpts_relay_poll", replace_existing=True, **_SHORT_TICK,
     )
     # sync_pending_fills can legitimately take longer than its 30s interval
-    # when the archive lags. Allow up to 2 concurrent runs so a slow tick
-    # doesn't starve every subsequent tick (previously every run was
-    # "skipped: maximum number of running instances reached (1)").
+    # when the archive lags. Keep a single in-flight tick so overlapping runs
+    # do not amplify archive API pressure.
     scheduler.add_job(
         sync_pending_fills, "interval", seconds=30,
         id="fill_sync", replace_existing=True,
-        max_instances=2, misfire_grace_time=60, coalesce=True,
+        max_instances=1, misfire_grace_time=60, coalesce=True,
     )
     scheduler.add_job(
         tick_edge_scanner, "interval", seconds=_EDGE_SCAN_SECONDS,
