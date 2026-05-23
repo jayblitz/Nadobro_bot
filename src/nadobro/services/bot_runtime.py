@@ -1823,25 +1823,36 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         else:
             open_orders = await run_blocking(client.get_open_orders, product_id)
 
-    with timed_metric(f"runtime.strategy.dispatch.{strategy}"):
-        if strategy == "vol":
-            try:
-                result = await asyncio.wait_for(
-                    run_blocking(
-                        _dispatch_strategy,
-                        strategy, telegram_id, network, state,
-                        client, mid, product_id, product, open_orders,
-                    ),
-                    timeout=max(_vol_call_timeout_seconds(), 20.0),
-                )
-            except asyncio.TimeoutError:
-                raise RuntimeError("VOL strategy dispatch timed out")
-        else:
-            result = await run_blocking(
-                _dispatch_strategy,
-                strategy, telegram_id, network, state,
-                client, mid, product_id, product, open_orders,
+    from src.nadobro.services.engine_runtime import (
+        ENGINE_MAPPED_STRATEGIES, engine_v2_enabled, run_engine_cycle,
+    )
+
+    if engine_v2_enabled() and strategy in ENGINE_MAPPED_STRATEGIES:
+        # Engine v2 owns execution for this strategy (feature-gated).
+        with timed_metric(f"runtime.strategy.engine.{strategy}"):
+            result = await run_engine_cycle(
+                telegram_id, network, state, client, mid, product, product_id
             )
+    else:
+        with timed_metric(f"runtime.strategy.dispatch.{strategy}"):
+            if strategy == "vol":
+                try:
+                    result = await asyncio.wait_for(
+                        run_blocking(
+                            _dispatch_strategy,
+                            strategy, telegram_id, network, state,
+                            client, mid, product_id, product, open_orders,
+                        ),
+                        timeout=max(_vol_call_timeout_seconds(), 20.0),
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError("VOL strategy dispatch timed out")
+            else:
+                result = await run_blocking(
+                    _dispatch_strategy,
+                    strategy, telegram_id, network, state,
+                    client, mid, product_id, product, open_orders,
+                )
 
     if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("action") == "grid_stop_loss_hit":
         _finalize_session(state, stop_reason="grid_sl_hit")
