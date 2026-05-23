@@ -7,6 +7,8 @@ after trades are placed via the Nado SDK (which only returns a digest).
 Archive docs: https://docs.nado.xyz/developer-resources/api/archive-indexer
 """
 import logging
+import os
+import threading
 import time
 import requests
 from typing import Optional
@@ -17,11 +19,67 @@ from src.nadobro.services.log_redaction import redact_sensitive_text
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 8.0
-_MAX_RETRIES = 2
-_RETRY_BASE_SECONDS = 0.3
+_MAX_RETRIES = max(0, int(os.environ.get("NADO_ARCHIVE_MAX_RETRIES", "1")))
+_RETRY_BASE_SECONDS = float(os.environ.get("NADO_ARCHIVE_RETRY_BASE_SECONDS", "0.5"))
+_MAX_CONCURRENT = max(1, int(os.environ.get("NADO_ARCHIVE_MAX_CONCURRENT", "3")))
+_MIN_INTERVAL_SECONDS = max(0.0, float(os.environ.get("NADO_ARCHIVE_MIN_INTERVAL_SECONDS", "0.35")))
+_429_COOLDOWN_SECONDS = max(1.0, float(os.environ.get("NADO_ARCHIVE_429_COOLDOWN_SECONDS", "12")))
+_POOL_SIZE = max(_MAX_CONCURRENT, int(os.environ.get("NADO_ARCHIVE_POOL_MAXSIZE", str(_MAX_CONCURRENT + 2))))
+
+_rate_lock = threading.RLock()
+_request_semaphore = threading.Semaphore(_MAX_CONCURRENT)
+_last_request_at = 0.0
+_rate_limited_until = 0.0
+_last_429_log_at = 0.0
 
 # Reuse the shared session from nado_client for connection pooling.
 _session: requests.Session | None = None
+
+
+def is_archive_rate_limited() -> bool:
+    with _rate_lock:
+        return time.time() < _rate_limited_until
+
+
+def archive_rate_limit_remaining() -> float:
+    with _rate_lock:
+        return max(0.0, _rate_limited_until - time.time())
+
+
+def _mark_rate_limited(status: int, body: str, attempt: int) -> None:
+    global _rate_limited_until, _last_429_log_at
+    now = time.time()
+    with _rate_lock:
+        _rate_limited_until = max(_rate_limited_until, now + _429_COOLDOWN_SECONDS)
+        should_log = (now - _last_429_log_at) >= 5.0
+        if should_log:
+            _last_429_log_at = now
+    if should_log:
+        logger.warning(
+            "Archive API HTTP %s (attempt %d): %s — backing off %.0fs",
+            status,
+            attempt,
+            redact_sensitive_text(body),
+            _429_COOLDOWN_SECONDS,
+        )
+
+
+def _wait_for_request_slot() -> None:
+    while True:
+        with _rate_lock:
+            now = time.time()
+            cooldown = max(0.0, _rate_limited_until - now)
+            spacing = max(0.0, _MIN_INTERVAL_SECONDS - (now - _last_request_at))
+            wait = max(cooldown, spacing)
+        if wait <= 0:
+            return
+        time.sleep(min(wait, 1.0))
+
+
+def _note_request_sent() -> None:
+    global _last_request_at
+    with _rate_lock:
+        _last_request_at = time.time()
 
 
 def _get_session() -> requests.Session:
@@ -30,7 +88,7 @@ def _get_session() -> requests.Session:
         _session = requests.Session()
         _session.headers.update({"Accept-Encoding": "gzip"})
         from requests.adapters import HTTPAdapter
-        adapter = HTTPAdapter(pool_connections=8, pool_maxsize=8)
+        adapter = HTTPAdapter(pool_connections=_POOL_SIZE, pool_maxsize=_POOL_SIZE)
         _session.mount("https://", adapter)
         _session.mount("http://", adapter)
     return _session
@@ -53,28 +111,45 @@ def _from_x18(value) -> float:
 
 
 def _post(url: str, payload: dict) -> dict | list | None:
-    session = _get_session()
-    for attempt in range(_MAX_RETRIES + 1):
-        try:
-            resp = session.post(url, json=payload, timeout=_REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            return resp.json()
-        except requests.HTTPError as e:
-            status = getattr(e.response, "status_code", "?")
-            body = ""
+    if is_archive_rate_limited():
+        return None
+
+    _request_semaphore.acquire()
+    try:
+        _wait_for_request_slot()
+        session = _get_session()
+        for attempt in range(_MAX_RETRIES + 1):
             try:
-                body = (e.response.text or "")[:200]
-            except Exception:
-                pass
-            logger.warning("Archive API HTTP %s (attempt %d): %s", status, attempt + 1, redact_sensitive_text(body))
-            if attempt >= _MAX_RETRIES:
-                return None
-        except requests.RequestException as e:
-            logger.warning("Archive API request failed (attempt %d): %s", attempt + 1, e)
-            if attempt >= _MAX_RETRIES:
-                return None
-        time.sleep(_RETRY_BASE_SECONDS * (2 ** attempt))
-    return None
+                _note_request_sent()
+                resp = session.post(url, json=payload, timeout=_REQUEST_TIMEOUT)
+                resp.raise_for_status()
+                return resp.json()
+            except requests.HTTPError as e:
+                status = getattr(e.response, "status_code", "?")
+                body = ""
+                try:
+                    body = (e.response.text or "")[:200]
+                except Exception:
+                    pass
+                if status == 429:
+                    _mark_rate_limited(status, body, attempt + 1)
+                    return None
+                logger.warning(
+                    "Archive API HTTP %s (attempt %d): %s",
+                    status,
+                    attempt + 1,
+                    redact_sensitive_text(body),
+                )
+                if attempt >= _MAX_RETRIES:
+                    return None
+            except requests.RequestException as e:
+                logger.warning("Archive API request failed (attempt %d): %s", attempt + 1, e)
+                if attempt >= _MAX_RETRIES:
+                    return None
+            time.sleep(_RETRY_BASE_SECONDS * (2 ** attempt))
+        return None
+    finally:
+        _request_semaphore.release()
 
 
 def _orders_list_from_archive_response(result) -> list:
@@ -293,6 +368,37 @@ def _parse_match(match: dict) -> dict:
 # Public API
 # ---------------------------------------------------------------------------
 
+def query_orders_by_digests(network: str, digests: list[str]) -> dict[str, dict]:
+    """Batch lookup of order fill data keyed by digest."""
+    unique: list[str] = []
+    seen: set[str] = set()
+    for digest in digests or []:
+        value = str(digest or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    if not unique:
+        return {}
+
+    url = archive_url_for_network(network)
+    payload = {"orders": {"digests": unique}}
+    result = _post(url, payload)
+    if not result:
+        return {}
+
+    orders = _orders_list_from_archive_response(result)
+    out: dict[str, dict] = {}
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        parsed = _parse_order(order)
+        digest = str(parsed.get("digest") or "").strip()
+        if digest:
+            out[digest] = parsed
+    return out
+
+
 def query_order_by_digest(
     network: str,
     digest: str,
@@ -313,6 +419,14 @@ def query_order_by_digest(
     attempt = 0
 
     while True:
+        if is_archive_rate_limited():
+            logger.debug(
+                "Archive rate limited; stopping digest poll for %s (%.1fs remaining)",
+                digest[:16],
+                archive_rate_limit_remaining(),
+            )
+            return None
+
         attempt += 1
         result = _post(url, payload)
         if result:
@@ -333,7 +447,9 @@ def query_order_by_digest(
         if time.time() >= deadline:
             logger.debug("Archive fill not resolved for digest %s after %.1fs", digest[:16], max_wait_seconds)
             return None
-        time.sleep(poll_interval)
+
+        sleep_for = max(float(poll_interval), archive_rate_limit_remaining())
+        time.sleep(sleep_for)
 
 
 def query_orders_by_subaccount(
