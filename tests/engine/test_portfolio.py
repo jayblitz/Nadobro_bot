@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.portfolio import (
@@ -16,6 +17,7 @@ from src.nadobro.engine.portfolio import (
 )
 from src.nadobro.engine.types import TradeType
 from src.nadobro.services.portfolio_history_worker import (
+    SnapshotAccountProvider,
     run_retention_once,
     run_sampler_once,
 )
@@ -111,6 +113,46 @@ def test_sampler_writes_one_row_per_user():
         assert len(rows) == 1
         assert rows[0].total_value_quote == Decimal(500)
         assert rows[0].by_asset["USDC"] == Decimal(500)
+
+    asyncio.run(body())
+
+
+def test_snapshot_account_provider_derives_missing_notional_value():
+    class FakeSnapshotProvider(SnapshotAccountProvider):
+        def _snapshot(self, user_id: int) -> object:
+            return SimpleNamespace(
+                positions=[
+                    {
+                        "product_name": "BTC-USDC",
+                        "signed_amount": "-2",
+                        "price": "100",
+                    }
+                ]
+            )
+
+    async def body():
+        provider = FakeSnapshotProvider()
+        accounts = await provider.accounts(1)
+        assert accounts["nado_perps"]["BTC-USDC"]["value"] == Decimal("200")
+
+        hist = InMemoryPortfolioHistoryRepository()
+        row = await _portfolio(acct=provider, hist=hist).sample(1)
+        assert row.total_value_quote == Decimal("200")
+        assert hist.fetch(1)[0].by_asset["BTC-USDC"] == Decimal("200")
+
+    asyncio.run(body())
+
+
+def test_sampler_skips_snapshot_failures_without_zero_row():
+    class FailingSnapshotProvider(SnapshotAccountProvider):
+        def _snapshot(self, user_id: int) -> object:
+            raise RuntimeError("snapshot unavailable")
+
+    async def body():
+        hist = InMemoryPortfolioHistoryRepository()
+        n = await run_sampler_once(_portfolio(acct=FailingSnapshotProvider(), hist=hist), [1])
+        assert n == 0
+        assert hist.fetch(1) == []
 
     asyncio.run(body())
 

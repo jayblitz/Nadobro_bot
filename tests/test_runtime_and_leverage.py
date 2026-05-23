@@ -269,6 +269,110 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         close_mock.assert_called_once_with(telegram_id, network)
         dispatch_mock.assert_not_called()
 
+    def test_run_cycle_retires_legacy_bro_and_cleans_exchange_state(self):
+        telegram_id = 42
+        network = "mainnet"
+        state = {
+            "running": True,
+            "strategy": "bro",
+            "product": "MULTI",
+            "interval_seconds": 1,
+            "last_run_ts": 0.0,
+            "strategy_session_id": 5,
+        }
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
+        saved_states = []
+
+        async def _run_blocking_stub(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch(
+            "src.nadobro.services.settings_service.get_strategy_settings",
+            return_value=({}, {}),
+        ), patch.object(
+            bot_runtime, "is_trading_paused", return_value=False
+        ), patch.object(
+            bot_runtime, "get_user", return_value=fake_user
+        ), patch.object(
+            bot_runtime, "run_blocking", side_effect=_run_blocking_stub
+        ), patch.object(
+            bot_runtime, "_save_state", side_effect=lambda _uid, _network, new_state: saved_states.append(dict(new_state))
+        ), patch.object(
+            bot_runtime, "update_strategy_session"
+        ) as update_session_mock, patch.object(
+            bot_runtime, "cleanup_strategy_positions", return_value={"success": True, "cancelled": 1.0}
+        ) as cleanup_mock, patch.object(
+            bot_runtime, "_dispatch_strategy"
+        ) as dispatch_mock, patch.object(
+            bot_runtime, "_notify", new=AsyncMock()
+        ):
+            result = asyncio.run(bot_runtime._run_cycle(telegram_id, network, state))
+
+        self.assertEqual(result, (True, None))
+        self.assertFalse(state.get("running"))
+        self.assertEqual(state.get("last_action"), "migrated_off_bro")
+        self.assertTrue(any(s.get("running") is False for s in saved_states))
+        cleanup_mock.assert_called_once_with(telegram_id, network, state)
+        update_session_mock.assert_called_once()
+        dispatch_mock.assert_not_called()
+
+    def test_restore_running_bots_retires_bro_even_when_legacy_flag_enabled(self):
+        telegram_id = 42
+        network = "mainnet"
+        state = {
+            "running": True,
+            "strategy": "bro",
+            "product": "MULTI",
+            "strategy_session_id": 7,
+        }
+        rows = [
+            {
+                "key": f"{bot_runtime.STATE_PREFIX}{telegram_id}:{network}",
+                "value": json.dumps(state),
+            }
+        ]
+
+        with patch.object(bot_runtime, "query_all", return_value=rows), patch.object(
+            bot_runtime, "legacy_bro_autoloop_enabled", return_value=True
+        ), patch.object(
+            bot_runtime, "_save_state"
+        ), patch.object(
+            bot_runtime, "update_strategy_session"
+        ), patch.object(
+            bot_runtime, "cleanup_strategy_positions", return_value={"success": True}
+        ) as cleanup_mock, patch.object(
+            bot_runtime, "_ensure_task"
+        ) as ensure_task_mock:
+            bot_runtime.restore_running_bots(enabled=True)
+
+        cleanup_mock.assert_called_once()
+        ensure_task_mock.assert_not_called()
+
+    def test_stop_all_strategies_for_user_cleans_up_on_network_switch(self):
+        telegram_id = 42
+        network = "mainnet"
+        rows = [
+            {
+                "key": f"{bot_runtime.STATE_PREFIX}{telegram_id}:{network}",
+                "value": json.dumps({"running": True, "strategy": "vol", "product": "KBTC"}),
+            }
+        ]
+
+        with patch.object(bot_runtime, "query_all", return_value=rows), patch.object(
+            bot_runtime, "set_bot_state"
+        ) as set_state_mock, patch.object(
+            bot_runtime, "cleanup_strategy_positions", return_value={"success": True}
+        ) as cleanup_mock, patch.object(
+            bot_runtime, "_finalize_session"
+        ):
+            bot_runtime.stop_all_strategies_for_user(telegram_id)
+
+        cleanup_mock.assert_called_once()
+        cleanup_state = cleanup_mock.call_args.args[2]
+        self.assertFalse(cleanup_state.get("running"))
+        self.assertEqual(cleanup_state.get("last_error"), "Stopped due to network switch")
+        set_state_mock.assert_called_once()
+
     def test_stop_all_user_bots_closes_each_running_network(self):
         telegram_id = 42
         rows = [
