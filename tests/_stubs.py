@@ -81,6 +81,34 @@ def install_test_stubs() -> None:
         sys.modules["telegram.ext"] = telegram_ext
         sys.modules["telegram.error"] = telegram_error
 
+    # apscheduler
+    if "apscheduler" not in sys.modules:
+        apscheduler_mod = types.ModuleType("apscheduler")
+        apscheduler_schedulers = types.ModuleType("apscheduler.schedulers")
+        apscheduler_asyncio = types.ModuleType("apscheduler.schedulers.asyncio")
+
+        class _AsyncIOScheduler:
+            def __init__(self, *args, **kwargs):
+                self.running = False
+                self.jobs = []
+
+            def add_job(self, *args, **kwargs):
+                self.jobs.append((args, kwargs))
+
+            def start(self):
+                self.running = True
+
+            def shutdown(self, wait=True):
+                self.running = False
+
+            def get_jobs(self):
+                return list(self.jobs)
+
+        apscheduler_asyncio.AsyncIOScheduler = _AsyncIOScheduler
+        sys.modules["apscheduler"] = apscheduler_mod
+        sys.modules["apscheduler.schedulers"] = apscheduler_schedulers
+        sys.modules["apscheduler.schedulers.asyncio"] = apscheduler_asyncio
+
     # psycopg2
     if "psycopg2" not in sys.modules:
         psycopg2_mod = types.ModuleType("psycopg2")
