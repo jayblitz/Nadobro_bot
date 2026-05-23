@@ -207,23 +207,30 @@ class SnapshotAccountProvider(AccountProvider):
         self.network = network
 
     async def accounts(self, user_id: int) -> Accounts:
-        snapshot = self._snapshot(user_id)
-        if snapshot is None:
-            return {}
+        from src.nadobro.services.async_utils import run_blocking
+
+        snapshot = await run_blocking(self._snapshot, user_id)
         accounts: Accounts = {"nado_perps": {}, "nado_spot": {}, "nado_vault": {}}
         for pos in getattr(snapshot, "positions", None) or []:
             pair = str(pos.get("product_name") or pos.get("pair") or "")
             if not pair:
                 continue
+            units = _dec(pos.get("signed_amount", pos.get("amount", 0)))
+            mark = _dec(pos.get("mark_price", pos.get("price", 0)))
+            value = _dec(pos.get("notional_value")) if pos.get("notional_value") is not None else Decimal(0)
+            if value <= 0 and units != 0 and mark > 0:
+                value = abs(units) * mark
             accounts["nado_perps"][pair] = {
-                "units": _dec(pos.get("signed_amount", pos.get("amount", 0))),
-                "mark": _dec(pos.get("mark_price", pos.get("price", 0))),
-                "value": _dec(pos.get("notional_value", 0)),
+                "units": units,
+                "mark": mark,
+                "value": value,
             }
         return accounts
 
     async def mark_prices(self, user_id: int) -> Dict[str, Decimal]:
-        snapshot = self._snapshot(user_id)
+        from src.nadobro.services.async_utils import run_blocking
+
+        snapshot = await run_blocking(self._snapshot, user_id)
         marks: Dict[str, Decimal] = {}
         for pos in getattr(snapshot, "positions", None) or []:
             pair = str(pos.get("product_name") or pos.get("pair") or "")
@@ -232,13 +239,9 @@ class SnapshotAccountProvider(AccountProvider):
         return marks
 
     def _snapshot(self, user_id: int) -> object:
-        try:
-            from src.nadobro.services.portfolio_service import get_portfolio_snapshot
+        from src.nadobro.services.portfolio_service import get_portfolio_snapshot
 
-            return get_portfolio_snapshot(user_id)
-        except Exception:  # noqa: BLE001
-            logger.warning("account snapshot unavailable for user %s", user_id, exc_info=True)
-            return None
+        return get_portfolio_snapshot(user_id)
 
 
 def _loads(value: object) -> Dict[str, object]:
