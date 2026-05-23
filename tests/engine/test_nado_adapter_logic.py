@@ -87,6 +87,7 @@ def test_order_status_open_when_resting():
         o = await a.place_order(PAIR, TradeType.BUY, OrderType.LIMIT_MAKER, Decimal(1), Decimal(99))
         a._client.open_orders = [{"digest": "d1", "filled": 0}]
         st = await a.order_status(o.id)
+        assert st.id == o.id
         assert st.state is OrderState.OPEN
 
     asyncio.run(body())
@@ -99,6 +100,7 @@ def test_order_status_filled_when_gone_and_matched():
         a._client.open_orders = []  # no longer resting
         a._client.matches = [{"digest": "d1", "amount": 1, "price": 99, "fee": "0.1"}]
         st = await a.order_status(o.id)
+        assert st.id == o.id
         assert st.state is OrderState.FILLED
         assert st.filled_base == Decimal(1) and st.filled_quote == Decimal(99)
         assert st.fee_quote == Decimal("0.1")
@@ -113,6 +115,7 @@ def test_order_status_cancelled_when_gone_and_no_fills():
         a._client.open_orders = []
         a._client.matches = []
         st = await a.order_status(o.id)
+        assert st.id == o.id
         assert st.state is OrderState.CANCELLED
 
     asyncio.run(body())
