@@ -11,11 +11,14 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Dict, List, Optional
+from typing import TYPE_CHECKING, AsyncIterator, Dict, List, Optional
 
 from src.nadobro.engine.executor_base import Executor, ExecutorFailed
 from src.nadobro.engine.risk import ExecutorRequest, RiskEngine
 from src.nadobro.engine.types import CloseType, RiskState
+
+if TYPE_CHECKING:
+    from src.nadobro.engine.controllers.controller_base import Controller
 
 
 @dataclass
@@ -38,6 +41,7 @@ class ExecutorOrchestrator:
         # callable(controller_id) -> RiskState; defaults to an empty snapshot
         self.risk_state_provider = risk_state_provider
         self._executors: Dict[str, Executor] = {}
+        self._controllers: Dict[str, "Controller"] = {}
         self._queue: "asyncio.Queue[ExecutorEvent]" = asyncio.Queue()
         self.event_log: List[ExecutorEvent] = []
         self._killed = False
@@ -173,13 +177,75 @@ class ExecutorOrchestrator:
         )
         return True
 
+    # -- controller management -------------------------------------------
+    async def spawn_controller(self, controller: "Controller") -> bool:
+        if self.is_killed:
+            self._emit(ExecutorEvent(kind="controller_rejected", controller_id=controller.id, reason="kill_switch"))
+            return False
+        self._controllers[controller.id] = controller
+        try:
+            await controller.on_start()
+        except Exception as exc:  # noqa: BLE001
+            controller._set_failed()
+            self._emit(ExecutorEvent(kind="controller_failed", controller_id=controller.id, reason=str(exc)))
+            return False
+        controller._set_active()
+        self._emit(ExecutorEvent(kind="controller_spawned", controller_id=controller.id))
+        return True
+
+    async def tick_controller(self, controller_id: str) -> None:
+        controller = self._controllers.get(controller_id)
+        if controller is None or not controller.is_active:
+            return
+        if self.risk is not None:
+            ok, reason = self.risk.pre_tick_check(controller_id, self._state_for(controller_id))
+            if not ok:
+                self._emit(ExecutorEvent(kind="controller_skipped", controller_id=controller_id, reason=reason))
+                return
+        try:
+            await controller.on_tick()
+        except Exception as exc:  # noqa: BLE001
+            controller._set_failed()
+            self._emit(ExecutorEvent(kind="controller_failed", controller_id=controller_id, reason=str(exc)))
+            return
+        self._emit(ExecutorEvent(kind="controller_tick", controller_id=controller_id))
+
+    def list_controllers(self, user_id: Optional[int] = None) -> List["Controller"]:
+        vals = list(self._controllers.values())
+        if user_id is not None:
+            vals = [c for c in vals if c.user_id == user_id]
+        return vals
+
+    def get_controller_status(self, controller_id: str) -> Optional[Dict[str, object]]:
+        controller = self._controllers.get(controller_id)
+        if controller is None:
+            return None
+        return {
+            "id": controller.id,
+            "name": controller.name,
+            "user_id": controller.user_id,
+            "state": controller.state.value,
+            "open_executors": len(self.list(controller_id, active_only=True)),
+        }
+
     async def stop_controller(
-        self, controller_id: str, close_type: CloseType = CloseType.EARLY_STOP
+        self,
+        controller_id: str,
+        close_type: CloseType = CloseType.EARLY_STOP,
+        reason: str = "stopped",
     ) -> int:
-        """Batched cancel: stop every active executor for a controller
-        concurrently."""
+        """Stop a controller (if registered) and batch-cancel all of its
+        active executors concurrently. Returns the executors stopped."""
+        controller = self._controllers.get(controller_id)
+        if controller is not None:
+            try:
+                await controller.on_stop(reason)
+            except Exception:  # noqa: BLE001
+                pass
+            controller._set_stopped()
         targets = self.list(controller_id, active_only=True)
         await asyncio.gather(*(self.stop(e.id, close_type) for e in targets))
+        self._emit(ExecutorEvent(kind="controller_stopped", controller_id=controller_id, reason=reason))
         return len(targets)
 
     # -- events -----------------------------------------------------------

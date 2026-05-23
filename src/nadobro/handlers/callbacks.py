@@ -2533,7 +2533,7 @@ def _mm_cycle_budget_preflight(
     if strategy_id not in ("grid", "rgrid", "dgrid", "mid"):
         return True, 0.0, 0.0, 0.0, 0, 0.0
 
-    from src.nadobro.strategies.mm_bot import DEFAULT_MIN_ORDER_NOTIONAL_USD, estimate_mm_quote_capacity
+    from src.nadobro.services.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD, estimate_mm_quote_capacity
 
     margin_usd = max(0.0, float(strategy_conf.get("notional_usd", 100.0) or 0.0))
     cycle_cfg = max(0.0, float(strategy_conf.get("cycle_notional_usd", margin_usd) or 0.0))

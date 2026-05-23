@@ -710,6 +710,13 @@ def init_db():
                     journal_path  TEXT NOT NULL,
                     UNIQUE (user_id, controller_id, session_n)
                 );
+
+                CREATE TABLE IF NOT EXISTS engine_kill_switch (
+                    scope      TEXT PRIMARY KEY,
+                    engaged    BOOLEAN NOT NULL DEFAULT FALSE,
+                    reason     TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
             """)
             conn.commit()
             logger.info("engine v2 tables verified/created")

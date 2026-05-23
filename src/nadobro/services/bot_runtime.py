@@ -1521,35 +1521,20 @@ async def _mark_cycle_error(telegram_id: int, network: str, error_msg: str):
 
 def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dict,
                        client, mid: float, product_id: int, product: str, open_orders: list) -> dict:
-    from src.nadobro.strategies import mm_bot, delta_neutral, volume_bot
-
-    if strategy in ("grid", "rgrid", "dgrid", "mid"):
-        return mm_bot.run_cycle(
-            telegram_id, network, state,
-            client=client, mid=mid, open_orders=open_orders,
-        )
-    elif strategy == "dn":
-        return delta_neutral.run_cycle(
-            telegram_id, network, state,
-            client=client, mid=mid, product_id=product_id,
-            product=product, open_orders=open_orders,
-        )
-    elif strategy == "vol":
-        return volume_bot.run_cycle(
-            telegram_id,
-            network,
-            state,
-            client=client,
-            mid=mid,
-        )
-    elif strategy == "bro":
+    if strategy == "bro":
         if not legacy_bro_autoloop_enabled():
             return {"success": True, "action": "skipped", "reason": "legacy_bro_autoloop_disabled"}
         # Alpha Agent autoloop backend was removed; nothing to run even if the
         # legacy flag is force-enabled.
         return {"success": True, "action": "skipped", "reason": "alpha_agent_autoloop_removed"}
-    else:
-        return {"success": False, "error": f"Unknown strategy '{strategy}'"}
+    # Engine v2: legacy run_cycle dispatch retired; strategies are managed by
+    # engine controllers via the orchestrator (see services/strategy_runtime).
+    from src.nadobro.services.strategy_runtime import dispatch_cycle
+
+    return dispatch_cycle(
+        strategy, telegram_id, network, state,
+        client=client, mid=mid, product_id=product_id, product=product, open_orders=open_orders,
+    )
 
 
 async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
@@ -1838,25 +1823,36 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         else:
             open_orders = await run_blocking(client.get_open_orders, product_id)
 
-    with timed_metric(f"runtime.strategy.dispatch.{strategy}"):
-        if strategy == "vol":
-            try:
-                result = await asyncio.wait_for(
-                    run_blocking(
-                        _dispatch_strategy,
-                        strategy, telegram_id, network, state,
-                        client, mid, product_id, product, open_orders,
-                    ),
-                    timeout=max(_vol_call_timeout_seconds(), 20.0),
-                )
-            except asyncio.TimeoutError:
-                raise RuntimeError("VOL strategy dispatch timed out")
-        else:
-            result = await run_blocking(
-                _dispatch_strategy,
-                strategy, telegram_id, network, state,
-                client, mid, product_id, product, open_orders,
+    from src.nadobro.services.engine_runtime import (
+        ENGINE_MAPPED_STRATEGIES, engine_v2_enabled, run_engine_cycle,
+    )
+
+    if engine_v2_enabled() and strategy in ENGINE_MAPPED_STRATEGIES:
+        # Engine v2 owns execution for this strategy (feature-gated).
+        with timed_metric(f"runtime.strategy.engine.{strategy}"):
+            result = await run_engine_cycle(
+                telegram_id, network, state, client, mid, product, product_id
             )
+    else:
+        with timed_metric(f"runtime.strategy.dispatch.{strategy}"):
+            if strategy == "vol":
+                try:
+                    result = await asyncio.wait_for(
+                        run_blocking(
+                            _dispatch_strategy,
+                            strategy, telegram_id, network, state,
+                            client, mid, product_id, product, open_orders,
+                        ),
+                        timeout=max(_vol_call_timeout_seconds(), 20.0),
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError("VOL strategy dispatch timed out")
+            else:
+                result = await run_blocking(
+                    _dispatch_strategy,
+                    strategy, telegram_id, network, state,
+                    client, mid, product_id, product, open_orders,
+                )
 
     if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("action") == "grid_stop_loss_hit":
         _finalize_session(state, stop_reason="grid_sl_hit")
