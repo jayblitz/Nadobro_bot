@@ -47,7 +47,12 @@ class DCARung:
     order_id: Optional[str] = None
     placed: bool = False
     filled: bool = False
+    # Cumulative venue-side totals already booked for this rung. BUG-DCA-1
+    # fix: track quote and fee separately so multi-price fills give the
+    # correct marginal price/quote/fee for each delta.
     _recorded: Decimal = Decimal(0)
+    _recorded_quote: Decimal = Decimal(0)
+    _recorded_fee: Decimal = Decimal(0)
 
 
 @dataclass
@@ -115,6 +120,9 @@ class DCAExecutor(Executor):
         self.trail_level: Optional[Decimal] = None
         self.close_order: Optional[NadoOrder] = None
         self._close_recorded = Decimal(0)
+        # BUG-DCA-1 / DCA-5 fix: track recorded close quote/fee separately.
+        self._close_recorded_quote = Decimal(0)
+        self._close_recorded_fee = Decimal(0)
         self._pending_close: Optional[CloseType] = None
 
     @property
@@ -154,14 +162,20 @@ class DCAExecutor(Executor):
         self._ingest_rung(rung, order)
 
     def _ingest_rung(self, rung: DCARung, order: NadoOrder) -> None:
+        # BUG-DCA-1 fix: ingest exact deltas from venue cumulative totals so
+        # multi-price fills don't corrupt the running WAE / fees.
         delta_base = order.filled_base - rung._recorded
         if delta_base <= 0:
             return
-        prev_q = (rung._recorded / order.filled_base) * order.filled_quote if order.filled_base else Decimal(0)
-        delta_quote = order.filled_quote - prev_q
-        price = delta_quote / delta_base if delta_base else Decimal(0)
-        self._record_fill(Fill(order.id, self.trading_pair, self.config.side, delta_base, price, Decimal(0), time.time()))
+        delta_quote = order.filled_quote - rung._recorded_quote
+        delta_fee = order.fee_quote - rung._recorded_fee
+        price = (delta_quote / delta_base) if delta_base > 0 else Decimal(0)
+        self._record_fill(
+            Fill(order.id, self.trading_pair, self.config.side, delta_base, price, delta_fee, time.time())
+        )
         rung._recorded = order.filled_base
+        rung._recorded_quote = order.filled_quote
+        rung._recorded_fee = order.fee_quote
         self.filled_base += delta_base
         self.filled_quote += delta_quote
         if order.state is OrderState.FILLED:
@@ -171,8 +185,26 @@ class DCAExecutor(Executor):
     async def on_create(self) -> None:
         self._activate()
         if self.config.mode is DCAMode.MAKER:
-            for rung in self.rungs:
-                await self._place_maker(rung)
+            # BUG-DCA-2 fix: if any rung placement fails part-way, cancel
+            # the ones we already placed so we don't leak open orders on the
+            # venue while the executor is marked FAILED.
+            placed_ids: List[str] = []
+            try:
+                for rung in self.rungs:
+                    await self._place_maker(rung)
+                    if rung.order_id is not None:
+                        placed_ids.append(rung.order_id)
+            except Exception:
+                for oid in placed_ids:
+                    captured = oid
+                    try:
+                        await self._guard(
+                            lambda: self.adapter.cancel_order(captured),
+                            label="dca_rollback_cancel",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                raise
 
     async def on_tick(self) -> None:
         if self.is_terminated:
@@ -259,12 +291,22 @@ class DCAExecutor(Executor):
             self._finalize(self._pending_close or CloseType.COMPLETED)
 
     async def _cancel_open_rungs(self) -> None:
+        # BUG-DCA-4 fix: before cancelling, poll each open rung once so any
+        # partial fill that arrived between the last tick and this stop call
+        # is ingested into inventory before the cancel removes it from the book.
         for rung in self.rungs:
             if rung.placed and not rung.filled and rung.order_id is not None:
                 oid = rung.order_id
                 try:
+                    pre = await self._guard(
+                        lambda: self.adapter.order_status(oid), label="dca_pre_cancel_status",
+                    )
+                    self._ingest_rung(rung, pre)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
                     await self._guard(lambda: self.adapter.cancel_order(oid), label="dca_cancel")
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
 
     async def _poll_close(self) -> None:
@@ -272,6 +314,7 @@ class DCAExecutor(Executor):
             return
         cid = self.close_order.id
         order = await self._guard(lambda: self.adapter.order_status(cid), label="dca_close_status")
+        self.close_order = order
         self._ingest_close(order)
         if order.state is OrderState.FILLED:
             self._finalize(self._pending_close or CloseType.COMPLETED)
@@ -280,15 +323,28 @@ class DCAExecutor(Executor):
         delta_base = order.filled_base - self._close_recorded
         if delta_base <= 0:
             return
-        prev_q = (self._close_recorded / order.filled_base) * order.filled_quote if order.filled_base else Decimal(0)
-        delta_quote = order.filled_quote - prev_q
-        price = delta_quote / delta_base if delta_base else Decimal(0)
-        self._record_fill(Fill(order.id, self.trading_pair, self.close_side, delta_base, price, Decimal(0), time.time()))
+        delta_quote = order.filled_quote - self._close_recorded_quote
+        delta_fee = order.fee_quote - self._close_recorded_fee
+        price = (delta_quote / delta_base) if delta_base > 0 else Decimal(0)
+        self._record_fill(
+            Fill(order.id, self.trading_pair, self.close_side, delta_base, price, delta_fee, time.time())
+        )
         self._close_recorded = order.filled_base
+        self._close_recorded_quote = order.filled_quote
+        self._close_recorded_fee = order.fee_quote
         self.exit_quote += delta_quote
 
     def _finalize(self, close_type: CloseType) -> None:
-        gross = (self.exit_quote - self.filled_quote) if self.is_long else (self.filled_quote - self.exit_quote)
+        # Proportional realized PnL — only book the closed portion.
+        if self.filled_base > 0:
+            avg_entry = self.filled_quote / self.filled_base
+        else:
+            avg_entry = Decimal(0)
+        closed_base = self._close_recorded
+        if self.is_long:
+            gross = self.exit_quote - (avg_entry * closed_base)
+        else:
+            gross = (avg_entry * closed_base) - self.exit_quote
         self._net_pnl_quote = gross - self._fees_paid_quote
         self.dca_state = DCAState.TERMINATED
         self._terminate(close_type)
@@ -296,12 +352,21 @@ class DCAExecutor(Executor):
     async def on_stop(self, close_type: CloseType = CloseType.EARLY_STOP) -> None:
         if self.is_terminated:
             return
+        if self._pending_close is None:
+            self._pending_close = close_type
         if self.config.keep_position:
             await self._cancel_open_rungs()
             self.dca_state = DCAState.TERMINATED
             self._terminate(close_type)
             return
-        self._pending_close = close_type
+        # BUG-DCA-3 fix: if a close order is already in flight, just poll it
+        # rather than spawning a SECOND market close which would double-flatten.
+        if self.dca_state is DCAState.CLOSING and self.close_order is not None:
+            await self._poll_close()
+            return
         await self._open_close()
         if not self.is_terminated:
-            self._terminate(close_type)
+            # Leave in CLOSING; subsequent ticks (or controller stop loop) will
+            # poll until the close order is terminal. Terminating here would
+            # leak the open close order on the venue.
+            pass

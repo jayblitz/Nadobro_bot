@@ -9,9 +9,12 @@ Implemented in Phase 1.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, AsyncIterator, Dict, List, Optional
+from typing import TYPE_CHECKING, AsyncIterator, Deque, Dict, List, Optional
 
 from src.nadobro.engine.executor_base import Executor, ExecutorFailed
 from src.nadobro.engine.risk import ExecutorRequest, RiskEngine
@@ -19,6 +22,21 @@ from src.nadobro.engine.types import CloseType, RiskState
 
 if TYPE_CHECKING:
     from src.nadobro.engine.controllers.controller_base import Controller
+
+logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# BUG-ORC-1 fix: cap the orchestrator's in-memory event_log and event queue.
+# Previously both were unbounded — long-running deployments leaked memory.
+DEFAULT_EVENT_LOG_LIMIT = _env_int("NADO_ORCH_EVENT_LOG_LIMIT", 10000)
+DEFAULT_EVENT_QUEUE_LIMIT = _env_int("NADO_ORCH_EVENT_QUEUE_LIMIT", 5000)
 
 
 @dataclass
@@ -36,16 +54,32 @@ class ExecutorOrchestrator:
         self,
         risk_engine: Optional[RiskEngine] = None,
         risk_state_provider: Optional[object] = None,
+        *,
+        event_log_limit: int = DEFAULT_EVENT_LOG_LIMIT,
+        event_queue_limit: int = DEFAULT_EVENT_QUEUE_LIMIT,
     ) -> None:
         self.risk = risk_engine
         # callable(controller_id) -> RiskState; defaults to an empty snapshot
         self.risk_state_provider = risk_state_provider
         self._executors: Dict[str, Executor] = {}
         self._controllers: Dict[str, "Controller"] = {}
-        self._queue: "asyncio.Queue[ExecutorEvent]" = asyncio.Queue()
-        self.event_log: List[ExecutorEvent] = []
+        # Bounded queue: when full, oldest events are dropped (with a log).
+        self._queue: "asyncio.Queue[ExecutorEvent]" = asyncio.Queue(
+            maxsize=max(1, event_queue_limit)
+        )
+        self._event_queue_limit = max(1, event_queue_limit)
+        # event_log is a bounded ring buffer.
+        self._event_log_limit = max(1, event_log_limit)
+        self._event_log_deque: Deque[ExecutorEvent] = deque(maxlen=self._event_log_limit)
+        self._queue_overflows = 0
         self._killed = False
         self._kill_reason: Optional[str] = None
+
+    @property
+    def event_log(self) -> List[ExecutorEvent]:
+        """Snapshot of the bounded event log. Mutating the returned list does
+        not affect the orchestrator's internal ring buffer."""
+        return list(self._event_log_deque)
 
     # -- kill switch ------------------------------------------------------
     def kill_switch_on(self, reason: str) -> None:
@@ -84,6 +118,11 @@ class ExecutorOrchestrator:
             state = self.risk_state_provider(controller_id)
         else:
             state = RiskState()
+        # BUG-RISK-1 fix: roll over daily counters on a UTC date boundary so
+        # yesterday's daily-pnl floor / cost-cap doesn't keep the gate armed
+        # into a new trading day.
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        state = state.rolled_over(today)
         state.executor_count = len(self.list(controller_id, active_only=True))
         return state
 
@@ -182,11 +221,31 @@ class ExecutorOrchestrator:
         if self.is_killed:
             self._emit(ExecutorEvent(kind="controller_rejected", controller_id=controller.id, reason="kill_switch"))
             return False
+        # BUG-CC-2 fix: register first so the controller can spawn child
+        # executors during on_start (their controller_id resolves via the
+        # registry), but if on_start raises, tear down any child executors
+        # the controller managed to spawn before bailing — otherwise the
+        # failed controller leaves live orders on the venue with no owner.
         self._controllers[controller.id] = controller
         try:
             await controller.on_start()
         except Exception as exc:  # noqa: BLE001
             controller._set_failed()
+            # Stop any child executors the controller created mid-start.
+            child_ids = [
+                ex.id for ex in self.list(controller.id, active_only=True)
+            ]
+            if child_ids:
+                try:
+                    await asyncio.gather(
+                        *(self.stop(eid, CloseType.FAILED) for eid in child_ids),
+                        return_exceptions=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "controller %s on_start rollback: child stop failed",
+                        controller.id, exc_info=True,
+                    )
             self._emit(ExecutorEvent(kind="controller_failed", controller_id=controller.id, reason=str(exc)))
             return False
         controller._set_active()
@@ -250,8 +309,31 @@ class ExecutorOrchestrator:
 
     # -- events -----------------------------------------------------------
     def _emit(self, event: ExecutorEvent) -> None:
-        self.event_log.append(event)
-        self._queue.put_nowait(event)
+        # Ring buffer (deque maxlen) drops oldest automatically.
+        self._event_log_deque.append(event)
+        # Queue is bounded; on overflow, drop the oldest queued event so the
+        # newest one can fit. This preserves a bounded *recent* window for
+        # consumers without blocking emitters.
+        try:
+            self._queue.put_nowait(event)
+        except asyncio.QueueFull:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self._queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # Queue still full (raced with another producer). Drop the
+                # new event and continue; the event_log retains a copy.
+                pass
+            self._queue_overflows += 1
+            if self._queue_overflows % 100 == 1:
+                logger.warning(
+                    "orchestrator event queue overflow (count=%d, cap=%d) — "
+                    "downstream consumer is too slow",
+                    self._queue_overflows, self._event_queue_limit,
+                )
 
     async def events(self) -> AsyncIterator[ExecutorEvent]:
         while True:
@@ -263,3 +345,7 @@ class ExecutorOrchestrator:
         while not self._queue.empty():
             out.append(self._queue.get_nowait())
         return out
+
+    @property
+    def queue_overflow_count(self) -> int:
+        return self._queue_overflows

@@ -191,3 +191,23 @@ class RiskState:
     daily_cost_usd: Decimal = Decimal(0)
     is_blocked: bool = False
     block_reason: Optional[str] = None
+    # BUG-RISK-1 fix: snapshot the UTC date the daily aggregates were
+    # computed for. The provider checks this against today's date and
+    # zero-resets daily_pnl_quote / daily_cost_usd on a new day so a stale
+    # state object can't keep the daily-loss kill switch armed indefinitely.
+    daily_anchor_utc: Optional[str] = None
+
+    def rolled_over(self, today_utc: str) -> "RiskState":
+        """Return a copy with daily counters reset if the day rolled over."""
+        if self.daily_anchor_utc == today_utc:
+            return self
+        return RiskState(
+            daily_pnl_quote=Decimal(0),
+            total_exposure_quote=self.total_exposure_quote,
+            executor_count=self.executor_count,
+            drawdown_pct=self.drawdown_pct,
+            daily_cost_usd=Decimal(0),
+            is_blocked=False,
+            block_reason=None,
+            daily_anchor_utc=today_utc,
+        )

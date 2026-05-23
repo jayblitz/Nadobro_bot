@@ -81,6 +81,10 @@ class TWAPExecutor(Executor):
         self.current_index = -1
         self.current_order: Optional[NadoOrder] = None
         self._current_recorded = Decimal(0)
+        # BUG-TWAP-2 / TWAP-3 fix: track recorded quote+fee separately so
+        # multi-price fills give correct marginal price + fee deltas.
+        self._current_recorded_quote = Decimal(0)
+        self._current_recorded_fee = Decimal(0)
         self.filled_base = Decimal(0)
         self.filled_quote = Decimal(0)
         self.lost_slices = 0
@@ -100,6 +104,11 @@ class TWAPExecutor(Executor):
         return min(self.n_orders - 1, int(elapsed // self.config.order_interval))
 
     # -- slice execution --------------------------------------------------
+    def _reset_current_counters(self) -> None:
+        self._current_recorded = Decimal(0)
+        self._current_recorded_quote = Decimal(0)
+        self._current_recorded_fee = Decimal(0)
+
     async def _place_slice(self, index: int, mid: Decimal) -> None:
         amount_base = self.config.amount_per_order_quote / mid
         if self.is_maker:
@@ -111,7 +120,7 @@ class TWAPExecutor(Executor):
                 label="twap_maker",
             )
             self.current_order = order
-            self._current_recorded = Decimal(0)
+            self._reset_current_counters()
             self._ingest_current(order)
         else:
             order = await self._guard(
@@ -122,19 +131,24 @@ class TWAPExecutor(Executor):
                 label="twap_taker",
             )
             self.current_order = order
-            self._current_recorded = Decimal(0)
+            self._reset_current_counters()
             self._ingest_current(order)
         self.current_index = index
 
     def _ingest_current(self, order: NadoOrder) -> None:
+        # BUG-TWAP-2 / TWAP-3 fix: exact delta ingestion with real fee delta.
         delta_base = order.filled_base - self._current_recorded
         if delta_base <= 0:
             return
-        prev_q = (self._current_recorded / order.filled_base) * order.filled_quote if order.filled_base else Decimal(0)
-        delta_quote = order.filled_quote - prev_q
-        price = delta_quote / delta_base if delta_base else Decimal(0)
-        self._record_fill(Fill(order.id, self.trading_pair, self.config.side, delta_base, price, Decimal(0), time.time()))
+        delta_quote = order.filled_quote - self._current_recorded_quote
+        delta_fee = order.fee_quote - self._current_recorded_fee
+        price = (delta_quote / delta_base) if delta_base > 0 else Decimal(0)
+        self._record_fill(
+            Fill(order.id, self.trading_pair, self.config.side, delta_base, price, delta_fee, time.time())
+        )
         self._current_recorded = order.filled_base
+        self._current_recorded_quote = order.filled_quote
+        self._current_recorded_fee = order.fee_quote
         self.filled_base += delta_base
         self.filled_quote += delta_quote
 
@@ -165,15 +179,32 @@ class TWAPExecutor(Executor):
         while self.current_index < due and not self.is_terminated:
             await self._advance(mid)
         if self.current_index >= self.n_orders - 1 and self._last_slice_resolved(now):
-            self._finalize()
+            await self._finalize()
+
+    async def _cancel_and_ingest_current(self) -> None:
+        """Cancel the resting maker slice and capture any partial fills first.
+        BUG-TWAP-4 fix.
+        """
+        if self.current_order is None:
+            return
+        oid = self.current_order.id
+        try:
+            await self._guard(lambda: self.adapter.cancel_order(oid), label="twap_cancel")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            refreshed = await self._guard(
+                lambda: self.adapter.order_status(oid), label="twap_post_cancel_status",
+            )
+            self.current_order = refreshed
+            self._ingest_current(refreshed)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _advance(self, mid: Decimal) -> None:
+        # BUG-TWAP-4 fix: capture partial fills before cancelling.
         if self.is_maker and self.current_order is not None and not self._current_filled():
-            oid = self.current_order.id
-            try:
-                await self._guard(lambda: self.adapter.cancel_order(oid), label="twap_cancel")
-            except Exception:
-                pass
+            await self._cancel_and_ingest_current()
             self.lost_slices += 1
         await self._place_slice(self.current_index + 1, mid)
 
@@ -184,8 +215,12 @@ class TWAPExecutor(Executor):
             return True
         return (now - self.start_ts) >= self.config.total_duration
 
-    def _finalize(self) -> None:
+    async def _finalize(self) -> None:
+        # BUG-TWAP-1 fix: actually cancel the last resting maker slice
+        # rather than just counting it as "lost" and leaving the order live
+        # on the venue. Ingest any partial fill first.
         if self.current_order is not None and self.is_maker and not self._current_filled():
+            await self._cancel_and_ingest_current()
             self.lost_slices += 1
         p0 = self.p0 or Decimal(0)
         mark = self.last_mid or p0
@@ -212,10 +247,8 @@ class TWAPExecutor(Executor):
     async def on_stop(self, close_type: CloseType = CloseType.EARLY_STOP) -> None:
         if self.is_terminated:
             return
+        # BUG-TWAP-1 fix on stop: don't leave a resting maker slice live on
+        # the venue after termination. Cancel and absorb partials first.
         if self.is_maker and self.current_order is not None and not self._current_filled():
-            oid = self.current_order.id
-            try:
-                await self._guard(lambda: self.adapter.cancel_order(oid), label="twap_cancel")
-            except Exception:
-                pass
+            await self._cancel_and_ingest_current()
         self._terminate(close_type)

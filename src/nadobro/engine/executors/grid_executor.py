@@ -50,8 +50,15 @@ class GridLevel:
     state: GridLevelState = GridLevelState.NOT_ACTIVE
     open_order_id: Optional[str] = None
     close_order_id: Optional[str] = None
+    # Cumulative venue-side fills already recorded for this level. We track
+    # base/quote/fee separately for both open and close legs so multi-price
+    # fills (variable VWAP) can be ingested as exact deltas — BUG-GR-4 fix.
     _open_recorded: Decimal = Decimal(0)
+    _open_quote_recorded: Decimal = Decimal(0)
+    _open_fee_recorded: Decimal = Decimal(0)
     _close_recorded: Decimal = Decimal(0)
+    _close_quote_recorded: Decimal = Decimal(0)
+    _close_fee_recorded: Decimal = Decimal(0)
     filled_base: Decimal = Decimal(0)
     filled_quote: Decimal = Decimal(0)
 
@@ -160,10 +167,16 @@ class GridExecutor(Executor):
         level.state = GridLevelState.OPEN_ORDER_PLACED
 
     async def _place_close(self, level: GridLevel) -> None:
+        await self._place_close_remaining(level, level.filled_base - level._close_recorded)
+
+    async def _place_close_remaining(self, level: GridLevel, base_amount: Decimal) -> None:
+        if base_amount <= 0:
+            level.state = GridLevelState.COMPLETE
+            return
         order = await self._guard(
             lambda: self.adapter.place_order(
                 self.trading_pair, self.close_side, OrderType.LIMIT_MAKER,
-                level.filled_base, level.close_price, self.config.leverage, True,
+                base_amount, level.close_price, self.config.leverage, True,
             ),
             label="grid_close",
         )
@@ -171,23 +184,40 @@ class GridExecutor(Executor):
         level.state = GridLevelState.CLOSE_ORDER_PLACED
 
     def _ingest(self, level: GridLevel, order: NadoOrder, side: TradeType, *, opening: bool) -> None:
-        recorded = level._open_recorded if opening else level._close_recorded
-        delta_base = order.filled_base - recorded
+        """Record the *delta* between the venue's current cumulative fill
+        totals and what this level has already booked. BUG-GR-4 fix: track
+        recorded base/quote/fee explicitly so multi-price (VWAP) fills give
+        the right marginal price for each new chunk.
+        BUG-GR-3 fix: pass the fee delta to the inventory book.
+        """
+        if opening:
+            recorded_b = level._open_recorded
+            recorded_q = level._open_quote_recorded
+            recorded_f = level._open_fee_recorded
+        else:
+            recorded_b = level._close_recorded
+            recorded_q = level._close_quote_recorded
+            recorded_f = level._close_fee_recorded
+        delta_base = order.filled_base - recorded_b
         if delta_base <= 0:
             return
-        # proportional quote/fee deltas
-        prev_q = (recorded / order.filled_base) * order.filled_quote if order.filled_base else Decimal(0)
-        delta_quote = order.filled_quote - prev_q
-        price = delta_quote / delta_base if delta_base else Decimal(0)
+        delta_quote = order.filled_quote - recorded_q
+        delta_fee = order.fee_quote - recorded_f
+        # Use the marginal price of this *chunk*, not the running VWAP.
+        price = (delta_quote / delta_base) if delta_base > 0 else Decimal(0)
         self._record_fill(
-            Fill(order.id, self.trading_pair, side, delta_base, price, Decimal(0), time.time())
+            Fill(order.id, self.trading_pair, side, delta_base, price, delta_fee, time.time())
         )
         if opening:
             level._open_recorded = order.filled_base
+            level._open_quote_recorded = order.filled_quote
+            level._open_fee_recorded = order.fee_quote
             level.filled_base = order.filled_base
             level.filled_quote = order.filled_quote
         else:
             level._close_recorded = order.filled_base
+            level._close_quote_recorded = order.filled_quote
+            level._close_fee_recorded = order.fee_quote
 
     # -- lifecycle --------------------------------------------------------
     async def on_create(self) -> None:
@@ -250,21 +280,66 @@ class GridExecutor(Executor):
             assert level.open_order_id is not None
             oid = level.open_order_id
             order = await self._guard(lambda: self.adapter.order_status(oid), label="grid_open_status")
+            # Always ingest any partial fills first so we don't lose inventory
+            # records when the order is about to be cancelled (BUG-GR-1) or
+            # was externally cancelled/rejected (BUG-GR-2).
+            self._ingest(level, order, self.open_side, opening=True)
             if order.state is OrderState.FILLED:
-                self._ingest(level, order, self.open_side, opening=True)
                 level.state = GridLevelState.OPEN_ORDER_FILLED
                 await self._place_close(level)
-            elif self.config.activation_bounds is not None and not self._within_bounds(level.open_price, mid):
-                await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_cancel")
+                return
+            if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
+                # BUG-GR-2 fix: external cancel/reject. If we got any fills,
+                # close them via the close leg; otherwise return to NOT_ACTIVE
+                # so the next placement cycle re-issues the open.
                 level.open_order_id = None
-                level.state = GridLevelState.NOT_ACTIVE
+                if level.filled_base > 0:
+                    level.state = GridLevelState.OPEN_ORDER_FILLED
+                    await self._place_close(level)
+                else:
+                    level.state = GridLevelState.NOT_ACTIVE
+                return
+            if self.config.activation_bounds is not None and not self._within_bounds(level.open_price, mid):
+                # BUG-GR-1 fix: cancel, then RE-POLL to capture any fills that
+                # arrived between status and cancel. If any base was filled,
+                # treat the level as opened and book the close leg.
+                try:
+                    await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_cancel")
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    post_cancel = await self._guard(
+                        lambda: self.adapter.order_status(oid), label="grid_open_post_cancel",
+                    )
+                    self._ingest(level, post_cancel, self.open_side, opening=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                level.open_order_id = None
+                if level.filled_base > 0:
+                    level.state = GridLevelState.OPEN_ORDER_FILLED
+                    await self._place_close(level)
+                else:
+                    level.state = GridLevelState.NOT_ACTIVE
         elif level.state is GridLevelState.CLOSE_ORDER_PLACED:
             assert level.close_order_id is not None
             cid = level.close_order_id
             order = await self._guard(lambda: self.adapter.order_status(cid), label="grid_close_status")
+            self._ingest(level, order, self.close_side, opening=False)
             if order.state is OrderState.FILLED:
-                self._ingest(level, order, self.close_side, opening=False)
                 level.state = GridLevelState.COMPLETE
+                return
+            if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
+                # BUG-GR-2 fix: re-place the close leg for the remaining base
+                # if any. If the level is fully closed via partials, complete it.
+                level.close_order_id = None
+                remaining = level.filled_base - level._close_recorded
+                if remaining <= 0:
+                    level.state = GridLevelState.COMPLETE
+                else:
+                    # Drop back to OPEN_ORDER_FILLED so _place_close re-issues
+                    # against the remaining inventory.
+                    level.state = GridLevelState.OPEN_ORDER_FILLED
+                    await self._place_close_remaining(level, remaining)
 
     # -- stop / teardown --------------------------------------------------
     async def _cancel_all_resting(self) -> None:
@@ -284,6 +359,23 @@ class GridExecutor(Executor):
 
     async def _stop_out(self, close_type: CloseType) -> None:
         await self._cancel_all_resting()
+        # After cancelling open orders, re-poll levels to absorb any last
+        # partial fills (BUG-GR-1 again at stop-out time).
+        for level in self.levels:
+            for label, oid, opening in (
+                ("grid_open_status_stop", level.open_order_id, True),
+                ("grid_close_status_stop", level.close_order_id, False),
+            ):
+                if oid is None:
+                    continue
+                try:
+                    captured = oid
+                    refreshed = await self._guard(
+                        lambda: self.adapter.order_status(captured), label=label,
+                    )
+                    self._ingest(level, refreshed, self.open_side if opening else self.close_side, opening=opening)
+                except Exception:  # noqa: BLE001
+                    pass
         net = self._net_base()
         if not self.config.keep_position and net > 0:
             flat = await self._guard(
@@ -294,9 +386,16 @@ class GridExecutor(Executor):
                 label="grid_flatten",
             )
             if flat.filled_base > 0:
+                # BUG-GR-5 fix: use the venue's authoritative quote total
+                # rather than re-deriving price * base (which silently loses
+                # precision for multi-price market fills) and pass the real
+                # venue fee through to inventory rather than zero.
                 price = flat.filled_quote / flat.filled_base
                 self._record_fill(
-                    Fill(flat.id, self.trading_pair, self.close_side, flat.filled_base, price, Decimal(0), time.time())
+                    Fill(
+                        flat.id, self.trading_pair, self.close_side,
+                        flat.filled_base, price, flat.fee_quote, time.time(),
+                    )
                 )
         self._terminate(close_type)
 

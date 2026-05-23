@@ -72,6 +72,15 @@ def build_orchestrator(
     )
 
 
+def deterministic_controller_id(strategy: str, user_id: int, network: str) -> str:
+    """Stable, cross-process controller id. BUG-ER-2 fix: with this, a second
+    worker that tries to start the same strategy hits the engine_executors
+    table's existing rows and we can detect the duplicate via
+    ``_remote_active(...)``.
+    """
+    return f"{strategy}:{int(user_id)}:{str(network)}"
+
+
 def build_controller(
     strategy: str,
     *,
@@ -110,7 +119,12 @@ class EngineRuntime:
 
     def is_running(self, user_id: int, network: str, strategy: str) -> bool:
         c = self._controllers.get(self._key(user_id, network, strategy))
-        return c is not None and c.is_active
+        if c is not None and c.is_active:
+            return True
+        # BUG-ER-2 fix: cross-process visibility. Another worker process
+        # may have started this strategy; check the engine_executors table
+        # for any non-terminated rows under the deterministic controller id.
+        return _remote_active(strategy, user_id, network)
 
     async def start(
         self,
@@ -124,15 +138,43 @@ class EngineRuntime:
         limits: Optional[RiskLimits] = None,
         risk_state_provider: Optional[Any] = None,
     ) -> Controller:
+        # BUG-ER-1 fix: if a previous instance is still registered (e.g. the
+        # controller failed mid-tick or the user restarted the strategy
+        # without an explicit stop), tear it down BEFORE replacing it with a
+        # fresh orchestrator/controller. Otherwise the old orchestrator's
+        # active executors keep ticking against the venue with no owner.
         key = self._key(user_id, network, strategy)
+        if key in self._controllers or key in self._orchestrators:
+            try:
+                await self.stop(user_id, network, strategy)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "stale engine runtime cleanup failed for %s; replacing anyway",
+                    key, exc_info=True,
+                )
+
         orch = build_orchestrator(limits=limits, risk_state_provider=risk_state_provider)
         controller = build_controller(
             strategy, user_id=user_id, configs=configs, orchestrator=orch,
             adapter=adapter, inventory=inventory, limits=limits,
+            controller_id=deterministic_controller_id(strategy, user_id, network),
         )
         self._orchestrators[key] = orch
         self._controllers[key] = controller
-        await orch.spawn_controller(controller)
+        try:
+            spawned = await orch.spawn_controller(controller)
+        except Exception:
+            # If spawn_controller raised, roll back our bookkeeping so a
+            # retry can start clean rather than crashing on the duplicate
+            # registration check above.
+            self._orchestrators.pop(key, None)
+            self._controllers.pop(key, None)
+            raise
+        if not spawned:
+            # Controller refused to start (kill switch / risk gate). Roll
+            # back so the dispatch result clearly says "not running".
+            self._orchestrators.pop(key, None)
+            self._controllers.pop(key, None)
         return controller
 
     async def tick(self, user_id: int, network: str, strategy: str) -> None:
@@ -162,6 +204,28 @@ class EngineRuntime:
                 self._executor_store.save(ex)  # type: ignore[attr-defined]
             except Exception:  # noqa: BLE001 - persistence must not break a tick
                 logger.warning("executor persistence failed for %s", ex.id, exc_info=True)
+
+
+def _remote_active(strategy: str, user_id: int, network: str) -> bool:
+    """Check the engine_executors table for non-terminated rows under the
+    deterministic controller id. Used by ``EngineRuntime.is_running`` to
+    detect strategies started by *another worker process* (BUG-ER-2).
+    Defensive: returns False on any DB failure so a transient error does
+    not block strategy startup entirely.
+    """
+    try:
+        from src.nadobro.db import query_count
+    except Exception:  # noqa: BLE001
+        return False
+    cid = deterministic_controller_id(strategy, user_id, network)
+    try:
+        return bool(query_count(
+            "SELECT 1 FROM engine_executors "
+            "WHERE controller_id = %s AND state <> 'TERMINATED'",
+            (cid,),
+        ))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _default_runtime() -> EngineRuntime:
@@ -197,10 +261,26 @@ ENGINE_MAPPED_STRATEGIES = ("grid", "rgrid", "dgrid", "mid", "vol")
 
 def engine_v2_enabled() -> bool:
     """Master switch for routing live strategy execution through the engine.
-    Default OFF — flip on per testnet validation (NADO_ENGINE_V2_RUNTIME)."""
-    return os.environ.get("NADO_ENGINE_V2_RUNTIME", "false").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+
+    BUG-SR-1 / BR-1 fix: default is now ON. The legacy ``run_cycle`` strategy
+    dispatch was removed during the engine-v2 cutover, so leaving this OFF
+    causes the bot to *silently no-op* every cycle (cycles report "success"
+    yet place no orders). Operators that need to roll back to the legacy
+    path no longer have one — set ``NADO_ENGINE_V2_RUNTIME=false`` only as
+    an emergency kill switch (the bot will accept it but log a critical
+    warning so it's never a silent footgun).
+    """
+    raw = os.environ.get("NADO_ENGINE_V2_RUNTIME", "").strip().lower()
+    if raw == "":
+        return True
+    if raw in ("0", "false", "no", "off"):
+        logger.critical(
+            "engine v2 runtime explicitly DISABLED via NADO_ENGINE_V2_RUNTIME=%s "
+            "— engine-mapped strategies will silently no-op until this is unset",
+            raw,
+        )
+        return False
+    return raw in ("1", "true", "yes", "on")
 
 
 def _f(settings: Dict[str, Any], key: str, default: float) -> float:
