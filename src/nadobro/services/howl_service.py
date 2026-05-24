@@ -1,7 +1,7 @@
 import logging
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.services.settings_service import get_strategy_settings, update_user_settings
@@ -24,7 +24,7 @@ def _pending_key(telegram_id: int, network: str) -> str:
 
 def get_recent_bro_trades(telegram_id: int, hours: int = 24, network: str = "mainnet") -> list[dict]:
     table = f"trades_{network}" if network in ("testnet", "mainnet") else "trades_mainnet"
-    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     rows = query_all(
         f"SELECT product_name, side, pnl, size, price, created_at, status "
         f"FROM {table} WHERE user_id = %s AND created_at > %s "
@@ -83,7 +83,7 @@ def run_howl_analysis(telegram_id: int, network: str, bot_state: dict) -> dict |
         return None
 
     howl_record = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "metrics": metrics,
         "suggestions": result.get("suggestions", []),
         "overall_assessment": result.get("overall_assessment", ""),
@@ -103,7 +103,7 @@ def run_howl_analysis(telegram_id: int, network: str, bot_state: dict) -> dict |
         except Exception:
             last_runs = []
     last_runs.append({
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now(timezone.utc).isoformat(),
         "trades_analyzed": len(trades),
         "suggestions_count": len(result.get("suggestions", [])),
     })
@@ -123,7 +123,7 @@ def get_pending_howl(telegram_id: int, network: str) -> dict | None:
         ts_str = data.get("timestamp")
         if ts_str:
             created = datetime.fromisoformat(ts_str)
-            age_hours = (datetime.utcnow() - created).total_seconds() / 3600.0
+            age_hours = (datetime.now(timezone.utc) - created).total_seconds() / 3600.0
             if age_hours > 48:
                 data["status"] = "expired"
                 set_bot_state(_pending_key(telegram_id, network), data)

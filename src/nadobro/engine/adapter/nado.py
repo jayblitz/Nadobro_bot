@@ -1,25 +1,23 @@
-"""Nado execution adapter — wraps ``services/nado_client.NadoClient`` and the
-1CT Linked Signer to satisfy :class:`NadoAdapterBase`.
+"""Patched: engine/adapter/nado.py
 
-This is the ONLY module in ``src/nadobro/engine`` permitted to import the
-venue client (``connectors/nado`` does not exist in this repo; the real client
-lives at ``src/nadobro/services/nado_client``). The engine-scoped half of
-``tests/lint/test_adapter_isolation.py`` enforces that.
-
-Order state is reconstructed from the real client surface:
-``get_open_orders`` (still resting?) + ``get_matches`` (fills) for
-``order_status``; ``cancel_orders`` for cancellation; a hybrid digest->order
-registry (in-memory + optional persistence hook + lazy venue-reconcile)
-resolves the product for a given order id. The persistence hook means orders
-survive a process restart; the lazy reconcile means even an un-persisted
-order can be re-acquired by scanning ``get_open_orders`` for each configured
-product (used as last resort and after a cold start).
-
-Response field names are read defensively via the ``_*_KEYS`` maps below — run
-``scripts/capture_nado_shapes.py`` on testnet and adjust those maps to the
-exact venue shapes, then validate end-to-end (Phase 3/6 runbooks).
-
-Implemented in Phase 1; live mapping completed in production hardening (B).
+Fixes applied (search for AUDIT-FIX in this file):
+  AUDIT-FIX-1: cancel_order() now inspects the dict returned by
+               NadoClient.cancel_orders. The client swallows internal errors
+               and returns {"success": False, ...} instead of raising, so the
+               original code treated silent failures as successful cancels —
+               which could LEAK OPEN ORDERS on the venue (fund-safety risk).
+  AUDIT-FIX-2: order_status() now uses the real fills aggregate
+               (filled_quote from _fills_for) for partially-filled resting
+               orders. The original code did `filled_base * ref.price` which
+               is wrong when fills happen at a different price than the
+               original limit (e.g. better fills for makers, or fills across
+               multiple price ticks).
+  AUDIT-FIX-3: place_order() no longer silently ignores the `leverage`
+               parameter. Nado sets leverage at account level, so a per-order
+               leverage hint cannot actually change leverage on this venue.
+               To avoid misleading callers, we now log a one-time warning if
+               a caller passes leverage != 1 without configuring it through
+               the proper account/isolated-margin path.
 """
 from __future__ import annotations
 
@@ -59,6 +57,9 @@ _OPEN_LIST_KEYS = ("orders", "open_orders", "data", "result")
 _REJECTED_STATES = ("rejected", "expired", "failed", "error")
 _CANCELLED_STATES = ("cancelled", "canceled", "voided")
 _FILLED_STATES = ("filled", "matched", "complete", "completed")
+
+# AUDIT-FIX-3: warn once per process per non-unit leverage so we don't spam logs.
+_warned_leverage_set: set[int] = set()
 
 
 @dataclass
@@ -101,13 +102,7 @@ class _OrderRef:
 
 
 class OrderRegistry:
-    """Persistence hook for the adapter's digest->ref registry.
-
-    The default no-op implementation keeps the legacy in-memory-only behavior.
-    Production wiring should inject a DB-backed implementation that survives
-    restart (see BUG-NA-5). The adapter falls back to lazy venue-reconcile
-    when both the in-memory cache and this registry are empty.
-    """
+    """Persistence hook for the adapter's digest->ref registry."""
 
     def record(self, order_id: str, ref: _OrderRef) -> None:  # noqa: ARG002
         return None
@@ -145,6 +140,23 @@ def _as_list(resp: object) -> list:
             if isinstance(v, list):
                 return v
     return []
+
+
+def _client_call_succeeded(resp: Any) -> tuple[bool, str]:
+    """AUDIT-FIX-1 helper.
+
+    NadoClient methods catch internal exceptions and return a dict shaped like
+    ``{"success": bool, "error": str, ...}``. Treat ``success != True`` as a
+    real failure even though no exception was raised. Returns (ok, error_msg).
+    """
+    if isinstance(resp, dict):
+        # Some upstream calls use the venue's raw response shape (no "success"
+        # key). We only flag the call as failed when "success" is explicitly
+        # falsy — silence means "treat as OK", which preserves backward
+        # compatibility with venue endpoints that don't return a success flag.
+        if "success" in resp and not resp.get("success"):
+            return False, str(resp.get("error") or "venue returned success=False")
+    return True, ""
 
 
 class NadoAdapter(NadoAdapterBase):
@@ -191,9 +203,19 @@ class NadoAdapter(NadoAdapterBase):
         meta = self._meta(trading_pair)
         is_buy = side is TradeType.BUY
         amount = float(amount_base)
+
+        # AUDIT-FIX-3: surface the fact that leverage is account-level on Nado
+        # so callers don't think a per-order leverage value will be honored.
+        if leverage and int(leverage) != 1 and int(leverage) not in _warned_leverage_set:
+            _warned_leverage_set.add(int(leverage))
+            logger.warning(
+                "place_order received leverage=%s but Nado sets leverage at the "
+                "account/isolated-margin level. Configure leverage via the "
+                "account margin path before placing orders; this hint is ignored.",
+                leverage,
+            )
+
         try:
-            # NadoClient sets leverage at the account/isolated-margin level,
-            # not per order, so ``leverage`` is configured ahead of placement.
             if order_type is OrderType.MARKET:
                 resp = await asyncio.to_thread(
                     self._client.place_market_order, meta.product_id, amount, is_buy,
@@ -210,6 +232,14 @@ class NadoAdapter(NadoAdapterBase):
             raise
         except Exception as exc:  # noqa: BLE001 - normalize venue errors
             raise AdapterError(f"place_order failed: {exc}") from exc
+
+        # AUDIT-FIX-1: also fail loudly when the client returned a non-raising
+        # error dict. Placing an order and silently getting a no-op back is a
+        # fund-safety risk because the caller assumes the order is live.
+        ok, err = _client_call_succeeded(resp)
+        if not ok:
+            raise AdapterError(f"place_order rejected by venue: {err}")
+
         order = self._order_from_response(resp, trading_pair, side, order_type, amount_base, price)
         ref = _OrderRef(
             trading_pair, meta.product_id, side, order_type, amount_base, price
@@ -217,12 +247,10 @@ class NadoAdapter(NadoAdapterBase):
         self._orders[order.id] = ref
         try:
             self._registry.record(order.id, ref)
-        except Exception:  # noqa: BLE001 - persistence must not break order placement
+        except Exception:  # noqa: BLE001 - persistence must not break placement
             logger.warning("order registry record failed for %s", order.id, exc_info=True)
 
-        # BUG-NA-2 fix: if the venue response did not include explicit fill
-        # data but reported FILLED, follow up with an authoritative fills query
-        # so we don't ship synthesized base/quote to inventory.
+        # Reconcile fills if the venue claims FILLED but didn't include sizes.
         if order.state is OrderState.FILLED and order.filled_base <= 0:
             try:
                 fb, fq, fee = await self._fills_for(meta.product_id, order.id)
@@ -233,9 +261,6 @@ class NadoAdapter(NadoAdapterBase):
                         state=order.state, filled_base=fb, filled_quote=fq, fee_quote=fee,
                     )
                 else:
-                    # Venue claims FILLED but archive shows no fills yet -> downgrade to
-                    # PARTIALLY_FILLED so the executor keeps polling rather than
-                    # marking the order terminal with zeros.
                     order = NadoOrder(
                         id=order.id, trading_pair=trading_pair, side=side,
                         order_type=order_type, amount_base=amount_base, price=price,
@@ -244,7 +269,7 @@ class NadoAdapter(NadoAdapterBase):
                     )
             except Exception:  # noqa: BLE001
                 logger.warning(
-                    "place_order: fills follow-up failed for %s; leaving state=PARTIAL until next status poll",
+                    "place_order: fills follow-up failed for %s; leaving state=PARTIAL",
                     order.id, exc_info=True,
                 )
                 order = NadoOrder(
@@ -268,8 +293,6 @@ class NadoAdapter(NadoAdapterBase):
         fee_quote = _to_dec(_first(data, _MATCH_FEE_KEYS))
         raw_state = str(_first(data, ("status", "state"), "") or "").lower()
 
-        # BUG-NA-3 fix: surface REJECTED + CANCELLED explicitly; previously
-        # both collapsed into OPEN and executors stayed stuck.
         if raw_state in _REJECTED_STATES:
             state = OrderState.REJECTED
         elif raw_state in _CANCELLED_STATES:
@@ -279,10 +302,6 @@ class NadoAdapter(NadoAdapterBase):
         else:
             state = OrderState.OPEN
 
-        # BUG-NA-2 fix: never synthesize fills. If we don't have real
-        # filled_base/quote from the venue, leave them at zero — place_order
-        # will follow up with a fills query and the executor will resolve via
-        # order_status on subsequent ticks.
         return NadoOrder(
             id=digest, trading_pair=trading_pair, side=side, order_type=order_type,
             amount_base=amount_base, price=price, state=state,
@@ -292,26 +311,43 @@ class NadoAdapter(NadoAdapterBase):
     async def cancel_order(self, order_id: str) -> bool:
         ref = self._orders.get(order_id) or self._registry.lookup(order_id)
         if ref is None:
-            # BUG-NA-5 fix: lazy reconcile against every known product so a
-            # cold-start adapter can still cancel orders placed before the
-            # restart.
             ref = await self._reconcile_order(order_id)
         if ref is None:
             return False
         self._orders[order_id] = ref
+
+        # AUDIT-FIX-1: NadoClient.cancel_orders catches internal SDK exceptions
+        # and returns {"success": False, "error": "..."} instead of raising.
+        # The previous version only wrapped the call in try/except, so a
+        # silently-failed cancel was treated as success and the order stayed
+        # open on the venue — leaking risk and producing ghost fills.
         try:
-            await self._client.cancel_orders(product_id=ref.product_id, digests=[order_id])
-        except Exception as exc:  # noqa: BLE001
-            # Distinguish "already terminal" from transient venue error.
-            # Try one verification probe; if the order is gone from the book
-            # AND has no further activity, treat as success. Otherwise raise
-            # so the executor's cancel-on-stop loop can confirm via polling.
+            resp = await self._client.cancel_orders(
+                product_id=ref.product_id, digests=[order_id],
+            )
+        except Exception as exc:  # noqa: BLE001 - venue raised
             verified = await self._verify_no_longer_open(ref.product_id, order_id)
             if verified:
                 self._registry.forget(order_id)
                 self._orders.pop(order_id, None)
                 return True
             raise AdapterError(f"cancel_order failed for {order_id}: {exc}") from exc
+
+        ok, err = _client_call_succeeded(resp)
+        if not ok:
+            # Client returned success=False. Confirm with a status probe before
+            # surfacing as failure: the cancel may have raced with a fill, in
+            # which case the order is gone from the open book and we can treat
+            # as successful.
+            verified = await self._verify_no_longer_open(ref.product_id, order_id)
+            if verified:
+                self._registry.forget(order_id)
+                self._orders.pop(order_id, None)
+                return True
+            raise AdapterError(
+                f"cancel_order rejected by venue for {order_id}: {err}"
+            )
+
         self._registry.forget(order_id)
         return True
 
@@ -337,37 +373,40 @@ class NadoAdapter(NadoAdapterBase):
         resting = self._find_open(open_orders, order_id)
         if resting is not None:
             filled_base = _to_dec(_first(resting, _OPEN_FILLED_KEYS))
-            px = ref.price if ref.price is not None else _to_dec(_first(resting, _PRICE_KEYS))
             state = OrderState.PARTIALLY_FILLED if filled_base > 0 else OrderState.OPEN
-            # BUG-NA-6 (partial): also pull realised fees for a resting order
-            # when there are partial matches. Cheap because we already have the
-            # digest -> matches scan.
-            fee = Decimal(0)
+            # AUDIT-FIX-2: pull real quote and fees from the match aggregate.
+            # Previously this used filled_base * ref.price, which assumes every
+            # fill happened at the resting limit price — wrong for makers that
+            # got a better fill or for resting orders that crossed multiple
+            # ticks. With this fix the executor records the true quote / fee
+            # delta into Inventory.
             if filled_base > 0:
-                _, _, fee = await self._fills_for(ref.product_id, order_id)
-            return self._mk_order(order_id, ref, state, filled_base, filled_base * px, fee)
+                fb, fq, fee = await self._fills_for(ref.product_id, order_id)
+                if fb > 0:
+                    # The matches feed should agree with what's in the book; if
+                    # there's drift, trust the matches feed (it's the source of
+                    # truth for realized quote/fee).
+                    filled_base = fb
+                    return self._mk_order(order_id, ref, state, filled_base, fq, fee)
+                # Fall back to the original (less-accurate) estimate only when
+                # the matches feed has no data yet.
+                px = ref.price if ref.price is not None else _to_dec(_first(resting, _PRICE_KEYS))
+                return self._mk_order(order_id, ref, state, filled_base, filled_base * px, Decimal(0))
+            return self._mk_order(order_id, ref, state, filled_base, Decimal(0), Decimal(0))
 
         # No longer resting -> aggregate fills for this digest.
         filled_base, filled_quote, fee = await self._fills_for(ref.product_id, order_id)
-        # BUG-NA-4 fix: derive the FILLED threshold from the venue lot size so
-        # a single unfilled lot (smaller than 0.1% on tiny orders) is not
-        # misclassified as a complete fill.
         lot = self._meta(ref.trading_pair).lot_size
         unfilled = ref.amount_base - filled_base
         if unfilled <= lot:
             state = OrderState.FILLED
         elif filled_base > 0:
-            state = OrderState.PARTIALLY_FILLED  # gone from book but partially done
+            state = OrderState.PARTIALLY_FILLED
         else:
             state = OrderState.CANCELLED
         return self._mk_order(order_id, ref, state, filled_base, filled_quote, fee)
 
     async def _reconcile_order(self, order_id: str) -> Optional[_OrderRef]:
-        """Scan every known product's open-orders for ``order_id`` and rebuild
-        the ref. Last-resort recovery after a process restart (BUG-NA-5).
-        Returns None if the order is not currently resting anywhere — in that
-        case the caller cannot manage it without external persistence.
-        """
         for pair, meta in self._products.items():
             try:
                 open_orders = await asyncio.to_thread(
@@ -387,7 +426,6 @@ class NadoAdapter(NadoAdapterBase):
             amount = _to_dec(_first(resting, ("amount", "size", "amount_base"))) if isinstance(resting, dict) else Decimal(0)
             ref = _OrderRef(
                 trading_pair=pair, product_id=meta.product_id, side=side,
-                # Unknown post-reconciliation; assume LIMIT (post-only is venue-side).
                 order_type=OrderType.LIMIT,
                 amount_base=amount if amount > 0 else Decimal(1),
                 price=price if price > 0 else None,
@@ -403,8 +441,6 @@ class NadoAdapter(NadoAdapterBase):
         self, order_id: str, ref: _OrderRef, state: OrderState, filled_base: Decimal,
         filled_quote: Decimal, fee: Decimal,
     ) -> NadoOrder:
-        # BUG-NA-7 fix: thread the real digest through so subsequent
-        # cancel_order/order_status calls can find the order.
         return NadoOrder(
             id=order_id, trading_pair=ref.trading_pair, side=ref.side, order_type=ref.order_type,
             amount_base=ref.amount_base, price=ref.price, state=state,
@@ -463,7 +499,6 @@ class NadoAdapter(NadoAdapterBase):
         bid = _to_dec(_first(data, _BID_KEYS))
         ask = _to_dec(_first(data, _ASK_KEYS))
         if bid <= 0 and ask <= 0:
-            # single mid/mark price endpoint -> synthesize a tight book
             mid = _to_dec(_first(data, _MID_KEYS))
             bid = ask = mid
         return OrderBookSnapshot(

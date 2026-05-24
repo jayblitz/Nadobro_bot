@@ -4,7 +4,7 @@ import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from src.nadobro.models.database import (
     TradeStatus, OrderSide, OrderTypeEnum, NetworkMode,
     get_last_trade_for_rate_limit, insert_trade, update_trade, get_trades_by_user,
@@ -400,7 +400,7 @@ def check_rate_limit(telegram_id: int, network: str = "mainnet") -> tuple[bool, 
             if created.tzinfo:
                 now = datetime.now(created.tzinfo)
             else:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
             elapsed = (now - created).total_seconds()
         except Exception as e:
             logger.warning("Rate-limit timestamp parse failed for user %s: %s", telegram_id, e)
@@ -545,7 +545,10 @@ def execute_market_order(
             intent_id = None
     if intent_id:
         try:
-            from src.nadobro.services.order_intents import reserve_order_intent
+            from src.nadobro.services.order_intents import (
+                OrderIntentReservationError,
+                reserve_order_intent,
+            )
 
             reserved, existing_intent = reserve_order_intent(
                 intent_id,
@@ -577,6 +580,23 @@ def execute_market_order(
                     "intent_id": intent_id,
                     "error": "Order is already being submitted. Please wait.",
                 }
+        except OrderIntentReservationError as exc:
+            # AUDIT-FIX-OI-1 call site: the DB-backed reservation failed.
+            # Refuse the order rather than risk a double-submit via the
+            # previous non-atomic fallback. User-visible retry message.
+            logger.warning(
+                "execute_market_order: order intent reservation unavailable (%s); "
+                "rejecting submission to avoid double-trade risk",
+                exc,
+            )
+            return {
+                "success": False,
+                "intent_id": intent_id,
+                "error": (
+                    "Order tracking is temporarily unavailable. Please try "
+                    "again in a few seconds."
+                ),
+            }
         except Exception:
             pass
 
@@ -589,7 +609,7 @@ def execute_market_order(
         "size": size,
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
     }
     if strategy_session_id:
@@ -685,7 +705,7 @@ def execute_market_order(
             update_data = {
                 "status": TradeStatus.FILLED.value,
                 "order_digest": digest,
-                "filled_at": datetime.utcnow().isoformat(),
+                "filled_at": datetime.now(timezone.utc).isoformat(),
             }
             update_data.update(fill_update)
             if "price" not in update_data or not update_data.get("price"):
@@ -871,7 +891,7 @@ def execute_spot_market_order(
         "size": size,
         "leverage": 1.0,
         "status": TradeStatus.PENDING.value,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
     }
     if strategy_session_id:
@@ -911,7 +931,7 @@ def execute_spot_market_order(
         update_data = {
             "status": TradeStatus.FILLED.value,
             "order_digest": digest,
-            "filled_at": datetime.utcnow().isoformat(),
+            "filled_at": datetime.now(timezone.utc).isoformat(),
         }
         update_data.update(fill_update)
         if "price" not in update_data or not update_data.get("price"):
@@ -1064,7 +1084,7 @@ def execute_spot_limit_order(
         "price": price,
         "leverage": 1.0,
         "status": TradeStatus.PENDING.value,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
     }
     if strategy_session_id:
@@ -1248,7 +1268,7 @@ def execute_limit_order(
         "price": price,
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
     }
     if strategy_session_id:
@@ -1280,7 +1300,10 @@ def execute_limit_order(
             intent_id = None
     if intent_id:
         try:
-            from src.nadobro.services.order_intents import reserve_order_intent
+            from src.nadobro.services.order_intents import (
+                OrderIntentReservationError,
+                reserve_order_intent,
+            )
 
             reserved, existing_intent = reserve_order_intent(
                 intent_id,
@@ -1313,6 +1336,21 @@ def execute_limit_order(
                     "intent_id": intent_id,
                     "error": "Order is already being submitted. Please wait.",
                 }
+        except OrderIntentReservationError as exc:
+            # AUDIT-FIX-OI-1 call site: refuse rather than risk double-submit.
+            logger.warning(
+                "execute_limit_order: order intent reservation unavailable (%s); "
+                "rejecting submission to avoid double-trade risk",
+                exc,
+            )
+            return {
+                "success": False,
+                "intent_id": intent_id,
+                "error": (
+                    "Order tracking is temporarily unavailable. Please try "
+                    "again in a few seconds."
+                ),
+            }
         except Exception:
             pass
 
@@ -1900,7 +1938,7 @@ def _record_close_in_db(
 
             if is_full_close:
                 update_data["status"] = TradeStatus.CLOSED.value
-                update_data["closed_at"] = datetime.utcnow().isoformat()
+                update_data["closed_at"] = datetime.now(timezone.utc).isoformat()
                 update_trade(open_trade["id"], update_data, network=selected_network)
                 logger.info(
                     "Trade #%d fully closed: %s %s size=%.4f open=%.2f close=%.2f pnl=%.4f fee=%.4f%s",
@@ -1928,9 +1966,9 @@ def _record_close_in_db(
                 "status": TradeStatus.CLOSED.value,
                 "order_digest": order_digest,
                 "close_price": close_price,
-                "closed_at": datetime.utcnow().isoformat(),
-                "created_at": datetime.utcnow().isoformat(),
-                "filled_at": datetime.utcnow().isoformat(),
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "filled_at": datetime.now(timezone.utc).isoformat(),
                 "source": source,
                 "open_trade_id": int(open_trade.get("id")),
             }
@@ -1986,9 +2024,9 @@ def _record_close_in_db(
                 "status": TradeStatus.CLOSED.value,
                 "order_digest": order_digest,
                 "close_price": close_price,
-                "closed_at": datetime.utcnow().isoformat(),
-                "created_at": datetime.utcnow().isoformat(),
-                "filled_at": datetime.utcnow().isoformat(),
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "filled_at": datetime.now(timezone.utc).isoformat(),
                 "source": source,
             }
             if fill_data:
@@ -2591,7 +2629,7 @@ def get_trade_analytics(telegram_id: int, strategy_session_id: int | None = None
     wins = len([t for t in decisive_pnl_trades if float(_realized_pnl(t)) > 0])
     losses = len([t for t in decisive_pnl_trades if float(_realized_pnl(t)) < 0])
     win_rate = (wins / len(decisive_pnl_trades) * 100) if decisive_pnl_trades else 0
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     volume_windows = {"24h": 0.0, "7d": 0.0, "30d": 0.0, "all": 0.0}
     total_fees = 0.0
     total_funding = 0.0

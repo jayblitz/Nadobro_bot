@@ -22,6 +22,17 @@ _FILL_SYNC_DIGEST_WAIT = float(os.environ.get("NADO_FILL_SYNC_DIGEST_WAIT_SECOND
 _FILL_SYNC_DIGEST_POLL = float(os.environ.get("NADO_FILL_SYNC_DIGEST_POLL_SECONDS", "1.0"))
 _MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SECONDS", "3.0"))
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
+# AUDIT-FIX-SCH-2: serialize cache fetches so two coroutines don't both miss
+# the cache and fire concurrent get_all_market_prices() requests. Lazy-init
+# because module load happens before the asyncio loop exists.
+_market_snapshot_lock: asyncio.Lock | None = None
+
+
+def _market_snapshot_lock_get() -> asyncio.Lock:
+    global _market_snapshot_lock
+    if _market_snapshot_lock is None:
+        _market_snapshot_lock = asyncio.Lock()
+    return _market_snapshot_lock
 
 
 def _format_alert_metric_value(condition: str, value: float) -> str:
@@ -204,14 +215,18 @@ async def tick_price_tracker():
 
 async def _get_market_snapshot(force_refresh: bool = False) -> dict:
     global _last_market_snapshot
-    now = asyncio.get_running_loop().time()
-    if (not force_refresh) and _last_market_snapshot.get("prices") and (
-        now - float(_last_market_snapshot.get("ts") or 0.0) < _MARKET_SNAPSHOT_TTL_SECONDS
-    ):
-        return _last_market_snapshot.get("prices") or {}
-    prices = await run_blocking(_check_client.get_all_market_prices)
-    _last_market_snapshot = {"ts": now, "prices": prices or {}}
-    return _last_market_snapshot["prices"]
+    # AUDIT-FIX-SCH-2: hold the lock for the full check-then-fetch sequence
+    # so two concurrent coroutines don't both miss the cache and race a
+    # second venue request.
+    async with _market_snapshot_lock_get():
+        now = asyncio.get_running_loop().time()
+        if (not force_refresh) and _last_market_snapshot.get("prices") and (
+            now - float(_last_market_snapshot.get("ts") or 0.0) < _MARKET_SNAPSHOT_TTL_SECONDS
+        ):
+            return _last_market_snapshot.get("prices") or {}
+        prices = await run_blocking(_check_client.get_all_market_prices)
+        _last_market_snapshot = {"ts": now, "prices": prices or {}}
+        return _last_market_snapshot["prices"]
 
 
 async def tick_howl():
@@ -562,8 +577,12 @@ async def sync_pending_fills():
                     if fill_data.get("first_fill_ts"):
                         from datetime import datetime as dt
                         try:
-                            update_data["filled_at"] = dt.utcfromtimestamp(
-                                int(fill_data["first_fill_ts"])
+                            # AUDIT-FIX-SCH-1: utcfromtimestamp is deprecated
+                            # (Py 3.12+) and returns a NAIVE datetime, which
+                            # blows up comparisons against aware timestamps
+                            # elsewhere in this file. Use an aware UTC instant.
+                            update_data["filled_at"] = dt.fromtimestamp(
+                                int(fill_data["first_fill_ts"]), tz=timezone.utc,
                             ).isoformat()
                         except Exception:
                             pass

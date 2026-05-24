@@ -3,6 +3,7 @@ import logging
 import os
 import secrets
 import string
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -21,6 +22,10 @@ INVITE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _ACCESS_CACHE_TTL = 10
 _ACCESS_CACHE_MAX_ENTRIES = 1024
 _access_cache: dict[int, dict] = {}
+# AUDIT-FIX-IS-2: protect the module-level cache. Without this lock,
+# _prune_access_cache could RuntimeError on concurrent iteration, and
+# concurrent _cache_access calls could lose entries to a partial dict mutation.
+_access_cache_lock = threading.Lock()
 
 
 def normalize_code(code: str) -> str:
@@ -31,8 +36,24 @@ def _invite_pepper() -> str:
     pepper = os.environ.get("INVITE_CODE_PEPPER") or ENCRYPTION_KEY
     if pepper:
         return pepper
-    logger.warning("INVITE_CODE_PEPPER and ENCRYPTION_KEY are unset; using development invite-code pepper")
-    return "nadobro-dev-invite-pepper"
+    # AUDIT-FIX-IS-1: fail loudly instead of silently falling back to a
+    # publicly-known development pepper. main.py already hard-exits if
+    # ENCRYPTION_KEY is missing, so this branch should never fire in
+    # production; if it does, refusing service is far safer than letting
+    # anyone with the source forge invite hashes.
+    if os.environ.get("NADOBRO_ALLOW_DEV_INVITE_PEPPER", "").strip().lower() in ("1", "true", "yes", "on"):
+        logger.warning(
+            "INVITE_CODE_PEPPER and ENCRYPTION_KEY are unset; using development "
+            "invite-code pepper because NADOBRO_ALLOW_DEV_INVITE_PEPPER is set "
+            "(do NOT enable this in production)."
+        )
+        return "nadobro-dev-invite-pepper"
+    raise RuntimeError(
+        "INVITE_CODE_PEPPER and ENCRYPTION_KEY are unset. Refusing to issue or "
+        "verify invite codes with a hardcoded pepper. Set ENCRYPTION_KEY (or "
+        "INVITE_CODE_PEPPER) before continuing, or set "
+        "NADOBRO_ALLOW_DEV_INVITE_PEPPER=true for local dev only."
+    )
 
 
 def _hash_code(code: str) -> str:
@@ -66,6 +87,7 @@ def _is_expired(row: dict) -> bool:
 
 
 def _prune_access_cache() -> None:
+    # AUDIT-FIX-IS-2: must be called with _access_cache_lock held.
     now = time.time()
     stale = [k for k, v in _access_cache.items() if now - float(v.get("ts") or 0) > _ACCESS_CACHE_TTL]
     for key in stale:
@@ -76,26 +98,29 @@ def _prune_access_cache() -> None:
 
 
 def invalidate_private_access_cache(telegram_id: Optional[int] = None) -> None:
-    if telegram_id is None:
-        _access_cache.clear()
-        return
-    _access_cache.pop(int(telegram_id), None)
+    with _access_cache_lock:
+        if telegram_id is None:
+            _access_cache.clear()
+            return
+        _access_cache.pop(int(telegram_id), None)
 
 
 def _cache_access(telegram_id: int, granted: bool) -> None:
-    _prune_access_cache()
-    _access_cache[int(telegram_id)] = {"granted": bool(granted), "ts": time.time()}
+    with _access_cache_lock:
+        _prune_access_cache()
+        _access_cache[int(telegram_id)] = {"granted": bool(granted), "ts": time.time()}
 
 
 def has_private_access(telegram_id: int) -> bool:
     telegram_id = int(telegram_id)
     if telegram_id in ADMIN_USER_IDS:
         return True
-    entry = _access_cache.get(telegram_id)
-    if entry and time.time() - float(entry.get("ts") or 0) < _ACCESS_CACHE_TTL:
-        return bool(entry.get("granted"))
-    if entry:
-        _access_cache.pop(telegram_id, None)
+    with _access_cache_lock:
+        entry = _access_cache.get(telegram_id)
+        if entry and time.time() - float(entry.get("ts") or 0) < _ACCESS_CACHE_TTL:
+            return bool(entry.get("granted"))
+        if entry:
+            _access_cache.pop(telegram_id, None)
     row = query_one(
         "SELECT private_access_granted FROM users WHERE telegram_id = %s",
         (telegram_id,),

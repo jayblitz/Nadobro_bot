@@ -1,20 +1,27 @@
-"""Position Hold inventory — per-``(user_id, trading_pair, controller_id)``
-aggregation of buy/sell base and quote amounts plus cumulative fees, with
-derived breakeven, realized PnL (matched min of base in/out) and unrealized
-PnL.
+"""Patched: engine/inventory.py
 
-Phase 1 ships an in-memory :class:`InventoryRepository` behind the same
-``apply_fill`` mutation seam the Phase 2 DB-backed repository will use; the
-in-memory store guards mutations with a re-entrant lock so a fill is applied
-atomically.
-
-Implemented in Phase 1.
+Fixes applied (search for AUDIT-FIX):
+  AUDIT-FIX-INV-1: list_for_user / list_for_controller used to return the
+                   stored PositionHold references. Because apply_fill mutates
+                   those same objects under a lock, a consumer iterating the
+                   returned list could observe partial mutations (e.g. a
+                   buy_amount_base updated but cum_fees_quote not yet). The
+                   threading.RLock was therefore only half-effective. We now
+                   return shallow copies so callers see an atomic snapshot
+                   per hold.
+  AUDIT-FIX-INV-2: explicitly reject NaN / non-finite fill quantities. The
+                   adapter normally guards this, but in a live system bad
+                   data from an upstream venue should never be silently
+                   incorporated into Inventory because it corrupts every
+                   subsequent PnL / position calculation. (See test
+                   engine/test_inventory.py for the related invariant.)
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
@@ -96,6 +103,14 @@ class PositionHold:
         return Decimal(0)
 
 
+def _is_finite_dec(value: Decimal) -> bool:
+    """AUDIT-FIX-INV-2 helper: Decimal can hold NaN / Infinity. Reject those."""
+    try:
+        return value.is_finite()
+    except Exception:
+        return False
+
+
 class InventoryRepository:
     """In-memory Position Hold store keyed by ``(user_id, trading_pair,
     controller_id)``. Holds on the same pair under different ``controller_id``
@@ -117,7 +132,9 @@ class InventoryRepository:
                     user_id=user_id, trading_pair=trading_pair, controller_id=controller_id
                 )
                 self._holds[key] = hold
-            return hold
+            # AUDIT-FIX-INV-1: return a copy so callers can't accidentally
+            # mutate the live hold under our lock.
+            return replace(hold)
 
     def apply_fill(
         self,
@@ -133,6 +150,13 @@ class InventoryRepository:
         base = _dec(base_qty)
         quote = _dec(quote_qty)
         fee = _dec(fee_quote)
+        # AUDIT-FIX-INV-2: reject malformed / non-finite quantities. We must
+        # never corrupt inventory state with NaN — every derived PnL would
+        # become NaN and propagate to user-facing PnL cards.
+        if not (_is_finite_dec(base) and _is_finite_dec(quote) and _is_finite_dec(fee)):
+            raise ValueError(
+                f"fill quantities must be finite (base={base}, quote={quote}, fee={fee})"
+            )
         if base < 0 or quote < 0:
             raise ValueError("fill quantities must be non-negative")
         key = self._key(user_id, trading_pair, controller_id)
@@ -151,16 +175,19 @@ class InventoryRepository:
             hold.cum_fees_quote += fee
             hold.updated_at = timestamp if timestamp is not None else time.time()
             self._holds[key] = hold
-            return hold
+            # AUDIT-FIX-INV-1: return a copy so callers don't share state.
+            return replace(hold)
 
     def list_for_user(self, user_id: int) -> List[PositionHold]:
         with self._lock:
-            return [h for h in self._holds.values() if h.user_id == user_id]
+            # AUDIT-FIX-INV-1: copy each hold to give callers an atomic
+            # snapshot independent of concurrent apply_fill mutations.
+            return [replace(h) for h in self._holds.values() if h.user_id == user_id]
 
     def list_for_controller(self, user_id: int, controller_id: str) -> List[PositionHold]:
         with self._lock:
             return [
-                h
+                replace(h)
                 for h in self._holds.values()
                 if h.user_id == user_id and h.controller_id == controller_id
             ]

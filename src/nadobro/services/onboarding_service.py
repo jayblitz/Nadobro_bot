@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
@@ -62,7 +62,7 @@ def _default_state() -> dict:
         "skipped_steps": [],
         "selected_template": None,
         "onboarding_complete": False,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -97,7 +97,7 @@ def get_onboarding_state(telegram_id: int) -> tuple[str, dict]:
 def save_onboarding_state(telegram_id: int, network: str, state: dict):
     state = dict(state)
     state["onboarding_complete"] = _compute_complete(state)
-    state["updated_at"] = datetime.utcnow().isoformat()
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
     set_bot_state(_state_key(telegram_id, network), state)
 
 

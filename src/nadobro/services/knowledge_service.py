@@ -4,7 +4,7 @@ import json
 import time
 import logging
 import requests as _requests
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
 
@@ -834,7 +834,7 @@ def _score_tweet_for_query(tweet: dict, question: str) -> float:
     if created_at:
         try:
             dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            age_hours = max(0.0, (datetime.utcnow() - dt.replace(tzinfo=None)).total_seconds() / 3600.0)
+            age_hours = max(0.0, (datetime.now(timezone.utc) - dt.replace(tzinfo=None)).total_seconds() / 3600.0)
             score += max(0.0, 2.0 - min(age_hours / 72.0, 2.0))
         except Exception:
             pass
@@ -925,7 +925,7 @@ def _pick_sources_for_question(question: str, context_text: str = "") -> list[st
 
 def _execute_x_search(query: str) -> tuple[str, list[str]]:
     """Search X/Twitter — prefers X API v2, with deterministic fallback text."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     is_points_q = _is_points_distribution_question(query)
     is_nado_q = _is_nado_x_question(query)
     weekday = now.strftime("%A")
@@ -1306,7 +1306,7 @@ def _execute_market_sentiment(query: str) -> tuple[str, list[str]]:
     if not client:
         return f"[MARKET SENTIMENT]\n{fng}\n\nxAI client not available for detailed sentiment.", []
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     try:
         response = client.chat.completions.create(
             model=XAI_X_SEARCH_MODEL,
@@ -1468,7 +1468,7 @@ def _run_agent_pipeline(question: str, provider: str, network: str = "mainnet") 
     if not client:
         raise RuntimeError(f"{provider.upper()} client not configured")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     current_date = now.strftime("%Y-%m-%d")
 
     active_tools = AGENT_TOOLS
@@ -1775,7 +1775,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
     if telegram_id:
         _add_to_chat_history(telegram_id, "user", question)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     current_date = now.strftime("%Y-%m-%d")
 
     lang = get_active_language()
@@ -2042,7 +2042,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
     if telegram_id:
         _add_to_chat_history(telegram_id, "user", question)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     current_date = now.strftime("%Y-%m-%d")
 
     lang = get_active_language()

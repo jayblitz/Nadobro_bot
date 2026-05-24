@@ -236,7 +236,8 @@ async def render_morning_brief(
         "edge_findings": _serialize_edges(edge_findings),
     }
 
-    today_str = _dt.datetime.utcnow().strftime("%a, %d %b %Y")
+    # AUDIT-FIX-DT-1: utcnow() is deprecated in Py 3.12+; use aware UTC.
+    today_str = _dt.datetime.now(_dt.timezone.utc).strftime("%a, %d %b %Y")
     messages = _build_messages(payload, today_str=today_str)
 
     parsed: dict = {}

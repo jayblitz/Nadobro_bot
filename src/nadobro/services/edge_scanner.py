@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ def _scan_via_x_api():
         logger.warning("Edge scanner: no LLM client for analysis")
         return None
 
-    current_date = datetime.utcnow().strftime("%Y-%m-%d")
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
         response = client.chat.completions.create(
             model=model,
@@ -228,7 +228,7 @@ def _scan_via_grok_search():
     if not client:
         return None
 
-    current_date = datetime.utcnow().strftime("%Y-%m-%d")
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     scan_model = os.environ.get("BRO_SCAN_MODEL", "grok-3-mini-fast")
 
     try:

@@ -2010,8 +2010,17 @@ class NadoClient:
         reduce_only: bool = False,
         sender: Optional[str] = None,
     ) -> dict:
-        mp = self.get_market_price(product_id)
-        if mp["mid"] == 0:
+        # AUDIT-FIX-NC-1: defensive dict access. get_market_price can return
+        # an unexpected shape (None on certain SDK error paths); the previous
+        # mp["mid"] would KeyError/TypeError and crash the placement path.
+        mp = self.get_market_price(product_id) or {}
+        try:
+            mid_value = float(mp.get("mid") or 0)
+            ask_value = float(mp.get("ask") or 0)
+            bid_value = float(mp.get("bid") or 0)
+        except (TypeError, ValueError):
+            return {"success": False, "error": "Could not fetch market price"}
+        if mid_value <= 0 or (ask_value <= 0 and bid_value <= 0):
             return {"success": False, "error": "Could not fetch market price"}
         try:
             slippage_pct = float(slippage_pct)
@@ -2019,7 +2028,7 @@ class NadoClient:
             slippage_pct = 1.0
         slippage_pct = max(0.1, min(slippage_pct, 10.0))
         multiplier = 1.0 + (slippage_pct / 100.0)
-        price = mp["ask"] * multiplier if is_buy else mp["bid"] / multiplier
+        price = ask_value * multiplier if is_buy else bid_value / multiplier
         return self.place_order(
             product_id,
             size,

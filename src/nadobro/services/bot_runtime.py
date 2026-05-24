@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Keys that must never be overwritten from persisted strategy *settings* into live runtime state.
 _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
@@ -384,7 +384,7 @@ def _mark_previous_sessions_superseded(telegram_id: int, network: str) -> None:
                 continue
             update_strategy_session(int(sid), {
                 "status": "stopped",
-                "stopped_at": datetime.utcnow().isoformat(),
+                "stopped_at": datetime.now(timezone.utc).isoformat(),
                 "stop_reason": "superseded_by_new_strategy",
             })
     except Exception as e:
@@ -404,7 +404,7 @@ def _schedule_bro_migration_notice(telegram_id: int) -> None:
 
 def _migrate_legacy_bro_state(telegram_id: int, network: str, state: dict) -> dict:
     """Disable the retired Bro autoloop and request the same cleanup as Stop."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     session_id = state.get("strategy_session_id")
     state["running"] = False
     state["last_action"] = "migrated_off_bro"
@@ -535,7 +535,7 @@ def _finalize_session(state: dict, stop_reason: str = "stopped"):
     try:
         update_strategy_session(int(session_id), {
             "status": "completed" if stop_reason in ("tp_hit", "target_reached", "target_volume_hit") else "stopped",
-            "stopped_at": datetime.utcnow().isoformat(),
+            "stopped_at": datetime.now(timezone.utc).isoformat(),
             "stop_reason": str(stop_reason)[:200],
         })
     except Exception as e:
@@ -745,7 +745,7 @@ def start_user_bot(
             "leverage": 1.0 if strategy == "vol" else float(leverage or 3.0),
             "slippage_pct": float(slippage_pct or 1.0),
             "reference_price": 0.0,
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
             "last_run_ts": 0.0,
             "last_error": None,
             "runs": 0,

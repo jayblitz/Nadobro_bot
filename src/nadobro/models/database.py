@@ -1,6 +1,6 @@
 import enum
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, TypeAlias
 
 from psycopg2 import sql as pgsql
@@ -82,7 +82,7 @@ def get_bot_state(key: str) -> Optional[dict]:
 
 def set_bot_state(key: str, value: JsonSerializable):
     payload = json.dumps(value) if not isinstance(value, str) else value
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     execute(
         """INSERT INTO bot_state (key, value, updated_at) VALUES (%s, %s, %s)
            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at""",
@@ -270,7 +270,7 @@ def update_alert_triggered(alert_id: int, network: str = "mainnet"):
     table = _alerts_table(network)
     execute(
         f"UPDATE {table} SET is_active = false, triggered_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(), alert_id),
+        (datetime.now(timezone.utc).isoformat(), alert_id),
     )
 
 
@@ -424,7 +424,7 @@ def get_all_active_mirrors() -> list:
 def stop_copy_mirror(mirror_id: int):
     execute(
         "UPDATE copy_mirrors SET active = false, stopped_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(), mirror_id),
+        (datetime.now(timezone.utc).isoformat(), mirror_id),
     )
 
 
@@ -465,7 +465,7 @@ def insert_copy_trade(data: dict) -> Optional[int]:
     ]
     filtered = {k: v for k, v in data.items() if k in cols and v is not None}
     if "created_at" not in filtered:
-        filtered["created_at"] = datetime.utcnow().isoformat()
+        filtered["created_at"] = datetime.now(timezone.utc).isoformat()
     col_names = list(filtered.keys())
     vals = [filtered[c] for c in col_names]
     placeholders = ", ".join(["%s"] * len(col_names))
@@ -607,7 +607,7 @@ def update_mirror_cumulative_pnl(mirror_id: int, pnl_delta: float):
 def auto_stop_mirror(mirror_id: int, reason: str):
     execute(
         "UPDATE copy_mirrors SET active = false, paused = false, auto_stopped_reason = %s, stopped_at = %s WHERE id = %s",
-        (reason, datetime.utcnow().isoformat(), mirror_id),
+        (reason, datetime.now(timezone.utc).isoformat(), mirror_id),
     )
 
 
@@ -620,7 +620,7 @@ def insert_copy_position(data: dict) -> Optional[int]:
     ]
     filtered = {k: v for k, v in data.items() if k in cols and v is not None}
     if "opened_at" not in filtered:
-        filtered["opened_at"] = datetime.utcnow().isoformat()
+        filtered["opened_at"] = datetime.now(timezone.utc).isoformat()
     if "status" not in filtered:
         filtered["status"] = "open"
     col_names = list(filtered.keys())
@@ -651,7 +651,7 @@ def get_open_copy_position_for_product(mirror_id: int, product_id: int) -> Optio
 def close_copy_position(position_id: int, pnl: float = 0.0, reason: str = "leader_closed"):
     execute(
         "UPDATE copy_positions SET status = 'closed', pnl = %s, closed_at = %s, close_reason = %s WHERE id = %s",
-        (pnl, datetime.utcnow().isoformat(), reason, position_id),
+        (pnl, datetime.now(timezone.utc).isoformat(), reason, position_id),
     )
 
 
@@ -683,7 +683,7 @@ _STRATEGY_SESSION_INSERT_COLS = frozenset({
 def insert_strategy_session(data: dict) -> Optional[int]:
     filtered = {k: v for k, v in data.items() if k in _STRATEGY_SESSION_INSERT_COLS and v is not None}
     if "started_at" not in filtered:
-        filtered["started_at"] = datetime.utcnow().isoformat()
+        filtered["started_at"] = datetime.now(timezone.utc).isoformat()
     if "status" not in filtered:
         filtered["status"] = "running"
     cols = list(filtered.keys())
@@ -953,14 +953,14 @@ def release_fill_sync(sync_id: int):
 def resolve_fill_sync(sync_id: int):
     execute(
         "UPDATE fill_sync_queue SET status = 'resolved', claimed_at = NULL, resolved_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(), sync_id),
+        (datetime.now(timezone.utc).isoformat(), sync_id),
     )
 
 
 def expire_fill_sync(sync_id: int):
     execute(
         "UPDATE fill_sync_queue SET status = 'expired', claimed_at = NULL, resolved_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(), sync_id),
+        (datetime.now(timezone.utc).isoformat(), sync_id),
     )
 
 
