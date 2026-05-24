@@ -35,7 +35,7 @@ from src.nadobro.handlers.keyboards import (
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
     mode_kb, strategy_hub_kb, wallet_kb, positions_kb, points_scope_kb,
     alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb,
-    private_access_kb, bro_answer_kb, referral_kb,
+    bro_answer_kb, referral_kb,
 )
 from src.nadobro.handlers.trade_card import (
     open_trade_card_from_message,
@@ -60,25 +60,17 @@ from src.nadobro.services.strategy_pending_input import (
     clear_strategy_pending_input,
     load_strategy_pending_input,
 )
-from src.nadobro.services.referral_service import get_referral_dashboard
+from src.nadobro.services.referral_service import (
+    auto_generate_referral_code,
+    claim_referral_code,
+    get_referral_dashboard,
+    get_user_referral_code,
+    normalize_referral_payload,
+    redeem_referral_code,
+    validate_custom_code,
+)
 from src.nadobro.services.managed_agent_state import is_managed_agent_enabled
 from src.nadobro.services.managed_agent_service import handle_managed_agent_turn
-from src.nadobro.services.invite_service import (
-    INVITE_CODE_LENGTH,
-    has_private_access,
-    normalize_code,
-    redeem_invite_code,
-)
-
-PRIVATE_ACCESS_MSG = """🔐 Private Alpha Access
-
-Welcome to Nadobro Bot!
-
-This is a private alpha version. To access the bot, please enter your access code.
-
-If you don't have an access code, please contact @jaynadobro to request one.
-
-Enter your 8-character access code below:"""
 
 
 async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
@@ -404,17 +396,27 @@ async def handle_message(update: Update, context: CallbackContext):
 
 
 async def _handle_message_inner(update, context, telegram_id, username, text, started):
-    if not await run_blocking(has_private_access, telegram_id):
-        normalized = normalize_code(text)
-        if len(normalized) == INVITE_CODE_LENGTH:
-            ok, msg = await run_blocking(redeem_invite_code, telegram_id, username, normalized)
-            if ok:
-                await update.message.reply_text(f"{msg}\n\nSend /start to continue setup.")
-            else:
-                await update.message.reply_text(msg, reply_markup=private_access_kb())
+    if context.user_data.get("pending_referral_claim"):
+        if await _handle_pending_referral_claim(update, context, telegram_id, text):
             return
-        await update.message.reply_text(PRIVATE_ACCESS_MSG, reply_markup=private_access_kb())
-        return
+
+    # Soft fallback: explicit "ref_<CODE>" pastes work outside the deep link
+    # too, so a user who shares the raw start-payload string still gets linked.
+    stripped = (text or "").strip()
+    if stripped.lower().startswith("ref_"):
+        normalized = normalize_referral_payload(stripped)
+        if normalized:
+            try:
+                ok, msg = await run_blocking(
+                    redeem_referral_code, telegram_id, username, normalized
+                )
+                if ok:
+                    await update.message.reply_text(f"✅ {msg}")
+                else:
+                    await update.message.reply_text(f"ℹ️ {msg}")
+            except Exception as exc:
+                logger.warning("ref_ free-text redeem failed for %s: %s", telegram_id, exc)
+            return
 
     resolved_text = resolve_reply_button_text(text)
     flow = context.user_data.get("trade_flow") or {}
@@ -1724,6 +1726,57 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
             ]),
         )
         return True
+
+
+async def _handle_pending_referral_claim(update, context, telegram_id, text):
+    """User tapped 'Claim Custom Code' and is now typing their desired code."""
+    raw = (text or "").strip()
+    if raw.lower() in ("cancel", "/cancel", "❌ cancel", "/start"):
+        context.user_data.pop("pending_referral_claim", None)
+        await _reply_loc(
+            update.message,
+            "Referral claim cancelled.",
+            reply_markup=localize_markup(persistent_menu_kb(), get_active_language()),
+        )
+        return True
+
+    normalized, error = validate_custom_code(raw)
+    if error:
+        await _reply_loc(
+            update.message,
+            f"⚠️ {error}\n\nType another code, or send `cancel` to abort.",
+        )
+        return True
+
+    username = update.effective_user.username if update.effective_user else None
+    user = await run_blocking(get_user, telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    ok, msg, row = await run_blocking(
+        claim_referral_code, telegram_id, normalized, network=network
+    )
+    if not ok:
+        await _reply_loc(
+            update.message,
+            f"⚠️ {msg}\n\nType another code, or send `cancel` to abort.",
+        )
+        return True
+
+    context.user_data.pop("pending_referral_claim", None)
+    payload = await run_blocking(get_referral_dashboard, telegram_id, network)
+    text_out = fmt_referral_dashboard(payload)
+    has_code = bool(payload.get("has_code"))
+    try:
+        await update.message.reply_text(
+            text_out,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=localize_markup(referral_kb(has_code=has_code), get_active_language()),
+        )
+    except BadRequest:
+        await update.message.reply_text(
+            plain_text_fallback(text_out),
+            reply_markup=localize_markup(referral_kb(has_code=has_code), get_active_language()),
+        )
+    return True
 
 
 async def _handle_pending_question(update, context, telegram_id, text):

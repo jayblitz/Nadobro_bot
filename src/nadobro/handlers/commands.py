@@ -24,7 +24,6 @@ from src.nadobro.handlers.keyboards import (
     home_card_kb,
     status_kb,
     compose_status_overview_kb,
-    private_access_kb,
 )
 from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_automation_for_user
 from src.nadobro.services.nado_tooling_service import get_ops_diagnostics
@@ -39,7 +38,11 @@ from src.nadobro.handlers.home_card import (
     open_help_card_from_command,
 )
 from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.invite_service import has_private_access, redeem_invite_code
+from src.nadobro.services.referral_service import (
+    REFERRAL_LINK_PREFIX,
+    normalize_referral_payload,
+    redeem_referral_code,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -81,41 +84,40 @@ We generate a secure 1CT signing key for your account. Your main wallet keys are
 
 Ready?"""
 
-PRIVATE_ACCESS_MSG = """🔐 Private Alpha Access
-
-Welcome to Nadobro Bot!
-
-This is a private alpha version. To access the bot, please enter your access code.
-
-If you don't have an access code, please contact @jaynadobro to request one.
-
-Enter your 8-character access code below:"""
-
-async def _ensure_private_access(update: Update, telegram_id: int) -> bool:
-    if await run_blocking(has_private_access, telegram_id):
-        return True
-    await update.message.reply_text(PRIVATE_ACCESS_MSG, reply_markup=private_access_kb())
-    return False
-
-
 async def cmd_start(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     username = update.effective_user.username
 
     user, is_new, _ = get_or_create_user(telegram_id, username)
 
-    invite_arg = context.args[0] if getattr(context, "args", None) else None
-    if not await run_blocking(has_private_access, telegram_id):
-        if invite_arg:
-            ok, msg = await run_blocking(redeem_invite_code, telegram_id, username, invite_arg)
-            if ok:
-                await update.message.reply_text(msg)
-            else:
-                await update.message.reply_text(msg, reply_markup=private_access_kb())
-                return
-        else:
-            await update.message.reply_text(PRIVATE_ACCESS_MSG, reply_markup=private_access_kb())
-            return
+    start_arg = context.args[0] if getattr(context, "args", None) else None
+    if start_arg:
+        raw = str(start_arg).strip()
+        if raw.lower().startswith(REFERRAL_LINK_PREFIX) or normalize_referral_payload(raw):
+            normalized = normalize_referral_payload(raw)
+            if normalized:
+                try:
+                    ok, msg = await run_blocking(
+                        redeem_referral_code, telegram_id, username, normalized
+                    )
+                    if ok:
+                        logger.info(
+                            "Referral linked on /start telegram_id=%s code_prefix=%s",
+                            telegram_id,
+                            normalized[:3],
+                        )
+                    else:
+                        logger.info(
+                            "Referral redemption skipped on /start telegram_id=%s reason=%s",
+                            telegram_id,
+                            msg,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Referral redemption raised on /start telegram_id=%s: %s",
+                        telegram_id,
+                        exc,
+                    )
 
     if not is_new_onboarding_complete(telegram_id):
         state = get_new_onboarding_state(telegram_id)
@@ -180,8 +182,6 @@ async def _send_dashboard_card(update: Update, context: CallbackContext, telegra
 
 async def cmd_help(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    if not await _ensure_private_access(update, telegram_id):
-        return
     with language_context(get_user_language(telegram_id)):
         if DUAL_MODE_CARD_FLOW:
             await open_help_card_from_command(update, context)
@@ -196,8 +196,6 @@ async def cmd_help(update: Update, context: CallbackContext):
 
 async def cmd_status(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    if not await _ensure_private_access(update, telegram_id):
-        return
     with language_context(get_user_language(telegram_id)):
         text, merged_kb = await build_status_dashboard_parts(telegram_id)
 
@@ -221,8 +219,6 @@ async def cmd_status(update: Update, context: CallbackContext):
 
 async def cmd_ops(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    if not await _ensure_private_access(update, telegram_id):
-        return
     with language_context(get_user_language(telegram_id)):
         status = await run_blocking(get_user_bot_status, telegram_id)
         ops = await run_blocking(get_ops_diagnostics, telegram_id)
@@ -252,8 +248,6 @@ async def cmd_ops(update: Update, context: CallbackContext):
 
 async def cmd_stop_all(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    if not await _ensure_private_access(update, telegram_id):
-        return
     with language_context(get_user_language(telegram_id)):
         lang = get_active_language()
         ok, msg = await run_blocking(stop_all_automation_for_user, telegram_id)
@@ -275,8 +269,6 @@ async def cmd_stop_all(update: Update, context: CallbackContext):
 
 async def cmd_revoke(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    if not await _ensure_private_access(update, telegram_id):
-        return
     with language_context(get_user_language(telegram_id)):
         lang = get_active_language()
         await update.message.reply_text(
@@ -351,8 +343,6 @@ def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:
 
 async def cmd_mm_status(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    if not await _ensure_private_access(update, telegram_id):
-        return
     text, is_active = await run_blocking(build_mm_status_text, telegram_id)
     try:
         from src.nadobro.handlers.formatters import escape_md
@@ -370,8 +360,6 @@ async def cmd_mm_status(update: Update, context: CallbackContext):
 
 async def cmd_mm_fills(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
-    if not await _ensure_private_access(update, telegram_id):
-        return
     limit = 10
     if context and getattr(context, "args", None):
         try:

@@ -182,12 +182,6 @@ def setup_bot():
         cmd_mm_status, cmd_mm_fills,
     )
     from src.nadobro.handlers.managed_agent import cmd_agent_on, cmd_agent_off, cmd_agent_status
-    from src.nadobro.handlers.admin_invites import (
-        cmd_invite_generate,
-        cmd_invite_status,
-        cmd_invite_revoke,
-        cmd_invite_grant,
-    )
     from src.nadobro.handlers.brief_commands import cmd_market_news, cmd_morning_brief
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
@@ -242,10 +236,6 @@ def setup_bot():
     app.add_handler(CommandHandler("agent_on", with_user_serialized(cmd_agent_on)))
     app.add_handler(CommandHandler("agent_off", with_user_serialized(cmd_agent_off)))
     app.add_handler(CommandHandler("agent_status", with_user_serialized(cmd_agent_status)))
-    app.add_handler(CommandHandler("invite_generate", with_user_serialized(cmd_invite_generate)))
-    app.add_handler(CommandHandler("invite_status", with_user_serialized(cmd_invite_status)))
-    app.add_handler(CommandHandler("invite_revoke", with_user_serialized(cmd_invite_revoke)))
-    app.add_handler(CommandHandler("invite_grant", with_user_serialized(cmd_invite_grant)))
     app.add_handler(CommandHandler("brief", with_user_serialized(cmd_morning_brief)))
     app.add_handler(CommandHandler("news", with_user_serialized(cmd_market_news)))
     # Phase 3: Tread-style live MM dashboard.

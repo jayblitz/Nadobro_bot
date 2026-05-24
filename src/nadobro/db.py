@@ -995,6 +995,29 @@ def init_db():
                 except Exception:
                     conn.rollback()
 
+        # --- Open-access migration (May 2026): the private-alpha invite gate
+        # was removed. Backfill historical users to granted and flip the
+        # default so any code path that still reads the column never blocks.
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    "ALTER TABLE users ALTER COLUMN private_access_granted SET DEFAULT true"
+                )
+                cur.execute(
+                    "UPDATE users SET private_access_granted = true "
+                    "WHERE private_access_granted IS DISTINCT FROM true"
+                )
+                conn.commit()
+                logger.info("Open-access backfill applied (private_access_granted=true)")
+            except Exception:
+                conn.rollback()
+                logger.warning(
+                    "Failed to backfill private_access_granted=true; the gate is "
+                    "no longer enforced in code but historical rows may still "
+                    "read as false.",
+                    exc_info=True,
+                )
+
         logger.info("Database tables verified/created")
     except Exception:
         conn.rollback()
