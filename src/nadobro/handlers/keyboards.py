@@ -131,12 +131,6 @@ def onboarding_accept_tos_kb():
     ])
 
 
-def private_access_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Request Access", url="https://t.me/jaynadobro")],
-    ])
-
-
 def persistent_menu_kb():
     if DUAL_MODE_CARD_FLOW:
         return ReplyKeyboardMarkup(
@@ -266,10 +260,20 @@ def portfolio_kb(has_positions: bool = False):
     return InlineKeyboardMarkup(rows)
 
 
-def referral_kb(can_generate: bool = False):
+def referral_kb(has_code: bool = False, **_compat):
+    """Inline keyboard for the Referral Deck.
+
+    ``has_code`` controls whether the user already owns a code (renders a
+    refresh-only keyboard) or still needs to claim one (renders the
+    Claim/Auto-Generate choice). ``**_compat`` swallows legacy kwargs (e.g.
+    ``can_generate``) so older call sites do not break during rollout.
+    """
     rows = []
-    if can_generate:
-        rows.append([InlineKeyboardButton("🎟 Generate Invite Code", callback_data="refer:generate")])
+    if not has_code:
+        rows.append([
+            InlineKeyboardButton("🎟 Claim Custom Code", callback_data="refer:claim"),
+            InlineKeyboardButton("🎲 Auto-Generate", callback_data="refer:autogen"),
+        ])
     rows.append([
         InlineKeyboardButton("🔗 Refresh referrals", callback_data="refer:view"),
         InlineKeyboardButton("🏠 Home", callback_data="nav:main"),

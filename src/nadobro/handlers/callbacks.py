@@ -29,7 +29,6 @@ from src.nadobro.handlers.keyboards import (
     onboarding_accept_tos_kb,
     copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
-    private_access_kb,
 )
 from src.nadobro.handlers.trade_card import handle_trade_card_callback, open_trade_card_from_callback
 from src.nadobro.handlers.render_utils import plain_text_fallback
@@ -58,7 +57,13 @@ from src.nadobro.services.points_service import (
     relay_user_reply_to_lowiqpts,
     request_points_refresh,
 )
-from src.nadobro.services.referral_service import generate_referral_invite_code, get_referral_dashboard
+from src.nadobro.services.referral_service import (
+    auto_generate_referral_code,
+    get_referral_dashboard,
+    get_user_referral_code,
+    MAX_CODE_LEN,
+    MIN_CODE_LEN,
+)
 from src.nadobro.services.strategy_pending_input import persist_strategy_pending_input
 from src.nadobro.services.onboarding_service import (
     get_resume_step,
@@ -81,7 +86,6 @@ from src.nadobro.config import (
     normalize_volume_spot_symbol,
 )
 from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.invite_service import has_private_access
 from src.nadobro.services.perf import timed_metric, log_slow
 from src.nadobro.services.trading_readiness import check_trading_readiness
 
@@ -241,10 +245,6 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
                 raise
         await query.message.chat.send_action(ChatAction.TYPING)
 
-        if not await run_blocking(has_private_access, telegram_id):
-            await _edit_loc(query, _PRIVATE_ACCESS_MSG, reply_markup=private_access_kb())
-            return
-
         if data.startswith("onb:"):
             await _handle_onb_new(query, data, telegram_id, context)
         elif data.startswith("vault:"):
@@ -285,7 +285,7 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
         elif data.startswith("points:"):
             await _handle_points(query, data, telegram_id, context)
         elif data.startswith("refer:"):
-            await _handle_referrals(query, data, telegram_id)
+            await _handle_referrals(query, data, telegram_id, context)
         elif data.startswith("alert:"):
             await _handle_alert(query, data, telegram_id, context)
         elif data.startswith("settings:"):
@@ -360,16 +360,6 @@ By tapping *"Let's Get It"* you accept the Terms of Use & Privacy Policy.
 We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
 
 Ready?"""
-
-_PRIVATE_ACCESS_MSG = """🔐 Private Alpha Access
-
-Welcome to Nadobro Bot!
-
-This is a private alpha version. To access the bot, please enter your access code.
-
-If you don't have an access code, please contact @jaynadobro to request one.
-
-Enter your 8-character access code below:"""
 
 async def _handle_onb_new(query, data, telegram_id, context):
     if data == "onb:accept_tos":
@@ -528,7 +518,7 @@ async def _handle_nav(query, data, telegram_id, context=None):
     elif target.startswith("portfolio:"):
         await _handle_portfolio(query, target, telegram_id)
     elif target.startswith("refer:"):
-        await _handle_referrals(query, target, telegram_id)
+        await _handle_referrals(query, target, telegram_id, context)
     else:
         logger.warning("nav: unknown target=%r telegram_id=%s", target, telegram_id)
         await _edit_loc(query,
@@ -538,27 +528,48 @@ async def _handle_nav(query, data, telegram_id, context=None):
         )
 
 
-async def _handle_referrals(query, data, telegram_id):
+async def _handle_referrals(query, data, telegram_id, context=None):
     action = data.split(":", 1)[1] if ":" in data else "view"
-    user = get_user(telegram_id)
+    user = await run_blocking(get_user, telegram_id)
     network = user.network_mode.value if user else "mainnet"
-    if action == "generate":
-        ok, msg, _row = await run_blocking(generate_referral_invite_code, telegram_id, network)
-        if not ok:
-            payload = await run_blocking(get_referral_dashboard, telegram_id, network)
-            await _edit_loc(
-                query,
-                fmt_referral_dashboard(payload) + "\n\n" + f"⚠️ {escape_md(msg)}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=referral_kb(can_generate=bool(payload.get("remaining_codes"))),
-            )
-            return
+
+    notice: str | None = None
+
+    if action == "claim":
+        if context is not None:
+            context.user_data["pending_referral_claim"] = True
+        prompt = (
+            "*🎟 Claim your custom referral code*\n\n"
+            f"Type the code you want to own \\({MIN_CODE_LEN}\\-{MAX_CODE_LEN} characters, A\\-Z and 0\\-9\\)\\.\n"
+            "Codes are *permanent once claimed* and unique across all of Nadobro\\.\n\n"
+            "Send `cancel` to abort\\."
+        )
+        await _edit_loc(
+            query,
+            prompt,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=referral_kb(has_code=False),
+        )
+        return
+
+    if action == "autogen":
+        ok, msg, _row = await run_blocking(
+            auto_generate_referral_code, telegram_id, network=network
+        )
+        notice = msg if not ok else None
+        if context is not None:
+            context.user_data.pop("pending_referral_claim", None)
+
+    # Default + post-action: re-render the dashboard.
     payload = await run_blocking(get_referral_dashboard, telegram_id, network)
+    body = fmt_referral_dashboard(payload)
+    if notice:
+        body = body + "\n\n" + f"⚠️ {escape_md(notice)}"
     await _edit_loc(
         query,
-        fmt_referral_dashboard(payload),
+        body,
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=referral_kb(can_generate=bool(payload.get("remaining_codes"))),
+        reply_markup=referral_kb(has_code=bool(payload.get("has_code"))),
     )
 
 

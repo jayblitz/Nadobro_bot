@@ -169,7 +169,7 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 ### Season 1
 - Nado runs a season-based points program (currently Season 1)
 - Points reward active, genuine trading participation
-- Nado is invite-only during Season 1 — invite codes are earned through your own trading activity
+- The Nadobro bot is open to everyone — you can /start without an access code; Nado platform referral codes link new traders to their referrer for points rewards
 - Points can be tracked on the Nado app and Referrals page
 - Docs: https://docs.nado.xyz/points/referrals
 - Points are distributed in weekly epochs
@@ -184,7 +184,7 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
   - Multi-level rewards: earn from 1st, 2nd, and 3rd level referrals
   - Points scale with the referred user's trading volume
 - NFT multipliers: Templars of the Storm NFT holders get points multipliers based on Wind Force tier
-- Invite codes: Unlock more invite codes by trading more
+- Referral codes: any Nadobro user can claim one unique referral code (3-20 chars) and share it freely — no volume threshold
 - Maintain positions: Active position holding contributes to point earning
 
 ### Anti-Farming Rules
@@ -210,7 +210,7 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 
 ### Step-by-Step Guide
 1. Visit https://www.nado.xyz/ and connect your wallet (MetaMask, WalletConnect, etc.)
-2. You need an invite code to join during Season 1 — get one from an existing user or the community
+2. (Optional) Use a friend's referral code so you both earn points; the Nadobro bot itself is open to everyone
 3. Switch your wallet to the Ink network (Nado will prompt you)
 4. Deposit USDT0 into your account (minimum $5 for subaccount creation)
 5. Start trading — choose a market (BTC-PERP, ETH-PERP, etc.) and place your first order
@@ -319,8 +319,8 @@ Nado's architecture integrates spot, perpetuals, and money markets into one risk
 ### What is Nado?
 Nado is a high-performance CLOB (Central Limit Order Book) DEX built on Ink L2 blockchain. It offers perpetual futures and spot trading with unified margin, backed by the team behind Kraken.
 
-### How do I get an invite code?
-During Season 1, Nado is invite-only. You can get an invite code from existing Nado users, the Telegram community, or through trading activity on the platform.
+### How do I get a referral code?
+The Nadobro Telegram bot is open to everyone — no access code is required. Open *Refer Friends* in the bot to claim your own custom or auto-generated referral code (one per user, permanent once claimed). Share the deep link or the code itself with new traders so they get linked to you when they /start the bot.
 
 ### What is USDT0?
 USDT0 is the primary settlement currency on Nado. It is Tether (USDT) bridged to the Ink L2 network. You need USDT0 to trade and it serves as collateral for positions.

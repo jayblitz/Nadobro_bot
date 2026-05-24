@@ -121,32 +121,52 @@ class TradingBroUpgradeTests(unittest.TestCase):
         self.assertIn("1\\. Add router", card)
         self.assertIn("\\- Test it", card)
 
-    def test_referral_dashboard_renders_configured_bot_link_and_mode_volume(self):
+    def test_referral_dashboard_renders_configured_bot_link_and_code(self):
         from src.nadobro.handlers.formatters import fmt_referral_dashboard
 
         card = fmt_referral_dashboard(
             {
                 "network": "testnet",
-                "own_volume_usd": 12_500,
-                "earned_codes": 1,
-                "generated_codes": 1,
-                "remaining_codes": 0,
-                "max_codes": 1000,
-                "volume_per_code": 10_000,
                 "total_referrals": 1,
                 "total_referred_volume": 2_500,
                 "total_referred_trades": 3,
                 "share_code": {
                     "public_code": "ABCDEFGH",
                     "link": "https://t.me/Nadbro_bot?start=ref_ABCDEFGH",
+                    "redemption_count": 4,
                 },
+                "has_code": True,
                 "referred_users": [],
+                "min_code_len": 3,
+                "max_code_len": 20,
             }
         )
 
         self.assertIn("TESTNET", card)
-        self.assertIn("*Your Testnet Volume:*", card)
+        self.assertIn("*Your Referral Code*", card)
+        self.assertIn("`ABCDEFGH`", card)
         self.assertIn("https://t\\.me/Nadbro\\_bot?start\\=ref\\_ABCDEFGH", card)
+        self.assertIn("*Redemptions:* 4", card)
+
+    def test_referral_dashboard_renders_claim_prompt_when_no_code(self):
+        from src.nadobro.handlers.formatters import fmt_referral_dashboard
+
+        card = fmt_referral_dashboard(
+            {
+                "network": "mainnet",
+                "total_referrals": 0,
+                "total_referred_volume": 0.0,
+                "total_referred_trades": 0,
+                "share_code": None,
+                "has_code": False,
+                "referred_users": [],
+                "min_code_len": 3,
+                "max_code_len": 20,
+            }
+        )
+
+        self.assertIn("*Claim your code*", card)
+        self.assertNotIn("`", card.split("*Direct Referrals*")[0])
 
     def test_trading_bro_prompt_uses_cool_buddy_tone(self):
         from src.nadobro.services.trading_bro_service import build_trading_bro_question
