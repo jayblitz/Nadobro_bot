@@ -18,8 +18,10 @@ _ERROR_NOTIFY_COOLDOWN_SECONDS = 300
 
 
 def _now_iso() -> str:
-    from datetime import datetime
-    return datetime.utcnow().isoformat()
+    # AUDIT-FIX-DT-1: utcnow() is deprecated in Py 3.12+ and returns a naive
+    # datetime that compares poorly with aware ones. Use aware UTC.
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _rule_key(telegram_id: int, network: str, product: str, rule_id: str) -> str:

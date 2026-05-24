@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 
@@ -33,7 +33,7 @@ def is_managed_agent_enabled(telegram_id: int) -> bool:
 
 
 def set_managed_agent_enabled(telegram_id: int, enabled: bool) -> dict:
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     def _mutator(settings: dict) -> None:
         state = settings.get("managed_agent")

@@ -1,14 +1,22 @@
-"""Order Executor — places a single order using one of LIMIT, LIMIT_MAKER,
-MARKET, or LIMIT_CHASER strategies.
+"""Patched: engine/executors/order_executor.py
 
-LIMIT_CHASER posts ``distance`` off mid and re-posts when mid moves past
-``refresh_threshold``, capped at ``max_refreshes`` (default 50) replacements.
-Fills are routed into Inventory on terminate.
-
-Implemented in Phase 1.
+Fixes applied (search for AUDIT-FIX):
+  AUDIT-FIX-OE-1: LIMIT_CHASER refresh used to cancel the resting order and
+                  then call self._place(...). If _place() raised (e.g. venue
+                  rejected the new quote), the executor was left with
+                  self.order == None and on_tick() early-returns forever — a
+                  silent leak that never reaches the chaser's max_refreshes
+                  cap. Now we mark the executor FAILED so the orchestrator's
+                  stop loop can intervene and a human can recover the user's
+                  exposure.
+  AUDIT-FIX-OE-2: _ingest now logs (at debug) when the adapter sends a
+                  filled_base that regresses below our accumulator. That can
+                  happen with stale snapshots and is otherwise invisible,
+                  which makes it impossible to diagnose missed fills.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -26,6 +34,8 @@ from src.nadobro.engine.types import (
     TradeType,
     _dec,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -123,24 +133,33 @@ class OrderExecutor(Executor):
     def _ingest(self, order: NadoOrder) -> None:
         """Record any newly-filled quantity since the last poll."""
         delta_base = order.filled_base - self._recorded_base
-        if delta_base > 0:
-            delta_quote = order.filled_quote - self._recorded_quote
-            delta_fee = order.fee_quote - self._recorded_fee
-            price = (delta_quote / delta_base) if delta_base else Decimal(0)
-            fill = Fill(
-                order_id=order.id,
-                trading_pair=self.trading_pair,
-                side=self.config.side,
-                amount_base=delta_base,
-                price=price,
-                fee_quote=delta_fee,
-                timestamp=time.time(),
-            )
-            self._record_fill(fill)
-            self.last_fill = fill
-            self._recorded_base = order.filled_base
-            self._recorded_quote = order.filled_quote
-            self._recorded_fee = order.fee_quote
+        if delta_base <= 0:
+            # AUDIT-FIX-OE-2: a stale snapshot can have filled_base < accumulator.
+            # Surface this so we can spot adapter misbehavior without raising.
+            if delta_base < 0:
+                logger.debug(
+                    "OrderExecutor _ingest saw regressed filled_base for %s "
+                    "(snapshot=%s, accumulator=%s)",
+                    order.id, order.filled_base, self._recorded_base,
+                )
+            return
+        delta_quote = order.filled_quote - self._recorded_quote
+        delta_fee = order.fee_quote - self._recorded_fee
+        price = (delta_quote / delta_base) if delta_base else Decimal(0)
+        fill = Fill(
+            order_id=order.id,
+            trading_pair=self.trading_pair,
+            side=self.config.side,
+            amount_base=delta_base,
+            price=price,
+            fee_quote=delta_fee,
+            timestamp=time.time(),
+        )
+        self._record_fill(fill)
+        self.last_fill = fill
+        self._recorded_base = order.filled_base
+        self._recorded_quote = order.filled_quote
+        self._recorded_fee = order.fee_quote
 
     # -- lifecycle --------------------------------------------------------
     async def on_create(self) -> None:
@@ -195,21 +214,38 @@ class OrderExecutor(Executor):
             return
         move = abs(mid - self._placement_mid) / self._placement_mid
         if move > cfg.refresh_threshold:
-            await self._guard(
-                lambda: self.adapter.cancel_order(order_ref.id), label="cancel_order"
-            )
-            price = await self._chaser_price()
-            await self._place(OrderType.LIMIT_MAKER, price)
+            # AUDIT-FIX-OE-1: cancel + place must be tracked together. If
+            # cancel succeeds and place fails, the executor would otherwise
+            # be left holding no order and never terminate, which silently
+            # parks the user's intent and abandons the chaser. We now mark
+            # the executor FAILED so the orchestrator sees the leak.
+            try:
+                await self._guard(
+                    lambda: self.adapter.cancel_order(order_ref.id), label="cancel_order"
+                )
+            except Exception:  # noqa: BLE001 - placement guard below handles the rest
+                logger.warning(
+                    "OrderExecutor chaser cancel failed for %s; aborting refresh",
+                    order_ref.id, exc_info=True,
+                )
+                self._terminate(CloseType.FAILED)
+                return
+            try:
+                price = await self._chaser_price()
+                await self._place(OrderType.LIMIT_MAKER, price)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "OrderExecutor chaser repost failed after cancel for %s; "
+                    "executor is now bare — terminating FAILED so the orchestrator "
+                    "can reconcile",
+                    order_ref.id, exc_info=True,
+                )
+                self.order = None
+                self._terminate(CloseType.FAILED)
+                return
             self.refreshes += 1
 
     async def on_stop(self, close_type: CloseType = CloseType.EARLY_STOP) -> None:
-        # BUG-CC-1 fix: cancel-on-stop must CONFIRM the venue side actually
-        # removed the order; previously any exception was swallowed and we
-        # terminated with the order still live. Now: attempt cancel, then
-        # poll order_status once. If the order is gone or terminal, ingest
-        # any final fills and terminate. If it's still open, we cannot
-        # cleanly terminate without leaking; surface FAILED so the
-        # controller's stop loop / operator can intervene.
         order = self.order
         if order is None or order.state in (
             OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED,
@@ -222,10 +258,9 @@ class OrderExecutor(Executor):
                 lambda: self.adapter.cancel_order(order.id),
                 label="cancel_order_stop",
             )
-        except Exception:  # noqa: BLE001 - venue cancel failure handled by status probe
+        except Exception:  # noqa: BLE001
             pass
 
-        # Verify by polling status. Capture any final fills, then check.
         try:
             refreshed = await self._guard(
                 lambda: self.adapter.order_status(order.id),
@@ -234,9 +269,6 @@ class OrderExecutor(Executor):
             self.order = refreshed
             self._ingest(refreshed)
         except Exception:  # noqa: BLE001
-            # Lost network during confirmation. The order's state on the
-            # venue is unknown; mark FAILED so a human / controller stop
-            # loop reconciles it.
             self._terminate(CloseType.FAILED)
             return
 
@@ -246,6 +278,4 @@ class OrderExecutor(Executor):
             self._terminate(close_type)
             return
 
-        # Order still resting after a cancel attempt + status confirm. This
-        # is the leak vector — surface FAILED instead of silently terminating.
         self._terminate(CloseType.FAILED)

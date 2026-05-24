@@ -50,7 +50,7 @@ def test_hedge_ratio_2_balanced_when_short_is_2x_long():
 def test_actual_drift_breaks_hedge():
     """When actual short-to-long ratio diverges past max_drift_pct, the
     controller stops both legs."""
-    from src.nadobro.engine.inventory import PositionHold
+    from src.nadobro.engine.types import TradeType
 
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
@@ -59,10 +59,18 @@ def test_actual_drift_breaks_hedge():
                       {"trading_pair_long": "L", "trading_pair_short": "S",
                        "hedge_ratio": "1", "leg_amount_quote": "50", "max_drift_pct": "0.05"})
         await orch.spawn_controller(c)
-        # Inject a synthetic 50% drift on the long leg's inventory.
-        hold = inv.get(c.user_id, "L", c.id)
-        hold.buy_amount_base *= Decimal("1.5")
-        hold.buy_amount_quote *= Decimal("1.5")
+        # Inject a synthetic 50% drift on the long leg's inventory. We have
+        # to use apply_fill (the public mutator) instead of mutating the
+        # PositionHold returned by inv.get(): post AUDIT-FIX-INV-1, get()
+        # returns a snapshot copy so external mutations can't corrupt the
+        # repository's live state.
+        existing = inv.get(c.user_id, "L", c.id)
+        bump_base = existing.buy_amount_base * Decimal("0.5")
+        bump_quote = existing.buy_amount_quote * Decimal("0.5")
+        inv.apply_fill(
+            c.user_id, "L", c.id, TradeType.BUY,
+            bump_base, bump_quote, Decimal(0),
+        )
         await orch.tick_controller(c.id)
         assert c.hedge_broken
         assert orch.list(c.id, active_only=True) == []

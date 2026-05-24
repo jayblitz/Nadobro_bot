@@ -10,7 +10,7 @@ of the system uses Grok's built-in X search instead.
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
@@ -145,7 +145,7 @@ def search_recent_tweets(
         _record_x_source(f"X cached tweets: {query[:60]}")
         return cached["tweets"]
 
-    start_time = (datetime.utcnow() - timedelta(hours=capped_hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_time = (datetime.now(timezone.utc) - timedelta(hours=capped_hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     params = {
         "query": query,

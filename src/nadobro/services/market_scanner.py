@@ -1,6 +1,6 @@
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from src.nadobro.services.price_tracker import get_full_technicals, get_all_technicals, classify_regime
@@ -67,7 +67,7 @@ def _get_sentiment(products: list[str]) -> Optional[str]:
             return None
 
         client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         symbols_str = ", ".join(products)
 
         response = client.chat.completions.create(
@@ -171,7 +171,7 @@ def build_market_snapshot(
         assets.append(asset)
 
     snapshot = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "assets": assets,
     }
 

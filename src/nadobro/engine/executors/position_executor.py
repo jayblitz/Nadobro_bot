@@ -422,6 +422,13 @@ class PositionExecutor(Executor):
         # barrier, not the stop.
         if self._pending_close_type is None:
             self._pending_close_type = close_type
+        # AUDIT-FIX-PE-1: confirm cancel actually removed the entry order
+        # from the venue before terminating. Combined with the adapter fix
+        # that surfaces silent cancel failures (engine/adapter/nado.py
+        # AUDIT-FIX-1), we must round-trip a status probe and only terminate
+        # if the order is now CANCELLED / REJECTED / FILLED. If it is still
+        # OPEN we mark the executor FAILED so the orchestrator's stop loop
+        # reconciles the residual instead of leaking an orphan entry order.
         if self.position_state is PositionExecState.OPENING:
             entry = self.entry_order
             if entry is not None and entry.state is OrderState.OPEN:
@@ -430,8 +437,46 @@ class PositionExecutor(Executor):
                         lambda: self.adapter.cancel_order(entry.id),
                         label="cancel_entry",
                     )
-                except Exception:  # noqa: BLE001 - cancel failures handled by adapter
+                except Exception:  # noqa: BLE001 - cancel failures handled by status probe below
                     pass
+                # Always re-probe so we ingest any final fills and learn the
+                # real venue state.
+                try:
+                    refreshed = await self._guard(
+                        lambda: self.adapter.order_status(entry.id),
+                        label="cancel_entry_status",
+                    )
+                    self.entry_order = refreshed
+                    self._ingest_entry(refreshed)
+                except Exception:  # noqa: BLE001
+                    # Can't confirm — fail FAILED instead of EARLY_STOP so
+                    # the orchestrator knows venue state is unknown.
+                    self._terminate(CloseType.FAILED)
+                    return
+                if (
+                    self.entry_order is None
+                    or self.entry_order.state in (
+                        OrderState.FILLED,
+                        OrderState.CANCELLED,
+                        OrderState.REJECTED,
+                    )
+                ):
+                    if (
+                        self.entry_order is not None
+                        and self.entry_order.state is OrderState.FILLED
+                        and self.entry_base > 0
+                    ):
+                        # Partial/full fill before cancel landed — hand off
+                        # into the ACTIVE_POSITION path so barriers / close
+                        # logic can flatten the residual position.
+                        self._on_entry_filled()
+                        return
+                    self._terminate(close_type)
+                    return
+                # Order still resting after cancel attempt — surface FAILED
+                # so a supervisor / human can reconcile the orphan.
+                self._terminate(CloseType.FAILED)
+                return
             self._terminate(close_type)
             return
         if self.position_state is PositionExecState.ACTIVE_POSITION:

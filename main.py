@@ -500,13 +500,24 @@ async def run_bot():
                 logger.warning("Health server failed (non-fatal): %s", e)
 
     stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
-    def handle_signal(sig, _frame):
-        logger.info(f"Received signal {sig}, shutting down...")
+    def _handle_signal_safely(sig_name: str) -> None:
+        logger.info("Received signal %s, shutting down...", sig_name)
         stop_event.set()
 
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
+    # AUDIT-FIX-MAIN-1: prefer loop.add_signal_handler so the callback runs
+    # in the asyncio loop's context. Falls back to signal.signal() on
+    # platforms (Windows) where add_signal_handler is unsupported. Calling
+    # stop_event.set() from a sync signal handler is technically safe in
+    # CPython because asyncio.Event.set() is thread-safe, but the asyncio
+    # path is the documented one and avoids racing other libraries' sync
+    # signal handlers.
+    for _sig, _name in ((signal.SIGINT, "SIGINT"), (signal.SIGTERM, "SIGTERM")):
+        try:
+            loop.add_signal_handler(_sig, _handle_signal_safely, _name)
+        except (NotImplementedError, RuntimeError):
+            signal.signal(_sig, lambda s, _f, n=_name: _handle_signal_safely(n))
 
     try:
         await stop_event.wait()

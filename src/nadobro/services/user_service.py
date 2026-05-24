@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from src.nadobro.models.database import UserRow, NetworkMode
@@ -65,12 +65,12 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple[UserRow,
         if username:
             execute(
                 "UPDATE users SET last_active = %s, telegram_username = %s WHERE telegram_id = %s",
-                (datetime.utcnow().isoformat(), username, telegram_id),
+                (datetime.now(timezone.utc).isoformat(), username, telegram_id),
             )
         else:
             execute(
                 "UPDATE users SET last_active = %s WHERE telegram_id = %s",
-                (datetime.utcnow().isoformat(), telegram_id),
+                (datetime.now(timezone.utc).isoformat(), telegram_id),
             )
         user = UserRow(row)
         _cache_user(user)
@@ -379,7 +379,7 @@ def update_trade_stats(
             trade_delta,
             volume_delta,
             volume_delta,
-            datetime.utcnow().isoformat(),
+            datetime.now(timezone.utc).isoformat(),
             telegram_id,
         ),
     )
@@ -403,7 +403,7 @@ def get_all_users_count() -> int:
 
 def get_active_users_count() -> int:
     from datetime import timedelta
-    cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     return query_count("SELECT COUNT(*) FROM users WHERE last_active >= %s", (cutoff,))
 
 
