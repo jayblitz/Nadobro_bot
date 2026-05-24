@@ -14,7 +14,6 @@ from src.nadobro.handlers.formatters import (
     fmt_positions,
     fmt_settings,
     fmt_wallet_info,
-    fmt_portfolio,
     fmt_help,
     fmt_points_dashboard,
     fmt_referral_dashboard,
@@ -28,7 +27,6 @@ from src.nadobro.handlers.keyboards import (
     points_scope_kb,
     alerts_kb,
     settings_kb,
-    portfolio_kb,
     referral_kb,
     persistent_menu_kb,
 )
@@ -39,7 +37,6 @@ from src.nadobro.services.points_service import get_points_dashboard
 from src.nadobro.services.referral_service import get_referral_dashboard
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric
-from src.nadobro.services.portfolio_service import PortfolioSnapshotUnavailable, get_portfolio_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -96,37 +93,12 @@ def build_positions_view(telegram_id: int):
     return fmt_positions(positions, prices), positions_kb(positions or [])
 
 
-def build_portfolio_view(telegram_id: int, force_refresh_orders: bool = False):
-    try:
-        snapshot = get_portfolio_snapshot(telegram_id, force_refresh=force_refresh_orders)
-    except PortfolioSnapshotUnavailable as e:
-        logger.warning("portfolio_snapshot_unavailable user=%s err=%s", telegram_id, e)
-        text = "⚠️ Wallet not initialized\\. Use /start first\\."
-        if "positions unavailable" in str(e).lower():
-            text = "⚠️ Portfolio refresh is temporarily unavailable\\. Try again shortly\\."
-        return localize_text(text, get_active_language()), home_card_kb()
-    except Exception as e:
-        logger.warning("portfolio_snapshot_failed user=%s err=%s", telegram_id, e)
-        return localize_text(
-            "⚠️ Portfolio refresh is temporarily unavailable\\. Try again shortly\\.",
-            get_active_language(),
-        ), home_card_kb()
-    msg = fmt_portfolio(snapshot.stats, snapshot.positions, snapshot.prices, open_orders=snapshot.open_orders)
-    elapsed = float(snapshot.timings.get("total") or 0.0)
-    if elapsed >= 1.2:
-        logger.info(
-            "portfolio_view_slow user=%s mode=%s refresh=%s cache=%s total=%.3fs positions=%.3fs prices=%.3fs stats=%.3fs orders=%.3fs",
-            telegram_id,
-            snapshot.network,
-            force_refresh_orders,
-            snapshot.from_cache,
-            elapsed,
-            float(snapshot.timings.get("positions") or 0.0),
-            float(snapshot.timings.get("prices") or 0.0),
-            float(snapshot.timings.get("stats") or 0.0),
-            float(snapshot.timings.get("orders") or 0.0),
-        )
-    return msg, portfolio_kb(has_positions=bool(snapshot.positions))
+# NOTE: ``build_portfolio_view`` was retired during the Portfolio workflow
+# redesign (2026-05). All portfolio rendering now goes through
+# ``portfolio_deck.render_portfolio_deck`` driven by ``nado_sync`` snapshots.
+# The legacy ``portfolio_service.get_portfolio_snapshot`` and ``fmt_portfolio``
+# path duplicated the data flow and was responsible for the two-source skew
+# that produced the tz-aware datetime warning seen in production logs.
 
 
 def _remember_home_card(context: CallbackContext, chat_id: int, message_id: int) -> None:

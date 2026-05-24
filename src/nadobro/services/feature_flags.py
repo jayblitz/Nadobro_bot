@@ -22,7 +22,10 @@ def legacy_bro_autoloop_enabled() -> bool:
 
 
 def portfolio_sync_enabled() -> bool:
-    return env_flag("NADO_PORTFOLIO_SYNC", False)
+    # Default ON per the workflow plan so the combined Positions screen
+    # tracks fills in near real time without requiring an environment
+    # override. Operators can disable by setting the env flag to 0.
+    return env_flag("NADO_PORTFOLIO_SYNC", True)
 
 
 def portfolio_ws_enabled() -> bool:
@@ -42,11 +45,13 @@ def vault_deposit_watch_interval_seconds() -> int:
 
 
 def portfolio_sync_interval_seconds() -> int:
-    raw = (os.environ.get("NADO_PORTFOLIO_SYNC_SECONDS") or "30").strip()
+    # Default 5s for near-real-time Positions tracking. Floor is also 5s
+    # so we don't hammer Nado faster than the snapshot cache TTL.
+    raw = (os.environ.get("NADO_PORTFOLIO_SYNC_SECONDS") or "5").strip()
     try:
         return max(5, int(float(raw)))
     except ValueError:
-        return 30
+        return 5
 
 
 def dgrid_intelligence_enabled() -> bool:

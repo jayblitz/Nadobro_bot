@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from _stubs import install_test_stubs
 
@@ -14,8 +15,10 @@ from src.nadobro.utils.x18 import to_x18
 
 def _snapshot():
     return {
+        "user_id": 42,
         "network": "testnet",
         "last_sync": "2026-01-01T00:00:00+00:00",
+        "equity": {"spot": "1000", "cross": "500", "isolated": "0", "total": "1500"},
         "positions": [
             {
                 "product_id": 1,
@@ -61,25 +64,72 @@ def test_portfolio_deck_and_subviews_render_without_local_sync_text():
     text, kb = render_portfolio_deck(_snapshot())
     assert "Portfolio · TESTNET" in text
     assert "local ledger" not in text
+    assert "Total Balance" in text
     assert kb.inline_keyboard
     assert render_loading() == "⏳ Loading portfolio…"
 
-    for renderer in (render_positions_view, render_orders_view, render_history_view):
+    for renderer in (render_positions_view, render_orders_view):
         view_text, view_kb = renderer(_snapshot())
         assert "TESTNET" in view_text
         assert view_kb.inline_keyboard
 
+    # History view pulls round-trips from the DB; stub them out for the
+    # smoke test so the renderer still produces a valid card.
+    with patch("src.nadobro.services.trade_service.compute_round_trips", return_value=[]):
+        view_text, view_kb = render_history_view(_snapshot())
+    assert "TESTNET" in view_text
+    assert view_kb.inline_keyboard
 
-def test_history_sorts_submission_idx_numerically():
-    snapshot = _snapshot()
-    snapshot["matches"] = [
-        {**snapshot["matches"][0], "submission_idx": "99", "product_name": "OLD"},
-        {**snapshot["matches"][0], "submission_idx": "100", "product_name": "NEW"},
+
+def test_history_renders_round_trips_newest_first():
+    """History now displays round-trips computed from manual fills.
+
+    The renderer must surface ``trip_key`` on the Share PnL button so the
+    callback can mint the per-trade card.
+    """
+    from datetime import datetime, timezone
+
+    round_trips = [
+        {
+            "trip_key": "200",
+            "pair": "NEW",
+            "side": "long",
+            "size": 1.0,
+            "avg_open_price": 100.0,
+            "avg_close_price": 110.0,
+            "realized_pnl": 10.0,
+            "fees": 0.2,
+            "funding_paid": 0.0,
+            "volume_usd": 210.0,
+            "open_ts": datetime(2026, 1, 2, tzinfo=timezone.utc),
+            "close_ts": datetime(2026, 1, 2, 1, tzinfo=timezone.utc),
+        },
+        {
+            "trip_key": "100",
+            "pair": "OLD",
+            "side": "short",
+            "size": 0.5,
+            "avg_open_price": 90.0,
+            "avg_close_price": 80.0,
+            "realized_pnl": 5.0,
+            "fees": 0.1,
+            "funding_paid": 0.0,
+            "volume_usd": 85.0,
+            "open_ts": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "close_ts": datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+        },
     ]
-
-    text, _ = render_history_view(snapshot)
+    with patch(
+        "src.nadobro.services.trade_service.compute_round_trips",
+        return_value=round_trips,
+    ):
+        text, kb = render_history_view(_snapshot())
 
     assert text.index("NEW") < text.index("OLD")
+    callback_data = [
+        btn.callback_data for row in kb.inline_keyboard for btn in row
+    ]
+    assert any("portfolio:share_pnl:rt:200" in cb for cb in callback_data)
 
 
 def test_order_cancel_indices_follow_sorted_order():

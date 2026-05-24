@@ -190,3 +190,43 @@ def build_pnl_card_data(
         "pnl": _fmt_signed_dollar(pnl),
         "referral_code": referral_code or "",
     }
+
+
+def build_round_trip_card_data(
+    telegram_id: int,
+    network: str,
+    round_trip_key: str,
+) -> dict:
+    """PnL card data for a History round-trip (manual / non-strategy).
+
+    ``round_trip_key`` is the stable id minted by
+    :func:`trade_service.compute_round_trips` (typically the close trade
+    id). The card uses ``strategy="manual"`` so the renderer picks the
+    neutral history skin.
+    """
+    from src.nadobro.services.trade_service import find_round_trip
+
+    rt = find_round_trip(int(telegram_id), network, str(round_trip_key))
+    if not rt:
+        return {
+            "symbol": "MANUAL",
+            "strategy": "manual",
+            "volume": _fmt_dollar(Decimal("0")),
+            "net_fees": _fmt_negative_dollar(Decimal("0")),
+            "pnl": _fmt_signed_dollar(Decimal("0")),
+            "referral_code": _fetch_active_referral_code(telegram_id, network) or "",
+        }
+
+    volume = _to_decimal(rt.get("volume_usd"))
+    pnl = _to_decimal(rt.get("realized_pnl"))
+    fees = _to_decimal(rt.get("fees"))
+    product_name = rt.get("product_name") or rt.get("pair")
+    referral_code = _fetch_active_referral_code(telegram_id, network)
+    return {
+        "symbol": _format_symbol(product_name, None),
+        "strategy": "manual",
+        "volume": _fmt_dollar(volume),
+        "net_fees": _fmt_negative_dollar(fees),
+        "pnl": _fmt_signed_dollar(pnl),
+        "referral_code": referral_code or "",
+    }

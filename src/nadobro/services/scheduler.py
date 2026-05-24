@@ -38,6 +38,18 @@ def _market_snapshot_lock_get() -> asyncio.Lock:
     return _market_snapshot_lock
 
 
+def _resolve_market_snapshot_lock() -> asyncio.Lock:
+    # Defensive shim: tolerates merge regressions / partial reloads that
+    # remove ``_market_snapshot_lock_get`` from the module namespace.
+    helper = globals().get("_market_snapshot_lock_get")
+    if helper is not None:
+        return helper()
+    global _market_snapshot_lock
+    if _market_snapshot_lock is None:
+        _market_snapshot_lock = asyncio.Lock()
+    return _market_snapshot_lock
+
+
 _RECORDED_FILL_STATUSES = frozenset({"filled", "partially_filled", "closed"})
 
 
@@ -236,7 +248,7 @@ async def _get_market_snapshot(force_refresh: bool = False) -> dict:
     # AUDIT-FIX-SCH-2: hold the lock for the full check-then-fetch sequence
     # so two concurrent coroutines don't both miss the cache and race a
     # second venue request.
-    async with _market_snapshot_lock_get():
+    async with _resolve_market_snapshot_lock():
         now = asyncio.get_running_loop().time()
         if (not force_refresh) and _last_market_snapshot.get("prices") and (
             now - float(_last_market_snapshot.get("ts") or 0.0) < _MARKET_SNAPSHOT_TTL_SECONDS

@@ -10,7 +10,11 @@ from typing import Any
 
 from src.nadobro.db import execute, query_all, query_one
 from src.nadobro.services.feature_flags import portfolio_ws_enabled
-from src.nadobro.services.portfolio_calculator import aggregate_trading_stats, positions_from_account_summary
+from src.nadobro.services.portfolio_calculator import (
+    aggregate_trading_stats,
+    compute_total_equity,
+    positions_from_account_summary,
+)
 from src.nadobro.services.user_service import get_user, get_user_nado_client
 from src.nadobro.utils.x18 import from_x18
 
@@ -105,7 +109,14 @@ async def sync_active_users(reason: str = "poll") -> None:
         await sync_user(user_id, network=network, reason=reason)
 
 
-async def sync_user(user_id: int, *, network: str | None = None, reason: str = "manual", force: bool = False) -> dict[str, Any]:
+async def sync_user(
+    user_id: int,
+    *,
+    network: str | None = None,
+    reason: str = "manual",
+    force: bool = False,
+    max_age_ms: int | None = 2000,
+) -> dict[str, Any]:
     user = await asyncio.to_thread(get_user, int(user_id))
     network = _normalize_network(network or (user.network_mode.value if user else "mainnet"))
     key = _cache_key(user_id, network)
@@ -113,9 +124,10 @@ async def sync_user(user_id: int, *, network: str | None = None, reason: str = "
         _inflight.clear()
     lock = _inflight.setdefault(key, asyncio.Lock())
     async with lock:
-        if not force:
+        cache_ttl = max(0.0, float(max_age_ms) / 1000.0) if max_age_ms is not None else 2.0
+        if not force and cache_ttl > 0:
             cached = _snapshot_cache.get(key)
-            if cached and time.time() - float(cached.get("monotonic_ts", 0)) < 2:
+            if cached and time.time() - float(cached.get("monotonic_ts", 0)) < cache_ttl:
                 return deepcopy(cached)
 
         started = time.perf_counter()
@@ -133,18 +145,21 @@ async def sync_user(user_id: int, *, network: str | None = None, reason: str = "
                 except Exception:
                     logger.debug("portfolio ws subscribe failed user=%s network=%s", user_id, network, exc_info=True)
 
-            summary, orders, trigger_orders, matches, funding = await asyncio.gather(
+            summary, orders, trigger_orders, matches, funding, balance = await asyncio.gather(
                 client.calculate_account_summary(ts=int(time.time())),
                 asyncio.to_thread(client.get_all_open_orders, True),
                 client.get_trigger_orders(limit=200),
                 client.get_matches(limit=200),
                 client.get_interest_and_funding_payments(limit=200),
+                asyncio.to_thread(client.get_balance),
             )
             plain_orders = _normalize_order_rows(orders)
             trigger_rows = [_mark_trigger_order(o) for o in _normalize_order_rows(trigger_orders)]
             all_orders = plain_orders + trigger_rows
             positions = [p.to_dict() for p in positions_from_account_summary(summary or {})]
             stats = aggregate_trading_stats(matches or [], funding or [])
+            spot_balances = ((balance or {}).get("balances") or {}) if isinstance(balance, dict) else {}
+            equity = compute_total_equity(summary or {}, spot_balances)
             snapshot = {
                 "user_id": int(user_id),
                 "network": network,
@@ -154,6 +169,8 @@ async def sync_user(user_id: int, *, network: str | None = None, reason: str = "
                 "matches": matches or [],
                 "funding_payments": funding or [],
                 "stats": stats,
+                "equity": equity,
+                "spot_balances": spot_balances,
                 "last_sync": _now(),
                 "monotonic_ts": time.time(),
                 "stale": False,
@@ -229,6 +246,7 @@ def _write_positions(user_id: int, network: str, positions: list[dict[str, Any]]
         pair = str(pos.get("symbol") or pos.get("product_name") or f"ID:{product_id}")
         side = "long" if bool(pos.get("is_long", True)) else "short"
         amount = abs(Decimal(str(pos.get("amount") or 0)))
+        leverage = _resolve_leverage(pos)
         execute(
             """
             UPDATE positions
@@ -247,7 +265,7 @@ def _write_positions(user_id: int, network: str, positions: list[dict[str, Any]]
                 _decimal_or_none(pos.get("est_liq_price")),
                 _decimal_or_none(pos.get("est_pnl")),
                 _decimal_or_none(pos.get("margin_used")),
-                _decimal_or_none(pos.get("leverage")),
+                leverage,
                 user_id,
                 network,
                 product_id,
@@ -281,7 +299,7 @@ def _write_positions(user_id: int, network: str, positions: list[dict[str, Any]]
                 _decimal_or_none(pos.get("est_liq_price")),
                 _decimal_or_none(pos.get("est_pnl")),
                 _decimal_or_none(pos.get("margin_used")),
-                _decimal_or_none(pos.get("leverage")),
+                leverage,
                 user_id,
                 network,
                 product_id,
@@ -368,14 +386,23 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         fee_x18 = _x18_field(match, "fee", "fee_x18")
         pnl_x18 = _x18_field(match, "realized_pnl", "realized_pnl_x18")
         base_amount = from_x18(base_x18)
+        digest = str(
+            match.get("digest")
+            or match.get("order_digest")
+            or order.get("digest")
+            or order.get("order_digest")
+            or ""
+        ).strip()
+        session_id, source = _back_link_intent(digest)
         execute(
             f"""
             INSERT INTO {table} (
               user_id, product_id, product_name, order_type, side, size, status,
               submission_idx, isolated, realized_pnl_x18, fee_x18, base_filled_x18, quote_filled_x18,
+              order_digest, strategy_session_id, source,
               filled_at, created_at
             )
-            VALUES (%s, %s, %s, 'match', %s, %s, 'filled', %s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (%s, %s, %s, 'match', %s, %s, 'filled', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             """,
             (
                 user_id,
@@ -389,11 +416,82 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 fee_x18,
                 base_x18,
                 quote_x18,
+                digest or None,
+                session_id,
+                source,
                 _timestamp_or_now(match.get("timestamp")),
             ),
         )
         inserted += 1
+        _maybe_increment_session_win_loss(session_id, pnl_x18)
     return inserted
+
+
+def _maybe_increment_session_win_loss(session_id: int | None, pnl_x18: str) -> None:
+    """Bump ``strategy_sessions.win_count`` / ``loss_count`` on decisive closes.
+
+    The performance cards read these counters directly. We increment here
+    when a venue-sync fill arrives with a back-linked ``strategy_session_id``
+    and a non-zero realized PnL — belt-and-suspenders alongside the
+    session-end rollup in ``bot_runtime._finalize_session``.
+    """
+    if not session_id:
+        return
+    try:
+        pnl = float(from_x18(pnl_x18))
+    except Exception:
+        return
+    if abs(pnl) <= 1e-9:
+        return
+    column = "win_count" if pnl > 0 else "loss_count"
+    try:
+        execute(
+            f"UPDATE strategy_sessions SET {column} = {column} + 1 WHERE id = %s",
+            (int(session_id),),
+        )
+    except Exception:
+        logger.debug("session win/loss increment failed session=%s", session_id, exc_info=True)
+
+
+def _back_link_intent(digest: str) -> tuple[int | None, str]:
+    """Resolve ``(strategy_session_id, source)`` from order_intents.
+
+    Strategies and engine adapters write to ``order_intents`` with ``value``
+    JSONB carrying ``strategy_session_id`` and ``source``. Venue-sync fills
+    only arrive with an ``order_digest``; this lookup re-attaches the tags
+    so per-session rollups and History (source=manual) filtering work.
+    Returns ``(None, "manual")`` when no intent is found.
+    """
+    if not digest:
+        return None, "manual"
+    try:
+        intent = query_one(
+            "SELECT value FROM order_intents WHERE order_digest = %s ORDER BY updated_at DESC NULLS LAST LIMIT 1",
+            (digest,),
+        )
+    except Exception:
+        logger.debug("intent back-link query failed digest=%s", digest, exc_info=True)
+        return None, "manual"
+    if not intent:
+        return None, "manual"
+    value = intent.get("value") or {}
+    if isinstance(value, str):
+        try:
+            import json
+
+            value = json.loads(value)
+        except Exception:
+            value = {}
+    if not isinstance(value, dict):
+        return None, "manual"
+    raw_session = value.get("strategy_session_id")
+    session_id: int | None
+    try:
+        session_id = int(raw_session) if raw_session is not None else None
+    except (TypeError, ValueError):
+        session_id = None
+    source = str(value.get("source") or "manual") or "manual"
+    return session_id, source
 
 
 def _write_funding(user_id: int, network: str, payments: list[dict[str, Any]]) -> int:
@@ -447,6 +545,33 @@ def _decimal_or_none(value: Any) -> str | None:
     if value is None or value == "":
         return None
     return str(Decimal(str(value)))
+
+
+def _resolve_leverage(pos: dict[str, Any]) -> str:
+    """Return a non-NULL leverage string.
+
+    Nado's ``calculate_account_summary`` often omits ``leverage`` on cross/
+    isolated rows; the ``positions`` table has a legacy ``NOT NULL DEFAULT 1``
+    column from the original DDL. Derive leverage from
+    ``notional / max(margin_used, eps)`` when available, otherwise fall back
+    to ``1`` so the row insert never fails.
+    """
+    raw = pos.get("leverage")
+    if raw is not None and str(raw) != "":
+        try:
+            value = Decimal(str(raw))
+            if value > 0:
+                return str(value)
+        except Exception:
+            pass
+    try:
+        notional = Decimal(str(pos.get("notional_value") or 0))
+        margin = Decimal(str(pos.get("margin_used") or 0))
+        if margin > 0 and notional > 0:
+            return str(notional / margin)
+    except Exception:
+        pass
+    return "1"
 
 
 def _timestamp_or_now(value: Any) -> datetime:

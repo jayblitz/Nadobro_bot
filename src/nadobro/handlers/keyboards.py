@@ -250,7 +250,7 @@ def portfolio_kb(has_positions: bool = False):
             InlineKeyboardButton("📜 Trade History", callback_data="portfolio:history"),
         ],
         [
-            InlineKeyboardButton("📊 Performance", callback_data="portfolio:analytics"),
+            InlineKeyboardButton("📊 Performance", callback_data="portfolio:performance"),
             InlineKeyboardButton("📊 Refresh portfolio", callback_data="portfolio:refresh"),
         ],
     ]
@@ -292,7 +292,7 @@ def portfolio_history_kb(page: int = 0, has_more: bool = False):
         rows.append(nav_row)
     rows.append([
         InlineKeyboardButton("📁 Back to Portfolio", callback_data="portfolio:view"),
-        InlineKeyboardButton("📊 View Performance", callback_data="portfolio:analytics"),
+        InlineKeyboardButton("📊 View Performance", callback_data="portfolio:performance"),
     ])
     rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)

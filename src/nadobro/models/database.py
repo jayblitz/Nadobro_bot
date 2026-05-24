@@ -704,6 +704,9 @@ _STRATEGY_SESSION_UPDATE_COLS = frozenset({
     "total_orders_filled", "total_orders_cancelled", "realized_pnl",
     "total_fees_paid", "total_volume_usd", "total_funding_paid",
     "stop_reason", "error_message",
+    # Portfolio workflow (migration 0010): persisted win/loss counters so
+    # per-session performance cards can render trustworthy stats.
+    "win_count", "loss_count",
 })
 
 
@@ -744,6 +747,60 @@ def increment_session_metrics(
         (cycles, orders_placed, orders_filled, orders_cancelled,
          pnl, fees, volume, funding, session_id),
     )
+
+
+def rollup_session_from_trades(session_id: int, network: str) -> dict:
+    """Recompute session totals from ``trades_<network>``.
+
+    Belt-and-suspenders rollup for the workflow plan: at session end we
+    re-aggregate every trade tagged with ``strategy_session_id`` so the
+    persisted card numbers match the actual fills (and don't drift when
+    venue-sync fills arrive late or when cycle increments missed a fee).
+
+    Returns the resolved totals dict (always returns; on DB error returns
+    an empty dict so callers can decide what to do).
+    """
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    try:
+        row = query_one(
+            f"""
+            SELECT
+              COUNT(*) FILTER (WHERE status IN ('filled', 'closed', 'partially_filled')) AS filled,
+              COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled,
+              COALESCE(SUM(COALESCE(realized_pnl, pnl, 0)), 0) AS realized_pnl,
+              COALESCE(SUM(COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0)), 0) AS fees,
+              COALESCE(SUM(ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)), 0) AS volume,
+              COALESCE(SUM(COALESCE(funding_paid, 0)), 0) AS funding,
+              COUNT(*) FILTER (
+                WHERE status IN ('filled', 'closed') AND COALESCE(realized_pnl, pnl, 0) > 1e-9
+              ) AS wins,
+              COUNT(*) FILTER (
+                WHERE status IN ('filled', 'closed') AND COALESCE(realized_pnl, pnl, 0) < -1e-9
+              ) AS losses
+            FROM {table}
+            WHERE strategy_session_id = %s
+            """,
+            (int(session_id),),
+        )
+    except Exception:
+        return {}
+    if not row:
+        return {}
+    totals = {
+        "total_orders_filled": int(row.get("filled") or 0),
+        "total_orders_cancelled": int(row.get("cancelled") or 0),
+        "realized_pnl": float(row.get("realized_pnl") or 0),
+        "total_fees_paid": float(row.get("fees") or 0),
+        "total_volume_usd": float(row.get("volume") or 0),
+        "total_funding_paid": float(row.get("funding") or 0),
+        "win_count": int(row.get("wins") or 0),
+        "loss_count": int(row.get("losses") or 0),
+    }
+    try:
+        update_strategy_session(int(session_id), totals)
+    except Exception:
+        pass
+    return totals
 
 
 def get_strategy_sessions_by_user(
