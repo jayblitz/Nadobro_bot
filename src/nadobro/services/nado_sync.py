@@ -155,7 +155,7 @@ async def sync_user(
             )
             plain_orders = _normalize_order_rows(orders)
             trigger_rows = [_mark_trigger_order(o) for o in _normalize_order_rows(trigger_orders)]
-            all_orders = plain_orders + trigger_rows
+            all_orders = _dedupe_orders_by_digest(plain_orders + trigger_rows)
             positions = [p.to_dict() for p in positions_from_account_summary(summary or {})]
             stats = aggregate_trading_stats(matches or [], funding or [])
             spot_balances = ((balance or {}).get("balances") or {}) if isinstance(balance, dict) else {}
@@ -393,7 +393,7 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             or order.get("order_digest")
             or ""
         ).strip()
-        session_id, source = _back_link_intent(digest)
+        session_id, source = _back_link_intent(digest, network)
         execute(
             f"""
             INSERT INTO {table} (
@@ -453,7 +453,7 @@ def _maybe_increment_session_win_loss(session_id: int | None, pnl_x18: str) -> N
         logger.debug("session win/loss increment failed session=%s", session_id, exc_info=True)
 
 
-def _back_link_intent(digest: str) -> tuple[int | None, str]:
+def _back_link_intent(digest: str, network: str) -> tuple[int | None, str]:
     """Resolve ``(strategy_session_id, source)`` from order_intents.
 
     Strategies and engine adapters write to ``order_intents`` with ``value``
@@ -461,6 +461,10 @@ def _back_link_intent(digest: str) -> tuple[int | None, str]:
     only arrive with an ``order_digest``; this lookup re-attaches the tags
     so per-session rollups and History (source=manual) filtering work.
     Returns ``(None, "manual")`` when no intent is found.
+
+    Execution-mode safety: the resolved ``strategy_session_id`` is dropped
+    if it doesn't belong to the same ``network`` as the incoming fill, so a
+    testnet fill never links to a mainnet session (or vice-versa).
     """
     if not digest:
         return None, "manual"
@@ -491,6 +495,22 @@ def _back_link_intent(digest: str) -> tuple[int | None, str]:
     except (TypeError, ValueError):
         session_id = None
     source = str(value.get("source") or "manual") or "manual"
+    if session_id is not None:
+        try:
+            session_row = query_one(
+                "SELECT network FROM strategy_sessions WHERE id = %s",
+                (int(session_id),),
+            )
+        except Exception:
+            session_row = None
+        if not session_row or _normalize_network(session_row.get("network")) != _normalize_network(network):
+            logger.debug(
+                "back-link dropped: session=%s network=%s != fill network=%s",
+                session_id,
+                session_row.get("network") if session_row else None,
+                network,
+            )
+            return None, source
     return session_id, source
 
 
@@ -600,6 +620,20 @@ def _network_table_suffix(network: Any) -> str:
     if normalized not in {"mainnet", "testnet"}:
         raise ValueError(f"unsupported network: {network}")
     return normalized
+
+
+def _dedupe_orders_by_digest(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop duplicate open orders when trigger + plain fetches overlap."""
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for order in orders:
+        digest = str(order.get("digest") or order.get("order_digest") or "")
+        if digest:
+            if digest in seen:
+                continue
+            seen.add(digest)
+        deduped.append(order)
+    return deduped
 
 
 def _normalize_order_rows(value: Any) -> list[dict[str, Any]]:

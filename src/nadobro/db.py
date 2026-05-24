@@ -1010,6 +1010,8 @@ def init_db():
                     ON order_intents (status, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_order_intents_trade_id
                     ON order_intents (trade_id) WHERE trade_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_order_intents_order_digest
+                    ON order_intents (order_digest) WHERE order_digest IS NOT NULL;
             """)
             conn.commit()
             logger.info("order_intents table verified/created")

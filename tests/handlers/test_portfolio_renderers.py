@@ -60,6 +60,23 @@ def _snapshot():
     }
 
 
+def test_portfolio_deck_shows_trigger_order_type():
+    snapshot = _snapshot()
+    snapshot["open_orders"] = [
+        {
+            "product_id": 1,
+            "product_name": "BTC",
+            "side": "LONG",
+            "price": "90000",
+            "type": "STOP",
+            "is_trigger": True,
+            "digest": "0xtrg",
+        }
+    ]
+    text, _ = render_portfolio_deck(snapshot)
+    assert "⚡ STOP" in text
+
+
 def test_portfolio_deck_and_subviews_render_without_local_sync_text():
     text, kb = render_portfolio_deck(_snapshot())
     assert "Portfolio · TESTNET" in text
@@ -143,6 +160,29 @@ def test_order_cancel_indices_follow_sorted_order():
 
     assert text.index("NEW") < text.index("OLD")
     assert kb.inline_keyboard[0][0].callback_data == "portfolio:cancel_order:0"
+
+
+def test_positions_cancel_indices_paginate_correctly():
+    snapshot = _snapshot()
+    snapshot["open_orders"] = [
+        {
+            "product_id": 1,
+            "product_name": f"ORD{i}",
+            "created_at": f"2026-01-{i:02d}T00:00:00Z",
+            "digest": f"0x{i}",
+        }
+        for i in range(1, 8)
+    ]
+
+    _, kb = render_positions_view(snapshot, ord_page=1, page_size=6)
+
+    cancel_callbacks = [
+        btn.callback_data
+        for row in kb.inline_keyboard
+        for btn in row
+        if btn.callback_data and btn.callback_data.startswith("portfolio:cancel_order:")
+    ]
+    assert cancel_callbacks == ["portfolio:cancel_order:4", "portfolio:cancel_order:5", "portfolio:cancel_order:6"]
 
 
 def test_session_card_template_and_card_generation(tmp_path):

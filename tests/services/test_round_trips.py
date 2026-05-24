@@ -152,3 +152,25 @@ def test_compute_round_trips_returns_empty_on_db_error():
 
     with patch("src.nadobro.db.query_all", side_effect=_boom):
         assert trade_service.compute_round_trips(42, "mainnet") == []
+
+
+def test_compute_round_trips_reads_network_scoped_table():
+    """History must never mix testnet and mainnet trades.
+
+    Compute on each network and assert the SQL targets the matching
+    ``trades_<network>`` table.
+    """
+    captured: list[str] = []
+
+    def _capture(sql, *params):
+        captured.append(sql)
+        return []
+
+    with patch("src.nadobro.db.query_all", side_effect=_capture):
+        trade_service.compute_round_trips(42, "testnet")
+        trade_service.compute_round_trips(42, "mainnet")
+
+    assert "trades_testnet" in captured[0]
+    assert "trades_mainnet" not in captured[0]
+    assert "trades_mainnet" in captured[1]
+    assert "trades_testnet" not in captured[1]

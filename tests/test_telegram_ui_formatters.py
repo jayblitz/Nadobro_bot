@@ -35,6 +35,7 @@ class TelegramUiFormatterTests(unittest.TestCase):
         self.assertIn("*Setup steps*", text)
         self.assertIn("`0xabc\\_def`", text)
         self.assertIn("1\\-Click Trading", text)
+        self.assertIn("app\\.nado\\.xyz\\?join=FzpOSwX", text)
 
     def test_alert_menu_intro_uses_new_toolkit_copy(self):
         text = formatters.fmt_alert_menu_intro()

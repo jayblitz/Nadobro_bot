@@ -8,6 +8,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from src.nadobro.utils.visual import divider, money
 
 
+def order_kind_label(order: dict[str, Any]) -> str:
+    kind = str(order.get("type") or order.get("order_type") or "LIMIT").upper()
+    if bool(order.get("is_trigger")):
+        kind = f"⚡ {kind}"
+    return kind
+
+
 def sorted_orders(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the same stable order used by the UI and callback indices."""
     return sorted(
@@ -29,7 +36,7 @@ def render_orders_view(snapshot: dict[str, Any], page: int = 0, page_size: int =
     for idx, order in enumerate(visible, start=page * page_size + 1):
         symbol = str(order.get("product_name") or order.get("product") or f"ID:{order.get('product_id')}")
         side = "📈" if str(order.get("side") or "").upper() in {"LONG", "BUY"} else "📉"
-        kind = str(order.get("type") or order.get("order_type") or "LIMIT").upper()
+        kind = order_kind_label(order)
         lines.extend([
             f"{idx} ╱ {symbol} {side} {kind}",
             f"📦 Size {abs(_dec(order.get('amount') or order.get('size')))}    🎯 Limit {money(_dec(order.get('price') or order.get('limit_price')))}",
