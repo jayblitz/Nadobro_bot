@@ -22,6 +22,22 @@ _FILL_SYNC_DIGEST_WAIT = float(os.environ.get("NADO_FILL_SYNC_DIGEST_WAIT_SECOND
 _FILL_SYNC_DIGEST_POLL = float(os.environ.get("NADO_FILL_SYNC_DIGEST_POLL_SECONDS", "1.0"))
 _MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SECONDS", "3.0"))
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
+# AUDIT-FIX-SCH-2: serialize cache fetches so two coroutines don't both miss
+# the cache and fire concurrent get_all_market_prices() requests. Lazy-init
+# because module load happens before the asyncio loop exists.
+# NOTE: this helper was lost during a main-branch merge; without it every
+# alert/price-tracker tick raised ``NameError: name '_market_snapshot_lock_get'
+# is not defined`` (visible in production logs every 5s).
+_market_snapshot_lock: asyncio.Lock | None = None
+
+
+def _market_snapshot_lock_get() -> asyncio.Lock:
+    global _market_snapshot_lock
+    if _market_snapshot_lock is None:
+        _market_snapshot_lock = asyncio.Lock()
+    return _market_snapshot_lock
+
+
 _RECORDED_FILL_STATUSES = frozenset({"filled", "partially_filled", "closed"})
 
 

@@ -86,6 +86,49 @@ class LogRedactionTests(unittest.TestCase):
 
         self.assertIn("7.1s", stream.getvalue())
 
+    def test_preserves_hh_mm_ss_timestamps(self):
+        # AUDIT-FIX-LR-2 regression: HH:MM:SS clock-style timestamps must NOT
+        # be mistaken for IPv6 by the formatter. Production logs depend on
+        # this since RedactingFormatter runs against the formatted asctime.
+        for text in (
+            "2026-05-24 15:52:43,015 [INFO] src.nadobro.db: Resolved hostname",
+            "2026/05/24 15:52:50 [error] 677#677 nginx connect() failed",
+            "started_at=15:52:43 elapsed=12.3s",
+        ):
+            self.assertIn("15:52", redact_sensitive_text(text), text)
+            self.assertNotIn("<REDACTED_IPV6>", redact_sensitive_text(text), text)
+
+    def test_telegram_identifier_fields_are_redacted(self):
+        # AUDIT-FIX-LR-3 regression: 9-digit Telegram IDs were leaking via
+        # ``user=...`` / ``chat_id=...`` operational log lines because the
+        # bare-long-id rule needs 10+ digits.
+        cases = (
+            "Strategy cycle start user=380277661 network=mainnet strategy=dgrid",
+            "Starting strategy loop for user 380277661 on mainnet",
+            "sent to chat_id=380277661 reply",
+            "telegram_id: 380277661 banned",
+            "context user_id: 12345678",
+        )
+        for text in cases:
+            redacted = redact_sensitive_text(text)
+            self.assertNotIn("380277661", redacted, text)
+            self.assertNotIn("12345678", redacted, text)
+            self.assertIn("<REDACTED_ID>", redacted, text)
+
+    def test_telegram_identifier_redaction_does_not_eat_counters(self):
+        # ``user count=3`` and similar non-identifier phrases must not be
+        # rewritten — that would defeat the whole point of debug logs.
+        self.assertEqual(
+            redact_sensitive_text("user count=3 active=2"),
+            "user count=3 active=2",
+        )
+
+    def test_compressed_ipv6_is_redacted(self):
+        # AUDIT-FIX-LR-2: the old regex missed compressed IPv6 forms like
+        # ``fe80::1`` while the new one catches them.
+        for text in ("connected fe80::1", "rpc 2001:db8::8a2e:370:7334 ok"):
+            self.assertIn("<REDACTED_IPV6>", redact_sensitive_text(text), text)
+
 
 if __name__ == "__main__":
     unittest.main()
