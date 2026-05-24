@@ -124,6 +124,36 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         rendered_sql = "\n".join(call[0] for call in execute_calls)
         assert "cancelled_or_filled" not in rendered_sql
 
+    def test_dedupe_orders_by_digest_keeps_first_occurrence(self):
+        plain = [{"digest": "0xdup", "type": "LIMIT"}]
+        trigger = [{"digest": "0xdup", "type": "TRIGGER", "order_type": "STOP"}]
+        deduped = nado_sync._dedupe_orders_by_digest(plain + trigger)
+        assert len(deduped) == 1
+        assert deduped[0]["type"] == "LIMIT"
+
+    def test_back_link_intent_rejects_cross_network_session(self):
+        """A testnet fill must never inherit a mainnet session_id."""
+        intent_row = {"value": {"strategy_session_id": 7, "source": "bro"}}
+        session_row = {"network": "mainnet"}
+        rows = [intent_row, session_row]
+
+        with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
+            sid, src = nado_sync._back_link_intent("0xfeed", "testnet")
+
+        assert sid is None
+        assert src == "bro"
+
+    def test_back_link_intent_accepts_same_network_session(self):
+        intent_row = {"value": {"strategy_session_id": 7, "source": "bro"}}
+        session_row = {"network": "mainnet"}
+        rows = [intent_row, session_row]
+
+        with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
+            sid, src = nado_sync._back_link_intent("0xfeed", "mainnet")
+
+        assert sid == 7
+        assert src == "bro"
+
     def test_normalize_order_rows_treats_no_open_orders_message_as_empty(self):
         assert nado_sync._normalize_order_rows({"message": "No open orders"}) == []
 
@@ -155,14 +185,15 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
                 "source": "dgrid",
             }
         }
-        with patch.object(nado_sync, "query_one", return_value=intent_row):
-            session_id, source = nado_sync._back_link_intent("0xdeadbeef")
+        rows = [intent_row, {"network": "testnet"}]
+        with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
+            session_id, source = nado_sync._back_link_intent("0xdeadbeef", "testnet")
         assert session_id == 99
         assert source == "dgrid"
 
     def test_back_link_intent_defaults_to_manual_when_lookup_empty(self):
         with patch.object(nado_sync, "query_one", return_value=None):
-            session_id, source = nado_sync._back_link_intent("0xabc")
+            session_id, source = nado_sync._back_link_intent("0xabc", "testnet")
         assert session_id is None
         assert source == "manual"
 

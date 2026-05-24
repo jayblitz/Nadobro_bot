@@ -6,6 +6,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.nadobro.handlers.orders_view import order_kind_label
 from src.nadobro.services.feature_flags import portfolio_sync_enabled, portfolio_sync_interval_seconds
 from src.nadobro.services.nado_sync import sync_user
 from src.nadobro.services.user_service import get_user
@@ -142,7 +143,9 @@ def render_portfolio_deck(
     lines.append("📋 Open Orders")
     for idx, order in enumerate(orders[:3], start=1):
         side = "📈" if str(order.get("side") or "").upper() in {"LONG", "BUY"} else "📉"
-        lines.append(f"{idx} ╱ {_order_symbol(order)} {side} LIMIT {money(_dec(order.get('price')))}")
+        lines.append(
+            f"{idx} ╱ {_order_symbol(order)} {side} {order_kind_label(order)} {money(_dec(order.get('price') or order.get('limit_price')))}"
+        )
     if not orders:
         lines.append("No open orders.")
     return "\n".join(lines)[:3500], portfolio_deck_kb(

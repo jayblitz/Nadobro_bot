@@ -861,7 +861,8 @@ async def _handle_portfolio(query, data, telegram_id):
 
     if action == "cancel_all_yes":
         await _edit_loc(query, "⏳ Cancelling open orders…")
-        from src.nadobro.handlers.portfolio_deck import render_portfolio_deck, snapshot_for_user
+        from src.nadobro.handlers.portfolio_deck import snapshot_for_user
+        from src.nadobro.handlers.positions_view import render_positions_view
 
         snapshot = await snapshot_for_user(telegram_id, force=True)
         client = await run_blocking(get_user_nado_client, telegram_id, snapshot.get("network"))
@@ -898,7 +899,9 @@ async def _handle_portfolio(query, data, telegram_id):
         if skipped:
             logger.warning("portfolio_cancel_all_skipped_orders user=%s skipped=%s", telegram_id, skipped)
         snapshot = await snapshot_for_user(telegram_id, force=True)
-        text, kb = render_portfolio_deck(snapshot)
+        from src.nadobro.handlers.positions_view import render_positions_view
+
+        text, kb = render_positions_view(snapshot)
         await _edit_loc(query, text, reply_markup=kb)
         return
 
@@ -991,11 +994,23 @@ async def _handle_portfolio(query, data, telegram_id):
             page = max(0, int(parts[2])) if len(parts) > 2 else 0
         except (TypeError, ValueError):
             page = 0
+        if not user:
+            await _edit_loc(
+                query,
+                "⚠ History unavailable — execution mode not set. Use /start to choose Testnet or Mainnet.",
+            )
+            return
         try:
             snapshot = await snapshot_for_user(telegram_id)
         except Exception as e:
             logger.warning("portfolio_history_snapshot_failed user=%s err=%s", telegram_id, e)
-            snapshot = {"network": mode_label or "MAINNET", "matches": []}
+            snapshot = {
+                "user_id": int(telegram_id),
+                "network": user.network_mode.value,
+                "matches": [],
+            }
+        if str(snapshot.get("network") or "").lower() != user.network_mode.value.lower():
+            snapshot["network"] = user.network_mode.value
         text, kb = render_history_view(snapshot, page=page)
         await _edit_loc(query, text, reply_markup=kb)
         return
@@ -1003,7 +1018,13 @@ async def _handle_portfolio(query, data, telegram_id):
     if action in ("analytics", "performance"):
         from src.nadobro.handlers.performance_view import render_performance_view
 
-        network = user.network_mode.value if user else "mainnet"
+        if not user:
+            await _edit_loc(
+                query,
+                "⚠ Performance unavailable — execution mode not set. Use /start to choose Testnet or Mainnet.",
+            )
+            return
+        network = user.network_mode.value
         page = 0
         if len(parts) > 2 and parts[2].isdigit():
             page = int(parts[2])
@@ -1013,6 +1034,10 @@ async def _handle_portfolio(query, data, telegram_id):
             logger.warning("portfolio_performance_failed user=%s err=%s", telegram_id, e)
             text, kb = "📊 Performance\n\nNo performance data available.", portfolio_analytics_kb()
         await _edit_loc(query, text, reply_markup=kb)
+        return
+
+    if action == "share_pnl" and not user:
+        await query.answer("Execution mode not set.", show_alert=True)
         return
 
     if action == "share_pnl":

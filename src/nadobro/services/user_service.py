@@ -116,6 +116,12 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     clear_client_cache()
     _readonly_cache.clear()
     invalidate_user_cache(telegram_id)
+    try:
+        from src.nadobro.services.nado_sync import clear_cache as _clear_portfolio_snapshot_cache
+
+        _clear_portfolio_snapshot_cache(int(telegram_id))
+    except Exception:
+        logger.debug("nado_sync cache clear failed on network switch user=%s", telegram_id, exc_info=True)
 
     addr = user.main_address
     if addr:

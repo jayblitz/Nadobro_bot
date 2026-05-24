@@ -1341,7 +1341,7 @@ def fmt_wallet_connect_card(pk_hex: str) -> str:
             _ui_section(
                 "Setup steps",
                 [
-                    "├ 1\\. Open https://app\\.nado\\.xyz, connect your wallet, and deposit at least $5 USDT0\\.",
+                    "├ 1\\. Open https://app\\.nado\\.xyz\\?join=FzpOSwX, connect your wallet, and deposit at least $5 USDT0\\.",
                     "├ 2\\. Go to *Settings → 1\\-Click Trading → Advanced 1CT*\\.",
                     "├ 3\\. Paste the trading key below into *1CT Private Key*:",
                     f"│ `{escape_md(pk_hex)}`",
