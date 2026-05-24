@@ -5,6 +5,7 @@ from src.nadobro.services.portfolio_calculator import (
     account_leverage,
     aggregate_trading_stats,
     clamp_margin_usage,
+    compute_total_equity,
     fill_price,
     funding_payment_label,
     funding_rate_conversions,
@@ -150,3 +151,79 @@ def test_aggregate_trading_stats_accepts_human_decimal_fallbacks():
     assert stats["total_fees"] == Decimal("0.25")
     assert stats["total_funding"] == Decimal("-1.5")
     assert stats["total_trades"] == 1
+
+
+def test_aggregate_trading_stats_emits_per_window_pnl_fees_and_funding():
+    """Portfolio workflow plan §4.1: Overview shows Volume + PnL together.
+
+    The aggregator MUST return per-window buckets for realized PnL, fees
+    and funding (in addition to volume). The Overview deck reads from
+    these buckets when the user toggles 24h / 7d / 30d / All.
+    """
+    now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+    fills = [
+        {
+            "quote_filled": str(to_x18("-1000")),
+            "fee": str(to_x18("3")),
+            "realized_pnl": str(to_x18("12")),
+            "filled_at": now - timedelta(hours=2),  # in 24h
+        },
+        {
+            "quote_filled": str(to_x18("500")),
+            "fee": str(to_x18("1")),
+            "realized_pnl": str(to_x18("-4")),
+            "filled_at": now - timedelta(days=3),  # in 7d, not 24h
+        },
+        {
+            "quote_filled": str(to_x18("250")),
+            "fee": str(to_x18("0.5")),
+            "realized_pnl": str(to_x18("2")),
+            "filled_at": now - timedelta(days=45),  # only in 'all'
+        },
+    ]
+    funding = [
+        {"amount": str(to_x18("2")), "timestamp": (now - timedelta(hours=4)).isoformat()},
+        {"amount": str(to_x18("-1.5")), "timestamp": (now - timedelta(days=15)).isoformat()},
+    ]
+
+    stats = aggregate_trading_stats(fills, funding, now=now)
+
+    assert stats["pnl_windows"]["24h"] == Decimal("12")
+    assert stats["pnl_windows"]["7d"] == Decimal("8")
+    assert stats["pnl_windows"]["30d"] == Decimal("8")
+    assert stats["pnl_windows"]["all"] == Decimal("10")
+
+    assert stats["fees_windows"]["24h"] == Decimal("3")
+    assert stats["fees_windows"]["7d"] == Decimal("4")
+    assert stats["fees_windows"]["all"] == Decimal("4.5")
+
+    assert stats["funding_windows"]["24h"] == Decimal("2")
+    assert stats["funding_windows"]["7d"] == Decimal("2")
+    assert stats["funding_windows"]["30d"] == Decimal("0.5")
+    assert stats["funding_windows"]["all"] == Decimal("0.5")
+
+
+def test_compute_total_equity_sums_spot_cross_and_isolated_buckets():
+    """User confirmed Q1: Total Balance = spot + cross + ALL isolated."""
+    equity = compute_total_equity(
+        {
+            "cross_equity": "1000",
+            "isolated_positions": [
+                {"margin_used": "250", "est_pnl": "5"},
+                {"net_margin": "100", "unrealized_pnl": "-10"},
+            ],
+        },
+        spot_balances={0: "500.50", 1: "12.75"},
+    )
+    assert equity["spot"] == Decimal("513.25")
+    assert equity["cross"] == Decimal("1000")
+    assert equity["isolated"] == Decimal("345")
+    assert equity["total"] == Decimal("1858.25")
+
+
+def test_compute_total_equity_falls_back_when_summary_missing_cross_field():
+    """compute_total_equity probes a list of cross-equity keys in priority
+    order. Older Nado payloads only carry ``net_value`` — verify that path."""
+    equity = compute_total_equity({"net_value": "742.5"}, spot_balances={})
+    assert equity["cross"] == Decimal("742.5")
+    assert equity["total"] == Decimal("742.5")

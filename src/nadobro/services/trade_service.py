@@ -177,12 +177,21 @@ def _is_close_order_type(order_type: str | None) -> bool:
 def _parse_trade_event_ts(raw) -> datetime | None:
     if not raw:
         return None
+    dt: datetime | None
     if isinstance(raw, datetime):
-        return raw
-    try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except Exception:
-        return None
+        dt = raw
+    else:
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        # Postgres rows often come back tz-naive; treat as UTC so we can subtract
+        # from tz-aware ``datetime.now(timezone.utc)`` without TypeError.
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
 
 
 def _normalize_trade_side(raw: str | None) -> str:
@@ -2649,7 +2658,7 @@ def get_trade_analytics(telegram_id: int, strategy_session_id: int | None = None
         total_fees += fee_value
         total_funding += funding_value
         if event_ts:
-            age = now - event_ts.replace(tzinfo=None) if event_ts.tzinfo else now - event_ts
+            age = now - event_ts
             if age <= timedelta(days=1):
                 volume_windows["24h"] += notional
             if age <= timedelta(days=7):
@@ -2694,3 +2703,163 @@ def get_account_and_performance_snapshot(telegram_id: int, prefer_cli: bool = Fa
         "account_error": account.get("error"),
         "performance": performance,
     }
+
+
+# ---------------------------------------------------------------------------
+# Round-trip aggregator for the History tab
+# ---------------------------------------------------------------------------
+def compute_round_trips(
+    telegram_id: int,
+    network: str,
+    *,
+    limit: int = 100,
+) -> list[dict]:
+    """FIFO-pair manual fills into round-trips.
+
+    Walks every ``trades_<network>`` row owned by ``telegram_id`` that is
+    NOT tagged with a ``strategy_session_id`` (i.e. text-to-trade,
+    manual buttons, or venue-sync rows that couldn't be back-linked to a
+    strategy intent). Lots are matched per
+    ``(product_id, isolated)`` with FIFO; each close emits a round-trip
+    record.
+
+    The result is sorted newest-first by ``close_ts`` and capped at
+    ``limit``. The ``trip_key`` is the close trade id (stable for the
+    Share PnL callback ``portfolio:share_pnl:rt:{key}``).
+    """
+    from src.nadobro.db import query_all as _query_all
+
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    try:
+        rows = _query_all(
+            f"""
+            SELECT id, product_id, product_name, side, status,
+                   COALESCE(fill_size, size, 0) AS sz,
+                   COALESCE(NULLIF(fill_price, 0), price, 0) AS px,
+                   COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0) AS fee,
+                   COALESCE(realized_pnl, pnl, 0) AS realized_pnl,
+                   COALESCE(funding_paid, 0) AS funding_paid,
+                   COALESCE(isolated, false) AS isolated,
+                   order_type,
+                   COALESCE(filled_at, created_at) AS ts
+            FROM {table}
+            WHERE user_id = %s
+              AND strategy_session_id IS NULL
+              AND COALESCE(source, 'manual') = 'manual'
+              AND status IN ('filled', 'closed', 'partially_filled')
+            ORDER BY COALESCE(filled_at, created_at) ASC, id ASC
+            """,
+            (int(telegram_id),),
+        )
+    except Exception:
+        logger.warning("compute_round_trips failed user=%s", telegram_id, exc_info=True)
+        return []
+
+    inventory: dict[tuple[int, bool], list[dict]] = {}
+    round_trips: list[dict] = []
+    for row in rows or []:
+        side = str(row.get("side") or "").lower()
+        order_type = str(row.get("order_type") or "").upper()
+        product_id = int(row.get("product_id") or 0)
+        isolated = bool(row.get("isolated"))
+        key = (product_id, isolated)
+        size = float(row.get("sz") or 0)
+        if size <= 0:
+            continue
+        price = float(row.get("px") or 0)
+        fee = float(row.get("fee") or 0)
+        realized = float(row.get("realized_pnl") or 0)
+        funding = float(row.get("funding_paid") or 0)
+        ts = row.get("ts")
+        product_name = str(row.get("product_name") or "")
+        # Reduce-only closes (close orders) always pop the FIFO regardless
+        # of side. Otherwise we pop opposite-side lots and queue same-side.
+        is_close = "CLOSE" in order_type
+        queued = inventory.setdefault(key, [])
+        existing_side = queued[0]["side"] if queued else None
+        opposite = existing_side and existing_side != side
+        if is_close or opposite:
+            remaining = size
+            close_fees = fee
+            close_realized = realized
+            close_funding = funding
+            open_lots: list[dict] = []
+            while remaining > 1e-12 and queued:
+                lot = queued[0]
+                take = min(lot["size"], remaining)
+                lot_share = take / lot["size"] if lot["size"] > 0 else 1.0
+                open_lots.append({
+                    "trade_id": lot["trade_id"],
+                    "size": take,
+                    "price": lot["price"],
+                    "ts": lot["ts"],
+                    "fees": lot["fees"] * lot_share,
+                    "funding": lot["funding"] * lot_share,
+                })
+                lot["size"] -= take
+                lot["fees"] -= lot["fees"] * lot_share
+                lot["funding"] -= lot["funding"] * lot_share
+                remaining -= take
+                if lot["size"] <= 1e-12:
+                    queued.pop(0)
+            if open_lots:
+                total_open_qty = sum(l["size"] for l in open_lots) or 1.0
+                avg_open = sum(l["price"] * l["size"] for l in open_lots) / total_open_qty
+                open_fees = sum(l["fees"] for l in open_lots)
+                open_funding = sum(l["funding"] for l in open_lots)
+                volume_usd = (total_open_qty * avg_open) + (size * price)
+                round_trips.append({
+                    "trip_key": str(row.get("id")),
+                    "product_id": product_id,
+                    "product_name": product_name,
+                    "pair": product_name,
+                    "isolated": isolated,
+                    "side": "long" if existing_side in ("long", "buy") else "short",
+                    "size": min(total_open_qty, size),
+                    "avg_open_price": avg_open,
+                    "avg_close_price": price,
+                    "open_ts": open_lots[0]["ts"],
+                    "close_ts": ts,
+                    "fees": open_fees + close_fees,
+                    "funding_paid": open_funding + close_funding,
+                    "realized_pnl": close_realized,
+                    "volume_usd": volume_usd,
+                })
+            if remaining > 1e-12:
+                # Close was bigger than inventory — record the leftover as
+                # an opening lot for the opposite side.
+                queued.append({
+                    "trade_id": int(row.get("id") or 0),
+                    "side": "long" if side in ("long", "buy") else "short",
+                    "size": remaining,
+                    "price": price,
+                    "fees": fee * (remaining / size),
+                    "funding": funding * (remaining / size),
+                    "ts": ts,
+                })
+        else:
+            queued.append({
+                "trade_id": int(row.get("id") or 0),
+                "side": side if side in ("long", "short", "buy", "sell") else "long",
+                "size": size,
+                "price": price,
+                "fees": fee,
+                "funding": funding,
+                "ts": ts,
+            })
+
+    round_trips.sort(key=lambda r: (r.get("close_ts") or ""), reverse=True)
+    return round_trips[: max(1, int(limit))]
+
+
+def find_round_trip(telegram_id: int, network: str, trip_key: str) -> dict | None:
+    """Return the single round-trip whose ``trip_key`` matches.
+
+    Uses :func:`compute_round_trips` so the result is consistent with the
+    History UI. Returns ``None`` when no match is found.
+    """
+    target = str(trip_key)
+    for trip in compute_round_trips(telegram_id, network, limit=500):
+        if str(trip.get("trip_key")) == target:
+            return trip
+    return None

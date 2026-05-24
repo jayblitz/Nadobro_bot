@@ -560,9 +560,13 @@ class NadoClient:
 
     def get_all_open_orders(self, refresh: bool = False) -> list[dict]:
         """
-        Fetch open orders for all perp products concurrently.
+        Fetch open orders for all perp products concurrently, across the
+        parent subaccount AND every discovered isolated-margin child
+        subaccount.
 
-        This avoids serial per-product REST calls on Portfolio refresh paths.
+        Without the isolated fan-out the Portfolio screen would silently
+        miss limit orders resting on isolated-margin markets (orders for
+        those markets rest on the child sender, not the parent).
         """
         product_pairs = []
         for name in get_perp_products(network=self.network, client=self):
@@ -573,21 +577,34 @@ class NadoClient:
         if not product_pairs:
             return []
 
+        senders: list[tuple[str | None, bool]] = [(None, False)]
+        try:
+            for iso in self._isolated_subaccount_hexes():
+                if iso:
+                    senders.append((str(iso), True))
+        except Exception as exc:
+            logger.debug("isolated open-order fan-out skipped: %s", exc, exc_info=True)
+
         rows: list[dict] = []
-        max_workers = max(1, min(len(product_pairs), _FANOUT_WORKERS))
+        max_workers = max(1, min(len(product_pairs) * max(1, len(senders)), _FANOUT_WORKERS))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(self.get_open_orders, pid, refresh): (name, pid)
-                for name, pid in product_pairs
-            }
+            futures = {}
+            for name, pid in product_pairs:
+                for sender_hex, is_iso in senders:
+                    futures[
+                        pool.submit(self.get_open_orders, pid, refresh, sender_hex)
+                    ] = (name, pid, sender_hex, is_iso)
             for fut in as_completed(futures):
-                _name, pid = futures[fut]
+                _name, pid, sender_hex, is_iso = futures[fut]
                 try:
                     for order in fut.result() or []:
                         normalized = dict(order)
                         normalized["product_id"] = int(normalized.get("product_id") or pid)
                         if not normalized.get("product_name"):
                             normalized["product_name"] = get_product_name(pid, network=self.network, client=self)
+                        if is_iso:
+                            normalized.setdefault("isolated", True)
+                            normalized.setdefault("subaccount", sender_hex)
                         rows.append(normalized)
                 except Exception:
                     continue

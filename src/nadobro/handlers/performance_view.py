@@ -16,45 +16,91 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CARD_TEMPLATE = PROJECT_ROOT / "assets" / "cards" / "session_card_template.png"
 
 
-def render_performance_view(user_id: int, network: str, limit: int = 5) -> tuple[str, InlineKeyboardMarkup]:
+PAGE_SIZE = 5
+
+
+def render_performance_view(
+    user_id: int,
+    network: str,
+    page: int = 0,
+    page_size: int = PAGE_SIZE,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Strategy-only performance, paginated 5 sessions per page.
+
+    Each card on the page shows the per-session stats from the workflow
+    plan: Strategy Mode, Pair, Volume Completed, Fees paid, Realized PnL
+    and Cost/$1M. Every card has its own Generate PnL button that calls
+    ``portfolio:share_pnl:{session_id}`` so the rendered image reflects
+    THAT specific session, not cumulative stats.
+    """
+    page = max(0, int(page))
+    offset = page * page_size
     sessions = query_all(
         """
         SELECT *
         FROM strategy_sessions
         WHERE user_id = %s AND network = %s
-        ORDER BY COALESCE(started_at, now()) DESC
-        LIMIT %s
+        ORDER BY COALESCE(stopped_at, started_at, now()) DESC
+        LIMIT %s OFFSET %s
         """,
-        (int(user_id), network, int(limit)),
+        (int(user_id), network, int(page_size) + 1, int(offset)),
     )
-    latest = sessions[0] if sessions else {}
-    state = "🟢 RUNNING" if str(latest.get("status") or "").lower() == "running" else "⏹ ENDED"
-    pnl = _dec(latest.get("realized_pnl") or latest.get("total_pnl") or 0)
-    wins = int(latest.get("win_count") or 0)
-    losses = int(latest.get("loss_count") or 0)
-    total = max(1, wins + losses)
-    win_rate = Decimal(wins) / Decimal(total) * Decimal(100) if wins + losses else Decimal("0")
+    has_next = len(sessions) > page_size
+    sessions = sessions[:page_size]
 
     lines = [
-        f"📊 Performance · {network.upper()}",
+        f"📊 Performance · {network.upper()}  (page {page + 1})",
         divider(),
-        f"Latest session: {latest.get('strategy_label') or latest.get('strategy') or '—'} · {state}",
-        f"🕐 Started {_fmt_dt(latest.get('started_at'))} · ⏱ {_duration(latest)}",
-        f"{'🟢' if pnl >= 0 else '🔴'} PnL {signed(pnl)}    🏆 Win {win_rate:.1f}%",
-        "",
-        "📈 Past Sessions",
     ]
-    for idx, row in enumerate(sessions, start=1):
-        label = row.get("strategy_label") or row.get("strategy") or f"Session {row.get('id')}"
-        lines.append(f"{idx} ╱ {label} {signed(_dec(row.get('realized_pnl') or 0))}")
+    rows: list[list[InlineKeyboardButton]] = []
     if not sessions:
         lines.append("No strategy sessions yet.")
-    rows = [
-        [InlineKeyboardButton("📤 Generate PnL Card", callback_data="portfolio:share_pnl")],
-        [InlineKeyboardButton("📜 History", callback_data="portfolio:history")],
-        [InlineKeyboardButton("⬅ Portfolio", callback_data="portfolio:view")],
-    ]
+    for idx, session in enumerate(sessions, start=1):
+        rows.extend(_render_session_card(lines, session, page * page_size + idx))
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ Back", callback_data=f"portfolio:performance:{page - 1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("Next ➡", callback_data=f"portfolio:performance:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("📜 History", callback_data="portfolio:history")])
+    rows.append([InlineKeyboardButton("⬅ Portfolio", callback_data="portfolio:view")])
     return "\n".join(lines)[:3500], InlineKeyboardMarkup(rows)
+
+
+def _render_session_card(
+    lines: list[str], session: dict[str, Any], display_idx: int
+) -> list[list[InlineKeyboardButton]]:
+    sid = int(session.get("id") or 0)
+    strategy = str(session.get("strategy") or "—")
+    pair = str(session.get("product_name") or "—")
+    volume = _dec(session.get("total_volume_usd") or 0)
+    fees = abs(_dec(session.get("total_fees_paid") or 0))
+    funding = _dec(session.get("total_funding_paid") or 0)
+    pnl = _dec(session.get("realized_pnl") or 0)
+    state = str(session.get("status") or "stopped").lower()
+    badge = "🟢 RUNNING" if state == "running" else "⏹ ENDED"
+    cost_per_million = (
+        (fees + abs(funding)) / volume * Decimal("1000000") if volume > 0 else Decimal("0")
+    )
+
+    lines.extend([
+        f"#{display_idx} · {strategy.upper()} · {pair} · {badge}",
+        f"   🕐 {_fmt_dt(session.get('started_at'))} · ⏱ {_duration(session)}",
+        f"   💰 Volume {money(volume)}",
+        f"   🏷 Fees -{money(fees)}    🔵 Funding {signed(funding)}",
+        f"   🏆 Realized PnL {signed(pnl)}",
+        f"   📐 Cost/$1M {money(cost_per_million)}",
+        "",
+    ])
+    return [[
+        InlineKeyboardButton(
+            f"📤 Generate PnL Card · #{display_idx}",
+            callback_data=f"portfolio:share_pnl:{sid}",
+        )
+    ]]
 
 
 def ensure_session_card_template(path: Path = CARD_TEMPLATE) -> Path:

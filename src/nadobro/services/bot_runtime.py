@@ -36,7 +36,7 @@ from src.nadobro.config import (
 from src.nadobro.models.database import (
     get_bot_state_raw, set_bot_state,
     insert_strategy_session, update_strategy_session, increment_session_metrics,
-    get_running_strategy_sessions,
+    get_running_strategy_sessions, rollup_session_from_trades,
 )
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
@@ -594,11 +594,37 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
         return None
 
 
+def _resolve_session_network(state: dict) -> str:
+    """Resolve the network for ``state`` for session rollup.
+
+    ``state`` is keyed externally by ``(telegram_id, network)`` and does not
+    currently carry the network inline. We probe a few common fields and
+    fall back to ``mainnet`` so the rollup never crashes the stop path.
+    """
+    for key in ("network", "network_mode", "selected_network", "active_network"):
+        val = state.get(key) if isinstance(state, dict) else None
+        if val:
+            text = str(val).lower()
+            return "testnet" if text == "testnet" else "mainnet"
+    return "mainnet"
+
+
 def _finalize_session(state: dict, stop_reason: str = "stopped"):
-    """Mark the strategy session as completed/stopped."""
+    """Mark the strategy session as completed/stopped.
+
+    Belt + suspenders: in addition to writing the status/stop_reason, re-run
+    a rollup from ``trades_<network>`` so the persisted card numbers reflect
+    every tagged fill — even late-arriving venue-sync rows. The status write
+    happens AFTER the rollup so a rollup error doesn't leave the row open.
+    """
     session_id = state.get("strategy_session_id")
     if not session_id:
         return
+    network = _resolve_session_network(state)
+    try:
+        rollup_session_from_trades(int(session_id), network)
+    except Exception as exc:
+        logger.warning("Session rollup failed #%s: %s", session_id, exc)
     try:
         update_strategy_session(int(session_id), {
             "status": "completed" if stop_reason in ("tp_hit", "target_reached", "target_volume_hit") else "stopped",
@@ -868,6 +894,9 @@ def start_user_bot(
     )
     if session_id:
         state["strategy_session_id"] = session_id
+    # Persist network on state so _finalize_session can rollup against the
+    # correct trades_<network> table after stop.
+    state["network"] = "testnet" if str(network).lower() == "testnet" else "mainnet"
     _save_state(telegram_id, network, state)
     _ensure_task(telegram_id, network)
     if strategy == "dn":

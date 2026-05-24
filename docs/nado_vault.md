@@ -77,7 +77,7 @@ client.market.burn_nlp(params)
 Two helpers cover state we read but don't sign:
 
 ```python
-client.get_nlp_position()  # REST `nlp_position` query — LP balance + NAV
+client.get_nlp_position()  # composed locally from `nlp_locked_balances` + spot balance + oracle price (gateway no longer exposes `nlp_position`)
 client.get_nlp_pool_info() # REST `nlp_pool_info` query — TVL / pool stats
 ```
 

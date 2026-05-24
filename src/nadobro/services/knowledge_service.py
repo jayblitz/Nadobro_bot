@@ -834,7 +834,9 @@ def _score_tweet_for_query(tweet: dict, question: str) -> float:
     if created_at:
         try:
             dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            age_hours = max(0.0, (datetime.now(timezone.utc) - dt.replace(tzinfo=None)).total_seconds() / 3600.0)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age_hours = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
             score += max(0.0, 2.0 - min(age_hours / 72.0, 2.0))
         except Exception:
             pass

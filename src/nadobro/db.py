@@ -676,6 +676,12 @@ def init_db():
                     stop_reason TEXT,
                     error_message TEXT
                 );
+                -- migrations/0010_portfolio_workflow.sql: persist win/loss
+                -- counters for per-session performance cards.
+                ALTER TABLE strategy_sessions
+                    ADD COLUMN IF NOT EXISTS win_count INT NOT NULL DEFAULT 0;
+                ALTER TABLE strategy_sessions
+                    ADD COLUMN IF NOT EXISTS loss_count INT NOT NULL DEFAULT 0;
                 CREATE INDEX IF NOT EXISTS idx_strategy_sessions_user
                     ON strategy_sessions (user_id, network, strategy);
                 CREATE INDEX IF NOT EXISTS idx_strategy_sessions_status
@@ -797,6 +803,10 @@ def init_db():
                 ALTER TABLE positions ADD COLUMN IF NOT EXISTS time_limit TIMESTAMPTZ NULL;
                 ALTER TABLE positions ADD COLUMN IF NOT EXISTS time_limit_source TEXT NULL;
                 ALTER TABLE positions ADD COLUMN IF NOT EXISTS time_limit_fired_at TIMESTAMPTZ NULL;
+                -- migrations/0010_portfolio_workflow.sql: Nado summary often
+                -- omits leverage on cross/isolated rows; accept NULL to avoid
+                -- portfolio sync write failures.
+                ALTER TABLE positions ALTER COLUMN leverage DROP NOT NULL;
                 CREATE UNIQUE INDEX IF NOT EXISTS positions_unique_open
                     ON positions (user_id, network, COALESCE(product_id, 0), isolated)
                     WHERE closed_at IS NULL;
