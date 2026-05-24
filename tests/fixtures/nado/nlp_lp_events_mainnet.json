@@ -1,0 +1,94 @@
+{
+  "events": [
+    {
+      "subaccount": "0xd476f83a84fea9a4f3da67a322f5873338784d9564656661756c740000000000",
+      "product_id": 0,
+      "submission_idx": "55892294",
+      "event_type": "mint_nlp",
+      "pre_balance": {
+        "spot": {
+          "product_id": 0,
+          "balance": {"amount": "53348927603841273717"}
+        }
+      },
+      "post_balance": {
+        "spot": {
+          "product_id": 0,
+          "balance": {"amount": "44348927603841273715"}
+        }
+      }
+    },
+    {
+      "subaccount": "0xd476f83a84fea9a4f3da67a322f5873338784d9564656661756c740000000000",
+      "product_id": 11,
+      "submission_idx": "55892294",
+      "event_type": "mint_nlp",
+      "pre_balance": {
+        "spot": {
+          "product_id": 11,
+          "balance": {"amount": "141067096220719470946"}
+        }
+      },
+      "post_balance": {
+        "spot": {
+          "product_id": 11,
+          "balance": {"amount": "148669149301578362175"}
+        }
+      },
+      "product": {
+        "spot": {
+          "product_id": 11,
+          "oracle_price_x18": "1052347295514562250"
+        }
+      }
+    },
+    {
+      "subaccount": "0xe23344c1111746efb9fa95f66201ca0ba5237d1c64656661756c740000000000",
+      "product_id": 11,
+      "submission_idx": "55883264",
+      "event_type": "burn_nlp",
+      "pre_balance": {
+        "spot": {
+          "product_id": 11,
+          "balance": {"amount": "99688103863839872486"}
+        }
+      },
+      "post_balance": {
+        "spot": {
+          "product_id": 11,
+          "balance": {"amount": "0"}
+        }
+      },
+      "product": {
+        "spot": {
+          "product_id": 11,
+          "oracle_price_x18": "1052437404435342698"
+        }
+      }
+    }
+  ],
+  "txs": [
+    {
+      "tx": {
+        "mint_nlp": {
+          "sender": "0xd476f83a84fea9a4f3da67a322f5873338784d9564656661756c740000000000",
+          "quote_amount": "8000000000000000000",
+          "nonce": 27
+        }
+      },
+      "submission_idx": "55892294",
+      "timestamp": "1779642877"
+    },
+    {
+      "tx": {
+        "burn_nlp": {
+          "sender": "0xe23344c1111746efb9fa95f66201ca0ba5237d1c64656661756c740000000000",
+          "nlp_amount": "99688103863839872486",
+          "nonce": 4
+        }
+      },
+      "submission_idx": "55883264",
+      "timestamp": "1779639331"
+    }
+  ]
+}

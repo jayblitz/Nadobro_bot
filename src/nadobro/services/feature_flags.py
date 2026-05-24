@@ -29,6 +29,18 @@ def portfolio_ws_enabled() -> bool:
     return env_flag("NADO_PORTFOLIO_WS", False)
 
 
+def vault_deposit_watch_enabled() -> bool:
+    return env_flag("NADO_VAULT_DEPOSIT_WATCH", True)
+
+
+def vault_deposit_watch_interval_seconds() -> int:
+    raw = (os.environ.get("NADO_VAULT_DEPOSIT_WATCH_SECONDS") or "60").strip()
+    try:
+        return max(30, int(float(raw)))
+    except ValueError:
+        return 60
+
+
 def portfolio_sync_interval_seconds() -> int:
     raw = (os.environ.get("NADO_PORTFOLIO_SYNC_SECONDS") or "30").strip()
     try:

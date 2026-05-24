@@ -401,10 +401,42 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_alerts_{net}_active ON alerts_{net} (user_id, is_active);
         """
+        _NETWORK_VAULT_WATCH_DDL = """
+            CREATE TABLE IF NOT EXISTS vault_deposit_watch_{net} (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL UNIQUE,
+                enabled BOOLEAN NOT NULL DEFAULT false,
+                last_seen_mintable_usdt0 DOUBLE PRECISION NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_vault_deposit_watch_{net}_enabled
+                ON vault_deposit_watch_{net} (enabled) WHERE enabled = true;
+        """
+        _NETWORK_VAULT_LP_EVENTS_DDL = """
+            CREATE TABLE IF NOT EXISTS vault_lp_events_{net} (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                event_type TEXT NOT NULL,
+                quote_usdt0 DOUBLE PRECISION,
+                nlp_amount DOUBLE PRECISION,
+                submission_idx TEXT,
+                tx_digest TEXT,
+                event_ts TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                CHECK (event_type IN ('mint', 'burn'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_vault_lp_events_{net}_user
+                ON vault_lp_events_{net} (user_id, event_ts DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_lp_events_{net}_dedupe
+                ON vault_lp_events_{net} (user_id, event_type, submission_idx)
+                WHERE submission_idx IS NOT NULL;
+        """
         with conn.cursor() as cur:
             for net in ("testnet", "mainnet"):
                 cur.execute(_NETWORK_TRADES_DDL.format(net=net))
                 cur.execute(_NETWORK_ALERTS_DDL.format(net=net))
+                cur.execute(_NETWORK_VAULT_WATCH_DDL.format(net=net))
+                cur.execute(_NETWORK_VAULT_LP_EVENTS_DDL.format(net=net))
             conn.commit()
             logger.info("Network-specific tables (trades_testnet/mainnet, alerts_testnet/mainnet) verified/created")
 

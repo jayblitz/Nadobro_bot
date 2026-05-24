@@ -276,9 +276,11 @@ async def run_bot():
     from src.nadobro.services.execution_queue import register_handlers, start_workers, stop_workers
     from src.nadobro.services.copy_service import set_copy_bot_app
     from src.nadobro.services.copy_service import start_copy_polling, stop_copy_polling
+    from src.nadobro.services.vault_deposit_watch_service import set_vault_watch_bot_app
     set_bot_app(bot_app)
     set_runtime_app(bot_app)
     set_copy_bot_app(bot_app)
+    set_vault_watch_bot_app(bot_app)
     register_handlers(handle_strategy_job, handle_alert_job)
     _sw = int(os.environ.get("NADO_STRATEGY_WORKERS", "2"))
     start_workers(
