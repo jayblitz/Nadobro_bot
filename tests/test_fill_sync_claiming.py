@@ -124,3 +124,37 @@ def test_sync_pending_fills_does_not_cancel_after_digest_poll_hits_rate_limit():
     update_trade.assert_not_called()
     resolve_fill_sync.assert_not_called()
     client.get_open_orders.assert_not_called()
+
+
+def test_market_snapshot_helpers_are_defined():
+    """AUDIT-FIX-SCH-2 regression: a main-branch merge deleted the
+    ``_market_snapshot_lock_get`` helper while leaving the call site in
+    ``_get_market_snapshot``. The result was a ``NameError`` raised on every
+    alert-tick and price-tracker tick (every 5s in production)."""
+    from src.nadobro.services import scheduler
+
+    assert callable(getattr(scheduler, "_market_snapshot_lock_get", None))
+    assert hasattr(scheduler, "_get_market_snapshot")
+
+    lock = scheduler._market_snapshot_lock_get()
+    assert isinstance(lock, asyncio.Lock)
+    assert scheduler._market_snapshot_lock_get() is lock
+
+
+def test_get_market_snapshot_returns_cached_prices_without_nameerror():
+    """The actual call site that was raising in production. Force a cached
+    hit so we don't need a real check client."""
+    from src.nadobro.services import scheduler
+
+    cached = {"BTC-PERP": 100.0}
+    with (
+        patch.object(scheduler, "_check_client", MagicMock()),
+        patch.object(
+            scheduler,
+            "_last_market_snapshot",
+            {"ts": float("inf"), "prices": cached},
+        ),
+    ):
+        result = asyncio.run(scheduler._get_market_snapshot())
+
+    assert result == cached
