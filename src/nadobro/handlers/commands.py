@@ -256,7 +256,7 @@ async def cmd_stop_all(update: Update, context: CallbackContext):
         return
     with language_context(get_user_language(telegram_id)):
         lang = get_active_language()
-        ok, msg = stop_all_automation_for_user(telegram_id)
+        ok, msg = await run_blocking(stop_all_automation_for_user, telegram_id)
         hint_ok = localize_text(
             "Give Nado a few seconds to sync, then confirm open orders and positions in Positions.",
             lang,

@@ -255,6 +255,7 @@ def _flatten_mirror_positions(mirror_id: int, user_id: int, network: str, reason
                 enforce_rate_limit=False,
                 reduce_only=True,
                 source="copy",
+                network=network,
             )
             if not result.get("success"):
                 errors.append(f"{product_name}: {result.get('error', 'close failed')}")

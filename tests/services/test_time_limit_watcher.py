@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 
-from src.nadobro.services.time_limit_watcher import time_limit_tick
+from src.nadobro.services.time_limit_watcher import _close_position, time_limit_tick
 
 
 def test_time_limit_tick_enqueues_claimed_rows(monkeypatch):
@@ -18,3 +18,29 @@ def test_time_limit_tick_enqueues_claimed_rows(monkeypatch):
     asyncio.run(time_limit_tick())
     assert any("time-limit-position" in key for _payload, key in enqueued)
     assert any("time-limit-order" in key for _payload, key in enqueued)
+
+
+def test_time_limit_close_uses_claimed_row_network(monkeypatch):
+    calls = []
+
+    def fake_execute_market_order(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"success": True, "network": kwargs.get("network")}
+
+    monkeypatch.setattr("src.nadobro.services.time_limit_watcher.execute_market_order", fake_execute_market_order)
+
+    asyncio.run(
+        _close_position(
+            {
+                "user_id": 77,
+                "pair": "BTC-PERP",
+                "size": "0.5",
+                "side": "long",
+                "leverage": 2,
+            },
+            "testnet",
+        )
+    )
+
+    assert calls
+    assert calls[0][1]["network"] == "testnet"

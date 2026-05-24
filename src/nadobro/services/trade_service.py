@@ -420,19 +420,20 @@ def validate_trade(
     leverage: float = 1.0,
     enforce_rate_limit: bool = True,
     reduce_only: bool = False,
+    network: str | None = None,
 ) -> tuple[bool, str]:
     user_obj = get_user(telegram_id)
-    network = user_obj.network_mode.value if user_obj else "mainnet"
-    client = get_user_readonly_client(telegram_id)
-    product_id = get_product_id(product, network=network, client=client)
+    selected_network = str(network or (user_obj.network_mode.value if user_obj else "mainnet"))
+    client = get_user_readonly_client(telegram_id, network=selected_network)
+    product_id = get_product_id(product, network=selected_network, client=client)
     if product_id is None:
-        available = ", ".join(get_perp_products(network=network, client=client))
+        available = ", ".join(get_perp_products(network=selected_network, client=client))
         return False, f"Unknown product '{product}'. Available: {available}"
 
     if size <= 0:
         return False, "Trade size must be positive."
 
-    max_leverage = get_product_max_leverage(product, network=network, client=client)
+    max_leverage = get_product_max_leverage(product, network=selected_network, client=client)
     # Tolerance for float jitter when strategies coerce to per-asset MAX (e.g. 50.0
     # vs. catalog returning 49.999999 from a derived weight).
     if leverage > max_leverage + 1e-9:
@@ -478,7 +479,7 @@ def validate_trade(
             )
 
     if enforce_rate_limit:
-        allowed, msg = check_rate_limit(telegram_id, network=network)
+        allowed, msg = check_rate_limit(telegram_id, network=selected_network)
         if not allowed:
             return False, msg
 
@@ -498,6 +499,7 @@ def execute_market_order(
     source: str = "manual",
     strategy_session_id: int = None,
     reduce_only: bool = False,
+    network: str | None = None,
     **kwargs,
 ) -> dict:
     builder_route = _builder_route_payload()
@@ -511,16 +513,18 @@ def execute_market_order(
         leverage,
         enforce_rate_limit=enforce_rate_limit,
         reduce_only=bool(reduce_only),
+        network=network,
     )
     if not valid:
         return {"success": False, "error": msg}
 
     user = get_user(telegram_id)
-    network = user.network_mode.value if user else "mainnet"
-    product_id = get_product_id(product, network=network)
-    client = get_user_nado_client(telegram_id)
+    selected_network = str(network or (user.network_mode.value if user else "mainnet"))
+    product_id = get_product_id(product, network=selected_network)
+    client = get_user_nado_client(telegram_id, network=selected_network)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
+    network = selected_network
 
     intent_id = kwargs.get("intent_id")
     order_nonce = kwargs.get("order_nonce") or kwargs.get("client_order_id") or kwargs.get("idempotency_key")
@@ -532,7 +536,7 @@ def execute_market_order(
 
             intent_id = build_intent_id(
                 user_id=telegram_id,
-                network=network,
+                network=selected_network,
                 strategy_session_id=strategy_session_id,
                 source=source,
                 product=product,
@@ -551,7 +555,7 @@ def execute_market_order(
                 intent_id,
                 {
                     "user_id": telegram_id,
-                    "network": network,
+                    "network": selected_network,
                     "strategy_session_id": strategy_session_id,
                     "source": source,
                     "product": product,
@@ -583,7 +587,7 @@ def execute_market_order(
     trade_data = {
         "user_id": telegram_id,
         "product_id": product_id,
-        "product_name": get_product_name(product_id, network=network),
+        "product_name": get_product_name(product_id, network=selected_network),
         "order_type": OrderTypeEnum.MARKET.value,
         "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
         "size": size,
@@ -594,7 +598,7 @@ def execute_market_order(
     }
     if strategy_session_id:
         trade_data["strategy_session_id"] = strategy_session_id
-    trade_id = insert_trade(trade_data, network=network)
+    trade_id = insert_trade(trade_data, network=selected_network)
     if not trade_id:
         return {"success": False, "error": "Failed to record trade."}
     if intent_id:
@@ -754,7 +758,7 @@ def execute_market_order(
             "product": get_product_name(product_id, network=network),
             "price": exec_px,
             "digest": result.get("digest"),
-            "network": user.network_mode.value,
+            "network": network,
             "trade_id": trade_id,
         }
         if exec_fee is not None and float(exec_fee or 0) >= 0:
