@@ -67,7 +67,7 @@ def mark_user_active(user_id: int) -> None:
 def active_users() -> list[dict[str, Any]]:
     return query_all(
         """
-        SELECT DISTINCT u.telegram_id, u.network_mode AS network
+        SELECT u.telegram_id, u.network_mode AS network, u.last_active
         FROM users u
         WHERE u.main_address IS NOT NULL
           AND (

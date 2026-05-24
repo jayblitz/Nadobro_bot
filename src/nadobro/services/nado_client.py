@@ -2293,7 +2293,14 @@ class NadoClient:
             quote_amount_x18 = int(round(float(usdt0_amount) * 1e18))
             if quote_amount_x18 <= 0:
                 return {"success": False, "error": "Deposit amount rounds to zero. Try a larger amount."}
-            params = MintNlpParams(quoteAmount=quote_amount_x18, spot_leverage=bool(spot_leverage))
+            sender_hex = self.subaccount_hex or ""
+            if not sender_hex:
+                return {"success": False, "error": "Subaccount unavailable. Re-link your wallet via /start."}
+            params = MintNlpParams(
+                sender=sender_hex,
+                quoteAmount=quote_amount_x18,
+                spot_leverage=bool(spot_leverage),
+            )
             resp = self.client.market.mint_nlp(params)
             digest = getattr(resp, "digest", None) or getattr(resp, "tx_hash", None)
             return {
@@ -2322,7 +2329,10 @@ class NadoClient:
             nlp_amount_x18 = int(round(float(nlp_amount) * 1e18))
             if nlp_amount_x18 <= 0:
                 return {"success": False, "error": "Withdraw amount rounds to zero. Try a larger amount."}
-            params = BurnNlpParams(nlpAmount=nlp_amount_x18)
+            sender_hex = self.subaccount_hex or ""
+            if not sender_hex:
+                return {"success": False, "error": "Subaccount unavailable. Re-link your wallet via /start."}
+            params = BurnNlpParams(sender=sender_hex, nlpAmount=nlp_amount_x18)
             resp = self.client.market.burn_nlp(params)
             digest = getattr(resp, "digest", None) or getattr(resp, "tx_hash", None)
             return {

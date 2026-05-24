@@ -68,7 +68,7 @@ def remove_copy_trader(admin_id: int, trader_id: int) -> tuple[bool, str]:
     if not is_admin(admin_id):
         return False, "Unauthorized."
     from src.nadobro.services.copy_service import remove_trader
-    ok, msg = remove_trader(trader_id)
+    ok, msg = remove_trader(trader_id, requester_user_id=admin_id, is_admin=True)
     if ok:
         log_admin_action(admin_id, "remove_copy_trader", f"trader_id={trader_id}")
     return ok, msg

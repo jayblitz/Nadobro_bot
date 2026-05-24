@@ -485,6 +485,34 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_copy_traders_active ON copy_traders (active);
 
+            -- migrations/0011_copy_trader_owner.sql: privacy scoping for custom
+            -- copy-trade wallets. owner_user_id IS NULL = public/curated entry
+            -- (admin-managed); otherwise the row is private to that telegram
+            -- user. Old single-column UNIQUE constraint on wallet_address
+            -- (which leaks visibility between users) is replaced by two
+            -- partial unique indexes.
+            ALTER TABLE copy_traders
+                ADD COLUMN IF NOT EXISTS owner_user_id BIGINT;
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'copy_traders_wallet_address_key'
+                ) THEN
+                    ALTER TABLE copy_traders
+                        DROP CONSTRAINT copy_traders_wallet_address_key;
+                END IF;
+            END $$;
+            CREATE UNIQUE INDEX IF NOT EXISTS copy_traders_curated_wallet_uq
+                ON copy_traders (wallet_address)
+                WHERE owner_user_id IS NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS copy_traders_owner_wallet_uq
+                ON copy_traders (owner_user_id, wallet_address)
+                WHERE owner_user_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_copy_traders_owner
+                ON copy_traders (owner_user_id)
+                WHERE owner_user_id IS NOT NULL;
+
             CREATE TABLE IF NOT EXISTS copy_mirrors (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,

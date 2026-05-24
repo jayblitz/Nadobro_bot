@@ -17,7 +17,11 @@ def test_reduce_only_validation_skips_opening_margin_check(monkeypatch):
         "get_user",
         lambda telegram_id: SimpleNamespace(network_mode=SimpleNamespace(value="mainnet")),
     )
-    monkeypatch.setattr(trade_service, "get_user_readonly_client", lambda telegram_id: _ReadonlyClient())
+    monkeypatch.setattr(
+        trade_service,
+        "get_user_readonly_client",
+        lambda telegram_id, **kwargs: _ReadonlyClient(),
+    )
     monkeypatch.setattr(trade_service, "get_product_id", lambda *args, **kwargs: 1)
     monkeypatch.setattr(trade_service, "get_product_max_leverage", lambda *args, **kwargs: 10)
     monkeypatch.setattr(trade_service, "ensure_active_wallet_ready", lambda telegram_id: (True, ""))
