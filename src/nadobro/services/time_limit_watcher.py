@@ -71,6 +71,7 @@ async def _close_position(row: dict, network: str) -> None:
         "time_limit",
         None,
         True,
+        network=network,
     )
     await _notify(user_id, f"Time-limit auto-close fired for {symbol}-PERP ({network}).\nReceipt: {result}")
 

@@ -425,7 +425,7 @@ async def _handle_mode(query, data, telegram_id, context=None):
                 raise
         return
 
-    success, result_msg = switch_network(telegram_id, target_network)
+    success, result_msg = await run_blocking(switch_network, telegram_id, target_network)
     if success:
         network_label = "🧪 TESTNET" if target_network == "testnet" else "🌐 MAINNET"
         await _edit_loc(query,
@@ -1129,7 +1129,7 @@ async def _handle_wallet(query, data, telegram_id, context):
         if net not in ("testnet", "mainnet"):
             return
 
-        success, result_msg = switch_network(telegram_id, net)
+        success, result_msg = await run_blocking(switch_network, telegram_id, net)
 
         if success:
             info = get_user_wallet_info(telegram_id)
