@@ -2318,45 +2318,179 @@ class NadoClient:
             logger.error("burn_nlp failed user=%s err=%s", _mask_address(self.address or ""), e)
             return {"success": False, "error": self._friendly_error(str(e))}
 
-    def get_nlp_position(self) -> dict:
-        """Return the user's NLP position (LP balance + USDT0 equivalent).
+    @staticmethod
+    def _x18_to_float(value) -> float:
+        if value is None or value == "":
+            return 0.0
+        try:
+            v = float(int(value)) / 1e18
+            return v
+        except (TypeError, ValueError):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
 
-        Uses the REST `nlp_position` query when available, falling back to the
-        spot-balance lookup for the NLP product (product_id = 1) so we always
-        surface *something* useful in the Vault card.
+    def resolve_nlp_product_id(self) -> int | None:
+        """Discover the NLP spot product id from all_products (cached per client)."""
+        cached = getattr(self, "_nlp_product_id", None)
+        if cached is not None:
+            return cached
+        override = os.environ.get("NADO_NLP_PRODUCT_ID")
+        if override:
+            try:
+                self._nlp_product_id = int(override)
+                return self._nlp_product_id
+            except ValueError:
+                pass
+        default = 11 if self.network == "mainnet" else 1
+        try:
+            payload = self._query_rest("all_products") or {}
+            data = payload.get("data") or payload
+            for sp in data.get("spot_products") or []:
+                if not isinstance(sp, dict):
+                    continue
+                pid = sp.get("product_id")
+                book = sp.get("book_info") or {}
+                min_size = str(book.get("min_size") or "")
+                # NLP spot uses large min_size increments on mainnet.
+                if pid is not None and min_size.startswith("100000000000000000"):
+                    self._nlp_product_id = int(pid)
+                    return self._nlp_product_id
+        except Exception as e:
+            logger.debug("resolve_nlp_product_id failed network=%s err=%s", self.network, e)
+        self._nlp_product_id = default
+        return self._nlp_product_id
+
+    def _spot_balance_amount(self, product_id: int) -> float:
+        try:
+            payload = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
+            data = payload.get("data") or payload
+            for row in data.get("spot_balances") or data.get("spotBalances") or []:
+                if not isinstance(row, dict):
+                    continue
+                pid = row.get("product_id")
+                if int(pid) != int(product_id):
+                    continue
+                bal = row.get("balance") or {}
+                return self._x18_to_float(bal.get("amount"))
+        except Exception as e:
+            logger.debug("spot_balance_amount failed pid=%s err=%s", product_id, e)
+        return 0.0
+
+    def _nlp_oracle_price(self, nlp_product_id: int) -> float:
+        try:
+            payload = self._query_rest("all_products") or {}
+            data = payload.get("data") or payload
+            for sp in data.get("spot_products") or []:
+                if not isinstance(sp, dict):
+                    continue
+                if int(sp.get("product_id") or -1) != int(nlp_product_id):
+                    continue
+                price_x18 = (
+                    sp.get("oracle_price_x18")
+                    or (sp.get("risk") or {}).get("price_x18")
+                )
+                px = self._x18_to_float(price_x18)
+                return px if px > 0 else 1.0
+        except Exception as e:
+            logger.debug("nlp_oracle_price failed err=%s", e)
+        return 1.0
+
+    def get_nlp_locked_balances(self) -> dict:
+        """Return locked/unlocked NLP balances and per-lock unlock timestamps."""
+        empty = {
+            "balance_locked": 0.0,
+            "balance_unlocked": 0.0,
+            "locked_entries": [],
+        }
+        try:
+            payload = self._query_rest(
+                "nlp_locked_balances", {"subaccount": self.subaccount_hex},
+            ) or {}
+            data = payload.get("data") or payload
+            locked = data.get("balance_locked") or {}
+            unlocked = data.get("balance_unlocked") or {}
+            entries = []
+            for row in data.get("locked_balances") or []:
+                if not isinstance(row, dict):
+                    continue
+                bal = (row.get("balance") or {}).get("balance") or {}
+                entries.append({
+                    "amount": self._x18_to_float(bal.get("amount")),
+                    "unlocked_at": int(row.get("unlocked_at") or 0),
+                })
+            return {
+                "balance_locked": self._x18_to_float((locked.get("balance") or {}).get("amount")),
+                "balance_unlocked": self._x18_to_float((unlocked.get("balance") or {}).get("amount")),
+                "locked_entries": entries,
+            }
+        except Exception as e:
+            logger.debug("nlp_locked_balances failed user=%s err=%s", _mask_address(self.address or ""), e)
+            return empty
+
+    def get_max_nlp_mintable(self, *, spot_leverage: bool = False) -> dict:
+        """Maximum USDT0 the user can mint into NLP right now."""
+        try:
+            payload = self._query_rest(
+                "max_nlp_mintable",
+                {
+                    "sender": self.subaccount_hex,
+                    "spot_leverage": "true" if spot_leverage else "false",
+                },
+            ) or {}
+            data = payload.get("data") or payload
+            amount_x18 = data.get("max_quote_amount") or 0
+            return {
+                "max_mintable_usdt0": self._x18_to_float(amount_x18),
+                "raw": data,
+            }
+        except Exception as e:
+            logger.debug("max_nlp_mintable failed user=%s err=%s", _mask_address(self.address or ""), e)
+            return {"max_mintable_usdt0": 0.0, "raw": {}}
+
+    def get_nlp_position(self) -> dict:
+        """Return the user's NLP position (LP balance + USDT0 NAV).
+
+        Gateway no longer exposes ``nlp_position``; derive from spot balance,
+        oracle price, and locked-balance metadata.
         """
         result: dict = {
             "exists": False,
             "lp_balance": 0.0,
             "lp_value_usdt0": 0.0,
             "last_mint_ts_ms": None,
+            "nlp_product_id": None,
         }
         try:
-            payload = self._query_rest("nlp_position", {"subaccount": self.subaccount_hex}) or {}
-            data = payload.get("data") or payload
-            lp_x18 = data.get("lp_amount") or data.get("nlp_amount") or data.get("amount") or 0
-            value_x18 = data.get("value") or data.get("quote_value") or data.get("usdc_value") or 0
-            last_mint = data.get("last_mint_timestamp") or data.get("last_mint_ts") or None
-            try:
-                lp_balance = float(int(lp_x18)) / 1e18 if lp_x18 not in (None, "", 0) else 0.0
-            except (TypeError, ValueError):
-                lp_balance = 0.0
-            try:
-                lp_value = float(int(value_x18)) / 1e18 if value_x18 not in (None, "", 0) else 0.0
-            except (TypeError, ValueError):
-                lp_value = 0.0
+            nlp_pid = self.resolve_nlp_product_id()
+            if nlp_pid is None:
+                return result
+            locked_info = self.get_nlp_locked_balances()
+            lp_balance = locked_info["balance_locked"] + locked_info["balance_unlocked"]
+            if lp_balance <= 0:
+                lp_balance = self._spot_balance_amount(nlp_pid)
+            oracle = self._nlp_oracle_price(nlp_pid)
+            lp_value = max(0.0, lp_balance * oracle)
+            last_mint_ts_ms = None
+            if locked_info["locked_entries"]:
+                # Most recent lock → infer mint time (4-day lockup before burn).
+                latest_unlock = max(e["unlocked_at"] for e in locked_info["locked_entries"])
+                if latest_unlock > 0:
+                    last_mint_ts_ms = int((latest_unlock - (4 * 24 * 60 * 60)) * 1000)
             result.update({
-                "exists": True,
+                "exists": lp_balance > 0 or lp_value > 0,
                 "lp_balance": lp_balance,
                 "lp_value_usdt0": lp_value,
-                "last_mint_ts_ms": int(last_mint) if last_mint else None,
+                "last_mint_ts_ms": last_mint_ts_ms,
+                "nlp_product_id": nlp_pid,
             })
         except Exception as e:
-            logger.debug("nlp_position REST failed user=%s err=%s", _mask_address(self.address or ""), e)
+            logger.debug("get_nlp_position failed user=%s err=%s", _mask_address(self.address or ""), e)
         return result
 
     def get_nlp_pool_info(self) -> dict:
-        """Return aggregate NLP pool stats (TVL, APR if exposed)."""
+        """Return aggregate NLP pool stats (raw gateway payload)."""
         try:
             payload = self._query_rest("nlp_pool_info") or {}
             data = payload.get("data") or payload
@@ -2364,6 +2498,29 @@ class NadoClient:
         except Exception as e:
             logger.debug("nlp_pool_info REST failed err=%s", e)
             return {"raw": {}}
+
+    def get_nlp_pool_stats(self) -> dict:
+        """Parse pool-level TVL hint from nlp_pool_info (APR filled by metrics service)."""
+        raw = self.get_nlp_pool_info().get("raw") or {}
+        tvl_usdt0 = 0.0
+        try:
+            pools = raw.get("nlp_pools") or []
+            for pool in pools:
+                if not isinstance(pool, dict):
+                    continue
+                info = pool.get("subaccount_info") or {}
+                healths = info.get("healths") or []
+                if healths and isinstance(healths[0], dict):
+                    assets = self._x18_to_float(healths[0].get("assets"))
+                    if assets > tvl_usdt0:
+                        tvl_usdt0 = assets
+        except Exception as e:
+            logger.debug("get_nlp_pool_stats parse failed err=%s", e)
+        return {
+            "tvl_usdt0": tvl_usdt0,
+            "apr_pct": None,
+            "raw": raw,
+        }
 
 
 _client_cache: dict[str, NadoClient] = {}

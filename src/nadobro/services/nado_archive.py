@@ -764,3 +764,52 @@ def query_funding_payments(
                 "oracle_price": _from_x18(p.get("oracle_price_x18", 0)),
             })
     return payments
+
+
+def query_nlp_snapshots(
+    network: str,
+    *,
+    count: int = 30,
+    granularity: int = 86400,
+) -> list[dict]:
+    """Return daily NLP pool snapshots (TVL, cumulative PnL, etc.)."""
+    url = archive_url_for_network(network)
+    payload = {
+        "nlp_snapshots": {
+            "interval": {
+                "count": max(1, min(int(count), 500)),
+                "granularity": max(60, int(granularity)),
+            },
+        },
+    }
+    result = _post(url, payload)
+    if not result or not isinstance(result, dict):
+        return []
+    snapshots = result.get("snapshots") or []
+    return [s for s in snapshots if isinstance(s, dict)]
+
+
+def query_nlp_lp_events(
+    network: str,
+    subaccount_hex: str,
+    *,
+    limit: int = 500,
+) -> dict:
+    """Return mint_nlp / burn_nlp archive events (+ txs) for a subaccount."""
+    if not subaccount_hex:
+        return {"events": [], "txs": []}
+    url = archive_url_for_network(network)
+    payload = {
+        "events": {
+            "subaccounts": [subaccount_hex],
+            "event_types": ["mint_nlp", "burn_nlp"],
+            "limit": {"raw": max(1, min(int(limit), 500))},
+        },
+    }
+    result = _post(url, payload)
+    if not result or not isinstance(result, dict):
+        return {"events": [], "txs": []}
+    return {
+        "events": [e for e in (result.get("events") or []) if isinstance(e, dict)],
+        "txs": [t for t in (result.get("txs") or []) if isinstance(t, dict)],
+    }

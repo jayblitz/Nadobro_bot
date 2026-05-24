@@ -752,12 +752,29 @@ async def tick_news_warmup() -> None:
         logger.warning("news warmup failed: %s", exc)
 
 
+async def tick_vault_deposit_watch_job():
+    from src.nadobro.services.feature_flags import vault_deposit_watch_enabled
+    if not vault_deposit_watch_enabled():
+        return
+    from src.nadobro.services.vault_deposit_watch_service import tick_vault_deposit_watch
+    # Watches are stored per-network; tick both networks every cycle so we
+    # don't miss capacity openings depending on which network the env points
+    # to. Each call is a no-op if no users are opted in for that network.
+    for network in ("mainnet", "testnet"):
+        try:
+            await tick_vault_deposit_watch(network=network)
+        except Exception as exc:
+            logger.warning("vault deposit watch tick failed network=%s: %s", network, exc)
+
+
 def start_scheduler():
     relay_poll_seconds = relay_poll_interval_seconds()
     from src.nadobro.services.feature_flags import (
         portfolio_sync_enabled,
         portfolio_sync_interval_seconds,
         time_limit_enabled,
+        vault_deposit_watch_enabled,
+        vault_deposit_watch_interval_seconds,
     )
     from src.nadobro.services.time_limit_watcher import time_limit_tick
 
@@ -815,6 +832,15 @@ def start_scheduler():
         tick_news_warmup, "interval", minutes=_NEWS_WARMUP_MINUTES,
         id="news_warmup", replace_existing=True, **_LONG_TICK,
     )
+    if vault_deposit_watch_enabled():
+        scheduler.add_job(
+            tick_vault_deposit_watch_job,
+            "interval",
+            seconds=vault_deposit_watch_interval_seconds(),
+            id="vault_deposit_watch",
+            replace_existing=True,
+            **_LONG_TICK,
+        )
     scheduler.add_job(initial_ai_setup, "date", id="initial_ai_setup", replace_existing=True)
     scheduler.start()
     logger.info(

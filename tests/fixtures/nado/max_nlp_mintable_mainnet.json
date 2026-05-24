@@ -1,0 +1,7 @@
+{
+  "status": "success",
+  "data": {
+    "max_quote_amount": "34250782930221490366619"
+  },
+  "request_type": "query_max_nlp_mintable"
+}

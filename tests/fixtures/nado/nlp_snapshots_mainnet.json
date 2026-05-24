@@ -1,0 +1,28 @@
+{
+  "snapshots": [
+    {
+      "submission_idx": "55904603",
+      "timestamp": "1779649254",
+      "cumulative_volume": "2502654698611475677197261366",
+      "cumulative_trades": "1726620",
+      "cumulative_mint_quote": "16659102522648309234948287",
+      "cumulative_burn_quote": "6861168199056317743900617",
+      "cumulative_pnl": "202382256665923453288042",
+      "oracle_price_x18": "1052405591456895525",
+      "depositors": "1926",
+      "tvl": "10000316580257914944335712"
+    },
+    {
+      "submission_idx": "54538069",
+      "timestamp": "1779235199",
+      "cumulative_volume": "2474397434844589295990024818",
+      "cumulative_trades": "1704336",
+      "cumulative_mint_quote": "16113438448162250220094785",
+      "cumulative_burn_quote": "6599305820169206194695360",
+      "cumulative_pnl": "193657780536640814099532",
+      "oracle_price_x18": "1051457185082620877",
+      "depositors": "1806",
+      "tvl": "9707790408529684839498957"
+    }
+  ]
+}

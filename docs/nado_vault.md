@@ -8,10 +8,12 @@ This page is the canonical reference for how the Vault is wired up inside the bo
 
 The Vault lives on the **Home card** (callback `vault:home`). Tapping it opens the Vault home, which shows:
 
-- NLP token balance and the USDT0 NAV of that balance.
+- Pool **TVL** and **APR** (from archive NLP snapshots).
+- **Your Position**: USDT0 NAV, NLP balance, all-time earned, unrealized PnL.
 - Idle USDT0 in the trading account.
-- Deposit room under the Private Alpha cap.
+- Deposit room and venue-authoritative **max mintable** (via `max_nlp_mintable`).
 - Lockup countdown (4-day post-mint, see below).
+- Opt-in **deposit opening alerts** (`vault:watch:on` / `vault:watch:off`).
 - Buttons: **Deposit**, **Withdraw**, **Refresh**, **Back**.
 
 **Deposit picker** offers presets (`$100`, `$500`, `$1,000`, `$5,000`), a `Max` button sized to whichever of (idle USDT0, remaining cap room) is smaller, and a `✍️ Custom amount` prompt that captures a free-text USDT0 amount.
@@ -94,8 +96,14 @@ client.get_nlp_pool_info() # REST `nlp_pool_info` query — TVL / pool stats
 | `vault:withdraw:pct:<pct>` | Show confirmation card for an N% burn |
 | `vault:withdraw:custom` | Prompt for a free-text NLP amount |
 | `vault:withdraw:confirm:<nlp_amount>` | Sign + submit `burn_nlp` |
+| `vault:watch:on` | Opt in to deposit-capacity alerts |
+| `vault:watch:off` | Opt out of deposit-capacity alerts |
 
 Custom-amount continuation messages route through `handle_vault_text` in the same module, which is wired into `handlers/messages.py` ahead of the brief-intent gate.
+
+## Deposit opening alerts
+
+Users below the $20k Private Alpha cap can opt in on the vault card. A scheduler job polls `max_nlp_mintable` every 60s (configurable via `NADO_VAULT_DEPOSIT_WATCH_SECONDS`) and sends a Telegram message whenever capacity transitions from closed (≤ `VAULT_DEPOSIT_CLOSED_EPSILON_USDT0`, default $1) to open (≥ `VAULT_DEPOSIT_OPEN_MIN_USDT0`, default $100). Controlled by `NADO_VAULT_DEPOSIT_WATCH=1`.
 
 ## Safety guardrails
 

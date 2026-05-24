@@ -1049,3 +1049,113 @@ def update_order_intent_row(intent_id: str, payload: dict) -> Optional[dict]:
             str(intent_id),
         ),
     )
+
+
+def _vault_watch_table(network: str) -> str:
+    if network not in _VALID_NETWORKS:
+        raise ValueError(f"Invalid network: {network}")
+    return f"vault_deposit_watch_{network}"
+
+
+def _vault_lp_events_table(network: str) -> str:
+    if network not in _VALID_NETWORKS:
+        raise ValueError(f"Invalid network: {network}")
+    return f"vault_lp_events_{network}"
+
+
+def get_vault_deposit_watch(telegram_id: int, network: str = "mainnet") -> dict | None:
+    table = _vault_watch_table(network)
+    return query_one(f"SELECT * FROM {table} WHERE user_id = %s", (telegram_id,))
+
+
+def set_vault_deposit_watch(
+    telegram_id: int,
+    *,
+    enabled: bool,
+    network: str = "mainnet",
+    last_seen_mintable_usdt0: float | None = None,
+) -> None:
+    table = _vault_watch_table(network)
+    existing = get_vault_deposit_watch(telegram_id, network)
+    if existing:
+        if last_seen_mintable_usdt0 is not None:
+            execute(
+                f"""UPDATE {table}
+                    SET enabled = %s, last_seen_mintable_usdt0 = %s, updated_at = now()
+                    WHERE user_id = %s""",
+                (enabled, last_seen_mintable_usdt0, telegram_id),
+            )
+        else:
+            execute(
+                f"UPDATE {table} SET enabled = %s, updated_at = now() WHERE user_id = %s",
+                (enabled, telegram_id),
+            )
+        return
+    execute(
+        f"""INSERT INTO {table} (user_id, enabled, last_seen_mintable_usdt0)
+            VALUES (%s, %s, %s)""",
+        (telegram_id, enabled, float(last_seen_mintable_usdt0 or 0.0)),
+    )
+
+
+def update_vault_watch_last_mintable(
+    telegram_id: int,
+    mintable_usdt0: float,
+    network: str = "mainnet",
+) -> None:
+    table = _vault_watch_table(network)
+    execute(
+        f"""UPDATE {table}
+            SET last_seen_mintable_usdt0 = %s, updated_at = now()
+            WHERE user_id = %s""",
+        (mintable_usdt0, telegram_id),
+    )
+
+
+def get_enabled_vault_deposit_watches(network: str = "mainnet") -> list:
+    table = _vault_watch_table(network)
+    return query_all(
+        f"SELECT * FROM {table} WHERE enabled = true ORDER BY user_id",
+    )
+
+
+def insert_vault_lp_event(
+    telegram_id: int,
+    *,
+    event_type: str,
+    quote_usdt0: float | None = None,
+    nlp_amount: float | None = None,
+    submission_idx: str | None = None,
+    tx_digest: str | None = None,
+    event_ts=None,
+    network: str = "mainnet",
+) -> None:
+    table = _vault_lp_events_table(network)
+    execute(
+        f"""INSERT INTO {table}
+            (user_id, event_type, quote_usdt0, nlp_amount, submission_idx, tx_digest, event_ts)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING""",
+        (
+            telegram_id,
+            event_type,
+            quote_usdt0,
+            nlp_amount,
+            submission_idx,
+            tx_digest,
+            event_ts,
+        ),
+    )
+
+
+def get_vault_lp_events(telegram_id: int, network: str = "mainnet", limit: int = 500) -> list:
+    table = _vault_lp_events_table(network)
+    return query_all(
+        f"""SELECT event_type, quote_usdt0, nlp_amount, submission_idx, tx_digest, event_ts
+            FROM {table}
+            WHERE user_id = %s
+            ORDER BY event_ts ASC NULLS LAST, id ASC
+            LIMIT %s""",
+        (telegram_id, limit),
+    )
+
