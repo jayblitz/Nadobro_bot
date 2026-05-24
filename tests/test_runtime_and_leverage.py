@@ -221,6 +221,46 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertEqual(state.get("direction"), "long")
         self.assertEqual(state.get("leverage"), 1.0)
 
+    def test_stop_user_bot_stops_engine_runtime_for_engine_strategy(self):
+        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
+        state = {"running": True, "strategy": "grid"}
+        runtime = SimpleNamespace(stop=AsyncMock())
+
+        with patch.object(bot_runtime, "_runtime_loop", None), patch.object(
+            bot_runtime, "get_user", return_value=fake_user
+        ), patch.object(
+            bot_runtime, "_load_state", return_value=state
+        ), patch.object(
+            bot_runtime, "_save_state"
+        ), patch.object(
+            bot_runtime, "_finalize_session"
+        ), patch.object(
+            bot_runtime, "cleanup_strategy_positions", return_value={"success": True}
+        ), patch("src.nadobro.services.engine_runtime.RUNTIME", runtime):
+            ok, msg = bot_runtime.stop_user_bot(123, cancel_orders=True)
+
+        self.assertTrue(ok, msg)
+        runtime.stop.assert_awaited_once_with(123, "mainnet", "grid")
+
+    def test_stop_all_user_bots_stops_each_engine_runtime(self):
+        row_state = {"running": True, "strategy": "mid"}
+        runtime = SimpleNamespace(stop=AsyncMock())
+
+        with patch.object(bot_runtime, "_runtime_loop", None), patch.object(
+            bot_runtime, "query_all",
+            return_value=[{"key": "strategy_bot:456:testnet", "value": json.dumps(row_state)}],
+        ), patch.object(
+            bot_runtime, "set_bot_state"
+        ), patch.object(
+            bot_runtime, "_finalize_session"
+        ), patch.object(
+            bot_runtime, "cleanup_strategy_positions", return_value={"success": True}
+        ), patch("src.nadobro.services.engine_runtime.RUNTIME", runtime):
+            ok, msg = bot_runtime.stop_all_user_bots(456, cancel_orders=True)
+
+        self.assertTrue(ok, msg)
+        runtime.stop.assert_awaited_once_with(456, "testnet", "mid")
+
     def test_run_cycle_retires_legacy_volume_perp_before_spot_dispatch(self):
         telegram_id = 42
         network = "mainnet"

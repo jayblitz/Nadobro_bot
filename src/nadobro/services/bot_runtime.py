@@ -354,6 +354,73 @@ def _save_state(telegram_id: int, network: str, state: dict):
     set_bot_state(_state_key(telegram_id, network), state)
 
 
+def _engine_stop_timeout_seconds() -> float:
+    raw = (os.environ.get("NADO_ENGINE_STOP_TIMEOUT_SECONDS") or "30").strip()
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _run_engine_stop_sync(coro_factory, *, user_id: int, network: str, strategy: str) -> tuple[bool, str | None]:
+    """Run engine teardown from sync stop paths without losing the async stop."""
+    timeout_s = _engine_stop_timeout_seconds()
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    target_loop = _runtime_loop if _runtime_loop and _runtime_loop.is_running() else None
+
+    try:
+        if target_loop is not None and target_loop is not current_loop:
+            future = asyncio.run_coroutine_threadsafe(coro_factory(), target_loop)
+            future.result(timeout=timeout_s)
+        elif current_loop is not None and current_loop.is_running():
+            # This fallback is only for unexpected direct calls from async code.
+            # Known handlers dispatch stop operations through run_blocking so we
+            # can wait for venue/order teardown to finish.
+            current_loop.create_task(coro_factory())
+            logger.warning(
+                "engine stop scheduled asynchronously from running loop user=%s network=%s strategy=%s",
+                user_id,
+                network,
+                strategy,
+            )
+        else:
+            asyncio.run(coro_factory())
+        return True, None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "engine runtime stop failed user=%s network=%s strategy=%s: %s",
+            user_id,
+            network,
+            strategy,
+            exc,
+            exc_info=True,
+        )
+        return False, str(exc)
+
+
+def _stop_engine_runtime_for_state(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
+    strategy = _normalize_strategy_id(str(state.get("strategy") or ""))
+    if not strategy:
+        return True, None
+    try:
+        from src.nadobro.services import engine_runtime
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("engine runtime import failed during stop user=%s: %s", telegram_id, exc, exc_info=True)
+        return False, str(exc)
+    if strategy not in engine_runtime.ENGINE_MAPPED_STRATEGIES:
+        return True, None
+
+    return _run_engine_stop_sync(
+        lambda: engine_runtime.RUNTIME.stop(telegram_id, network, strategy),
+        user_id=telegram_id,
+        network=network,
+        strategy=strategy,
+    )
+
+
 async def _notify(telegram_id: int, text: str, **fmt_kwargs):
     if not _bot_app:
         return
@@ -898,10 +965,14 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
     if task:
         task.cancel()
 
+    engine_ok, engine_error = _stop_engine_runtime_for_state(telegram_id, network, state)
+
     if cancel_orders:
         close_res = cleanup_strategy_positions(telegram_id, network, state)
         if not close_res.get("success"):
             return False, f"Strategy loop stopped, but cleanup failed: {close_res.get('error', 'unknown')}"
+    if not engine_ok:
+        return False, f"Strategy loop stopped, but engine cleanup failed: {engine_error or 'unknown'}"
 
     return True, "Strategy bot stopped. Open orders cancellation requested."
 
@@ -932,6 +1003,9 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = True) -> tuple[bo
             task = _tasks.pop(tk, None)
             if task:
                 task.cancel()
+            engine_ok, engine_error = _stop_engine_runtime_for_state(telegram_id, network, state)
+            if not engine_ok:
+                close_errors.append(f"{network}: engine cleanup failed: {engine_error or 'unknown'}")
             if cancel_orders:
                 close_res = cleanup_strategy_positions(telegram_id, network, state)
                 if not close_res.get("success"):
@@ -1184,6 +1258,20 @@ def stop_all_strategies_for_user(telegram_id: int) -> None:
             task = _tasks.pop(tk, None)
             if task:
                 task.cancel()
+            engine_ok, engine_error = _stop_engine_runtime_for_state(telegram_id, network, state)
+            if not engine_ok:
+                logger.warning(
+                    "Network switch engine cleanup failed for user=%s network=%s strategy=%s: %s",
+                    telegram_id,
+                    network,
+                    strategy,
+                    engine_error or "unknown",
+                )
+                state["last_error"] = (
+                    "Stopped due to network switch; engine cleanup failed: "
+                    f"{str(engine_error or 'unknown')[:180]}"
+                )
+                set_bot_state(key, state)
             close_res = cleanup_strategy_positions(telegram_id, network, state)
             if not close_res.get("success"):
                 logger.warning(

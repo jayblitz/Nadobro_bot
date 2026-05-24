@@ -22,17 +22,19 @@ _FILL_SYNC_DIGEST_WAIT = float(os.environ.get("NADO_FILL_SYNC_DIGEST_WAIT_SECOND
 _FILL_SYNC_DIGEST_POLL = float(os.environ.get("NADO_FILL_SYNC_DIGEST_POLL_SECONDS", "1.0"))
 _MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SECONDS", "3.0"))
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
-# AUDIT-FIX-SCH-2: serialize cache fetches so two coroutines don't both miss
-# the cache and fire concurrent get_all_market_prices() requests. Lazy-init
-# because module load happens before the asyncio loop exists.
-_market_snapshot_lock: asyncio.Lock | None = None
+_RECORDED_FILL_STATUSES = frozenset({"filled", "partially_filled", "closed"})
 
 
-def _market_snapshot_lock_get() -> asyncio.Lock:
-    global _market_snapshot_lock
-    if _market_snapshot_lock is None:
-        _market_snapshot_lock = asyncio.Lock()
-    return _market_snapshot_lock
+def _trade_has_recorded_fill(trade_row: dict | None) -> bool:
+    if not trade_row:
+        return False
+    status = str(trade_row.get("status") or "").lower()
+    if status in _RECORDED_FILL_STATUSES:
+        return True
+    try:
+        return abs(float(trade_row.get("fill_size") or 0.0)) > 0.0
+    except Exception:
+        return False
 
 
 def _format_alert_metric_value(condition: str, value: float) -> str:
@@ -501,6 +503,9 @@ async def sync_pending_fills():
                             _FILL_SYNC_DIGEST_POLL,
                         )
                     if not fill_data or not fill_data.get("is_filled"):
+                        if is_archive_rate_limited() or _trade_has_recorded_fill(trade_row):
+                            await run_blocking(release_fill_sync, sync_id)
+                            return False
                         # Check if order was cancelled only after enough retries to avoid
                         # misclassifying late archive indexing as cancellation.
                         if attempts >= 8:
