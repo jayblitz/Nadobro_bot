@@ -79,6 +79,22 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertEqual(result.get("success"), False)
         self.assertIn("NADO_BUILDER_FEE_RATE", result.get("error", ""))
 
+    def test_builder_routing_disabled_on_testnet(self):
+        """Builder routing is a mainnet-only contract — testnet orders must
+        never carry a builder id (the venue rejects with error 2118
+        ``Invalid builder``). Verify the helper returns ``(0, 0)`` without
+        consulting env vars and without raising when env is unset."""
+        from src.nadobro.config import get_nado_builder_routing_config
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(get_nado_builder_routing_config("testnet"), (0, 0))
+        with patch.dict(
+            "os.environ", {"NADO_BUILDER_ID": "9999", "NADO_BUILDER_FEE_RATE": "10"}, clear=True
+        ):
+            # Even with valid mainnet config, testnet must still skip it.
+            self.assertEqual(get_nado_builder_routing_config("testnet"), (0, 0))
+            self.assertEqual(get_nado_builder_routing_config("mainnet"), (9999, 10))
+
     def test_query_rest_retries_after_non_json_response(self):
         client = NadoClient(private_key="0xabc", network="mainnet")
         responses = [

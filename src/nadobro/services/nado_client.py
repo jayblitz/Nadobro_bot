@@ -1730,7 +1730,7 @@ class NadoClient:
         try:
             sender_hex = (sender or "").strip() or self.subaccount_hex
             try:
-                builder_id, builder_fee_rate = get_nado_builder_routing_config()
+                builder_id, builder_fee_rate = get_nado_builder_routing_config(self.network)
             except ValueError as cfg_err:
                 logger.error("Builder routing misconfiguration; rejecting order: %s", cfg_err)
                 return {"success": False, "error": f"Builder routing misconfigured: {cfg_err}"}

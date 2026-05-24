@@ -334,7 +334,7 @@ def run_strategy_start_preflight(
         return False, "Wallet signing client unavailable for active mode. Re-link signer in Wallet settings."
 
     try:
-        get_nado_builder_routing_config()
+        get_nado_builder_routing_config(network)
     except ValueError as e:
         return False, f"Builder routing misconfigured: {e}"
 

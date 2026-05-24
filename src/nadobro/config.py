@@ -264,13 +264,20 @@ NADO_BUILDER_FEE_RATE_ENV = "NADO_BUILDER_FEE_RATE"
 NADO_BUILDER_FEE_RATE_1_BPS = 10  # 0.1 bps units
 
 
-def get_nado_builder_routing_config() -> tuple[int, int]:
+def get_nado_builder_routing_config(network: str | None = None) -> tuple[int, int]:
     """Return validated (builder_id, builder_fee_rate) for order routing.
 
     Safety-first behavior:
-    - Builder routing is mandatory for order placement.
+    - Builder routing is mandatory for **mainnet** order placement only.
+    - Testnet orders bypass builder routing entirely and return ``(0, 0)`` —
+      the venue's builder registry is mainnet-only, and a stale/invalid
+      builder id is what was causing testnet places to fail with
+      ``error_code=2118 "Invalid builder"``.
     - Fee rate is locked to 1 bps (10 units) to avoid accidental fee changes.
     """
+    if isinstance(network, str) and network.strip().lower() == "testnet":
+        return 0, 0
+
     builder_id_raw = (os.environ.get(NADO_BUILDER_ID_ENV) or "").strip()
     if not builder_id_raw:
         raise ValueError(f"{NADO_BUILDER_ID_ENV} is required for order placement.")

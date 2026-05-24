@@ -91,15 +91,30 @@ def _trade_ts_display(val) -> str:
     return s[:19] if len(s) >= 19 else s
 
 
-def _builder_route_payload() -> dict:
+def _builder_route_payload(network: str | None = None) -> dict:
+    """Builder routing payload for trade metadata.
+
+    Pass ``network`` so testnet trades bypass the mainnet-only builder
+    registry and never fail with ``error_code=2118 "Invalid builder"``.
+    """
     try:
-        builder_id, builder_fee_rate = get_nado_builder_routing_config()
+        builder_id, builder_fee_rate = get_nado_builder_routing_config(network)
         return {
             "builder_id": int(builder_id),
             "builder_fee_rate": int(builder_fee_rate),
         }
     except Exception as e:
         return {"error": f"Builder routing misconfigured: {e}"}
+
+
+def _resolve_user_network(telegram_id: int, explicit: str | None = None) -> str:
+    if explicit:
+        return str(explicit)
+    try:
+        user = get_user(telegram_id)
+    except Exception:
+        user = None
+    return str(user.network_mode.value if user else "mainnet")
 
 
 def _resolve_fill_data(client, digest: str, network: str) -> dict | None:
@@ -511,7 +526,8 @@ def execute_market_order(
     network: str | None = None,
     **kwargs,
 ) -> dict:
-    builder_route = _builder_route_payload()
+    selected_network = _resolve_user_network(telegram_id, network)
+    builder_route = _builder_route_payload(selected_network)
     if builder_route.get("error"):
         return {"success": False, "error": builder_route["error"]}
 
@@ -522,7 +538,7 @@ def execute_market_order(
         leverage,
         enforce_rate_limit=enforce_rate_limit,
         reduce_only=bool(reduce_only),
-        network=network,
+        network=selected_network,
     )
     if not valid:
         return {"success": False, "error": msg}
@@ -830,13 +846,12 @@ def execute_spot_market_order(
     spot_symbol: str | None = None,
     asset_label: str | None = None,
 ) -> dict:
-    builder_route = _builder_route_payload()
-    if builder_route.get("error"):
-        return {"success": False, "error": builder_route["error"]}
-
     asset = (asset or "").upper().strip()
     user = get_user(telegram_id)
     selected_network = str(network or (user.network_mode.value if user else "mainnet"))
+    builder_route = _builder_route_payload(selected_network)
+    if builder_route.get("error"):
+        return {"success": False, "error": builder_route["error"]}
     spot_meta = get_spot_metadata(asset, network=selected_network)
     spot_product_id = int(spot_product_id) if spot_product_id is not None else get_spot_product_id(asset, network=selected_network)
     if spot_product_id is None:
@@ -1047,13 +1062,12 @@ def execute_spot_limit_order(
     open_trade_id: int | None = None,
 ) -> dict:
     """Place a limit order on a Nado spot book (same engine path as perp limits)."""
-    builder_route = _builder_route_payload()
-    if builder_route.get("error"):
-        return {"success": False, "error": builder_route["error"]}
-
     asset = (asset or "").upper().strip()
     user = get_user(telegram_id)
     selected_network = str(network or (user.network_mode.value if user else "mainnet"))
+    builder_route = _builder_route_payload(selected_network)
+    if builder_route.get("error"):
+        return {"success": False, "error": builder_route["error"]}
     spot_meta = get_spot_metadata(asset, network=selected_network)
     spot_product_id = int(spot_product_id) if spot_product_id is not None else get_spot_product_id(asset, network=selected_network)
     if spot_product_id is None:
@@ -1240,7 +1254,8 @@ def execute_limit_order(
     open_trade_id: int | None = None,
     **kwargs,
 ) -> dict:
-    builder_route = _builder_route_payload()
+    selected_network = _resolve_user_network(telegram_id, kwargs.get("network"))
+    builder_route = _builder_route_payload(selected_network)
     if builder_route.get("error"):
         return {"success": False, "error": builder_route["error"]}
 
@@ -1251,6 +1266,7 @@ def execute_limit_order(
         leverage,
         enforce_rate_limit=enforce_rate_limit,
         reduce_only=bool(reduce_only),
+        network=selected_network,
     )
     if not valid:
         return {"success": False, "error": msg}
