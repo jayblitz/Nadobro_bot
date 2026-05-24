@@ -2013,7 +2013,12 @@ async def _handle_pending_copy_wallet(update, context, telegram_id, text):
         return True
 
     from src.nadobro.services.copy_service import add_trader
-    ok, msg, trader_id = add_trader(wallet, label=wallet[:10], is_curated=False)
+    ok, msg, trader_id = add_trader(
+        wallet,
+        label=wallet[:10],
+        is_curated=False,
+        owner_user_id=int(telegram_id),
+    )
     if ok and trader_id:
         from src.nadobro.handlers.keyboards import copy_trader_preview_kb
         wallet_snip = wallet[:6] + "..." + wallet[-4:]

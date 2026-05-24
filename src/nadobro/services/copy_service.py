@@ -70,22 +70,53 @@ async def _notify_user(telegram_id: int, text: str):
 
 # ─── Public API ────────────────────────────────────────────────
 
-def add_trader(wallet_address: str, label: str = "", is_curated: bool = False) -> tuple[bool, str, int | None]:
+def add_trader(
+    wallet_address: str,
+    label: str = "",
+    is_curated: bool = False,
+    owner_user_id: int | None = None,
+) -> tuple[bool, str, int | None]:
+    """Add a copy-trade target.
+
+    Curated entries (admin-only) get owner_user_id=None and are visible to
+    everyone. Personal entries require an owner_user_id and remain private
+    to that telegram user.
+    """
     if not wallet_address or len(wallet_address) < 10:
         return False, "Invalid wallet address.", None
     wallet = wallet_address.strip()
     if not wallet.startswith("0x"):
         return False, "Wallet address must start with 0x.", None
-    trader_id = upsert_copy_trader(wallet, label=label, is_curated=is_curated)
+    if not is_curated and owner_user_id is None:
+        return False, "Owner required for personal trader.", None
+    trader_id = upsert_copy_trader(
+        wallet,
+        label=label,
+        is_curated=is_curated,
+        owner_user_id=None if is_curated else owner_user_id,
+    )
     if not trader_id:
         return False, "Failed to save trader.", None
     return True, f"Trader added: {label or wallet[:10]}...", trader_id
 
 
-def remove_trader(trader_id: int) -> tuple[bool, str]:
+def remove_trader(trader_id: int, requester_user_id: int | None = None, is_admin: bool = False) -> tuple[bool, str]:
+    """Remove a copy trader.
+
+    A non-admin requester may only remove a trader they personally own
+    (owner_user_id == requester). Curated entries are removable only by
+    admins. This prevents one user from deactivating another user's
+    private copy target.
+    """
     trader = get_copy_trader(trader_id)
     if not trader:
         return False, "Trader not found."
+    owner_id = trader.get("owner_user_id")
+    if not is_admin:
+        if owner_id is None:
+            return False, "Curated traders are admin-managed."
+        if requester_user_id is None or int(owner_id) != int(requester_user_id):
+            return False, "Trader not found."
     mirrors = get_mirrors_for_trader(trader_id)
     for m in mirrors:
         _flatten_mirror_positions(int(m["id"]), int(m["user_id"]), str(m.get("network", "mainnet")), reason="trader_removed")
@@ -113,6 +144,10 @@ def start_copy(
 
     trader = get_copy_trader(trader_id)
     if not trader or not trader.get("active"):
+        return False, "Trader not found or inactive."
+
+    owner_id = trader.get("owner_user_id")
+    if owner_id is not None and int(owner_id) != int(telegram_id):
         return False, "Trader not found or inactive."
 
     if margin_per_trade < MIN_MARGIN_PER_TRADE or margin_per_trade > MAX_MARGIN_PER_TRADE:
@@ -273,14 +308,22 @@ def _flatten_mirror_positions(mirror_id: int, user_id: int, network: str, reason
     return closed, total_pnl, total_notional, errors
 
 
-def get_available_traders() -> list[dict]:
-    traders = get_active_copy_traders()
+def get_available_traders(user_id: int | None = None) -> list[dict]:
+    """Traders visible to `user_id`: curated entries + their own privates.
+
+    Callers MUST pass the requesting user's telegram_id. The old signature
+    (no user_id) returned the full table and leaked custom wallets between
+    users; we now treat the public path as curated-only and require an
+    explicit caller for the personal hub.
+    """
+    traders = get_active_copy_traders(user_id=user_id)
     return [
         {
             "id": t["id"],
             "wallet": t["wallet_address"],
             "label": t.get("label") or t["wallet_address"][:10],
             "is_curated": t.get("is_curated", False),
+            "owner_user_id": t.get("owner_user_id"),
         }
         for t in traders
     ]
@@ -340,9 +383,16 @@ def get_trader_stats(trader_id: int) -> dict:
     return stats
 
 
-def get_trader_preview(trader_id: int, network: str = "mainnet") -> dict:
+def get_trader_preview(trader_id: int, network: str = "mainnet", requester_user_id: int | None = None) -> dict:
     trader = get_copy_trader(trader_id)
     if not trader:
+        return {"found": False}
+    owner_id = trader.get("owner_user_id")
+    if (
+        owner_id is not None
+        and requester_user_id is not None
+        and int(owner_id) != int(requester_user_id)
+    ):
         return {"found": False}
     wallet = str(trader.get("wallet_address") or "")
     client = NadoClient.from_address(wallet, network)

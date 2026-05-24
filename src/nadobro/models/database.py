@@ -342,16 +342,51 @@ def get_recent_admin_logs(limit: int = 20) -> list:
     )
 
 
-def upsert_copy_trader(wallet_address: str, label: str = "", is_curated: bool = False) -> Optional[int]:
+def upsert_copy_trader(
+    wallet_address: str,
+    label: str = "",
+    is_curated: bool = False,
+    owner_user_id: Optional[int] = None,
+) -> Optional[int]:
+    """Insert/update a copy trader entry.
+
+    Privacy contract:
+      * Curated entries (is_curated=True) MUST have owner_user_id=None and
+        are visible to everyone.
+      * Personal entries MUST have owner_user_id set; they are visible only
+        to that telegram user. Two different users may add the same wallet
+        and each gets their own private row.
+    """
     wallet = wallet_address.strip()
-    row = execute_returning(
-        """INSERT INTO copy_traders (wallet_address, label, is_curated, active)
-           VALUES (%s, %s, %s, true)
-           ON CONFLICT (wallet_address) DO UPDATE
-               SET label = EXCLUDED.label, is_curated = EXCLUDED.is_curated, active = true
-           RETURNING id""",
-        (wallet, label, is_curated),
-    )
+    if is_curated:
+        owner_user_id = None
+        row = execute_returning(
+            """INSERT INTO copy_traders
+                   (wallet_address, label, is_curated, active, owner_user_id)
+               VALUES (%s, %s, true, true, NULL)
+               ON CONFLICT (wallet_address) WHERE owner_user_id IS NULL
+               DO UPDATE
+                   SET label = EXCLUDED.label,
+                       is_curated = true,
+                       active = true
+               RETURNING id""",
+            (wallet, label),
+        )
+    else:
+        if owner_user_id is None:
+            return None
+        row = execute_returning(
+            """INSERT INTO copy_traders
+                   (wallet_address, label, is_curated, active, owner_user_id)
+               VALUES (%s, %s, false, true, %s)
+               ON CONFLICT (owner_user_id, wallet_address) WHERE owner_user_id IS NOT NULL
+               DO UPDATE
+                   SET label = EXCLUDED.label,
+                       is_curated = false,
+                       active = true
+               RETURNING id""",
+            (wallet, label, int(owner_user_id)),
+        )
     return row["id"] if row else None
 
 
@@ -359,16 +394,52 @@ def get_copy_trader(trader_id: int) -> Optional[dict]:
     return query_one("SELECT * FROM copy_traders WHERE id = %s", (trader_id,))
 
 
-def get_copy_trader_by_wallet(wallet: str) -> Optional[dict]:
-    return query_one("SELECT * FROM copy_traders WHERE wallet_address = %s", (wallet.strip(),))
+def get_copy_trader_by_wallet(
+    wallet: str,
+    owner_user_id: Optional[int] = None,
+) -> Optional[dict]:
+    if owner_user_id is None:
+        return query_one(
+            "SELECT * FROM copy_traders WHERE wallet_address = %s AND owner_user_id IS NULL",
+            (wallet.strip(),),
+        )
+    return query_one(
+        """SELECT * FROM copy_traders
+           WHERE wallet_address = %s
+             AND (owner_user_id IS NULL OR owner_user_id = %s)""",
+        (wallet.strip(), int(owner_user_id)),
+    )
 
 
-def get_active_copy_traders() -> list:
-    return query_all("SELECT * FROM copy_traders WHERE active = true ORDER BY id")
+def get_active_copy_traders(user_id: Optional[int] = None) -> list:
+    """Return active copy traders visible to `user_id`.
+
+    A NULL `user_id` returns only curated (public) entries (used by
+    background pollers that don't have a specific viewer context but still
+    must respect privacy). A bot user always sees curated + their own
+    personal entries — never any other user's custom wallets.
+    """
+    if user_id is None:
+        return query_all(
+            """SELECT * FROM copy_traders
+               WHERE active = true AND owner_user_id IS NULL
+               ORDER BY id"""
+        )
+    return query_all(
+        """SELECT * FROM copy_traders
+           WHERE active = true
+             AND (owner_user_id IS NULL OR owner_user_id = %s)
+           ORDER BY (owner_user_id IS NULL) DESC, id""",
+        (int(user_id),),
+    )
 
 
 def get_curated_copy_traders() -> list:
-    return query_all("SELECT * FROM copy_traders WHERE active = true AND is_curated = true ORDER BY id")
+    return query_all(
+        """SELECT * FROM copy_traders
+           WHERE active = true AND is_curated = true AND owner_user_id IS NULL
+           ORDER BY id"""
+    )
 
 
 def deactivate_copy_trader(trader_id: int):

@@ -79,6 +79,89 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertEqual(result.get("success"), False)
         self.assertIn("NADO_BUILDER_FEE_RATE", result.get("error", ""))
 
+    def test_mint_nlp_passes_sender_subaccount(self):
+        """The Nado SDK validates that MintNlpParams.sender is supplied —
+        omitting it triggers the ``sender field required`` pydantic error
+        observed in production. Verify the helper threads the linked
+        subaccount through to the SDK."""
+        client = NadoClient.from_address("0x" + "2" * 40, network="mainnet")
+        client._initialized = True
+        captured: dict = {}
+
+        class _MintParams:
+            def __init__(self, **kwargs):
+                captured["params_kwargs"] = kwargs
+
+        class _Market:
+            def mint_nlp(self, params):
+                captured["params"] = params
+                return SimpleNamespace(digest="0xmintdigest")
+
+        client.client = SimpleNamespace(market=_Market())
+        with patch.dict(
+            sys.modules,
+            {
+                "nado_protocol.engine_client.types.execute": SimpleNamespace(
+                    MintNlpParams=_MintParams,
+                    BurnNlpParams=object,
+                )
+            },
+        ):
+            result = client.mint_nlp(usdt0_amount=10.0)
+
+        self.assertTrue(result.get("success"), msg=result)
+        self.assertEqual(captured["params_kwargs"]["sender"], client.subaccount_hex)
+        self.assertGreater(captured["params_kwargs"]["quoteAmount"], 0)
+        self.assertEqual(result.get("digest"), "0xmintdigest")
+
+    def test_burn_nlp_passes_sender_subaccount(self):
+        """Same contract for burn_nlp: production logs showed `1 validation
+        error for BurnNlpParams sender field required` because the client
+        was constructing the params without `sender`. After the fix the
+        subaccount hex MUST appear in the kwargs."""
+        client = NadoClient.from_address("0x" + "3" * 40, network="mainnet")
+        client._initialized = True
+        captured: dict = {}
+
+        class _BurnParams:
+            def __init__(self, **kwargs):
+                captured["params_kwargs"] = kwargs
+
+        class _Market:
+            def burn_nlp(self, params):
+                captured["params"] = params
+                return SimpleNamespace(digest="0xburndigest")
+
+        client.client = SimpleNamespace(market=_Market())
+        with patch.dict(
+            sys.modules,
+            {
+                "nado_protocol.engine_client.types.execute": SimpleNamespace(
+                    MintNlpParams=object,
+                    BurnNlpParams=_BurnParams,
+                )
+            },
+        ):
+            result = client.burn_nlp(nlp_amount=2.5)
+
+        self.assertTrue(result.get("success"), msg=result)
+        self.assertEqual(captured["params_kwargs"]["sender"], client.subaccount_hex)
+        self.assertGreater(captured["params_kwargs"]["nlpAmount"], 0)
+        self.assertEqual(result.get("digest"), "0xburndigest")
+
+    def test_burn_nlp_refuses_without_subaccount(self):
+        """If subaccount hex is unavailable the helper must short-circuit
+        instead of issuing an invalid request — burns without a sender
+        are pre-routing errors and would have wasted an SDK call."""
+        client = NadoClient.from_address("0x" + "4" * 40, network="mainnet")
+        client._initialized = True
+        client.client = object()
+        client.subaccount_hex = ""
+
+        result = client.burn_nlp(nlp_amount=1.0)
+        self.assertFalse(result.get("success"))
+        self.assertIn("Subaccount", result.get("error", ""))
+
     def test_builder_routing_disabled_on_testnet(self):
         """Builder routing is a mainnet-only contract — testnet orders must
         never carry a builder id (the venue rejects with error 2118

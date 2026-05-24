@@ -45,7 +45,7 @@ def test_reserve_order_intent_blocks_active_existing_intent(monkeypatch):
 def test_market_order_duplicate_pending_intent_does_not_insert_trade(monkeypatch):
     captured = {}
 
-    monkeypatch.setattr(trade_service, "_builder_route_payload", lambda: {})
+    monkeypatch.setattr(trade_service, "_builder_route_payload", lambda *args, **kwargs: {})
     monkeypatch.setattr(trade_service, "validate_trade", lambda *args, **kwargs: (True, ""))
     monkeypatch.setattr(
         trade_service,
@@ -53,7 +53,7 @@ def test_market_order_duplicate_pending_intent_does_not_insert_trade(monkeypatch
         lambda _telegram_id: SimpleNamespace(network_mode=SimpleNamespace(value="mainnet")),
     )
     monkeypatch.setattr(trade_service, "get_product_id", lambda *args, **kwargs: 1)
-    monkeypatch.setattr(trade_service, "get_user_nado_client", lambda _telegram_id: object())
+    monkeypatch.setattr(trade_service, "get_user_nado_client", lambda *args, **kwargs: object())
     monkeypatch.setattr(
         trade_service,
         "insert_trade",

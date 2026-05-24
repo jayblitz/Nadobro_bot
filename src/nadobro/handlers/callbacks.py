@@ -4025,7 +4025,7 @@ async def _handle_copy(query, data, context, telegram_id):
     action = parts[1] if len(parts) > 1 else ""
 
     if action == "hub":
-        traders = await run_blocking(get_available_traders)
+        traders = await run_blocking(get_available_traders, telegram_id)
         admin_flag = is_admin(telegram_id)
         if traders:
             lang = get_active_language()
@@ -4057,7 +4057,7 @@ async def _handle_copy(query, data, context, telegram_id):
 
     elif action == "trader" and len(parts) >= 3:
         trader_id = int(parts[2])
-        traders = await run_blocking(get_available_traders)
+        traders = await run_blocking(get_available_traders, telegram_id)
         trader = next((t for t in traders if t["id"] == trader_id), None)
         if not trader:
             await _edit_loc(query, "⚠️ Trader not found\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
@@ -4065,7 +4065,10 @@ async def _handle_copy(query, data, context, telegram_id):
 
         user = get_user(telegram_id)
         trader_network = user.network_mode.value if user else "mainnet"
-        preview = await run_blocking(get_trader_preview, trader_id, trader_network)
+        preview = await run_blocking(get_trader_preview, trader_id, trader_network, telegram_id)
+        if not preview.get("found"):
+            await _edit_loc(query, "⚠️ Trader not found\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
         equity = float(preview.get("equity_usd") or 0.0)
         equity_str = f"${equity:,.0f}" if equity > 0 else "N/A"
         curated = " ⭐ Curated" if trader.get("is_curated") else ""
@@ -4171,7 +4174,7 @@ async def _handle_copy(query, data, context, telegram_id):
         setup["cumulative_take_profit_pct"] = ctp_pct if ctp_pct > 0 else None
         setup["step"] = "confirm"
 
-        traders = await run_blocking(get_available_traders)
+        traders = await run_blocking(get_available_traders, telegram_id)
         trader = next((t for t in traders if t["id"] == setup["trader_id"]), None)
         trader_label = trader["label"] if trader else "Unknown"
 
