@@ -33,7 +33,7 @@ class _Client:
             "isolated_positions": [],
         }
 
-    def get_all_open_orders(self, refresh=True):
+    def get_all_open_orders(self, refresh=True, *, include_isolated=True):
         return [{"product_id": 1, "product_name": "BTC", "digest": "0xabc", "amount": "1", "price": "100"}]
 
     async def get_trigger_orders(self, limit=200):
@@ -196,6 +196,29 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
             session_id, source = nado_sync._back_link_intent("0xabc", "testnet")
         assert session_id is None
         assert source == "manual"
+
+    def test_user_has_isolated_artifacts_detects_isolated_position(self):
+        """Poll fan-out must include isolated subaccounts whenever the prior
+        snapshot shows any isolated artifact. Skipping it for users who hold
+        no isolated positions is the optimization; keeping it for those who
+        do is correctness."""
+        assert nado_sync._user_has_isolated_artifacts(None) is False
+        assert nado_sync._user_has_isolated_artifacts({}) is False
+        cross_only = {
+            "positions": [{"symbol": "BTC", "isolated": False}],
+            "open_orders": [{"digest": "0x1"}],
+        }
+        assert nado_sync._user_has_isolated_artifacts(cross_only) is False
+        with_isolated_position = {
+            "positions": [{"symbol": "BTC", "isolated": True, "subaccount": "0xabc"}],
+            "open_orders": [],
+        }
+        assert nado_sync._user_has_isolated_artifacts(with_isolated_position) is True
+        with_isolated_order = {
+            "positions": [],
+            "open_orders": [{"digest": "0x2", "subaccount": "0xdef"}],
+        }
+        assert nado_sync._user_has_isolated_artifacts(with_isolated_order) is True
 
     def test_active_users_uses_cursor_pagination_not_limit_200(self):
         """SCALE: the previous active_users used ``LIMIT 200`` which silently

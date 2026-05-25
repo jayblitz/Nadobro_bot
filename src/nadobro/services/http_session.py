@@ -65,6 +65,16 @@ _CF_BREAKER_COOLDOWN_SECONDS = float(os.environ.get("NADO_CF_BREAKER_COOLDOWN_SE
 # Log dedup: only emit one Cloudflare-challenge warning per host per window.
 _CF_LOG_THROTTLE_SECONDS = float(os.environ.get("NADO_CF_LOG_THROTTLE_SECONDS", "60"))
 
+# Per-host token bucket: cap sustained outbound RPS to avoid tripping
+# Cloudflare's managed-challenge from a single egress IP. The bucket refills
+# at ``_HTTP_RPS_PER_HOST`` tokens/sec and holds up to ``_HTTP_BURST_PER_HOST``
+# tokens so short bursts still go through. Default budget (8 rps, burst 16) is
+# well below Cloudflare's typical bot-management thresholds while still
+# servicing a few dozen concurrent users.
+_HTTP_RPS_PER_HOST = float(os.environ.get("NADO_HTTP_RPS_PER_HOST", "8"))
+_HTTP_BURST_PER_HOST = float(os.environ.get("NADO_HTTP_BURST_PER_HOST", "16"))
+_HTTP_BUCKET_MAX_WAIT_SECONDS = float(os.environ.get("NADO_HTTP_BUCKET_MAX_WAIT_SECONDS", "2.5"))
+
 
 # ---------------------------------------------------------------------------
 # Shared session.
@@ -117,6 +127,66 @@ class _BreakerState:
 _breaker_lock = threading.RLock()
 _breaker: dict[str, _BreakerState] = {}
 _log_last_emit: dict[str, float] = {}
+
+
+# ---------------------------------------------------------------------------
+# Per-host token bucket (one bucket per netloc).
+# ---------------------------------------------------------------------------
+@dataclass
+class _BucketState:
+    tokens: float
+    last_refill: float
+
+
+_bucket_lock = threading.Lock()
+_buckets: dict[str, _BucketState] = {}
+
+
+def _acquire_token(host: str, *, max_wait: float | None = None) -> bool:
+    """Block until a token is available for ``host`` or ``max_wait`` elapses.
+
+    Returns True if a token was acquired, False if we timed out. Callers that
+    receive False should treat the request as throttled (skip rather than
+    pile on). Pure-Python sleep loop; safe to invoke from threads inside
+    ``ThreadPoolExecutor``.
+    """
+    if not host or _HTTP_RPS_PER_HOST <= 0:
+        return True
+    budget = float(max_wait if max_wait is not None else _HTTP_BUCKET_MAX_WAIT_SECONDS)
+    deadline = time.monotonic() + budget
+    while True:
+        with _bucket_lock:
+            now = time.monotonic()
+            state = _buckets.get(host)
+            if state is None:
+                state = _BucketState(tokens=_HTTP_BURST_PER_HOST, last_refill=now)
+                _buckets[host] = state
+            elapsed = max(0.0, now - state.last_refill)
+            state.tokens = min(_HTTP_BURST_PER_HOST, state.tokens + elapsed * _HTTP_RPS_PER_HOST)
+            state.last_refill = now
+            if state.tokens >= 1.0:
+                state.tokens -= 1.0
+                return True
+            needed = 1.0 - state.tokens
+            wait = needed / _HTTP_RPS_PER_HOST
+        if time.monotonic() + wait > deadline:
+            return False
+        time.sleep(min(wait, 0.25))
+
+
+def bucket_snapshot() -> dict[str, dict[str, float]]:
+    """Diagnostic snapshot of per-host token buckets."""
+    with _bucket_lock:
+        return {
+            host: {"tokens": state.tokens, "last_refill": state.last_refill}
+            for host, state in _buckets.items()
+        }
+
+
+def throttle_host(url: str, *, max_wait: float | None = None) -> bool:
+    """Public token-bucket gate. Callers (NadoClient SDK paths) invoke this
+    before each gateway call so SDK and REST share one shaping bucket."""
+    return _acquire_token(_host(url), max_wait=max_wait)
 
 
 def _host(url: str) -> str:
@@ -216,6 +286,9 @@ def cf_request(
     if is_circuit_open(url):
         return None
     host = _host(url)
+    if not _acquire_token(host):
+        logger.debug("cf_request throttled host=%s (token bucket starved)", host)
+        return None
     attempts = max(1, _CF_RETRY_MAX + 1)
     last_resp: Optional[requests.Response] = None
     for attempt in range(attempts):
