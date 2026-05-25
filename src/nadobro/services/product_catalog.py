@@ -14,17 +14,21 @@ from src.nadobro.config import (
     NADO_TESTNET_ARCHIVE,
     NADO_TESTNET_REST,
 )
+from src.nadobro.services.http_session import SESSION as _rest_session, cf_get
 
 logger = logging.getLogger(__name__)
 
 _CATALOG_TTL_SECONDS = int(os.environ.get("NADO_PRODUCT_CATALOG_TTL_SECONDS", "60"))
+# When the live fetch fails or the circuit is open, keep serving the
+# previously-cached catalog for this longer window so the UI keeps working
+# instead of collapsing to an empty list while Cloudflare challenges clear.
+_CATALOG_STALE_TTL_SECONDS = int(os.environ.get("NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS", "900"))
 _DYNAMIC_DEFAULT_MAX_LEVERAGE = int(os.environ.get("NADO_DYNAMIC_DEFAULT_MAX_LEVERAGE", "20"))
 _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
 
 _catalog_cache: dict[str, dict] = {}
 _spot_catalog_cache: dict[str, dict] = {}
 _dn_pair_cache: dict[str, dict] = {}
-_rest_session = requests.Session()
 
 
 def _first_present(*candidates):
@@ -222,13 +226,14 @@ def _fetch_v2_symbols_map(network: str, product_type: str | None = None) -> dict
     if product_type:
         params["product_type"] = product_type
     try:
-        resp = _rest_session.get(
+        resp = cf_get(
             f"{_archive_v2_url(network)}/symbols",
             params=params,
-            headers={"Accept-Encoding": "gzip"},
             timeout=_REQUEST_TIMEOUT_SECONDS,
         )
-        data = resp.json() if resp is not None else {}
+        if resp is None:
+            return {}
+        data = resp.json()
         if isinstance(data, dict):
             return {str(k): v for k, v in data.items() if isinstance(v, dict)}
     except Exception as e:
@@ -274,13 +279,68 @@ def _build_dynamic_spot_catalog(network: str) -> Optional[dict]:
 
 def get_spot_catalog(network: str = "mainnet", refresh: bool = False) -> dict:
     key = str(network or "mainnet").lower()
-    if not refresh:
-        cached = _spot_catalog_cache.get(key)
-        if cached and (time.time() - cached["ts"] < _CATALOG_TTL_SECONDS):
-            return cached["data"]
-    data = _build_dynamic_spot_catalog(key) or _build_static_spot_catalog()
-    _spot_catalog_cache[key] = {"data": data, "ts": time.time()}
-    return data
+    cached = _spot_catalog_cache.get(key)
+    if not refresh and cached and (time.time() - cached["ts"] < _CATALOG_TTL_SECONDS):
+        return cached["data"]
+    live = _build_dynamic_spot_catalog(key)
+    if live is not None:
+        _spot_catalog_cache[key] = {"data": live, "ts": time.time()}
+        return live
+    # SCALE: when the live archive endpoint is temporarily blocked (Cloudflare
+    # challenge / outage) prefer the previously-cached catalog over collapsing
+    # to the tiny static list -- otherwise users see "no markets" until the
+    # circuit clears. Static list is a final safety net.
+    if cached and (time.time() - cached["ts"] < _CATALOG_STALE_TTL_SECONDS):
+        return cached["data"]
+    fallback = _build_static_spot_catalog()
+    _spot_catalog_cache[key] = {"data": fallback, "ts": time.time()}
+    return fallback
+
+
+# Stable, quote-like symbols that should never appear as a *base* in the Volume
+# strategy menu (they are quote assets / cash legs on Nado markets).
+_QUOTE_LIKE_SYMBOLS: frozenset[str] = frozenset({"USDC", "USDC0", "USDT", "USDT0", "USD"})
+
+
+def is_spot_catalog_dynamic(network: str = "mainnet") -> bool:
+    """True if the spot catalog for ``network`` is sourced from the live v2
+    endpoint (vs. the static fallback). The UI uses this to distinguish
+    "no pairs listed" vs "catalog temporarily unavailable".
+    """
+    catalog = get_spot_catalog(network=network)
+    spots = catalog.get("spots") or {}
+    if not spots:
+        return False
+    return any(bool(row.get("dynamic")) for row in spots.values() if isinstance(row, dict))
+
+
+def list_volume_spot_bases(network: str = "mainnet", refresh: bool = False) -> list[str]:
+    """Canonical base symbols (e.g. ``KBTC``, ``WETH``, ``QQQX``, ``SPYX``)
+    that are tradeable as spot on ``network``. Sourced live from the v2 spot
+    catalog so new listings appear without code changes; quote-like assets
+    (USDC, USDT0) and non-live markets are excluded.
+    """
+    catalog = get_spot_catalog(network=network, refresh=refresh)
+    spots = catalog.get("spots") or {}
+    out: list[str] = []
+    seen: set[str] = set()
+    sorted_entries = sorted(
+        ((key, row) for key, row in spots.items() if isinstance(row, dict)),
+        key=lambda kv: int((kv[1] or {}).get("id", 1_000_000)),
+    )
+    for _, row in sorted_entries:
+        if not _is_live_trading_status(row.get("trading_status")):
+            continue
+        if not _market_is_open(row):
+            continue
+        base = str(row.get("base") or row.get("symbol") or "").upper().strip()
+        if not base or base in seen:
+            continue
+        if base in _QUOTE_LIKE_SYMBOLS:
+            continue
+        seen.add(base)
+        out.append(base)
+    return out
 
 
 def _fetch_all_products(network: str, client=None) -> list[dict]:
@@ -293,13 +353,10 @@ def _fetch_all_products(network: str, client=None) -> list[dict]:
             logger.warning("catalog: client all_products failed on %s: %s", network, e)
     try:
         url = f"{_rest_url(network)}/query"
-        resp = _rest_session.get(
-            url,
-            params={"type": "all_products"},
-            headers={"Accept-Encoding": "gzip"},
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-        )
-        data = resp.json() if resp is not None else {}
+        resp = cf_get(url, params={"type": "all_products"}, timeout=_REQUEST_TIMEOUT_SECONDS)
+        if resp is None:
+            return []
+        data = resp.json()
         if data.get("status") == "success":
             return ((data.get("data") or {}).get("perp_products") or [])
     except Exception as e:
@@ -327,12 +384,7 @@ def _fetch_symbol_rows(network: str, client=None) -> list[dict]:
     if not rows_by_pid:
         try:
             url = f"{_rest_url(network)}/query"
-            resp = _rest_session.get(
-                url,
-                params={"type": "symbols"},
-                headers={"Accept-Encoding": "gzip"},
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
+            resp = cf_get(url, params={"type": "symbols"}, timeout=_REQUEST_TIMEOUT_SECONDS)
             data = resp.json() if resp is not None else {}
             if data.get("status") == "success":
                 symbols = ((data.get("data") or {}).get("symbols") or {})
@@ -611,9 +663,18 @@ def get_catalog(network: str = "mainnet", client=None, refresh: bool = False) ->
         if cached and (time.time() - cached["ts"] < _CATALOG_TTL_SECONDS):
             return cached["data"]
 
-    data = _build_dynamic_catalog(key, client=client) or _build_static_catalog()
-    _catalog_cache[key] = {"data": data, "ts": time.time()}
-    return data
+    live = _build_dynamic_catalog(key, client=client)
+    if live is not None:
+        _catalog_cache[key] = {"data": live, "ts": time.time()}
+        return live
+    # Stale-cache fallback so a transient Cloudflare challenge does not collapse
+    # the menu / risk engine product set; see comment in get_spot_catalog.
+    cached = _catalog_cache.get(key)
+    if cached and (time.time() - cached["ts"] < _CATALOG_STALE_TTL_SECONDS):
+        return cached["data"]
+    fallback = _build_static_catalog()
+    _catalog_cache[key] = {"data": fallback, "ts": time.time()}
+    return fallback
 
 
 def get_dn_pair_catalog(network: str = "mainnet", client=None, refresh: bool = False) -> dict:

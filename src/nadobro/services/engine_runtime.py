@@ -315,8 +315,18 @@ def map_strategy_config(
         }
     if strategy == "vol":
         interval = max(1.0, _f(settings, "interval_seconds", 60))
+        # Normalize the trading pair so the VolumeBotController validation
+        # sees a canonical base (e.g. ``KBTC``) regardless of whether
+        # ``state.product`` was stored as ``KBTC`` (current UI) or as a
+        # dashed pair like ``KBTC-USDC0`` (legacy/tests).
+        try:
+            from src.nadobro.config import normalize_volume_spot_symbol
+
+            vol_pair = normalize_volume_spot_symbol(str(product or "")) or str(product or "")
+        except Exception:
+            vol_pair = str(product or "")
         return {
-            "trading_pair": product,
+            "trading_pair": vol_pair,
             "total_amount_quote": Decimal(str(notional)),
             "total_duration": interval * 4,
             "order_interval": interval,

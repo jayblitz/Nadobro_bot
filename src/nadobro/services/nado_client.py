@@ -5,7 +5,6 @@ import os
 import random
 import asyncio
 import requests
-from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional
@@ -63,15 +62,10 @@ def _limit_order_expiration_seconds() -> int:
         logger.warning("Invalid NADO_LIMIT_ORDER_EXPIRATION_SECONDS=%r; using %s", raw, default)
         return default
     return max(60, v)
-_rest_session = requests.Session()
-_rest_session.mount(
-    "https://",
-    HTTPAdapter(pool_connections=max(8, _REST_POOL_CONNECTIONS), pool_maxsize=max(8, _REST_POOL_MAXSIZE)),
-)
-_rest_session.mount(
-    "http://",
-    HTTPAdapter(pool_connections=max(8, _REST_POOL_CONNECTIONS), pool_maxsize=max(8, _REST_POOL_MAXSIZE)),
-)
+# Share the hardened session (browser-like UA + Accept headers) with the rest
+# of the bot so Cloudflare's lightweight bot check lets our REST traffic
+# through. The shared SESSION already mounts pool-sized HTTPS/HTTP adapters.
+from src.nadobro.services.http_session import SESSION as _rest_session  # noqa: E402
 _open_orders_cache: dict[tuple[str, str, int], dict] = {}
 _positions_fallback_cache: dict[tuple[str, str], dict] = {}
 
@@ -204,12 +198,23 @@ class NadoClient:
                 snippet = (resp.text or "").strip().replace("\n", " ")[:180]
             except Exception:
                 snippet = ""
-            logger.warning(
-                "REST returned non-JSON status=%s content_type=%s body=%r",
-                getattr(resp, "status_code", "?"),
-                (getattr(resp, "headers", {}) or {}).get("content-type"),
-                snippet,
-            )
+            status_code = getattr(resp, "status_code", "?")
+            content_type = (getattr(resp, "headers", {}) or {}).get("content-type") or ""
+            # Dedup the Cloudflare-challenge flood: this branch was emitting
+            # tens of identical WARNINGs per second when the venue was
+            # challenging us. Route those through the throttled CF logger.
+            if status_code == 403 and "text/html" in content_type.lower():
+                try:
+                    from src.nadobro.services.http_session import _log_cf_warning  # noqa: WPS437
+
+                    _log_cf_warning(getattr(resp, "url", ""), status_code, snippet)
+                except Exception:
+                    pass
+            else:
+                logger.warning(
+                    "REST returned non-JSON status=%s content_type=%s body=%r",
+                    status_code, content_type, snippet,
+                )
             return None
 
     def _query_rest(self, query_type: str, extra_params: Optional[dict] = None) -> Optional[dict]:

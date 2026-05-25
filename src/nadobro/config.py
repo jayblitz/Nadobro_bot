@@ -201,31 +201,51 @@ def get_dn_pair(product: str, network: str = None, client=None) -> dict:
     }
 
 
-# Volume strategy spot mode: Nado spot symbols (kBTC/wETH/USDC map here). Listed order is UI order.
-VOLUME_SPOT_SYMBOLS: tuple[str, ...] = ("KBTC", "WETH", "USDC")
+# Volume strategy spot mode SAFETY FLOOR: used only if the live catalog is
+# unreachable. The live list comes from ``product_catalog.list_volume_spot_bases``,
+# so adding a new spot market on Nado (e.g. QQQX, SPYX) shows up automatically
+# without a code change. Quote-like assets (USDC, USDT0) are NEVER tradeable as
+# a base and are excluded everywhere.
+VOLUME_SPOT_SYMBOLS: tuple[str, ...] = ("KBTC", "WETH", "BTC", "ETH", "QQQX", "SPYX")
 
 
 def normalize_volume_spot_symbol(name: str) -> str:
-    """Map user/miniapp input to canonical VOLUME_SPOT_SYMBOLS key."""
+    """Canonicalize a user/miniapp/state symbol to the catalog-facing key.
+
+    Maps common alias forms (``btc`` -> ``KBTC``, ``eth`` -> ``WETH``) and
+    strips quoting suffixes (``KBTC-USDC0`` -> ``KBTC``) so callers can pass
+    whatever shape they have without crashing the controller.
+    """
     raw = (name or "").strip()
     if not raw:
         return ""
-    low = raw.lower().replace(" ", "").replace("-", "")
+    # Strip dashed/slashed quote suffix: "KBTC-USDC0" -> "KBTC".
+    head = raw.replace("/", "-").split("-", 1)[0]
+    low = head.lower().replace(" ", "")
     if low in ("btc", "kbtc"):
         return "KBTC"
     if low in ("eth", "weth"):
         return "WETH"
-    if low in ("usdc",):
-        return "USDC"
-    up = raw.upper()
-    if up in VOLUME_SPOT_SYMBOLS:
-        return up
-    return up
+    return head.upper()
 
 
 def list_volume_spot_product_names(network: str = None, client=None) -> list[str]:
-    """Symbols from VOLUME_SPOT_SYMBOLS that resolve to a spot product id on this network."""
+    """Spot base symbols available for the Volume strategy on ``network``.
+
+    Live source: ``product_catalog.list_volume_spot_bases`` (Nado v2 spot
+    catalog). Falls back to ``VOLUME_SPOT_SYMBOLS`` filtered by which symbols
+    resolve to a spot product id, so the menu still renders something if the
+    archive endpoint is temporarily 403'd.
+    """
     network_name = str(network or _default_catalog_network())
+    try:
+        from src.nadobro.services.product_catalog import list_volume_spot_bases
+
+        names = list_volume_spot_bases(network=network_name)
+        if names:
+            return names
+    except Exception:
+        pass
     out: list[str] = []
     for sym in VOLUME_SPOT_SYMBOLS:
         if get_spot_product_id(sym, network=network_name, client=client) is not None:
