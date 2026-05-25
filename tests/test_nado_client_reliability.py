@@ -206,6 +206,60 @@ class NadoClientReliabilityTests(unittest.TestCase):
         mock_get.assert_not_called()
         mock_post.assert_called_once()
 
+    def test_from_address_client_exposes_acting_user_id_for_gateway_gate(self):
+        """Regression: the gateway-budget gate reads ``acting_user_id`` on
+        every REST call, but ``from_address`` builds the client via
+        ``cls.__new__`` (bypassing ``__init__``). A missing attribute crashed
+        every read-only client (alert price-check, price tracker, catalog)
+        with ``'NadoClient' object has no attribute 'acting_user_id'`` before
+        any network I/O — flooding logs every 5s."""
+        client = NadoClient.from_address("0x" + "0" * 40, network="testnet")
+        self.assertIsNone(client.acting_user_id)
+        # Must not raise AttributeError regardless of token-bucket verdict.
+        try:
+            allowed = client._gateway_allowed()
+        finally:
+            client._gateway_release()
+        self.assertIsInstance(allowed, bool)
+        # The class-level default also protects raw ``__new__`` instances.
+        self.assertIsNone(NadoClient.__new__(NadoClient).acting_user_id)
+
+    def test_get_all_market_prices_serves_cache_without_fanout_when_blocked(self):
+        """Regression (gateway contract): when the batched ``market_prices``
+        request is unavailable AND the gateway is throttling/blocked, callers
+        must serve cached data — never fan out to one REST call per product,
+        which amplifies load exactly when we must back off."""
+        import src.nadobro.services.nado_client as nc
+        from src.nadobro.services import gateway_budget
+
+        client = NadoClient.from_address("0x" + "0" * 40, network="testnet")
+
+        def _tripwire(*_a, **_k):
+            raise AssertionError("per-product fanout ran while gateway was blocked")
+
+        client.get_market_price = _tripwire
+
+        # Cache present -> serve it, no fanout.
+        with patch.object(client, "_query_rest", return_value=None), patch.object(
+            gateway_budget, "is_gateway_blocked", return_value=True
+        ):
+            with nc._caches_lock:
+                nc._ALL_PRICES_CACHE["testnet"] = {
+                    "data": {"BTC": {"bid": 1.0, "ask": 2.0, "mid": 1.5}},
+                    "ts": 0.0,
+                }
+            served = client.get_all_market_prices()
+        self.assertEqual(served, {"BTC": {"bid": 1.0, "ask": 2.0, "mid": 1.5}})
+
+        # Cache empty -> return {}, still no fanout.
+        with patch.object(client, "_query_rest", return_value=None), patch.object(
+            gateway_budget, "is_gateway_blocked", return_value=True
+        ):
+            with nc._caches_lock:
+                nc._ALL_PRICES_CACHE.pop("testnet", None)
+            empty = client.get_all_market_prices()
+        self.assertEqual(empty, {})
+
     def test_extract_positions_from_rest_payload_supports_camel_case_fields(self):
         client = NadoClient(private_key="0xabc", network="mainnet")
         payload = {
