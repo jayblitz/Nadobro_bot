@@ -18,11 +18,13 @@ from src.nadobro.services.http_session import SESSION as _rest_session, cf_get
 
 logger = logging.getLogger(__name__)
 
-_CATALOG_TTL_SECONDS = int(os.environ.get("NADO_PRODUCT_CATALOG_TTL_SECONDS", "60"))
+# Product metadata changes rarely; default to hourly refresh to avoid hammering
+# archive/gateway on every strategy tick or menu render.
+_CATALOG_TTL_SECONDS = int(os.environ.get("NADO_PRODUCT_CATALOG_TTL_SECONDS", "3600"))
 # When the live fetch fails or the circuit is open, keep serving the
 # previously-cached catalog for this longer window so the UI keeps working
 # instead of collapsing to an empty list while Cloudflare challenges clear.
-_CATALOG_STALE_TTL_SECONDS = int(os.environ.get("NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS", "900"))
+_CATALOG_STALE_TTL_SECONDS = int(os.environ.get("NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS", "86400"))
 _DYNAMIC_DEFAULT_MAX_LEVERAGE = int(os.environ.get("NADO_DYNAMIC_DEFAULT_MAX_LEVERAGE", "20"))
 _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
 
@@ -572,8 +574,9 @@ def _build_dynamic_catalog(network: str, client=None) -> Optional[dict]:
 
 
 def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
-    perp_catalog = get_catalog(network=network, client=client, refresh=True)
-    spot_catalog = get_spot_catalog(network=network, refresh=True)
+    # Respect catalog TTL — do not force-refresh on every DN-pair lookup.
+    perp_catalog = get_catalog(network=network, client=client, refresh=False)
+    spot_catalog = get_spot_catalog(network=network, refresh=False)
     v2_symbols = _fetch_v2_symbols_map(network)
     if not (perp_catalog.get("perps") and spot_catalog.get("spots")):
         return None

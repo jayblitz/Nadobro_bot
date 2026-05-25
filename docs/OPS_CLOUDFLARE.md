@@ -39,7 +39,7 @@ The defenses live in `services/http_session.py`:
 3. **Per-host circuit breaker**: after 8 challenges within a 10s window the
    circuit opens for 30s. Subsequent calls short-circuit to `None`; callers
    serve from `_spot_catalog_cache` / `_catalog_cache` via the stale-TTL
-   path (`NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS`, default 900s).
+   path (`NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS`, default 86400s / 24h).
 4. **Throttled logs**: only one Cloudflare-warning line per host per minute
    (was: hundreds per second).
 
@@ -55,7 +55,13 @@ The defenses live in `services/http_session.py`:
 | `NADO_CF_BREAKER_WINDOW_SECONDS`         | 10      | Sliding window for the threshold above.              |
 | `NADO_CF_BREAKER_COOLDOWN_SECONDS`       | 30      | How long the breaker stays open.                     |
 | `NADO_CF_LOG_THROTTLE_SECONDS`           | 60      | Cooldown between CF-warning log emissions per host.  |
-| `NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS` | 900     | How long the cached catalog stays valid after a 403. |
+| `NADO_PRODUCT_CATALOG_TTL_SECONDS`       | 3600    | Live catalog refresh interval (default: 1 hour).     |
+| `NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS` | 86400   | Stale catalog served after fetch failure (24h).      |
+| `NADO_PORTFOLIO_SYNC_SECONDS`            | 30      | Background portfolio poll interval.                  |
+| `NADO_PORTFOLIO_SYNC_USERS_PER_TICK`     | 8       | Active users synced per poll tick.                   |
+| `NADO_PORTFOLIO_POLL_CACHE_SECONDS`      | 45      | Skip re-sync if user polled within this window.      |
+| `NADO_PORTFOLIO_HEAVY_SYNC_SECONDS`      | 300     | Matches/funding archive refresh cadence per user.    |
+| `NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS`    | 3600    | SDK all-products cache TTL.                          |
 
 ## What to do when you see the storm in logs
 

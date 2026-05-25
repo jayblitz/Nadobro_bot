@@ -18,9 +18,21 @@ from src.nadobro.config import (
 logger = logging.getLogger(__name__)
 
 _price_cache = {}
-_PRICE_CACHE_TTL = 5
+_PRICE_CACHE_TTL = int(os.environ.get("NADO_PRICE_CACHE_TTL_SECONDS", "10"))
 _ALL_PRODUCTS_CACHE = {}
-_ALL_PRODUCTS_TTL = 20
+# Product list is static metadata — align with catalog hourly refresh.
+_ALL_PRODUCTS_TTL = int(os.environ.get("NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS", "3600"))
+
+
+def _format_sdk_error(exc: Exception, *, max_len: int = 200) -> str:
+    """Compact SDK error text; never dump Cloudflare HTML into logs."""
+    msg = str(exc)
+    lower = msg.lower()
+    if "just a moment" in lower or "<!doctype html" in lower:
+        return "Cloudflare challenge (403 HTML response)"
+    if len(msg) > max_len:
+        return msg[:max_len] + "…"
+    return msg
 _FUNDING_CACHE = {}
 _FUNDING_TTL = 10
 # Shared lock for the price / open-orders / funding caches. Methods on
@@ -42,7 +54,7 @@ _REST_RETRY_BASE_SECONDS = float(os.environ.get("NADO_REST_RETRY_BASE_SECONDS", 
 _REST_RETRY_JITTER_SECONDS = float(os.environ.get("NADO_REST_RETRY_JITTER_SECONDS", "0.2"))
 _REST_POOL_CONNECTIONS = int(os.environ.get("NADO_HTTP_POOL_CONNECTIONS", "64"))
 _REST_POOL_MAXSIZE = int(os.environ.get("NADO_HTTP_POOL_MAXSIZE", "64"))
-_OPEN_ORDERS_CACHE_TTL = float(os.environ.get("NADO_OPEN_ORDERS_CACHE_TTL_SECONDS", "2.0"))
+_OPEN_ORDERS_CACHE_TTL = float(os.environ.get("NADO_OPEN_ORDERS_CACHE_TTL_SECONDS", "5.0"))
 _POSITIONS_FALLBACK_TTL = float(os.environ.get("NADO_POSITIONS_FALLBACK_TTL_SECONDS", "6.0"))
 _POSITIONS_FALLBACK_MAX_PRODUCTS = int(os.environ.get("NADO_POSITIONS_FALLBACK_MAX_PRODUCTS", "16"))
 
@@ -297,7 +309,7 @@ class NadoClient:
                     _price_cache[cache_key] = {"data": result, "ts": time.time()}
                 return result
             except Exception as e:
-                logger.error(f"SDK get_market_price failed: {e}")
+                logger.error("SDK get_market_price failed: %s", _format_sdk_error(e))
 
         try:
             data = self._query_rest("market_price", {"product_id": product_id}) or {}
@@ -462,7 +474,7 @@ class NadoClient:
                         balances[sb.product_id] = float(bal)
                 return {"exists": info.exists, "balances": balances}
             except Exception as e:
-                logger.error(f"SDK get_balance failed: {e}")
+                logger.error("SDK get_balance failed: %s", _format_sdk_error(e))
 
         try:
             data = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
@@ -508,7 +520,7 @@ class NadoClient:
                     _open_orders_cache[cache_key] = {"data": orders, "ts": time.time()}
                 return orders
             except Exception as e:
-                logger.error(f"SDK get_open_orders failed: {e}")
+                logger.error("SDK get_open_orders failed: %s", _format_sdk_error(e))
         try:
             # Read-only/runtime clients rely on REST, so keep parity with SDK path.
             data = self._query_rest(
@@ -650,7 +662,7 @@ class NadoClient:
                 rows = data.get("matches")
             return self._to_plain(rows or [])
         except Exception as e:
-            logger.error("SDK get_matches failed: %s", e)
+            logger.error("SDK get_matches failed: %s", _format_sdk_error(e))
             return []
 
     async def get_interest_and_funding_payments(
@@ -697,7 +709,7 @@ class NadoClient:
                 return payments
             return []
         except Exception as e:
-            logger.error("SDK get_interest_and_funding_payments failed: %s", e)
+            logger.error("SDK get_interest_and_funding_payments failed: %s", _format_sdk_error(e))
             return []
 
     async def calculate_account_summary(self, *, ts: int | None = None) -> dict:
@@ -723,7 +735,7 @@ class NadoClient:
 
             return self._to_plain(await asyncio.to_thread(_call)) or {}
         except Exception as e:
-            logger.error("SDK calculate_account_summary failed: %s", e)
+            logger.error("SDK calculate_account_summary failed: %s", _format_sdk_error(e))
             return {}
 
     async def cancel_orders(self, *, product_id: int, digests: list[str]) -> dict:
@@ -794,7 +806,7 @@ class NadoClient:
                 rows = data.get("orders")
             return self._to_plain(rows or [])
         except Exception as e:
-            logger.error("get_trigger_orders failed: %s", e)
+            logger.error("get_trigger_orders failed: %s", _format_sdk_error(e))
             return []
 
     async def cancel_trigger_orders(self, *, product_id: int, digests: list[str]) -> dict:

@@ -45,13 +45,40 @@ def vault_deposit_watch_interval_seconds() -> int:
 
 
 def portfolio_sync_interval_seconds() -> int:
-    # Default 5s for near-real-time Positions tracking. Floor is also 5s
-    # so we don't hammer Nado faster than the snapshot cache TTL.
-    raw = (os.environ.get("NADO_PORTFOLIO_SYNC_SECONDS") or "5").strip()
+    # Default 30s: keeps Positions reasonably fresh without flooding gateway/
+    # archive when many users are active. Strategies/copy/vault use separate loops.
+    raw = (os.environ.get("NADO_PORTFOLIO_SYNC_SECONDS") or "30").strip()
     try:
-        return max(5, int(float(raw)))
+        return max(15, int(float(raw)))
     except ValueError:
-        return 5
+        return 30
+
+
+def portfolio_sync_users_per_tick() -> int:
+    """How many active users to sync per scheduler tick (cursor page size)."""
+    raw = (os.environ.get("NADO_PORTFOLIO_SYNC_USERS_PER_TICK") or "8").strip()
+    try:
+        return max(1, min(50, int(float(raw))))
+    except ValueError:
+        return 8
+
+
+def portfolio_poll_cache_seconds() -> int:
+    """Skip re-fetching a user during background poll if synced within this window."""
+    raw = (os.environ.get("NADO_PORTFOLIO_POLL_CACHE_SECONDS") or "45").strip()
+    try:
+        return max(15, int(float(raw)))
+    except ValueError:
+        return 45
+
+
+def portfolio_heavy_sync_seconds() -> int:
+    """Matches/funding archive calls run at most this often per user during poll."""
+    raw = (os.environ.get("NADO_PORTFOLIO_HEAVY_SYNC_SECONDS") or "300").strip()
+    try:
+        return max(60, int(float(raw)))
+    except ValueError:
+        return 300
 
 
 def dgrid_intelligence_enabled() -> bool:

@@ -795,8 +795,8 @@ def start_scheduler():
     # jobs were emitting "Run time of job ... was missed by Ns" warnings. We
     # don't care about a missed alert tick — coalesce stacked misses into one
     # and give the scheduler a grace window before logging.
-    _SHORT_TICK = {"misfire_grace_time": 30, "coalesce": True}
-    _LONG_TICK = {"misfire_grace_time": 120, "coalesce": True}
+    _SHORT_TICK = {"misfire_grace_time": 30, "coalesce": True, "max_instances": 1}
+    _LONG_TICK = {"misfire_grace_time": 120, "coalesce": True, "max_instances": 1}
 
     scheduler.add_job(
         check_alerts, "interval", seconds=_ALERT_SCAN_SECONDS,
