@@ -155,12 +155,12 @@ def _note_request_sent() -> None:
 def _get_session() -> requests.Session:
     global _session
     if _session is None:
-        _session = requests.Session()
-        _session.headers.update({"Accept-Encoding": "gzip"})
-        from requests.adapters import HTTPAdapter
-        adapter = HTTPAdapter(pool_connections=_POOL_SIZE, pool_maxsize=_POOL_SIZE)
-        _session.mount("https://", adapter)
-        _session.mount("http://", adapter)
+        # Share the hardened session (browser-like UA + Accept headers + pool
+        # adapters) so the archive endpoint stops getting Cloudflare-challenged
+        # on every poll. Pool sizes already chosen for high concurrency.
+        from src.nadobro.services.http_session import SESSION as _shared
+
+        _session = _shared
     return _session
 
 
@@ -185,6 +185,16 @@ def _post(url: str, payload: dict) -> dict | list | None:
     # don't hold a slot during cooldown.
     if is_archive_rate_limited():
         return None
+    # SCALE: also short-circuit when our Cloudflare circuit breaker is open
+    # for this host. Avoids stacking up archive calls into a queue that just
+    # gets 403'd back to back.
+    try:
+        from src.nadobro.services.http_session import is_circuit_open
+
+        if is_circuit_open(url):
+            return None
+    except Exception:
+        pass
 
     _request_semaphore.acquire()
     try:
@@ -205,9 +215,11 @@ def _post(url: str, payload: dict) -> dict | list | None:
                 status = getattr(e.response, "status_code", "?")
                 body = ""
                 retry_after = 0.0
+                content_type = ""
                 try:
                     body = (e.response.text or "")[:200]
                     retry_after = _parse_retry_after(getattr(e.response, "headers", None))
+                    content_type = (getattr(e.response, "headers", {}) or {}).get("content-type") or ""
                 except Exception:  # noqa: BLE001
                     pass
                 if status == 429:
@@ -221,12 +233,23 @@ def _post(url: str, payload: dict) -> dict | list | None:
                         _rate_limited_until = max(
                             _rate_limited_until, time.time() + retry_after,
                         )
-                logger.warning(
-                    "Archive API HTTP %s (attempt %d): %s",
-                    status,
-                    attempt + 1,
-                    redact_sensitive_text(body),
-                )
+                # Cloudflare-challenge: route through the throttled logger and
+                # let the breaker capture the failure so callers stop hammering.
+                if status == 403 and "text/html" in content_type.lower():
+                    try:
+                        from src.nadobro.services.http_session import _log_cf_warning, _record_challenge, _host  # noqa: WPS437
+
+                        _log_cf_warning(url, status, body)
+                        _record_challenge(_host(url))
+                    except Exception:
+                        pass
+                else:
+                    logger.warning(
+                        "Archive API HTTP %s (attempt %d): %s",
+                        status,
+                        attempt + 1,
+                        redact_sensitive_text(body),
+                    )
                 if attempt >= _MAX_RETRIES:
                     return None
             except requests.RequestException as e:

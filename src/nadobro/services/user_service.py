@@ -113,15 +113,12 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
         logger.warning("Failed to stop strategies on network switch for %s: %s", telegram_id, e)
 
     execute("UPDATE users SET network_mode = %s WHERE telegram_id = %s", (network, telegram_id))
-    clear_client_cache()
-    _readonly_cache.clear()
+    # SCALE FIX: invalidate only THIS user's client caches across both networks
+    # so a single user switching mode never disrupts the other 999 users' cached
+    # SDK sessions. Previously this cleared every user's NadoClient + readonly
+    # cache, causing a thundering-herd against the venue.
+    _invalidate_user_caches(user.main_address, telegram_id)
     invalidate_user_cache(telegram_id)
-    try:
-        from src.nadobro.services.nado_sync import clear_cache as _clear_portfolio_snapshot_cache
-
-        _clear_portfolio_snapshot_cache(int(telegram_id))
-    except Exception:
-        logger.debug("nado_sync cache clear failed on network switch user=%s", telegram_id, exc_info=True)
 
     addr = user.main_address
     if addr:
@@ -170,6 +167,33 @@ def _prune_readonly_cache(now: float | None = None) -> None:
     while len(_readonly_cache) > _READONLY_CACHE_MAX_ENTRIES:
         oldest = min(_readonly_cache, key=lambda k: float(_readonly_cache[k].get("ts") or 0))
         _readonly_cache.pop(oldest, None)
+
+
+def _invalidate_user_caches(address: Optional[str], telegram_id: int) -> None:
+    """SCALE: per-user cache invalidation.
+
+    Wipes only the cached NadoClient + readonly-client entries belonging to a
+    single wallet address across both networks, plus the user's portfolio
+    snapshot. Used on network switch / unlink so a single user's mutation
+    never invalidates every other user's cached SDK sessions.
+    """
+    addr = (str(address or "").strip().lower()) or None
+    if addr:
+        for net in ("testnet", "mainnet"):
+            try:
+                clear_client_cache(address=addr, network=net)
+            except Exception:
+                logger.debug("clear_client_cache(addr=%s, net=%s) failed", addr, net, exc_info=True)
+        for key in list(_readonly_cache.keys()):
+            # Readonly cache key is "ro:<addr>:<network>".
+            if key.startswith(f"ro:{addr}:"):
+                _readonly_cache.pop(key, None)
+    try:
+        from src.nadobro.services.nado_sync import clear_cache as _clear_portfolio_snapshot_cache
+
+        _clear_portfolio_snapshot_cache(int(telegram_id))
+    except Exception:
+        logger.debug("nado_sync cache clear failed user=%s", telegram_id, exc_info=True)
 
 
 def _is_wallet_fully_linked(user: Optional[UserRow]) -> bool:
@@ -242,9 +266,7 @@ def save_linked_signer(
         ),
     )
     invalidate_user_cache(telegram_id)
-    clear_client_cache()
-    _readonly_cache.clear()
-
+    _invalidate_user_caches(main_address, telegram_id)
 
 
 def has_mode_private_key(telegram_id: int, network: str) -> bool:
@@ -414,13 +436,16 @@ def get_active_users_count() -> int:
 
 
 def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple[bool, str]:
+    # Resolve the address BEFORE wiping the row so we can target this user's
+    # entries in the global caches instead of nuking every other user's.
+    prior_user = get_user(telegram_id)
+    prior_address = prior_user.main_address if prior_user else None
     execute(
         "UPDATE users SET main_address = NULL, linked_signer_address = NULL, encrypted_linked_signer_pk = NULL, salt = NULL WHERE telegram_id = %s",
         (telegram_id,),
     )
     invalidate_user_cache(telegram_id)
-    clear_client_cache()
-    _readonly_cache.clear()
+    _invalidate_user_caches(prior_address, telegram_id)
     return True, _loc("{network} wallet unlinked. You can link again via Wallet button.").format(network=network)
 
 

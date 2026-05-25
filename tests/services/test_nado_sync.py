@@ -197,6 +197,55 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         assert session_id is None
         assert source == "manual"
 
+    def test_active_users_uses_cursor_pagination_not_limit_200(self):
+        """SCALE: the previous active_users used ``LIMIT 200`` which silently
+        dropped every other user once we crossed 200 simultaneously-active
+        accounts. The new shape paginates by ``telegram_id > cursor`` with a
+        page-sized limit so the scheduler walks the full set across ticks.
+        """
+        captured = {}
+
+        def _capture(sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+            return []
+
+        with patch.object(nado_sync, "query_all", side_effect=_capture):
+            nado_sync.active_users(limit=50, after_user_id=12345)
+
+        assert "u.telegram_id > %s" in captured["sql"]
+        assert "ORDER BY u.telegram_id ASC" in captured["sql"]
+        assert "LIMIT %s" in captured["sql"]
+        assert captured["params"] == (12345, 50)
+
+    async def test_sync_active_users_advances_cursor_then_wraps(self):
+        """Cursor must advance across ticks; reaching the end resets to 0 so
+        new users (lower IDs added between ticks) eventually get picked up.
+        """
+        nado_sync._active_users_cursor = 0
+
+        page_one = [
+            {"telegram_id": 10, "network": "testnet"},
+            {"telegram_id": 20, "network": "mainnet"},
+        ]
+        page_two = []  # end of set
+
+        pages = iter([page_one, page_two])
+
+        def _next_page(*args, **kwargs):
+            return next(pages, [])
+
+        async def _noop_sync(*args, **kwargs):
+            return None
+
+        with patch.object(nado_sync, "active_users", side_effect=_next_page), patch.object(
+            nado_sync, "sync_user", new=_noop_sync,
+        ):
+            await nado_sync.sync_active_users(reason="test")
+            assert nado_sync._active_users_cursor == 20  # advanced to last user id
+            await nado_sync.sync_active_users(reason="test")
+            assert nado_sync._active_users_cursor == 0  # wrapped when end reached
+
     def test_write_matches_increments_session_win_count(self):
         execute_calls = []
         with patch.object(nado_sync, "query_one", return_value=None), patch.object(

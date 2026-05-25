@@ -64,12 +64,28 @@ def mark_user_active(user_id: int) -> None:
         logger.debug("mark_user_active failed user=%s", user_id, exc_info=True)
 
 
-def active_users() -> list[dict[str, Any]]:
+_ACTIVE_USERS_PAGE_SIZE = 200
+# Module-level cursor for active_users pagination. Lives in the process so the
+# scheduler walks all active users across ticks without re-syncing the same
+# top-N every iteration. Reset to 0 when we reach the end (handled below).
+_active_users_cursor: int = 0
+
+
+def active_users(limit: int | None = None, after_user_id: int | None = None) -> list[dict[str, Any]]:
+    """Return active users on this network, paginated.
+
+    SCALE: previously hard-capped at LIMIT 200, which silently dropped every
+    other user once we crossed that count. Now we paginate by ``telegram_id``
+    (stable across calls) and the scheduler walks the full set across ticks.
+    """
+    page = int(limit if limit is not None else _ACTIVE_USERS_PAGE_SIZE)
+    cursor = int(after_user_id or 0)
     return query_all(
         """
         SELECT u.telegram_id, u.network_mode AS network, u.last_active
         FROM users u
         WHERE u.main_address IS NOT NULL
+          AND u.telegram_id > %s
           AND (
             u.last_active >= now() - interval '60 minutes'
             OR EXISTS (
@@ -91,22 +107,38 @@ def active_users() -> list[dict[str, Any]]:
                 AND s.status = 'running'
             )
           )
-        ORDER BY u.last_active DESC NULLS LAST
-        LIMIT 200
-        """
+        ORDER BY u.telegram_id ASC
+        LIMIT %s
+        """,
+        (cursor, page),
     )
 
 
 async def sync_active_users(reason: str = "poll") -> None:
+    """Walk active users in stable cursor order, one page per tick.
+
+    The scheduler invokes this every NADO_PORTFOLIO_SCHEDULER_INTERVAL_SECONDS
+    seconds. Each call advances ``_active_users_cursor`` so the next call picks
+    up where the previous one left off; reaching the end resets the cursor so
+    we loop continuously. This scales gracefully to thousands of users without
+    any single tick blocking on more than ``_ACTIVE_USERS_PAGE_SIZE`` syncs.
+    """
+    global _active_users_cursor
     try:
-        rows = await asyncio.to_thread(active_users)
+        rows = await asyncio.to_thread(active_users, _ACTIVE_USERS_PAGE_SIZE, _active_users_cursor)
     except Exception as exc:
         logger.warning("portfolio active user query failed: %s", exc)
+        return
+    if not rows:
+        # End of page -> wrap to the start so the next tick picks up new users
+        # that were added since we last looped.
+        _active_users_cursor = 0
         return
     for row in rows:
         user_id = int(row.get("telegram_id"))
         network = str(row.get("network") or "mainnet")
         await sync_user(user_id, network=network, reason=reason)
+        _active_users_cursor = max(_active_users_cursor, user_id)
 
 
 async def sync_user(

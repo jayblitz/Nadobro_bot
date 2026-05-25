@@ -1,10 +1,11 @@
-"""Volume Bot controller — spot-only wash-cycle, preserving the PR #72/#73
-spot-only cutover. Hard-coded to spot (leverage 1) on the supported pairs;
-perp configs are rejected at construction. Runs a MAKER TWAP buy half then a
-MAKER TWAP sell-cleanup half. The daily-volume cap is enforced upstream by the
+"""Volume Bot controller — spot-only wash-cycle. Hard-coded to spot
+(leverage 1); perp configs are rejected at construction. The list of
+*supported pairs* is sourced from the live Nado spot catalog (see
+``services.product_catalog.list_volume_spot_bases``) per execution mode, so
+new testnet/mainnet listings (e.g. ``QQQX``, ``SPYX``) are picked up
+automatically without code edits. Runs a MAKER TWAP buy half then a MAKER
+TWAP sell-cleanup half. The daily-volume cap is enforced upstream by the
 Risk Engine.
-
-Implemented in Phase 4.
 """
 from __future__ import annotations
 
@@ -16,21 +17,36 @@ from src.nadobro.engine.executors.twap_executor import TWAPExecutor, TWAPExecuto
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import TradeType, _dec
 
-SUPPORTED_SPOT_PAIRS = {"KBTC-USDC", "WETH-USDC"}
+# Quote-like symbols that must never be selected as a base for Volume.
+# Kept in sync with ``product_catalog._QUOTE_LIKE_SYMBOLS``.
+_QUOTE_LIKE_BASES = frozenset({"USDC", "USDC0", "USDT", "USDT0", "USD"})
 
 
 class VolumeBotController(Controller):
     def __init__(self, **kwargs: object) -> None:
         super().__init__(name="volume_bot", **kwargs)  # type: ignore[arg-type]
-        self.trading_pair = str(self.cfg("trading_pair"))
+        raw_pair = str(self.cfg("trading_pair") or "").strip().upper()
         market = str(self.cfg("market", "spot")).lower()
         leverage = int(self.cfg("leverage", 1))
         if market != "spot":
             raise ValueError("VolumeBotController is spot-only (market must be 'spot')")
         if leverage != 1:
             raise ValueError("VolumeBotController is spot-only (leverage must be 1)")
-        if self.trading_pair not in SUPPORTED_SPOT_PAIRS:
-            raise ValueError(f"{self.trading_pair} is not a supported volume-bot spot pair")
+        if not raw_pair:
+            raise ValueError("VolumeBotController requires a non-empty trading_pair")
+        # Reject perps explicitly so a mis-routed configuration fails loudly.
+        if raw_pair.endswith("-PERP") or raw_pair.endswith("PERP"):
+            raise ValueError(f"{raw_pair} is a perp; VolumeBotController is spot-only")
+        # Reject a quote-only "pair" (e.g. trading_pair="USDC" means trade USDC
+        # against the quote, which is a no-op stable/stable trade and the venue
+        # has no spot book for it). The base is everything before the dash if a
+        # dashed pair (e.g. ``KBTC-USDC0`` -> base ``KBTC``) was supplied.
+        base = raw_pair.split("-", 1)[0]
+        if base in _QUOTE_LIKE_BASES:
+            raise ValueError(
+                f"{raw_pair} is a quote-like asset and not a valid Volume spot base"
+            )
+        self.trading_pair = raw_pair
         self.total_amount_quote = _dec(self.cfg("total_amount_quote", "50"))
         self.total_duration = float(self.cfg("total_duration", 600))
         self.order_interval = float(self.cfg("order_interval", 60))

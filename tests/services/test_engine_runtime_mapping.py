@@ -59,6 +59,30 @@ def test_map_vol_config_is_spot():
     assert cfg["total_duration"] == 240.0 and cfg["order_interval"] == 60.0
 
 
+def test_map_vol_config_normalizes_dashed_and_bare_product():
+    """``state.product`` may be stored as a bare base (current UI flow) or
+    as a dashed pair (legacy + tests). Both must produce a canonical
+    ``trading_pair`` the VolumeBotController accepts. Regression guard for
+    the production crash where ``USDC`` / ``KBTC`` collided with the
+    controller's hardcoded ``{"KBTC-USDC", "WETH-USDC"}`` set.
+    """
+    bare = er.map_strategy_config(
+        "vol", {"notional_usd": 50.0, "interval_seconds": 30}, Decimal(100), product="KBTC",
+    )
+    assert bare["trading_pair"] == "KBTC"
+
+    dashed = er.map_strategy_config(
+        "vol", {"notional_usd": 50.0, "interval_seconds": 30}, Decimal(100), product="KBTC-USDC0",
+    )
+    # Suffix stripped via normalize_volume_spot_symbol.
+    assert dashed["trading_pair"] == "KBTC"
+
+    testnet_listing = er.map_strategy_config(
+        "vol", {"notional_usd": 50.0, "interval_seconds": 30}, Decimal(100), product="QQQX",
+    )
+    assert testnet_listing["trading_pair"] == "QQQX"
+
+
 def test_map_risk_limits():
     lim = er.map_risk_limits({"notional_usd": 100.0, "levels": 3, "session_notional_cap_usd": 0.0})
     assert lim.max_open_executors == 5            # levels + 2

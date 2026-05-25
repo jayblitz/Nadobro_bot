@@ -1587,10 +1587,29 @@ async def _handle_strategy(query, data, context, telegram_id):
         vm = _vol_market_pref(context) if strategy_id == "vol" else None
         available_pairs = _strategy_available_products(strategy_id, network, vm)
         if strategy_id == "vol" and vm == "spot" and not available_pairs:
+            # Distinguish "catalog returned but nothing listed for {network}" vs
+            # "catalog endpoint is failing/Cloudflare-blocked right now" so the
+            # user gets accurate guidance for the active mode.
+            try:
+                from src.nadobro.services.product_catalog import is_spot_catalog_dynamic
+
+                catalog_live = is_spot_catalog_dynamic(network)
+            except Exception:
+                catalog_live = False
+            network_label = "Testnet" if str(network).lower() == "testnet" else "Mainnet"
+            if catalog_live:
+                body = (
+                    f"⚠️ *Volume Spot*\n\nNo spot books are listed for {network_label} right now\\. "
+                    "Pick *Perp* or come back when Nado lists a spot pair on this network\\."
+                )
+            else:
+                body = (
+                    f"⚠️ *Volume Spot*\n\nSpot catalog temporarily unavailable on {network_label} "
+                    "\\(upstream is being challenged by Cloudflare\\)\\. Please retry in ~30s\\."
+                )
             await _edit_loc(
                 query,
-                "⚠️ *Volume Spot*\n\nNo KBTC/WETH/USDC spot books resolved on this network\\. "
-                "Switch to mainnet or pick **Perp**\\.",
+                body,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=strategy_action_kb("vol", "BTC", ["BTC"], vol_market=vm),
             )
