@@ -2391,14 +2391,14 @@ class NadoClient:
             return {"success": False, "error": "Client not initialized. Please try /start again."}
         if usdt0_amount is None or float(usdt0_amount) <= 0:
             return {"success": False, "error": "Deposit amount must be positive."}
+        sender_hex = self.subaccount_hex or ""
+        if not sender_hex:
+            return {"success": False, "error": "Subaccount unavailable. Re-link your wallet via /start."}
         try:
             from nado_protocol.engine_client.types.execute import MintNlpParams
             quote_amount_x18 = int(round(float(usdt0_amount) * 1e18))
             if quote_amount_x18 <= 0:
                 return {"success": False, "error": "Deposit amount rounds to zero. Try a larger amount."}
-            sender_hex = self.subaccount_hex or ""
-            if not sender_hex:
-                return {"success": False, "error": "Subaccount unavailable. Re-link your wallet via /start."}
             params = MintNlpParams(
                 sender=sender_hex,
                 quoteAmount=quote_amount_x18,
@@ -2427,14 +2427,14 @@ class NadoClient:
             return {"success": False, "error": "Client not initialized. Please try /start again."}
         if nlp_amount is None or float(nlp_amount) <= 0:
             return {"success": False, "error": "Withdraw amount must be positive."}
+        sender_hex = self.subaccount_hex or ""
+        if not sender_hex:
+            return {"success": False, "error": "Subaccount unavailable. Re-link your wallet via /start."}
         try:
             from nado_protocol.engine_client.types.execute import BurnNlpParams
             nlp_amount_x18 = int(round(float(nlp_amount) * 1e18))
             if nlp_amount_x18 <= 0:
                 return {"success": False, "error": "Withdraw amount rounds to zero. Try a larger amount."}
-            sender_hex = self.subaccount_hex or ""
-            if not sender_hex:
-                return {"success": False, "error": "Subaccount unavailable. Re-link your wallet via /start."}
             params = BurnNlpParams(sender=sender_hex, nlpAmount=nlp_amount_x18)
             resp = self.client.market.burn_nlp(params)
             digest = getattr(resp, "digest", None) or getattr(resp, "tx_hash", None)

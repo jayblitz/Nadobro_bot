@@ -34,7 +34,7 @@ class _Client:
             "isolated_positions": [],
         }
 
-    def get_all_open_orders(self, refresh=True, *, include_isolated=True):
+    def get_all_open_orders(self, refresh=True, *, include_isolated=True, strict=False):
         self.include_isolated_flags.append(include_isolated)
         return [{"product_id": 1, "product_name": "BTC", "digest": "0xabc", "amount": "1", "price": "100"}]
 
