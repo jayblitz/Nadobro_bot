@@ -73,6 +73,78 @@ def _order_submit_timeout_seconds() -> float:
     return max(5.0, val)
 
 
+_SUBMIT_UNKNOWN_PREFIX = "Order submit status unknown"
+
+
+def _unknown_submit_retry_window_seconds() -> float:
+    raw = (os.environ.get("NADO_UNKNOWN_SUBMIT_RETRY_WINDOW_SECONDS") or "120").strip()
+    try:
+        val = float(raw)
+    except Exception:
+        return 120.0
+    return max(30.0, val)
+
+
+def _submit_unknown_message(detail: object) -> str:
+    return (
+        f"{_SUBMIT_UNKNOWN_PREFIX}: {detail}. "
+        "The venue may still accept this order; check Portfolio before retrying."
+    )
+
+
+def _parse_trade_timestamp(value) -> float | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _recent_unknown_market_submit(
+    telegram_id: int,
+    *,
+    network: str,
+    product_id: int,
+    side: str,
+    size: float,
+) -> dict | None:
+    """Find a recent market submit whose venue result is still ambiguous."""
+    try:
+        trades = get_trades_by_user(telegram_id, limit=25, network=network) or []
+    except Exception:
+        return None
+    now_ts = time.time()
+    window_s = _unknown_submit_retry_window_seconds()
+    for trade in trades:
+        try:
+            if int(trade.get("product_id") or 0) != int(product_id):
+                continue
+            if str(trade.get("status") or "").lower() != TradeStatus.PENDING.value:
+                continue
+            if str(trade.get("order_type") or "").lower() != OrderTypeEnum.MARKET.value:
+                continue
+            if str(trade.get("side") or "").lower() != str(side).lower():
+                continue
+            if abs(float(trade.get("size") or 0) - float(size)) > 1e-10:
+                continue
+            if not str(trade.get("error_message") or "").startswith(_SUBMIT_UNKNOWN_PREFIX):
+                continue
+            created_ts = _parse_trade_timestamp(trade.get("created_at"))
+            if created_ts is None or now_ts - created_ts > window_s:
+                continue
+            return trade
+        except Exception:
+            continue
+    return None
+
+
 def _submit_with_timeout(func, *args, timeout_s: float, **kwargs):
     fut = _submit_pool.submit(func, *args, **kwargs)
     try:
@@ -550,6 +622,21 @@ def execute_market_order(
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
     network = selected_network
+    side_value = OrderSide.LONG.value if is_long else OrderSide.SHORT.value
+    unknown_submit = _recent_unknown_market_submit(
+        telegram_id,
+        network=network,
+        product_id=product_id,
+        side=side_value,
+        size=size,
+    )
+    if unknown_submit:
+        return {
+            "success": False,
+            "pending": True,
+            "trade_id": unknown_submit.get("id"),
+            "error": "A matching order submit is still status unknown. Check Portfolio before retrying.",
+        }
 
     intent_id = kwargs.get("intent_id")
     order_nonce = kwargs.get("order_nonce") or kwargs.get("client_order_id") or kwargs.get("idempotency_key")
@@ -634,7 +721,7 @@ def execute_market_order(
         "product_id": product_id,
         "product_name": get_product_name(product_id, network=selected_network),
         "order_type": OrderTypeEnum.MARKET.value,
-        "side": OrderSide.LONG.value if is_long else OrderSide.SHORT.value,
+        "side": side_value,
         "size": size,
         "leverage": leverage,
         "status": TradeStatus.PENDING.value,
@@ -686,12 +773,13 @@ def execute_market_order(
         timeout_s=submit_timeout,
     )
     if not submit_ok:
+        unknown_msg = _submit_unknown_message(submit_result)
         try:
             update_trade(
                 trade_id,
                 {
-                    "status": TradeStatus.FAILED.value,
-                    "error_message": str(submit_result),
+                    "status": TradeStatus.PENDING.value,
+                    "error_message": unknown_msg,
                 },
                 network=network,
             )
@@ -701,10 +789,10 @@ def execute_market_order(
             try:
                 from src.nadobro.services.order_intents import update_order_intent
 
-                update_order_intent(intent_id, status="failed", error=str(submit_result), trade_id=trade_id)
+                update_order_intent(intent_id, status="recorded", error=unknown_msg, trade_id=trade_id)
             except Exception:
                 pass
-        return {"success": False, "error": str(submit_result)}
+        return {"success": False, "pending": True, "trade_id": trade_id, "error": unknown_msg}
     result = submit_result
 
     if result["success"]:
@@ -909,13 +997,28 @@ def execute_spot_market_order(
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
     network = selected_network
+    side_value = OrderSide.LONG.value if is_buy else OrderSide.SHORT.value
+    unknown_submit = _recent_unknown_market_submit(
+        telegram_id,
+        network=network,
+        product_id=spot_product_id,
+        side=side_value,
+        size=size,
+    )
+    if unknown_submit:
+        return {
+            "success": False,
+            "pending": True,
+            "trade_id": unknown_submit.get("id"),
+            "error": "A matching order submit is still status unknown. Check Portfolio before retrying.",
+        }
 
     spot_trade_data = {
         "user_id": telegram_id,
         "product_id": spot_product_id,
         "product_name": spot_symbol,
         "order_type": OrderTypeEnum.MARKET.value,
-        "side": OrderSide.LONG.value if is_buy else OrderSide.SHORT.value,
+        "side": side_value,
         "size": size,
         "leverage": 1.0,
         "status": TradeStatus.PENDING.value,
@@ -938,18 +1041,19 @@ def execute_spot_market_order(
         timeout_s=submit_timeout,
     )
     if not submit_ok:
+        unknown_msg = _submit_unknown_message(submit_result)
         try:
             update_trade(
                 trade_id,
                 {
-                    "status": TradeStatus.FAILED.value,
-                    "error_message": str(submit_result),
+                    "status": TradeStatus.PENDING.value,
+                    "error_message": unknown_msg,
                 },
                 network=network,
             )
         except Exception:
             pass
-        return {"success": False, "error": str(submit_result)}
+        return {"success": False, "pending": True, "trade_id": trade_id, "error": unknown_msg}
     result = submit_result
     if result.get("success"):
         digest = result.get("digest", "")
@@ -1271,10 +1375,9 @@ def execute_limit_order(
     if not valid:
         return {"success": False, "error": msg}
 
-    user = get_user(telegram_id)
-    network = user.network_mode.value if user else "mainnet"
+    network = selected_network
     product_id = get_product_id(product, network=network)
-    client = get_user_nado_client(telegram_id)
+    client = get_user_nado_client(telegram_id, network=network)
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required. Check Wallet settings."}
 

@@ -9,7 +9,8 @@ full table for everyone. After the fix, custom traders carry an
 These tests pin the SQL contracts so the regression cannot return.
 """
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from _stubs import install_test_stubs
 
@@ -222,6 +223,95 @@ class CopyServicePrivacyTests(unittest.TestCase):
 
         self.assertFalse(ok)
         create_spy.assert_not_called()
+
+    def test_get_trader_preview_denies_private_trader_without_requester(self):
+        owned = {
+            "id": 9,
+            "wallet_address": "0xtarget",
+            "label": "private",
+            "active": True,
+            "owner_user_id": 1111,
+        }
+        with patch.object(copy_service, "get_copy_trader", return_value=owned), patch.object(
+            copy_service.NadoClient, "from_address"
+        ) as client_spy:
+            preview = copy_service.get_trader_preview(9, network="mainnet", requester_user_id=None)
+
+        self.assertEqual(preview, {"found": False})
+        client_spy.assert_not_called()
+
+    def test_place_tp_sl_orders_passes_mirror_network_to_execution(self):
+        captured = []
+
+        def _capture_limit(**kwargs):
+            captured.append(kwargs)
+            return {"success": True, "digest": f"0x{len(captured)}"}
+
+        with patch.object(copy_service, "execute_limit_order", side_effect=_capture_limit):
+            digests = copy_service._place_tp_sl_orders(
+                4242,
+                "BTC",
+                1,
+                0.5,
+                True,
+                2.0,
+                120.0,
+                80.0,
+                "testnet",
+            )
+
+        self.assertEqual(digests, {"tp_order_digest": "0x1", "sl_order_digest": "0x2"})
+        self.assertEqual([call["network"] for call in captured], ["testnet", "testnet"])
+
+
+class CopyServiceNetworkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sync_mirror_positions_uses_mirror_network_for_new_order(self):
+        captured = {}
+        mirror = {
+            "id": 5,
+            "user_id": 4242,
+            "network": "testnet",
+            "margin_per_trade": 50.0,
+            "max_leverage": 3.0,
+            "total_allocated_usd": 500.0,
+        }
+
+        async def _inline_run_blocking(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        def _capture_market(**kwargs):
+            captured.update(kwargs)
+            return {"success": True, "digest": "0xopen", "price": 100.0}
+
+        with patch.object(copy_service, "run_blocking", side_effect=_inline_run_blocking), patch.object(
+            copy_service, "get_user", return_value=SimpleNamespace(network_mode=SimpleNamespace(value="testnet"))
+        ), patch.object(copy_service, "get_open_copy_positions", return_value=[]), patch.object(
+            copy_service, "get_product_name", return_value="BTC-PERP"
+        ) as product_name_spy, patch.object(
+            copy_service, "get_product_max_leverage", return_value=5.0
+        ), patch.object(copy_service, "execute_market_order", side_effect=_capture_market), patch.object(
+            copy_service, "insert_copy_position", return_value=123
+        ), patch.object(copy_service, "_place_tp_sl_orders", return_value={}), patch.object(
+            copy_service, "_notify_user", new_callable=AsyncMock
+        ):
+            await copy_service._sync_mirror_positions(
+                mirror,
+                {1: {"side": "LONG", "entry_price": 100.0, "size": 1.0}},
+            )
+
+        self.assertEqual(captured["network"], "testnet")
+        product_name_spy.assert_called_with(1, network="testnet")
+
+
+class CopyTradingMigrationTests(unittest.TestCase):
+    def test_owner_migration_backfills_or_deactivates_legacy_personal_rows(self):
+        from pathlib import Path
+
+        sql = Path("src/nadobro/migrations/0011_copy_trader_owner.sql").read_text()
+        self.assertIn("COUNT(DISTINCT user_id) = 1", sql)
+        self.assertIn("SET owner_user_id = owners.user_id", sql)
+        self.assertIn("SET active = false", sql)
+        self.assertIn("COALESCE(is_curated, false) = false", sql)
 
 
 if __name__ == "__main__":

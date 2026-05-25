@@ -14,6 +14,7 @@ from src.nadobro.utils.x18 import to_x18
 class _Client:
     def __init__(self):
         self.summary_calls = 0
+        self.include_isolated_flags = []
 
     async def calculate_account_summary(self, ts=None):
         self.summary_calls += 1
@@ -33,10 +34,11 @@ class _Client:
             "isolated_positions": [],
         }
 
-    def get_all_open_orders(self, refresh=True, *, include_isolated=True):
+    def get_all_open_orders(self, refresh=True, *, include_isolated=True, strict=False):
+        self.include_isolated_flags.append(include_isolated)
         return [{"product_id": 1, "product_name": "BTC", "digest": "0xabc", "amount": "1", "price": "100"}]
 
-    async def get_trigger_orders(self, limit=200):
+    async def get_trigger_orders(self, limit=200, strict=False):
         return [{"product_id": 1, "product_name": "BTC", "digest": "0xtrg", "amount": "1", "price": "110", "type": "trigger"}]
 
     async def get_matches(self, limit=200):
@@ -89,6 +91,55 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
 
         assert result["stale"] is True
         assert "boom" in result["error"]
+
+    async def test_sync_summary_failure_does_not_write_destructive_snapshot(self):
+        class FailingSummaryClient(_Client):
+            async def calculate_account_summary(self, ts=None):
+                raise RuntimeError("summary unavailable")
+
+        cached = {"user_id": 42, "network": "testnet", "last_sync": datetime.now(timezone.utc), "positions": []}
+        nado_sync.set_cached_snapshot(42, "testnet", cached)
+        with patch.object(nado_sync, "get_user", return_value=SimpleNamespace(network_mode=SimpleNamespace(value="testnet"))), patch.object(
+            nado_sync, "get_user_nado_client", return_value=FailingSummaryClient()
+        ), patch.object(nado_sync, "_write_snapshot") as write_snapshot, patch.object(
+            nado_sync, "_write_sync_log_error"
+        ):
+            result = await nado_sync.sync_user(42, network="testnet", force=True)
+
+        assert result["stale"] is True
+        assert "summary unavailable" in result["error"]
+        write_snapshot.assert_not_called()
+
+    async def test_circuit_open_returns_stale_for_refresh_without_db_writes(self):
+        cached = {"user_id": 42, "network": "mainnet", "last_sync": datetime.now(timezone.utc), "positions": [{"symbol": "BTC"}]}
+        nado_sync.set_cached_snapshot(42, "mainnet", cached)
+        with patch.object(nado_sync, "get_user", return_value=SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))), patch.object(
+            nado_sync, "_gateway_circuit_open", return_value=True
+        ), patch.object(nado_sync, "get_user_nado_client") as client_spy, patch.object(nado_sync, "execute") as execute_spy:
+            result = await nado_sync.sync_user(42, network="mainnet", reason="refresh", force=True)
+
+        assert result["stale"] is True
+        assert result["positions"] == [{"symbol": "BTC"}]
+        client_spy.assert_not_called()
+        execute_spy.assert_not_called()
+
+    async def test_poll_sync_includes_isolated_orders_before_authoritative_sweep(self):
+        client = _Client()
+        stale_prior = {
+            "user_id": 42,
+            "network": "testnet",
+            "monotonic_ts": 0,
+            "positions": [{"symbol": "BTC", "isolated": False}],
+            "open_orders": [{"digest": "0xold"}],
+        }
+        nado_sync.set_cached_snapshot(42, "testnet", stale_prior)
+
+        with patch.object(nado_sync, "get_user", return_value=SimpleNamespace(network_mode=SimpleNamespace(value="testnet"))), patch.object(
+            nado_sync, "get_user_nado_client", return_value=client
+        ), patch.object(nado_sync, "execute"), patch.object(nado_sync, "query_one", return_value=None):
+            await nado_sync.sync_user(42, network="testnet", reason="poll", max_age_ms=0)
+
+        assert client.include_isolated_flags == [True]
 
     def test_write_matches_decodes_human_size_but_keeps_x18_fields(self):
         execute_calls = []

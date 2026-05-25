@@ -79,6 +79,16 @@ def _user_has_isolated_artifacts(snapshot: dict[str, Any] | None) -> bool:
     return False
 
 
+def _gateway_circuit_open(network: str) -> bool:
+    try:
+        from src.nadobro.services.http_session import is_circuit_open
+
+        gateway = NADO_MAINNET_REST if _normalize_network(network) == "mainnet" else NADO_TESTNET_REST
+        return bool(is_circuit_open(gateway))
+    except Exception:
+        return False
+
+
 def mark_user_active(user_id: int) -> None:
     try:
         execute("UPDATE users SET last_active = now() WHERE telegram_id = %s", (int(user_id),))
@@ -277,16 +287,9 @@ async def sync_user(
                 time.time() - last_heavy >= heavy_interval
             )
 
-            # Only fan out to isolated subaccounts when the user actually has
-            # one (or we've never synced them). Cuts the per-poll cost from
-            # ``1 + N_isolated`` round-trips down to ``1`` for the vast
-            # majority of users who only trade cross-margin.
-            include_isolated = bool(
-                force
-                or str(reason) != "poll"
-                or _user_has_isolated_artifacts(prior)
-                or not prior
-            )
+            # The DB write below treats missing live orders as closed, so every
+            # authoritative sync must include isolated subaccounts too.
+            include_isolated = True
 
             summary, orders, trigger_orders, balance = await asyncio.gather(
                 client.calculate_account_summary(ts=int(time.time())),
