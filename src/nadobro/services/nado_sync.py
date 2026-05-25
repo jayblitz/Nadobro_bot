@@ -79,6 +79,16 @@ def _user_has_isolated_artifacts(snapshot: dict[str, Any] | None) -> bool:
     return False
 
 
+def _gateway_circuit_open(network: str) -> bool:
+    try:
+        from src.nadobro.services.http_session import is_circuit_open
+
+        gateway = NADO_MAINNET_REST if _normalize_network(network) == "mainnet" else NADO_TESTNET_REST
+        return bool(is_circuit_open(gateway))
+    except Exception:
+        return False
+
+
 def mark_user_active(user_id: int) -> None:
     try:
         execute("UPDATE users SET last_active = now() WHERE telegram_id = %s", (int(user_id),))
@@ -218,31 +228,25 @@ async def sync_user(
             if cached and time.time() - float(cached.get("monotonic_ts", 0)) < cache_ttl:
                 return deepcopy(cached)
 
-        if reason == "poll" and not force:
-            try:
-                from src.nadobro.services.http_session import is_circuit_open
-
-                gateway = NADO_MAINNET_REST if network == "mainnet" else NADO_TESTNET_REST
-                if is_circuit_open(gateway):
-                    cached = _snapshot_cache.get(key)
-                    if cached:
-                        stale = deepcopy(cached)
-                        stale.update({"stale": True, "reason": reason})
-                        return stale
-                    logger.debug(
-                        "portfolio sync skipped user=%s network=%s: gateway circuit open",
-                        user_id,
-                        network,
-                    )
-                    return {
-                        "user_id": int(user_id),
-                        "network": network,
-                        "stale": True,
-                        "reason": reason,
-                        "monotonic_ts": time.time(),
-                    }
-            except Exception:
-                pass
+        if _gateway_circuit_open(network):
+            cached = _snapshot_cache.get(key)
+            if cached:
+                stale = deepcopy(cached)
+                stale.update({"stale": True, "reason": reason})
+                return stale
+            logger.debug(
+                "portfolio sync skipped user=%s network=%s reason=%s: gateway circuit open",
+                user_id,
+                network,
+                reason,
+            )
+            return {
+                "user_id": int(user_id),
+                "network": network,
+                "stale": True,
+                "reason": reason,
+                "monotonic_ts": time.time(),
+            }
 
         started = time.perf_counter()
         try:
@@ -266,21 +270,14 @@ async def sync_user(
                 time.time() - last_heavy >= heavy_interval
             )
 
-            # Only fan out to isolated subaccounts when the user actually has
-            # one (or we've never synced them). Cuts the per-poll cost from
-            # ``1 + N_isolated`` round-trips down to ``1`` for the vast
-            # majority of users who only trade cross-margin.
-            include_isolated = bool(
-                force
-                or str(reason) != "poll"
-                or _user_has_isolated_artifacts(prior)
-                or not prior
-            )
+            # The DB write below treats missing live orders as closed, so every
+            # authoritative sync must include isolated subaccounts too.
+            include_isolated = True
 
             summary, orders, trigger_orders, balance = await asyncio.gather(
                 client.calculate_account_summary(ts=int(time.time())),
-                asyncio.to_thread(client.get_all_open_orders, True, include_isolated=include_isolated),
-                client.get_trigger_orders(limit=200),
+                asyncio.to_thread(client.get_all_open_orders, True, include_isolated=include_isolated, strict=True),
+                client.get_trigger_orders(limit=200, strict=True),
                 asyncio.to_thread(client.get_balance),
             )
 

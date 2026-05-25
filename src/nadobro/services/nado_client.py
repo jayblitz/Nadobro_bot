@@ -580,7 +580,12 @@ class NadoClient:
         return []
 
     def _open_orders_for_sender_batched(
-        self, sender: str, product_ids: list[int], *, refresh: bool = False
+        self,
+        sender: str,
+        product_ids: list[int],
+        *,
+        refresh: bool = False,
+        strict: bool = False,
     ) -> list[dict]:
         """One gateway call that returns open orders for ``sender`` across
         every product in ``product_ids``. Replaces the per-product fan-out
@@ -588,15 +593,21 @@ class NadoClient:
         if not sender or not product_ids:
             return []
         if not self._ensure_sdk_client():
+            if strict:
+                raise RuntimeError("SDK client unavailable for open-order sync")
             return []
 
         try:
             from src.nadobro.services.http_session import is_circuit_open, throttle_host
 
             if is_circuit_open(self._rest_url()):
+                if strict:
+                    raise RuntimeError("gateway circuit open for open-order sync")
                 return []
             throttle_host(self._rest_url())
         except Exception:
+            if strict:
+                raise
             pass
 
         try:
@@ -610,6 +621,10 @@ class NadoClient:
                 "SDK get_subaccount_multi_products_open_orders failed: %s",
                 _format_sdk_error(e),
             )
+            if strict:
+                raise RuntimeError(
+                    f"SDK get_subaccount_multi_products_open_orders failed: {_format_sdk_error(e)}"
+                ) from e
             return []
 
         rows: list[dict] = []
@@ -644,6 +659,7 @@ class NadoClient:
         refresh: bool = False,
         *,
         include_isolated: bool = True,
+        strict: bool = False,
     ) -> list[dict]:
         """Fetch open orders for every perp product on a single sender in **one**
         gateway call (per sender), instead of the previous ``products × senders``
@@ -660,12 +676,16 @@ class NadoClient:
             if pid is not None:
                 product_ids.append(int(pid))
         if not product_ids:
+            if strict:
+                raise RuntimeError("product catalog unavailable for open-order sync")
             return []
 
         rows: list[dict] = []
         parent = self.subaccount_hex or ""
         if parent:
-            rows.extend(self._open_orders_for_sender_batched(parent, product_ids, refresh=refresh))
+            rows.extend(self._open_orders_for_sender_batched(parent, product_ids, refresh=refresh, strict=strict))
+        elif strict:
+            raise RuntimeError("subaccount unavailable for open-order sync")
 
         if not include_isolated:
             return rows
@@ -675,10 +695,12 @@ class NadoClient:
             isolated = self._isolated_subaccount_hexes() or []
         except Exception as exc:
             logger.debug("isolated open-order discovery skipped: %s", exc, exc_info=True)
+            if strict:
+                raise RuntimeError(f"isolated open-order discovery failed: {exc}") from exc
         for iso in isolated:
             if not iso or iso.lower() == parent.lower():
                 continue
-            for order in self._open_orders_for_sender_batched(iso, product_ids, refresh=refresh):
+            for order in self._open_orders_for_sender_batched(iso, product_ids, refresh=refresh, strict=strict):
                 order.setdefault("isolated", True)
                 order.setdefault("subaccount", iso)
                 rows.append(order)
@@ -777,7 +799,7 @@ class NadoClient:
         subaccount and optional snapshot timestamp are supplied through from_client.
         """
         if not self._ensure_sdk_client():
-            return {}
+            raise RuntimeError("SDK client unavailable for account summary")
         try:
             from nado_protocol.utils.margin_manager import MarginManager
 
@@ -793,7 +815,7 @@ class NadoClient:
             return self._to_plain(await asyncio.to_thread(_call)) or {}
         except Exception as e:
             logger.error("SDK calculate_account_summary failed: %s", _format_sdk_error(e))
-            return {}
+            raise RuntimeError(f"SDK calculate_account_summary failed: {_format_sdk_error(e)}") from e
 
     async def cancel_orders(self, *, product_id: int, digests: list[str]) -> dict:
         """
@@ -831,12 +853,17 @@ class NadoClient:
         product_ids: list[int] | None = None,
         limit: int = 100,
         digests: list[str] | None = None,
+        strict: bool = False,
     ) -> list[dict]:
         """List trigger / TP / SL / TWAP orders from the trigger service."""
         if not self._ensure_sdk_client():
+            if strict:
+                raise RuntimeError("SDK client unavailable for trigger-order sync")
             return []
         trigger_client = getattr(getattr(self.client, "context", None), "trigger_client", None)
         if not trigger_client:
+            if strict:
+                raise RuntimeError("Trigger client unavailable for trigger-order sync")
             return []
         try:
             from nado_protocol.trigger_client.types.query import (
@@ -864,6 +891,8 @@ class NadoClient:
             return self._to_plain(rows or [])
         except Exception as e:
             logger.error("get_trigger_orders failed: %s", _format_sdk_error(e))
+            if strict:
+                raise RuntimeError(f"get_trigger_orders failed: {_format_sdk_error(e)}") from e
             return []
 
     async def cancel_trigger_orders(self, *, product_id: int, digests: list[str]) -> dict:
