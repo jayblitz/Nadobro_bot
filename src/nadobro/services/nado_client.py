@@ -22,6 +22,10 @@ _PRICE_CACHE_TTL = int(os.environ.get("NADO_PRICE_CACHE_TTL_SECONDS", "10"))
 _ALL_PRODUCTS_CACHE = {}
 # Product list is static metadata — align with catalog hourly refresh.
 _ALL_PRODUCTS_TTL = int(os.environ.get("NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS", "3600"))
+# Last good full price snapshot per network. Served when the gateway budget
+# is throttling/blocked so callers back off instead of fanning out to one
+# REST call per product (which is what the gateway is meant to prevent).
+_ALL_PRICES_CACHE = {}
 
 
 def _format_sdk_error(exc: Exception, *, max_len: int = 200) -> str:
@@ -119,6 +123,12 @@ def _mask_address(value: str) -> str:
 
 
 class NadoClient:
+    # Class-level default so every construction path — including the
+    # __init__-bypassing ``from_address`` (uses ``cls.__new__``) — exposes
+    # this attribute. The gateway-budget gate reads it on every REST call;
+    # a missing attribute crashes read-only clients before any network I/O.
+    acting_user_id: Optional[int] = None
+
     def __init__(self, private_key: str, network: str = "testnet", main_address: str = None):
         self.private_key = private_key
         self.network = network
@@ -138,6 +148,7 @@ class NadoClient:
         instance.client = None
         instance.address = address
         instance.main_address = address
+        instance.acting_user_id = None
         instance._initialized = False
         try:
             from nado_protocol.utils.bytes32 import subaccount_to_hex
@@ -205,11 +216,11 @@ class NadoClient:
 
     def _gateway_allowed(self) -> bool:
         from src.nadobro.services.gateway_budget import try_acquire
-        return try_acquire(self._rest_url(), user_id=self.acting_user_id)
+        return try_acquire(self._rest_url(), user_id=getattr(self, "acting_user_id", None))
 
     def _gateway_release(self) -> None:
         from src.nadobro.services.gateway_budget import release
-        release(self.acting_user_id)
+        release(getattr(self, "acting_user_id", None))
 
     def _record_gateway_error(self, exc: Exception) -> None:
         from src.nadobro.services.gateway_budget import is_rate_limit_error, record_gateway_failure
@@ -434,9 +445,21 @@ class NadoClient:
                     if mid > 0:
                         prices[name] = {"bid": float(bid), "ask": float(ask), "mid": float(mid)}
                 if prices:
+                    with _caches_lock:
+                        _ALL_PRICES_CACHE[self.network] = {"data": prices, "ts": time.time()}
                     return prices
         except Exception as e:
             logger.debug("market_prices bulk query unavailable, falling back to fanout: %s", e)
+
+        # The batched single-request path came back empty. If the gateway is
+        # throttling/blocking this host, the budget contract requires us to
+        # back off and serve cached data — NOT fan out to one REST call per
+        # product, which would amplify load exactly when we must reduce it.
+        from src.nadobro.services.gateway_budget import is_gateway_blocked
+        if is_gateway_blocked(self._rest_url()):
+            with _caches_lock:
+                cached = _ALL_PRICES_CACHE.get(self.network)
+            return dict(cached["data"]) if cached else {}
 
         perp_products = []
         for name in get_perp_products(network=self.network, client=self):
