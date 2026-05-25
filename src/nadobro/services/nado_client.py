@@ -48,7 +48,11 @@ _size_increment_x18_cache = {}
 _price_increment_x18_cache = {}
 _min_size_x18_cache = {}
 _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
-_FANOUT_WORKERS = int(os.environ.get("NADO_FANOUT_WORKERS", "8"))
+# Capacity for legacy ThreadPool fan-out paths (e.g. per-product positions). Set
+# conservatively to 2 so we never burst N concurrent requests into Cloudflare;
+# the batched open-orders path (``get_subaccount_multi_products_open_orders``)
+# avoids this fan-out entirely.
+_FANOUT_WORKERS = int(os.environ.get("NADO_FANOUT_WORKERS", "2"))
 _REST_MAX_RETRIES = int(os.environ.get("NADO_REST_MAX_RETRIES", "2"))
 _REST_RETRY_BASE_SECONDS = float(os.environ.get("NADO_REST_RETRY_BASE_SECONDS", "0.25"))
 _REST_RETRY_JITTER_SECONDS = float(os.environ.get("NADO_REST_RETRY_JITTER_SECONDS", "0.2"))
@@ -575,56 +579,109 @@ class NadoClient:
             _open_orders_cache[cache_key] = {"data": [], "ts": time.time()}
         return []
 
-    def get_all_open_orders(self, refresh: bool = False) -> list[dict]:
-        """
-        Fetch open orders for all perp products concurrently, across the
-        parent subaccount AND every discovered isolated-margin child
-        subaccount.
+    def _open_orders_for_sender_batched(
+        self, sender: str, product_ids: list[int], *, refresh: bool = False
+    ) -> list[dict]:
+        """One gateway call that returns open orders for ``sender`` across
+        every product in ``product_ids``. Replaces the per-product fan-out
+        that previously issued N requests per sender."""
+        if not sender or not product_ids:
+            return []
+        if not self._ensure_sdk_client():
+            return []
 
-        Without the isolated fan-out the Portfolio screen would silently
-        miss limit orders resting on isolated-margin markets (orders for
-        those markets rest on the child sender, not the parent).
+        try:
+            from src.nadobro.services.http_session import is_circuit_open, throttle_host
+
+            if is_circuit_open(self._rest_url()):
+                return []
+            throttle_host(self._rest_url())
+        except Exception:
+            pass
+
+        try:
+            from nado_protocol.utils.math import from_x18
+
+            data = self.client.context.engine_client.get_subaccount_multi_products_open_orders(
+                product_ids, sender
+            )
+        except Exception as e:
+            logger.error(
+                "SDK get_subaccount_multi_products_open_orders failed: %s",
+                _format_sdk_error(e),
+            )
+            return []
+
+        rows: list[dict] = []
+        now = time.time()
+        for product_block in getattr(data, "product_orders", None) or []:
+            pid = int(getattr(product_block, "product_id", 0) or 0)
+            block_orders: list[dict] = []
+            for o in getattr(product_block, "orders", None) or []:
+                try:
+                    amount = from_x18(int(o.amount))
+                    price = from_x18(int(o.price_x18))
+                except Exception:
+                    continue
+                block_orders.append(
+                    {
+                        "digest": o.digest,
+                        "amount": float(amount),
+                        "price": float(price),
+                        "side": "LONG" if float(amount) > 0 else "SHORT",
+                        "product_id": pid,
+                        "product_name": get_product_name(pid, network=self.network, client=self),
+                    }
+                )
+            cache_key = (self.network, str(sender), pid)
+            with _caches_lock:
+                _open_orders_cache[cache_key] = {"data": list(block_orders), "ts": now}
+            rows.extend(block_orders)
+        return rows
+
+    def get_all_open_orders(
+        self,
+        refresh: bool = False,
+        *,
+        include_isolated: bool = True,
+    ) -> list[dict]:
+        """Fetch open orders for every perp product on a single sender in **one**
+        gateway call (per sender), instead of the previous ``products × senders``
+        ThreadPool fan-out.
+
+        ``include_isolated=False`` (used by the background portfolio poller
+        when the user has no known isolated positions) skips the archive query
+        AND the extra batched call per child subaccount, dropping the
+        per-user cost to a single round-trip.
         """
-        product_pairs = []
+        product_ids: list[int] = []
         for name in get_perp_products(network=self.network, client=self):
             pid = get_product_id(name, network=self.network, client=self)
             if pid is not None:
-                product_pairs.append((name, int(pid)))
-
-        if not product_pairs:
+                product_ids.append(int(pid))
+        if not product_ids:
             return []
 
-        senders: list[tuple[str | None, bool]] = [(None, False)]
-        try:
-            for iso in self._isolated_subaccount_hexes():
-                if iso:
-                    senders.append((str(iso), True))
-        except Exception as exc:
-            logger.debug("isolated open-order fan-out skipped: %s", exc, exc_info=True)
-
         rows: list[dict] = []
-        max_workers = max(1, min(len(product_pairs) * max(1, len(senders)), _FANOUT_WORKERS))
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {}
-            for name, pid in product_pairs:
-                for sender_hex, is_iso in senders:
-                    futures[
-                        pool.submit(self.get_open_orders, pid, refresh, sender_hex)
-                    ] = (name, pid, sender_hex, is_iso)
-            for fut in as_completed(futures):
-                _name, pid, sender_hex, is_iso = futures[fut]
-                try:
-                    for order in fut.result() or []:
-                        normalized = dict(order)
-                        normalized["product_id"] = int(normalized.get("product_id") or pid)
-                        if not normalized.get("product_name"):
-                            normalized["product_name"] = get_product_name(pid, network=self.network, client=self)
-                        if is_iso:
-                            normalized.setdefault("isolated", True)
-                            normalized.setdefault("subaccount", sender_hex)
-                        rows.append(normalized)
-                except Exception:
-                    continue
+        parent = self.subaccount_hex or ""
+        if parent:
+            rows.extend(self._open_orders_for_sender_batched(parent, product_ids, refresh=refresh))
+
+        if not include_isolated:
+            return rows
+
+        isolated: list[str] = []
+        try:
+            isolated = self._isolated_subaccount_hexes() or []
+        except Exception as exc:
+            logger.debug("isolated open-order discovery skipped: %s", exc, exc_info=True)
+        for iso in isolated:
+            if not iso or iso.lower() == parent.lower():
+                continue
+            for order in self._open_orders_for_sender_batched(iso, product_ids, refresh=refresh):
+                order.setdefault("isolated", True)
+                order.setdefault("subaccount", iso)
+                rows.append(order)
         return rows
 
     async def get_matches(

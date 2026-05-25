@@ -81,6 +81,49 @@ def test_circuit_opens_after_threshold(fresh_http, monkeypatch):
     assert fresh_http.cf_get(url, timeout=1.0) is None
 
 
+def test_token_bucket_caps_burst_rate(fresh_http):
+    """Verify the per-host token bucket allows a burst up to ``burst`` then
+    rejects further immediate acquisitions, so a single Fly machine can't
+    stampede Cloudflare with N concurrent SDK calls.
+    """
+    fresh_http._HTTP_RPS_PER_HOST = 100.0  # fast refill so the test is quick
+    fresh_http._HTTP_BURST_PER_HOST = 3.0
+    fresh_http._HTTP_BUCKET_MAX_WAIT_SECONDS = 0.0  # fail-fast for the test
+    host = "gateway.test-bucket.nado.xyz"
+    # Burst of 3 succeeds back-to-back.
+    assert fresh_http._acquire_token(host) is True
+    assert fresh_http._acquire_token(host) is True
+    assert fresh_http._acquire_token(host) is True
+    # Fourth in the same instant is rejected (max_wait=0).
+    assert fresh_http._acquire_token(host) is False
+
+
+def test_token_bucket_refills(fresh_http):
+    """After waiting at least 1/rps seconds, a new token is available."""
+    fresh_http._HTTP_RPS_PER_HOST = 50.0  # 20ms per token
+    fresh_http._HTTP_BURST_PER_HOST = 1.0
+    fresh_http._HTTP_BUCKET_MAX_WAIT_SECONDS = 0.0
+    host = "gateway.refill-test.nado.xyz"
+    assert fresh_http._acquire_token(host) is True
+    assert fresh_http._acquire_token(host) is False
+    time.sleep(0.05)
+    assert fresh_http._acquire_token(host) is True
+
+
+def test_cf_request_short_circuits_when_bucket_starved(fresh_http, monkeypatch):
+    """When the bucket can't yield a token within max_wait, cf_request must
+    return None instead of issuing the call. Prevents queued threads from
+    piling onto Cloudflare after a transient burst."""
+    fresh_http._HTTP_RPS_PER_HOST = 1.0
+    fresh_http._HTTP_BURST_PER_HOST = 0.0  # always empty
+    fresh_http._HTTP_BUCKET_MAX_WAIT_SECONDS = 0.0
+    fake = MagicMock()
+    monkeypatch.setattr(fresh_http.SESSION, "get", fake)
+    result = fresh_http.cf_get("https://gateway.starved.nado.xyz/query", timeout=1.0)
+    assert result is None
+    assert fake.call_count == 0
+
+
 def test_success_resets_failure_counter(fresh_http, monkeypatch):
     fresh_http._CF_RETRY_MAX = 0
     fresh_http._CF_BREAKER_THRESHOLD = 5

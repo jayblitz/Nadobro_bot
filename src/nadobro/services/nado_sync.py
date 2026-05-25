@@ -64,6 +64,21 @@ def set_cached_snapshot(user_id: int, network: str, snapshot: dict[str, Any]) ->
     _snapshot_cache[_cache_key(user_id, network)] = deepcopy(cached)
 
 
+def _user_has_isolated_artifacts(snapshot: dict[str, Any] | None) -> bool:
+    """True if the prior snapshot shows any isolated-margin position or order.
+    Used by the poller to decide whether to pay for the isolated-subaccount
+    fan-out on this tick."""
+    if not snapshot:
+        return False
+    for position in snapshot.get("positions") or []:
+        if isinstance(position, dict) and (position.get("isolated") or position.get("subaccount")):
+            return True
+    for order in snapshot.get("open_orders") or []:
+        if isinstance(order, dict) and (order.get("isolated") or order.get("subaccount")):
+            return True
+    return False
+
+
 def mark_user_active(user_id: int) -> None:
     try:
         execute("UPDATE users SET last_active = now() WHERE telegram_id = %s", (int(user_id),))
@@ -251,9 +266,20 @@ async def sync_user(
                 time.time() - last_heavy >= heavy_interval
             )
 
+            # Only fan out to isolated subaccounts when the user actually has
+            # one (or we've never synced them). Cuts the per-poll cost from
+            # ``1 + N_isolated`` round-trips down to ``1`` for the vast
+            # majority of users who only trade cross-margin.
+            include_isolated = bool(
+                force
+                or str(reason) != "poll"
+                or _user_has_isolated_artifacts(prior)
+                or not prior
+            )
+
             summary, orders, trigger_orders, balance = await asyncio.gather(
                 client.calculate_account_summary(ts=int(time.time())),
-                asyncio.to_thread(client.get_all_open_orders, True),
+                asyncio.to_thread(client.get_all_open_orders, True, include_isolated=include_isolated),
                 client.get_trigger_orders(limit=200),
                 asyncio.to_thread(client.get_balance),
             )

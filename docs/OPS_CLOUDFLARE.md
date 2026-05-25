@@ -62,6 +62,10 @@ The defenses live in `services/http_session.py`:
 | `NADO_PORTFOLIO_POLL_CACHE_SECONDS`      | 45      | Skip re-sync if user polled within this window.      |
 | `NADO_PORTFOLIO_HEAVY_SYNC_SECONDS`      | 300     | Matches/funding archive refresh cadence per user.    |
 | `NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS`    | 3600    | SDK all-products cache TTL.                          |
+| `NADO_FANOUT_WORKERS`                    | 2       | Cap on parallel SDK fan-out worker threads.          |
+| `NADO_HTTP_RPS_PER_HOST`                 | 8       | Sustained outbound RPS cap per Nado host.            |
+| `NADO_HTTP_BURST_PER_HOST`               | 16      | Token-bucket burst capacity per Nado host.           |
+| `NADO_HTTP_BUCKET_MAX_WAIT_SECONDS`      | 2.5     | Max time a thread waits for a token before skipping. |
 
 ## What to do when you see the storm in logs
 
