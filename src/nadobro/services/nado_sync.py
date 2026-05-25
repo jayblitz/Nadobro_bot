@@ -228,31 +228,48 @@ async def sync_user(
             if cached and time.time() - float(cached.get("monotonic_ts", 0)) < cache_ttl:
                 return deepcopy(cached)
 
-        if _gateway_circuit_open(network):
-            cached = _snapshot_cache.get(key)
-            if cached:
-                stale = deepcopy(cached)
-                stale.update({"stale": True, "reason": reason})
-                return stale
-            logger.debug(
-                "portfolio sync skipped user=%s network=%s reason=%s: gateway circuit open",
-                user_id,
-                network,
-                reason,
-            )
-            return {
-                "user_id": int(user_id),
-                "network": network,
-                "stale": True,
-                "reason": reason,
-                "monotonic_ts": time.time(),
-            }
+        if reason == "poll" and not force:
+            try:
+                from src.nadobro.services.gateway_budget import is_gateway_blocked
+                from src.nadobro.services.ws_health import is_healthy, reconcile_due
+
+                gateway = NADO_MAINNET_REST if network == "mainnet" else NADO_TESTNET_REST
+                if is_gateway_blocked(gateway):
+                    cached = _snapshot_cache.get(key)
+                    if cached:
+                        stale = deepcopy(cached)
+                        stale.update({"stale": True, "reason": reason})
+                        return stale
+                    logger.debug(
+                        "portfolio sync skipped user=%s network=%s: gateway circuit open",
+                        user_id,
+                        network,
+                    )
+                    return {
+                        "user_id": int(user_id),
+                        "network": network,
+                        "stale": True,
+                        "reason": reason,
+                        "monotonic_ts": time.time(),
+                    }
+                if portfolio_ws_enabled() and is_healthy(int(user_id), network):
+                    prior = _snapshot_cache.get(key) or {}
+                    last_reconcile = float(prior.get("last_reconcile_monotonic", 0))
+                    if prior and not reconcile_due(int(user_id), network, last_reconcile):
+                        stale = deepcopy(prior)
+                        stale.update({"stale": False, "reason": "ws_cached", "ws_healthy": True})
+                        return stale
+            except Exception:
+                pass
 
         started = time.perf_counter()
         try:
-            client = await asyncio.to_thread(get_user_nado_client, int(user_id), network)
+            from src.nadobro.services.async_utils import run_blocking_sdk
+
+            client = await run_blocking_sdk(get_user_nado_client, int(user_id), network)
             if not client:
                 raise RuntimeError("Nado client unavailable")
+            client.acting_user_id = int(user_id)
             if portfolio_ws_enabled() and not str(reason).startswith("ws"):
                 try:
                     from src.nadobro.services.nado_ws import PortfolioWsSubscription, portfolio_ws
@@ -276,9 +293,9 @@ async def sync_user(
 
             summary, orders, trigger_orders, balance = await asyncio.gather(
                 client.calculate_account_summary(ts=int(time.time())),
-                asyncio.to_thread(client.get_all_open_orders, True, include_isolated=include_isolated, strict=True),
-                client.get_trigger_orders(limit=200, strict=True),
-                asyncio.to_thread(client.get_balance),
+                run_blocking_sdk(client.get_all_open_orders, True, include_isolated=include_isolated),
+                client.get_trigger_orders(limit=200),
+                run_blocking_sdk(client.get_balance),
             )
 
             if need_heavy:
@@ -312,6 +329,9 @@ async def sync_user(
                 "last_sync": _now(),
                 "monotonic_ts": time.time(),
                 "last_heavy_monotonic": last_heavy_monotonic,
+                "last_reconcile_monotonic": time.monotonic() if str(reason).startswith("ws") or force else float(
+                    (_snapshot_cache.get(key) or {}).get("last_reconcile_monotonic", time.monotonic())
+                ),
                 "stale": False,
                 "reason": reason,
             }

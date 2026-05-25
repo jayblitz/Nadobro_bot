@@ -126,6 +126,7 @@ class NadoClient:
         self.subaccount_hex = None
         self.address = None
         self.main_address = main_address
+        self.acting_user_id: Optional[int] = None
         self._initialized = False
         self._derive_address()
 
@@ -202,6 +203,19 @@ class NadoClient:
     def _archive_url(self):
         return NADO_MAINNET_ARCHIVE if self.network == "mainnet" else NADO_TESTNET_ARCHIVE
 
+    def _gateway_allowed(self) -> bool:
+        from src.nadobro.services.gateway_budget import try_acquire
+        return try_acquire(self._rest_url(), user_id=self.acting_user_id)
+
+    def _gateway_release(self) -> None:
+        from src.nadobro.services.gateway_budget import release
+        release(self.acting_user_id)
+
+    def _record_gateway_error(self, exc: Exception) -> None:
+        from src.nadobro.services.gateway_budget import is_rate_limit_error, record_gateway_failure
+        if is_rate_limit_error(exc):
+            record_gateway_failure(self._rest_url(), exc)
+
     @staticmethod
     def _parse_json_response(resp) -> Optional[dict]:
         if resp is None:
@@ -234,6 +248,8 @@ class NadoClient:
             return None
 
     def _query_rest(self, query_type: str, extra_params: Optional[dict] = None) -> Optional[dict]:
+        if not self._gateway_allowed():
+            return None
         params = {"type": query_type}
         if extra_params:
             params.update(extra_params)
@@ -241,30 +257,34 @@ class NadoClient:
         headers = {"Accept-Encoding": "gzip"}
         use_post = query_type in {"market_prices", "orders"} or isinstance((extra_params or {}).get("product_ids"), list)
         max_attempts = max(1, _REST_MAX_RETRIES + 1)
-        for attempt in range(max_attempts):
-            try:
-                if use_post:
-                    resp = _rest_session.post(url, json=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
-                else:
-                    resp = _rest_session.get(url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
-                data = self._parse_json_response(resp)
-                if data is not None:
-                    return data
-                if attempt < (max_attempts - 1):
+        try:
+            for attempt in range(max_attempts):
+                try:
+                    if use_post:
+                        resp = _rest_session.post(url, json=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
+                    else:
+                        resp = _rest_session.get(url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
+                    data = self._parse_json_response(resp)
+                    if data is not None:
+                        return data
+                    if attempt < (max_attempts - 1):
+                        sleep_s = (_REST_RETRY_BASE_SECONDS * (2 ** attempt)) + random.uniform(0.0, _REST_RETRY_JITTER_SECONDS)
+                        time.sleep(sleep_s)
+                        continue
+                    return None
+                except requests.RequestException as e:
+                    self._record_gateway_error(e)
+                    if attempt >= (max_attempts - 1):
+                        logger.error("REST query failed type=%s attempts=%s: %s", query_type, max_attempts, e)
+                        return None
                     sleep_s = (_REST_RETRY_BASE_SECONDS * (2 ** attempt)) + random.uniform(0.0, _REST_RETRY_JITTER_SECONDS)
                     time.sleep(sleep_s)
-                    continue
-                return None
-            except requests.RequestException as e:
-                if attempt >= (max_attempts - 1):
-                    logger.error("REST query failed type=%s attempts=%s: %s", query_type, max_attempts, e)
+                except Exception as e:
+                    logger.error("REST query failed type=%s unexpected: %s", query_type, e)
                     return None
-                sleep_s = (_REST_RETRY_BASE_SECONDS * (2 ** attempt)) + random.uniform(0.0, _REST_RETRY_JITTER_SECONDS)
-                time.sleep(sleep_s)
-            except Exception as e:
-                logger.error("REST query failed type=%s unexpected: %s", query_type, e)
-                return None
-        return None
+            return None
+        finally:
+            self._gateway_release()
 
     @staticmethod
     def _to_plain(value):
@@ -468,6 +488,8 @@ class NadoClient:
 
     def get_balance(self) -> dict:
         if self._initialized and self.client:
+            if not self._gateway_allowed():
+                return {"exists": False, "balances": {}}
             try:
                 from nado_protocol.utils.math import from_x18
                 info = self.client.context.engine_client.get_subaccount_info(self.subaccount_hex)
@@ -478,7 +500,10 @@ class NadoClient:
                         balances[sb.product_id] = float(bal)
                 return {"exists": info.exists, "balances": balances}
             except Exception as e:
+                self._record_gateway_error(e)
                 logger.error("SDK get_balance failed: %s", _format_sdk_error(e))
+            finally:
+                self._gateway_release()
 
         try:
             data = self._query_rest("subaccount_info", {"subaccount": self.subaccount_hex}) or {}
@@ -505,6 +530,12 @@ class NadoClient:
             if cached and (time.time() - float(cached.get("ts", 0))) < _OPEN_ORDERS_CACHE_TTL:
                 return list(cached.get("data") or [])
         if self._initialized and self.client:
+            if not self._gateway_allowed():
+                with _caches_lock:
+                    cached = _open_orders_cache.get(cache_key)
+                if cached:
+                    return list(cached.get("data") or [])
+                return []
             try:
                 from nado_protocol.utils.math import from_x18
                 orders_data = self.client.context.engine_client.get_subaccount_open_orders(product_id, eff_sender)
@@ -524,7 +555,10 @@ class NadoClient:
                     _open_orders_cache[cache_key] = {"data": orders, "ts": time.time()}
                 return orders
             except Exception as e:
+                self._record_gateway_error(e)
                 logger.error("SDK get_open_orders failed: %s", _format_sdk_error(e))
+            finally:
+                self._gateway_release()
         try:
             # Read-only/runtime clients rely on REST, so keep parity with SDK path.
             data = self._query_rest(
@@ -597,18 +631,8 @@ class NadoClient:
                 raise RuntimeError("SDK client unavailable for open-order sync")
             return []
 
-        try:
-            from src.nadobro.services.http_session import is_circuit_open, throttle_host
-
-            if is_circuit_open(self._rest_url()):
-                if strict:
-                    raise RuntimeError("gateway circuit open for open-order sync")
-                return []
-            throttle_host(self._rest_url())
-        except Exception:
-            if strict:
-                raise
-            pass
+        if not self._gateway_allowed():
+            return []
 
         try:
             from nado_protocol.utils.math import from_x18
@@ -617,6 +641,7 @@ class NadoClient:
                 product_ids, sender
             )
         except Exception as e:
+            self._record_gateway_error(e)
             logger.error(
                 "SDK get_subaccount_multi_products_open_orders failed: %s",
                 _format_sdk_error(e),
@@ -626,6 +651,8 @@ class NadoClient:
                     f"SDK get_subaccount_multi_products_open_orders failed: {_format_sdk_error(e)}"
                 ) from e
             return []
+        finally:
+            self._gateway_release()
 
         rows: list[dict] = []
         now = time.time()

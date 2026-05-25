@@ -8,8 +8,8 @@ logger = logging.getLogger(__name__)
 
 _pool = None
 _pool_pid = None
-_DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
-_DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "12"))
+_DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "2"))
+_DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "30"))
 
 def _prepare_db_url(url: str) -> str:
     import re
@@ -87,6 +87,10 @@ def put_db(conn):
             conn.close()
         except Exception:
             pass
+
+
+def pool_stats() -> dict[str, int]:
+    return {"min": _DB_POOL_MIN, "max": _DB_POOL_MAX}
 
 
 def query_one(sql, params=None):
