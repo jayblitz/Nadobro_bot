@@ -67,7 +67,7 @@ async def snapshot_for_user(
 
     Every Portfolio render path passes ``max_age_ms=2000`` so Positions and
     Overview never show data older than ~2s when the user is actively
-    navigating. Background polling (5s) keeps the cache warm between taps.
+    navigating. Background polling keeps the cache warm between taps.
     """
     from src.nadobro.services.nado_sync import mark_user_active
 

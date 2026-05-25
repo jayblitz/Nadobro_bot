@@ -9,7 +9,14 @@ from decimal import Decimal
 from typing import Any
 
 from src.nadobro.db import execute, query_all, query_one
-from src.nadobro.services.feature_flags import portfolio_ws_enabled
+from src.nadobro.config import NADO_MAINNET_REST, NADO_TESTNET_REST
+from src.nadobro.services.feature_flags import (
+    portfolio_heavy_sync_seconds,
+    portfolio_poll_cache_seconds,
+    portfolio_sync_interval_seconds,
+    portfolio_sync_users_per_tick,
+    portfolio_ws_enabled,
+)
 from src.nadobro.services.portfolio_calculator import (
     aggregate_trading_stats,
     compute_total_equity,
@@ -64,7 +71,7 @@ def mark_user_active(user_id: int) -> None:
         logger.debug("mark_user_active failed user=%s", user_id, exc_info=True)
 
 
-_ACTIVE_USERS_PAGE_SIZE = 200
+_ACTIVE_USERS_PAGE_SIZE = portfolio_sync_users_per_tick()
 # Module-level cursor for active_users pagination. Lives in the process so the
 # scheduler walks all active users across ticks without re-syncing the same
 # top-N every iteration. Reset to 0 when we reach the end (handled below).
@@ -117,28 +124,54 @@ def active_users(limit: int | None = None, after_user_id: int | None = None) -> 
 async def sync_active_users(reason: str = "poll") -> None:
     """Walk active users in stable cursor order, one page per tick.
 
-    The scheduler invokes this every NADO_PORTFOLIO_SCHEDULER_INTERVAL_SECONDS
-    seconds. Each call advances ``_active_users_cursor`` so the next call picks
-    up where the previous one left off; reaching the end resets the cursor so
-    we loop continuously. This scales gracefully to thousands of users without
-    any single tick blocking on more than ``_ACTIVE_USERS_PAGE_SIZE`` syncs.
+    Each scheduler invocation advances ``_active_users_cursor`` so we never
+    re-sync the same top-N users every tick. Page size and poll interval are
+    tunable via env (defaults: 8 users / 30s) to stay under Cloudflare limits.
     """
     global _active_users_cursor
+
+    if reason == "poll":
+        try:
+            from src.nadobro.services.http_session import is_circuit_open
+
+            if is_circuit_open(NADO_MAINNET_REST) and is_circuit_open(NADO_TESTNET_REST):
+                logger.debug("portfolio sync skipped: Cloudflare circuit open on both gateways")
+                return
+        except Exception:
+            pass
+
     try:
         rows = await asyncio.to_thread(active_users, _ACTIVE_USERS_PAGE_SIZE, _active_users_cursor)
     except Exception as exc:
         logger.warning("portfolio active user query failed: %s", exc)
         return
     if not rows:
-        # End of page -> wrap to the start so the next tick picks up new users
-        # that were added since we last looped.
         _active_users_cursor = 0
         return
+
+    poll_cache_ms = portfolio_poll_cache_seconds() * 1000 if reason == "poll" else None
+    tick_budget = max(5.0, portfolio_sync_interval_seconds() * 0.85)
+    deadline = time.monotonic() + tick_budget
+    synced = 0
+
     for row in rows:
+        if time.monotonic() >= deadline:
+            logger.debug(
+                "portfolio sync tick budget exhausted after %d users (budget=%.0fs)",
+                synced,
+                tick_budget,
+            )
+            break
         user_id = int(row.get("telegram_id"))
         network = str(row.get("network") or "mainnet")
-        await sync_user(user_id, network=network, reason=reason)
+        await sync_user(
+            user_id,
+            network=network,
+            reason=reason,
+            max_age_ms=poll_cache_ms,
+        )
         _active_users_cursor = max(_active_users_cursor, user_id)
+        synced += 1
 
 
 async def sync_user(
@@ -147,7 +180,7 @@ async def sync_user(
     network: str | None = None,
     reason: str = "manual",
     force: bool = False,
-    max_age_ms: int | None = 2000,
+    max_age_ms: int | None = None,
 ) -> dict[str, Any]:
     user = await asyncio.to_thread(get_user, int(user_id))
     network = _normalize_network(network or (user.network_mode.value if user else "mainnet"))
@@ -156,11 +189,45 @@ async def sync_user(
         _inflight.clear()
     lock = _inflight.setdefault(key, asyncio.Lock())
     async with lock:
-        cache_ttl = max(0.0, float(max_age_ms) / 1000.0) if max_age_ms is not None else 2.0
+        if max_age_ms is None:
+            if reason == "poll":
+                max_age_ms = portfolio_poll_cache_seconds() * 1000
+            elif reason in ("cold_render", "refresh"):
+                max_age_ms = 5000
+            else:
+                max_age_ms = 2000
+
+        cache_ttl = max(0.0, float(max_age_ms) / 1000.0) if max_age_ms is not None else 0.0
         if not force and cache_ttl > 0:
             cached = _snapshot_cache.get(key)
             if cached and time.time() - float(cached.get("monotonic_ts", 0)) < cache_ttl:
                 return deepcopy(cached)
+
+        if reason == "poll" and not force:
+            try:
+                from src.nadobro.services.http_session import is_circuit_open
+
+                gateway = NADO_MAINNET_REST if network == "mainnet" else NADO_TESTNET_REST
+                if is_circuit_open(gateway):
+                    cached = _snapshot_cache.get(key)
+                    if cached:
+                        stale = deepcopy(cached)
+                        stale.update({"stale": True, "reason": reason})
+                        return stale
+                    logger.debug(
+                        "portfolio sync skipped user=%s network=%s: gateway circuit open",
+                        user_id,
+                        network,
+                    )
+                    return {
+                        "user_id": int(user_id),
+                        "network": network,
+                        "stale": True,
+                        "reason": reason,
+                        "monotonic_ts": time.time(),
+                    }
+            except Exception:
+                pass
 
         started = time.perf_counter()
         try:
@@ -177,14 +244,30 @@ async def sync_user(
                 except Exception:
                     logger.debug("portfolio ws subscribe failed user=%s network=%s", user_id, network, exc_info=True)
 
-            summary, orders, trigger_orders, matches, funding, balance = await asyncio.gather(
+            prior = _snapshot_cache.get(key) or {}
+            heavy_interval = float(portfolio_heavy_sync_seconds())
+            last_heavy = float(prior.get("last_heavy_monotonic", 0))
+            need_heavy = force or str(reason) not in ("poll",) or (
+                time.time() - last_heavy >= heavy_interval
+            )
+
+            summary, orders, trigger_orders, balance = await asyncio.gather(
                 client.calculate_account_summary(ts=int(time.time())),
                 asyncio.to_thread(client.get_all_open_orders, True),
                 client.get_trigger_orders(limit=200),
-                client.get_matches(limit=200),
-                client.get_interest_and_funding_payments(limit=200),
                 asyncio.to_thread(client.get_balance),
             )
+
+            if need_heavy:
+                matches, funding = await asyncio.gather(
+                    client.get_matches(limit=200),
+                    client.get_interest_and_funding_payments(limit=200),
+                )
+                last_heavy_monotonic = time.time()
+            else:
+                matches = list(prior.get("matches") or [])
+                funding = list(prior.get("funding_payments") or [])
+                last_heavy_monotonic = last_heavy
             plain_orders = _normalize_order_rows(orders)
             trigger_rows = [_mark_trigger_order(o) for o in _normalize_order_rows(trigger_orders)]
             all_orders = _dedupe_orders_by_digest(plain_orders + trigger_rows)
@@ -205,6 +288,7 @@ async def sync_user(
                 "spot_balances": spot_balances,
                 "last_sync": _now(),
                 "monotonic_ts": time.time(),
+                "last_heavy_monotonic": last_heavy_monotonic,
                 "stale": False,
                 "reason": reason,
             }
