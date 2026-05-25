@@ -2,11 +2,66 @@ import asyncio
 import logging
 import os
 import time
+from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-_strategy_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+
+class _FairStrategyQueue:
+    """Deficit round-robin queue keyed by ``telegram_id``.
+
+    Prevents one heavy user from monopolizing the strategy worker pool
+    when the global queue is backlogged.
+    """
+
+    def __init__(self, maxsize: int = 500) -> None:
+        self.maxsize = int(maxsize)
+        self._lock = asyncio.Lock()
+        self._not_empty = asyncio.Condition(self._lock)
+        self._not_full = asyncio.Condition(self._lock)
+        self._per_user: dict[int, deque] = defaultdict(deque)
+        self._deficit: dict[int, float] = defaultdict(float)
+        self._quantum = 1.0
+        self._size = 0
+
+    def qsize(self) -> int:
+        return self._size
+
+    @property
+    def full(self) -> bool:
+        return self._size >= self.maxsize
+
+    async def put(self, item: dict[str, Any]) -> None:
+        user_id = int((item or {}).get("telegram_id") or 0)
+        async with self._not_full:
+            while self._size >= self.maxsize:
+                await self._not_full.wait()
+            self._per_user[user_id].append(item)
+            self._size += 1
+            self._not_empty.notify()
+
+    async def get(self) -> dict[str, Any]:
+        async with self._not_empty:
+            while self._size == 0:
+                await self._not_empty.wait()
+            active = [uid for uid, q in self._per_user.items() if q]
+            for uid in active:
+                self._deficit[uid] += self._quantum
+            uid = max(active, key=lambda u: self._deficit[u])
+            item = self._per_user[uid].popleft()
+            self._deficit[uid] -= 1.0
+            if not self._per_user[uid]:
+                del self._per_user[uid]
+            self._size -= 1
+            self._not_full.notify()
+            return item
+
+    def task_done(self) -> None:
+        return None
+
+
+_strategy_queue: _FairStrategyQueue = _FairStrategyQueue(maxsize=500)
 _alert_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
 _workers: list[asyncio.Task] = []
 _strategy_worker_target: int = 1
@@ -152,8 +207,12 @@ async def _worker_loop(name: str, queue: asyncio.Queue, handler_getter: Callable
             queue.task_done()
 
 
-def start_workers(strategy_workers: int = 2, alert_workers: int = 1):
+def start_workers(strategy_workers: int | None = None, alert_workers: int = 1):
     global _strategy_worker_target, _alert_worker_target
+    if strategy_workers is None:
+        import multiprocessing
+        cpu = max(1, multiprocessing.cpu_count())
+        strategy_workers = max(8, min(cpu * 2, 16))
     _strategy_worker_target = max(1, int(strategy_workers))
     _alert_worker_target = max(1, int(alert_workers))
 
@@ -214,6 +273,7 @@ def get_queue_diagnostics() -> dict[str, Any]:
         "strategy_workers_target": int(_strategy_worker_target),
         "alert_workers_target": int(_alert_worker_target),
         "dedupe_cache_size": len(_dedupe_seen),
+        "strategy_queue_fair": True,
         "stats": dict(_stats),
     }
 

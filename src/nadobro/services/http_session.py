@@ -65,14 +65,12 @@ _CF_BREAKER_COOLDOWN_SECONDS = float(os.environ.get("NADO_CF_BREAKER_COOLDOWN_SE
 # Log dedup: only emit one Cloudflare-challenge warning per host per window.
 _CF_LOG_THROTTLE_SECONDS = float(os.environ.get("NADO_CF_LOG_THROTTLE_SECONDS", "60"))
 
-# Per-host token bucket: cap sustained outbound RPS to avoid tripping
-# Cloudflare's managed-challenge from a single egress IP. The bucket refills
-# at ``_HTTP_RPS_PER_HOST`` tokens/sec and holds up to ``_HTTP_BURST_PER_HOST``
-# tokens so short bursts still go through. Default budget (8 rps, burst 16) is
-# well below Cloudflare's typical bot-management thresholds while still
-# servicing a few dozen concurrent users.
-_HTTP_RPS_PER_HOST = float(os.environ.get("NADO_HTTP_RPS_PER_HOST", "8"))
-_HTTP_BURST_PER_HOST = float(os.environ.get("NADO_HTTP_BURST_PER_HOST", "16"))
+# Per-host token bucket: cap sustained outbound RPS. Default **16 rps / burst 32**
+# reflects Nado's 2× rate-limit increase (2026-05). Still well below
+# Telegram-scale fan-out; per-user buckets in ``gateway_budget`` provide
+# fairness on top of this host ceiling.
+_HTTP_RPS_PER_HOST = float(os.environ.get("NADO_HTTP_RPS_PER_HOST", "16"))
+_HTTP_BURST_PER_HOST = float(os.environ.get("NADO_HTTP_BURST_PER_HOST", "32"))
 _HTTP_BUCKET_MAX_WAIT_SECONDS = float(os.environ.get("NADO_HTTP_BUCKET_MAX_WAIT_SECONDS", "2.5"))
 
 
@@ -265,6 +263,16 @@ def _log_cf_warning(url: str, status: int, snippet: str) -> None:
     )
 
 
+def _gateway_blocked(url: str) -> bool:
+    if is_circuit_open(url):
+        return True
+    try:
+        from src.nadobro.services.gateway_budget import is_gateway_rate_limited
+        return is_gateway_rate_limited(url)
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Public request helper.
 # ---------------------------------------------------------------------------
@@ -283,7 +291,7 @@ def cf_request(
     Returns the final ``Response`` (which the caller can ``.json()``) or
     ``None`` when the circuit is open or every retry was challenged.
     """
-    if is_circuit_open(url):
+    if _gateway_blocked(url):
         return None
     host = _host(url)
     if not _acquire_token(host):

@@ -157,6 +157,24 @@ def _runtime_health_payload() -> dict:
             payload["status"] = "degraded"
         if not scheduler_diag.get("running"):
             payload["status"] = "degraded"
+        try:
+            from src.nadobro.services.gateway_budget import snapshot as gateway_snapshot
+            from src.nadobro.services.ws_health import snapshot as ws_snapshot
+            from src.nadobro.services.market_feed import snapshot as market_snapshot
+            from src.nadobro.services.async_utils import pool_stats
+            from src.nadobro.services.user_circuit import snapshot as circuit_snapshot
+            from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+            from src.nadobro.services.strategy_scheduler import get_scheduler
+
+            payload["gateway"] = gateway_snapshot()
+            payload["ws_health"] = ws_snapshot()
+            payload["market_feed"] = market_snapshot()
+            payload["thread_pools"] = pool_stats()
+            payload["user_circuit"] = circuit_snapshot()
+            if strategy_scheduler_enabled():
+                payload["strategy_scheduler"] = get_scheduler().stats()
+        except Exception:
+            pass
     except Exception as e:
         payload["status"] = "degraded"
         payload["health_error"] = str(e)
@@ -282,17 +300,21 @@ async def run_bot():
     set_copy_bot_app(bot_app)
     set_vault_watch_bot_app(bot_app)
     register_handlers(handle_strategy_job, handle_alert_job)
-    _sw = int(os.environ.get("NADO_STRATEGY_WORKERS", "2"))
+    _sw_raw = (os.environ.get("NADO_STRATEGY_WORKERS") or "").strip()
+    _sw = int(_sw_raw) if _sw_raw else None
     start_workers(
-        strategy_workers=max(1, _sw),
+        strategy_workers=_sw,
         alert_workers=int(os.environ.get("NADO_ALERT_WORKERS", "1")),
     )
     start_runtime_supervisor()
     from src.nadobro.services.runtime_supervisor import runtime_mode
+    from src.nadobro.services.execution_queue import get_queue_diagnostics
 
+    _diag = get_queue_diagnostics()
     logger.info(
-        "Strategy queue: NADO_STRATEGY_WORKERS=%s NADO_RUNTIME_MODE=%s NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS=%s",
-        max(1, _sw),
+        "Strategy queue: NADO_STRATEGY_WORKERS=%s workers=%s NADO_RUNTIME_MODE=%s NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS=%s",
+        _sw_raw or "auto",
+        _diag.get("strategy_workers_target"),
         runtime_mode(),
         (os.environ.get("NADO_STRATEGY_CYCLE_TIMEOUT_SECONDS") or "180").strip(),
     )
@@ -312,11 +334,21 @@ async def run_bot():
             # Read-only client is sufficient for alert price checks.
             alert_client = NadoClient.from_address(alert_address, alert_network)
         set_check_client(alert_client)
+        from src.nadobro.services.market_feed import bind_fetcher
+
+        bind_fetcher(alert_client.get_all_market_prices)
         logger.info("Alert price-check client initialized (network=%s)", alert_network)
     except Exception as e:
         logger.warning(f"Alert price-check client failed to initialize: {e}")
 
     start_scheduler()
+    from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+    from src.nadobro.services.strategy_scheduler import get_scheduler
+    from src.nadobro.services.bot_runtime import _load_state
+
+    if strategy_scheduler_enabled():
+        await get_scheduler().start(_load_state)
+        logger.info("Central strategy scheduler started")
     auto_restore = os.environ.get("NADO_AUTO_RESTORE_STRATEGIES", "true").strip().lower() in ("1", "true", "yes", "on")
     restore_running_bots(enabled=auto_restore)
     try:
@@ -518,7 +550,14 @@ async def run_bot():
     finally:
         logger.info("Shutting down...")
         from src.nadobro.services.scheduler import stop_scheduler
+        from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+        from src.nadobro.services.strategy_scheduler import get_scheduler
+        from src.nadobro.services.nado_ws import portfolio_ws
+
         stop_scheduler()
+        if strategy_scheduler_enabled():
+            await get_scheduler().stop()
+        await portfolio_ws.stop()
         await stop_copy_polling()
         stop_runtime()
         stop_runtime_supervisor()
