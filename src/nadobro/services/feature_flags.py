@@ -32,6 +32,18 @@ def portfolio_ws_enabled() -> bool:
     return env_flag("NADO_PORTFOLIO_WS", False)
 
 
+def strategy_scheduler_enabled() -> bool:
+    return env_flag("NADO_STRATEGY_SCHEDULER", True)
+
+
+def portfolio_reconcile_seconds() -> int:
+    raw = (os.environ.get("NADO_WS_RECONCILE_SECONDS") or "300").strip()
+    try:
+        return max(60, int(float(raw)))
+    except ValueError:
+        return 300
+
+
 def vault_deposit_watch_enabled() -> bool:
     return env_flag("NADO_VAULT_DEPOSIT_WATCH", True)
 

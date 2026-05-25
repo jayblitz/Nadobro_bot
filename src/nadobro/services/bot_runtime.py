@@ -993,6 +993,14 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
     task = _tasks.pop(tk, None)
     if task:
         task.cancel()
+    try:
+        from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+        from src.nadobro.services.strategy_scheduler import get_scheduler
+
+        if strategy_scheduler_enabled():
+            get_scheduler().unregister(telegram_id, network)
+    except Exception:
+        pass
 
     engine_ok, engine_error = _stop_engine_runtime_for_state(telegram_id, network, state)
 
@@ -1373,6 +1381,14 @@ def _schedule_task_on_loop(telegram_id: int, network: str):
 
 
 def _ensure_task(telegram_id: int, network: str):
+    from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+
+    if strategy_scheduler_enabled():
+        from src.nadobro.services.strategy_scheduler import get_scheduler
+
+        get_scheduler().register(telegram_id, network)
+        return
+
     global _runtime_loop
     try:
         loop = asyncio.get_running_loop()
@@ -1460,6 +1476,19 @@ async def handle_strategy_job(payload: dict):
         return
     telegram_id = int(payload.get("telegram_id"))
     network = str(payload.get("network"))
+    try:
+        from src.nadobro.services.user_circuit import is_open, last_error
+
+        if is_open(telegram_id, network):
+            logger.info(
+                "Strategy cycle skipped — user circuit open user=%s network=%s err=%s",
+                telegram_id,
+                network,
+                last_error(telegram_id, network),
+            )
+            return
+    except Exception:
+        pass
     key = _task_key(telegram_id, network)
     lock = _job_locks.setdefault(key, asyncio.Lock())
     if lock.locked():
@@ -1607,6 +1636,12 @@ async def handle_strategy_job(payload: dict):
                     _save_state(telegram_id, network, hb_state)
                 if ok:
                     _job_stats["cycles_ok"] += 1
+                    try:
+                        from src.nadobro.services.user_circuit import record_success
+
+                        record_success(telegram_id, network)
+                    except Exception:
+                        pass
                     if _cycle_result_label(ok, error_msg) == "ok":
                         refreshed = _load_state(telegram_id, network)
                         if refreshed.get("error_streak") or refreshed.get("last_error"):
@@ -1616,11 +1651,23 @@ async def handle_strategy_job(payload: dict):
                             _save_state(telegram_id, network, refreshed)
                 else:
                     _job_stats["cycles_failed"] += 1
+                    try:
+                        from src.nadobro.services.user_circuit import record_failure
+
+                        record_failure(telegram_id, network, error_msg or "unknown cycle error")
+                    except Exception:
+                        pass
                     await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
             except Exception as e:
                 _job_stats["cycles_failed"] += 1
                 logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
                 strategy_name = str(state.get("strategy") or "strategy").upper()
+                try:
+                    from src.nadobro.services.user_circuit import record_failure
+
+                    record_failure(telegram_id, network, str(e))
+                except Exception:
+                    pass
                 await _mark_cycle_error(telegram_id, network, f"{strategy_name}[cycle/crash]: {str(e)[:220]}")
             finally:
                 elapsed_ms = (time.perf_counter() - cycle_started) * 1000.0

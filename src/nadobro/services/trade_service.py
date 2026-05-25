@@ -2545,15 +2545,9 @@ def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]
         TradeStatus.PARTIALLY_FILLED.value,
     }
     by_digest: dict[str, dict] = {}
-    active_product_ids: set[int] = set()
     for t in trades:
         digest = str(t.get("order_digest") or "").strip()
         status = str(t.get("status") or "").lower()
-        if status in pending_like or status == TradeStatus.FILLED.value:
-            try:
-                active_product_ids.add(int(t.get("product_id")))
-            except Exception:
-                pass
         if status in pending_like and digest:
             by_digest[digest] = t
 
@@ -2562,35 +2556,6 @@ def get_open_limit_orders(telegram_id: int, refresh: bool = False) -> list[dict]
         all_open_orders = client.get_all_open_orders(refresh=refresh) or []
     except Exception:
         all_open_orders = []
-
-    seen_digests = {str(o.get("digest") or "").strip() for o in all_open_orders if str(o.get("digest") or "").strip()}
-    if active_product_ids:
-        for product_id in sorted(active_product_ids):
-            for sender in _order_sender_params(client, network):
-                try:
-                    direct_orders = client.get_open_orders(product_id, refresh=refresh, sender=sender) or []
-                except Exception as e:
-                    logger.debug(
-                        "direct open-order probe failed user=%s product=%s sender=%s err=%s",
-                        telegram_id,
-                        product_id,
-                        "default" if sender is None else "isolated",
-                        e,
-                    )
-                    continue
-                for order in direct_orders:
-                    digest = str((order or {}).get("digest") or "").strip()
-                    if digest and digest in seen_digests:
-                        continue
-                    normalized = dict(order or {})
-                    normalized["product_id"] = int(normalized.get("product_id") or product_id)
-                    if not normalized.get("product_name"):
-                        normalized["product_name"] = get_product_name(product_id, network=network, client=client)
-                    if sender:
-                        normalized["sender"] = sender
-                    all_open_orders.append(normalized)
-                    if digest:
-                        seen_digests.add(digest)
 
     for order in all_open_orders:
         digest = str(order.get("digest") or "").strip()

@@ -42,6 +42,14 @@ The defenses live in `services/http_session.py`:
    path (`NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS`, default 86400s / 24h).
 4. **Throttled logs**: only one Cloudflare-warning line per host per minute
    (was: hundreds per second).
+5. **Unified gateway budget** (`services/gateway_budget.py`): every Nado REST/SDK
+   call passes through host + per-user token buckets and an in-flight cap.
+   Nado `error_code=1000` opens a host rate-limit circuit (default 60s cooldown).
+   Callers **must skip** and serve cache when `try_acquire` returns false — never
+   fan out to per-product fallbacks.
+6. **WS-first portfolio** (when `NADO_PORTFOLIO_WS=true`): healthy WebSocket
+   connections skip REST poll ticks; full reconcile runs every
+   `NADO_WS_RECONCILE_SECONDS` (default 300s).
 
 ## Tunables (env vars)
 
@@ -63,9 +71,21 @@ The defenses live in `services/http_session.py`:
 | `NADO_PORTFOLIO_HEAVY_SYNC_SECONDS`      | 300     | Matches/funding archive refresh cadence per user.    |
 | `NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS`    | 3600    | SDK all-products cache TTL.                          |
 | `NADO_FANOUT_WORKERS`                    | 2       | Cap on parallel SDK fan-out worker threads.          |
-| `NADO_HTTP_RPS_PER_HOST`                 | 8       | Sustained outbound RPS cap per Nado host.            |
-| `NADO_HTTP_BURST_PER_HOST`               | 16      | Token-bucket burst capacity per Nado host.           |
+| `NADO_HTTP_RPS_PER_HOST`                 | 16      | Sustained outbound RPS cap per Nado host (2× after Nado limit increase). |
+| `NADO_HTTP_BURST_PER_HOST`               | 32      | Token-bucket burst capacity per Nado host.           |
 | `NADO_HTTP_BUCKET_MAX_WAIT_SECONDS`      | 2.5     | Max time a thread waits for a token before skipping. |
+| `NADO_USER_GATEWAY_RPS`                  | 4       | Per-user fair-share RPS cap (all gateway/SDK calls). |
+| `NADO_USER_GATEWAY_BURST`                | 8       | Per-user token-bucket burst.                         |
+| `NADO_USER_MAX_INFLIGHT`                 | 4       | Max concurrent gateway calls per user.               |
+| `NADO_GATEWAY_RL_THRESHOLD`              | 4       | Nado `error_code=1000` hits before host RL circuit.  |
+| `NADO_GATEWAY_RL_COOLDOWN_SECONDS`       | 60      | Host rate-limit circuit cooldown.                    |
+| `NADO_STRATEGY_SCHEDULER`                | true    | Central scheduler (one loop) vs N per-user tasks.    |
+| `NADO_PORTFOLIO_WS`                      | false   | WS-driven portfolio invalidation (rollout flag).     |
+| `NADO_WS_DEBOUNCE_SECONDS`               | 2       | Coalesce WS bursts into one sync.                    |
+| `NADO_WS_RECONCILE_SECONDS`              | 300     | Full REST reconcile interval when WS is healthy.     |
+| `NADO_WS_HEALTH_SECONDS`                 | 45      | WS considered stale after this silence.              |
+| `NADO_USER_CIRCUIT_THRESHOLD`            | 5       | Consecutive cycle errors before user circuit opens.  |
+| `NADO_USER_CIRCUIT_COOLDOWN_SECONDS`     | 120     | User circuit cooldown after threshold.               |
 
 ## What to do when you see the storm in logs
 

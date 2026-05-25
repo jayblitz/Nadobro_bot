@@ -148,7 +148,9 @@ def get_user_nado_client(telegram_id: int, network: str | None = None, **kwargs)
         pk_bytes = decrypt_with_server_key(ciphertext)
         pk = pk_bytes.decode("utf-8") if isinstance(pk_bytes, bytes) else pk_bytes
         selected_network = str(network or user.network_mode.value)
-        return get_nado_client(pk, selected_network, main_address=user.main_address)
+        client = get_nado_client(pk, selected_network, main_address=user.main_address)
+        client.acting_user_id = int(telegram_id)
+        return client
     except Exception as e:
         logger.warning("Failed to get Nado client for user %s: %s", telegram_id, e)
         return None
@@ -213,6 +215,7 @@ def get_user_readonly_client(telegram_id: int, network: str | None = None) -> Op
     if cached:
         _readonly_cache.pop(cache_key, None)
     client = NadoClient.from_address(user.main_address, selected_network)
+    client.acting_user_id = int(telegram_id)
     _readonly_cache[cache_key] = {"client": client, "ts": time.time()}
     return client
 
