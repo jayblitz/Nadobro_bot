@@ -361,7 +361,10 @@ def run_strategy_start_preflight(
     try:
         get_nado_builder_routing_config(network)
     except ValueError as e:
-        return False, f"Builder routing misconfigured: {e}"
+        # Keep infrastructure/config detail in (redacted) logs, not in the
+        # user-facing string.
+        logger.warning("Builder routing misconfigured for user %s on %s: %s", telegram_id, network, e)
+        return False, "Order routing is temporarily misconfigured. Please try again shortly."
 
     vm = str(vol_market or "perp").strip().lower()
     if vm == "spot":
@@ -379,7 +382,10 @@ def run_strategy_start_preflight(
         mp = signing_client.get_market_price(int(product_id))
         mid = float((mp or {}).get("mid") or 0.0)
     except Exception as e:
-        return False, f"Could not fetch market price for {str(product).upper()} ({network}): {e}"
+        # Don't echo the raw exception (can carry host/URL/internal detail) to
+        # the user — log it and show a generic message.
+        logger.warning("get_market_price failed in preflight for %s (%s): %s", product, network, e)
+        return False, f"Could not fetch market price for {str(product).upper()} ({network}). Market may be unavailable."
     if mid <= 0:
         return False, f"Could not fetch market price for {str(product).upper()} ({network})."
 
@@ -449,6 +455,12 @@ def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple
     )
     invalidate_user_cache(telegram_id)
     _invalidate_user_caches(prior_address, telegram_id)
+    try:
+        from src.nadobro.services.audit_log import record_audit_event
+
+        record_audit_event(telegram_id, "wallet_unlinked", f"network={network}")
+    except Exception:
+        pass
     return True, _loc("{network} wallet unlinked. You can link again via Wallet button.").format(network=network)
 
 

@@ -1156,6 +1156,7 @@ async def _handle_wallet(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else "view"
 
     if action == "view":
+        show_connect = False
         try:
             info = get_user_wallet_info(telegram_id, verify_signer=True)
             is_linked = bool(info and info.get("is_linked"))
@@ -1164,15 +1165,24 @@ async def _handle_wallet(query, data, telegram_id, context):
 
                 pk_hex, _ = _ensure_pending_wallet_signer(context)
                 msg, kb = fmt_wallet_connect_card(pk_hex), wallet_kb_not_linked()
+                show_connect = True
             else:
                 msg, kb = fmt_wallet_info(info), (wallet_kb() if is_linked else wallet_kb_not_linked())
         except Exception:
             msg, kb = build_wallet_view_payload(telegram_id, context=context, verify_signer=True)
-        await _edit_loc(query, 
+        await _edit_loc(query,
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=kb,
         )
+        # SECURITY: this message renders the 1CT signer private key. Remember its
+        # coordinates so we can delete it from chat history the moment the wallet
+        # is linked (the key is no longer needed once it's on Nado + encrypted).
+        if show_connect and context is not None and getattr(query, "message", None) is not None:
+            context.user_data["wallet_connect_msg"] = {
+                "chat_id": query.message.chat_id,
+                "message_id": query.message.message_id,
+            }
     elif action == "balance":
         client = get_user_readonly_client(telegram_id)
         if not client:

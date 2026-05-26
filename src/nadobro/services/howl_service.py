@@ -13,6 +13,104 @@ logger = logging.getLogger(__name__)
 HOWL_STATE_PREFIX = "howl:"
 HOWL_PENDING_PREFIX = "howl_pending:"
 
+# SECURITY (audit 2026-05): HOWL parameter changes are produced by an LLM whose
+# input includes attacker-influenceable context (recent trade history, market
+# sentiment scraped from social feeds). The LLM's structured output therefore
+# must be treated as UNTRUSTED. Before this allowlist existed, ``approve_howl_
+# suggestion`` wrote ``bro[<arbitrary param>] = <arbitrary value>`` directly,
+# letting a hallucinated or prompt-injected suggestion crank ``budget_usd`` to
+# millions, ``leverage_cap`` past venue limits, flip ``risk_level`` to
+# aggressive, or zero out ``min_confidence`` — silently dismantling the Alpha
+# Agent's risk rails behind a single (persuasively worded) "approve" tap.
+#
+# Only the keys below are tunable via HOWL, and each value is clamped to a safe
+# band. Unknown keys are rejected outright. These bounds mirror the manual
+# config caps enforced in handlers/callbacks.py so the auto-tuner can never push
+# settings somewhere a human couldn't.
+_HOWL_RISK_LEVELS = ("conservative", "balanced", "aggressive")
+# (param, kind, lo, hi) — kind is "int", "float", "enum", or "bool".
+_HOWL_NUMERIC_BOUNDS: dict[str, tuple[str, float, float]] = {
+    "budget_usd": ("float", 10.0, 1_000_000.0),
+    "max_positions": ("int", 1, 10),
+    "cycle_seconds": ("int", 60, 3600),
+    "tp_pct": ("float", 0.3, 20.0),
+    "sl_pct": ("float", 0.3, 20.0),
+    "max_loss_pct": ("float", 1.0, 50.0),
+    "max_daily_loss_usd": ("float", 0.0, 1_000_000.0),
+    "leverage_cap": ("int", 1, 20),
+    "min_reward_risk": ("float", 0.5, 5.0),
+    "min_confidence": ("float", 0.3, 0.99),
+    "howl_hour_utc": ("int", 0, 23),
+}
+_HOWL_BOOL_PARAMS = ("use_sentiment", "use_cmc", "howl_enabled")
+
+
+def _coerce_bool(value) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes", "on", "enabled"):
+            return True
+        if v in ("false", "0", "no", "off", "disabled"):
+            return False
+    return None
+
+
+def validate_howl_param(param: str, value):
+    """Validate an LLM-proposed bro-setting change.
+
+    Returns ``(ok, coerced_value, error)``. ``ok`` is False (with a human
+    message) for unknown params, wrong types, or out-of-band values. This is the
+    single chokepoint that keeps untrusted HOWL output from weakening risk
+    limits.
+    """
+    param = str(param or "").strip()
+    if param in _HOWL_NUMERIC_BOUNDS:
+        kind, lo, hi = _HOWL_NUMERIC_BOUNDS[param]
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return False, None, f"{param} must be numeric"
+        if num != num or num in (float("inf"), float("-inf")):  # NaN / inf guard
+            return False, None, f"{param} is not a finite number"
+        if num < lo or num > hi:
+            return False, None, f"{param} must be between {lo} and {hi}"
+        return True, (int(num) if kind == "int" else num), None
+    if param == "risk_level":
+        v = str(value or "").strip().lower()
+        if v not in _HOWL_RISK_LEVELS:
+            return False, None, f"risk_level must be one of {', '.join(_HOWL_RISK_LEVELS)}"
+        return True, v, None
+    if param in _HOWL_BOOL_PARAMS:
+        b = _coerce_bool(value)
+        if b is None:
+            return False, None, f"{param} must be true/false"
+        return True, b, None
+    if param == "products":
+        if not isinstance(value, (list, tuple)) or not value:
+            return False, None, "products must be a non-empty list"
+        try:
+            from src.nadobro.config import get_perp_products
+
+            known = {p.upper() for p in (get_perp_products() or [])}
+        except Exception:
+            known = set()
+        cleaned = []
+        for item in value:
+            sym = str(item or "").upper().replace("-PERP", "").strip()
+            if not sym:
+                continue
+            if known and sym not in known:
+                return False, None, f"unknown product '{sym}'"
+            cleaned.append(sym)
+        if not cleaned:
+            return False, None, "no valid products in suggestion"
+        return True, cleaned[:10], None
+    return False, None, f"'{param}' is not a tunable parameter"
+
 
 def _howl_key(telegram_id: int, network: str) -> str:
     return f"{HOWL_STATE_PREFIX}{telegram_id}:{network}"
@@ -149,15 +247,35 @@ def approve_howl_suggestion(telegram_id: int, network: str, suggestion_index: in
     if not param or new_value is None:
         return False, "Invalid suggestion data"
 
-    try:
-        if isinstance(new_value, str):
-            try:
-                new_value = float(new_value)
-                if new_value == int(new_value):
-                    new_value = int(new_value)
-            except ValueError:
-                pass
+    # SECURITY: never trust the LLM's param/value verbatim — validate against the
+    # allowlist + safe bounds so a hallucinated or prompt-injected suggestion
+    # can't weaken the risk rails. Rejected suggestions are marked so the user
+    # isn't told a no-op "succeeded".
+    ok, coerced_value, error = validate_howl_param(param, new_value)
+    if not ok:
+        suggestions[suggestion_index]["status"] = "rejected"
+        suggestions[suggestion_index]["reject_reason"] = error
+        pending["status"] = "partially_applied" if any(
+            s.get("status") not in ("approved", "rejected") for s in suggestions
+        ) else "completed"
+        set_bot_state(_pending_key(telegram_id, network), pending)
+        logger.warning(
+            "Rejected unsafe HOWL suggestion user=%s param=%s: %s",
+            telegram_id, param, error,
+        )
+        try:
+            from src.nadobro.services.audit_log import record_audit_event
 
+            record_audit_event(
+                telegram_id, "howl_suggestion_rejected", f"param={param} reason={error}"
+            )
+        except Exception:
+            pass
+        return False, f"Skipped unsafe suggestion ({param}): {error}"
+
+    new_value = coerced_value
+
+    try:
         def _mutate(s):
             strategies = s.setdefault("strategies", {})
             bro = strategies.setdefault("bro", {})
