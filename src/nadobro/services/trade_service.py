@@ -176,7 +176,8 @@ def _builder_route_payload(network: str | None = None) -> dict:
             "builder_fee_rate": int(builder_fee_rate),
         }
     except Exception as e:
-        return {"error": f"Builder routing misconfigured: {e}"}
+        logger.warning("Builder routing misconfigured on %s: %s", network, e)
+        return {"error": "Order routing is temporarily misconfigured. Please try again shortly."}
 
 
 def _resolve_user_network(telegram_id: int, explicit: str | None = None) -> str:
@@ -915,6 +916,18 @@ def execute_market_order(
         )
         if sl_result:
             payload.update(sl_result)
+        # SECURITY: append-only audit of every signed order (manual + agent).
+        try:
+            from src.nadobro.services.audit_log import record_audit_event
+
+            record_audit_event(
+                telegram_id,
+                "order_placed",
+                f"source={source} net={network} product={payload.get('product')} "
+                f"side={payload['side']} size={size} lev={leverage}",
+            )
+        except Exception:
+            pass
         return payload
 
     return result

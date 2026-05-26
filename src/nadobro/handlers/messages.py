@@ -526,6 +526,22 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     if await _handle_interaction_intent_message(update, context, telegram_id, text):
         return
 
+    # Abuse / cost guard: the managed-agent path below makes LLM + market/DB
+    # calls. Throttle it per-user so a single account can't spam expensive
+    # inference. Quick paths above (buttons, trade flows) are intentionally not
+    # rate-limited so normal UX stays snappy.
+    from src.nadobro.services.user_rate_limit import check_rate_limit as _llm_rate_limit
+
+    allowed, retry_after = _llm_rate_limit(telegram_id, "llm")
+    if not allowed:
+        wait = max(1, int(retry_after + 0.5))
+        await _reply_loc(
+            update.message,
+            "⏳ Easy bro, you're firing faster than I can think. "
+            f"Give me ~{wait}s and hit me again.",
+        )
+        return
+
     if await _handle_managed_agent_message(update, context, telegram_id, username, text):
         return
 
@@ -1374,9 +1390,28 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
         pk_bytes = pk_hex.encode("utf-8")
         ciphertext = encrypt_with_server_key(pk_bytes)
         save_linked_signer(telegram_id, main_addr, linked_addr, ciphertext)
+        # SECURITY: append-only audit trail for a sensitive key event.
+        try:
+            from src.nadobro.services.audit_log import record_audit_event
+
+            record_audit_event(telegram_id, "wallet_linked", f"signer={linked_addr}")
+        except Exception:
+            pass
+        # SECURITY: delete the chat message that displayed the 1CT private key —
+        # it's now encrypted at rest and registered on Nado, so leaving the
+        # plaintext key in chat history is pure downside.
+        connect_msg = context.user_data.pop("wallet_connect_msg", None)
+        if connect_msg:
+            try:
+                await context.bot.delete_message(
+                    chat_id=connect_msg.get("chat_id"),
+                    message_id=connect_msg.get("message_id"),
+                )
+            except Exception:
+                pass
         for key in ("wallet_flow", "wallet_linked_signer_pk", "wallet_main_address", "wallet_linked_signer_address"):
             context.user_data.pop(key, None)
-        await _reply_loc(update.message, 
+        await _reply_loc(update.message,
             "✅ Wallet linked! Your 1CT key is encrypted and stored.\n\n"
             "You can now trade directly from this bot. Revoke anytime with /revoke.",
             reply_markup=persistent_menu_kb(),

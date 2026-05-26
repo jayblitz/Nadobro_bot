@@ -243,6 +243,20 @@ def init_db():
                     details TEXT,
                     created_at TIMESTAMPTZ DEFAULT now()
                 );
+                -- Append-only security audit trail for sensitive user actions
+                -- (wallet link/unlink/revoke, order placement, rejected agent
+                -- auto-tuning). No UPDATE/DELETE paths write to this table.
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created
+                    ON audit_logs (user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_action_created
+                    ON audit_logs (action, created_at DESC);
                 CREATE TABLE IF NOT EXISTS invite_codes (
                     id BIGSERIAL PRIMARY KEY,
                     code_hash TEXT UNIQUE NOT NULL,

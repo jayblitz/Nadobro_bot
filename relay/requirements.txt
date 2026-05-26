@@ -1,4 +1,10 @@
-fastapi>=0.133.0,<1.0
+# SECURITY: fastapi 0.136.3 is malicious (OSV MAL-2026-4750) — that release
+# secretly added a typosquat 'fastar' dependency to the [standard] extra,
+# giving whoever controls 'fastar' install-time code execution. It is currently
+# the latest published version, so an open range resolves straight into it.
+# Exclude it explicitly; this resolves to the last good 0.136.1 and will pick up
+# a future patched release (0.136.4+) automatically.
+fastapi>=0.133.0,!=0.136.3,<1.0
 starlette==1.0.1
 uvicorn[standard]>=0.34.0,<1.0
 telethon>=1.36.0,<2.0
