@@ -7,7 +7,12 @@ from typing import Optional
 
 from src.nadobro.models.database import UserRow, NetworkMode
 from src.nadobro.db import query_one, query_all, execute, query_count
-from src.nadobro.services.nado_client import get_nado_client, NadoClient, clear_client_cache
+from src.nadobro.services.nado_client import (
+    get_nado_client,
+    NadoClient,
+    clear_client_cache,
+    clear_linked_signer_cache,
+)
 from src.nadobro.i18n import get_active_language, localize_text
 from src.nadobro.config import get_nado_builder_routing_config, get_product_id
 
@@ -186,6 +191,16 @@ def _invalidate_user_caches(address: Optional[str], telegram_id: int) -> None:
                 clear_client_cache(address=addr, network=net)
             except Exception:
                 logger.debug("clear_client_cache(addr=%s, net=%s) failed", addr, net, exc_info=True)
+            try:
+                # Also drop cached "verified" linkage state — otherwise a
+                # user who re-links to a new signer would still hit the old
+                # verified=True for up to 60s + Redis TTL.
+                clear_linked_signer_cache(address=addr, network=net)
+            except Exception:
+                logger.debug(
+                    "clear_linked_signer_cache(addr=%s, net=%s) failed",
+                    addr, net, exc_info=True,
+                )
         for key in list(_readonly_cache.keys()):
             # Readonly cache key is "ro:<addr>:<network>".
             if key.startswith(f"ro:{addr}:"):
