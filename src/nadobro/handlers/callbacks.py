@@ -1163,7 +1163,7 @@ async def _handle_wallet(query, data, telegram_id, context):
             if not is_linked and context is not None:
                 from src.nadobro.handlers.wallet_view import _ensure_pending_wallet_signer
 
-                pk_hex, _ = _ensure_pending_wallet_signer(context)
+                pk_hex, _ = _ensure_pending_wallet_signer(context, telegram_id)
                 msg, kb = fmt_wallet_connect_card(pk_hex), wallet_kb_not_linked()
                 show_connect = True
             else:

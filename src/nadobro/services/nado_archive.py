@@ -180,7 +180,34 @@ def _from_x18(value) -> float:
         return 0.0
 
 
-def _post(url: str, payload: dict) -> dict | list | None:
+def _derive_archive_weight(payload: dict) -> float:
+    """Documented archive IP weight for a ``_post`` payload (``{type: params}``)."""
+    try:
+        from src.nadobro.services.nado_weights import query_weight
+    except Exception:
+        return 5.0
+    if not isinstance(payload, dict) or not payload:
+        return 5.0
+    key = next(iter(payload))
+    inner = payload.get(key) if isinstance(payload.get(key), dict) else {}
+    limit = inner.get("limit")
+    if isinstance(limit, dict):
+        limit = limit.get("raw")
+    # The archive "Orders" weight uses a /20 divisor; map to that formula.
+    qt = "archive_orders" if key == "orders" else key
+    return float(
+        query_weight(
+            qt,
+            {
+                "limit": limit,
+                "subaccounts": inner.get("subaccounts"),
+                "digests": inner.get("digests"),
+            },
+        )
+    )
+
+
+def _post(url: str, payload: dict, *, weight: float | None = None) -> dict | list | None:
     # BUG-NAR-3 partial: short-circuit *before* acquiring the semaphore so we
     # don't hold a slot during cooldown.
     if is_archive_rate_limited():
@@ -192,6 +219,18 @@ def _post(url: str, payload: dict) -> dict | list | None:
         from src.nadobro.services.http_session import is_circuit_open
 
         if is_circuit_open(url):
+            return None
+    except Exception:
+        pass
+
+    # Charge the documented archive IP weight against the shared per-host
+    # weight bucket so this path and the SDK indexer paths in nado_client share
+    # one 2400/min archive budget. Skip (serve None) when starved.
+    try:
+        from src.nadobro.services.http_session import throttle_host
+
+        cost = _derive_archive_weight(payload) if weight is None else float(weight)
+        if not throttle_host(url, cost=cost):
             return None
     except Exception:
         pass

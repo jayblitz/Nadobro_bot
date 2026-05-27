@@ -4,14 +4,33 @@ Every outbound call to Nado (REST via ``http_session`` or SDK via
 ``nado_client``) must pass through :func:`try_acquire` **before** hitting
 the network and call :func:`release` in a ``finally`` block.
 
-Layers (checked in order):
+Nado is **weight-based** with three independent budgets
+(https://docs.nado.xyz/developer-resources/api/rate-limits):
+
+  * Core queries  — per **IP**     : 2400/min, 400/10s  (= 40 weight/s, burst 400)
+  * Archive/index — per **IP**     : 2400/min, 400/10s  (separate host)
+  * Executes      — per **wallet** : 600/min, 100/10s   (= 10 weight/s, burst 100)
+
+Callers pass ``weight`` (documented per-call cost — see ``nado_weights``) and
+``kind`` (``"query"`` or ``"execute"``). Layers, checked in order:
+
+**Query / archive (kind="query", limited per IP):**
 
 1. **Host circuit** — Cloudflare + Nado ``error_code=1000`` breakers.
-2. **Host token bucket** — global egress (default **16 rps / burst 32**,
-   reflecting Nado's 2× rate-limit increase).
-3. **Per-user in-flight cap** — max ``NADO_USER_MAX_INFLIGHT`` (default 4)
-   concurrent calls per ``user_id``.
-4. **Per-user token bucket** — fair share (default **4 rps / burst 8**).
+2. **Per-user in-flight cap** — max ``NADO_USER_MAX_INFLIGHT`` (default 4).
+3. **Host weight bucket** — the per-IP query budget (40 weight/s, set in
+   ``http_session``; keyed by netloc so gateway and archive are independent).
+4. **Per-user weight bucket** — fair share so one user can't starve the IP
+   budget (default **8 weight/s / burst 24**).
+
+**Execute (kind="execute", limited per wallet):**
+
+1. **Host circuit** (executes still ride the gateway host).
+2. **Per-wallet weight bucket** — the 600/min wallet budget (default **9
+   weight/s / burst 90**; doc 10/100 with a safety margin). Charging the
+   documented weights makes order sub-limits fall out for free — e.g. a
+   place *without* spot leverage costs 20, so 20×30 = 600/min caps it at the
+   documented 30/min automatically.
 
 When :func:`try_acquire` returns ``False``, callers must **skip** the call
 and serve cached data — never fan out to per-product fallbacks.
@@ -27,11 +46,19 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_USER_RPS = float(os.environ.get("NADO_USER_GATEWAY_RPS", "4"))
-_USER_BURST = float(os.environ.get("NADO_USER_GATEWAY_BURST", "8"))
+# Per-user fair share of the per-IP query budget (now in *weight*/s, not
+# requests/s). Defaults bumped to track Nado's 40 weight/s IP ceiling.
+_USER_RPS = float(os.environ.get("NADO_USER_GATEWAY_RPS", "8"))
+_USER_BURST = float(os.environ.get("NADO_USER_GATEWAY_BURST", "24"))
 _USER_MAX_WAIT = float(os.environ.get("NADO_USER_GATEWAY_MAX_WAIT_SECONDS", "2.0"))
 _USER_MAX_INFLIGHT = int(os.environ.get("NADO_USER_MAX_INFLIGHT", "4"))
 _USER_BUCKET_MAX = int(os.environ.get("NADO_USER_GATEWAY_BUCKETS_MAX", "8192"))
+
+# Per-wallet execute budget (weight/s). Nado allows 600/min == 100/10s == 10
+# weight/s per wallet; default carries a ~10% safety margin (9/90).
+_WALLET_RPS = float(os.environ.get("NADO_WALLET_EXECUTE_RPS", "9"))
+_WALLET_BURST = float(os.environ.get("NADO_WALLET_EXECUTE_BURST", "90"))
+_WALLET_BUCKET_MAX = int(os.environ.get("NADO_WALLET_EXECUTE_BUCKETS_MAX", "8192"))
 
 _RL_THRESHOLD = int(os.environ.get("NADO_GATEWAY_RL_THRESHOLD", "4"))
 _RL_WINDOW = float(os.environ.get("NADO_GATEWAY_RL_WINDOW_SECONDS", "15"))
@@ -49,19 +76,22 @@ class _TokenBucket:
         if self.tokens <= 0:
             self.tokens = self.burst
 
-    def try_acquire(self, *, max_wait: float) -> bool:
+    def try_acquire(self, *, max_wait: float, cost: float = 1.0) -> bool:
+        # A single call can't cost more than the burst ceiling or the bucket
+        # could never fill enough; clamp to avoid a deadlock until the deadline.
+        need = max(1.0, min(float(cost), self.burst))
         deadline = time.monotonic() + max(0.0, max_wait)
         while True:
             now = time.monotonic()
             elapsed = max(0.0, now - self.last_refill)
             self.tokens = min(self.burst, self.tokens + elapsed * self.rps)
             self.last_refill = now
-            if self.tokens >= 1.0:
-                self.tokens -= 1.0
+            if self.tokens >= need:
+                self.tokens -= need
                 return True
             if now >= deadline:
                 return False
-            needed = (1.0 - self.tokens) / self.rps if self.rps > 0 else 0.25
+            needed = (need - self.tokens) / self.rps if self.rps > 0 else 0.25
             time.sleep(min(needed, 0.25, max(0.0, deadline - now)))
 
 
@@ -74,6 +104,7 @@ class _BreakerLite:
 _lock = threading.RLock()
 _user_buckets: dict[int, _TokenBucket] = {}
 _user_inflight: dict[int, int] = {}
+_wallet_buckets: dict[str, _TokenBucket] = {}
 _gateway_rl: dict[str, _BreakerLite] = {}
 
 
@@ -151,16 +182,52 @@ def _user_bucket(user_id: int) -> _TokenBucket:
         return bucket
 
 
+def _wallet_bucket(wallet: str) -> _TokenBucket:
+    with _lock:
+        bucket = _wallet_buckets.get(wallet)
+        if bucket is None:
+            if len(_wallet_buckets) >= _WALLET_BUCKET_MAX:
+                oldest = min(_wallet_buckets, key=lambda k: _wallet_buckets[k].last_refill)
+                _wallet_buckets.pop(oldest, None)
+            bucket = _TokenBucket(rps=_WALLET_RPS, burst=_WALLET_BURST)
+            _wallet_buckets[wallet] = bucket
+        return bucket
+
+
 def try_acquire(
     url: str,
     *,
     user_id: Optional[int] = None,
+    weight: float = 1.0,
+    kind: str = "query",
+    wallet: Optional[str] = None,
     max_wait: Optional[float] = None,
 ) -> bool:
-    """Reserve one gateway slot. Always pair with :func:`release`."""
+    """Reserve gateway budget for one call of ``weight`` (documented Nado
+    weight). ``kind`` selects the budget:
+
+      * ``"query"`` — per-IP host bucket + per-user fair share + in-flight cap.
+        Pair with :func:`release` when ``user_id`` is supplied.
+      * ``"execute"`` — per-wallet bucket only (no in-flight slot, so **no**
+        :func:`release` needed). Executes are limited per wallet, not per IP.
+
+    Returns False when budget is unavailable — callers must skip and serve
+    cached data.
+    """
     if is_gateway_blocked(url):
         return False
     wait = _USER_MAX_WAIT if max_wait is None else float(max_wait)
+    w = max(1.0, float(weight))
+
+    if kind == "execute":
+        key = (wallet or "").strip().lower()
+        if not key:
+            return True  # no wallet to scope by; host circuit already checked
+        if not _wallet_bucket(key).try_acquire(max_wait=wait, cost=w):
+            logger.debug("gateway budget: wallet %s execute bucket starved (w=%s)", key[:10], w)
+            return False
+        return True
+
     uid: Optional[int] = int(user_id) if user_id is not None else None
     if uid is not None:
         with _lock:
@@ -171,10 +238,10 @@ def try_acquire(
     allowed = True
     try:
         from src.nadobro.services.http_session import throttle_host
-        if not throttle_host(url, max_wait=wait):
+        if not throttle_host(url, cost=w, max_wait=wait):
             allowed = False
-        elif uid is not None and not _user_bucket(uid).try_acquire(max_wait=wait):
-            logger.debug("gateway budget: user %s token bucket starved", uid)
+        elif uid is not None and not _user_bucket(uid).try_acquire(max_wait=wait, cost=w):
+            logger.debug("gateway budget: user %s token bucket starved (w=%s)", uid, w)
             allowed = False
     except Exception:
         pass
@@ -209,6 +276,7 @@ def snapshot() -> dict:
         breakers = {}
     return {
         "user_buckets": len(_user_buckets),
+        "wallet_buckets": len(_wallet_buckets),
         "user_inflight": inflight,
         "gateway_rl_open": rl_open,
         "host_buckets": host_buckets,
@@ -217,5 +285,7 @@ def snapshot() -> dict:
             "user_rps": _USER_RPS,
             "user_burst": _USER_BURST,
             "user_max_inflight": _USER_MAX_INFLIGHT,
+            "wallet_rps": _WALLET_RPS,
+            "wallet_burst": _WALLET_BURST,
         },
     }

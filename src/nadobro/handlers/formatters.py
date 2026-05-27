@@ -1334,6 +1334,7 @@ def fmt_settings(user_data):
 
 
 def fmt_wallet_connect_card(pk_hex: str) -> str:
+    key_line = f"`{escape_md(pk_hex)}`"
     return "\n\n".join(
         [
             _ui_header("Wallet Connect", icon="👛"),
@@ -1343,12 +1344,12 @@ def fmt_wallet_connect_card(pk_hex: str) -> str:
                 [
                     "├ 1\\. Open https://app\\.nado\\.xyz\\?join=FzpOSwX, connect your wallet, and deposit at least $5 USDT0\\.",
                     "├ 2\\. Go to *Settings → 1\\-Click Trading → Advanced 1CT*\\.",
-                    "├ 3\\. Paste the trading key below into *1CT Private Key*:",
-                    f"│ `{escape_md(pk_hex)}`",
+                    "├ 3\\. Paste the trading key below into *1CT Private Key* \\(tap to copy\\):",
                     "├ 4\\. Enable the toggle, save, and confirm the wallet transaction\\.",
                     "└ 5\\. Reply here with your main wallet address \\(`0x...`\\)\\.",
                 ],
             ),
+            key_line,
             _ui_footer_hint("This signer is for trading only and cannot withdraw funds\\."),
         ]
     )

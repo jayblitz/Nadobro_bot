@@ -214,9 +214,28 @@ class NadoClient:
     def _archive_url(self):
         return NADO_MAINNET_ARCHIVE if self.network == "mainnet" else NADO_TESTNET_ARCHIVE
 
-    def _gateway_allowed(self) -> bool:
+    def _gateway_allowed(
+        self,
+        *,
+        weight: float = 1.0,
+        kind: str = "query",
+        url: Optional[str] = None,
+        wallet: Optional[str] = None,
+        user_scoped: bool = True,
+    ) -> bool:
+        """Reserve gateway budget for one call. ``weight`` is the documented
+        Nado weight (see ``nado_weights``). ``kind="query"`` charges the per-IP
+        host budget (default ``_rest_url`` host; pass ``url=self._archive_url()``
+        for indexer reads). ``kind="execute"`` charges the per-wallet budget.
+
+        ``user_scoped`` paths take an in-flight slot and MUST call
+        :meth:`_gateway_release`; execute/archive paths set it False (token
+        bucket only, nothing to release).
+        """
         from src.nadobro.services.gateway_budget import try_acquire
-        return try_acquire(self._rest_url(), user_id=getattr(self, "acting_user_id", None))
+        target = url or self._rest_url()
+        uid = getattr(self, "acting_user_id", None) if user_scoped else None
+        return try_acquire(target, user_id=uid, weight=weight, kind=kind, wallet=wallet)
 
     def _gateway_release(self) -> None:
         from src.nadobro.services.gateway_budget import release
@@ -259,7 +278,8 @@ class NadoClient:
             return None
 
     def _query_rest(self, query_type: str, extra_params: Optional[dict] = None) -> Optional[dict]:
-        if not self._gateway_allowed():
+        from src.nadobro.services.nado_weights import query_weight
+        if not self._gateway_allowed(weight=query_weight(query_type, extra_params)):
             return None
         params = {"type": query_type}
         if extra_params:
@@ -367,6 +387,13 @@ class NadoClient:
                 self.initialize()
             if not self._initialized or not self.client:
                 return []
+        from src.nadobro.services.nado_weights import query_weight
+        if not self._gateway_allowed(
+            weight=query_weight("candlesticks", {"limit": limit}),
+            url=self._archive_url(),
+            user_scoped=False,
+        ):
+            return []
         try:
             from nado_protocol.indexer_client.types.query import IndexerCandlesticksParams
             from nado_protocol.indexer_client.types.models import IndexerCandlesticksGranularity
@@ -511,7 +538,7 @@ class NadoClient:
 
     def get_balance(self) -> dict:
         if self._initialized and self.client:
-            if not self._gateway_allowed():
+            if not self._gateway_allowed(weight=2):  # subaccount_info: IP weight 2
                 return {"exists": False, "balances": {}}
             try:
                 from nado_protocol.utils.math import from_x18
@@ -553,7 +580,7 @@ class NadoClient:
             if cached and (time.time() - float(cached.get("ts", 0))) < _OPEN_ORDERS_CACHE_TTL:
                 return list(cached.get("data") or [])
         if self._initialized and self.client:
-            if not self._gateway_allowed():
+            if not self._gateway_allowed(weight=2):  # subaccount_orders (1 product): IP weight 2
                 with _caches_lock:
                     cached = _open_orders_cache.get(cache_key)
                 if cached:
@@ -647,7 +674,8 @@ class NadoClient:
         if not self._ensure_sdk_client():
             return []
 
-        if not self._gateway_allowed():
+        # "Orders" query: IP weight = 2 * product_ids.length
+        if not self._gateway_allowed(weight=2 * max(1, len(product_ids))):
             return []
 
         try:
@@ -753,6 +781,13 @@ class NadoClient:
         """
         if not self._ensure_sdk_client():
             return []
+        from src.nadobro.services.nado_weights import query_weight
+        if not self._gateway_allowed(
+            weight=query_weight("matches", {"limit": limit, "subaccounts": [self.subaccount_hex]}),
+            url=self._archive_url(),
+            user_scoped=False,
+        ):
+            return []
         try:
             from nado_protocol.indexer_client.types.query import IndexerMatchesParams
 
@@ -790,6 +825,8 @@ class NadoClient:
         """
         if not self._ensure_sdk_client():
             return []
+        if not self._gateway_allowed(weight=5, url=self._archive_url(), user_scoped=False):
+            return []  # interest & funding payments: IP weight 5
         try:
             from nado_protocol.indexer_client.types.query import IndexerInterestAndFundingParams
 
@@ -832,6 +869,9 @@ class NadoClient:
         """
         if not self._ensure_sdk_client():
             return {}
+        # Pulls subaccount info + indexer events; charge a conservative weight.
+        if not self._gateway_allowed(weight=10, url=self._archive_url(), user_scoped=False):
+            return {}
         try:
             from nado_protocol.utils.margin_manager import MarginManager
 
@@ -860,6 +900,11 @@ class NadoClient:
             return {"success": True, "cancelled": 0, "digests": []}
         if not self._ensure_sdk_client():
             return {"success": False, "error": "Client not initialized", "digests": clean_digests}
+        # Cancel with digests = wallet weight equal to the number of digests.
+        if not self._gateway_allowed(
+            weight=len(clean_digests), kind="execute", wallet=self.subaccount_hex, user_scoped=False
+        ):
+            return {"success": False, "error": "Rate limited — please retry in a moment.", "rate_limited": True, "digests": clean_digests}
         try:
             from nado_protocol.engine_client.types.execute import CancelOrdersParams
 
@@ -892,6 +937,8 @@ class NadoClient:
         trigger_client = getattr(getattr(self.client, "context", None), "trigger_client", None)
         if not trigger_client:
             return []
+        if not self._gateway_allowed(weight=5, user_scoped=False):
+            return []  # trigger-service list query; conservative weight
         try:
             from nado_protocol.trigger_client.types.query import (
                 ListTriggerOrdersParams,
@@ -930,6 +977,10 @@ class NadoClient:
         trigger_client = getattr(getattr(self.client, "context", None), "trigger_client", None)
         if not trigger_client:
             return {"success": False, "error": "Trigger client not initialized", "digests": clean_digests}
+        if not self._gateway_allowed(
+            weight=len(clean_digests), kind="execute", wallet=self.subaccount_hex, user_scoped=False
+        ):
+            return {"success": False, "error": "Rate limited — please retry in a moment.", "rate_limited": True, "digests": clean_digests}
         try:
             from nado_protocol.trigger_client.types.execute import CancelTriggerOrdersParams
 
@@ -1855,6 +1906,12 @@ class NadoClient:
         if not self._initialized or not self.client:
             return {"success": False, "error": "Client not initialized. Please try /start again."}
 
+        # Per-wallet execute budget (600 weight/min). Place w/ spot leverage = 1.
+        place_sender = (sender or "").strip() or self.subaccount_hex
+        if not self._gateway_allowed(weight=1, kind="execute", wallet=place_sender, user_scoped=False):
+            logger.warning("place_order throttled by wallet execute budget sender=%s", _mask_address(place_sender))
+            return {"success": False, "error": "Rate limited — please retry in a moment.", "rate_limited": True}
+
         try:
             sender_hex = (sender or "").strip() or self.subaccount_hex
             try:
@@ -2214,10 +2271,14 @@ class NadoClient:
         if not self._initialized or not self.client:
             return {"success": False, "error": "Client not initialized"}
 
+        eff_sender = (sender or "").strip() or self.subaccount_hex
+        # Cancel with 1 digest = wallet weight 1.
+        if not self._gateway_allowed(weight=1, kind="execute", wallet=eff_sender, user_scoped=False):
+            return {"success": False, "error": "Rate limited — please retry in a moment.", "rate_limited": True}
+
         try:
             from nado_protocol.engine_client.types.execute import CancelOrdersParams
 
-            eff_sender = (sender or "").strip() or self.subaccount_hex
             cancel_params = CancelOrdersParams(
                 sender=eff_sender,
                 productIds=[product_id],

@@ -5,6 +5,7 @@ from src.nadobro.services.text_trade_pending import (
     clear_text_close_all_pending,
     clear_text_trade_pending,
 )
+from src.nadobro.services.wallet_pending_flow import clear_wallet_pending_flow
 
 # Any in-progress conversational/multi-step state that should be discarded
 # when users intentionally navigate back home.
@@ -40,7 +41,12 @@ def clear_pending_user_state(context: CallbackContext | None, telegram_user_id: 
         context.user_data.pop(key, None)
     if telegram_user_id is not None:
         uid = int(telegram_user_id)
-        for clearer in (clear_strategy_pending_input, clear_text_trade_pending, clear_text_close_all_pending):
+        for clearer in (
+            clear_strategy_pending_input,
+            clear_text_trade_pending,
+            clear_text_close_all_pending,
+            clear_wallet_pending_flow,
+        ):
             try:
                 clearer(uid)
             except Exception:
