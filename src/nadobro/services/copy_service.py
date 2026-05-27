@@ -388,11 +388,7 @@ def get_trader_preview(trader_id: int, network: str = "mainnet", requester_user_
     if not trader:
         return {"found": False}
     owner_id = trader.get("owner_user_id")
-    if (
-        owner_id is not None
-        and requester_user_id is not None
-        and int(owner_id) != int(requester_user_id)
-    ):
+    if owner_id is not None and (requester_user_id is None or int(owner_id) != int(requester_user_id)):
         return {"found": False}
     wallet = str(trader.get("wallet_address") or "")
     client = NadoClient.from_address(wallet, network)
@@ -631,7 +627,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     for pid, cp in list(copy_pos_by_product.items()):
         if pid not in leader_pos_map:
             # Leader closed this position — close ours too
-            product_name = cp.get("product_name", get_product_name(pid))
+            product_name = cp.get("product_name") or get_product_name(pid, network=network)
             product_key = product_name.replace("-PERP", "")
             try:
                 # Close by opening opposite side
@@ -647,6 +643,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     enforce_rate_limit=False,
                     reduce_only=True,
                     source="copy",
+                    network=network,
                 )
                 if not result.get("success"):
                     logger.warning("Failed to close copy position %s: %s", cp["id"], result.get("error", "close failed"))
@@ -671,7 +668,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             # Already tracking this position — update TP/SL if changed
             existing = copy_pos_by_product[pid]
             if existing["side"].upper() != leader_pos["side"].upper():
-                product_name = existing.get("product_name", get_product_name(pid))
+                product_name = existing.get("product_name") or get_product_name(pid, network=network)
                 product_key = product_name.replace("-PERP", "")
                 try:
                     close_res = await run_blocking(
@@ -685,6 +682,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                         enforce_rate_limit=False,
                         reduce_only=True,
                         source="copy",
+                        network=network,
                     )
                     if not close_res.get("success"):
                         logger.error("Failed to flip copy position %s: %s", existing["id"], close_res.get("error", "close failed"))
@@ -703,7 +701,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                 continue
 
         # New position from leader — open a copy
-        product_name = get_product_name(pid)
+        product_name = get_product_name(pid, network=network)
         product_key = product_name.replace("-PERP", "")
         is_long = leader_pos["side"] == "LONG"
         leader_entry = leader_pos.get("entry_price", 0)
@@ -730,6 +728,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                 slippage_pct=1.5,
                 enforce_rate_limit=False,
                 source="copy",
+                network=network,
             )
 
             if result.get("success"):
@@ -764,6 +763,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     leverage,
                     leader_pos.get("tp_price"),
                     leader_pos.get("sl_price"),
+                    network,
                 )
                 if copy_position_id and bracket_digests:
                     from src.nadobro.db import execute as db_execute
@@ -806,7 +806,8 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
 
 def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                         size: float, is_long: bool, leverage: float,
-                        tp_price: Optional[float], sl_price: Optional[float]):
+                        tp_price: Optional[float], sl_price: Optional[float],
+                        network: str):
     """Place TP and SL orders for a copy position."""
     digests = {}
     if tp_price and tp_price > 0:
@@ -822,6 +823,7 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                 reduce_only=True,
                 order_type_override="TAKE_PROFIT",
                 source="copy",
+                network=network,
             )
             if result.get("success") and result.get("digest"):
                 digests["tp_order_digest"] = result.get("digest")
@@ -841,6 +843,7 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                 reduce_only=True,
                 order_type_override="STOP_LOSS",
                 source="copy",
+                network=network,
             )
             if result.get("success") and result.get("digest"):
                 digests["sl_order_digest"] = result.get("digest")
@@ -901,7 +904,7 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
         logger.debug("Failed to cancel old TP/SL: %s", e)
 
     # Place updated TP/SL
-    bracket_digests = _place_tp_sl_orders(user_id, product_key, pid, size, is_long, leverage, new_tp, new_sl)
+    bracket_digests = _place_tp_sl_orders(user_id, product_key, pid, size, is_long, leverage, new_tp, new_sl, network)
     db_execute(
         """
         UPDATE copy_positions
