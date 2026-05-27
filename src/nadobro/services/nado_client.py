@@ -537,8 +537,26 @@ class NadoClient:
         return {}
 
     def get_balance(self) -> dict:
+        # Redis cache layer. Two-fold purpose:
+        #   1. Smooth over transient "Too Many Requests" on query_subaccount_info
+        #      so callers that conflate exists=False with "not linked" don't
+        #      flip the user's UI state on a rate-limit blip.
+        #   2. Reduce IP weight burned by the portfolio_sync tick on
+        #      subaccount_info reads (weight=2 per call).
+        # TTL kept short (30s default) so wallet deposit / withdraw / fill
+        # visibility doesn't lag noticeably.
+        redis_key = f"balance:{self.network}:{self.subaccount_hex}"
+        balance_ttl_seconds = int(
+            os.environ.get("NADO_BALANCE_CACHE_TTL_SECONDS", "30") or "30"
+        )
+
         if self._initialized and self.client:
             if not self._gateway_allowed(weight=2):  # subaccount_info: IP weight 2
+                # Throttled by our own gateway budget — try Redis before
+                # surrendering a misleading exists=False.
+                cached = self._read_balance_redis(redis_key)
+                if cached is not None:
+                    return cached
                 return {"exists": False, "balances": {}}
             try:
                 from nado_protocol.utils.math import from_x18
@@ -548,10 +566,18 @@ class NadoClient:
                     for sb in info.spot_balances:
                         bal = from_x18(int(sb.balance.amount))
                         balances[sb.product_id] = float(bal)
-                return {"exists": info.exists, "balances": balances}
+                result = {"exists": bool(info.exists), "balances": balances}
+                self._write_balance_redis(redis_key, result, balance_ttl_seconds)
+                return result
             except Exception as e:
                 self._record_gateway_error(e)
                 logger.error("SDK get_balance failed: %s", _format_sdk_error(e))
+                # On *any* SDK failure (rate-limit, Cloudflare, transient
+                # network), prefer the last known-good snapshot to a hard
+                # exists=False that downstream UI may render as "not linked".
+                cached = self._read_balance_redis(redis_key)
+                if cached is not None:
+                    return cached
             finally:
                 self._gateway_release()
 
@@ -565,11 +591,46 @@ class NadoClient:
                     bal = int(sb["balance"]["amount"]) / 1e18
                     balances[sb["product_id"]] = bal
                 exists = bool(exists_field) if exists_field is not None else bool(balances)
-                return {"exists": exists, "balances": balances}
+                result = {"exists": exists, "balances": balances}
+                self._write_balance_redis(redis_key, result, balance_ttl_seconds)
+                return result
         except Exception as e:
             logger.error(f"REST get_balance failed: {e}")
 
+        # REST path also failed — last resort cache before exists=False.
+        cached = self._read_balance_redis(redis_key)
+        if cached is not None:
+            return cached
         return {"exists": False, "balances": {}}
+
+    def _read_balance_redis(self, redis_key: str) -> Optional[dict]:
+        try:
+            from src.nadobro.services.upstash_redis import get_redis
+            cached = get_redis().get_json(redis_key)
+            if isinstance(cached, dict) and "balances" in cached:
+                # Coerce product_id keys back to int (JSON only has str keys).
+                balances = cached.get("balances") or {}
+                if isinstance(balances, dict):
+                    fixed: dict = {}
+                    for k, v in balances.items():
+                        try:
+                            fixed[int(k)] = float(v)
+                        except (TypeError, ValueError):
+                            fixed[k] = v
+                    cached["balances"] = fixed
+                return cached
+        except Exception as e:  # pragma: no cover - cache is best-effort
+            logger.debug("Upstash balance cache read failed: %s", e)
+        return None
+
+    def _write_balance_redis(self, redis_key: str, value: dict, ttl_seconds: int) -> None:
+        if ttl_seconds <= 0:
+            return
+        try:
+            from src.nadobro.services.upstash_redis import get_redis
+            get_redis().set_json(redis_key, value, ttl_seconds=ttl_seconds)
+        except Exception as e:  # pragma: no cover
+            logger.debug("Upstash balance cache write failed: %s", e)
 
     def get_open_orders(self, product_id: int, refresh: bool = False, sender: Optional[str] = None) -> list:
         eff_sender = (sender or "").strip() or self.subaccount_hex
@@ -1552,6 +1613,7 @@ class NadoClient:
     def verify_linked_signer(self, expected_signer_address: str = None, *, use_cache: bool = True) -> dict:
         expected = (expected_signer_address or self.address or "").lower()
         cache_key = (self.network, str(self.subaccount_hex or ""), expected)
+        redis_key = f"linked_signer:{self.network}:{self.subaccount_hex}:{expected}"
         if use_cache and _LINKED_SIGNER_CACHE_TTL_SECONDS > 0:
             cached = _linked_signer_cache.get(cache_key)
             if cached and (time.time() - float(cached.get("ts", 0))) < _LINKED_SIGNER_CACHE_TTL_SECONDS:
@@ -1560,6 +1622,24 @@ class NadoClient:
                 payload = cached.get("payload") or {}
                 if payload.get("verified") and not payload.get("error"):
                     return dict(payload)
+            # Process-local cache missed — try Upstash before paying the
+            # round-trip to Nado. Survives process restart and short rate-limit
+            # windows where the SDK would otherwise return an error.
+            try:
+                from src.nadobro.services.upstash_redis import get_redis
+                redis_payload = get_redis().get_json(redis_key)
+                if (
+                    isinstance(redis_payload, dict)
+                    and redis_payload.get("verified")
+                    and not redis_payload.get("error")
+                ):
+                    _linked_signer_cache[cache_key] = {
+                        "ts": time.time(),
+                        "payload": dict(redis_payload),
+                    }
+                    return dict(redis_payload)
+            except Exception as cache_err:  # pragma: no cover - cache is best-effort
+                logger.debug("Upstash linked-signer cache read failed: %s", cache_err)
 
         result = {
             "verified": False,
@@ -1582,6 +1662,18 @@ class NadoClient:
                             current, expected, result["verified"])
                 if result["verified"]:
                     _linked_signer_cache[cache_key] = {"ts": time.time(), "payload": dict(result)}
+                    try:
+                        from src.nadobro.services.upstash_redis import get_redis
+                        # TTL mirrors the in-process cache so an unlink/relink
+                        # cannot be masked for longer than the existing
+                        # staleness budget. The Redis layer is just a wider
+                        # net for transient query failures, not a new TTL.
+                        get_redis().set_json(
+                            redis_key, dict(result),
+                            ttl_seconds=max(15, int(_LINKED_SIGNER_CACHE_TTL_SECONDS)),
+                        )
+                    except Exception as cache_err:  # pragma: no cover
+                        logger.debug("Upstash linked-signer cache write failed: %s", cache_err)
                 return result
             except Exception as e:
                 logger.warning("SDK get_linked_signer failed: %s", e)
@@ -1610,6 +1702,14 @@ class NadoClient:
 
         if result["verified"] and not result["error"]:
             _linked_signer_cache[cache_key] = {"ts": time.time(), "payload": dict(result)}
+            try:
+                from src.nadobro.services.upstash_redis import get_redis
+                get_redis().set_json(
+                    redis_key, dict(result),
+                    ttl_seconds=max(15, int(_LINKED_SIGNER_CACHE_TTL_SECONDS)),
+                )
+            except Exception as cache_err:  # pragma: no cover
+                logger.debug("Upstash linked-signer cache write failed: %s", cache_err)
         return result
 
     @staticmethod
@@ -1641,43 +1741,82 @@ class NadoClient:
         err_lower = error_str.lower()
         compact = err_lower.replace("_", "").replace("-", "")
         if "ipqueryonly" in compact:
-            diag = ""
+            # Branch the user-facing message on the *actual* signer state so we
+            # don't tell users to re-link a key that's already correctly linked.
+            # Previous copy led with "your 1CT signer key is not linked" even
+            # when verify_linked_signer returned verified=True — confusing in
+            # the transient IP-throttle / Cloudflare-WAF case which the user
+            # has no way to fix from the Nado UI. (Audit 2026-05-27.)
+            check_status: Optional[str] = None
+            check_current: Optional[str] = None
+            check_error: Optional[str] = None
+            signer_addr = ""
             try:
-                signer_addr = self.address
+                signer_addr = self.address or ""
                 if signer_addr and self.subaccount_hex:
                     check = self.verify_linked_signer(signer_addr)
-                    current = check.get("current_signer")
-                    if check.get("error"):
-                        diag = f"\n\n🔍 Diagnostic: Could not verify linked signer ({check['error']})"
-                    elif not current:
-                        diag = (
-                            f"\n\n🔍 Diagnostic: NO linked signer found on the exchange for this subaccount. "
-                            f"You must link the bot's 1CT key first.\n"
-                            f"Bot's 1CT signer address: {signer_addr}"
-                        )
-                    elif check["verified"]:
-                        diag = (
-                            f"\n\n🔍 Diagnostic: Bot's 1CT signer IS linked correctly ({signer_addr[:10]}...). "
-                            f"The rejection is likely an IP restriction on the exchange gateway. "
-                            f"The bot server IP may be blocked for write operations."
-                        )
+                    check_error = check.get("error")
+                    check_current = check.get("current_signer")
+                    if check_error:
+                        check_status = "error"
+                    elif not check_current:
+                        check_status = "missing"
+                    elif check.get("verified"):
+                        check_status = "verified"
                     else:
-                        diag = (
-                            f"\n\n🔍 Diagnostic: SIGNER MISMATCH!\n"
-                            f"• Exchange has: {current[:10]}... linked\n"
-                            f"• Bot's signer: {signer_addr[:10]}...\n"
-                            f"Go to Nado Settings → 1-Click Trading → disable → "
-                            f"then Advanced 1CT → paste the bot's key → enable and save."
-                        )
+                        check_status = "mismatch"
             except Exception as de:
                 logger.warning("Linked signer diagnostic failed: %s", de)
+                check_status = "error"
+                check_error = str(de)
 
+            if check_status == "verified":
+                # Most common cause now we run on a stable allowlisted IP:
+                # transient per-IP throttle from Nado's gateway / WAF when
+                # query weight spikes. Don't blame the user.
+                return (
+                    "⚠️ The exchange temporarily restricted this request "
+                    "(ip_query_only).\n\n"
+                    "Your 1CT signer IS linked correctly — this is an "
+                    "exchange-side IP throttle, not a setup problem. The bot "
+                    "will retry automatically; if it persists, wait a few "
+                    "seconds and try again."
+                )
+            if check_status == "mismatch":
+                short_current = (check_current or "")[:10]
+                short_signer = signer_addr[:10] if signer_addr else "<unavailable>"
+                return (
+                    "⚠️ Signer mismatch — the exchange has a different 1CT key "
+                    "linked.\n\n"
+                    f"• Exchange has: {short_current}... linked\n"
+                    f"• Bot's signer: {short_signer}...\n\n"
+                    "Fix: Nado web app → Settings → 1-Click Trading → disable → "
+                    "Advanced 1CT → paste the bot's key → enable and save."
+                )
+            if check_status == "missing":
+                return (
+                    "⚠️ Your 1CT signer key is not linked on Nado.\n\n"
+                    "Fix: Nado web app → Settings → 1-Click Trading → paste "
+                    "your 1CT private key → enable the toggle → save.\n"
+                    f"Bot's 1CT signer address: {signer_addr or '<unavailable>'}"
+                )
+            # check_status is "error" (or None): we couldn't verify because the
+            # query itself was rate-limited or Cloudflare-challenged. Fall back
+            # to the historical 3-step list but lead with the most likely
+            # transient cause now that allowlisted IPs are the norm.
+            suffix = ""
+            if check_error:
+                suffix = f"\n\n🔍 Could not verify signer status: {check_error}"
             return (
-                "The exchange restricted this trade (ip_query_only). This usually means:\n"
-                "1. Your 1CT signer key is not linked on Nado — go to Settings → 1-Click Trading on the Nado web app, paste your 1CT private key, enable the toggle, and save.\n"
-                "2. Your subaccount may not be initialized — deposit at least $5 USDT0 at https://testnet.nado.xyz/portfolio/faucet\n"
-                "3. If already linked and funded, the bot's server IP may be restricted by the exchange."
-                + diag
+                "⚠️ The exchange restricted this trade (ip_query_only). "
+                "Possible causes:\n"
+                "1. The bot's server IP is temporarily throttled by the "
+                "exchange — wait a moment and retry.\n"
+                "2. Your 1CT signer key may not be linked on Nado — Settings → "
+                "1-Click Trading → paste your 1CT private key → enable.\n"
+                "3. Your subaccount may not be initialized — deposit at least "
+                "$5 USDT0."
+                + suffix
             )
         compact_json = error_str.replace(" ", "")
         if (
@@ -2063,13 +2202,57 @@ class NadoClient:
 
             result_str = str(result)
             lowered_result = result_str.lower()
-            if (
+            is_failure_result = (
                 (hasattr(result, "status") and str(getattr(result, "status")).lower() == "failure")
                 or ('"status":"failure"' in lowered_result)
                 or ("'status': 'failure'" in lowered_result)
-            ):
+            )
+            is_blocked_result = "blocked" in lowered_result or "reason" in lowered_result
+
+            # Transient ip_query_only retry. Nado occasionally downgrades a
+            # write-allowed IP to query-only for a short window when its
+            # per-IP gateway weight saturates (we saw this twice in the
+            # 2026-05-27 incident: get_balance Too Many Requests at
+            # 20:46:19 / 20:48:50, then place_order ip_query_only at
+            # 20:49:07). When verify_linked_signer confirms the signer IS
+            # linked, a single bounded backoff retry recovers the trade
+            # without bothering the user.
+            compact_result = lowered_result.replace("_", "").replace("-", "")
+            if (is_failure_result or is_blocked_result) and "ipqueryonly" in compact_result:
+                if _retry_count < 1:
+                    try:
+                        check = self.verify_linked_signer(self.address)
+                    except Exception as ve:  # pragma: no cover
+                        logger.warning("verify_linked_signer during retry check failed: %s", ve)
+                        check = {"verified": False}
+                    if check.get("verified"):
+                        backoff = 1.5 + random.uniform(0.0, 0.75)
+                        logger.warning(
+                            "place_order ip_query_only with verified signer; "
+                            "retrying once after %.2fs (product_id=%s sender=%s)",
+                            backoff, product_id, _mask_address(sender_hex),
+                        )
+                        time.sleep(backoff)
+                        try:
+                            return self.place_order(
+                                product_id=product_id,
+                                size=size,
+                                price=price,
+                                order_type=order_type,
+                                is_buy=is_buy,
+                                isolated_only=isolated_only,
+                                isolated_margin=isolated_margin,
+                                reduce_only=reduce_only,
+                                sender=sender,
+                                _retry_count=_retry_count + 1,
+                            )
+                        except Exception as retry_e:
+                            logger.error("place_order ip_query_only retry failed: %s", retry_e)
+                            return {"success": False, "error": self._friendly_error(str(retry_e))}
+
+            if is_failure_result:
                 return {"success": False, "error": self._friendly_error(result_str)}
-            if "blocked" in result_str.lower() or "reason" in result_str.lower():
+            if is_blocked_result:
                 return {"success": False, "error": self._friendly_error(result_str)}
 
             return {
@@ -2792,3 +2975,62 @@ def clear_client_cache(address: str = None, network: str = None):
         _client_cache.pop(cache_key, None)
     else:
         _client_cache.clear()
+
+
+def clear_linked_signer_cache(
+    address: Optional[str] = None,
+    network: Optional[str] = None,
+) -> None:
+    """Drop cached linked-signer state for a wallet (both layers).
+
+    Called from user_service when a user unlinks / re-links a 1CT key, so a
+    stale ``verified=True`` cannot mask the change. Pass ``address=None`` to
+    drop everything (e.g. test setup).
+    """
+    target_addr = (address or "").strip().lower() or None
+    target_net = (network or "").strip().lower() or None
+
+    if target_addr is None:
+        _linked_signer_cache.clear()
+    else:
+        # The cache key is (network, subaccount_hex, expected_signer). The
+        # expected_signer is the lower-cased address we want to drop; we also
+        # accept subaccount_hex starting with that address. Walk the keys
+        # rather than reconstructing the subaccount_hex (which depends on
+        # subaccount name and we can't always assume "default" here).
+        addr_no0x = target_addr[2:] if target_addr.startswith("0x") else target_addr
+        for key in list(_linked_signer_cache.keys()):
+            net, subaccount_hex, expected = key
+            if target_net and net != target_net:
+                continue
+            if expected == target_addr or (subaccount_hex or "").lower().startswith(addr_no0x):
+                _linked_signer_cache.pop(key, None)
+
+    # Best-effort Redis invalidation. We don't know the subaccount_hex /
+    # network combinations without a SCAN; instead we use a sentinel pattern
+    # so the next verify_linked_signer write overwrites. For a strict
+    # invalidation we'd need SCAN + DEL, which Upstash supports but adds
+    # latency on every unlink — not worth it for the in-memory TTL we already
+    # have. The 60s TTL bounds staleness either way.
+    try:
+        from src.nadobro.services.upstash_redis import get_redis
+
+        redis = get_redis()
+        if not redis.enabled or not target_addr:
+            return
+        nets = (target_net,) if target_net else ("mainnet", "testnet")
+        for net in nets:
+            # We can't reconstruct subaccount_hex deterministically without
+            # importing nado_protocol here; use the same helper the client
+            # uses. Best-effort: fall through silently.
+            try:
+                from nado_protocol.utils.bytes32 import subaccount_to_hex
+
+                subaccount_hex = subaccount_to_hex(target_addr, "default")
+            except Exception:
+                continue
+            redis.delete(
+                f"linked_signer:{net}:{subaccount_hex}:{target_addr}"
+            )
+    except Exception as e:  # pragma: no cover - cache invalidation is best-effort
+        logger.debug("clear_linked_signer_cache Redis delete failed: %s", e)

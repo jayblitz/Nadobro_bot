@@ -152,6 +152,13 @@ async def sync_active_users(reason: str = "poll") -> None:
     Each scheduler invocation advances ``_active_users_cursor`` so we never
     re-sync the same top-N users every tick. Page size and poll interval are
     tunable via env (defaults: 8 users / 30s) to stay under Cloudflare limits.
+
+    A Redis-backed lock guards the tick: APScheduler ``max_instances=1`` only
+    protects *within* a process, but a slow tick (we saw 99s callbacks on
+    2026-05-27) still made subsequent ticks pile up and skip. With the
+    distributed lock + tick budget, only one tick runs at a time across the
+    fleet, and ticks that would pile up are silently dropped (apscheduler
+    ``coalesce=True`` already collapses missed runs).
     """
     global _active_users_cursor
 
@@ -165,38 +172,61 @@ async def sync_active_users(reason: str = "poll") -> None:
         except Exception:
             pass
 
-    try:
-        rows = await asyncio.to_thread(active_users, _ACTIVE_USERS_PAGE_SIZE, _active_users_cursor)
-    except Exception as exc:
-        logger.warning("portfolio active user query failed: %s", exc)
-        return
-    if not rows:
-        _active_users_cursor = 0
-        return
-
-    poll_cache_ms = portfolio_poll_cache_seconds() * 1000 if reason == "poll" else None
+    # Lock TTL is slightly longer than our tick budget so a crashed worker's
+    # lock expires before the next tick. If Redis isn't configured the lock
+    # is a no-op (acquires=True) and we fall back to in-process protection.
     tick_budget = max(5.0, portfolio_sync_interval_seconds() * 0.85)
-    deadline = time.monotonic() + tick_budget
-    synced = 0
+    lock_ttl = max(15, int(tick_budget) + 10)
+    try:
+        from src.nadobro.services.upstash_redis import RedisLock
+    except Exception:
+        RedisLock = None  # type: ignore
 
-    for row in rows:
-        if time.monotonic() >= deadline:
-            logger.debug(
-                "portfolio sync tick budget exhausted after %d users (budget=%.0fs)",
-                synced,
-                tick_budget,
+    lock_name = f"portfolio_sync:{reason}"
+    lock_ctx = RedisLock(lock_name, ttl_seconds=lock_ttl) if RedisLock else None
+    if lock_ctx is not None:
+        acquired = lock_ctx.acquire()
+        if not acquired:
+            logger.debug("portfolio sync skipped: lock held by another worker (%s)", lock_name)
+            return
+    try:
+        try:
+            rows = await asyncio.to_thread(active_users, _ACTIVE_USERS_PAGE_SIZE, _active_users_cursor)
+        except Exception as exc:
+            logger.warning("portfolio active user query failed: %s", exc)
+            return
+        if not rows:
+            _active_users_cursor = 0
+            return
+
+        poll_cache_ms = portfolio_poll_cache_seconds() * 1000 if reason == "poll" else None
+        deadline = time.monotonic() + tick_budget
+        synced = 0
+
+        for row in rows:
+            if time.monotonic() >= deadline:
+                logger.debug(
+                    "portfolio sync tick budget exhausted after %d users (budget=%.0fs)",
+                    synced,
+                    tick_budget,
+                )
+                break
+            user_id = int(row.get("telegram_id"))
+            network = str(row.get("network") or "mainnet")
+            await sync_user(
+                user_id,
+                network=network,
+                reason=reason,
+                max_age_ms=poll_cache_ms,
             )
-            break
-        user_id = int(row.get("telegram_id"))
-        network = str(row.get("network") or "mainnet")
-        await sync_user(
-            user_id,
-            network=network,
-            reason=reason,
-            max_age_ms=poll_cache_ms,
-        )
-        _active_users_cursor = max(_active_users_cursor, user_id)
-        synced += 1
+            _active_users_cursor = max(_active_users_cursor, user_id)
+            synced += 1
+    finally:
+        if lock_ctx is not None:
+            try:
+                lock_ctx.release()
+            except Exception:  # pragma: no cover - release is best-effort
+                logger.debug("portfolio_sync lock release failed", exc_info=True)
 
 
 async def sync_user(
