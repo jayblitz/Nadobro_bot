@@ -65,12 +65,16 @@ _CF_BREAKER_COOLDOWN_SECONDS = float(os.environ.get("NADO_CF_BREAKER_COOLDOWN_SE
 # Log dedup: only emit one Cloudflare-challenge warning per host per window.
 _CF_LOG_THROTTLE_SECONDS = float(os.environ.get("NADO_CF_LOG_THROTTLE_SECONDS", "60"))
 
-# Per-host token bucket: cap sustained outbound RPS. Default **16 rps / burst 32**
-# reflects Nado's 2× rate-limit increase (2026-05). Still well below
-# Telegram-scale fan-out; per-user buckets in ``gateway_budget`` provide
-# fairness on top of this host ceiling.
-_HTTP_RPS_PER_HOST = float(os.environ.get("NADO_HTTP_RPS_PER_HOST", "16"))
-_HTTP_BURST_PER_HOST = float(os.environ.get("NADO_HTTP_BURST_PER_HOST", "32"))
+# Per-host **weight** token bucket: models Nado's documented per-IP query
+# budget of 2400 weight/min == 400 weight/10s == **40 weight/s, burst 400**
+# (https://docs.nado.xyz/developer-resources/api/rate-limits). Tokens are
+# *weight*, not requests — callers pass the documented weight of each call as
+# ``cost`` (see ``nado_weights``). Gateway and archive are distinct netlocs, so
+# each gets its own bucket and its own 2400/min IP budget automatically.
+# Defaults carry a ~10% safety margin (36/360) to absorb clock drift and the
+# per-minute-vs-per-10s nuance; raise toward 40/400 or lower via env in prod.
+_HTTP_RPS_PER_HOST = float(os.environ.get("NADO_HTTP_RPS_PER_HOST", "36"))
+_HTTP_BURST_PER_HOST = float(os.environ.get("NADO_HTTP_BURST_PER_HOST", "360"))
 _HTTP_BUCKET_MAX_WAIT_SECONDS = float(os.environ.get("NADO_HTTP_BUCKET_MAX_WAIT_SECONDS", "2.5"))
 
 
@@ -140,16 +144,21 @@ _bucket_lock = threading.Lock()
 _buckets: dict[str, _BucketState] = {}
 
 
-def _acquire_token(host: str, *, max_wait: float | None = None) -> bool:
-    """Block until a token is available for ``host`` or ``max_wait`` elapses.
+def _acquire_token(host: str, *, cost: float = 1.0, max_wait: float | None = None) -> bool:
+    """Reserve ``cost`` weight tokens for ``host`` or time out after ``max_wait``.
 
-    Returns True if a token was acquired, False if we timed out. Callers that
-    receive False should treat the request as throttled (skip rather than
-    pile on). Pure-Python sleep loop; safe to invoke from threads inside
+    ``cost`` is the documented Nado *weight* of the call (default 1). Returns
+    True if the weight was reserved, False if we timed out. Callers that receive
+    False should treat the request as throttled (skip rather than pile on).
+    Pure-Python sleep loop; safe to invoke from threads inside
     ``ThreadPoolExecutor``.
     """
     if not host or _HTTP_RPS_PER_HOST <= 0:
         return True
+    # A single call can never cost more than the burst ceiling, otherwise the
+    # bucket could never accumulate enough tokens and we'd deadlock until the
+    # deadline. Clamp (burst 360 >> any documented single-call weight ~50).
+    need = max(1.0, min(float(cost), _HTTP_BURST_PER_HOST))
     budget = float(max_wait if max_wait is not None else _HTTP_BUCKET_MAX_WAIT_SECONDS)
     deadline = time.monotonic() + budget
     while True:
@@ -162,11 +171,10 @@ def _acquire_token(host: str, *, max_wait: float | None = None) -> bool:
             elapsed = max(0.0, now - state.last_refill)
             state.tokens = min(_HTTP_BURST_PER_HOST, state.tokens + elapsed * _HTTP_RPS_PER_HOST)
             state.last_refill = now
-            if state.tokens >= 1.0:
-                state.tokens -= 1.0
+            if state.tokens >= need:
+                state.tokens -= need
                 return True
-            needed = 1.0 - state.tokens
-            wait = needed / _HTTP_RPS_PER_HOST
+            wait = (need - state.tokens) / _HTTP_RPS_PER_HOST
         if time.monotonic() + wait > deadline:
             return False
         time.sleep(min(wait, 0.25))
@@ -181,10 +189,11 @@ def bucket_snapshot() -> dict[str, dict[str, float]]:
         }
 
 
-def throttle_host(url: str, *, max_wait: float | None = None) -> bool:
-    """Public token-bucket gate. Callers (NadoClient SDK paths) invoke this
-    before each gateway call so SDK and REST share one shaping bucket."""
-    return _acquire_token(_host(url), max_wait=max_wait)
+def throttle_host(url: str, *, cost: float = 1.0, max_wait: float | None = None) -> bool:
+    """Public weight token-bucket gate. Callers (NadoClient SDK + REST paths)
+    invoke this before each call so SDK and REST share one shaping bucket per
+    host. ``cost`` is the documented Nado weight of the call."""
+    return _acquire_token(_host(url), cost=cost, max_wait=max_wait)
 
 
 def _host(url: str) -> str:
@@ -284,18 +293,21 @@ def cf_request(
     params: dict | None = None,
     json_body: dict | None = None,
     headers: dict | None = None,
+    cost: float = 1.0,
 ) -> Optional[requests.Response]:
     """Perform an HTTP request through the shared session with Cloudflare-aware
     retries and a per-host circuit breaker.
 
-    Returns the final ``Response`` (which the caller can ``.json()``) or
-    ``None`` when the circuit is open or every retry was challenged.
+    ``cost`` is the documented Nado weight of the call (default 1) charged
+    against the per-host weight bucket. Returns the final ``Response`` (which
+    the caller can ``.json()``) or ``None`` when the circuit is open or every
+    retry was challenged.
     """
     if _gateway_blocked(url):
         return None
     host = _host(url)
-    if not _acquire_token(host):
-        logger.debug("cf_request throttled host=%s (token bucket starved)", host)
+    if not _acquire_token(host, cost=cost):
+        logger.debug("cf_request throttled host=%s (token bucket starved, cost=%s)", host, cost)
         return None
     attempts = max(1, _CF_RETRY_MAX + 1)
     last_resp: Optional[requests.Response] = None
@@ -325,12 +337,12 @@ def cf_request(
     return last_resp
 
 
-def cf_get(url: str, *, timeout: float, params: dict | None = None, headers: dict | None = None) -> Optional[requests.Response]:
-    return cf_request("GET", url, timeout=timeout, params=params, headers=headers)
+def cf_get(url: str, *, timeout: float, params: dict | None = None, headers: dict | None = None, cost: float = 1.0) -> Optional[requests.Response]:
+    return cf_request("GET", url, timeout=timeout, params=params, headers=headers, cost=cost)
 
 
-def cf_post(url: str, *, timeout: float, json_body: dict | None = None, headers: dict | None = None) -> Optional[requests.Response]:
-    return cf_request("POST", url, timeout=timeout, json_body=json_body, headers=headers)
+def cf_post(url: str, *, timeout: float, json_body: dict | None = None, headers: dict | None = None, cost: float = 1.0) -> Optional[requests.Response]:
+    return cf_request("POST", url, timeout=timeout, json_body=json_body, headers=headers, cost=cost)
 
 
 def breaker_snapshot() -> dict[str, dict[str, float | int]]:

@@ -48,7 +48,7 @@ from src.nadobro.handlers.home_card import (
 )
 from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.state_reset import clear_pending_user_state
-from src.nadobro.handlers.wallet_view import build_wallet_view_payload
+from src.nadobro.handlers.wallet_view import build_wallet_view_payload, hydrate_wallet_flow_context
 from src.nadobro.handlers.formatters import fmt_points_dashboard
 from src.nadobro.services.points_service import (
     get_points_dashboard,
@@ -60,6 +60,7 @@ from src.nadobro.services.strategy_pending_input import (
     clear_strategy_pending_input,
     load_strategy_pending_input,
 )
+from src.nadobro.services.wallet_pending_flow import clear_wallet_pending_flow
 from src.nadobro.services.referral_service import (
     auto_generate_referral_code,
     claim_referral_code,
@@ -450,6 +451,11 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
                     pass
             return
 
+    # Wallet linking must win over Bro/Strategy/AI handlers. Hydrate from bot_state
+    # when user_data was lost (multi-worker webhooks).
+    if await _handle_wallet_flow(update, context, telegram_id, text):
+        return
+
     # Strategy Lab / Bro FAQ / support-question text beats trade-card numerics, LOWIQPTS relay,
     # and chat agents. Hydrate from bot_state when user_data was lost (multi-worker webhooks).
     if await _handle_pending_strategy_input(update, context, telegram_id, text):
@@ -466,9 +472,6 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
         return
 
     if await _handle_pending_text_close_all_confirmation(update, context, telegram_id, text):
-        return
-
-    if await _handle_wallet_flow(update, context, telegram_id, text):
         return
 
     if await _handle_trade_flow_free_text(update, context, telegram_id, text):
@@ -1366,6 +1369,7 @@ def _is_valid_main_address(text: str) -> bool:
 
 
 async def _handle_wallet_flow(update, context, telegram_id, text):
+    await run_blocking(hydrate_wallet_flow_context, context, int(telegram_id))
     flow = context.user_data.get("wallet_flow")
     if not flow:
         return False
@@ -1385,6 +1389,7 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
         linked_addr = context.user_data.get("wallet_linked_signer_address")
         if not pk_hex or not linked_addr:
             context.user_data.pop("wallet_flow", None)
+            await run_blocking(clear_wallet_pending_flow, int(telegram_id))
             await _reply_loc(update.message, "⚠️ Session expired. Tap the Wallet button to start again.")
             return True
         pk_bytes = pk_hex.encode("utf-8")
@@ -1411,9 +1416,12 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
                 pass
         for key in ("wallet_flow", "wallet_linked_signer_pk", "wallet_main_address", "wallet_linked_signer_address"):
             context.user_data.pop(key, None)
+        await run_blocking(clear_wallet_pending_flow, int(telegram_id))
+        await _delete_user_message(update)
         await _reply_loc(update.message,
-            "✅ Wallet linked! Your 1CT key is encrypted and stored.\n\n"
-            "You can now trade directly from this bot. Revoke anytime with /revoke.",
+            "✅ 1CT linked\\! Your trading key is encrypted and stored\\.\n\n"
+            "You can now trade directly from this bot\\. Revoke anytime with /revoke\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=persistent_menu_kb(),
         )
         return True

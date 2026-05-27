@@ -34,6 +34,8 @@ class TelegramUiFormatterTests(unittest.TestCase):
         text = formatters.fmt_wallet_connect_card("0xabc_def")
         self.assertIn("*Setup steps*", text)
         self.assertIn("`0xabc\\_def`", text)
+        self.assertIn("tap to copy", text)
+        self.assertNotIn("│ `0xabc", text)
         self.assertIn("1\\-Click Trading", text)
         self.assertIn("app\\.nado\\.xyz\\?join=FzpOSwX", text)
 
