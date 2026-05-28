@@ -401,6 +401,46 @@ def _run_engine_stop_sync(coro_factory, *, user_id: int, network: str, strategy:
         return False, str(exc)
 
 
+def _run_engine_start_sync(
+    coro_factory, *, user_id: int, network: str, strategy: str
+) -> tuple[bool, dict | None, str | None]:
+    """NO_ORDERS_AUDIT-FIX-R3: same shape as ``_run_engine_stop_sync`` but
+    returns the coroutine's result dict so the caller can decide whether to
+    surface a failure to the user. Eager engine starts from the sync
+    ``start_user_bot`` path go through here.
+    """
+    timeout_s = _engine_stop_timeout_seconds()  # reuse the same env knob
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    target_loop = _runtime_loop if _runtime_loop and _runtime_loop.is_running() else None
+    try:
+        if target_loop is not None and target_loop is not current_loop:
+            future = asyncio.run_coroutine_threadsafe(coro_factory(), target_loop)
+            result = future.result(timeout=timeout_s)
+        elif current_loop is not None and current_loop.is_running():
+            # We're already on the loop — schedule and don't wait. The
+            # scheduler tick will pick it up on the next pass.
+            current_loop.create_task(coro_factory())
+            logger.info(
+                "engine start scheduled asynchronously from running loop user=%s strategy=%s",
+                user_id, strategy,
+            )
+            return True, {"success": True, "action": "engine_scheduled"}, None
+        else:
+            result = asyncio.run(coro_factory())
+        if isinstance(result, dict):
+            return bool(result.get("success", False)), result, result.get("error")
+        return True, {"success": True}, None
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "eager engine start failed user=%s network=%s strategy=%s: %s",
+            user_id, network, strategy, exc, exc_info=True,
+        )
+        return False, None, str(exc)
+
+
 def _stop_engine_runtime_for_state(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
     strategy = _normalize_strategy_id(str(state.get("strategy") or ""))
     if not strategy:
@@ -824,6 +864,39 @@ def start_user_bot(
     if not preflight_ok:
         return False, preflight_msg
 
+    # NO_ORDERS_AUDIT-FIX-R5: vol spot TWAP slices are sized from
+    # ``notional_usd / slices`` (slices ≈ total_duration / order_interval,
+    # default = 4). If the resulting per-slice quote is below the spot
+    # pair's min_notional, every TWAP slice silently rejects at the venue.
+    # Surface a precise actionable error instead.
+    if strategy == "vol" and vol_market_kw == "spot":
+        from src.nadobro.config import get_spot_metadata
+        from src.nadobro.services.product_catalog import _x18_to_float
+
+        _, _vol_cfg = get_strategy_settings(telegram_id, "vol")
+        _notional = float(_vol_cfg.get("notional_usd") or 100.0)
+        _interval = max(1.0, float(_vol_cfg.get("interval_seconds") or 60.0))
+        _slices = max(1, int((_interval * 4) / _interval))  # mirrors map_strategy_config
+        per_slice = _notional / _slices
+        spot_meta = get_spot_metadata(product, network=network) or {}
+        min_size_x18 = spot_meta.get("min_size_x18")
+        min_notional_usd = _x18_to_float(min_size_x18) if min_size_x18 else None
+        # If the catalog lookup failed we don't block — we'd rather let the
+        # user try than refuse on a transient catalog miss — but we log it.
+        if min_notional_usd is None:
+            logger.warning(
+                "vol start: spot min_notional unavailable for %s on %s; "
+                "skipping pre-flight check (transient catalog miss)",
+                product, network,
+            )
+        elif per_slice < float(min_notional_usd):
+            return False, (
+                f"Vol slice notional ${per_slice:,.2f} is below the spot pair's "
+                f"venue minimum ${float(min_notional_usd):,.2f}. "
+                f"Raise notional to at least ${float(min_notional_usd) * _slices:,.0f} "
+                f"or lower order_interval."
+            )
+
     _mark_previous_sessions_superseded(telegram_id, network)
     _, strat_cfg = get_strategy_settings(telegram_id, strategy)
     state = _default_state()
@@ -899,6 +972,75 @@ def start_user_bot(
     state["network"] = "testnet" if str(network).lower() == "testnet" else "mainnet"
     _save_state(telegram_id, network, state)
     _ensure_task(telegram_id, network)
+
+    # NO_ORDERS_AUDIT-FIX-R3: eager engine kickoff. Without this, the first
+    # order doesn't post until the scheduler's next tick (up to
+    # interval_seconds = 60s by default). Users hit Start, see no orders for
+    # 60s, and assume the bot is broken. Kick the first run_engine_cycle
+    # right now so on_start side-effects (executors spawned, orders posted)
+    # happen within seconds.
+    #
+    # Failure handling: a transient failure here (e.g., mid feed returned
+    # 0) is non-fatal — the scheduler tick will retry. A *hard* error
+    # (e.g., engine_v2 disabled, controller construction failed) DOES bubble
+    # up and we tear down the session so the user can retry cleanly.
+    try:
+        from src.nadobro.services import engine_runtime as _er
+
+        if _er.engine_v2_enabled() and strategy in _er.ENGINE_MAPPED_STRATEGIES:
+            user_client = get_user_nado_client(telegram_id, network)
+            if user_client is None:
+                logger.warning(
+                    "eager engine start: no Nado client for user=%s — skipping kickoff "
+                    "(scheduler will retry on next tick)",
+                    telegram_id,
+                )
+            else:
+                # Resolve the mid + product_id the same way _run_cycle does.
+                try:
+                    mp = user_client.get_market_price(int(product_id)) or {}
+                    mid_val = float(mp.get("mid", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "eager engine start: get_market_price failed user=%s product_id=%s; "
+                        "scheduler will retry", telegram_id, product_id, exc_info=True,
+                    )
+                    mid_val = 0.0
+                # mid==0 is acceptable here for non-grid strategies; map_strategy_config
+                # caps the grid band to a minimum, and mm/vol get a fresh mid on tick.
+                ok, _result, err = _run_engine_start_sync(
+                    lambda: _er.run_engine_cycle(
+                        telegram_id, network, state, user_client, mid_val,
+                        str(state.get("product") or product), int(product_id),
+                    ),
+                    user_id=telegram_id, network=network, strategy=strategy,
+                )
+                if ok:
+                    logger.info(
+                        "eager engine kickoff OK user=%s strategy=%s on %s mid=%s",
+                        telegram_id, strategy, network, mid_val,
+                    )
+                else:
+                    logger.critical(
+                        "eager engine kickoff FAILED user=%s strategy=%s on %s err=%s",
+                        telegram_id, strategy, network, err,
+                    )
+                    # Tear down: stop any partial engine state, mark session
+                    # stopped, clear running flag so the scheduler doesn't
+                    # keep retrying a broken config.
+                    try:
+                        _stop_engine_runtime_for_state(telegram_id, network, state)
+                    except Exception:
+                        logger.warning("eager start rollback: engine stop failed", exc_info=True)
+                    _finalize_session(state, stop_reason=f"eager_start_failed: {err}")
+                    state["running"] = False
+                    state["last_error"] = f"Engine start failed: {err}"
+                    _save_state(telegram_id, network, state)
+                    return False, f"Engine failed to start: {err}"
+    except Exception:
+        # The eager kickoff is best-effort; don't block Start on it.
+        logger.warning("eager engine kickoff threw — scheduler will retry", exc_info=True)
+
     if strategy == "dn":
         funding_mode = str(state.get("funding_entry_mode") or "wait").strip().lower()
         funding_label = "wait favorable" if funding_mode == "wait" else "enter anyway"

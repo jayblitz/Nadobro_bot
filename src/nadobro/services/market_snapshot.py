@@ -110,7 +110,9 @@ def _gather_sync(network: str) -> SnapshotPayload:
     rows: list[SnapshotRow] = []
     if perp_symbols:
         try:
-            client = NadoClient.from_address("0x0000000000000000000000000000000000000000", network)
+            # NO_ORDERS_AUDIT-FIX-R6b: route through the digest-keyed cache.
+            from src.nadobro.services.nado_client import get_or_create_readonly_client
+            client = get_or_create_readonly_client("0x0000000000000000000000000000000000000000", network)
         except Exception as exc:
             logger.warning("snapshot Nado client init failed: %s", exc)
             client = None

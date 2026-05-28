@@ -229,7 +229,14 @@ def get_user_readonly_client(telegram_id: int, network: str | None = None) -> Op
         return cached.get("client")
     if cached:
         _readonly_cache.pop(cache_key, None)
-    client = NadoClient.from_address(user.main_address, selected_network)
+    # NO_ORDERS_AUDIT-FIX-R6b: go through the digest-keyed cache so this
+    # client is shared with every other consumer (knowledge_service, copy
+    # service, market_snapshot). The 60s ``_readonly_cache`` TTL stays in
+    # place as a per-user fast path that avoids the lock on every call.
+    from src.nadobro.services.nado_client import get_or_create_readonly_client
+    client = get_or_create_readonly_client(
+        user.main_address, selected_network, user_id=int(telegram_id),
+    )
     client.acting_user_id = int(telegram_id)
     _readonly_cache[cache_key] = {"client": client, "ts": time.time()}
     return client

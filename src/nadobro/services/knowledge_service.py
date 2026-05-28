@@ -1151,7 +1151,9 @@ def _execute_price_brief(
     low_24h = None
     change_24h = None
     try:
-        client = NadoClient.from_address("0x0000000000000000000000000000000000000000", network)
+        # NO_ORDERS_AUDIT-FIX-R6b: route through the digest-keyed cache.
+        from src.nadobro.services.nado_client import get_or_create_readonly_client
+        client = get_or_create_readonly_client("0x0000000000000000000000000000000000000000", network)
         stats = client.get_product_market_stats(product_id)
         mid = float(stats.get("mid") or 0) or None
         bid = float(stats.get("bid") or 0)
@@ -1264,7 +1266,9 @@ def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, li
     if product_id is None:
         if symbol == "ALL":
             try:
-                client = NadoClient.from_address("0x0000000000000000000000000000000000000000", network)
+                # NO_ORDERS_AUDIT-FIX-R6b: cached.
+                from src.nadobro.services.nado_client import get_or_create_readonly_client
+                client = get_or_create_readonly_client("0x0000000000000000000000000000000000000000", network)
                 prices = client.get_all_market_prices()
                 lines = ["[LIVE PRICES FROM NADO DEX]"]
                 for name, p in sorted(prices.items()):
@@ -1279,7 +1283,9 @@ def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, li
         return f"[LIVE PRICE] Unknown asset '{product}'. Supported: {', '.join(supported)}", []
 
     try:
-        client = NadoClient.from_address("0x0000000000000000000000000000000000000000", network)
+        # NO_ORDERS_AUDIT-FIX-R6b: cached.
+        from src.nadobro.services.nado_client import get_or_create_readonly_client
+        client = get_or_create_readonly_client("0x0000000000000000000000000000000000000000", network)
         price_data = client.get_market_price(product_id)
         mid = price_data.get("mid", 0)
         bid = price_data.get("bid", 0)
