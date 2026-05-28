@@ -709,6 +709,14 @@ def alert_condition_kb(product):
 def alert_delete_kb(alerts):
     rows = []
     for a in alerts:
+        if a.get("kind") == "vault_deposit":
+            # Bug #2: vault deposit watch is toggled off via the vault screen,
+            # not the numeric alert:del path (its id is non-numeric).
+            rows.append([InlineKeyboardButton(
+                f"🔕 Stop {a['product']} deposit alert",
+                callback_data="vault:watch:off",
+            )])
+            continue
         rows.append([InlineKeyboardButton(
             f"🗑 #{a['id']} {a['product']} {a['condition']} ${a['target']:,.2f}",
             callback_data=f"alert:del:{a['id']}",

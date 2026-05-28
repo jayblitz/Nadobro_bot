@@ -22,6 +22,15 @@ _PRICE_CACHE_TTL = int(os.environ.get("NADO_PRICE_CACHE_TTL_SECONDS", "10"))
 _ALL_PRODUCTS_CACHE = {}
 # Product list is static metadata — align with catalog hourly refresh.
 _ALL_PRODUCTS_TTL = int(os.environ.get("NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS", "3600"))
+# Shared, network-scoped Redis TTL for the *latest* candlestick query. Short by
+# design (1m candles go stale fast) but long enough to collapse the per-tick
+# 200-bar fetches that the dgrid candle_provider issues every cycle for every
+# user into a single indexer query per window. Set to 0 to disable.
+_CANDLES_REDIS_TTL = int(os.environ.get("NADO_CANDLES_CACHE_TTL_SECONDS", "30"))
+# Product size/price increments are effectively static venue metadata. Cache
+# the parsed map per network so each worker boot reuses one all_products query
+# instead of re-fetching it. Aligns with the catalog hourly refresh.
+_INCREMENTS_REDIS_TTL = int(os.environ.get("NADO_INCREMENTS_CACHE_TTL_SECONDS", "3600"))
 # Last good full price snapshot per network. Served when the gateway budget
 # is throttling/blocked so callers back off instead of fanning out to one
 # REST call per product (which is what the gateway is meant to prevent).
@@ -538,6 +547,18 @@ class NadoClient:
                 self.initialize()
             if not self._initialized or not self.client:
                 return []
+        # Shared Redis cache for the live "latest" window (max_time is None).
+        # Historical/paginated queries (max_time set) are not cached — they are
+        # rare and would pollute the shared key. A hit here avoids both the
+        # gateway-budget spend and the indexer query entirely.
+        candles_redis_key = None
+        if max_time is None and _CANDLES_REDIS_TTL > 0:
+            candles_redis_key = (
+                f"nado:candles:{self.network}:{int(product_id)}:{timeframe}:{int(limit)}"
+            )
+            cached = self._read_cache_redis(candles_redis_key)
+            if isinstance(cached, list):
+                return cached
         from src.nadobro.services.nado_weights import query_weight
         if not self._gateway_allowed(
             weight=query_weight("candlesticks", {"limit": limit}),
@@ -579,6 +600,8 @@ class NadoClient:
                         "volume": float(get("volume", 0) or 0),
                     }
                 )
+            if candles_redis_key is not None and candles:
+                self._write_cache_redis(candles_redis_key, candles, _CANDLES_REDIS_TTL)
             return candles
         except Exception as e:
             logger.warning("SDK get_candlesticks failed product_id=%s timeframe=%s: %s", product_id, timeframe, e)
@@ -782,6 +805,33 @@ class NadoClient:
             get_redis().set_json(redis_key, value, ttl_seconds=ttl_seconds)
         except Exception as e:  # pragma: no cover
             logger.debug("Upstash balance cache write failed: %s", e)
+
+    # -- generic Upstash cache helpers ------------------------------------
+    # Shared, network-scoped (NOT per-user) JSON cache used to absorb
+    # rate-limit pressure from Nado's per-IP gateway for data that is
+    # effectively static across users — the product catalog and (briefly)
+    # candlesticks. Cross-process: a value cached by one worker is reused by
+    # every other worker on the same network, which is the whole point of
+    # using Upstash over the in-process dict. Best-effort: any Redis failure
+    # falls through to the live SDK path.
+    @staticmethod
+    def _read_cache_redis(redis_key: str):
+        try:
+            from src.nadobro.services.upstash_redis import get_redis
+            return get_redis().get_json(redis_key)
+        except Exception as e:  # pragma: no cover - cache is best-effort
+            logger.debug("Upstash cache read failed (%s): %s", redis_key, e)
+            return None
+
+    @staticmethod
+    def _write_cache_redis(redis_key: str, value, ttl_seconds: int) -> None:
+        if ttl_seconds <= 0:
+            return
+        try:
+            from src.nadobro.services.upstash_redis import get_redis
+            get_redis().set_json(redis_key, value, ttl_seconds=ttl_seconds)
+        except Exception as e:  # pragma: no cover
+            logger.debug("Upstash cache write failed (%s): %s", redis_key, e)
 
     def get_open_orders(self, product_id: int, refresh: bool = False, sender: Optional[str] = None) -> list:
         eff_sender = (sender or "").strip() or self.subaccount_hex
@@ -1116,7 +1166,9 @@ class NadoClient:
             logger.error("SDK calculate_account_summary failed: %s", _format_sdk_error(e))
             raise RuntimeError(f"SDK calculate_account_summary failed: {_format_sdk_error(e)}") from e
 
-    async def cancel_orders(self, *, product_id: int, digests: list[str]) -> dict:
+    async def cancel_orders(
+        self, *, product_id: int, digests: list[str], _retry_count: int = 0
+    ) -> dict:
         """
         Cancel multiple plain engine orders for one product.
 
@@ -1141,6 +1193,34 @@ class NadoClient:
                 digests=clean_digests,
             )
             response = await asyncio.to_thread(self.client.market.cancel_orders, cancel_params)
+            # BUG-CANCEL-1: detect a transient ip_query_only downgrade in the
+            # response and retry once (verified signer), instead of falsely
+            # reporting a successful batch cancel and leaving orders live.
+            if self._result_is_ip_query_only(response) and _retry_count < 1:
+                try:
+                    check = await asyncio.to_thread(self.verify_linked_signer, self.address)
+                except Exception as ve:  # pragma: no cover
+                    logger.warning("verify_linked_signer during cancel_orders retry check failed: %s", ve)
+                    check = {"verified": False}
+                if check.get("verified"):
+                    backoff = 1.5 + random.uniform(0.0, 0.75)
+                    logger.warning(
+                        "cancel_orders ip_query_only with verified signer; "
+                        "retrying once after %.2fs (product_id=%s, n=%d)",
+                        backoff, product_id, len(clean_digests),
+                    )
+                    await asyncio.sleep(backoff)
+                    return await self.cancel_orders(
+                        product_id=product_id, digests=clean_digests,
+                        _retry_count=_retry_count + 1,
+                    )
+            if self._result_is_ip_query_only(response):
+                return {
+                    "success": False,
+                    "error": self._friendly_error(str(response)),
+                    "digests": clean_digests,
+                    "response": self._to_plain(response),
+                }
             return {
                 "success": True,
                 "cancelled": len(clean_digests),
@@ -2161,15 +2241,62 @@ class NadoClient:
                 candidates.append(aligned)
         return candidates
 
+    def _store_increment(self, pid: int, size_x18, price_x18, min_x18) -> dict:
+        """Populate the in-process increment caches for one product and return
+        a JSON-serializable blob entry for the shared Redis cache."""
+        entry: dict = {}
+        if size_x18 is not None:
+            try:
+                si = int(size_x18)
+                _size_increment_x18_cache[(self.network, pid)] = si
+                _size_increment_cache[(self.network, pid)] = si / 1e18
+                entry["size_x18"] = si
+            except (TypeError, ValueError):
+                pass
+        if price_x18 is not None:
+            try:
+                pi = int(price_x18)
+                _price_increment_x18_cache[(self.network, pid)] = pi
+                _price_increment_cache[(self.network, pid)] = pi / 1e18
+                entry["price_x18"] = pi
+            except (TypeError, ValueError):
+                pass
+        if min_x18 is not None:
+            try:
+                mi = int(min_x18)
+                _min_size_x18_cache[(self.network, pid)] = mi
+                entry["min_x18"] = mi
+            except (TypeError, ValueError):
+                pass
+        return entry
+
     def _warm_product_increment_cache(self, product_id: int) -> None:
         key = (self.network, product_id)
         if key in _size_increment_x18_cache and key in _price_increment_x18_cache:
             return
+        # Shared Redis layer: increments are static venue metadata, so hydrate
+        # the whole network's map from one Upstash entry before falling back to
+        # an all_products REST query (a per-IP gateway hit on every worker boot).
+        redis_key = f"nado:increments:{self.network}"
+        blob = self._read_cache_redis(redis_key)
+        if isinstance(blob, dict) and blob:
+            for pid_str, vals in blob.items():
+                try:
+                    pid = int(pid_str)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(vals, dict):
+                    self._store_increment(
+                        pid, vals.get("size_x18"), vals.get("price_x18"), vals.get("min_x18")
+                    )
+            if key in _size_increment_x18_cache and key in _price_increment_x18_cache:
+                return
         try:
             data = self._query_rest("all_products") or {}
             if data.get("status") != "success":
                 return
             perp_products = (data.get("data", {}) or {}).get("perp_products", []) or []
+            fresh_blob: dict = {}
             for p in perp_products:
                 pid = p.get("product_id")
                 try:
@@ -2180,25 +2307,11 @@ class NadoClient:
                 size_inc_x18 = p.get("size_increment_x18") or book_info.get("size_increment")
                 price_inc_x18 = p.get("price_increment_x18") or book_info.get("price_increment_x18")
                 min_size_x18 = p.get("min_size_x18") or book_info.get("min_size_x18") or p.get("min_size")
-                if size_inc_x18 is not None:
-                    try:
-                        size_inc_x18_int = int(size_inc_x18)
-                        _size_increment_x18_cache[(self.network, pid)] = size_inc_x18_int
-                        _size_increment_cache[(self.network, pid)] = size_inc_x18_int / 1e18
-                    except (TypeError, ValueError):
-                        pass
-                if price_inc_x18 is not None:
-                    try:
-                        price_inc_x18_int = int(price_inc_x18)
-                        _price_increment_x18_cache[(self.network, pid)] = price_inc_x18_int
-                        _price_increment_cache[(self.network, pid)] = price_inc_x18_int / 1e18
-                    except (TypeError, ValueError):
-                        pass
-                if min_size_x18 is not None:
-                    try:
-                        _min_size_x18_cache[(self.network, pid)] = int(min_size_x18)
-                    except (TypeError, ValueError):
-                        pass
+                entry = self._store_increment(pid, size_inc_x18, price_inc_x18, min_size_x18)
+                if entry:
+                    fresh_blob[str(pid)] = entry
+            if fresh_blob:
+                self._write_cache_redis(redis_key, fresh_blob, _INCREMENTS_REDIS_TTL)
         except Exception as e:
             logger.debug("Could not warm product increment cache for %s: %s", product_id, e)
 
@@ -2623,7 +2736,30 @@ class NadoClient:
             sender=sender,
         )
 
-    def cancel_order(self, product_id: int, digest: str, sender: Optional[str] = None) -> dict:
+    @staticmethod
+    def _result_is_ip_query_only(result) -> bool:
+        """BUG-CANCEL-1: detect the same transient ip_query_only downgrade that
+        place_order handles, but on a cancel response. Nado returns this as a
+        failure/blocked *status in the response body* (not an exception), so
+        the cancel paths used to silently report success while the venue had
+        actually refused the cancel."""
+        try:
+            result_str = str(result)
+        except Exception:  # pragma: no cover
+            return False
+        lowered = result_str.lower()
+        is_failure = (
+            (hasattr(result, "status") and str(getattr(result, "status")).lower() == "failure")
+            or ('"status":"failure"' in lowered)
+            or ("'status': 'failure'" in lowered)
+        )
+        is_blocked = "blocked" in lowered or "reason" in lowered
+        compact = lowered.replace("_", "").replace("-", "")
+        return (is_failure or is_blocked) and "ipqueryonly" in compact
+
+    def cancel_order(
+        self, product_id: int, digest: str, sender: Optional[str] = None, _retry_count: int = 0
+    ) -> dict:
         if not self._initialized or not self.client:
             return {"success": False, "error": "Client not initialized"}
 
@@ -2640,7 +2776,28 @@ class NadoClient:
                 productIds=[product_id],
                 digests=[digest],
             )
-            self.client.market.cancel_orders(cancel_params)
+            result = self.client.market.cancel_orders(cancel_params)
+            # BUG-CANCEL-1: mirror place_order's ip_query_only verify+retry so a
+            # transient query-only downgrade doesn't leave a stale order live
+            # (and doesn't get falsely reported as a successful cancel).
+            if self._result_is_ip_query_only(result) and _retry_count < 1:
+                try:
+                    check = self.verify_linked_signer(self.address)
+                except Exception as ve:  # pragma: no cover
+                    logger.warning("verify_linked_signer during cancel retry check failed: %s", ve)
+                    check = {"verified": False}
+                if check.get("verified"):
+                    backoff = 1.5 + random.uniform(0.0, 0.75)
+                    logger.warning(
+                        "cancel_order ip_query_only with verified signer; "
+                        "retrying once after %.2fs (product_id=%s)", backoff, product_id,
+                    )
+                    time.sleep(backoff)
+                    return self.cancel_order(
+                        product_id, digest, sender=sender, _retry_count=_retry_count + 1,
+                    )
+            if self._result_is_ip_query_only(result):
+                return {"success": False, "error": self._friendly_error(str(result)), "digest": digest}
             return {"success": True, "digest": digest}
         except Exception as e:
             logger.error(f"cancel_order failed: {e}")
@@ -2801,6 +2958,17 @@ class NadoClient:
         cached = _ALL_PRODUCTS_CACHE.get(cache_key)
         if cached and (time.time() - cached["ts"] < _ALL_PRODUCTS_TTL):
             return cached["data"]
+        # Redis layer: the catalog is identical for every user on a network and
+        # changes rarely, so absorb the per-cycle build_product_meta_from_catalog
+        # hits across all workers via a shared Upstash entry before paying for an
+        # SDK get_all_products call (a per-IP gateway query that helped saturate
+        # the gateway into ip_query_only). On a hit, also warm the in-process
+        # cache so subsequent same-process calls skip Redis entirely.
+        redis_key = f"nado:catalog:{self.network}:products"
+        redis_cached = self._read_cache_redis(redis_key)
+        if isinstance(redis_cached, dict) and "perp" in redis_cached and "spot" in redis_cached:
+            _ALL_PRODUCTS_CACHE[cache_key] = {"data": redis_cached, "ts": time.time()}
+            return redis_cached
         try:
             if self._initialized and self.client:
                 products = self.client.context.engine_client.get_all_products()
@@ -2809,6 +2977,7 @@ class NadoClient:
                     "spot": [{"id": p.product_id} for p in products.spot_products],
                 }
                 _ALL_PRODUCTS_CACHE[cache_key] = {"data": data, "ts": time.time()}
+                self._write_cache_redis(redis_key, data, _ALL_PRODUCTS_TTL)
                 return data
         except Exception as e:
             logger.error(f"get_all_products_info failed: {e}")
