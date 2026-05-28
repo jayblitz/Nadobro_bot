@@ -626,17 +626,27 @@ def fmt_alerts(alerts):
 
     for idx, a in enumerate(alerts, start=1):
         condition = str(a.get("condition") or "")
-        target = float(a.get("target") or 0)
-        if condition.startswith("funding"):
-            target_str = f"{target:,.4f}%"
+        mode_str = escape_md(str(a.get("network", "mainnet")).upper())
+        if a.get("kind") == "vault_deposit":
+            # Bug #2: the NLP vault deposit watch is a separate, read-only kind
+            # of alert (no numeric target / id). Render it with its own line.
+            lines.append(f"🔔 *{escape_md(a['product'])}* \\| {_loc('Deposit Capacity Open')}")
+            lines.append(
+                f"{_loc('Notifies when vault deposit space opens')} \\| "
+                f"{_loc('Mode')}: *{mode_str}*"
+            )
         else:
-            target_str = f"${target:,.2f}"
-        lines.append(f"🔔 *{escape_md(a['product'])}* \\| {escape_md(condition.replace('_', ' ').title())}")
-        lines.append(
-            f"{_loc('Target')}: *{escape_md(target_str)}* \\| "
-            f"{_loc('ID')}: *\\#{escape_md(str(a['id']))}* \\| "
-            f"{_loc('Mode')}: *{escape_md(str(a.get('network', 'mainnet')).upper())}*"
-        )
+            target = float(a.get("target") or 0)
+            if condition.startswith("funding"):
+                target_str = f"{target:,.4f}%"
+            else:
+                target_str = f"${target:,.2f}"
+            lines.append(f"🔔 *{escape_md(a['product'])}* \\| {escape_md(condition.replace('_', ' ').title())}")
+            lines.append(
+                f"{_loc('Target')}: *{escape_md(target_str)}* \\| "
+                f"{_loc('ID')}: *\\#{escape_md(str(a['id']))}* \\| "
+                f"{_loc('Mode')}: *{mode_str}*"
+            )
         if idx < len(alerts):
             lines.extend(["", md2_rule(20), ""])
 

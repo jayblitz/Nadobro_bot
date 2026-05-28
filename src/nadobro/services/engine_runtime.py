@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from src.nadobro.engine.adapter.base import NadoAdapterBase
-from src.nadobro.engine.controllers.controller_base import Controller
+from src.nadobro.engine.controllers.controller_base import Controller, ControllerState
 from src.nadobro.engine.controllers.copy_trading import CopyController
 from src.nadobro.engine.controllers.delta_neutral import DeltaNeutralController
 from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
@@ -125,6 +126,15 @@ class EngineRuntime:
         # may have started this strategy; check the engine_executors table
         # for any non-terminated rows under the deterministic controller id.
         return _remote_active(strategy, user_id, network)
+
+    def needs_recovery(self, user_id: int, network: str, strategy: str) -> bool:
+        """BUG-TICK-1 recovery: True when a locally-registered controller has
+        entered the terminal FAILED state. Such a controller will never tick
+        again (``is_active`` is permanently False), so the engine cycle must
+        tear it down and rebuild a fresh one instead of silently no-op'ing
+        forever — the exact silent-stall this audit chased."""
+        c = self._controllers.get(self._key(user_id, network, strategy))
+        return c is not None and c.state is ControllerState.FAILED
 
     async def start(
         self,
@@ -518,7 +528,19 @@ async def run_engine_cycle(
 
         configs["candle_provider"] = _candle_provider
 
-    if not RUNTIME.is_running(telegram_id, network, strategy):
+    # BUG-TICK-1 recovery: if the local controller went terminal-FAILED (a
+    # genuinely fatal error, or an exhausted transient-error streak), force a
+    # rebuild even though a stale executor row may still make is_running()
+    # report True via _remote_active. start() tears the FAILED controller down
+    # before replacing it, so this cleanly resurrects a stalled strategy.
+    needs_recovery = RUNTIME.needs_recovery(telegram_id, network, strategy)
+    if needs_recovery:
+        logger.warning(
+            "engine controller FAILED for user=%s network=%s strategy=%s — "
+            "rebuilding (BUG-TICK-1 recovery)",
+            telegram_id, network, strategy,
+        )
+    if needs_recovery or not RUNTIME.is_running(telegram_id, network, strategy):
         meta = build_product_meta_from_catalog(client)
         # ensure the traded pair has metadata (fallback to a permissive default)
         if product not in meta:
@@ -574,7 +596,10 @@ async def run_engine_cycle(
                 "engine_started user=%s network=%s strategy=%s active_executors=%s",
                 telegram_id, network, strategy, active_n,
             )
-        return {"success": True, "action": "engine_started", "strategy": strategy}
+        action = "engine_recovered" if needs_recovery else "engine_started"
+        if needs_recovery:
+            state["last_recovery_ts"] = time.time()
+        return {"success": True, "action": action, "strategy": strategy}
 
     await RUNTIME.tick(telegram_id, network, strategy)
     # NO_ORDERS_AUDIT-FIX-DIAG: surface executor count after each tick too,

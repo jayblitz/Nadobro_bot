@@ -33,6 +33,59 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# BUG-TICK-1 fix: a controller used to be marked FAILED (terminal, no recovery)
+# on ANY exception from on_tick — including transient venue hiccups such as a
+# short-lived ip_query_only downgrade or a "Too Many Requests" rate-limit. That
+# turned a recoverable blip into a permanent silent stall (ticks no-op forever
+# while is_running() stays True off a stale executor row). These markers let us
+# keep the controller ACTIVE across transient errors and only fail it on a
+# genuinely fatal error or after the transient streak is exhausted.
+_TRANSIENT_ERROR_MARKERS = (
+    "ipqueryonly",
+    "toomanyrequests",
+    "too many requests",
+    "ratelimit",
+    "rate limit",
+    "rate limited",
+    "timeout",
+    "timed out",
+    "temporarily",
+    "serviceunavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "connectionerror",
+    "429",
+    "502",
+    "503",
+    "504",
+)
+
+# After this many consecutive transient failures we give up and mark the
+# controller FAILED (the venue problem is no longer "transient").
+DEFAULT_CONTROLLER_MAX_TRANSIENT_FAILS = _env_int(
+    "NADO_CONTROLLER_MAX_TRANSIENT_FAILS", 8
+)
+# Cap on the exponential backoff window between transient retries (seconds).
+DEFAULT_CONTROLLER_BACKOFF_CAP_S = float(
+    _env_int("NADO_CONTROLLER_BACKOFF_CAP_S", 90)
+)
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """True when an on_tick exception looks like a recoverable venue/network
+    hiccup rather than a fatal logic error. Conservative: unknown errors are
+    treated as fatal so real bugs still surface as FAILED."""
+    if isinstance(exc, (asyncio.TimeoutError, ConnectionError)):
+        return True
+    text = str(exc).lower()
+    compact = text.replace("_", "").replace("-", "")
+    return any(m in text or m in compact for m in _TRANSIENT_ERROR_MARKERS)
+
+
 # BUG-ORC-1 fix: cap the orchestrator's in-memory event_log and event queue.
 # Previously both were unbounded — long-running deployments leaked memory.
 DEFAULT_EVENT_LOG_LIMIT = _env_int("NADO_ORCH_EVENT_LOG_LIMIT", 10000)
@@ -74,6 +127,14 @@ class ExecutorOrchestrator:
         self._queue_overflows = 0
         self._killed = False
         self._kill_reason: Optional[str] = None
+        # BUG-TICK-1: per-controller transient-failure tracking. We keep a
+        # controller ACTIVE across transient venue errors (counting them) and
+        # apply a short exponential backoff window before the next tick retries,
+        # only failing the controller once the streak is exhausted.
+        self._controller_fail_counts: Dict[str, int] = {}
+        self._controller_backoff_until: Dict[str, float] = {}
+        self._controller_max_transient_fails = DEFAULT_CONTROLLER_MAX_TRANSIENT_FAILS
+        self._controller_backoff_cap_s = DEFAULT_CONTROLLER_BACKOFF_CAP_S
 
     @property
     def event_log(self) -> List[ExecutorEvent]:
@@ -256,6 +317,15 @@ class ExecutorOrchestrator:
         controller = self._controllers.get(controller_id)
         if controller is None or not controller.is_active:
             return
+        # BUG-TICK-1: honor an active transient-failure backoff window so we
+        # don't hammer a saturated/rate-limited venue on every scheduled tick.
+        backoff_until = self._controller_backoff_until.get(controller_id, 0.0)
+        if backoff_until and time.time() < backoff_until:
+            self._emit(ExecutorEvent(
+                kind="controller_skipped", controller_id=controller_id,
+                reason="transient_backoff",
+            ))
+            return
         if self.risk is not None:
             ok, reason = self.risk.pre_tick_check(controller_id, self._state_for(controller_id))
             if not ok:
@@ -264,10 +334,60 @@ class ExecutorOrchestrator:
         try:
             await controller.on_tick()
         except Exception as exc:  # noqa: BLE001
-            controller._set_failed()
-            self._emit(ExecutorEvent(kind="controller_failed", controller_id=controller_id, reason=str(exc)))
+            self._handle_controller_tick_error(controller, controller_id, exc)
             return
+        # Success: clear any transient-failure state and resume normally.
+        self._controller_fail_counts.pop(controller_id, None)
+        self._controller_backoff_until.pop(controller_id, None)
         self._emit(ExecutorEvent(kind="controller_tick", controller_id=controller_id))
+
+    def _handle_controller_tick_error(
+        self, controller: "Controller", controller_id: str, exc: Exception
+    ) -> None:
+        """BUG-TICK-1: classify an on_tick error. Transient venue/network
+        errors keep the controller ACTIVE (with bounded exponential backoff)
+        so a recoverable blip no longer permanently stalls the strategy; only
+        a fatal error, or an exhausted transient streak, marks it FAILED."""
+        if _is_transient_error(exc):
+            count = self._controller_fail_counts.get(controller_id, 0) + 1
+            self._controller_fail_counts[controller_id] = count
+            if count >= self._controller_max_transient_fails:
+                self._controller_backoff_until.pop(controller_id, None)
+                self._controller_fail_counts.pop(controller_id, None)
+                controller._set_failed()
+                logger.error(
+                    "controller %s FAILED after %d consecutive transient errors; "
+                    "last: %s", controller_id, count, exc,
+                )
+                self._emit(ExecutorEvent(
+                    kind="controller_failed", controller_id=controller_id,
+                    reason=f"transient_exhausted({count}): {exc}",
+                ))
+                return
+            # Exponential backoff (1.5s, 3s, 6s, ... capped), with jitter.
+            backoff = min(
+                self._controller_backoff_cap_s,
+                1.5 * (2 ** (count - 1)),
+            )
+            self._controller_backoff_until[controller_id] = time.time() + backoff
+            logger.warning(
+                "controller %s transient error (%d/%d), backing off %.1fs: %s",
+                controller_id, count, self._controller_max_transient_fails,
+                backoff, exc,
+            )
+            self._emit(ExecutorEvent(
+                kind="controller_degraded", controller_id=controller_id,
+                reason=f"transient({count}/{self._controller_max_transient_fails}): {exc}",
+            ))
+            return
+        # Fatal / unrecognized error: fail fast so real bugs surface.
+        self._controller_backoff_until.pop(controller_id, None)
+        self._controller_fail_counts.pop(controller_id, None)
+        controller._set_failed()
+        logger.error("controller %s FAILED (fatal): %s", controller_id, exc)
+        self._emit(ExecutorEvent(
+            kind="controller_failed", controller_id=controller_id, reason=str(exc),
+        ))
 
     def list_controllers(self, user_id: Optional[int] = None) -> List["Controller"]:
         vals = list(self._controllers.values())

@@ -69,9 +69,10 @@ def get_user_alerts(telegram_id: int) -> list:
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"
     alerts = get_alerts_by_user(telegram_id, active_only=True, network=network)
-    return [
+    rows = [
         {
             "id": a.get("id"),
+            "kind": "price",
             "product": a.get("product_name"),
             "condition": a.get("condition"),
             "target": a.get("target_value"),
@@ -80,6 +81,34 @@ def get_user_alerts(telegram_id: int) -> list:
         }
         for a in alerts
     ]
+    # Bug #2 fix: the NLP vault deposit watch lives in a *separate* table and
+    # was never surfaced here — so an enabled deposit alert showed "Stop
+    # deposit alerts" in the vault screen yet "No active alerts" in the Alert
+    # Engine. Merge an active watch in as a read-only display row (toggled off
+    # via the vault screen, not the numeric alert:del path).
+    rows.extend(_vault_deposit_watch_rows(telegram_id, network))
+    return rows
+
+
+def _vault_deposit_watch_rows(telegram_id: int, network: str) -> list:
+    try:
+        from src.nadobro.models.database import get_vault_deposit_watch
+        watch = get_vault_deposit_watch(telegram_id, network=network)
+    except Exception:  # noqa: BLE001 - a missing/locked watch table must not break the alert list
+        logger.warning("vault deposit watch lookup failed for alert listing", exc_info=True)
+        return []
+    if not (watch and watch.get("enabled")):
+        return []
+    created = watch.get("created_at") or watch.get("updated_at") or ""
+    return [{
+        "id": "vault-deposit",
+        "kind": "vault_deposit",
+        "product": "NLP Vault",
+        "condition": "deposit_capacity_open",
+        "target": 0,
+        "network": network,
+        "created_at": str(created)[:19] if created else "",
+    }]
 
 
 def delete_alert(telegram_id: int, alert_id: int) -> dict:
