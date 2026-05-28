@@ -254,9 +254,12 @@ RUNTIME = _default_runtime()
 # bot_runtime hookup (feature-gated): settings -> controller config mapping,
 # product metadata, and the per-cycle driver.
 # --------------------------------------------------------------------------
-# Strategies the engine can drive today (dn/copy have their own subsystems and
-# are mapped in a follow-up).
-ENGINE_MAPPED_STRATEGIES = ("grid", "rgrid", "dgrid", "mid", "vol")
+# Strategies the engine can drive today. NO_ORDERS_AUDIT-FIX-R1: ``dn`` is now
+# included. Previously it was excluded "for a follow-up" but ``dn`` was ALSO
+# in ``strategy_runtime.LEGACY_STRATEGY_KEYS`` which silently no-op'd every
+# DN cycle. The DeltaNeutralController has been live since Phase 4, so wire
+# it up here and emit its config keys in ``map_strategy_config``.
+ENGINE_MAPPED_STRATEGIES = ("grid", "rgrid", "dgrid", "mid", "vol", "dn")
 
 
 def engine_v2_enabled() -> bool:
@@ -313,6 +316,31 @@ def map_strategy_config(
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": leverage,
         }
+    if strategy == "dn":
+        # NO_ORDERS_AUDIT-FIX-R1: DN config keys for DeltaNeutralController.
+        # The controller expects trading_pair_long/short, hedge_ratio,
+        # leg_amount_quote, max_drift_pct, and barriers. ``product`` here is
+        # the base symbol (e.g. "BTC"); the long leg is the SPOT pair and the
+        # short leg is the PERP. The adapter resolves the trading_pair string
+        # against the product catalog via build_product_meta_from_catalog.
+        from src.nadobro.engine.types import TripleBarrierConfig as _TBC
+
+        base = str(product or "").upper().split("-", 1)[0]
+        long_pair = f"{base}-USDC0"        # spot leg
+        short_pair = f"{base}-PERP"         # perp leg
+        hedge_ratio = Decimal(str(_f(settings, "dn_hedge_ratio", 1.0)))
+        leg_quote = Decimal(str(_f(settings, "fixed_margin_usd", notional)))
+        max_drift = Decimal(str(_f(settings, "dn_max_drift_pct", 5.0))) / Decimal(100)
+        return {
+            "trading_pair": long_pair,  # for parent base-class .trading_pair if read
+            "trading_pair_long": long_pair,
+            "trading_pair_short": short_pair,
+            "hedge_ratio": hedge_ratio,
+            "leg_amount_quote": leg_quote,
+            "max_drift_pct": max_drift,
+            "barriers": _TBC(take_profit=tp or None, stop_loss=sl or None),
+            "leverage": leverage,
+        }
     if strategy == "vol":
         interval = max(1.0, _f(settings, "interval_seconds", 60))
         # Normalize the trading pair so the VolumeBotController validation
@@ -333,14 +361,52 @@ def map_strategy_config(
             "market": "spot",
             "leverage": 1,
         }
-    # grid / rgrid / dgrid family: center a band on mid
-    band = mid * spread_frac * Decimal(levels)
-    return {
+    # grid / rgrid / dgrid family.
+    #
+    # NO_ORDERS_AUDIT-FIX-R4: spread_bp is now interpreted as the per-level
+    # STEP (distance between adjacent grid levels), not the total band. With
+    # `levels` levels stepping by `spread_frac` each:
+    #
+    #   * grid  (BUY, long):  N levels stepping DOWN from mid.
+    #                         span = (levels - 1) * spread_frac
+    #                         start = mid * (1 - span)  (lo)
+    #                         end   = mid               (hi)  — all buys ≤ mid
+    #
+    #   * rgrid (SELL, short): N levels stepping UP from mid.
+    #                         start = mid                    (lo)
+    #                         end   = mid * (1 + span)       (hi)  — all sells ≥ mid
+    #
+    #   * dgrid: side is chosen dynamically per tick. We DON'T fix the band
+    #     here; instead we pass ``step_pct`` and ``levels_count`` so the
+    #     DynamicGridController can rebuild the side-correct band against
+    #     a fresh mid before spawning the executor.
+    #
+    # Why the old code was wrong: it used a symmetric band (mid ± band) where
+    # band = step × levels. A BUY grid then had levels ABOVE mid, which a
+    # post-only LIMIT_MAKER buy gets rejected for (would cross the book).
+    # Those levels never placed — silent partial failure.
+
+    # Floor the per-level step so a near-zero spread_bp doesn't collapse the
+    # grid to one price level (which then divides by zero in
+    # generate_grid_levels).
+    if spread_frac <= 0:
+        spread_frac = Decimal("0.0005")  # 5 bp fallback
+    span = spread_frac * Decimal(max(levels - 1, 1))
+
+    if strategy == "rgrid":
+        start_price = mid
+        end_price = mid * (Decimal(1) + span)
+        limit_price = mid * (Decimal(1) + sl) if sl > 0 else Decimal(0)
+    else:  # grid OR dgrid-as-long-default; dgrid recomputes at on_tick
+        start_price = mid * (Decimal(1) - span)
+        end_price = mid
+        limit_price = mid * (Decimal(1) - sl) if sl > 0 else Decimal(0)
+
+    cfg: Dict[str, object] = {
         "trading_pair": product,
-        "start_price": mid - band,
-        "end_price": mid + band,
-        # hard stop: below for long grids, above for the short (reverse) grid
-        "limit_price": (mid * (Decimal(1) + sl)) if strategy == "rgrid" else (mid * (Decimal(1) - sl)),
+        "start_price": start_price,
+        "end_price": end_price,
+        "limit_price": limit_price,
         "total_amount_quote": Decimal(str(notional)),
         "min_spread_between_orders": spread_frac,
         "max_open_orders": levels,
@@ -348,7 +414,25 @@ def map_strategy_config(
         "triple_barrier_config": TripleBarrierConfig(
             take_profit=tp or None, stop_loss=sl or None
         ),
+        # NO_ORDERS_AUDIT-FIX-R4: extra knobs consumed by DynamicGridController
+        # so it can rebuild the side-correct band on the fly. Ignored by
+        # GridController / ReverseGridController.
+        "step_pct": spread_frac,
+        "levels_count": levels,
+        "tp_pct": tp,
+        "sl_pct": sl,
     }
+    # NO_ORDERS_AUDIT-FIX-R2: DynamicGridController requires a candle_provider
+    # callable to classify the volatility regime. Without one, _candles()
+    # returns [] and on_tick exits early — no executor ever spawned, no orders
+    # placed. We bind the provider in ``run_engine_cycle`` because it needs
+    # access to the live ``client`` and ``product_id`` to call
+    # ``client.get_candlesticks(...)``; setting ``"candle_provider": None``
+    # here makes the contract explicit and lets the cycle driver inject the
+    # real provider on first start.
+    if strategy == "dgrid":
+        cfg["candle_provider"] = None
+    return cfg
 
 
 def map_risk_limits(settings: Dict[str, Any]) -> RiskLimits:
@@ -413,6 +497,27 @@ async def run_engine_cycle(
                                   leverage=int(_f(settings, "leverage", 1)))
     limits = map_risk_limits(settings)
 
+    # NO_ORDERS_AUDIT-FIX-R2: inject the dgrid candle_provider HERE, because
+    # this is where ``client`` and ``product_id`` are available. The provider
+    # closure is recreated on every cycle, which is fine — the controller only
+    # caches a reference at on_start.
+    if strategy == "dgrid" and configs.get("candle_provider") is None:
+        _cli = client
+        _pid = int(product_id)
+
+        def _candle_provider(_pair: str) -> list:
+            try:
+                # 1m candles, last 200 — enough for ema_slow_period=50 + atr_window=14.
+                return _cli.get_candlesticks(_pid, timeframe="1m", limit=200) or []  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - never let candle fetch break a tick
+                logger.warning(
+                    "dgrid candle_provider failed for pair=%s product_id=%s",
+                    _pair, _pid, exc_info=True,
+                )
+                return []
+
+        configs["candle_provider"] = _candle_provider
+
     if not RUNTIME.is_running(telegram_id, network, strategy):
         meta = build_product_meta_from_catalog(client)
         # ensure the traded pair has metadata (fallback to a permissive default)
@@ -420,12 +525,69 @@ async def run_engine_cycle(
             from src.nadobro.engine.adapter.nado import ProductMeta
 
             meta[product] = ProductMeta(int(product_id), _dec("0.01"), _dec("0.001"), _dec("1"))
+        # NO_ORDERS_AUDIT-FIX-R1: DN needs metadata for BOTH legs (spot long +
+        # perp short). If either is absent the adapter raises "Unknown trading
+        # pair" inside the controller's first call, the exception is swallowed
+        # by ``_guard``, and we never see the cause. Materialize both keys
+        # from the configs so DN can spawn legs.
+        if strategy == "dn":
+            from src.nadobro.engine.adapter.nado import ProductMeta
+
+            for key in ("trading_pair_long", "trading_pair_short"):
+                pair = str(configs.get(key) or "")
+                if pair and pair not in meta:
+                    # Permissive defaults — real values come from the live
+                    # catalog when it's available.
+                    meta[pair] = ProductMeta(int(product_id), _dec("0.01"),
+                                              _dec("0.001"), _dec("1"))
+                    logger.warning(
+                        "dn: no catalog metadata for %s; using permissive defaults",
+                        pair,
+                    )
         adapter = build_adapter(client, meta)
         await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),
             limits=limits,
         )
+        # NO_ORDERS_AUDIT-FIX-DIAG: log post-start executor count so an
+        # operator can immediately see "controller started but spawned 0
+        # executors" — the exact symptom this audit chased.
+        controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        orch = RUNTIME._orchestrators.get((telegram_id, network, strategy))      # noqa: SLF001
+        active_n = len(orch.list(controller.id, active_only=True)) if (controller and orch) else 0
+        if controller is None:
+            logger.error(
+                "engine_started but controller is None user=%s network=%s strategy=%s "
+                "— spawn_controller likely refused (risk/kill switch)",
+                telegram_id, network, strategy,
+            )
+        elif active_n == 0 and strategy in ("grid", "rgrid", "vol", "dn"):
+            # These strategies spawn executors in on_start; zero here means
+            # on_start did nothing. dgrid/mid spawn on first tick, so allow.
+            logger.warning(
+                "engine_started but 0 executors for user=%s network=%s strategy=%s "
+                "— controller on_start did not spawn any executors; check configs",
+                telegram_id, network, strategy,
+            )
+        else:
+            logger.info(
+                "engine_started user=%s network=%s strategy=%s active_executors=%s",
+                telegram_id, network, strategy, active_n,
+            )
         return {"success": True, "action": "engine_started", "strategy": strategy}
 
     await RUNTIME.tick(telegram_id, network, strategy)
+    # NO_ORDERS_AUDIT-FIX-DIAG: surface executor count after each tick too,
+    # bucketed at INFO every ~10 ticks. Comment out if too chatty.
+    try:
+        orch = RUNTIME._orchestrators.get((telegram_id, network, strategy))  # noqa: SLF001
+        controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        if orch is not None and controller is not None:
+            active_n = len(orch.list(controller.id, active_only=True))
+            logger.debug(
+                "engine_ticked user=%s strategy=%s active_executors=%s",
+                telegram_id, strategy, active_n,
+            )
+    except Exception:  # noqa: BLE001
+        pass
     return {"success": True, "action": "engine_ticked", "strategy": strategy}

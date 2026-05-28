@@ -391,7 +391,9 @@ def get_trader_preview(trader_id: int, network: str = "mainnet", requester_user_
     if owner_id is not None and (requester_user_id is None or int(owner_id) != int(requester_user_id)):
         return {"found": False}
     wallet = str(trader.get("wallet_address") or "")
-    client = NadoClient.from_address(wallet, network)
+    # NO_ORDERS_AUDIT-FIX-R6b: cached.
+    from src.nadobro.services.nado_client import get_or_create_readonly_client
+    client = get_or_create_readonly_client(wallet, network)
     positions = client.get_all_positions() or []
     balance = client.get_balance() or {}
     balances = balance.get("balances", {}) or {}
@@ -496,7 +498,9 @@ async def _poll_all_mirrors():
 
 
 def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict:
-    leader_client = NadoClient.from_address(wallet, network)
+    # NO_ORDERS_AUDIT-FIX-R6b: cached.
+    from src.nadobro.services.nado_client import get_or_create_readonly_client
+    leader_client = get_or_create_readonly_client(wallet, network)
     leader_positions = leader_client.get_all_positions() or []
     leader_pos_map = {}
     for pos in leader_positions:

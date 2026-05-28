@@ -122,6 +122,157 @@ def _mask_address(value: str) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# NO_ORDERS_AUDIT-FIX-R6b: process-wide NadoClient cache.
+#
+# Background: the logs showed "Initializing default mainnet context" firing
+# every 1-30 seconds. Each one is a separate ~400 ms NadoClient construction
+# (signer + query client + chain RPC handshakes). The sync_active_users job
+# overran its 30 s interval as a direct consequence and APScheduler started
+# skipping ticks.
+#
+# Cache strategy:
+#  * Key for signing clients: ("signer", sha256(private_key)[:32], network).
+#    The raw key never sits in the dict — only its truncated digest.
+#  * Key for read-only clients: ("readonly", address.lower(), network).
+#  * Returns an *already-initialized* client (we call .initialize() inside
+#    the factory) so callers never re-init.
+#  * Signer rotation detection: when a caller asks for a signing client and
+#    the cached key for the user differs from the new private_key hash, the
+#    old entry is evicted before constructing the new one. Callers route
+#    rotations through ``invalidate_client_cache_for_user(user_id)`` for an
+#    explicit clear.
+#
+# This is a "broad" cache as requested. The risk we explicitly accept is that
+# a private key rotation that bypasses both the user-id eviction AND the
+# digest check (e.g., the same address but a different key) cannot be
+# detected — but since signing clients are derived from private keys, the
+# digest WILL change whenever the underlying key changes. Verified by test.
+# ---------------------------------------------------------------------------
+import hashlib  # noqa: E402
+
+_NADO_CLIENT_CACHE: "dict[tuple, NadoClient]" = {}
+_NADO_CLIENT_CACHE_USER_INDEX: "dict[int, set[tuple]]" = {}
+_NADO_CLIENT_CACHE_LOCK = threading.RLock()
+_NADO_CLIENT_CACHE_STATS = {
+    "signer_hit": 0, "signer_miss": 0, "signer_rotate": 0,
+    "readonly_hit": 0, "readonly_miss": 0,
+    "invalidate_user": 0, "clear_all": 0,
+}
+
+
+def _pk_digest(private_key: str) -> str:
+    """Stable, non-reversible hash for cache keys. We truncate to 32 hex
+    chars (128 bits) — collision-resistant for any realistic process and
+    avoids leaking the full key shape into logs / dumps."""
+    pk = (private_key or "").strip()
+    if pk.startswith("0x"):
+        pk = pk[2:]
+    return hashlib.sha256(pk.encode("utf-8")).hexdigest()[:32]
+
+
+def _track_user_key(user_id: Optional[int], cache_key: tuple) -> None:
+    if user_id is None:
+        return
+    bucket = _NADO_CLIENT_CACHE_USER_INDEX.setdefault(int(user_id), set())
+    bucket.add(cache_key)
+
+
+def get_or_create_signing_client(
+    private_key: str,
+    network: str = "testnet",
+    *,
+    main_address: Optional[str] = None,
+    user_id: Optional[int] = None,
+) -> "NadoClient":
+    """Return a cached, already-initialized signing NadoClient. Rotation-safe:
+    a different ``private_key`` for the same ``user_id``+``network`` evicts
+    the previous entry before constructing the new one."""
+    digest = _pk_digest(private_key)
+    cache_key = ("signer", digest, str(network))
+    with _NADO_CLIENT_CACHE_LOCK:
+        # Rotation detection: if the user already has signing keys cached,
+        # they must all match the new digest; otherwise drop the stale ones.
+        if user_id is not None:
+            existing = list(_NADO_CLIENT_CACHE_USER_INDEX.get(int(user_id), set()))
+            stale = [k for k in existing if k[0] == "signer" and k != cache_key]
+            if stale:
+                _NADO_CLIENT_CACHE_STATS["signer_rotate"] += 1
+                for k in stale:
+                    _NADO_CLIENT_CACHE.pop(k, None)
+                    _NADO_CLIENT_CACHE_USER_INDEX[int(user_id)].discard(k)
+        cached = _NADO_CLIENT_CACHE.get(cache_key)
+        if cached is not None:
+            _NADO_CLIENT_CACHE_STATS["signer_hit"] += 1
+            return cached
+        _NADO_CLIENT_CACHE_STATS["signer_miss"] += 1
+        client = NadoClient(private_key, network, main_address=main_address)
+        # Initialize INSIDE the cache build so callers don't re-pay the
+        # ~400 ms cost on every retrieval.
+        try:
+            client.initialize()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "get_or_create_signing_client: initialize() raised; caching uninitialized client for %s",
+                _mask_address(getattr(client, "address", "")), exc_info=True,
+            )
+        _NADO_CLIENT_CACHE[cache_key] = client
+        _track_user_key(user_id, cache_key)
+        return client
+
+
+def get_or_create_readonly_client(
+    address: str,
+    network: str = "testnet",
+    *,
+    user_id: Optional[int] = None,
+) -> "NadoClient":
+    """Return a cached read-only NadoClient (``NadoClient.from_address``).
+    Read-only clients don't need ``.initialize()`` — the SDK contexts they
+    use are pulled lazily on the first query."""
+    addr = str(address or "").strip().lower()
+    cache_key = ("readonly", addr, str(network))
+    with _NADO_CLIENT_CACHE_LOCK:
+        cached = _NADO_CLIENT_CACHE.get(cache_key)
+        if cached is not None:
+            _NADO_CLIENT_CACHE_STATS["readonly_hit"] += 1
+            return cached
+        _NADO_CLIENT_CACHE_STATS["readonly_miss"] += 1
+        client = NadoClient.from_address(address, network)
+        _NADO_CLIENT_CACHE[cache_key] = client
+        _track_user_key(user_id, cache_key)
+        return client
+
+
+def invalidate_client_cache_for_user(user_id: int) -> int:
+    """Drop every cached client (signing + readonly) associated with the
+    given user_id. Call this from the wallet rotation / unlink paths."""
+    with _NADO_CLIENT_CACHE_LOCK:
+        keys = _NADO_CLIENT_CACHE_USER_INDEX.pop(int(user_id), set())
+        for k in list(keys):
+            _NADO_CLIENT_CACHE.pop(k, None)
+        _NADO_CLIENT_CACHE_STATS["invalidate_user"] += 1
+        return len(keys)
+
+
+def clear_nado_client_cache() -> None:
+    """Wipe the entire cache. Mainly for tests and emergency operator use."""
+    with _NADO_CLIENT_CACHE_LOCK:
+        _NADO_CLIENT_CACHE.clear()
+        _NADO_CLIENT_CACHE_USER_INDEX.clear()
+        _NADO_CLIENT_CACHE_STATS["clear_all"] += 1
+
+
+def get_nado_client_cache_stats() -> dict:
+    """Diagnostic snapshot for observability endpoints."""
+    with _NADO_CLIENT_CACHE_LOCK:
+        return {
+            **_NADO_CLIENT_CACHE_STATS,
+            "size": len(_NADO_CLIENT_CACHE),
+            "users_tracked": len(_NADO_CLIENT_CACHE_USER_INDEX),
+        }
+
+
 class NadoClient:
     # Class-level default so every construction path — including the
     # __init__-bypassing ``from_address`` (uses ``cls.__new__``) — exposes
@@ -2944,6 +3095,11 @@ class NadoClient:
         }
 
 
+# Legacy address-keyed cache. Kept for backward compatibility with
+# ``clear_client_cache(address=..., network=...)`` callers in user_service.
+# NO_ORDERS_AUDIT-FIX-R6b: ``get_nado_client`` now delegates to the
+# digest-keyed cache above, which is rotation-safe (a new private key for the
+# same address evicts the stale entry instead of returning it).
 _client_cache: dict[str, NadoClient] = {}
 
 
@@ -2952,29 +3108,48 @@ def _cache_key_for(address: str, network: str) -> str:
 
 
 def get_nado_client(private_key: str, network: str = "testnet", main_address: str = None) -> NadoClient:
-    client = NadoClient(private_key, network, main_address=main_address)
-    # Derive the signer address before initialization for cache key
+    """Public factory for signing clients. Delegates to the digest-keyed
+    cache so every construction path in the codebase shares the same pool."""
+    client = get_or_create_signing_client(private_key, network, main_address=main_address)
+    # Keep the legacy address-keyed dict populated so existing
+    # ``clear_client_cache(address=...)`` consumers still flush correctly.
     signer_address = client.address
     if signer_address:
-        cache_key = _cache_key_for(signer_address, network)
-        cached = _client_cache.get(cache_key)
-        if cached:
-            if main_address and cached.main_address != main_address:
-                cached.main_address = main_address
-                cached.subaccount_hex = cached._compute_subaccount_hex(main_address)
-            return cached
-    client.initialize()
-    if signer_address:
-        _client_cache[cache_key] = client
+        _client_cache[_cache_key_for(signer_address, network)] = client
+    if main_address and client.main_address != main_address:
+        # Subaccount can drift if the caller re-uses the same signer with a
+        # different main wallet (sub-account on a different account).
+        client.main_address = main_address
+        client.subaccount_hex = client._compute_subaccount_hex(main_address)
     return client
 
 
 def clear_client_cache(address: str = None, network: str = None):
+    """Legacy clear by address/network. Also reaches into the digest cache
+    by walking the user index — but since we don't have the user_id here,
+    we do a best-effort scan of the digest cache for matching addresses."""
     if address and network:
         cache_key = _cache_key_for(address, network)
-        _client_cache.pop(cache_key, None)
+        cached = _client_cache.pop(cache_key, None)
+        if cached is not None:
+            # Best-effort: remove from the digest cache too. The digest key
+            # is keyed by sha256(private_key); we don't have the pk here,
+            # so we scan the small cache for instances pointing at this
+            # address.
+            with _NADO_CLIENT_CACHE_LOCK:
+                stale = [
+                    k for k, v in _NADO_CLIENT_CACHE.items()
+                    if k[0] == "signer"
+                    and k[2] == network
+                    and getattr(v, "address", "").lower() == str(address).lower()
+                ]
+                for k in stale:
+                    _NADO_CLIENT_CACHE.pop(k, None)
     else:
         _client_cache.clear()
+        with _NADO_CLIENT_CACHE_LOCK:
+            _NADO_CLIENT_CACHE.clear()
+            _NADO_CLIENT_CACHE_USER_INDEX.clear()
 
 
 def clear_linked_signer_cache(

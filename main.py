@@ -24,6 +24,12 @@ logging.basicConfig(
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# NO_ORDERS_AUDIT-FIX-R6a: the Nado SDK logs "Initializing default {mode}
+# context" at INFO on every default-context construction (~400 ms each). With
+# repeated client construction across users, this dominates the logs and
+# masks real signal. Quiet it to WARNING; real errors still surface.
+logging.getLogger("nado_protocol").setLevel(logging.WARNING)
+logging.getLogger("nado_protocol.client").setLevel(logging.WARNING)
 
 logger = logging.getLogger("nadobro")
 
@@ -328,11 +334,15 @@ async def run_bot():
             or "0x0000000000000000000000000000000000000000"
         ).strip()
         if alert_pk:
-            alert_client = NadoClient(alert_pk, alert_network)
-            alert_client.initialize()
+            # NO_ORDERS_AUDIT-FIX-R6b: go through the digest-keyed cache so
+            # we don't pay the SDK init cost on every restart-without-restart
+            # (e.g. health-check restarts).
+            from src.nadobro.services.nado_client import get_or_create_signing_client
+            alert_client = get_or_create_signing_client(alert_pk, alert_network)
         else:
             # Read-only client is sufficient for alert price checks.
-            alert_client = NadoClient.from_address(alert_address, alert_network)
+            from src.nadobro.services.nado_client import get_or_create_readonly_client
+            alert_client = get_or_create_readonly_client(alert_address, alert_network)
         set_check_client(alert_client)
         from src.nadobro.services.market_feed import bind_fetcher
 
