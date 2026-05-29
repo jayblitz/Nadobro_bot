@@ -18,6 +18,7 @@ Implemented in Phase 4.
 from __future__ import annotations
 
 import inspect
+import logging
 from decimal import Decimal
 from typing import List, Optional
 
@@ -28,6 +29,8 @@ from src.nadobro.engine.executors.reverse_grid_executor import ReverseGridExecut
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.routines import volatility_regime
 from src.nadobro.engine.types import TradeType, _dec
+
+logger = logging.getLogger(__name__)
 
 
 class DynamicGridController(Controller):
@@ -85,6 +88,17 @@ class DynamicGridController(Controller):
 
         candles = await self._candles()
         if not candles:
+            # Silent-no-spawn diagnosability: dgrid spawns its grid only on a
+            # tick where candles are available. An empty result here (cold
+            # Redis cache + gateway throttle, candle_provider error, or a
+            # provider that was never injected) is the #1 reason a started
+            # dgrid strategy "does nothing" with no error. Make it visible.
+            logger.warning(
+                "dgrid no spawn: candle fetch returned empty for pair=%s "
+                "(controller=%s) — likely gateway throttle / cold cache; "
+                "will retry next tick",
+                self.trading_pair, self.id,
+            )
             return
         regime_info = await volatility_regime.run(self.trading_pair, candles)
         regime = str(regime_info["regime"])
@@ -110,7 +124,19 @@ class DynamicGridController(Controller):
         cfg = build_grid_config(merged, side)
         ex = cls(cfg, user_id=self.user_id, controller_id=self.id, adapter=self.adapter,
                  inventory=self.inventory)
-        await self.spawn_executor(
+        logger.info(
+            "dgrid spawning %s grid pair=%s regime=%s mid=%s levels=%s notional=%s "
+            "start=%s end=%s (controller=%s)",
+            side.name, self.trading_pair, regime, mid, cfg.max_open_orders,
+            cfg.total_amount_quote, cfg.start_price, cfg.end_price, self.id,
+        )
+        spawned = await self.spawn_executor(
             ex, ExecutorRequest(order_amount_quote=cfg.total_amount_quote,
                                 position_size_quote=cfg.total_amount_quote)
         )
+        if not spawned:
+            logger.warning(
+                "dgrid spawn_executor refused for pair=%s (controller=%s) — "
+                "risk gate / kill switch / min-notional; no grid placed",
+                self.trading_pair, self.id,
+            )

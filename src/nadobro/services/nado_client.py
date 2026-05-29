@@ -61,6 +61,15 @@ _size_increment_x18_cache = {}
 _price_increment_x18_cache = {}
 _min_size_x18_cache = {}
 _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
+# The nado_protocol SDK builds plain ``requests.Session()`` objects and calls
+# ``session.post/get`` with NO ``timeout=`` — so a stalled gateway connection
+# (the exact failure mode of an ip_query_only / saturated host that accepts the
+# socket then never replies) blocks the worker thread FOREVER. That is what
+# wedges ``sync_active_users`` (holding the portfolio_sync max_instances slot)
+# and can hang an order placement. We force a (connect, read) timeout onto every
+# SDK session so no call can block indefinitely. Override via env.
+_SDK_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("NADO_SDK_CONNECT_TIMEOUT_SECONDS", "5"))
+_SDK_READ_TIMEOUT_SECONDS = float(os.environ.get("NADO_SDK_READ_TIMEOUT_SECONDS", "12"))
 # Capacity for legacy ThreadPool fan-out paths (e.g. per-product positions). Set
 # conservatively to 2 so we never burst N concurrent requests into Cloudflare;
 # the batched open-orders path (``get_subaccount_multi_products_open_orders``)
@@ -95,6 +104,35 @@ def _limit_order_expiration_seconds() -> int:
 # of the bot so Cloudflare's lightweight bot check lets our REST traffic
 # through. The shared SESSION already mounts pool-sized HTTPS/HTTP adapters.
 from src.nadobro.services.http_session import SESSION as _rest_session  # noqa: E402
+
+
+def _install_session_timeout(session, timeout) -> bool:
+    """Force a default ``timeout`` onto a ``requests.Session`` instance.
+
+    All ``Session.get/post/put/...`` verbs funnel through ``Session.request``,
+    so wrapping that one method injects the timeout for every call the SDK
+    makes — without patching SDK source. Idempotent: marks the instance so a
+    re-init (``_ensure_sdk_client``) does not double-wrap. ``timeout`` may be a
+    float or a ``(connect, read)`` tuple. A caller-supplied ``timeout`` is never
+    overridden.
+    """
+    if session is None or getattr(session, "_nado_timeout_installed", False):
+        return False
+    try:
+        orig_request = session.request
+
+        def _request(method, url, **kwargs):
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = timeout
+            return orig_request(method, url, **kwargs)
+
+        session.request = _request  # type: ignore[assignment]
+        session._nado_timeout_installed = True
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 _open_orders_cache: dict[tuple[str, str, int], dict] = {}
 _positions_fallback_cache: dict[tuple[str, str], dict] = {}
 
@@ -344,6 +382,7 @@ class NadoClient:
 
             mode = NadoClientMode.TESTNET if self.network == "testnet" else NadoClientMode.MAINNET
             self.client = create_nado_client(mode, self.private_key)
+            self._install_sdk_timeouts()
             signer = getattr(getattr(self.client, "context", None), "signer", None)
             signer_address = getattr(signer, "address", None)
             if signer_address:
@@ -367,6 +406,32 @@ class NadoClient:
             logger.error(f"Failed to initialize Nado client: {e}")
             self._initialized = False
             return False
+
+    def _install_sdk_timeouts(self) -> None:
+        """Attach a (connect, read) timeout to every SDK ``requests.Session``.
+
+        ``EngineClient`` (query+execute), ``IndexerClient`` and the optional
+        ``TriggerClient`` each own one ``self.session``; the SDK never passes
+        ``timeout=`` on its calls, so without this a hung connection wedges the
+        worker thread permanently. Best-effort: any structural drift in the SDK
+        is swallowed so client init never fails on account of this hardening.
+        """
+        timeout = (_SDK_CONNECT_TIMEOUT_SECONDS, _SDK_READ_TIMEOUT_SECONDS)
+        ctx = getattr(self.client, "context", None)
+        if ctx is None:
+            return
+        installed = 0
+        for attr in ("engine_client", "indexer_client", "trigger_client"):
+            sub = getattr(ctx, attr, None)
+            if sub is None:
+                continue
+            if _install_session_timeout(getattr(sub, "session", None), timeout):
+                installed += 1
+        if installed:
+            logger.info(
+                "Nado SDK session timeouts installed connect=%ss read=%ss sessions=%s network=%s",
+                _SDK_CONNECT_TIMEOUT_SECONDS, _SDK_READ_TIMEOUT_SECONDS, installed, self.network,
+            )
 
     def _rest_url(self):
         return NADO_MAINNET_REST if self.network == "mainnet" else NADO_TESTNET_REST
@@ -565,6 +630,14 @@ class NadoClient:
             url=self._archive_url(),
             user_scoped=False,
         ):
+            # Previously a silent []. This denial is the upstream cause of
+            # dgrid's "no spawn" — surface it so an empty candle result is
+            # always traceable to a gateway-budget throttle.
+            logger.warning(
+                "get_candlesticks throttled by gateway budget product_id=%s "
+                "timeframe=%s limit=%s — returning empty (cache miss)",
+                product_id, timeframe, limit,
+            )
             return []
         try:
             from nado_protocol.indexer_client.types.query import IndexerCandlesticksParams

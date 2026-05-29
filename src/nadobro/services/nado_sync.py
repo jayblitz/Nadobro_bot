@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -29,6 +30,13 @@ logger = logging.getLogger(__name__)
 
 _snapshot_cache: dict[tuple[int, str], dict[str, Any]] = {}
 _inflight: dict[tuple[int, str], asyncio.Lock] = {}
+
+# Backstop for the SDK-session timeouts in nado_client: even if a single SDK
+# call slips past its socket timeout, no one user may pin the portfolio_sync
+# tick (and its apscheduler max_instances=1 slot) indefinitely. A breach here
+# means a worker thread is wedged on a dead connection — we log + skip the user
+# rather than letting the whole tick hang for 40 minutes.
+_SYNC_USER_TIMEOUT_SECONDS = float(os.environ.get("NADO_SYNC_USER_TIMEOUT_SECONDS", "30"))
 
 
 def _now() -> datetime:
@@ -213,12 +221,23 @@ async def sync_active_users(reason: str = "poll") -> None:
                 break
             user_id = int(row.get("telegram_id"))
             network = str(row.get("network") or "mainnet")
-            await sync_user(
-                user_id,
-                network=network,
-                reason=reason,
-                max_age_ms=poll_cache_ms,
-            )
+            try:
+                await asyncio.wait_for(
+                    sync_user(
+                        user_id,
+                        network=network,
+                        reason=reason,
+                        max_age_ms=poll_cache_ms,
+                    ),
+                    timeout=_SYNC_USER_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "portfolio sync user=%s network=%s exceeded %.0fs budget — "
+                    "likely a wedged SDK call on a dead connection; skipping user "
+                    "so the tick does not stall",
+                    user_id, network, _SYNC_USER_TIMEOUT_SECONDS,
+                )
             _active_users_cursor = max(_active_users_cursor, user_id)
             synced += 1
     finally:
@@ -291,6 +310,31 @@ async def sync_user(
                         return stale
             except Exception:
                 pass
+
+        # Gateway circuit short-circuit for ALL sync reasons (not just poll):
+        # when the Cloudflare circuit is open, hitting the gateway just adds
+        # load and stalls behind the same dead host. Return the cached snapshot
+        # marked stale (or a synthetic stale row if we have nothing cached)
+        # rather than constructing an SDK client and issuing writes. ``force``
+        # does not bypass this — a forced refresh against an open circuit is
+        # exactly the traffic we must shed.
+        if _gateway_circuit_open(network):
+            cached = _snapshot_cache.get(key)
+            if cached:
+                stale = deepcopy(cached)
+                stale.update({"stale": True, "reason": reason})
+                return stale
+            logger.debug(
+                "portfolio sync skipped user=%s network=%s reason=%s: gateway circuit open",
+                user_id, network, reason,
+            )
+            return {
+                "user_id": int(user_id),
+                "network": network,
+                "stale": True,
+                "reason": reason,
+                "monotonic_ts": time.time(),
+            }
 
         started = time.perf_counter()
         try:

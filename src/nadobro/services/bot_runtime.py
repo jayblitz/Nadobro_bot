@@ -114,6 +114,11 @@ def _vol_call_timeout_seconds() -> float:
 MAX_OPEN_ORDERS_PER_PRODUCT = 6
 STRATEGY_ERROR_ALERT_STREAK = 3
 
+# Engine strategies that spawn their executors on the first *tick* (not in
+# on_start). For these the eager kickoff must fire an immediate follow-up tick
+# or the strategy posts nothing until the scheduler's next interval.
+_SPAWN_ON_TICK_STRATEGIES = {"dgrid", "mid"}
+
 _bot_app = None
 _runtime_loop: asyncio.AbstractEventLoop | None = None
 _tasks: dict[str, asyncio.Task] = {}
@@ -1020,6 +1025,26 @@ def start_user_bot(
                         "eager engine kickoff OK user=%s strategy=%s on %s mid=%s",
                         telegram_id, strategy, network, mid_val,
                     )
+                    # NO_ORDERS-FIX: dgrid/mid spawn their executors on the
+                    # first *tick*, not in on_start — so the eager kickoff above
+                    # only STARTS them and the grid wouldn't post until the
+                    # scheduler's next tick (up to interval_seconds later). Fire
+                    # one immediate follow-up cycle (now is_running() -> tick)
+                    # so these strategies place orders within seconds like the
+                    # spawn-on-start ones. Best-effort: a throttle/empty-candle
+                    # tick is a no-op the scheduler retries.
+                    if strategy in _SPAWN_ON_TICK_STRATEGIES:
+                        ok2, _r2, err2 = _run_engine_start_sync(
+                            lambda: _er.run_engine_cycle(
+                                telegram_id, network, state, user_client, mid_val,
+                                str(state.get("product") or product), int(product_id),
+                            ),
+                            user_id=telegram_id, network=network, strategy=strategy,
+                        )
+                        logger.info(
+                            "eager engine first-tick user=%s strategy=%s ok=%s err=%s",
+                            telegram_id, strategy, ok2, err2,
+                        )
                 else:
                     logger.critical(
                         "eager engine kickoff FAILED user=%s strategy=%s on %s err=%s",
