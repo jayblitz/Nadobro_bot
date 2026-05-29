@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -13,13 +14,37 @@ from src.nadobro.services.ws_health import mark_connected, mark_disconnected, to
 logger = logging.getLogger(__name__)
 
 # Debounce WS invalidations — coalesce bursts into one sync per window.
-_DEBOUNCE_SECONDS = float(__import__("os").environ.get("NADO_WS_DEBOUNCE_SECONDS", "2.0"))
+_DEBOUNCE_SECONDS = float(os.environ.get("NADO_WS_DEBOUNCE_SECONDS", "2.0"))
 _pending_sync: dict[tuple[int, str], float] = {}
 
+# Subscriptions WS v2 streams we care about for portfolio invalidation. Per the
+# Nado docs these are subaccount-scoped; ``order_update`` and ``fill`` require a
+# prior ``authenticate`` on the connection. ``product_id: null`` means "all
+# products" so a single subscription per stream covers every market.
+#   docs: https://docs.nado.xyz/developer-resources/api/subscriptions/streams
+_PORTFOLIO_STREAMS = ("order_update", "fill", "position_change", "funding_payment")
 
-def ws_url_for_network(network: str) -> str:
+# Event ``type`` (or ``reason``) values that mean our cached portfolio snapshot
+# is now stale and should be refreshed.
+_INVALIDATING_EVENTS = {"order_update", "fill", "position_change", "funding_payment"}
+
+
+def subscribe_url_for_network(network: str) -> str:
+    """Subscriptions (streams) websocket endpoint.
+
+    IMPORTANT: this is ``/v1/subscribe`` — the live-data subscriptions socket —
+    NOT ``/v1/ws`` which is the gateway *action* socket for executes/queries.
+    Subscribing to streams on ``/v1/ws`` silently yields no data, which is why
+    the portfolio WS never went healthy and every poll fell back to the full
+    REST read storm. (Audit 2026-05-29.)
+    """
     env = "prod" if str(network) == "mainnet" else "test"
-    return f"wss://gateway.{env}.nado.xyz/v1/ws"
+    return f"wss://gateway.{env}.nado.xyz/v1/subscribe"
+
+
+# Back-compat alias: some callers/tests import ``ws_url_for_network``.
+def ws_url_for_network(network: str) -> str:
+    return subscribe_url_for_network(network)
 
 
 @dataclass
@@ -77,23 +102,71 @@ class NadoPortfolioWs:
                 backoff = min(60.0, backoff * 2)
                 await self._schedule_sync(sub.user_id, sub.network, force=True, reason="ws_reconnect")
 
+    def _build_auth_message(self, sub: PortfolioWsSubscription) -> dict[str, Any] | None:
+        """Sign the per-connection ``authenticate`` message using the user's
+        signing client. Returns None for read-only users (no signer) — they
+        simply won't get the authenticated streams and stay on REST polling.
+        """
+        try:
+            from src.nadobro.services.user_service import get_user_nado_client
+
+            client = get_user_nado_client(int(sub.user_id), network=sub.network)
+            if client is None:
+                return None
+            return client.sign_stream_authentication(sender=sub.subaccount)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "portfolio ws auth signing failed user=%s network=%s: %s",
+                sub.user_id, sub.network, exc,
+            )
+            return None
+
     async def _connect_once(self, sub: PortfolioWsSubscription) -> None:
         import websockets
 
-        async with websockets.connect(ws_url_for_network(sub.network), ping_interval=20, ping_timeout=20) as ws:
-            await ws.send(json.dumps({
-                "type": "subscribe",
-                "subaccount": sub.subaccount,
-                "channels": ["position_change", "order_update", "fill", "funding_payment", "mark_price"],
-            }))
+        # ``compression="deflate"`` makes the client advertise the required
+        # ``Sec-WebSocket-Extensions: permessage-deflate`` in the handshake.
+        async with websockets.connect(
+            subscribe_url_for_network(sub.network),
+            ping_interval=20,
+            ping_timeout=20,
+            compression="deflate",
+        ) as ws:
+            # 1) Authenticate (required before order_update / fill).
+            auth_msg = await asyncio.to_thread(self._build_auth_message, sub)
+            if auth_msg is not None:
+                await ws.send(json.dumps(auth_msg))
+
+            # 2) Subscribe to each portfolio stream as its own message. The
+            #    subscriptions API takes ONE ``stream`` per ``subscribe`` (not a
+            #    ``channels`` array) and echoes the ``id`` back in the response.
+            for idx, stream_type in enumerate(_PORTFOLIO_STREAMS, start=1):
+                await ws.send(json.dumps({
+                    "method": "subscribe",
+                    "stream": {
+                        "type": stream_type,
+                        "product_id": None,  # all products
+                        "subaccount": sub.subaccount,
+                    },
+                    "id": idx,
+                }))
+
             mark_connected(sub.user_id, sub.network)
             await self._schedule_sync(sub.user_id, sub.network, force=True, reason="ws_connect")
+
             async for raw in ws:
                 event = _json(raw)
-                if _event_type(event) == "mark_price":
-                    _push_mark_prices(sub.network, event)
+                # Any inbound frame (event, subscribe ack, heartbeat) proves the
+                # socket is alive — keep health fresh so sync_user keeps skipping
+                # the REST poll.
+                touch(sub.user_id, sub.network)
+                if _is_auth_or_error(event):
+                    _log_control_frame(sub, event)
+                    continue
+                # Phase C: drive the per-order lifecycle store off the stream so
+                # the engine can stop polling order_status on every tick.
+                _route_lifecycle(event)
                 if _should_invalidate(event):
-                    touch(sub.user_id, sub.network)
                     await self._schedule_sync(
                         sub.user_id,
                         sub.network,
@@ -125,9 +198,72 @@ def _json(raw: Any) -> dict[str, Any]:
         return {}
 
 
+def _is_auth_or_error(event: dict[str, Any]) -> bool:
+    """Control frames: authenticate ack, subscribe ack, or an error response."""
+    if not isinstance(event, dict):
+        return False
+    if "error" in event or "result" in event:
+        return True
+    method = str(event.get("method") or "")
+    return method in {"authenticate", "subscribe", "unsubscribe"}
+
+
+def _log_control_frame(sub: PortfolioWsSubscription, event: dict[str, Any]) -> None:
+    if event.get("error"):
+        logger.warning(
+            "portfolio ws control error user=%s network=%s: %s",
+            sub.user_id, sub.network, event.get("error"),
+        )
+    else:
+        logger.debug("portfolio ws control frame user=%s: %s", sub.user_id, event)
+
+
+def _payload(event: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap a stream frame to the dict that holds the event fields."""
+    current: Any = event
+    for _ in range(4):
+        if not isinstance(current, dict):
+            return {}
+        if any(k in current for k in ("digest", "reason", "id", "filled_qty")):
+            return current
+        nxt = current.get("payload") or current.get("data") or current.get("message")
+        if nxt is None:
+            return current
+        current = nxt
+    return event if isinstance(event, dict) else {}
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _route_lifecycle(event: dict[str, Any]) -> None:
+    """Feed order_update / fill stream events into the lifecycle store."""
+    etype = _event_type(event)
+    if etype not in ("order_update", "fill"):
+        return
+    try:
+        from src.nadobro.engine import order_lifecycle
+
+        body = _payload(event)
+        tag = _as_int(body.get("id"))
+        if etype == "order_update":
+            order_lifecycle.apply_order_update(
+                digest=body.get("digest"), reason=body.get("reason"), tag=tag,
+            )
+        else:  # fill — carries only ``id`` (our Phase-B tag), no digest
+            order_lifecycle.apply_fill(tag=tag, digest=body.get("digest"))
+    except Exception:  # noqa: BLE001 - lifecycle is best-effort; never break the WS loop
+        logger.debug("lifecycle routing failed", exc_info=True)
+
+
 def _should_invalidate(event: dict[str, Any]) -> bool:
-    event_type = _event_type(event)
-    return event_type in {"position_change", "order_update", "fill", "funding_payment", "mark_price"}
+    return _event_type(event) in _INVALIDATING_EVENTS
 
 
 def _event_type(event: dict[str, Any]) -> str:
@@ -140,40 +276,6 @@ def _event_type(event: dict[str, Any]) -> str:
             return event_type
         current = current.get("payload") or current.get("data") or current.get("message")
     return ""
-
-
-def _push_mark_prices(network: str, event: dict[str, Any]) -> None:
-    """Best-effort mark price push into the shared market feed cache."""
-    try:
-        from src.nadobro.config import get_product_name
-        from src.nadobro.services.market_feed import update_from_ws
-
-        payload = event.get("payload") or event.get("data") or event
-        if not isinstance(payload, dict):
-            return
-        try:
-            pid = int(payload.get("product_id") or 0)
-        except (TypeError, ValueError):
-            return
-        if pid <= 0:
-            return
-        price_raw = payload.get("mark_price_x18") or payload.get("price_x18") or payload.get("mark_price")
-        if price_raw is None:
-            return
-        try:
-            from nado_protocol.utils.math import from_x18
-            mid = float(from_x18(int(price_raw)))
-        except Exception:
-            try:
-                mid = float(price_raw)
-            except (TypeError, ValueError):
-                return
-        if mid <= 0:
-            return
-        name = str(get_product_name(pid, network=network)).replace("-PERP", "")
-        update_from_ws(network, {name: {"bid": mid, "ask": mid, "mid": mid}})
-    except Exception:
-        logger.debug("mark_price ws push failed", exc_info=True)
 
 
 portfolio_ws = NadoPortfolioWs()

@@ -78,12 +78,12 @@ class _StubClient:
         self.placed_resps: list = []
         self.cancel_should_raise = False
 
-    def place_limit_order(self, product_id, size, price, is_buy=True, post_only=False, reduce_only=False):
+    def place_limit_order(self, product_id, size, price, is_buy=True, post_only=False, reduce_only=False, **kwargs):
         resp = {"digest": "d1", "status": "open"}
         self.placed_resps.append(resp)
         return resp
 
-    def place_market_order(self, product_id, size, is_buy=True, reduce_only=False):
+    def place_market_order(self, product_id, size, is_buy=True, reduce_only=False, **kwargs):
         resp = {"digest": "m1", "status": "filled", "price": 100}
         self.placed_resps.append(resp)
         return resp

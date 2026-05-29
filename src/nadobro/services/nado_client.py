@@ -783,19 +783,36 @@ class NadoClient:
             pass
         return {}
 
-    def get_balance(self) -> dict:
-        # Redis cache layer. Two-fold purpose:
+    def get_balance(self, force: bool = False) -> dict:
+        # Redis cache layer. Three-fold purpose:
         #   1. Smooth over transient "Too Many Requests" on query_subaccount_info
         #      so callers that conflate exists=False with "not linked" don't
         #      flip the user's UI state on a rate-limit blip.
         #   2. Reduce IP weight burned by the portfolio_sync tick on
         #      subaccount_info reads (weight=2 per call).
+        #   3. READ-THROUGH: serve a fresh cached value (within TTL) WITHOUT
+        #      touching the gateway at all. Previously the happy path always
+        #      issued the weight-2 ``get_subaccount_info`` call and only fell
+        #      back to Redis on throttle/error — so a tight portfolio_sync poll
+        #      burned one gateway read per cycle even though the cached value
+        #      was still fresh. Under gateway saturation that steady stream of
+        #      reads is exactly what trips Nado's per-IP ``ip_query_only``
+        #      downgrade (which then blocks ALL writes, incl. strategy orders).
+        #      The Redis TTL already bounds staleness to ``balance_ttl_seconds``
+        #      (an expired key returns None), so honoring it here is safe and
+        #      matches the documented freshness tolerance. ``force=True`` lets
+        #      callers that need a real-time balance bypass the cache.
         # TTL kept short (30s default) so wallet deposit / withdraw / fill
         # visibility doesn't lag noticeably.
         redis_key = f"balance:{self.network}:{self.subaccount_hex}"
         balance_ttl_seconds = int(
             os.environ.get("NADO_BALANCE_CACHE_TTL_SECONDS", "30") or "30"
         )
+
+        if not force and balance_ttl_seconds > 0:
+            cached = self._read_balance_redis(redis_key)
+            if cached is not None:
+                return cached
 
         if self._initialized and self.client:
             if not self._gateway_allowed(weight=2):  # subaccount_info: IP weight 2
@@ -1914,6 +1931,61 @@ class NadoClient:
 
         return merged
 
+    def sign_stream_authentication(
+        self, *, expiration_ms: Optional[int] = None, sender: Optional[str] = None
+    ) -> dict:
+        """Build a signed ``authenticate`` message for the subscriptions WS v2.
+
+        The subscriptions gateway (``/v1/subscribe``) requires a one-time
+        EIP-712 ``StreamAuthentication`` before subscribing to the
+        authenticated streams (``order_update`` / ``fill``). The signed struct
+        is ``StreamAuthentication{ sender: bytes32, expiration: uint64 }`` over
+        the standard Nado domain, with the *endpoint* contract as the verifying
+        contract (NOT the per-product order book contract — that one is only
+        for ``place_order``). Authentication is per-connection and, once set,
+        applies to the whole wallet for the life of the socket.
+
+        Returns the exact JSON dict to send over the websocket:
+        ``{"method":"authenticate","sender":<hex>,"expiration":<ms>,"signature":<0x..>}``.
+        Raises ``RuntimeError`` if the client has no signer (read-only client).
+        """
+        if not self._initialized or not self.client:
+            raise RuntimeError("Nado client not initialized; cannot sign stream auth")
+        from nado_protocol.contracts.types import NadoTxType
+        from nado_protocol.contracts.eip712.sign import (
+            build_eip712_typed_data,
+            sign_eip712_typed_data,
+        )
+
+        engine_client = self.client.context.engine_client
+        signer = engine_client.linked_signer or engine_client.signer
+        if signer is None:
+            raise RuntimeError("Nado client has no signer; cannot authenticate stream")
+
+        sender_hex = (sender or self.subaccount_hex or "").strip()
+        if not sender_hex:
+            raise RuntimeError("Missing subaccount for stream authentication")
+        # Default: 24h out, in milliseconds (docs: expiration is ms since epoch).
+        if expiration_ms is None:
+            expiration_ms = int(time.time() * 1000) + 24 * 60 * 60 * 1000
+
+        clean = sender_hex[2:] if sender_hex.startswith("0x") else sender_hex
+        msg = {"sender": bytes.fromhex(clean), "expiration": int(expiration_ms)}
+        typed = build_eip712_typed_data(
+            NadoTxType.AUTHENTICATE_STREAM,
+            msg,
+            engine_client.endpoint_addr,
+            int(engine_client.chain_id),
+        )
+        sig = sign_eip712_typed_data(typed, signer)
+        sig = sig if str(sig).startswith("0x") else "0x" + str(sig)
+        return {
+            "method": "authenticate",
+            "sender": sender_hex if sender_hex.startswith("0x") else "0x" + sender_hex,
+            "expiration": int(expiration_ms),
+            "signature": sig,
+        }
+
     def verify_linked_signer(self, expected_signer_address: str = None, *, use_cache: bool = True) -> dict:
         expected = (expected_signer_address or self.address or "").lower()
         cache_key = (self.network, str(self.subaccount_hex or ""), expected)
@@ -2399,6 +2471,7 @@ class NadoClient:
         isolated_margin: Optional[float] = None,
         reduce_only: bool = False,
         sender: Optional[str] = None,
+        client_id: Optional[int] = None,
         _retry_count: int = 0,
     ) -> dict:
         if not self._initialized or not self.client:
@@ -2507,12 +2580,27 @@ class NadoClient:
                     isolated_margin = float(isolated_margin) * (float(size) / pre_bump_size)
                 isolated_margin_x6 = max(0, self._to_x6_int(float(isolated_margin)))
 
+            # Unique-ID tagging (WS v2 / MM correlation): when a ``client_id`` is
+            # supplied, embed its low 20 bits in the order nonce — the docs are
+            # explicit that ``client_id`` is NOT part of the order digest, so the
+            # authoritative way to distinguish otherwise-identical orders (same
+            # grid level placed repeatedly) is the last 20 bits of the nonce.
+            # We ALSO pass it as ``PlaceOrderParams.id`` so it echoes back in the
+            # ``order_update`` / ``fill`` subscription events for fast lookup.
+            #   docs: .../api/gateway/executes/place-order (client id)
+            tag: Optional[int] = None
+            if client_id is not None:
+                tag = int(client_id) & 0xFFFFF  # 20-bit space
+                order_nonce = gen_order_nonce(random_int=tag)
+            else:
+                order_nonce = gen_order_nonce()
+
             order = OrderParams(
                 sender=sender_hex,
                 priceX18=price_x18,
                 amount=amount_x18,
                 expiration=get_expiration_timestamp(expiration_secs),
-                nonce=gen_order_nonce(),
+                nonce=order_nonce,
                 appendix=self._build_order_appendix(
                     appendix_order_type_int,
                     isolated=bool(isolated_only),
@@ -2523,11 +2611,18 @@ class NadoClient:
                 ),
             )
 
-            params = PlaceOrderParams(product_id=product_id, order=order)
+            params = PlaceOrderParams(product_id=product_id, order=order, id=tag)
             result = self.client.market.place_order(params)
 
             if hasattr(result, 'data') and result.data:
                 if hasattr(result.data, 'digest') and result.data.digest:
+                    # A confirmed execute proves the IP can write again — close
+                    # any open ip_query_only write circuit immediately.
+                    try:
+                        from src.nadobro.services.gateway_budget import clear_write_ban
+                        clear_write_ban(self._rest_url())
+                    except Exception:  # noqa: BLE001
+                        pass
                     return {
                         "success": True,
                         "digest": result.data.digest,
@@ -2535,6 +2630,7 @@ class NadoClient:
                         "size": size,
                         "price": price,
                         "side": "LONG" if is_buy else "SHORT",
+                        "client_id": tag,
                     }
 
             result_str = str(result)
@@ -2546,46 +2642,33 @@ class NadoClient:
             )
             is_blocked_result = "blocked" in lowered_result or "reason" in lowered_result
 
-            # Transient ip_query_only retry. Nado occasionally downgrades a
-            # write-allowed IP to query-only for a short window when its
-            # per-IP gateway weight saturates (we saw this twice in the
-            # 2026-05-27 incident: get_balance Too Many Requests at
-            # 20:46:19 / 20:48:50, then place_order ip_query_only at
-            # 20:49:07). When verify_linked_signer confirms the signer IS
-            # linked, a single bounded backoff retry recovers the trade
-            # without bothering the user.
+            # ip_query_only: Nado downgrades a saturated IP to query-only — every
+            # execute is rejected while the ban holds (we have seen it persist
+            # for many minutes, e.g. 2026-05-29 00:29 → 00:43). A sub-second
+            # inline retry cannot beat a multi-minute ban and only adds load, so
+            # instead we OPEN the per-host write circuit (see gateway_budget) and
+            # return a clear transient error. Subsequent executes short-circuit
+            # cheaply until the cooldown lapses, letting the IP recover and the
+            # controller retry on a later tick. NOTE: the SDK usually *raises*
+            # this rather than returning it — the exception handler below records
+            # it too; this branch covers the returned-result shape.
             compact_result = lowered_result.replace("_", "").replace("-", "")
             if (is_failure_result or is_blocked_result) and "ipqueryonly" in compact_result:
-                if _retry_count < 1:
-                    try:
-                        check = self.verify_linked_signer(self.address)
-                    except Exception as ve:  # pragma: no cover
-                        logger.warning("verify_linked_signer during retry check failed: %s", ve)
-                        check = {"verified": False}
-                    if check.get("verified"):
-                        backoff = 1.5 + random.uniform(0.0, 0.75)
-                        logger.warning(
-                            "place_order ip_query_only with verified signer; "
-                            "retrying once after %.2fs (product_id=%s sender=%s)",
-                            backoff, product_id, _mask_address(sender_hex),
-                        )
-                        time.sleep(backoff)
-                        try:
-                            return self.place_order(
-                                product_id=product_id,
-                                size=size,
-                                price=price,
-                                order_type=order_type,
-                                is_buy=is_buy,
-                                isolated_only=isolated_only,
-                                isolated_margin=isolated_margin,
-                                reduce_only=reduce_only,
-                                sender=sender,
-                                _retry_count=_retry_count + 1,
-                            )
-                        except Exception as retry_e:
-                            logger.error("place_order ip_query_only retry failed: %s", retry_e)
-                            return {"success": False, "error": self._friendly_error(str(retry_e))}
+                try:
+                    from src.nadobro.services.gateway_budget import record_ip_query_only
+                    record_ip_query_only(self._rest_url())
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "place_order rejected ip_query_only (write circuit armed) "
+                    "product_id=%s sender=%s", product_id, _mask_address(sender_hex),
+                )
+                return {
+                    "success": False,
+                    "error": "Venue temporarily blocked order placement (ip_query_only). Retrying shortly.",
+                    "rate_limited": True,
+                    "ip_query_only": True,
+                }
 
             if is_failure_result:
                 return {"success": False, "error": self._friendly_error(result_str)}
@@ -2600,6 +2683,32 @@ class NadoClient:
             }
         except Exception as e:
             err_str = str(e)
+
+            # ip_query_only is RAISED by the SDK (requests/engine_client throws
+            # on the rejection body), so it never reaches the returned-result
+            # branch above — this is the real-world path. Arm the write circuit
+            # and return a transient error instead of falling through to the
+            # increment/min-notional retries (which don't apply) and a misleading
+            # hard failure. This is the fix for the 2026-05-29 incident where
+            # three executes failed 24ms apart with no backoff and no retry.
+            compact_err = err_str.lower().replace("_", "").replace("-", "")
+            if "ipqueryonly" in compact_err:
+                try:
+                    from src.nadobro.services.gateway_budget import record_ip_query_only
+                    record_ip_query_only(self._rest_url())
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "place_order raised ip_query_only (write circuit armed) "
+                    "product_id=%s", product_id,
+                )
+                return {
+                    "success": False,
+                    "error": "Venue temporarily blocked order placement (ip_query_only). Retrying shortly.",
+                    "rate_limited": True,
+                    "ip_query_only": True,
+                }
+
             increment = self._extract_price_increment_from_error(err_str, product_id)
             size_increment = self._extract_size_increment_from_error(err_str, product_id)
             min_size_x18 = self._extract_min_size_x18_from_error(err_str, product_id)
@@ -2640,6 +2749,7 @@ class NadoClient:
                             isolated_margin=isolated_margin,
                             reduce_only=reduce_only,
                             sender=sender,
+                            client_id=client_id,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -2675,6 +2785,7 @@ class NadoClient:
                                 isolated_margin=isolated_margin,
                                 reduce_only=reduce_only,
                                 sender=sender,
+                                client_id=client_id,
                                 _retry_count=_retry_count + 1,
                             )
                         except Exception as retry_e:
@@ -2704,6 +2815,7 @@ class NadoClient:
                             isolated_margin=isolated_margin,
                             reduce_only=reduce_only,
                             sender=sender,
+                            client_id=client_id,
                             _retry_count=_retry_count + 1,
                         )
                         if retry_result.get("success"):
@@ -2734,6 +2846,7 @@ class NadoClient:
                             isolated_margin=isolated_margin,
                             reduce_only=reduce_only,
                             sender=sender,
+                            client_id=client_id,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -2753,6 +2866,7 @@ class NadoClient:
         isolated_margin: Optional[float] = None,
         reduce_only: bool = False,
         sender: Optional[str] = None,
+        client_id: Optional[int] = None,
     ) -> dict:
         # AUDIT-FIX-NC-1: defensive dict access. get_market_price can return
         # an unexpected shape (None on certain SDK error paths); the previous
@@ -2783,6 +2897,7 @@ class NadoClient:
             isolated_margin=isolated_margin,
             reduce_only=reduce_only,
             sender=sender,
+            client_id=client_id,
         )
 
     def place_limit_order(
@@ -2796,6 +2911,7 @@ class NadoClient:
         reduce_only: bool = False,
         post_only: bool = False,
         sender: Optional[str] = None,
+        client_id: Optional[int] = None,
     ) -> dict:
         return self.place_order(
             product_id,
@@ -2807,6 +2923,7 @@ class NadoClient:
             isolated_margin=isolated_margin,
             reduce_only=reduce_only,
             sender=sender,
+            client_id=client_id,
         )
 
     @staticmethod
@@ -2850,31 +2967,46 @@ class NadoClient:
                 digests=[digest],
             )
             result = self.client.market.cancel_orders(cancel_params)
-            # BUG-CANCEL-1: mirror place_order's ip_query_only verify+retry so a
-            # transient query-only downgrade doesn't leave a stale order live
-            # (and doesn't get falsely reported as a successful cancel).
-            if self._result_is_ip_query_only(result) and _retry_count < 1:
-                try:
-                    check = self.verify_linked_signer(self.address)
-                except Exception as ve:  # pragma: no cover
-                    logger.warning("verify_linked_signer during cancel retry check failed: %s", ve)
-                    check = {"verified": False}
-                if check.get("verified"):
-                    backoff = 1.5 + random.uniform(0.0, 0.75)
-                    logger.warning(
-                        "cancel_order ip_query_only with verified signer; "
-                        "retrying once after %.2fs (product_id=%s)", backoff, product_id,
-                    )
-                    time.sleep(backoff)
-                    return self.cancel_order(
-                        product_id, digest, sender=sender, _retry_count=_retry_count + 1,
-                    )
+            # BUG-CANCEL-1: never falsely report a query-only-blocked cancel as
+            # success (that would leave a stale order live). Arm the write
+            # circuit so subsequent executes short-circuit until the ban lifts,
+            # and return a transient failure the caller can retry.
             if self._result_is_ip_query_only(result):
-                return {"success": False, "error": self._friendly_error(str(result)), "digest": digest}
+                try:
+                    from src.nadobro.services.gateway_budget import record_ip_query_only
+                    record_ip_query_only(self._rest_url())
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "cancel_order rejected ip_query_only (write circuit armed) product_id=%s",
+                    product_id,
+                )
+                return {
+                    "success": False,
+                    "error": self._friendly_error(str(result)),
+                    "digest": digest,
+                    "rate_limited": True,
+                    "ip_query_only": True,
+                }
+            try:
+                from src.nadobro.services.gateway_budget import clear_write_ban
+                clear_write_ban(self._rest_url())
+            except Exception:  # noqa: BLE001
+                pass
             return {"success": True, "digest": digest}
         except Exception as e:
+            err_str = str(e)
+            compact_err = err_str.lower().replace("_", "").replace("-", "")
+            if "ipqueryonly" in compact_err:
+                try:
+                    from src.nadobro.services.gateway_budget import record_ip_query_only
+                    record_ip_query_only(self._rest_url())
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning("cancel_order raised ip_query_only (write circuit armed) product_id=%s", product_id)
+                return {"success": False, "error": err_str, "digest": digest, "rate_limited": True, "ip_query_only": True}
             logger.error(f"cancel_order failed: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": err_str}
 
     def cancel_all_orders(self, product_id: int) -> dict:
         orders = self.get_open_orders(product_id)
