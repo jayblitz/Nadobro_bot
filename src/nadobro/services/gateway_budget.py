@@ -64,6 +64,16 @@ _RL_THRESHOLD = int(os.environ.get("NADO_GATEWAY_RL_THRESHOLD", "4"))
 _RL_WINDOW = float(os.environ.get("NADO_GATEWAY_RL_WINDOW_SECONDS", "15"))
 _RL_COOLDOWN = float(os.environ.get("NADO_GATEWAY_RL_COOLDOWN_SECONDS", "60"))
 
+# ip_query_only WRITE circuit. Nado downgrades a saturated IP to query-only:
+# reads still work, but every execute (place/cancel) is rejected with
+# {"reason":"ip_query_only","blocked":true}. This is INVISIBLE to the
+# Cloudflare / error_code=1000 breakers above, so without this the bot keeps
+# firing doomed orders into the ban — adding load that keeps the IP banned and
+# churning executors into FAILED. When we observe an ip_query_only rejection we
+# open a short per-host write circuit so executes short-circuit (cheap, no
+# round-trip) until the ban is likely lifted; queries are unaffected.
+_WRITE_BAN_COOLDOWN = float(os.environ.get("NADO_WRITE_BAN_COOLDOWN_SECONDS", "45"))
+
 
 @dataclass
 class _TokenBucket:
@@ -106,6 +116,7 @@ _user_buckets: dict[int, _TokenBucket] = {}
 _user_inflight: dict[int, int] = {}
 _wallet_buckets: dict[str, _TokenBucket] = {}
 _gateway_rl: dict[str, _BreakerLite] = {}
+_write_ban: dict[str, float] = {}  # host -> open_until (monotonic-free wall clock)
 
 
 def _host(url: str) -> str:
@@ -170,6 +181,46 @@ def is_gateway_blocked(url: str) -> bool:
         return is_gateway_rate_limited(url)
 
 
+def record_ip_query_only(url: str) -> None:
+    """Open the per-host WRITE circuit after an ip_query_only rejection.
+
+    Reads are intentionally NOT affected — only executes short-circuit while the
+    circuit is open. Idempotent: a fresh rejection re-arms the cooldown so a
+    sustained ban keeps writes parked instead of probing every tick.
+    """
+    host = _host(url)
+    if not host:
+        return
+    now = time.time()
+    with _lock:
+        prev = _write_ban.get(host, 0.0)
+        _write_ban[host] = now + _WRITE_BAN_COOLDOWN
+        if now >= prev:  # transition closed -> open; log once per window
+            logger.warning(
+                "Nado WRITE circuit OPEN host=%s cooldown=%.0fs (ip_query_only) — "
+                "executes parked, reads unaffected",
+                host, _WRITE_BAN_COOLDOWN,
+            )
+
+
+def is_write_blocked(url: str) -> bool:
+    """True while the per-host write circuit is open (ip_query_only cooldown)."""
+    host = _host(url)
+    if not host:
+        return False
+    with _lock:
+        return time.time() < _write_ban.get(host, 0.0)
+
+
+def clear_write_ban(url: str) -> None:
+    """Close the write circuit early (e.g. after a confirmed successful execute)."""
+    host = _host(url)
+    if not host:
+        return
+    with _lock:
+        _write_ban.pop(host, None)
+
+
 def _user_bucket(user_id: int) -> _TokenBucket:
     with _lock:
         bucket = _user_buckets.get(user_id)
@@ -220,6 +271,12 @@ def try_acquire(
     w = max(1.0, float(weight))
 
     if kind == "execute":
+        # ip_query_only write circuit: while open, every execute is rejected by
+        # the venue anyway — short-circuit so we don't add load that prolongs
+        # the ban or churn executors into FAILED on a doomed round-trip.
+        if is_write_blocked(url):
+            logger.debug("gateway budget: execute parked — write circuit open host=%s", _host(url))
+            return False
         key = (wallet or "").strip().lower()
         if not key:
             return True  # no wallet to scope by; host circuit already checked

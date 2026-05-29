@@ -25,10 +25,10 @@ class _FakeClient:
         self.matches = []
         self.cancelled = []
 
-    def place_limit_order(self, product_id, size, price, is_buy=True, post_only=False, reduce_only=False):
+    def place_limit_order(self, product_id, size, price, is_buy=True, post_only=False, reduce_only=False, **kwargs):
         return {"digest": "d1", "status": "open"}
 
-    def place_market_order(self, product_id, size, is_buy=True, reduce_only=False):
+    def place_market_order(self, product_id, size, is_buy=True, reduce_only=False, **kwargs):
         return {"digest": "m1", "status": "filled", "price": 100}
 
     def get_open_orders(self, product_id, refresh=False, sender=None):

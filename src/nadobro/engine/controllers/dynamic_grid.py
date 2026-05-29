@@ -135,8 +135,9 @@ class DynamicGridController(Controller):
                                 position_size_quote=cfg.total_amount_quote)
         )
         if not spawned:
+            reason = self.orchestrator.last_spawn_reason(self.id) or "unknown"
             logger.warning(
-                "dgrid spawn_executor refused for pair=%s (controller=%s) — "
-                "risk gate / kill switch / min-notional; no grid placed",
-                self.trading_pair, self.id,
+                "dgrid spawn_executor refused for pair=%s (controller=%s) "
+                "reason=%s — no grid placed (will retry next tick)",
+                self.trading_pair, self.id, reason,
             )

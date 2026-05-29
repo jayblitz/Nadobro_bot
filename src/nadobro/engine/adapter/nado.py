@@ -37,6 +37,7 @@ from src.nadobro.engine.adapter.base import (
     OrderBookSnapshot,
     OrderState,
 )
+from src.nadobro.engine import order_lifecycle, order_tags
 from src.nadobro.engine.types import OrderType, TradeType, _dec
 
 # The sole permitted venue import inside the engine.
@@ -172,6 +173,10 @@ class NadoAdapter(NadoAdapterBase):
         self._products = products
         self._orders: Dict[str, _OrderRef] = {}
         self._registry: OrderRegistry = registry or OrderRegistry()
+        # Phase C: last authoritative status snapshot per digest +
+        # (lifecycle change-seq seen when it was taken). Lets order_status skip
+        # a gateway poll while the WS lifecycle says nothing changed.
+        self._status_cache: Dict[str, tuple[NadoOrder, int]] = {}
 
     # -- product metadata -------------------------------------------------
     def _meta(self, trading_pair: str) -> ProductMeta:
@@ -215,11 +220,27 @@ class NadoAdapter(NadoAdapterBase):
                 leverage,
             )
 
+        # Phase B: tag every engine order with a unique 20-bit client_id so the
+        # WS v2 order_update / fill streams (which echo it back as ``id``) can be
+        # correlated to this controller / executor / grid level. The adapter is
+        # the single choke point for engine orders, so auto-tagging here covers
+        # all strategies without touching each executor.
+        tag = order_tags.allocate_tag()
+        order_tags.register(
+            tag,
+            trading_pair=trading_pair,
+            product_id=meta.product_id,
+            side=side.name,
+            order_type=order_type.name,
+            amount_base=str(amount_base),
+            price=(str(price) if price is not None else None),
+        )
+
         try:
             if order_type is OrderType.MARKET:
                 resp = await asyncio.to_thread(
                     self._client.place_market_order, meta.product_id, amount, is_buy,
-                    reduce_only=reduce_only,
+                    reduce_only=reduce_only, client_id=tag,
                 )
             else:
                 if price is None:
@@ -227,10 +248,13 @@ class NadoAdapter(NadoAdapterBase):
                 resp = await asyncio.to_thread(
                     self._client.place_limit_order, meta.product_id, amount, float(price), is_buy,
                     post_only=order_type is OrderType.LIMIT_MAKER, reduce_only=reduce_only,
+                    client_id=tag,
                 )
         except AdapterError:
+            order_tags.forget(tag=tag)
             raise
         except Exception as exc:  # noqa: BLE001 - normalize venue errors
+            order_tags.forget(tag=tag)
             raise AdapterError(f"place_order failed: {exc}") from exc
 
         # AUDIT-FIX-1: also fail loudly when the client returned a non-raising
@@ -238,9 +262,14 @@ class NadoAdapter(NadoAdapterBase):
         # fund-safety risk because the caller assumes the order is live.
         ok, err = _client_call_succeeded(resp)
         if not ok:
+            order_tags.forget(tag=tag)
             raise AdapterError(f"place_order rejected by venue: {err}")
 
         order = self._order_from_response(resp, trading_pair, side, order_type, amount_base, price)
+        # Link the venue digest to the tag so stream events keyed by EITHER the
+        # client id (tag) OR the digest resolve back to this order's metadata.
+        order_tags.bind_digest(tag, order.id)
+        order_lifecycle.seed(order.id, state=order.state, tag=tag)
         ref = _OrderRef(
             trading_pair, meta.product_id, side, order_type, amount_base, price
         )
@@ -365,6 +394,28 @@ class NadoAdapter(NadoAdapterBase):
         if ref is None:
             raise AdapterError(f"unknown order id: {order_id}")
         self._orders[order_id] = ref
+
+        # Phase C: WS-driven short-circuit. Return the last authoritative
+        # snapshot WITHOUT a gateway poll when the lifecycle (local WS feed, or
+        # the cross-process Redis mirror) proves it's still current. Amounts
+        # always came from REST (below); the lifecycle only gates whether we
+        # re-poll. No entry / stale ⇒ fall through to REST. One lifecycle read
+        # (at most one Redis GET) per call.
+        lc = order_lifecycle.get(order_id)
+        cached = self._status_cache.get(order_id)
+        if cached is not None:
+            snap, seen_seq = cached
+            # A terminal snapshot is permanent — never poll again.
+            if snap.state.is_terminal:
+                return snap
+            if lc is not None and lc.fresh and lc.seq == seen_seq:
+                return snap
+
+        order = await self._order_status_rest(order_id, ref)
+        self._status_cache[order_id] = (order, lc.seq if lc is not None else -1)
+        return order
+
+    async def _order_status_rest(self, order_id: str, ref: _OrderRef) -> NadoOrder:
         try:
             open_orders = await asyncio.to_thread(self._client.get_open_orders, ref.product_id, True)
         except Exception as exc:  # noqa: BLE001

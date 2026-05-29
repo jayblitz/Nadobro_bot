@@ -135,6 +135,10 @@ class ExecutorOrchestrator:
         self._controller_backoff_until: Dict[str, float] = {}
         self._controller_max_transient_fails = DEFAULT_CONTROLLER_MAX_TRANSIENT_FAILS
         self._controller_backoff_cap_s = DEFAULT_CONTROLLER_BACKOFF_CAP_S
+        # Last spawn-rejection/failure reason per controller, so a controller
+        # can report WHY spawn returned False instead of guessing. Cleared on a
+        # successful spawn.
+        self._last_spawn_reason: Dict[str, str] = {}
 
     @property
     def event_log(self) -> List[ExecutorEvent]:
@@ -192,6 +196,7 @@ class ExecutorOrchestrator:
         self, executor: Executor, request: Optional[ExecutorRequest] = None
     ) -> bool:
         if self.is_killed:
+            self._last_spawn_reason[executor.controller_id] = "kill_switch"
             self._emit(
                 ExecutorEvent(
                     kind="spawn_rejected",
@@ -207,6 +212,7 @@ class ExecutorOrchestrator:
                 executor.controller_id, request, state
             )
             if not ok:
+                self._last_spawn_reason[executor.controller_id] = f"risk:{reason}"
                 self._emit(
                     ExecutorEvent(
                         kind="spawn_rejected",
@@ -220,6 +226,7 @@ class ExecutorOrchestrator:
         try:
             await executor.on_create()
         except ExecutorFailed as exc:
+            self._last_spawn_reason[executor.controller_id] = f"executor_failed:{exc}"
             self._emit(
                 ExecutorEvent(
                     kind="failed",
@@ -230,6 +237,7 @@ class ExecutorOrchestrator:
                 )
             )
             return False
+        self._last_spawn_reason.pop(executor.controller_id, None)
         self._emit(
             ExecutorEvent(
                 kind="spawned",
@@ -238,6 +246,12 @@ class ExecutorOrchestrator:
             )
         )
         return True
+
+    def last_spawn_reason(self, controller_id: str) -> Optional[str]:
+        """Why the most recent :meth:`spawn` for this controller returned False
+        (``kill_switch`` / ``risk:<reason>`` / ``executor_failed:<detail>``), or
+        ``None`` if the last spawn succeeded."""
+        return self._last_spawn_reason.get(controller_id)
 
     async def tick(self, executor_id: str) -> None:
         ex = self._executors.get(executor_id)

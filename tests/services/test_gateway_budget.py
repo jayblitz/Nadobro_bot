@@ -26,6 +26,7 @@ def _reset_gateway_state():
         mod._user_buckets.clear()
         mod._user_inflight.clear()
         mod._wallet_buckets.clear()
+        mod._write_ban.clear()
 
 
 def _fresh_module(monkeypatch):
@@ -146,3 +147,71 @@ def test_is_rate_limit_error():
     assert is_rate_limit_error('Too many requests "error_code":1000')
     assert is_rate_limit_error(Exception("error_code=1000"))
     assert not is_rate_limit_error("connection reset")
+
+
+def test_write_circuit_blocks_executes_not_queries(monkeypatch):
+    """An ip_query_only ban parks executes but leaves the read lane open.
+
+    This is the core of the fix: the venue's per-IP write-ban (reads allowed,
+    orders rejected) must short-circuit the execute lane so we stop firing
+    doomed orders into the ban, while queries keep flowing.
+    """
+    mod = _fresh_module(monkeypatch)
+    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    query_url = "https://gateway.mainnet.nado.xyz/query"
+    execute_url = "https://gateway.mainnet.nado.xyz/execute"
+
+    # Before the ban, an execute is allowed.
+    assert mod.try_acquire(execute_url, kind="execute", wallet="0xabc", weight=1) is True
+
+    # Venue returns ip_query_only -> arm the write circuit.
+    mod.record_ip_query_only(execute_url)
+    assert mod.is_write_blocked(execute_url) is True
+
+    # Executes are now parked (host shares the same name).
+    assert mod.try_acquire(execute_url, kind="execute", wallet="0xabc", weight=1) is False
+    # ...but the read/query lane is unaffected.
+    assert mod.try_acquire(query_url, user_id=1, weight=1) is True
+    mod.release(1)
+
+
+def test_write_circuit_clears_on_success(monkeypatch):
+    """A successful write clears the ban so executes resume immediately."""
+    mod = _fresh_module(monkeypatch)
+    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    url = "https://gateway.mainnet.nado.xyz/execute"
+
+    mod.record_ip_query_only(url)
+    assert mod.is_write_blocked(url) is True
+    assert mod.try_acquire(url, kind="execute", wallet="0xabc", weight=1) is False
+
+    mod.clear_write_ban(url)
+    assert mod.is_write_blocked(url) is False
+    assert mod.try_acquire(url, kind="execute", wallet="0xabc", weight=1) is True
+
+
+def test_write_circuit_expires_after_cooldown(monkeypatch):
+    """The ban auto-expires once the cooldown window elapses."""
+    monkeypatch.setenv("NADO_WRITE_BAN_COOLDOWN_SECONDS", "0.05")
+    mod = _fresh_module(monkeypatch)
+    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    url = "https://gateway.mainnet.nado.xyz/execute"
+
+    mod.record_ip_query_only(url)
+    assert mod.is_write_blocked(url) is True
+    time.sleep(0.06)
+    assert mod.is_write_blocked(url) is False
+    assert mod.try_acquire(url, kind="execute", wallet="0xabc", weight=1) is True
+
+
+def test_write_circuit_is_per_host(monkeypatch):
+    """The ban is keyed by host and does not leak across venues."""
+    mod = _fresh_module(monkeypatch)
+    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    banned = "https://gateway.mainnet.nado.xyz/execute"
+    other = "https://gateway.testnet.nado.xyz/execute"
+
+    mod.record_ip_query_only(banned)
+    assert mod.is_write_blocked(banned) is True
+    assert mod.is_write_blocked(other) is False
+    assert mod.try_acquire(other, kind="execute", wallet="0xabc", weight=1) is True
