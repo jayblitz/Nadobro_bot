@@ -42,6 +42,7 @@ import itertools
 import json
 import logging
 import os
+import threading
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,78 @@ def v2_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+# ---------------------------------------------------------------------------
+# Background event loop + sync bridge
+#
+# place_order runs SYNC inside a worker thread (run_blocking_sdk); cancel_orders
+# runs on the main loop. Rather than special-case the caller context, every v2
+# send is submitted to one dedicated daemon loop via run_coroutine_threadsafe.
+# All sockets live on (and are only touched from) that loop, so their state is
+# single-threaded and asyncio-safe regardless of which thread called in.
+# ---------------------------------------------------------------------------
+_bg_loop: "Optional[asyncio.AbstractEventLoop]" = None
+_bg_lock = threading.Lock()
+_sockets: "dict[str, NadoActionWsV2]" = {}
+
+
+def _ensure_bg_loop() -> "asyncio.AbstractEventLoop":
+    """Start (once) a daemon thread running a private event loop for v2 IO."""
+    global _bg_loop
+    with _bg_lock:
+        if _bg_loop is not None and _bg_loop.is_running():
+            return _bg_loop
+        loop = asyncio.new_event_loop()
+
+        def _run() -> None:
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        t = threading.Thread(target=_run, name="nado-ws-v2-loop", daemon=True)
+        t.start()
+        _bg_loop = loop
+        return loop
+
+
+async def _get_socket(network: str) -> "NadoActionWsV2":
+    """Create/reuse one socket per network. Runs ON the bg loop."""
+    sock = _sockets.get(network)
+    if sock is None:
+        sock = NadoActionWsV2(network)
+        _sockets[network] = sock
+    return sock
+
+
+def send_execute_sync(
+    network: str,
+    execute_name: str,
+    inner_body: "dict[str, Any]",
+    *,
+    timeout: "Optional[float]" = None,
+) -> "dict[str, Any]":
+    """Synchronous entry point usable from ANY thread.
+
+    Submits the (already-signed) inner execute body to the per-network v2 socket
+    on the background loop and blocks for the correlated response. Raises on
+    transport failure so the caller can fall back to REST. ``inner_body`` is the
+    unwrapped payload, e.g. the value of ``{"place_order": {...}}``.
+    """
+    loop = _ensure_bg_loop()
+
+    async def _go() -> "dict[str, Any]":
+        sock = await _get_socket(network)
+        if execute_name == "place_order":
+            return await sock.place_order(inner_body, timeout=timeout)
+        if execute_name == "cancel_orders":
+            return await sock.cancel_orders(inner_body, timeout=timeout)
+        if execute_name == "cancel_product_orders":
+            return await sock.cancel_product_orders(inner_body, timeout=timeout)
+        raise ValueError(f"{execute_name} is not routable over the v2 hot-path")
+
+    fut = asyncio.run_coroutine_threadsafe(_go(), loop)
+    wait_s = (timeout if timeout is not None else _DEFAULT_REQUEST_TIMEOUT_SECONDS) + 2.0
+    return fut.result(timeout=wait_s)
 
 
 class NadoActionWsV2:
