@@ -96,6 +96,30 @@ The defenses live in `services/http_session.py`:
 2. If the breaker is stuck open for >5 minutes, escalate to the Nado team
    using the templated message below.
 
+## Production egress IPs (Fly.io `nadobro-bot`, region `ams`)
+
+Static egress is allocated via `fly ips allocate-egress -a nadobro-bot -r ams`.
+List current allocations with `fly ips list -a nadobro-bot` (look for `Type:
+egress`).
+
+Verified 2026-05-30 from inside the running machine (`curl -4`, default curl,
+and Python `SESSION` from `services/http_session.py`):
+
+| Role | IPv4 | IPv6 |
+| --- | --- | --- |
+| **Egress (outbound to Nado)** | **`209.71.105.229`** | `2a09:8280:e601:1:0:dc:1560:0` |
+| Ingress (inbound Telegram webhooks only) | `149.248.205.64` | `2a09:8280:1::dc:1560:0` |
+
+The bot uses IPv4 for Nado REST/SDK calls. Give Nado **`209.71.105.229`** for
+allowlisting; IPv6 is optional.
+
+Re-verify after redeploy or egress changes:
+
+```bash
+fly ssh console -a nadobro-bot -C "curl -4 -s https://ifconfig.me"
+fly ssh console -a nadobro-bot -C 'python3 -c "from src.nadobro.services.http_session import SESSION; print(SESSION.get(\"https://ifconfig.me\", timeout=10).text.strip())"'
+```
+
 ## Templated message to send to Nado
 
 > Hi Nado team — our Telegram bot is consistently being challenged by
@@ -109,8 +133,9 @@ The defenses live in `services/http_session.py`:
 > rule for these paths, or (c) raise the bot score threshold for the
 > `/query` and `/v2/symbols` endpoints?
 >
-> Our service ID is **`<fill-in>`**, our egress IPs are
-> **`<fill-in / contact ops>`**, and we are happy to add any custom header or
+> Our service ID is **`nadobro-bot`**, our egress IPs are
+> **`209.71.105.229`** (IPv4, primary) and optionally
+> `2a09:8280:e601:1:0:dc:1560:0` (IPv6), and we are happy to add any custom header or
 > auth scheme you prefer. Even a 30 rpm shared bucket would unblock the
 > per-user portfolio sync that 1000s of our users rely on.
 >
