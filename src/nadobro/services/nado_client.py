@@ -1932,9 +1932,10 @@ class NadoClient:
         return merged
 
     def sign_stream_authentication(
-        self, *, expiration_ms: Optional[int] = None, sender: Optional[str] = None
+        self, *, expiration_ms: Optional[int] = None, sender: Optional[str] = None,
+        auth_id: int = 0,
     ) -> dict:
-        """Build a signed ``authenticate`` message for the subscriptions WS v2.
+        """Build a signed ``authenticate`` message for the subscriptions (streams) websocket.
 
         The subscriptions gateway (``/v1/subscribe``) requires a one-time
         EIP-712 ``StreamAuthentication`` before subscribing to the
@@ -1981,8 +1982,11 @@ class NadoClient:
         sig = sig if str(sig).startswith("0x") else "0x" + str(sig)
         return {
             "method": "authenticate",
-            "sender": sender_hex if sender_hex.startswith("0x") else "0x" + sender_hex,
-            "expiration": int(expiration_ms),
+            "id": int(auth_id),
+            "tx": {
+                "sender": sender_hex if sender_hex.startswith("0x") else "0x" + sender_hex,
+                "expiration": str(int(expiration_ms)),
+            },
             "signature": sig,
         }
 
