@@ -25,6 +25,28 @@ class _FakeResponse:
         return self._payload
 
 
+class MaskPayloadTests(unittest.TestCase):
+    def test_mask_payload_redacts_hex_keeps_reason_and_caps_length(self):
+        from src.nadobro.services.nado_client import _mask_payload
+
+        raw = (
+            '{"reason":"ip_query_only","blocked":true,'
+            '"sender":"0x1234567890abcdef1234567890abcdef12345678",'
+            '"detail":"signer 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef not authorized"}'
+        )
+        out = _mask_payload(raw)
+        self.assertIn("ip_query_only", out)            # full reason preserved
+        self.assertIn("0x<REDACTED>", out)             # addresses redacted
+        self.assertNotIn("1234567890abcdef", out)
+        self.assertNotIn("deadbeef", out)
+        # short 0x values (e.g. 0x0) are left intact (only 12+ hex runs masked)
+        self.assertEqual(_mask_payload("status 0x0 ok"), "status 0x0 ok")
+        # length is capped
+        capped = _mask_payload("z" * 5000, limit=600)
+        self.assertTrue(capped.endswith("…(truncated)"))
+        self.assertLess(len(capped), 5000)
+
+
 class NadoClientReliabilityTests(unittest.TestCase):
     def test_build_order_appendix_sets_isolated_reduce_only_and_margin(self):
         appendix = NadoClient._build_order_appendix(
