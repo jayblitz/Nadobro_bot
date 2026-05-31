@@ -96,32 +96,75 @@ The defenses live in `services/http_session.py`:
 2. If the breaker is stuck open for >5 minutes, escalate to the Nado team
    using the templated message below.
 
-## Production egress IPs (Fly.io `nadobro-bot`, region `ams`)
+## `ip_read_only` / `ip_query_only` is a GEO-BLOCK — egress must be in an allowed country
 
-Static egress is allocated via `fly ips allocate-egress -a nadobro-bot -r ams`.
-List current allocations with `fly ips list -a nadobro-bot` (look for `Type:
-egress`).
+> ⚠️ **Do not commit real IP addresses to this repo.** Keep actual egress IPs in
+> the Fly dashboard / secrets store / private ops channel. The commands below
+> regenerate them on demand.
 
-Verified 2026-05-30 from inside the running machine (`curl -4`, default curl,
-and Python `SESSION` from `services/http_session.py`):
+**Root cause of strategy orders failing with `{"reason":"ip_read_only","blocked":true}`:**
+Nado rejects *writes* (place/cancel order — reads are unaffected) from any IP
+that **geolocates to a restricted territory** (US, CA, and others). See the list:
+<https://docs.nado.xyz/legal/restricted-territories>. This is a legal/compliance
+block — it is **not** rate limiting (raising the per-IP limit does nothing) and
+**not** a 1CT signer problem (the linked signer reads `verified=True` throughout).
 
-| Role | IPv4 | IPv6 |
-| --- | --- | --- |
-| **Egress (outbound to Nado)** | **`209.71.105.229`** | `2a09:8280:e601:1:0:dc:1560:0` |
-| Ingress (inbound Telegram webhooks only) | `149.248.205.64` | `2a09:8280:1::dc:1560:0` |
+**The trap — Fly region ≠ egress IP geolocation.** A machine in `ams`
+(Amsterdam) can still be assigned a **US-registered** egress IP from Fly's pool
+(AS40509 skews US). Example seen in prod: an `ams` machine egressed via a Fly IP
+that geolocated to **Colorado, US** → every order blocked. So you must verify the
+**geolocation of the actual IP**, not the region.
 
-The bot uses IPv4 for Nado REST/SDK calls. Give Nado **`209.71.105.229`** for
-allowlisting; IPv6 is optional.
-
-Re-verify after redeploy or egress changes:
+### Procedure: obtain an allowed-country egress IP
 
 ```bash
-fly ssh console -a nadobro-bot -C "curl -4 -s https://ifconfig.me"
-fly ssh console -a nadobro-bot -C 'python3 -c "from src.nadobro.services.http_session import SESSION; print(SESSION.get(\"https://ifconfig.me\", timeout=10).text.strip())"'
+# 1. Allocate a dedicated static egress IP (per machine/region):
+fly ips allocate-egress -a <app-name> -r <region>
+
+# 2. List allocations (look for Type: egress):
+fly ips list -a <app-name>
+
+# 3. VERIFY THE COUNTRY Nado sees — this is the check that matters, not the IP:
+fly ssh console -a <app-name> -C "curl -4 -s https://ipinfo.io/country"          # from inside the machine
+curl -s https://ipinfo.io/<egress-ip>/country                                     # for a specific allocated IP
+# cross-check org/region too:
+curl -s https://ipinfo.io/<egress-ip>/json
 ```
+
+- If the country is **NOT** on the restricted list (e.g. `NL`, `JP`, `SG`) →
+  done. Confirm with Nado, then writes should succeed.
+- If it geolocates to **US/CA/restricted** → release it
+  (`fly ips release <egress-ip> -a <app-name>`) and try another region, or
+  **open a Fly support ticket asking for an egress IP that geolocates to a
+  specific allowed country** (Fly's pool is US-heavy, so a clean NL/JP IP may
+  need their help, or a different provider/proxy — see fallback below).
+
+**Re-verify the country after every redeploy / egress change** (Machine
+recreation can drop or change the allocation). Bake a geo-check into the release
+process so a redeploy can't silently land back on a US IP.
+
+Set `NADO_FORCE_IPV4=1` (default in `fly.toml`) so Nado REST/SDK traffic uses
+the static IPv4 egress rather than IPv6 when the destination publishes AAAA
+records.
+
+### Fallback if Fly can't provide an allowed-geo egress
+
+Route Nado traffic through a proxy / small VPS in an allowed country (NL/JP)
+whose IP verifiably geolocates correctly. This requires adding egress-proxy
+support to the bot (SDK engine/indexer/trigger sessions + the pooled
+`http_session.SESSION` + the WS connect) — not yet implemented. Track as a
+follow-up if the Fly-native path doesn't yield a clean IP.
+
+> Compliance: this is only legitimate when correcting a **misclassification**
+> (you operate from a non-restricted country and the IP was mislabeled) — not to
+> serve users actually located in restricted territories. Get sign-off from
+> whoever owns compliance.
 
 ## Templated message to send to Nado
 
+> ⚠️ Fill `<service-id>` and `<egress-ipv4>` in at send time from the ops
+> secret store — do **not** commit the real values here.
+>
 > Hi Nado team — our Telegram bot is consistently being challenged by
 > Cloudflare on `gateway.{mainnet,testnet}.nado.xyz/query` and
 > `archive.{mainnet,testnet}.nado.xyz/v2/symbols`. We see HTTP 403 with the
@@ -133,11 +176,10 @@ fly ssh console -a nadobro-bot -C 'python3 -c "from src.nadobro.services.http_se
 > rule for these paths, or (c) raise the bot score threshold for the
 > `/query` and `/v2/symbols` endpoints?
 >
-> Our service ID is **`nadobro-bot`**, our egress IPs are
-> **`209.71.105.229`** (IPv4, primary) and optionally
-> `2a09:8280:e601:1:0:dc:1560:0` (IPv6), and we are happy to add any custom header or
-> auth scheme you prefer. Even a 30 rpm shared bucket would unblock the
-> per-user portfolio sync that 1000s of our users rely on.
+> Our service ID is **`<service-id>`**, our static egress IPv4 is
+> **`<egress-ipv4>`** (see ops secret store), and we are happy to add any
+> custom header or auth scheme you prefer. Even a 30 rpm shared bucket would
+> unblock the per-user portfolio sync that 1000s of our users rely on.
 >
 > Thanks!
 
