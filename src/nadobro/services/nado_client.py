@@ -3,6 +3,7 @@ import threading
 import time
 import os
 import random
+import re
 import asyncio
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -166,6 +167,22 @@ def _mask_address(value: str) -> str:
     text = str(value or "").strip()
     if text.startswith("0x") and len(text) >= 12:
         return f"{text[:6]}...{text[-4:]}"
+    return text
+
+
+_HEX_RUN_RE = re.compile(r"0x[0-9a-fA-F]{12,}")
+
+
+def _mask_payload(value: object, *, limit: int = 600) -> str:
+    """Render an arbitrary venue payload/exception for diagnostic logging:
+    redact long 0x-hex runs (addresses/digests/subaccounts) and cap length so
+    the FULL server reason is captured without leaking identifiers or spamming
+    logs. Used to surface the complete ``ip_query_only`` body, which the bot
+    previously discarded (only ``product_id`` was logged)."""
+    text = str(value or "")
+    text = _HEX_RUN_RE.sub("0x<REDACTED>", text)
+    if len(text) > limit:
+        text = text[:limit] + "…(truncated)"
     return text
 
 
@@ -1307,6 +1324,10 @@ class NadoClient:
                         _retry_count=_retry_count + 1,
                     )
             if self._result_is_ip_query_only(response):
+                logger.warning(
+                    "cancel_orders rejected ip_query_only product_id=%s n=%d host=%s raw=%s",
+                    product_id, len(clean_digests), self._rest_url(), _mask_payload(response),
+                )
                 return {
                     "success": False,
                     "error": self._friendly_error(str(response)),
@@ -2733,7 +2754,9 @@ class NadoClient:
                     pass
                 logger.warning(
                     "place_order rejected ip_query_only (write circuit armed) "
-                    "product_id=%s sender=%s", product_id, _mask_address(sender_hex),
+                    "product_id=%s sender=%s host=%s raw=%s",
+                    product_id, _mask_address(sender_hex), self._rest_url(),
+                    _mask_payload(result_str),
                 )
                 return {
                     "success": False,
@@ -2772,7 +2795,9 @@ class NadoClient:
                     pass
                 logger.warning(
                     "place_order raised ip_query_only (write circuit armed) "
-                    "product_id=%s", product_id,
+                    "product_id=%s sender=%s host=%s raw=%s",
+                    product_id, _mask_address(sender_hex), self._rest_url(),
+                    _mask_payload(err_str),
                 )
                 return {
                     "success": False,
@@ -3050,8 +3075,9 @@ class NadoClient:
                 except Exception:  # noqa: BLE001
                     pass
                 logger.warning(
-                    "cancel_order rejected ip_query_only (write circuit armed) product_id=%s",
-                    product_id,
+                    "cancel_order rejected ip_query_only (write circuit armed) "
+                    "product_id=%s host=%s raw=%s",
+                    product_id, self._rest_url(), _mask_payload(result),
                 )
                 return {
                     "success": False,
@@ -3075,7 +3101,11 @@ class NadoClient:
                     record_ip_query_only(self._rest_url())
                 except Exception:  # noqa: BLE001
                     pass
-                logger.warning("cancel_order raised ip_query_only (write circuit armed) product_id=%s", product_id)
+                logger.warning(
+                    "cancel_order raised ip_query_only (write circuit armed) "
+                    "product_id=%s host=%s raw=%s",
+                    product_id, self._rest_url(), _mask_payload(err_str),
+                )
                 return {"success": False, "error": err_str, "digest": digest, "rate_limited": True, "ip_query_only": True}
             logger.error(f"cancel_order failed: {e}")
             return {"success": False, "error": err_str}
