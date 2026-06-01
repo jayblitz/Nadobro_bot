@@ -320,6 +320,134 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
             await nado_sync.sync_active_users(reason="test")
             assert nado_sync._active_users_cursor == 0  # wrapped when end reached
 
+    async def test_per_user_timeout_capped_to_remaining_tick_budget(self):
+        """A single wedged user must not run past the tick budget.
+
+        Regression: ``_SYNC_USER_TIMEOUT_SECONDS`` (30s) was >= the sync
+        interval (30s) and > the ~25.5s tick budget, so one wedged SDK call
+        overran the whole interval and APScheduler skipped the next
+        ``sync_active_users`` run. The per-user ``wait_for`` timeout is now
+        bounded by the budget remaining in the tick.
+        """
+        nado_sync._active_users_cursor = 0
+        captured_timeouts = []
+
+        rows = [{"telegram_id": 10, "network": "mainnet"}]
+
+        async def _fast_sync(*args, **kwargs):
+            return None
+
+        async def _capturing_wait_for(coro, timeout=None):
+            captured_timeouts.append(timeout)
+            return await coro  # consume the coroutine so it is awaited
+
+        with patch.object(nado_sync, "active_users", return_value=rows), patch.object(
+            nado_sync, "sync_user", new=_fast_sync
+        ), patch.object(
+            nado_sync, "portfolio_sync_interval_seconds", return_value=10
+        ), patch.object(
+            nado_sync.asyncio, "wait_for", new=_capturing_wait_for
+        ):
+            # tick_budget = max(5.0, 10 * 0.85) = 8.5s
+            await nado_sync.sync_active_users(reason="test")
+
+        assert captured_timeouts, "sync_user was never invoked"
+        # Capped to the remaining budget (~8.5s), well below the 30s per-user
+        # default — so the tick can never overrun its interval.
+        assert captured_timeouts[0] <= 8.6
+        assert captured_timeouts[0] < nado_sync._SYNC_USER_TIMEOUT_SECONDS
+
+    async def test_budget_truncated_timeout_does_not_warn_wedged(self):
+        """A timeout caused by the tick running out of budget (not a dead
+        connection) must NOT log the scary "wedged SDK call" warning — that
+        would re-create the log noise the per-user cap was meant to avoid. It
+        is logged at debug as a retry-next-tick instead.
+        """
+        import asyncio as _asyncio
+
+        nado_sync._active_users_cursor = 0
+        rows = [{"telegram_id": 10, "network": "mainnet"}]
+
+        async def _never_sync(*args, **kwargs):
+            await _asyncio.sleep(100)
+
+        async def _timeout_wait_for(coro, timeout=None):
+            coro.close()  # avoid "coroutine was never awaited"
+            raise _asyncio.TimeoutError
+
+        with patch.object(nado_sync, "active_users", return_value=rows), patch.object(
+            nado_sync, "sync_user", new=_never_sync
+        ), patch.object(
+            nado_sync, "portfolio_sync_interval_seconds", return_value=6
+        ), patch.object(
+            nado_sync.asyncio, "wait_for", new=_timeout_wait_for
+        ):
+            # tick_budget = max(5.0, 6*0.85) = 5.1s; user_timeout = ~5.1 < 30 =>
+            # budget-truncated, not a wedge.
+            with self.assertLogs("src.nadobro.services.nado_sync", level="DEBUG") as cm:
+                await nado_sync.sync_active_users(reason="test")
+
+        joined = "\n".join(cm.output)
+        assert "wedged" not in joined
+        assert "truncated" in joined
+
+    async def test_redis_lock_does_not_block_event_loop(self):
+        """RedisLock acquire/release do synchronous Upstash REST round-trips;
+        they must be offloaded to a thread so they don't starve the event loop
+        (which previously made APScheduler skip check_alerts/sync ticks)."""
+        import asyncio as _asyncio
+        import time as _time
+
+        class _BlockingLock:
+            def __init__(self, *a, **k):
+                pass
+
+            def acquire(self):
+                _time.sleep(0.3)  # synchronous Upstash round-trip
+                return True
+
+            def release(self):
+                _time.sleep(0.1)
+
+        ticks = {"n": 0}
+
+        async def _ticker():
+            # Advances continuously. If the loop were blocked by a synchronous
+            # acquire()/release() (~0.4s total), it could not advance during
+            # that window.
+            while True:
+                ticks["n"] += 1
+                await _asyncio.sleep(0.01)
+
+        async def _fast_sync(*args, **kwargs):
+            return None
+
+        rows = [{"telegram_id": 10, "network": "mainnet"}]
+
+        with patch.dict(
+            "sys.modules",
+            {"src.nadobro.services.upstash_redis": SimpleNamespace(RedisLock=_BlockingLock)},
+        ), patch.object(
+            nado_sync, "active_users", return_value=rows
+        ), patch.object(
+            nado_sync, "sync_user", new=_fast_sync
+        ):
+            ticker = _asyncio.create_task(_ticker())
+            await _asyncio.sleep(0)  # let the ticker start
+            await nado_sync.sync_active_users(reason="test")
+            # Snapshot progress AT completion — before cancelling — so an inline
+            # (loop-blocking) acquire/release would show near-zero ticks here.
+            ticks_at_completion = ticks["n"]
+            ticker.cancel()
+            try:
+                await ticker
+            except _asyncio.CancelledError:
+                pass
+
+        # ~0.4s of offloaded sleeping at 0.01s/tick => tens of ticks. An inline
+        # blocking lock would freeze the loop and leave this near zero.
+        assert ticks_at_completion >= 15
+
     def test_write_matches_increments_session_win_count(self):
         execute_calls = []
         with patch.object(nado_sync, "query_one", return_value=None), patch.object(

@@ -44,7 +44,13 @@ from urllib.parse import urlsplit
 import requests
 from requests.adapters import HTTPAdapter
 
+from src.nadobro.services.ipv4_egress import install_ipv4_only_resolver
+
 logger = logging.getLogger(__name__)
+
+# Before building the shared Session, pin urllib3 to AF_INET when configured.
+# Covers REST, archive, product_catalog, and nado_protocol SDK sessions.
+install_ipv4_only_resolver()
 
 
 # ---------------------------------------------------------------------------
