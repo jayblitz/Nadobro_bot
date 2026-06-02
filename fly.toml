@@ -45,11 +45,11 @@ kill_timeout = 60
   processes = ['app']
 
 [[vm]]
-  memory = '8gb'
+  memory = '2gb'
   cpu_kind = 'performance'
-  cpus = 4
-  memory_mb = 8192
-  size = 'performance-4x'
+  cpus = 1
+  memory_mb = 2048
+  size = 'performance-1x'
 
 [[http_service.checks]]
   interval = "15s"
