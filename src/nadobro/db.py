@@ -66,8 +66,18 @@ def get_pool():
             raise RuntimeError("Neither SUPABASE_DATABASE_URL nor DATABASE_URL environment variable is set.")
         db_label = "Supabase" if os.environ.get("SUPABASE_DATABASE_URL") else "default"
         url = _prepare_db_url(url)
+        # Only force the DB host to IPv4 when IPv4-only egress is explicitly
+        # requested. By default we stay dual-stack: Supabase's direct host often
+        # publishes only AAAA (IPv6) records, so forcing an A lookup logged
+        # "No address associated with hostname" and fell back to the hostname
+        # anyway. Letting psycopg2/libpq resolve dual-stack is simpler and works.
         if db_label == "Supabase":
-            url = _resolve_host_ipv4(url)
+            try:
+                from src.nadobro.services.ipv4_egress import force_ipv4_enabled
+            except Exception:  # pragma: no cover - keep DB init resilient
+                force_ipv4_enabled = lambda: False  # noqa: E731
+            if force_ipv4_enabled():
+                url = _resolve_host_ipv4(url)
         _pool = psycopg2.pool.ThreadedConnectionPool(_DB_POOL_MIN, _DB_POOL_MAX, url)
         _pool_pid = current_pid
         logger.info("PostgreSQL connection pool initialized (%s) min=%s max=%s", db_label, _DB_POOL_MIN, _DB_POOL_MAX)

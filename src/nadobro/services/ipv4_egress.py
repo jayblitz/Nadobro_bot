@@ -1,11 +1,12 @@
-"""Pin outbound Nado traffic to IPv4 for stable Fly egress identity.
+"""Optionally pin outbound Nado traffic to IPv4 for a stable Fly egress identity.
 
-Fly static egress is allocated as an IPv4+IPv6 pair, but Python ``requests``
-and ``websockets`` may prefer IPv6 when the destination publishes AAAA
-records. For Nado rate-limit whitelisting we want the static IPv4 egress
-address consistently.
+Fly static egress is allocated as an IPv4+IPv6 pair, so BOTH addresses are
+stable and can be allowlisted by Nado. Default is now dual-stack: let the OS
+pick IPv4 or IPv6 per destination. Forcing IPv4-only previously broke
+IPv6-only upstreams (e.g. Supabase's direct host publishes only AAAA records,
+which surfaced as "No address associated with hostname").
 
-Set ``NADO_FORCE_IPV4=0`` to disable (e.g. local dev without static egress).
+Set ``NADO_FORCE_IPV4=1`` to opt back into IPv4-only egress.
 """
 from __future__ import annotations
 
@@ -19,8 +20,9 @@ _INSTALLED = False
 
 
 def force_ipv4_enabled() -> bool:
-    raw = os.environ.get("NADO_FORCE_IPV4", "1").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+    # Default off: dual-stack (IPv4 + IPv6). Opt in with NADO_FORCE_IPV4=1.
+    raw = os.environ.get("NADO_FORCE_IPV4", "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def install_ipv4_only_resolver() -> bool:

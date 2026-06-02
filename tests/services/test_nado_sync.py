@@ -391,63 +391,6 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         assert "wedged" not in joined
         assert "truncated" in joined
 
-    async def test_redis_lock_does_not_block_event_loop(self):
-        """RedisLock acquire/release do synchronous Upstash REST round-trips;
-        they must be offloaded to a thread so they don't starve the event loop
-        (which previously made APScheduler skip check_alerts/sync ticks)."""
-        import asyncio as _asyncio
-        import time as _time
-
-        class _BlockingLock:
-            def __init__(self, *a, **k):
-                pass
-
-            def acquire(self):
-                _time.sleep(0.3)  # synchronous Upstash round-trip
-                return True
-
-            def release(self):
-                _time.sleep(0.1)
-
-        ticks = {"n": 0}
-
-        async def _ticker():
-            # Advances continuously. If the loop were blocked by a synchronous
-            # acquire()/release() (~0.4s total), it could not advance during
-            # that window.
-            while True:
-                ticks["n"] += 1
-                await _asyncio.sleep(0.01)
-
-        async def _fast_sync(*args, **kwargs):
-            return None
-
-        rows = [{"telegram_id": 10, "network": "mainnet"}]
-
-        with patch.dict(
-            "sys.modules",
-            {"src.nadobro.services.upstash_redis": SimpleNamespace(RedisLock=_BlockingLock)},
-        ), patch.object(
-            nado_sync, "active_users", return_value=rows
-        ), patch.object(
-            nado_sync, "sync_user", new=_fast_sync
-        ):
-            ticker = _asyncio.create_task(_ticker())
-            await _asyncio.sleep(0)  # let the ticker start
-            await nado_sync.sync_active_users(reason="test")
-            # Snapshot progress AT completion — before cancelling — so an inline
-            # (loop-blocking) acquire/release would show near-zero ticks here.
-            ticks_at_completion = ticks["n"]
-            ticker.cancel()
-            try:
-                await ticker
-            except _asyncio.CancelledError:
-                pass
-
-        # ~0.4s of offloaded sleeping at 0.01s/tick => tens of ticks. An inline
-        # blocking lock would freeze the loop and leave this near zero.
-        assert ticks_at_completion >= 15
-
     def test_write_matches_increments_session_win_count(self):
         execute_calls = []
         with patch.object(nado_sync, "query_one", return_value=None), patch.object(

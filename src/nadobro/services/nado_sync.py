@@ -189,100 +189,74 @@ async def sync_active_users(reason: str = "poll") -> None:
         except Exception:
             pass
 
-    # Lock TTL is slightly longer than our tick budget so a crashed worker's
-    # lock expires before the next tick. If Redis isn't configured the lock
-    # is a no-op (acquires=True) and we fall back to in-process protection.
     tick_budget = max(5.0, portfolio_sync_interval_seconds() * 0.85)
-    lock_ttl = max(15, int(tick_budget) + 10)
-    try:
-        from src.nadobro.services.upstash_redis import RedisLock
-    except Exception:
-        RedisLock = None  # type: ignore
 
-    lock_name = f"portfolio_sync:{reason}"
-    lock_ctx = RedisLock(lock_name, ttl_seconds=lock_ttl) if RedisLock else None
-    if lock_ctx is not None:
-        # RedisLock.acquire()/release() do SYNCHRONOUS Upstash REST round-trips
-        # (requests.post, up to the Upstash timeout each). Calling them inline on
-        # the event loop blocks EVERY other coroutine — alerts, WS, handlers — for
-        # the duration, on every tick. That starvation is what made APScheduler
-        # skip check_alerts (5s) and sync_active_users with "maximum number of
-        # running instances reached". Offload the round-trips to a thread.
-        acquired = await asyncio.to_thread(lock_ctx.acquire)
-        if not acquired:
-            logger.debug("portfolio sync skipped: lock held by another worker (%s)", lock_name)
-            return
+    # No cross-process lock: a single machine runs this job, and APScheduler's
+    # ``max_instances=1`` already prevents overlapping ticks in-process. (The
+    # former Upstash RedisLock was removed with the rest of the Upstash layer;
+    # its synchronous REST round-trips were a source of event-loop starvation.)
     try:
+        rows = await asyncio.to_thread(active_users, _ACTIVE_USERS_PAGE_SIZE, _active_users_cursor)
+    except Exception as exc:
+        logger.warning("portfolio active user query failed: %s", exc)
+        return
+    if not rows:
+        _active_users_cursor = 0
+        return
+
+    poll_cache_ms = portfolio_poll_cache_seconds() * 1000 if reason == "poll" else None
+    deadline = time.monotonic() + tick_budget
+    synced = 0
+
+    for row in rows:
+        remaining = deadline - time.monotonic()
+        if remaining < _MIN_USER_SYNC_BUDGET_SECONDS:
+            logger.debug(
+                "portfolio sync tick budget exhausted after %d users (budget=%.0fs)",
+                synced,
+                tick_budget,
+            )
+            break
+        user_id = int(row.get("telegram_id"))
+        network = str(row.get("network") or "mainnet")
+        # Cap the per-user timeout to the budget left in this tick. With a
+        # bare 30s per-user timeout (>= the 30s sync interval and > the
+        # ~25.5s tick budget), a single user wedged on a dead SDK connection
+        # ran the whole tick past its interval and APScheduler skipped the
+        # next sync_active_users run ("maximum number of running instances
+        # reached"). Bounding by the remaining budget means the tick can
+        # never overrun, so ticks stop piling up.
+        user_timeout = min(_SYNC_USER_TIMEOUT_SECONDS, remaining)
         try:
-            rows = await asyncio.to_thread(active_users, _ACTIVE_USERS_PAGE_SIZE, _active_users_cursor)
-        except Exception as exc:
-            logger.warning("portfolio active user query failed: %s", exc)
-            return
-        if not rows:
-            _active_users_cursor = 0
-            return
-
-        poll_cache_ms = portfolio_poll_cache_seconds() * 1000 if reason == "poll" else None
-        deadline = time.monotonic() + tick_budget
-        synced = 0
-
-        for row in rows:
-            remaining = deadline - time.monotonic()
-            if remaining < _MIN_USER_SYNC_BUDGET_SECONDS:
+            await asyncio.wait_for(
+                sync_user(
+                    user_id,
+                    network=network,
+                    reason=reason,
+                    max_age_ms=poll_cache_ms,
+                ),
+                timeout=user_timeout,
+            )
+        except asyncio.TimeoutError:
+            # Only the FULL per-user timeout signals a wedged connection.
+            # A budget-truncated timeout (user_timeout < the configured
+            # per-user timeout) just means the tick ran out of room — the
+            # user is retried next tick, so don't cry "dead connection".
+            if user_timeout >= _SYNC_USER_TIMEOUT_SECONDS:
+                logger.warning(
+                    "portfolio sync user=%s network=%s exceeded %.0fs budget — "
+                    "likely a wedged SDK call on a dead connection; skipping user "
+                    "so the tick does not stall",
+                    user_id, network, _SYNC_USER_TIMEOUT_SECONDS,
+                )
+            else:
                 logger.debug(
-                    "portfolio sync tick budget exhausted after %d users (budget=%.0fs)",
-                    synced,
-                    tick_budget,
+                    "portfolio sync user=%s network=%s truncated at %.1fs (tick "
+                    "budget); will retry next tick",
+                    user_id, network, user_timeout,
                 )
-                break
-            user_id = int(row.get("telegram_id"))
-            network = str(row.get("network") or "mainnet")
-            # Cap the per-user timeout to the budget left in this tick. With a
-            # bare 30s per-user timeout (>= the 30s sync interval and > the
-            # ~25.5s tick budget), a single user wedged on a dead SDK connection
-            # ran the whole tick past its interval and APScheduler skipped the
-            # next sync_active_users run ("maximum number of running instances
-            # reached"). Bounding by the remaining budget means the tick can
-            # never overrun, so ticks stop piling up.
-            user_timeout = min(_SYNC_USER_TIMEOUT_SECONDS, remaining)
-            try:
-                await asyncio.wait_for(
-                    sync_user(
-                        user_id,
-                        network=network,
-                        reason=reason,
-                        max_age_ms=poll_cache_ms,
-                    ),
-                    timeout=user_timeout,
-                )
-            except asyncio.TimeoutError:
-                # Only the FULL per-user timeout signals a wedged connection.
-                # A budget-truncated timeout (user_timeout < the configured
-                # per-user timeout) just means the tick ran out of room — the
-                # user is retried next tick, so don't cry "dead connection".
-                if user_timeout >= _SYNC_USER_TIMEOUT_SECONDS:
-                    logger.warning(
-                        "portfolio sync user=%s network=%s exceeded %.0fs budget — "
-                        "likely a wedged SDK call on a dead connection; skipping user "
-                        "so the tick does not stall",
-                        user_id, network, _SYNC_USER_TIMEOUT_SECONDS,
-                    )
-                else:
-                    logger.debug(
-                        "portfolio sync user=%s network=%s truncated at %.1fs (tick "
-                        "budget); will retry next tick",
-                        user_id, network, user_timeout,
-                    )
-            _active_users_cursor = max(_active_users_cursor, user_id)
-            synced += 1
-    finally:
-        if lock_ctx is not None:
-            try:
-                # See acquire(): release() also does synchronous Upstash REST
-                # (GET + DEL). Keep it off the event loop.
-                await asyncio.to_thread(lock_ctx.release)
-            except Exception:  # pragma: no cover - release is best-effort
-                logger.debug("portfolio_sync lock release failed", exc_info=True)
+        _active_users_cursor = max(_active_users_cursor, user_id)
+        synced += 1
 
 
 async def sync_user(
