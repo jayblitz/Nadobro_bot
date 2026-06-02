@@ -26,7 +26,11 @@ kill_timeout = 60
   TELEGRAM_WEBHOOK_PATH = "/telegram/webhook"
   TELEGRAM_WEBHOOK_PORT = "8082"
   PORT = "8080"
-  NADO_FORCE_IPV4 = "1"
+  # Allow dual-stack (IPv4 + IPv6) egress. Fly static egress is an IPv4+IPv6
+  # pair, so both are stable for Nado allowlisting; forcing IPv4-only also broke
+  # IPv6-only upstreams (e.g. Supabase direct host → "No address associated
+  # with hostname"). Set to "1" only if a destination must see the IPv4 egress.
+  NADO_FORCE_IPV4 = "0"
   # Portfolio-sync SDK reads (calculate_account_summary, get_trigger_orders,
   # get_matches, get_interest_and_funding_payments) now route through the
   # dedicated SDK thread pool (run_blocking_sdk) instead of the shared default
@@ -45,11 +49,11 @@ kill_timeout = 60
   processes = ['app']
 
 [[vm]]
-  memory = '8gb'
+  memory = '2gb'
   cpu_kind = 'performance'
-  cpus = 4
-  memory_mb = 8192
-  size = 'performance-4x'
+  cpus = 1
+  memory_mb = 2048
+  size = 'performance-1x'
 
 [[http_service.checks]]
   interval = "15s"

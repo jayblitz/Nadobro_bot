@@ -27,11 +27,11 @@ _ALL_PRODUCTS_TTL = int(os.environ.get("NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS", "3
 # design (1m candles go stale fast) but long enough to collapse the per-tick
 # 200-bar fetches that the dgrid candle_provider issues every cycle for every
 # user into a single indexer query per window. Set to 0 to disable.
-_CANDLES_REDIS_TTL = int(os.environ.get("NADO_CANDLES_CACHE_TTL_SECONDS", "30"))
+_CANDLES_CACHE_TTL = int(os.environ.get("NADO_CANDLES_CACHE_TTL_SECONDS", "30"))
 # Product size/price increments are effectively static venue metadata. Cache
 # the parsed map per network so each worker boot reuses one all_products query
 # instead of re-fetching it. Aligns with the catalog hourly refresh.
-_INCREMENTS_REDIS_TTL = int(os.environ.get("NADO_INCREMENTS_CACHE_TTL_SECONDS", "3600"))
+_INCREMENTS_CACHE_TTL = int(os.environ.get("NADO_INCREMENTS_CACHE_TTL_SECONDS", "3600"))
 # Last good full price snapshot per network. Served when the gateway budget
 # is throttling/blocked so callers back off instead of fanning out to one
 # REST call per product (which is what the gateway is meant to prevent).
@@ -56,6 +56,42 @@ _FUNDING_TTL = 10
 # that holds the lock can still call into another locked helper. (Audit
 # 2026-05.)
 _caches_lock = threading.RLock()
+
+# In-process TTL cache shared across calls within this worker process. Replaces
+# the former Upstash (cross-process) cache layer for balance / catalog /
+# increments / candlesticks. On a single-machine deployment a local dict is
+# faster and has no network failure mode; on multi-process worker pools each
+# process keeps its own copy (the previous cross-process sharing was the only
+# thing Upstash bought us, and it is not worth a network round-trip here).
+# Values are returned by reference, matching the existing ``_price_cache``
+# convention — treat reads as read-only.
+_shared_cache: "dict[str, tuple[float, object]]" = {}  # key -> (expires_at, value)
+
+
+def _shared_cache_get(key: str):
+    now = time.time()
+    with _caches_lock:
+        item = _shared_cache.get(key)
+        if not item:
+            return None
+        expires_at, value = item
+        if expires_at < now:
+            _shared_cache.pop(key, None)
+            return None
+        return value
+
+
+def _shared_cache_set(key: str, value, ttl_seconds: int) -> None:
+    if ttl_seconds <= 0:
+        return
+    with _caches_lock:
+        _shared_cache[key] = (time.time() + float(ttl_seconds), value)
+        if len(_shared_cache) > 4096:  # opportunistic eviction to bound memory
+            now = time.time()
+            for k in [k for k, (exp, _v) in _shared_cache.items() if exp < now]:
+                _shared_cache.pop(k, None)
+
+
 _size_increment_cache = {}
 _price_increment_cache = {}
 _size_increment_x18_cache = {}
@@ -641,11 +677,11 @@ class NadoClient:
         # rare and would pollute the shared key. A hit here avoids both the
         # gateway-budget spend and the indexer query entirely.
         candles_redis_key = None
-        if max_time is None and _CANDLES_REDIS_TTL > 0:
+        if max_time is None and _CANDLES_CACHE_TTL > 0:
             candles_redis_key = (
                 f"nado:candles:{self.network}:{int(product_id)}:{timeframe}:{int(limit)}"
             )
-            cached = self._read_cache_redis(candles_redis_key)
+            cached = self._read_shared_cache(candles_redis_key)
             if isinstance(cached, list):
                 return cached
         from src.nadobro.services.nado_weights import query_weight
@@ -698,7 +734,7 @@ class NadoClient:
                     }
                 )
             if candles_redis_key is not None and candles:
-                self._write_cache_redis(candles_redis_key, candles, _CANDLES_REDIS_TTL)
+                self._write_shared_cache(candles_redis_key, candles, _CANDLES_CACHE_TTL)
             return candles
         except Exception as e:
             logger.warning("SDK get_candlesticks failed product_id=%s timeframe=%s: %s", product_id, timeframe, e)
@@ -834,7 +870,7 @@ class NadoClient:
         )
 
         if not force and balance_ttl_seconds > 0:
-            cached = self._read_balance_redis(redis_key)
+            cached = self._read_balance_cache(redis_key)
             if cached is not None:
                 return cached
 
@@ -842,7 +878,7 @@ class NadoClient:
             if not self._gateway_allowed(weight=2):  # subaccount_info: IP weight 2
                 # Throttled by our own gateway budget — try Redis before
                 # surrendering a misleading exists=False.
-                cached = self._read_balance_redis(redis_key)
+                cached = self._read_balance_cache(redis_key)
                 if cached is not None:
                     return cached
                 return {"exists": False, "balances": {}}
@@ -855,7 +891,7 @@ class NadoClient:
                         bal = from_x18(int(sb.balance.amount))
                         balances[sb.product_id] = float(bal)
                 result = {"exists": bool(info.exists), "balances": balances}
-                self._write_balance_redis(redis_key, result, balance_ttl_seconds)
+                self._write_balance_cache(redis_key, result, balance_ttl_seconds)
                 return result
             except Exception as e:
                 self._record_gateway_error(e)
@@ -863,7 +899,7 @@ class NadoClient:
                 # On *any* SDK failure (rate-limit, Cloudflare, transient
                 # network), prefer the last known-good snapshot to a hard
                 # exists=False that downstream UI may render as "not linked".
-                cached = self._read_balance_redis(redis_key)
+                cached = self._read_balance_cache(redis_key)
                 if cached is not None:
                     return cached
             finally:
@@ -880,72 +916,47 @@ class NadoClient:
                     balances[sb["product_id"]] = bal
                 exists = bool(exists_field) if exists_field is not None else bool(balances)
                 result = {"exists": exists, "balances": balances}
-                self._write_balance_redis(redis_key, result, balance_ttl_seconds)
+                self._write_balance_cache(redis_key, result, balance_ttl_seconds)
                 return result
         except Exception as e:
             logger.error(f"REST get_balance failed: {e}")
 
         # REST path also failed — last resort cache before exists=False.
-        cached = self._read_balance_redis(redis_key)
+        cached = self._read_balance_cache(redis_key)
         if cached is not None:
             return cached
         return {"exists": False, "balances": {}}
 
-    def _read_balance_redis(self, redis_key: str) -> Optional[dict]:
-        try:
-            from src.nadobro.services.upstash_redis import get_redis
-            cached = get_redis().get_json(redis_key)
-            if isinstance(cached, dict) and "balances" in cached:
-                # Coerce product_id keys back to int (JSON only has str keys).
-                balances = cached.get("balances") or {}
-                if isinstance(balances, dict):
-                    fixed: dict = {}
-                    for k, v in balances.items():
-                        try:
-                            fixed[int(k)] = float(v)
-                        except (TypeError, ValueError):
-                            fixed[k] = v
-                    cached["balances"] = fixed
-                return cached
-        except Exception as e:  # pragma: no cover - cache is best-effort
-            logger.debug("Upstash balance cache read failed: %s", e)
+    def _read_balance_cache(self, cache_key: str) -> Optional[dict]:
+        cached = _shared_cache_get(cache_key)
+        if isinstance(cached, dict) and "balances" in cached:
+            return cached
         return None
 
-    def _write_balance_redis(self, redis_key: str, value: dict, ttl_seconds: int) -> None:
+    def _write_balance_cache(self, cache_key: str, value: dict, ttl_seconds: int) -> None:
         if ttl_seconds <= 0:
             return
-        try:
-            from src.nadobro.services.upstash_redis import get_redis
-            get_redis().set_json(redis_key, value, ttl_seconds=ttl_seconds)
-        except Exception as e:  # pragma: no cover
-            logger.debug("Upstash balance cache write failed: %s", e)
+        # Store a shallow copy so a later mutation of the returned result can't
+        # corrupt the cached snapshot. Balance dicts are small.
+        snapshot = {
+            "exists": value.get("exists"),
+            "balances": dict(value.get("balances") or {}),
+        }
+        _shared_cache_set(cache_key, snapshot, ttl_seconds)
 
-    # -- generic Upstash cache helpers ------------------------------------
-    # Shared, network-scoped (NOT per-user) JSON cache used to absorb
-    # rate-limit pressure from Nado's per-IP gateway for data that is
-    # effectively static across users — the product catalog and (briefly)
-    # candlesticks. Cross-process: a value cached by one worker is reused by
-    # every other worker on the same network, which is the whole point of
-    # using Upstash over the in-process dict. Best-effort: any Redis failure
-    # falls through to the live SDK path.
+    # -- generic in-process cache helpers ---------------------------------
+    # Network-scoped (NOT per-user) cache used to absorb rate-limit pressure
+    # from Nado's per-IP gateway for data that is effectively static across
+    # users — the product catalog, increments, and (briefly) candlesticks.
+    # Backed by the in-process ``_shared_cache`` (Upstash removed). Best-effort:
+    # a miss falls through to the live SDK path.
     @staticmethod
-    def _read_cache_redis(redis_key: str):
-        try:
-            from src.nadobro.services.upstash_redis import get_redis
-            return get_redis().get_json(redis_key)
-        except Exception as e:  # pragma: no cover - cache is best-effort
-            logger.debug("Upstash cache read failed (%s): %s", redis_key, e)
-            return None
+    def _read_shared_cache(cache_key: str):
+        return _shared_cache_get(cache_key)
 
     @staticmethod
-    def _write_cache_redis(redis_key: str, value, ttl_seconds: int) -> None:
-        if ttl_seconds <= 0:
-            return
-        try:
-            from src.nadobro.services.upstash_redis import get_redis
-            get_redis().set_json(redis_key, value, ttl_seconds=ttl_seconds)
-        except Exception as e:  # pragma: no cover
-            logger.debug("Upstash cache write failed (%s): %s", redis_key, e)
+    def _write_shared_cache(cache_key: str, value, ttl_seconds: int) -> None:
+        _shared_cache_set(cache_key, value, ttl_seconds)
 
     def get_open_orders(self, product_id: int, refresh: bool = False, sender: Optional[str] = None) -> list:
         eff_sender = (sender or "").strip() or self.subaccount_hex
@@ -2031,7 +2042,6 @@ class NadoClient:
     def verify_linked_signer(self, expected_signer_address: str = None, *, use_cache: bool = True) -> dict:
         expected = (expected_signer_address or self.address or "").lower()
         cache_key = (self.network, str(self.subaccount_hex or ""), expected)
-        redis_key = f"linked_signer:{self.network}:{self.subaccount_hex}:{expected}"
         if use_cache and _LINKED_SIGNER_CACHE_TTL_SECONDS > 0:
             cached = _linked_signer_cache.get(cache_key)
             if cached and (time.time() - float(cached.get("ts", 0))) < _LINKED_SIGNER_CACHE_TTL_SECONDS:
@@ -2040,24 +2050,6 @@ class NadoClient:
                 payload = cached.get("payload") or {}
                 if payload.get("verified") and not payload.get("error"):
                     return dict(payload)
-            # Process-local cache missed — try Upstash before paying the
-            # round-trip to Nado. Survives process restart and short rate-limit
-            # windows where the SDK would otherwise return an error.
-            try:
-                from src.nadobro.services.upstash_redis import get_redis
-                redis_payload = get_redis().get_json(redis_key)
-                if (
-                    isinstance(redis_payload, dict)
-                    and redis_payload.get("verified")
-                    and not redis_payload.get("error")
-                ):
-                    _linked_signer_cache[cache_key] = {
-                        "ts": time.time(),
-                        "payload": dict(redis_payload),
-                    }
-                    return dict(redis_payload)
-            except Exception as cache_err:  # pragma: no cover - cache is best-effort
-                logger.debug("Upstash linked-signer cache read failed: %s", cache_err)
 
         result = {
             "verified": False,
@@ -2080,18 +2072,6 @@ class NadoClient:
                             current, expected, result["verified"])
                 if result["verified"]:
                     _linked_signer_cache[cache_key] = {"ts": time.time(), "payload": dict(result)}
-                    try:
-                        from src.nadobro.services.upstash_redis import get_redis
-                        # TTL mirrors the in-process cache so an unlink/relink
-                        # cannot be masked for longer than the existing
-                        # staleness budget. The Redis layer is just a wider
-                        # net for transient query failures, not a new TTL.
-                        get_redis().set_json(
-                            redis_key, dict(result),
-                            ttl_seconds=max(15, int(_LINKED_SIGNER_CACHE_TTL_SECONDS)),
-                        )
-                    except Exception as cache_err:  # pragma: no cover
-                        logger.debug("Upstash linked-signer cache write failed: %s", cache_err)
                 return result
             except Exception as e:
                 logger.warning("SDK get_linked_signer failed: %s", e)
@@ -2120,14 +2100,6 @@ class NadoClient:
 
         if result["verified"] and not result["error"]:
             _linked_signer_cache[cache_key] = {"ts": time.time(), "payload": dict(result)}
-            try:
-                from src.nadobro.services.upstash_redis import get_redis
-                get_redis().set_json(
-                    redis_key, dict(result),
-                    ttl_seconds=max(15, int(_LINKED_SIGNER_CACHE_TTL_SECONDS)),
-                )
-            except Exception as cache_err:  # pragma: no cover
-                logger.debug("Upstash linked-signer cache write failed: %s", cache_err)
         return result
 
     @staticmethod
@@ -2465,7 +2437,7 @@ class NadoClient:
         # the whole network's map from one Upstash entry before falling back to
         # an all_products REST query (a per-IP gateway hit on every worker boot).
         redis_key = f"nado:increments:{self.network}"
-        blob = self._read_cache_redis(redis_key)
+        blob = self._read_shared_cache(redis_key)
         if isinstance(blob, dict) and blob:
             for pid_str, vals in blob.items():
                 try:
@@ -2498,7 +2470,7 @@ class NadoClient:
                 if entry:
                     fresh_blob[str(pid)] = entry
             if fresh_blob:
-                self._write_cache_redis(redis_key, fresh_blob, _INCREMENTS_REDIS_TTL)
+                self._write_shared_cache(redis_key, fresh_blob, _INCREMENTS_CACHE_TTL)
         except Exception as e:
             logger.debug("Could not warm product increment cache for %s: %s", product_id, e)
 
@@ -3287,7 +3259,7 @@ class NadoClient:
         # the gateway into ip_query_only). On a hit, also warm the in-process
         # cache so subsequent same-process calls skip Redis entirely.
         redis_key = f"nado:catalog:{self.network}:products"
-        redis_cached = self._read_cache_redis(redis_key)
+        redis_cached = self._read_shared_cache(redis_key)
         if isinstance(redis_cached, dict) and "perp" in redis_cached and "spot" in redis_cached:
             _ALL_PRODUCTS_CACHE[cache_key] = {"data": redis_cached, "ts": time.time()}
             return redis_cached
@@ -3299,7 +3271,7 @@ class NadoClient:
                     "spot": [{"id": p.product_id} for p in products.spot_products],
                 }
                 _ALL_PRODUCTS_CACHE[cache_key] = {"data": data, "ts": time.time()}
-                self._write_cache_redis(redis_key, data, _ALL_PRODUCTS_TTL)
+                self._write_shared_cache(redis_key, data, _ALL_PRODUCTS_TTL)
                 return data
         except Exception as e:
             logger.error(f"get_all_products_info failed: {e}")
@@ -3671,32 +3643,3 @@ def clear_linked_signer_cache(
                 continue
             if expected == target_addr or (subaccount_hex or "").lower().startswith(addr_no0x):
                 _linked_signer_cache.pop(key, None)
-
-    # Best-effort Redis invalidation. We don't know the subaccount_hex /
-    # network combinations without a SCAN; instead we use a sentinel pattern
-    # so the next verify_linked_signer write overwrites. For a strict
-    # invalidation we'd need SCAN + DEL, which Upstash supports but adds
-    # latency on every unlink — not worth it for the in-memory TTL we already
-    # have. The 60s TTL bounds staleness either way.
-    try:
-        from src.nadobro.services.upstash_redis import get_redis
-
-        redis = get_redis()
-        if not redis.enabled or not target_addr:
-            return
-        nets = (target_net,) if target_net else ("mainnet", "testnet")
-        for net in nets:
-            # We can't reconstruct subaccount_hex deterministically without
-            # importing nado_protocol here; use the same helper the client
-            # uses. Best-effort: fall through silently.
-            try:
-                from nado_protocol.utils.bytes32 import subaccount_to_hex
-
-                subaccount_hex = subaccount_to_hex(target_addr, "default")
-            except Exception:
-                continue
-            redis.delete(
-                f"linked_signer:{net}:{subaccount_hex}:{target_addr}"
-            )
-    except Exception as e:  # pragma: no cover - cache invalidation is best-effort
-        logger.debug("clear_linked_signer_cache Redis delete failed: %s", e)
