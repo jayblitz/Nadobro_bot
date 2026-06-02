@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from src.nadobro.services.ipv4_egress import websocket_connect_kwargs
 from src.nadobro.services.ws_health import mark_connected, mark_disconnected, touch
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,7 @@ class NadoPortfolioWs:
             ping_interval=20,
             ping_timeout=20,
             compression="deflate",
+            **websocket_connect_kwargs(),
         ) as ws:
             # 1) Authenticate. Only ``order_update`` requires auth; we send
             #    authenticate once up-front so it is in place before subscribe.

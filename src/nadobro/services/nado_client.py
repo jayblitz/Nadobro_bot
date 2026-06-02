@@ -106,6 +106,13 @@ def _limit_order_expiration_seconds() -> int:
 # through. The shared SESSION already mounts pool-sized HTTPS/HTTP adapters.
 from src.nadobro.services.http_session import SESSION as _rest_session  # noqa: E402
 
+# Per-user portfolio-sync reads run their blocking SDK work in the dedicated
+# SDK thread pool, not the shared default executor that asyncio.to_thread uses.
+# This isolates wedge-prone background polling from latency-critical paths
+# (order execution, WS auth, Telegram-reply DB reads) that also fan work out to
+# the default executor — a poll storm can no longer starve them.
+from src.nadobro.services.async_utils import run_blocking_sdk  # noqa: E402
+
 
 def _install_session_timeout(session, timeout) -> bool:
     """Force a default ``timeout`` onto a ``requests.Session`` instance.
@@ -1169,7 +1176,11 @@ class NadoClient:
         if not self._ensure_sdk_client():
             return []
         from src.nadobro.services.nado_weights import query_weight
-        if not self._gateway_allowed(
+        # _gateway_allowed -> try_acquire can time.sleep() on a starved token
+        # bucket. This runs in the coroutine body (not inside _call), so doing it
+        # inline would block the event loop. Run it in the SDK pool.
+        if not await run_blocking_sdk(
+            self._gateway_allowed,
             weight=query_weight("matches", {"limit": limit, "subaccounts": [self.subaccount_hex]}),
             url=self._archive_url(),
             user_scoped=False,
@@ -1189,7 +1200,7 @@ class NadoClient:
                 )
                 return self.client.context.indexer_client.get_matches(params)
 
-            data = await asyncio.to_thread(_call)
+            data = await run_blocking_sdk(_call)
             rows = getattr(data, "matches", None)
             if rows is None and isinstance(data, dict):
                 rows = data.get("matches")
@@ -1212,7 +1223,10 @@ class NadoClient:
         """
         if not self._ensure_sdk_client():
             return []
-        if not self._gateway_allowed(weight=5, url=self._archive_url(), user_scoped=False):
+        # Run the (potentially sleeping) token-bucket gate in the SDK pool.
+        if not await run_blocking_sdk(
+            self._gateway_allowed, weight=5, url=self._archive_url(), user_scoped=False
+        ):
             return []  # interest & funding payments: IP weight 5
         try:
             from nado_protocol.indexer_client.types.query import IndexerInterestAndFundingParams
@@ -1232,7 +1246,7 @@ class NadoClient:
                 )
                 return self.client.context.indexer_client.get_interest_and_funding_payments(params)
 
-            data = await asyncio.to_thread(_call)
+            data = await run_blocking_sdk(_call)
             plain = self._to_plain(data)
             if isinstance(plain, dict):
                 payments = []
@@ -1268,7 +1282,7 @@ class NadoClient:
                 )
                 return manager.calculate_account_summary()
 
-            return self._to_plain(await asyncio.to_thread(_call)) or {}
+            return self._to_plain(await run_blocking_sdk(_call)) or {}
         except Exception as e:
             logger.error("SDK calculate_account_summary failed: %s", _format_sdk_error(e))
             raise RuntimeError(f"SDK calculate_account_summary failed: {_format_sdk_error(e)}") from e
@@ -1362,7 +1376,8 @@ class NadoClient:
             if strict:
                 raise RuntimeError("Trigger client unavailable for trigger-order sync")
             return []
-        if not self._gateway_allowed(weight=5, user_scoped=False):
+        # Run the (potentially sleeping) token-bucket gate in the SDK pool.
+        if not await run_blocking_sdk(self._gateway_allowed, weight=5, user_scoped=False):
             return []  # trigger-service list query; conservative weight
         try:
             from nado_protocol.trigger_client.types.query import (
@@ -1382,7 +1397,7 @@ class NadoClient:
                 digests=digests,
                 limit=int(limit),
             )
-            response = await asyncio.to_thread(trigger_client.list_trigger_orders, params)
+            response = await run_blocking_sdk(trigger_client.list_trigger_orders, params)
             data = getattr(response, "data", None)
             rows = getattr(data, "orders", None)
             if rows is None and isinstance(data, dict):
