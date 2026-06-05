@@ -4,7 +4,7 @@
 #
 
 app = 'nadobro-bot'
-primary_region = 'nrt'
+primary_region = 'fra'
 kill_signal = 'SIGTERM'
 kill_timeout = 60
 
