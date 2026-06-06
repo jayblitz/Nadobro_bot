@@ -226,7 +226,20 @@ def install_test_stubs() -> None:
         eth_account_mod.Account = _Account
         sys.modules["eth_account"] = eth_account_mod
 
-    # httpx
+    # httpx — prefer the real package when it's installed. The stub below only
+    # defines AsyncClient/HTTPStatusError; installing it unconditionally (when
+    # httpx merely hasn't been imported *yet*) poisons sys.modules so a later
+    # ``from httpx import URL, Proxy, Timeout, ...`` (openai does this, pulled in
+    # via knowledge_service) fails at collection. Only fall back to the stub if
+    # the real httpx genuinely isn't importable.
+    if "httpx" not in sys.modules:
+        try:
+            import httpx  # noqa: F401  (registers the real module in sys.modules)
+        except ImportError:
+            _install_httpx_stub()
+
+
+def _install_httpx_stub():
     if "httpx" not in sys.modules:
         httpx_mod = types.ModuleType("httpx")
 

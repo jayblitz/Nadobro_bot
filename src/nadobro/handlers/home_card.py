@@ -35,13 +35,31 @@ from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
 from src.nadobro.services.points_service import get_points_dashboard
 from src.nadobro.services.referral_service import get_referral_dashboard
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk_capped
 from src.nadobro.services.perf import timed_metric
+
+# Wall-clock ceiling for the data views (positions/wallet) that still issue a
+# live SDK call on the click path. Generous enough for a warm gateway, short
+# enough that a hung host yields a "refreshing" placeholder instead of a 30s
+# freeze. These also run on the SDK pool (not the misc pool) so a slow gateway
+# can never starve unrelated DB reads. Tunable via env.
+import os as _os
+
+_DATA_VIEW_CEILING_SECONDS = float(_os.environ.get("NADO_DATA_VIEW_CEILING_SECONDS", "6.0"))
 
 logger = logging.getLogger(__name__)
 
 HOME_CARD_KEY = "home_card_message"
 KEYBOARD_REMOVED_KEY = "dual_mode_keyboard_removed"
+
+# Dedupe in-flight balance warms so rapid taps during the refresh window don't
+# pile redundant gateway fetches onto the SDK pool. {subaccount_hex: ts}.
+import threading as _threading
+import time as _time
+
+_warm_lock = _threading.Lock()
+_warm_inflight: dict[str, float] = {}
+_WARM_DEDUPE_SECONDS = 10.0
 
 
 def build_home_card_text(telegram_id: int) -> str:
@@ -54,8 +72,16 @@ def build_home_card_text(telegram_id: int) -> str:
     try:
         client = get_user_readonly_client(telegram_id)
         if client:
-            balance = client.get_balance()
-            if balance and balance.get("exists"):
+            # PERF: render from the in-process balance cache only — a tap must
+            # never block on the gateway (a throttled host can hang the call to
+            # the full ~30s SDK timeout, which is the root cause of the slow
+            # button). On a cache miss we show "updating…" and warm the cache
+            # off-thread so the next render is instant + fresh.
+            balance = client.get_balance(cache_only=True)
+            if balance and balance.get("pending"):
+                balance_str = "updating…"
+                _warm_balance_async(client)
+            elif balance and balance.get("exists"):
                 raw = (balance.get("balances", {}) or {}).get(0, 0)
                 if not raw:
                     raw = (balance.get("balances", {}) or {}).get("0", 0)
@@ -64,6 +90,38 @@ def build_home_card_text(telegram_id: int) -> str:
         pass
 
     return fmt_home_command_center_card(network, balance_str)
+
+
+def _warm_balance_async(client) -> None:
+    """Fire-and-forget refresh of the balance cache on the SDK thread pool.
+
+    Keeps the gateway call off the click path while ensuring the next card
+    render serves a fresh value. Deduped + best-effort: a failed/slow warm just
+    leaves the previous display value in place.
+    """
+    try:
+        key = str(getattr(client, "subaccount_hex", "") or id(client))
+        now = _time.time()
+        with _warm_lock:
+            last = _warm_inflight.get(key, 0.0)
+            if now - last < _WARM_DEDUPE_SECONDS:
+                return
+            _warm_inflight[key] = now
+        from src.nadobro.services.async_utils import _sdk_pool
+
+        _sdk_pool.submit(_safe_warm_balance, client, key)
+    except Exception:
+        pass
+
+
+def _safe_warm_balance(client, key: str) -> None:
+    try:
+        client.get_balance(force=True)
+    except Exception:
+        pass
+    finally:
+        with _warm_lock:
+            _warm_inflight.pop(key, None)
 
 
 async def build_home_card_text_async(telegram_id: int) -> str:
@@ -273,6 +331,13 @@ def _view_settings_text(telegram_id: int):
     return msg, settings_kb(lev, slip)
 
 
+def _refreshing_placeholder(message_key: str):
+    return (
+        localize_text(message_key, get_active_language()),
+        home_card_kb(),
+    )
+
+
 async def resolve_home_view(callback_data: str, telegram_id: int):
     if callback_data in ("market:view", "nav:market_radar", "market:radar", "home:market_radar"):
         callback_data = "points:view"
@@ -281,11 +346,21 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
     if callback_data == "nav:strategy_hub":
         return _view_strategy_text()
     if callback_data == "wallet:view":
-        return await run_blocking(_view_wallet_text, telegram_id)
+        # SDK pool + bounded cap: keep the live signer/balance read off the misc
+        # pool and never let a hung gateway freeze the tap.
+        return await run_blocking_sdk_capped(
+            _view_wallet_text, telegram_id,
+            timeout_seconds=_DATA_VIEW_CEILING_SECONDS,
+            default=_refreshing_placeholder("⏳ Refreshing wallet… tap again in a moment\\."),
+        )
     if callback_data == "portfolio:view":
         return await _view_portfolio_text(telegram_id)
     if callback_data == "pos:view":
-        return await run_blocking(_view_positions_text, telegram_id)
+        return await run_blocking_sdk_capped(
+            _view_positions_text, telegram_id,
+            timeout_seconds=_DATA_VIEW_CEILING_SECONDS,
+            default=_refreshing_placeholder("⏳ Refreshing positions… tap again in a moment\\."),
+        )
     if callback_data == "points:view":
         return await run_blocking(_view_points_text, telegram_id)
     if callback_data == "refer:view":
@@ -299,7 +374,11 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
 
 async def open_home_card_view_from_message(update, context: CallbackContext, telegram_id: int, callback_data: str):
     if callback_data == "wallet:view":
-        text, kb = await run_blocking(build_wallet_view_payload, telegram_id, context, True)
+        text, kb = await run_blocking_sdk_capped(
+            build_wallet_view_payload, telegram_id, context, True,
+            timeout_seconds=_DATA_VIEW_CEILING_SECONDS,
+            default=_refreshing_placeholder("⏳ Refreshing wallet… tap again in a moment\\."),
+        )
         await _edit_or_send_card(update, context, text, kb, prefer_reply_to_message=True)
         return
     text, kb = await resolve_home_view(callback_data, telegram_id)

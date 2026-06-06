@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import time
 from collections import defaultdict, deque
@@ -7,6 +8,18 @@ from contextlib import contextmanager
 logger = logging.getLogger(__name__)
 
 _MAX_SAMPLES = 400
+
+# --- Service-level objectives ---------------------------------------------
+# A single slow call already logs via ``log_slow``; the SLO check is the
+# aggregate early-warning: it fires when the *p95* over the recent window
+# crosses the target, which is the signal that the gateway/event-loop is
+# degrading for everyone (not just one unlucky tap). Tunable via env.
+_SLO_THRESHOLDS_MS: dict[str, float] = {
+    "callback.total": float(os.environ.get("NADO_SLO_CALLBACK_P95_MS", "1000")),
+    "message.total": float(os.environ.get("NADO_SLO_MESSAGE_P95_MS", "2500")),
+    "card.home.build": float(os.environ.get("NADO_SLO_HOME_BUILD_P95_MS", "250")),
+}
+_SLO_MIN_SAMPLES = int(os.environ.get("NADO_SLO_MIN_SAMPLES", "20"))
 _metrics: dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_SAMPLES))
 _counters: dict[str, int] = defaultdict(int)
 _lock = threading.Lock()
@@ -105,3 +118,28 @@ def log_slow(metric: str, threshold_ms: float, started_at: float) -> None:
     record_metric(metric, elapsed_ms)
     if elapsed_ms >= threshold_ms:
         logger.warning("%s slow-path %.2fms", metric, elapsed_ms)
+
+
+def check_slo() -> list[str]:
+    """Evaluate p95 of each tracked SLO metric against its target.
+
+    Returns a list of human-readable breach lines (also logged at WARNING) so a
+    scheduler tick or /ops view can surface sustained degradation. Empty list =
+    all SLOs healthy. Cheap: reads the in-memory metric window only.
+    """
+    snap = snapshot()
+    breaches: list[str] = []
+    for metric, threshold_ms in _SLO_THRESHOLDS_MS.items():
+        data = snap.get(metric)
+        if not data or data["count"] < _SLO_MIN_SAMPLES:
+            continue
+        if data["p95_ms"] >= threshold_ms:
+            increment_counter(f"slo.breach.{metric}")
+            line = (
+                f"SLO breach {metric}: p95={data['p95_ms']:.0f}ms "
+                f"(target {threshold_ms:.0f}ms) p50={data['p50_ms']:.0f}ms "
+                f"max={data['max_ms']:.0f}ms n={data['count']}"
+            )
+            logger.warning(line)
+            breaches.append(line)
+    return breaches

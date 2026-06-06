@@ -41,11 +41,18 @@ async def run_sampler_once(
     portfolio: Portfolio, user_ids: List[int], now: Optional[datetime] = None
 ) -> int:
     """Snapshot each user once. Returns the number of rows written."""
+    from src.nadobro.services.portfolio_service import PortfolioSnapshotUnavailable
+
     written = 0
     for uid in user_ids:
         try:
             await portfolio.sample(uid, now)
             written += 1
+        except PortfolioSnapshotUnavailable as e:
+            # Expected for users who haven't linked / funded a wallet yet.
+            # Logging a full traceback every 60s for each such user is what
+            # turns the logs into noise — keep it to a single debug line.
+            logger.debug("portfolio sample skipped for user %s: %s", uid, e)
         except Exception:  # noqa: BLE001 - one bad user shouldn't kill the loop
             logger.warning("portfolio sample failed for user %s", uid, exc_info=True)
     return written
@@ -362,7 +369,13 @@ def list_active_user_ids(days: int = 1) -> List[int]:
     from src.nadobro.db import query_all
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    # Only sample users who actually have a linked wallet. Sampling wallet-less
+    # users just raised PortfolioSnapshotUnavailable every 60s (one burned
+    # snapshot + one log line per user); filtering at the source removes both
+    # the wasted SDK-pool work and the log noise.
     rows = query_all(
-        "SELECT telegram_id FROM users WHERE last_active >= %s", (cutoff,)
+        "SELECT telegram_id FROM users "
+        "WHERE last_active >= %s AND main_address IS NOT NULL AND main_address <> ''",
+        (cutoff,),
     )
     return [r["telegram_id"] for r in rows or []]
