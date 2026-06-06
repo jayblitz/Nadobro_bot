@@ -67,6 +67,11 @@ _caches_lock = threading.RLock()
 # convention — treat reads as read-only.
 _shared_cache: "dict[str, tuple[float, object]]" = {}  # key -> (expires_at, value)
 
+# Long-lived "last known balance" copy for the click/render path. The live
+# balance still uses NADO_BALANCE_CACHE_TTL_SECONDS (30s); this only backs the
+# non-blocking display read so a tap never falls through to the gateway.
+_BALANCE_DISPLAY_TTL = int(os.environ.get("NADO_BALANCE_DISPLAY_TTL_SECONDS", "900") or "900")
+
 
 def _shared_cache_get(key: str):
     now = time.time()
@@ -843,7 +848,7 @@ class NadoClient:
             pass
         return {}
 
-    def get_balance(self, force: bool = False) -> dict:
+    def get_balance(self, force: bool = False, cache_only: bool = False) -> dict:
         # Redis cache layer. Three-fold purpose:
         #   1. Smooth over transient "Too Many Requests" on query_subaccount_info
         #      so callers that conflate exists=False with "not linked" don't
@@ -873,6 +878,17 @@ class NadoClient:
             cached = self._read_balance_cache(redis_key)
             if cached is not None:
                 return cached
+
+        # PERF (click path): never block a button tap on the gateway. Return the
+        # freshest cached value, else the long-lived display copy, else a
+        # pending sentinel the UI can render as "updating…". The caller is
+        # expected to warm the cache out-of-band (background SDK pool submit or
+        # the portfolio sync tick) so the next render is fresh.
+        if cache_only:
+            disp = self._read_balance_cache(redis_key) or self._read_balance_cache(f"{redis_key}:display")
+            if disp is not None:
+                return disp
+            return {"exists": False, "balances": {}, "pending": True}
 
         if self._initialized and self.client:
             if not self._gateway_allowed(weight=2):  # subaccount_info: IP weight 2
@@ -943,6 +959,14 @@ class NadoClient:
             "balances": dict(value.get("balances") or {}),
         }
         _shared_cache_set(cache_key, snapshot, ttl_seconds)
+        # PERF: also keep a long-lived "display" copy. The click path
+        # (``cache_only=True``) renders the home/dashboard card from this
+        # without ever touching the gateway, so a tap is a microsecond memory
+        # read instead of a 5–30s blocking ``get_subaccount_info`` on a
+        # throttled / ip_query_only host. Staleness is bounded by how often a
+        # real fetch refreshes it; freshness for the live number still comes
+        # from the short-TTL key above.
+        _shared_cache_set(f"{cache_key}:display", snapshot, _BALANCE_DISPLAY_TTL)
 
     # -- generic in-process cache helpers ---------------------------------
     # Network-scoped (NOT per-user) cache used to absorb rate-limit pressure

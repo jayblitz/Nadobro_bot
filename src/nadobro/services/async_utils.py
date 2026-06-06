@@ -49,6 +49,34 @@ async def run_blocking_sdk(func: Callable[P, R], *args: P.args, **kwargs: P.kwar
     return await _run_in(_sdk_pool, func, *args, **kwargs)
 
 
+# Default wall-clock ceiling for an SDK call that sits on a user-facing render
+# path. The Nado SDK session timeout is read=12s × up-to-3 sessions (~30s), which
+# is far too long to make a Telegram tap wait. ``run_blocking_sdk_capped`` bounds
+# the *await* so the handler returns a placeholder; the underlying thread keeps
+# running (it warms the cache for the next render) — we just stop blocking on it.
+_SDK_CALL_CEILING_SECONDS = float(os.environ.get("NADO_SDK_CALL_CEILING_SECONDS", "1.5"))
+
+
+async def run_blocking_sdk_capped(
+    func: Callable[P, R],
+    *args: P.args,
+    timeout_seconds: float | None = None,
+    default: R = None,  # type: ignore[assignment]
+    **kwargs: P.kwargs,
+) -> R:
+    """Run a blocking SDK call on the SDK pool with a hard wall-clock cap.
+
+    On timeout, returns ``default`` immediately instead of blocking the click
+    path for the full SDK timeout chain. The orphaned thread runs to completion
+    (Python can't cancel it) and typically warms the relevant cache.
+    """
+    ceiling = _SDK_CALL_CEILING_SECONDS if timeout_seconds is None else timeout_seconds
+    try:
+        return await asyncio.wait_for(run_blocking_sdk(func, *args, **kwargs), timeout=ceiling)
+    except asyncio.TimeoutError:
+        return default
+
+
 def pool_stats() -> dict[str, int]:
     return {
         "db_workers": _DB_WORKERS,

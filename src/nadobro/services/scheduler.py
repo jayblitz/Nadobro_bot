@@ -727,6 +727,16 @@ async def tick_edge_scanner():
         logger.error("Edge scanner tick failed: %s", e)
 
 
+async def tick_perf_slo():
+    """Aggregate SLO watchdog: warn when click/message p95 degrades fleet-wide."""
+    try:
+        from src.nadobro.services.perf import check_slo
+
+        check_slo()
+    except Exception as e:
+        logger.debug("perf SLO tick failed: %s", e)
+
+
 async def initial_ai_setup():
     """Run initial AI setup: KB indexing + first edge scan."""
     try:
@@ -853,6 +863,10 @@ def start_scheduler():
             replace_existing=True,
             **_LONG_TICK,
         )
+    scheduler.add_job(
+        tick_perf_slo, "interval", seconds=60,
+        id="perf_slo", replace_existing=True, **_SHORT_TICK,
+    )
     scheduler.add_job(initial_ai_setup, "date", id="initial_ai_setup", replace_existing=True)
     scheduler.start()
     logger.info(
