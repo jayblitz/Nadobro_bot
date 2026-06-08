@@ -16,7 +16,7 @@ import logging
 import os
 import time
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from src.nadobro.engine.adapter.base import NadoAdapterBase
 from src.nadobro.engine.controllers.controller_base import Controller, ControllerState
@@ -330,17 +330,31 @@ def map_strategy_config(
         # NO_ORDERS_AUDIT-FIX-R1: DN config keys for DeltaNeutralController.
         # The controller expects trading_pair_long/short, hedge_ratio,
         # leg_amount_quote, max_drift_pct, and barriers. ``product`` here is
-        # the base symbol (e.g. "BTC"); the long leg is the SPOT pair and the
-        # short leg is the PERP. The adapter resolves the trading_pair string
-        # against the product catalog via build_product_meta_from_catalog.
+        # the base symbol (e.g. "QQQ"); the long leg is the SPOT pair and the
+        # short leg is the PERP. run_engine_cycle resolves the real per-leg
+        # product_ids + isolated flag via get_dn_pair (see _materialize_dn_leg_meta).
         from src.nadobro.engine.types import TripleBarrierConfig as _TBC
 
         base = str(product or "").upper().split("-", 1)[0]
-        long_pair = f"{base}-USDC0"        # spot leg
+        # Nado spot is quoted/collateralized in USDT0 (see config SPOT ids).
+        # The real spot product_id is resolved from the catalog in
+        # _materialize_dn_leg_meta — this string is the display/inventory key.
+        long_pair = f"{base}-USDT0"        # spot leg
         short_pair = f"{base}-PERP"         # perp leg
         hedge_ratio = Decimal(str(_f(settings, "dn_hedge_ratio", 1.0)))
         leg_quote = Decimal(str(_f(settings, "fixed_margin_usd", notional)))
         max_drift = Decimal(str(_f(settings, "dn_max_drift_pct", 5.0))) / Decimal(100)
+        # Hold duration: default 1h, clamp [60s, 24h]. The controller owns this
+        # timer and closes BOTH legs together at expiry.
+        hold_seconds = int(max(60.0, min(_f(settings, "dn_hold_seconds", 3600.0), 86400.0)))
+        # Volume-farming: repeat open->hold->close N times with a gap between.
+        cycles = int(max(1.0, _f(settings, "dn_cycles", 1.0)))
+        cycle_gap_seconds = int(max(0.0, _f(settings, "dn_cycle_gap_seconds", 30.0)))
+        # Per-leg TP/SL are OFF by default for DN: a one-sided TP would close a
+        # single leg early and break the hedge. Only honor them if the operator
+        # explicitly opts in via dn_leg_tp_pct / dn_leg_sl_pct.
+        leg_tp = Decimal(str(_f(settings, "dn_leg_tp_pct", 0.0))) / Decimal(100)
+        leg_sl = Decimal(str(_f(settings, "dn_leg_sl_pct", 0.0))) / Decimal(100)
         return {
             "trading_pair": long_pair,  # for parent base-class .trading_pair if read
             "trading_pair_long": long_pair,
@@ -348,8 +362,13 @@ def map_strategy_config(
             "hedge_ratio": hedge_ratio,
             "leg_amount_quote": leg_quote,
             "max_drift_pct": max_drift,
-            "barriers": _TBC(take_profit=tp or None, stop_loss=sl or None),
-            "leverage": leverage,
+            "hold_seconds": hold_seconds,
+            "cycles": cycles,
+            "cycle_gap_seconds": cycle_gap_seconds,
+            "barriers": _TBC(take_profit=leg_tp or None, stop_loss=leg_sl or None),
+            # Strictly 1x short by design (margin = full notional). Surfaced so
+            # the adapter sizes isolated margin correctly for the perp leg.
+            "leverage": 1,
         }
     if strategy == "vol":
         interval = max(1.0, _f(settings, "interval_seconds", 60))
@@ -456,32 +475,174 @@ def map_risk_limits(settings: Dict[str, Any]) -> RiskLimits:
     )
 
 
+def _opt_int(value: object) -> Optional[int]:
+    """``int(value)`` or ``None`` if missing/unparseable (typed so mypy is happy
+    with ``Any | None`` catalog fields)."""
+    if value is None:
+        return None
+    try:
+        return int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+
+
+def _x18_dec(value: object, default: str) -> Decimal:
+    """Convert an x18-scaled catalog field (stored as an int-ish string, value
+    × 1e18) to a real Decimal. Falls back to ``default`` when missing/unparseable
+    — but a legitimate 0 is preserved."""
+    if value is None:
+        return _dec(default)
+    try:
+        return _dec(str(int(str(value)))) / _dec(10 ** 18)
+    except (TypeError, ValueError):
+        try:
+            return _dec(value)
+        except Exception:  # noqa: BLE001
+            return _dec(default)
+
+
 def build_product_meta_from_catalog(client: object) -> Dict[str, object]:
-    """Best-effort {trading_pair -> ProductMeta} from the live product catalog.
-    Field names confirmed via the live catalog on testnet; defensive here."""
+    """{trading_pair -> ProductMeta} from the live product catalog, with each
+    product's real tick_size / lot_size / min_notional plus is_perp /
+    isolated_only.
+
+    The previous implementation expected ``client.get_all_products_info()`` to
+    return a ``"products"`` list of richly-described dicts, but that method
+    actually returns ``{"perp": [{"id": ...}], "spot": [{"id": ...}]}`` — so it
+    produced an EMPTY dict and every engine strategy silently fell back to the
+    permissive ``ProductMeta(pid, 0.01, 0.001, 1)`` with wrong increments. We now
+    read the resolved perp + spot catalogs (which carry the x18-scaled
+    increments and the isolated_only flag) and key each product under its base,
+    canonical symbol, and — for perps — the ``BASE-PERP`` alias, so whichever
+    string a strategy uses for ``trading_pair`` resolves.
+    """
     from src.nadobro.engine.adapter.nado import ProductMeta
+    from src.nadobro.services import product_catalog as pc
 
     out: Dict[str, object] = {}
+    network = str(getattr(client, "network", None) or "mainnet")
+
+    def _register(meta: object, keys: Iterable[str], *, overwrite: bool) -> None:
+        for key in keys:
+            k = str(key or "").strip()
+            if k and (overwrite or k not in out):
+                out[k] = meta
+
+    # Perps: id + price/size increments + min notional + isolated flag.
     try:
-        catalog = client.get_all_products_info()  # type: ignore[attr-defined]
+        perps = (pc.get_catalog(network=network, client=client) or {}).get("perps") or {}
     except Exception:  # noqa: BLE001
-        logger.warning("product catalog unavailable", exc_info=True)
-        return out
-    items = catalog if isinstance(catalog, list) else (catalog or {}).get("products", [])
-    for p in items or []:
-        if not isinstance(p, dict):
+        logger.warning("perp catalog unavailable", exc_info=True)
+        perps = {}
+    for base, row in (perps.items() if isinstance(perps, dict) else []):
+        if not isinstance(row, dict):
             continue
-        pair = str(p.get("symbol") or p.get("product_name") or p.get("name") or "")
-        pid = p.get("product_id") or p.get("id")
-        if not pair or pid is None:
+        pid = _opt_int(row.get("id"))
+        if pid is None:
             continue
-        out[pair] = ProductMeta(
-            product_id=int(pid),
-            tick_size=_dec(p.get("tick_size", "0.01")),
-            lot_size=_dec(p.get("lot_size", p.get("min_size", "0.001"))),
-            min_notional=_dec(p.get("min_notional", "1")),
+        meta = ProductMeta(
+            product_id=pid,
+            tick_size=_x18_dec(row.get("price_increment_x18"), "0.01"),
+            lot_size=_x18_dec(row.get("size_increment_x18"), "0.001"),
+            min_notional=_x18_dec(row.get("min_size_x18"), "1"),
+            is_perp=True,
+            isolated_only=bool(row.get("isolated_only")),
         )
+        symbol = str(row.get("symbol") or f"{base}-PERP")
+        _register(meta, (base, symbol, f"{base}-PERP"), overwrite=True)
+
+    # Spots: id + (best-effort) increments; never isolated. Don't clobber a perp
+    # alias on a base collision (perps registered first).
+    try:
+        spots = (pc.get_spot_catalog(network=network) or {}).get("spots") or {}
+    except Exception:  # noqa: BLE001
+        logger.warning("spot catalog unavailable", exc_info=True)
+        spots = {}
+    for base, row in (spots.items() if isinstance(spots, dict) else []):
+        if not isinstance(row, dict):
+            continue
+        pid = _opt_int(row.get("id"))
+        if pid is None:
+            continue
+        meta = ProductMeta(
+            product_id=pid,
+            tick_size=_x18_dec(row.get("price_increment_x18"), "0.01"),
+            lot_size=_x18_dec(row.get("size_increment_x18"), "0.001"),
+            min_notional=_x18_dec(row.get("min_size_x18"), "1"),
+            is_perp=False,
+            isolated_only=False,
+        )
+        symbol = str(row.get("symbol") or base)
+        _register(meta, (base, symbol), overwrite=False)
+
     return out
+
+
+def _materialize_dn_leg_meta(
+    meta: Dict[str, object],
+    configs: Dict[str, Any],
+    client: object,
+    network: str,
+    product: str,
+) -> None:
+    """Register ProductMeta for the DN spot (long) and perp (short) legs, keyed
+    by the exact ``trading_pair_long`` / ``trading_pair_short`` strings the
+    controller uses, with each leg's REAL product_id and the perp's
+    isolated-only flag resolved from the DN pair catalog.
+
+    Safety: we never fall back to a shared product_id for the two legs (that
+    would trade one product twice). If a leg's id can't be resolved we leave it
+    unregistered so the adapter raises a clear "Unknown trading pair" and the
+    controller fails to start cleanly instead of mis-trading.
+    """
+    from src.nadobro.engine.adapter.nado import ProductMeta
+    from src.nadobro.services.product_catalog import (
+        get_dn_pair,
+        is_product_isolated_only,
+    )
+
+    base = str(product or "").upper().split("-", 1)[0]
+    long_sym = str(configs.get("trading_pair_long") or "")
+    short_sym = str(configs.get("trading_pair_short") or "")
+
+    dn: Dict[str, Any] = {}
+    try:
+        dn = dict(get_dn_pair(base, network=network, client=client) or {})
+    except Exception:  # noqa: BLE001 - catalog is best-effort
+        logger.warning("dn: get_dn_pair failed for %s", base, exc_info=True)
+    try:
+        iso = bool(is_product_isolated_only(base, network=network, client=client))
+    except Exception:  # noqa: BLE001
+        iso = False
+
+    spot_pid = dn.get("spot_product_id")
+    perp_pid = dn.get("perp_product_id")
+
+    if long_sym:
+        if spot_pid is not None:
+            meta[long_sym] = ProductMeta(
+                int(spot_pid), _dec("0.01"), _dec("0.001"), _dec("1"),
+                is_perp=False, isolated_only=False,
+            )
+        else:
+            logger.error(
+                "dn: could not resolve SPOT product_id for %s (long leg %s); "
+                "leaving unregistered so the controller fails cleanly",
+                base, long_sym,
+            )
+
+    if short_sym:
+        if perp_pid is not None:
+            meta[short_sym] = ProductMeta(
+                int(perp_pid), _dec("0.01"), _dec("0.001"), _dec("1"),
+                is_perp=True, isolated_only=iso,
+            )
+        else:
+            logger.error(
+                "dn: could not resolve PERP product_id for %s (short leg %s); "
+                "leaving unregistered so the controller fails cleanly",
+                base, short_sym,
+            )
 
 
 async def run_engine_cycle(
@@ -548,24 +709,12 @@ async def run_engine_cycle(
 
             meta[product] = ProductMeta(int(product_id), _dec("0.01"), _dec("0.001"), _dec("1"))
         # NO_ORDERS_AUDIT-FIX-R1: DN needs metadata for BOTH legs (spot long +
-        # perp short). If either is absent the adapter raises "Unknown trading
-        # pair" inside the controller's first call, the exception is swallowed
-        # by ``_guard``, and we never see the cause. Materialize both keys
-        # from the configs so DN can spawn legs.
+        # perp short), each with its OWN product_id. The old fallback keyed both
+        # legs to the SAME ``product_id`` — which would have traded the perp
+        # twice instead of spot+perp. Resolve real per-leg ids (and the perp's
+        # isolated-only flag) from the DN pair catalog.
         if strategy == "dn":
-            from src.nadobro.engine.adapter.nado import ProductMeta
-
-            for key in ("trading_pair_long", "trading_pair_short"):
-                pair = str(configs.get(key) or "")
-                if pair and pair not in meta:
-                    # Permissive defaults — real values come from the live
-                    # catalog when it's available.
-                    meta[pair] = ProductMeta(int(product_id), _dec("0.01"),
-                                              _dec("0.001"), _dec("1"))
-                    logger.warning(
-                        "dn: no catalog metadata for %s; using permissive defaults",
-                        pair,
-                    )
+            _materialize_dn_leg_meta(meta, configs, client, network, product)
         adapter = build_adapter(client, meta)
         await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),

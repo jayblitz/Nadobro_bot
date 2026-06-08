@@ -32,36 +32,19 @@ logger = logging.getLogger(__name__)
 _submit_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="nadobro-submit")
 
 
+# Isolated-margin sizing now lives in services/margin.py so the engine adapter
+# and this manual path compute it identically. These thin wrappers preserve the
+# existing private call sites in this module.
 def _isolated_margin_safety_multiplier() -> float:
-    """Headroom multiplier applied on top of the bare initial-margin requirement.
+    from src.nadobro.services.margin import isolated_margin_safety_multiplier
 
-    ``isolated_margin = notional / leverage`` is the venue's exact initial-margin
-    floor. Signing exactly that leaves zero room for fees, the next price tick,
-    or the cross-account's simultaneous reservations across other resting
-    quotes, so isolated-only markets (equities, commodities) reject with
-    error_code 2006 ("account health below threshold") almost immediately.
-    Default 1.20 covers ~1.5 bp taker fee + 1 tick + a small maintenance
-    cushion; override via NADO_ISOLATED_MARGIN_SAFETY for tuning.
-    """
-    raw = (os.environ.get("NADO_ISOLATED_MARGIN_SAFETY") or "1.20").strip()
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return 1.20
-    return max(1.0, val)
+    return isolated_margin_safety_multiplier()
 
 
 def _compute_isolated_margin(size: float, price: float, leverage: float) -> float | None:
-    """Initial-margin requirement plus the safety buffer, or None on bad inputs."""
-    try:
-        size_f = abs(float(size))
-        price_f = float(price)
-        lev_f = float(leverage)
-    except (TypeError, ValueError):
-        return None
-    if size_f <= 0 or price_f <= 0 or lev_f <= 0:
-        return None
-    return (size_f * price_f) / max(1.0, lev_f) * _isolated_margin_safety_multiplier()
+    from src.nadobro.services.margin import compute_isolated_margin
+
+    return compute_isolated_margin(size, price, leverage)
 
 
 def _order_submit_timeout_seconds() -> float:

@@ -122,6 +122,37 @@ def _fetch_session(telegram_id: int, network: str, session_id: Optional[int]) ->
     return dict(row or {})
 
 
+def _net_funding_usd(session: dict, network: str) -> Decimal:
+    """Net funding RECEIVED (positive) on the session's perp over its lifetime,
+    summed from the synced ``funding_payments_<network>`` feed (the data the
+    adapter's funding endpoint produces). The indexer signs funding positive =
+    *paid* by the user, so we negate to report received-positive. Scoped to the
+    session's product_id and ``[started_at, stopped_at]`` window."""
+    product_id = session.get("product_id")
+    started_at = session.get("started_at")
+    user_id = session.get("user_id")
+    if product_id is None or started_at is None or user_id is None:
+        return Decimal(0)
+    table = "funding_payments_testnet" if str(network).lower() == "testnet" else "funding_payments_mainnet"
+    try:
+        row = query_one(
+            f"""
+            SELECT COALESCE(SUM(amount_x18), 0) AS paid_x18
+            FROM {table}
+            WHERE user_id = %s AND product_id = %s
+              AND paid_at >= %s
+              AND paid_at <= COALESCE(%s, now())
+            """,
+            (int(user_id), int(product_id), started_at, session.get("stopped_at")),
+        )
+    except Exception:  # noqa: BLE001 - funding is additive context, never fatal
+        return Decimal(0)
+    if not row:
+        return Decimal(0)
+    paid_x18 = _to_decimal(dict(row).get("paid_x18"))
+    return -(paid_x18 / Decimal(10 ** 18))
+
+
 def _fetch_active_referral_code(telegram_id: int, network: str) -> Optional[str]:
     """The user's most recent active referral ``public_code`` for this network.
 
@@ -179,6 +210,13 @@ def build_pnl_card_data(
     fees = _to_decimal(session.get("total_fees_paid"))
     product_name = session.get("product_name")
     strategy = session.get("strategy")
+
+    # Delta Neutral profit IS the funding: price PnL nets ~0 across the hedged
+    # legs, so fold net funding received into the displayed PnL. Scoped to DN so
+    # other strategies (whose realized_pnl already reflects their economics)
+    # aren't double-counted.
+    if str(strategy or "").lower() in ("dn", "delta_neutral"):
+        pnl = pnl + _net_funding_usd(session, network)
 
     referral_code = _fetch_active_referral_code(telegram_id, network)
 
