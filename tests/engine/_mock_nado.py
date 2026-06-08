@@ -53,6 +53,9 @@ class MockNadoAdapter(NadoAdapterBase):
         self._fill_events: List[Fill] = []
         self.placed: List[NadoOrder] = []
         self.cancelled: List[str] = []
+        # Funding the short leg "earns" per call to funding_since (received-
+        # positive). Tests can set this to simulate accrued funding.
+        self.funding_quote: Decimal = Decimal(0)
 
     # -- test controls ----------------------------------------------------
     def set_mid(self, value: object) -> None:
@@ -164,6 +167,10 @@ class MockNadoAdapter(NadoAdapterBase):
                 self._mid_idx += 1
             return value
         return self._mid
+
+    async def funding_since(self, trading_pair: str, since_ts: float) -> Decimal:
+        self._maybe_fail("funding_since")
+        return _dec(self.funding_quote)
 
     def tick_size(self, trading_pair: str) -> Decimal:
         return self._tick

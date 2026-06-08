@@ -30,6 +30,37 @@ def test_map_grid_config_centers_band_and_sets_barriers():
     assert tb.take_profit == Decimal("0.006") and tb.stop_loss == Decimal("0.005")
 
 
+def test_map_dn_config_defaults():
+    cfg = er.map_strategy_config(
+        "dn",
+        {"notional_usd": 500.0, "fixed_margin_usd": 500.0},
+        Decimal(715), product="QQQ",
+    )
+    assert cfg["trading_pair_long"] == "QQQ-USDT0"   # spot leg (USDT0-quoted)
+    assert cfg["trading_pair_short"] == "QQQ-PERP"    # perp leg
+    assert cfg["leg_amount_quote"] == Decimal("500")
+    assert cfg["hedge_ratio"] == Decimal("1")
+    assert cfg["hold_seconds"] == 3600                # default 1h
+    assert cfg["cycles"] == 1
+    assert cfg["leverage"] == 1                       # strictly 1x short
+    # Per-leg TP/SL are OFF by default — a one-sided TP would break the hedge.
+    tb = cfg["barriers"]
+    assert isinstance(tb, TripleBarrierConfig)
+    assert tb.take_profit is None and tb.stop_loss is None
+
+
+def test_map_dn_clamps_hold_and_sets_cycles():
+    cfg = er.map_strategy_config(
+        "dn",
+        {"fixed_margin_usd": 250.0, "dn_hold_seconds": 999999.0,
+         "dn_cycles": 5.0, "dn_cycle_gap_seconds": 45.0, "dn_hedge_ratio": 1.0},
+        Decimal(100), product="AAPL",
+    )
+    assert cfg["hold_seconds"] == 86400               # clamped to 24h
+    assert cfg["cycles"] == 5
+    assert cfg["cycle_gap_seconds"] == 45
+
+
 def test_map_rgrid_hard_stop_is_above_mid():
     cfg = er.map_strategy_config(
         "rgrid", {"notional_usd": 100.0, "spread_bp": 10.0, "levels": 4, "sl_pct": 0.8},
@@ -90,25 +121,71 @@ def test_map_risk_limits():
     assert lim.max_position_size_quote == Decimal("300")  # notional * levels fallback
 
 
-def test_build_product_meta_from_catalog():
+def test_build_product_meta_from_catalog(monkeypatch):
+    """Real catalog rows carry x18-scaled increments + isolated_only; the builder
+    must convert them (not fall back to permissive 0.01/0.001/1 defaults) and
+    flag perps vs spot. Regression for the bug where get_all_products_info()
+    returned {"perp","spot"} (not a "products" list) so the builder yielded {}.
+    """
+    from src.nadobro.services import product_catalog as pc
+
+    # x18-scaled: 0.5 tick, 0.001 lot, 5 min-notional.
+    X18 = 10 ** 18
+    perps = {
+        "perps": {
+            "QQQ": {
+                "id": 7, "symbol": "QQQ-PERP", "isolated_only": True,
+                "price_increment_x18": str(5 * X18 // 10),     # 0.5
+                "size_increment_x18": str(X18 // 1000),        # 0.001
+                "min_size_x18": str(5 * X18),                  # 5
+            },
+        }
+    }
+    spots = {
+        "spots": {
+            "QQQ-USDC0": {
+                "id": 8, "symbol": "QQQ-USDC0",
+                "price_increment_x18": str(X18 // 100),        # 0.01
+                "size_increment_x18": str(X18 // 1000),        # 0.001
+                "min_size_x18": str(X18),                      # 1
+            },
+        }
+    }
+    monkeypatch.setattr(pc, "get_catalog", lambda **kw: perps)
+    monkeypatch.setattr(pc, "get_spot_catalog", lambda **kw: spots)
+
     class _Client:
-        def get_all_products_info(self):
-            return [{"symbol": "BTC-USDC", "product_id": 2, "tick_size": "0.5",
-                     "lot_size": "0.001", "min_notional": "5"}]
+        network = "testnet"
 
     meta = er.build_product_meta_from_catalog(_Client())
-    assert "BTC-USDC" in meta
-    pm = meta["BTC-USDC"]
-    assert pm.product_id == 2 and pm.tick_size == Decimal("0.5")
-    assert pm.min_notional == Decimal("5")
+
+    # Perp resolves under base, canonical symbol, and BASE-PERP alias.
+    for key in ("QQQ", "QQQ-PERP"):
+        assert key in meta
+    perp = meta["QQQ-PERP"]
+    assert perp.product_id == 7
+    assert perp.tick_size == Decimal("0.5")        # real increment, not 0.01 default
+    assert perp.lot_size == Decimal("0.001")
+    assert perp.min_notional == Decimal("5")
+    assert perp.is_perp is True and perp.isolated_only is True
+
+    spot = meta["QQQ-USDC0"]
+    assert spot.product_id == 8 and spot.is_perp is False and spot.isolated_only is False
 
 
-def test_build_product_meta_handles_bad_catalog():
-    class _Bad:
-        def get_all_products_info(self):
-            raise RuntimeError("down")
+def test_build_product_meta_handles_bad_catalog(monkeypatch):
+    from src.nadobro.services import product_catalog as pc
 
-    assert er.build_product_meta_from_catalog(_Bad()) == {}
+    def _boom(**kw):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(pc, "get_catalog", _boom)
+    monkeypatch.setattr(pc, "get_spot_catalog", _boom)
+
+    class _Client:
+        network = "testnet"
+
+    assert er.build_product_meta_from_catalog(_Client()) == {}
 
 
 def test_engine_v2_enabled_gate(monkeypatch):

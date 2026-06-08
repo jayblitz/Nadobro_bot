@@ -32,6 +32,7 @@ from src.nadobro.engine.types import (
     PositionAction,
     TradeType,
     TripleBarrierConfig,
+    _dec,
 )
 
 
@@ -345,6 +346,34 @@ class PositionExecutor(Executor):
         # residual; if that also fails, mark FAILED so the controller can act.
         if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
             await self._escalate_close()
+
+    async def reduce_position(self, base_amount: Decimal) -> Decimal:
+        """Partially reduce an open position by ``base_amount`` (base units) via
+        a reduce-only MARKET order, staying in ACTIVE_POSITION. Used by the
+        Delta Neutral controller to trim the over-hedged leg when the other leg
+        underfills, so the hedge stays balanced instead of leaning on the drift
+        gate. Returns the base actually reduced (0 if not applicable)."""
+        if self.position_state is not PositionExecState.ACTIVE_POSITION:
+            return Decimal(0)
+        remaining = self.entry_base - self.exit_base
+        amount = min(_dec(base_amount), remaining)
+        if amount <= 0:
+            return Decimal(0)
+        order = await self._guard(
+            lambda: self.adapter.place_order(
+                self.trading_pair,
+                self.exit_side,
+                OrderType.MARKET,
+                amount,
+                None,
+                self.config.order_config.leverage,
+                True,
+            ),
+            label="reduce_position",
+        )
+        before = self.exit_base
+        self._ingest_exit(order)
+        return self.exit_base - before
 
     async def _escalate_close(self) -> None:
         """Promote a stuck close to a MARKET order. Used when the venue

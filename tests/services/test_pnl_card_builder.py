@@ -201,6 +201,38 @@ class TestBuildPnLCardDataShape:
         assert data["net_fees"] == "-$3.21"
         assert data["volume"] == "$500.00"
 
+    def test_delta_neutral_folds_funding_into_pnl(self):
+        """For a DN session, net funding received is added to the displayed PnL
+        (price PnL nets ~0, funding is the real profit). Funding comes from the
+        synced funding_payments feed, signed received-positive."""
+        session = {
+            "id": 5, "user_id": 42, "network": "testnet",
+            "strategy": "delta_neutral", "product_name": "QQQ",
+            "product_id": 7, "started_at": "2026-06-01T00:00:00Z", "stopped_at": None,
+            "total_volume_usd": Decimal("1000"),
+            "realized_pnl": Decimal("0.50"),
+            "total_fees_paid": Decimal("0.20"),
+        }
+        # amount_x18 stored positive = paid; -3e18 => received 3.0.
+        funding_row = {"paid_x18": Decimal("-3000000000000000000")}
+        calls = {"n": 0}
+
+        def stub(sql, params=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return session
+            if calls["n"] == 2:
+                assert "funding_payments_testnet" in sql
+                return funding_row
+            return None  # referral
+
+        with patch.object(builder, "query_one", side_effect=stub):
+            data = builder.build_pnl_card_data(telegram_id=42, network="testnet", session_id=5)
+
+        # 0.50 realized + 3.00 funding received = 3.50
+        assert data["pnl"] == "+$3.50"
+        assert calls["n"] == 3  # session + funding + referral
+
     def test_no_referral_omits_code_field_as_empty_string(self):
         # The renderer only draws the referral line when truthy, so empty
         # string must produce a clean card with no bottom-right text.

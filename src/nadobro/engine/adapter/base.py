@@ -166,3 +166,11 @@ class NadoAdapterBase(abc.ABC):
 
     async def funding_rate(self, trading_pair: str) -> Optional[Decimal]:
         raise NotImplementedError
+
+    async def funding_since(self, trading_pair: str, since_ts: float) -> Decimal:
+        """Net funding the user has *received* on ``trading_pair`` since
+        ``since_ts`` (epoch seconds), as a signed quote amount: positive = the
+        user earned funding (the Delta Neutral short collecting it), negative =
+        the user paid funding. Default 0 so test doubles need not implement it;
+        the live adapter overrides via the indexer funding endpoint."""
+        return Decimal(0)

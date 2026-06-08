@@ -42,6 +42,9 @@ from src.nadobro.engine.types import OrderType, TradeType, _dec
 
 # The sole permitted venue import inside the engine.
 from src.nadobro.services.nado_client import NadoClient
+# Pure-math isolated-margin sizing shared with the manual trade path so both
+# size an isolated-only leg identically.
+from src.nadobro.services.margin import compute_isolated_margin
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,13 @@ class ProductMeta:
     tick_size: Decimal
     lot_size: Decimal
     min_notional: Decimal
+    # ``is_perp`` / ``isolated_only`` drive margin routing in place_order. Nado
+    # RWA perps on testnet are isolated-margin only: an order on such a product
+    # MUST carry isolated_only + an isolated_margin amount or the venue rejects
+    # it (error_code 2006). Defaults keep every existing 4-arg construction
+    # (spot / cross perps) behaving as before.
+    is_perp: bool = False
+    isolated_only: bool = False
 
 
 @dataclass
@@ -123,6 +133,22 @@ def _to_dec(value: object, default: Decimal = Decimal(0)) -> Decimal:
         return _dec(value)
     except Exception:
         return default
+
+
+def _funding_row_epoch(row: Dict[str, Any]) -> Optional[float]:
+    """Best-effort epoch-seconds for a funding payment row (the indexer feed
+    keys it ``timestamp``; the synced DB row uses ``paid_at``). Tolerates
+    millisecond timestamps."""
+    raw = row.get("timestamp")
+    if raw is None:
+        raw = row.get("paid_at")
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v / 1000.0 if v > 1e11 else v
 
 
 def _first(d: Dict[str, Any], keys: Sequence[str], default: object = None) -> object:
@@ -209,14 +235,33 @@ class NadoAdapter(NadoAdapterBase):
         is_buy = side is TradeType.BUY
         amount = float(amount_base)
 
-        # AUDIT-FIX-3: surface the fact that leverage is account-level on Nado
-        # so callers don't think a per-order leverage value will be honored.
-        if leverage and int(leverage) != 1 and int(leverage) not in _warned_leverage_set:
+        # Isolated-margin routing. Nado RWA perps are isolated-only: the order
+        # must carry isolated_only=True and an isolated_margin amount or the
+        # venue rejects it (error_code 2006). We mirror the manual trade path —
+        # post the computed margin on BOTH opens and reduce-only closes; the
+        # reduce_only appendix bit prevents a close from growing the position.
+        # The shared helper applies the safety buffer (notional * 1.20 at 1x),
+        # so signing exactly the bare initial margin can't trip account health.
+        isolated_only = bool(meta.isolated_only)
+        isolated_margin: Optional[float] = None
+        if isolated_only:
+            ref_price = float(price) if price is not None else float(await self.mid_price(trading_pair))
+            isolated_margin = compute_isolated_margin(amount, ref_price, int(leverage) or 1)
+            if isolated_margin is None:
+                raise AdapterError(
+                    f"could not size isolated margin for {trading_pair} "
+                    f"(amount={amount}, price={ref_price}, leverage={leverage})"
+                )
+        elif leverage and int(leverage) != 1 and int(leverage) not in _warned_leverage_set:
+            # Cross-margin perps: leverage is account-level on Nado, so a
+            # per-order hint can't change it. Warn once (AUDIT-FIX-3). Isolated
+            # products are handled above and DO consume leverage, so they no
+            # longer hit this misleading warning.
             _warned_leverage_set.add(int(leverage))
             logger.warning(
-                "place_order received leverage=%s but Nado sets leverage at the "
-                "account/isolated-margin level. Configure leverage via the "
-                "account margin path before placing orders; this hint is ignored.",
+                "place_order received leverage=%s on a cross-margin product but "
+                "Nado sets cross leverage at the account level; this hint is "
+                "ignored. Use an isolated-only product to size margin per order.",
                 leverage,
             )
 
@@ -240,6 +285,7 @@ class NadoAdapter(NadoAdapterBase):
             if order_type is OrderType.MARKET:
                 resp = await asyncio.to_thread(
                     self._client.place_market_order, meta.product_id, amount, is_buy,
+                    isolated_only=isolated_only, isolated_margin=isolated_margin,
                     reduce_only=reduce_only, client_id=tag,
                 )
             else:
@@ -247,6 +293,7 @@ class NadoAdapter(NadoAdapterBase):
                     raise AdapterError("limit order requires a price")
                 resp = await asyncio.to_thread(
                     self._client.place_limit_order, meta.product_id, amount, float(price), is_buy,
+                    isolated_only=isolated_only, isolated_margin=isolated_margin,
                     post_only=order_type is OrderType.LIMIT_MAKER, reduce_only=reduce_only,
                     client_id=tag,
                 )
@@ -588,3 +635,37 @@ class NadoAdapter(NadoAdapterBase):
             return None
         raw = _first(data, ("rate", "funding_rate", "funding", "hourly_funding")) if isinstance(data, dict) else data
         return _to_dec(raw) if raw is not None else None
+
+    async def funding_since(self, trading_pair: str, since_ts: float) -> Decimal:
+        """Net funding RECEIVED on the perp since ``since_ts`` (positive = the
+        short collected funding). Pulls the user-scoped indexer funding feed and
+        sums the product's payments. The indexer's amount is signed with
+        positive = funding *paid* by the user, so we negate to report
+        received-positive."""
+        meta = self._meta(trading_pair)
+        try:
+            rows = await self._client.get_interest_and_funding_payments(
+                product_ids=[meta.product_id]
+            )
+        except Exception as exc:  # noqa: BLE001 - normalize venue errors
+            raise AdapterError(f"funding_since failed: {exc}") from exc
+        from src.nadobro.services.portfolio_calculator import funding_payment_amount
+
+        paid_total = Decimal(0)
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("type") or "funding") != "funding":
+                continue
+            pid = row.get("product_id")
+            if pid is not None:
+                try:
+                    if int(pid) != int(meta.product_id):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            ts = _funding_row_epoch(row)
+            if ts is not None and ts < float(since_ts):
+                continue
+            paid_total += funding_payment_amount(row)
+        return -paid_total

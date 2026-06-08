@@ -49,6 +49,91 @@ def _adapter():
     return NadoAdapter(_FakeClient(), META)
 
 
+class _CapturingClient(_FakeClient):
+    """Captures the isolated-margin kwargs the adapter forwards."""
+
+    def __init__(self):
+        super().__init__()
+        self.market_calls = []
+
+    def place_market_order(self, product_id, size, is_buy=True, **kwargs):
+        self.market_calls.append({"product_id": product_id, "size": size,
+                                  "is_buy": is_buy, **kwargs})
+        return {"digest": "m1", "status": "filled", "price": 100,
+                "filled_base": str(size), "filled_quote": str(size * 100)}
+
+
+def test_isolated_perp_order_posts_isolated_margin():
+    """An order on an isolated-only perp must carry isolated_only=True and a
+    safety-buffered isolated_margin (= notional * 1.20 at 1x). RWA perps on Nado
+    testnet reject otherwise (error_code 2006). This is the fix that unblocks the
+    Delta Neutral short leg."""
+    perp_pair = "QQQ-PERP"
+    meta = {perp_pair: ProductMeta(product_id=7, tick_size=Decimal("0.01"),
+                                   lot_size=Decimal("0.001"), min_notional=Decimal(1),
+                                   is_perp=True, isolated_only=True)}
+
+    async def body():
+        client = _CapturingClient()
+        a = NadoAdapter(client, meta)
+        # SELL 0.5 base; ref price falls back to mid = (99+101)/2 = 100.
+        await a.place_order(perp_pair, TradeType.SELL, OrderType.MARKET, Decimal("0.5"))
+        assert len(client.market_calls) == 1
+        call = client.market_calls[0]
+        assert call["isolated_only"] is True
+        # 0.5 * 100 / 1 * 1.20 = 60.0
+        assert abs(float(call["isolated_margin"]) - 60.0) < 1e-6
+
+    asyncio.run(body())
+
+
+def test_funding_since_sums_received_positive():
+    """funding_since returns net funding RECEIVED (positive), filtered to the
+    product and timestamp window. The indexer signs funding positive = paid, so
+    a row of -2.0 paid (i.e. received) becomes +2.0 received."""
+    perp_pair = "QQQ-PERP"
+    meta = {perp_pair: ProductMeta(product_id=7, tick_size=Decimal("0.01"),
+                                   lot_size=Decimal("0.001"), min_notional=Decimal(1),
+                                   is_perp=True, isolated_only=True)}
+
+    class _FundingClient(_FakeClient):
+        async def get_interest_and_funding_payments(self, *, product_ids=None, limit=200, idx=None):
+            return [
+                # received 2.0 (paid = -2.0), in-window, this product
+                {"type": "funding", "product_id": 7, "amount": "-2.0", "timestamp": 2000},
+                # paid 0.5 (cost), in-window
+                {"type": "funding", "product_id": 7, "amount": "0.5", "timestamp": 2500},
+                # before since_ts → excluded
+                {"type": "funding", "product_id": 7, "amount": "-9.0", "timestamp": 500},
+                # different product → excluded
+                {"type": "funding", "product_id": 99, "amount": "-9.0", "timestamp": 3000},
+                # interest, not funding → excluded
+                {"type": "interest", "product_id": 7, "amount": "-9.0", "timestamp": 3000},
+            ]
+
+    async def body():
+        a = NadoAdapter(_FundingClient(), meta)
+        net = await a.funding_since(perp_pair, since_ts=1000)
+        # received 2.0 - paid 0.5 = net received 1.5
+        assert net == Decimal("1.5")
+
+    asyncio.run(body())
+
+
+def test_spot_order_is_not_isolated():
+    """A spot (or cross) product must NOT post isolated margin — that path is
+    unchanged."""
+    async def body():
+        client = _CapturingClient()
+        a = NadoAdapter(client, META)  # META[PAIR] is not isolated
+        await a.place_order(PAIR, TradeType.BUY, OrderType.MARKET, Decimal("0.5"))
+        call = client.market_calls[0]
+        assert call["isolated_only"] is False
+        assert call["isolated_margin"] is None
+
+    asyncio.run(body())
+
+
 def test_place_registers_order_and_market_fills():
     async def body():
         a = _adapter()
