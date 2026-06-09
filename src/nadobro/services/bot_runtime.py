@@ -628,6 +628,9 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
                     "dgrid_min_spread_bp", "dgrid_max_spread_bp", "dgrid_short_window_points",
                     "dgrid_long_window_points",
                     "target_volume_usd", "funding_entry_mode", "fixed_margin_usd", "vol_direction",
+                    # Delta Neutral (engine v2) settings.
+                    "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds",
+                    "dn_max_drift_pct", "dn_hedge_ratio",
                 )
             }),
         })

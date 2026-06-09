@@ -1625,6 +1625,10 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "dgrid_max_spread_bp": (1.0, 200.0),
         "dgrid_short_window_points": (2, 50),
         "dgrid_long_window_points": (4, 200),
+        # Delta Neutral (engine v2) custom inputs.
+        "fixed_margin_usd": (1, 1000000),
+        "dn_hold_seconds": (60, 86400),
+        "dn_cycles": (1, 100),
     }
     if field not in limits:
         logger.error("Missing strategy limit for field=%s (strategy=%s)", field, strategy)
@@ -1649,6 +1653,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         int_fields = {
             "interval_seconds", "levels", "quote_ttl_seconds", "rgrid_reset_timeout_seconds",
             "grid_reset_timeout_seconds", "dgrid_short_window_points", "dgrid_long_window_points",
+            "dn_hold_seconds", "dn_cycles",
         }
         if field in int_fields:
             cfg[field] = int(value)
