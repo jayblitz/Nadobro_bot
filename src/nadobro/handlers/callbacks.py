@@ -1898,6 +1898,10 @@ async def _handle_strategy(query, data, context, telegram_id):
             "directional_bias",
             # Volume Bot (spot, 2026-05) accepts session margin + target volume.
             "session_margin_usd", "target_volume_usd",
+            # Delta Neutral (engine v2) — the controller reads these directly:
+            # per-leg size, hold duration, cycle count + gap, hedge drift gate.
+            "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
+            "dn_cycle_gap_seconds", "dn_max_drift_pct", "dn_hedge_ratio",
         }
         if field not in allowed_numeric_fields:
             return
@@ -1952,6 +1956,13 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_long_window_points": (4, 200),
             "auto_close_on_maintenance": (0, 1),
             "is_long_bias": (0, 1),
+            # Delta Neutral (engine v2).
+            "fixed_margin_usd": (1, 1000000),
+            "dn_hold_seconds": (60, 86400),        # 1 minute .. 24 hours
+            "dn_cycles": (1, 100),
+            "dn_cycle_gap_seconds": (0, 86400),
+            "dn_max_drift_pct": (0.5, 50),
+            "dn_hedge_ratio": (0.1, 5.0),
         }
         lo, hi = limits[field]
         if value < lo or value > hi:
@@ -1959,6 +1970,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         int_fields = {
             "interval_seconds", "levels", "max_open_orders",
             "auto_close_on_maintenance", "is_long_bias", "rgrid_reset_timeout_seconds",
+            "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds",
         }
 
         def _mutate(s):
@@ -2036,6 +2048,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
             "directional_bias",
+            # Delta Neutral (engine v2) custom inputs.
+            "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
         )
         if strategy_id == "vol" and field not in {"sl_pct", "session_margin_usd", "target_volume_usd"}:
             return
@@ -2087,6 +2101,9 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_long_window_points": "Enter DGRID long volatility window points \\(example: `12`\\)",
             "session_margin_usd": "Enter session margin in USD \\(per\\-cycle notional, example: `500`\\)",
             "target_volume_usd": "Enter target cumulative volume in USD \\(example: `25000`\\)",
+            "fixed_margin_usd": "Enter per\\-leg size in USD \\(example: `100`\\)",
+            "dn_hold_seconds": "Enter hold duration in seconds \\(60 – 86400; example: `3600` for 1h\\)",
+            "dn_cycles": "Enter how many open→hold→close cycles to run \\(example: `3`\\)",
         }
         await _edit_loc(query, 
             f"✏️ *Custom {escape_md(field)}*\n\n"
@@ -2764,12 +2781,15 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         )
     elif strategy == "dn":
         auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
-        funding_mode = str(conf.get("funding_entry_mode", "wait")).strip().lower()
-        funding_label = "WAIT FAVORABLE" if funding_mode == "wait" else "ENTER ANYWAY"
+        leg_size = float(conf.get("fixed_margin_usd", conf.get("notional_usd", 100.0)) or 100.0)
+        hold_s = int(conf.get("dn_hold_seconds", 3600) or 3600)
+        cycles = int(conf.get("dn_cycles", 1) or 1)
+        drift_pct = float(conf.get("dn_max_drift_pct", 5.0) or 5.0)
         extra = (
-            "Hedge model: *Spot long + matching perp short* \\(BTC/ETH only\\)\n"
-            "Leverage cap: *1x to 5x* \\(used on perp leg\\)\n"
-            f"Funding entry: *{escape_md(funding_label)}*\n"
+            "Hedge model: *Spot long \\+ 1x perp short* \\(BTC, ETH, QQQ, SPY…\\)\n"
+            f"Size \\(per leg\\): *{escape_md(f'${leg_size:,.0f}')}* · "
+            f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* · Cycles: *{escape_md(str(cycles))}*\n"
+            f"Hedge drift gate: *{escape_md(f'{drift_pct:.1f}%')}*\n"
             f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
         )
     return base + extra + "Use presets or set custom values below\\."
@@ -2823,8 +2843,18 @@ def _strategy_section_for_field(strategy: str, field: str) -> str:
             return "risk"
         return "setup"
     if strategy == "dn":
-        return "safety" if field in {"auto_close_on_maintenance", "funding_entry_mode"} else "setup"
+        return "safety" if field in {"auto_close_on_maintenance", "dn_max_drift_pct"} else "setup"
     return "setup"
+
+
+def _fmt_hold_duration(seconds: int) -> str:
+    """Human-friendly hold duration: 3600 -> '1h', 21600 -> '6h', 5400 -> '90m'."""
+    s = max(0, int(seconds or 0))
+    if s and s % 3600 == 0:
+        return f"{s // 3600}h"
+    if s and s % 60 == 0:
+        return f"{s // 60}m"
+    return f"{s}s"
 
 
 def _strategy_config_menu_text(strategy: str, conf: dict, network: str) -> str:
@@ -2833,7 +2863,7 @@ def _strategy_config_menu_text(strategy: str, conf: dict, network: str) -> str:
         "rgrid": "Reverse GRID",
         "dgrid": "Dynamic GRID",
         "mid": "Mid Mode",
-        "dn": "Mirror Delta Neutral",
+        "dn": "Delta Neutral",
         "vol": "Volume Bot",
     }
     return (
@@ -3007,21 +3037,23 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         )
 
     if strategy == "dn":
-        funding_mode = str(conf.get("funding_entry_mode", "wait")).strip().lower()
-        funding_label = "WAIT FAVORABLE" if funding_mode == "wait" else "ENTER ANYWAY"
+        leg_size = float(conf.get("fixed_margin_usd", conf.get("notional_usd", 100.0)) or 100.0)
+        hold_s = int(conf.get("dn_hold_seconds", 3600) or 3600)
+        cycles = int(conf.get("dn_cycles", 1) or 1)
+        drift_pct = float(conf.get("dn_max_drift_pct", 5.0) or 5.0)
         if section == "safety":
             auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
             return (
-                "⚙️ *Mirror Delta Neutral · Safety*\n\n"
-                f"Funding entry: *{escape_md(funding_label)}*\n"
+                "⚙️ *Delta Neutral · Safety*\n\n"
+                f"Hedge drift gate: *{escape_md(f'{drift_pct:.1f}%')}*\n"
                 f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
-                "WAIT FAVORABLE avoids entering new hedges while the short leg would pay funding\\."
+                "If the two legs drift apart by more than the gate, both are closed immediately\\."
             )
         return (
-            "⚙️ *Mirror Delta Neutral · Core*\n\n"
-            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
-            f"TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n\n"
-            "Keep this simple and hedge-focused\\."
+            "⚙️ *Delta Neutral · Core*\n\n"
+            f"Size \\(per leg\\): *{escape_md(f'${leg_size:,.0f}')}* \\| Short: *1x*\n"
+            f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* \\| Cycles: *{escape_md(str(cycles))}*\n\n"
+            "Buys spot \\+ 1x\\-shorts the perp, holds, then exits both legs together — repeated per cycle\\."
         )
 
     return _fmt_strategy_config_text(strategy, conf, network)
@@ -3379,37 +3411,36 @@ def _strategy_config_section_kb(strategy: str, section: str):
             ]
     elif strategy == "dn":
         if section == "setup":
+            # Engine-v2 Delta Neutral knobs: per-leg size, hold duration, and how
+            # many open→hold→close cycles to run. The short is strictly 1x, so
+            # there is no leverage control here.
             rows = [
                 [
-                    InlineKeyboardButton("Margin $50", callback_data="strategy:set:dn:notional_usd:50"),
-                    InlineKeyboardButton("Margin $100", callback_data="strategy:set:dn:notional_usd:100"),
-                    InlineKeyboardButton("Margin $250", callback_data="strategy:set:dn:notional_usd:250"),
+                    InlineKeyboardButton("Size $50", callback_data="strategy:set:dn:fixed_margin_usd:50"),
+                    InlineKeyboardButton("Size $100", callback_data="strategy:set:dn:fixed_margin_usd:100"),
+                    InlineKeyboardButton("Size $250", callback_data="strategy:set:dn:fixed_margin_usd:250"),
                 ],
                 [
-                    InlineKeyboardButton("30s", callback_data="strategy:set:dn:interval_seconds:30"),
-                    InlineKeyboardButton("60s", callback_data="strategy:set:dn:interval_seconds:60"),
-                    InlineKeyboardButton("120s", callback_data="strategy:set:dn:interval_seconds:120"),
+                    InlineKeyboardButton("Hold 1h", callback_data="strategy:set:dn:dn_hold_seconds:3600"),
+                    InlineKeyboardButton("Hold 6h", callback_data="strategy:set:dn:dn_hold_seconds:21600"),
+                    InlineKeyboardButton("Hold 24h", callback_data="strategy:set:dn:dn_hold_seconds:86400"),
                 ],
                 [
-                    InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:dn:tp_pct:0.5"),
-                    InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:dn:tp_pct:1.0"),
-                    InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:dn:tp_pct:2.0"),
+                    InlineKeyboardButton("1 Cycle", callback_data="strategy:set:dn:dn_cycles:1"),
+                    InlineKeyboardButton("5 Cycles", callback_data="strategy:set:dn:dn_cycles:5"),
+                    InlineKeyboardButton("10 Cycles", callback_data="strategy:set:dn:dn_cycles:10"),
                 ],
                 [
-                    InlineKeyboardButton("SL 0.25%", callback_data="strategy:set:dn:sl_pct:0.25"),
-                    InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:dn:sl_pct:0.5"),
-                    InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:dn:sl_pct:1.0"),
-                ],
-                [
-                    InlineKeyboardButton("Custom Margin", callback_data="strategy:input:dn:notional_usd"),
-                    InlineKeyboardButton("Custom Interval", callback_data="strategy:input:dn:interval_seconds"),
+                    InlineKeyboardButton("✍️ Custom Size", callback_data="strategy:input:dn:fixed_margin_usd"),
+                    InlineKeyboardButton("✍️ Custom Hold (s)", callback_data="strategy:input:dn:dn_hold_seconds"),
                 ],
             ]
         else:
             rows = [
                 [
-                    InlineKeyboardButton("Wait Favorable", callback_data="strategy:set_text:dn:funding_entry_mode:wait"),
-                    InlineKeyboardButton("Enter Anyway", callback_data="strategy:set_text:dn:funding_entry_mode:enter_anyway"),
+                    InlineKeyboardButton("Drift 3%", callback_data="strategy:set:dn:dn_max_drift_pct:3"),
+                    InlineKeyboardButton("Drift 5%", callback_data="strategy:set:dn:dn_max_drift_pct:5"),
+                    InlineKeyboardButton("Drift 10%", callback_data="strategy:set:dn:dn_max_drift_pct:10"),
                 ],
                 [
                     InlineKeyboardButton("Auto-Close ON", callback_data="strategy:set:dn:auto_close_on_maintenance:1"),
@@ -3625,7 +3656,7 @@ def _build_strategy_preview_text(
         "rgrid": "Reverse GRID",
         "dgrid": "Dynamic GRID",
         "mid": "Mid Mode",
-        "dn": "Mirror Delta Neutral",
+        "dn": "Delta Neutral",
         "vol": "Volume Bot",
     }
     network, settings = get_user_settings(telegram_id)
@@ -3969,8 +4000,13 @@ def _build_strategy_preview_text(
     status_dot = "🟢" if est_net >= 0 else "🟠"
     funding_bias = "FAVORABLE" if funding_rate > 0.000001 else "UNFAVORABLE"
     auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
-    funding_mode = str(conf.get("funding_entry_mode", "enter_anyway")).strip().lower()
-    mode_label = "ENTER ANYWAY" if funding_mode == "enter_anyway" else "WAIT FAVORABLE"
+    # Engine-v2 DN settings (what the controller actually runs).
+    dn_leg_size = float(conf.get("fixed_margin_usd", margin_usd) or margin_usd)
+    dn_hold_label = _fmt_hold_duration(int(conf.get("dn_hold_seconds", 3600) or 3600))
+    dn_cycles = int(conf.get("dn_cycles", 1) or 1)
+    dn_cycles_label = str(dn_cycles) + (
+        "" if dn_cycles == 1 else f" · {int(conf.get('dn_cycle_gap_seconds', 30) or 0)}s gap"
+    )
     dn_spot_symbol = str(dn_pair.get("spot_symbol") or product).upper()
     dn_perp_symbol = str(dn_pair.get("perp_symbol") or f"{product}-PERP").upper()
     dn_market_label = f"{dn_spot_symbol} spot / {dn_perp_symbol}"
@@ -3984,7 +4020,7 @@ def _build_strategy_preview_text(
     elif strategy_id == "dn" and not dn_pair:
         warning = "⚠️ This DN pair is not currently available\\."
     return (
-        "🪞 *Mirror Delta Neutral Dashboard*\n"
+        "⚖️ *Delta Neutral Dashboard*\n"
         f"Strategy Status: {status_emoji} *{status_label}*\n\n"
         "📊 *Your Stats*\n"
         f"• Volume Traded: *{escape_md(_fmt_usd(session_volume))}*\n"
@@ -3997,13 +4033,14 @@ def _build_strategy_preview_text(
         f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
         "⚙️ *Current Settings*\n"
         f"• Market: *{escape_md(dn_market_label)}*\n"
-        f"• Size: *{escape_md(_fmt_usd(margin_usd))}*\n"
-        f"• Funding Leverage: *{escape_md(f'{leverage:.0f}x')}*\n"
-        f"• Funding Entry: *{escape_md(mode_label)}*\n"
-        f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
+        f"• Size \\(per leg\\): *{escape_md(_fmt_usd(dn_leg_size))}*\n"
+        f"• Short Leverage: *1x* \\(fixed\\)\n"
+        f"• Hold: *{escape_md(dn_hold_label)}*\n"
+        f"• Cycles: *{escape_md(dn_cycles_label)}*\n"
         f"• Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
         "ℹ️ *How it works*\n"
-        "Opens LONG on Nado spot and SHORT on the same perp to farm funding while staying delta neutral\\.\n"
+        "Buys spot \\+ 1x\\-shorts the same perp, holds for the set duration, then exits both legs "
+        "together — farming spot \\+ perp volume and funding while staying delta neutral\\. Repeats per cycle\\.\n"
         f"Funding now: *{escape_md(funding_bias)}* \\| Est\\. Daily Fees: *{escape_md(_fmt_usd(est_fees))}*"
         + (f"\n\n{warning}" if warning else "")
     )

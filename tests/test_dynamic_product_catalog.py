@@ -17,6 +17,27 @@ class DynamicProductCatalogTests(unittest.TestCase):
         # Wrapped synthetic ticker keeps legacy WB…X stripping (e.g. SPY perp leg).
         self.assertEqual(product_catalog._dn_underlying_key("WBSPYX"), "SPY")
 
+    def test_dn_underlying_key_maps_real_testnet_wrapped_stocks(self):
+        # The live Nado testnet spot symbols use the w<TICKER>x wrapper
+        # (wQQQx / wSPYx / wNVDAx). These MUST map to the bare ticker so the
+        # spot leg pairs with <TICKER>-PERP — otherwise QQQ/SPY/etc. silently
+        # drop out of the Delta Neutral asset list (only BTC/ETH survive).
+        cases = {
+            "wQQQx": "QQQ", "wSPYx": "SPY", "wNVDAx": "NVDA", "wTSLAx": "TSLA",
+            "wMETAx": "META", "wGOOGLx": "GOOGL", "wAAPLx": "AAPL",
+            "wMSFTx": "MSFT", "wAMZNx": "AMZN",
+        }
+        for spot_symbol, expected in cases.items():
+            self.assertEqual(product_catalog._dn_underlying_key(spot_symbol), expected)
+            # And the matching perp leg resolves to the same underlying.
+            self.assertEqual(
+                product_catalog._dn_underlying_key(f"{expected}-PERP"), expected
+            )
+        # Non-wrapped majors and an unrelated W-prefixed ticker are untouched.
+        self.assertEqual(product_catalog._dn_underlying_key("WBTC"), "BTC")
+        self.assertEqual(product_catalog._dn_underlying_key("WETH"), "ETH")
+        self.assertEqual(product_catalog._dn_underlying_key("WTI-PERP"), "WTI")
+
     def test_parse_trade_intent_recognizes_listed_perp(self):
         names = product_catalog.list_perp_names(network="mainnet", refresh=True)
         self.assertTrue(names, "expected non-empty perp list from catalog")

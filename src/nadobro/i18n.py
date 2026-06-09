@@ -722,12 +722,12 @@ _LABELS = {
         "ru": "🐺 Отчет HOWL",
         "ko": "🐺 HOWL 리포트",
     },
-    "⚖️ Mirror DN": {
-        "zh": "⚖️ 镜像 DN",
-        "fr": "⚖️ Miroir DN",
-        "ar": "⚖️ مرآة DN",
-        "ru": "⚖️ Mirror DN",
-        "ko": "⚖️ 미러 DN",
+    "⚖️ Delta Neutral": {
+        "zh": "⚖️ Delta 中性",
+        "fr": "⚖️ Delta Neutral",
+        "ar": "⚖️ Delta محايد",
+        "ru": "⚖️ Delta-нейтральный",
+        "ko": "⚖️ 델타 뉴트럴",
     },
     "Switch Asset": {
         "zh": "切换资产",

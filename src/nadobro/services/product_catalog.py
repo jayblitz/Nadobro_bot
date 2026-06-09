@@ -122,11 +122,19 @@ def _dn_underlying_key(symbol: str) -> str:
     if text in exact_aliases:
         return exact_aliases[text]
     compact = text.replace("-", "")
-    if compact.startswith("WB") and compact.endswith("X") and len(compact) > 3:
-        return compact[2:-1]
-    # xStocks wrapped Backed spot symbols (e.g. wbNVDA -> NVDA) pair with NVDA-PERP.
+    # Wrapped-stock spot symbols map back to their bare ticker so the spot pairs
+    # with ``<TICKER>-PERP``. Two wrappers are seen on Nado:
+    #   • xStocks (testnet):  w<TICKER>x   e.g. wQQQx / wSPYx / wNVDAx  (W…X)
+    #     -> WQQQX -> QQQ, WSPYX -> SPY, WNVDAX -> NVDA, WGOOGLX -> GOOGL
+    #   • Backed  (legacy):   wb<TICKER>   e.g. wbNVDA                  (WB prefix)
+    # WBTC / WETH are handled by ``exact_aliases`` above, so they never reach
+    # here. Order matters: check the ``WB`` (Backed) prefix before the generic
+    # ``W…X`` rule.
     if compact.startswith("WB") and len(compact) >= 5:
-        return compact[2:]
+        inner = compact[2:]
+        return inner[:-1] if (inner.endswith("X") and len(inner) > 1) else inner
+    if compact.startswith("W") and compact.endswith("X") and len(compact) > 3:
+        return compact[1:-1]
     return compact or text
 
 
