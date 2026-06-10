@@ -155,12 +155,12 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
             try:
                 return await query.message.reply_text(localized, **kwargs)
             except BadRequest as e_send:
-                if "Can't parse entities" in str(e_send) and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
+                if "Can't parse entities" in str(e_send) and kwargs.get("parse_mode") in (ParseMode.MARKDOWN_V2, ParseMode.HTML):
                     fallback_kwargs = dict(kwargs)
                     fallback_kwargs.pop("parse_mode", None)
                     return await query.message.reply_text(plain_text_fallback(localized), **fallback_kwargs)
                 raise
-        if "Can't parse entities" in msg and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
+        if "Can't parse entities" in msg and kwargs.get("parse_mode") in (ParseMode.MARKDOWN_V2, ParseMode.HTML):
             fallback_kwargs = dict(kwargs)
             fallback_kwargs.pop("parse_mode", None)
             try:
@@ -184,7 +184,19 @@ async def handle_callback(update: Update, context: CallbackContext):
       return await _handle_callback_inner(update, context, query, data, telegram_id, started)
 
 
+# Per-chat interaction sequence. Bumped on EVERY callback so background
+# message-edit jobs (portfolio refresh) can detect that the user has since
+# navigated elsewhere and must not clobber the current screen.
+_CB_SEQ: dict[int, int] = {}
+
+
+def interaction_seq(chat_id: int) -> int:
+    return _CB_SEQ.get(int(chat_id), 0)
+
+
 async def _handle_callback_inner(update, context, query, data, telegram_id, started):
+    _seq_chat = getattr(getattr(query, "message", None), "chat_id", None) or int(telegram_id)
+    _CB_SEQ[int(_seq_chat)] = _CB_SEQ.get(int(_seq_chat), 0) + 1
     try:
         try:
             # LOWIQPTS cancel needs a targeted answer (e.g. show_alert) when nothing is pending.

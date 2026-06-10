@@ -10,7 +10,7 @@ from src.nadobro.handlers.orders_view import order_kind_label
 from src.nadobro.services.feature_flags import portfolio_sync_enabled, portfolio_sync_interval_seconds
 from src.nadobro.services.nado_sync import sync_user
 from src.nadobro.services.user_service import get_user
-from src.nadobro.utils.visual import divider, money, pct, signed, stale_banner, time_ago
+from src.nadobro.utils.visual import b, divider, esc, money, pct, pnl_dot, signed_money, stale_banner, time_ago
 
 
 _VALID_WINDOWS = ("24h", "7d", "30d", "all")
@@ -87,7 +87,14 @@ def render_portfolio_deck(
     snapshot: dict[str, Any],
     *,
     window: str = _DEFAULT_WINDOW,
+    refreshing: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup]:
+    """Render the Portfolio overview (Telegram HTML parse mode).
+
+    ``refreshing`` swaps the sync line for a live "Refreshing…" hint — the
+    cached deck is shown instantly and the message is edited in place when
+    the background sync lands.
+    """
     window = _normalize_window(window)
     network = str(snapshot.get("network") or "mainnet").upper()
     positions = list(snapshot.get("positions") or [])
@@ -96,7 +103,7 @@ def render_portfolio_deck(
     equity = snapshot.get("equity") or {}
     last_sync = _as_dt(snapshot.get("last_sync"))
     threshold = (portfolio_sync_interval_seconds() * 2) if portfolio_sync_enabled() else 300
-    stale = stale_banner(last_sync, threshold) if last_sync else "⚠ Stale · last sync never"
+    stale = stale_banner(last_sync, threshold) if last_sync else "⚠️ Never synced"
 
     total_upnl = sum((_dec(p.get("est_pnl")) for p in positions if p.get("est_pnl") is not None), Decimal("0"))
     total_balance = _dec(equity.get("total")) if equity else Decimal("0")
@@ -111,43 +118,67 @@ def render_portfolio_deck(
     fees_window = _window_value(stats, "fees_windows", window)
     funding_window = _window_value(stats, "funding_windows", window)
 
-    lines = []
-    if stale or snapshot.get("stale"):
-        lines.append(stale or "⚠ Stale · last sync unknown")
-    lines.extend([
-        f"📋 Portfolio · {network} · {_window_label(window)}",
+    if refreshing:
+        sync_line = f"🔄 Refreshing · showing {time_ago(last_sync) if last_sync else 'cached'} data"
+    elif snapshot.get("stale") and snapshot.get("error"):
+        # The last refresh ATTEMPT failed (gateway circuit, venue error).
+        # Don't claim "Live" — say what the user is actually looking at.
+        sync_line = f"⚠️ Sync issue · showing {time_ago(last_sync) if last_sync else 'cached'} data"
+    elif stale:
+        sync_line = stale
+    else:
+        sync_line = f"🟢 Live · synced {time_ago(last_sync)}"
+
+    # Funding sign convention: positive = paid (a cost), negative = received.
+    if funding_window > 0:
+        funding_line = f"Funding   -{money(funding_window)} (paid)"
+    elif funding_window < 0:
+        funding_line = f"Funding   +{money(abs(funding_window))} (received)"
+    else:
+        funding_line = "Funding   $0.00"
+
+    lines = [
+        f"📊 <b>Portfolio</b> · {esc(network)} · {_window_label(window)}",
+        sync_line,
         divider(),
-        f"📡 Synced {time_ago(last_sync) if last_sync else 'never'}",
-        f"💎 Total Balance {money(total_balance)}    🟢 uPnL {signed(total_upnl)}",
-        f"   Spot {money(spot_eq)} · Cross {money(cross_eq)} · Isolated {money(iso_eq)}",
-        f"🚀 Positions {len(positions)}    📋 Orders {len(orders)}",
+        f"<b>Total Balance</b>  {money(total_balance)}",
+        f"Spot {money(spot_eq)} · Cross {money(cross_eq)} · Iso {money(iso_eq)}",
         "",
-        f"⚡ Volume ({_window_label(window)})",
-        f"💰 Vol {money(vol_window)}",
-        "",
-        f"🏆 PnL ({_window_label(window)})",
-        f"   Realized {signed(pnl_window)}",
-        f"   Fees -{money(abs(fees_window))}",
-        f"   Funding {signed(funding_window)} ({'paid' if funding_window > 0 else 'received'})",
+        f"<b>Unrealized PnL</b>  {pnl_dot(total_upnl)} {signed_money(total_upnl)}",
+        f"{len(positions)} open position{'' if len(positions) == 1 else 's'} · "
+        f"{len(orders)} open order{'' if len(orders) == 1 else 's'}",
         divider(),
-        "🔝 Top Positions",
-    ])
-    for idx, pos in enumerate(sorted(positions, key=lambda p: abs(_dec(p.get("est_pnl"))), reverse=True)[:5], start=1):
-        direction = "📈" if bool(pos.get("is_long", True)) else "📉"
+        f"<b>Activity</b> · {_window_label(window)}",
+        f"Volume    {money(vol_window)}",
+        f"Realized  {signed_money(pnl_window)}",
+        f"Fees      -{money(abs(fees_window))}",
+        funding_line,
+        divider(),
+        "<b>Top Positions</b>",
+    ]
+    for pos in sorted(positions, key=lambda p: abs(_dec(p.get("est_pnl"))), reverse=True)[:5]:
+        est_pnl = _dec(pos.get("est_pnl"))
+        direction = "long" if bool(pos.get("is_long", True)) else "short"
+        margin = "iso" if bool(pos.get("isolated")) else "cross"
+        upnl_pct = pos.get("upnl_pct")
+        pct_part = f" ({pct(_dec(upnl_pct))})" if upnl_pct is not None else ""
         lines.append(
-            f"{idx} ╱ {_pos_symbol(pos)} {_margin(pos)} {direction} {money(_dec(pos.get('est_pnl')))} ({pct(_dec(pos.get('upnl_pct')) if pos.get('upnl_pct') is not None else Decimal('0'))})"
+            f"{pnl_dot(est_pnl)} {b(_pos_symbol(pos))} · {direction} · {margin}  "
+            f"{signed_money(est_pnl)}{pct_part}"
         )
     if not positions:
-        lines.append("No open positions.")
-    lines.append("")
-    lines.append("📋 Open Orders")
-    for idx, order in enumerate(orders[:3], start=1):
-        side = "📈" if str(order.get("side") or "").upper() in {"LONG", "BUY"} else "📉"
+        lines.append("No open positions")
+    lines.extend(["", "<b>Open Orders</b>"])
+    for order in orders[:3]:
+        side = "buy" if str(order.get("side") or "").upper() in {"LONG", "BUY"} else "sell"
         lines.append(
-            f"{idx} ╱ {_order_symbol(order)} {side} {order_kind_label(order)} {money(_dec(order.get('price') or order.get('limit_price')))}"
+            f"• {b(_order_symbol(order))} · {side} · {esc(order_kind_label(order))}  "
+            f"{money(_dec(order.get('price') or order.get('limit_price')))}"
         )
+    if len(orders) > 3:
+        lines.append(f"… and {len(orders) - 3} more")
     if not orders:
-        lines.append("No open orders.")
+        lines.append("No open orders")
     return "\n".join(lines)[:3500], portfolio_deck_kb(
         bool(positions), bool(orders), window=window
     )

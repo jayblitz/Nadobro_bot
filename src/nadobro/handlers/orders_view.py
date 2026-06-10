@@ -8,6 +8,23 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from src.nadobro.utils.visual import divider, money
 
 
+def cancel_callback_for(order, fallback_index: int) -> str:
+    """Cancel callback that identifies the order by DIGEST, not list position.
+
+    A positional index re-resolved against a fresh snapshot can point at a
+    DIFFERENT order if the list shifted (a fill or external cancel) between
+    render and tap — and then we cancel the wrong order. The digest prefix
+    (16 hex chars, unique per user in practice) survives list reordering;
+    the numeric form remains only for orders that carry no digest and for
+    buttons rendered before this upgrade.
+    """
+    digest = str(order.get("digest") or order.get("order_digest") or "")
+    short = digest.lower().removeprefix("0x")[:16]
+    if short:
+        return f"portfolio:cancel_order:d:{short}"
+    return f"portfolio:cancel_order:{fallback_index}"
+
+
 def order_kind_label(order: dict[str, Any]) -> str:
     kind = str(order.get("type") or order.get("order_type") or "LIMIT").upper()
     if bool(order.get("is_trigger")):
@@ -43,7 +60,7 @@ def render_orders_view(snapshot: dict[str, Any], page: int = 0, page_size: int =
             f"🕐 Created {str(order.get('created_at') or '—')} UTC",
             "",
         ])
-        rows.append([InlineKeyboardButton(f"🗑 Cancel {idx}", callback_data=f"portfolio:cancel_order:{idx - 1}")])
+        rows.append([InlineKeyboardButton(f"🗑 Cancel {idx}", callback_data=cancel_callback_for(order, idx - 1))])
     if not visible:
         lines.append("No open orders.")
     lines.append(divider())

@@ -79,7 +79,7 @@ def test_portfolio_deck_shows_trigger_order_type():
 
 def test_portfolio_deck_and_subviews_render_without_local_sync_text():
     text, kb = render_portfolio_deck(_snapshot())
-    assert "Portfolio · TESTNET" in text
+    assert "<b>Portfolio</b> · TESTNET" in text
     assert "local ledger" not in text
     assert "Total Balance" in text
     assert kb.inline_keyboard
@@ -159,7 +159,8 @@ def test_order_cancel_indices_follow_sorted_order():
     text, kb = render_orders_view(snapshot)
 
     assert text.index("NEW") < text.index("OLD")
-    assert kb.inline_keyboard[0][0].callback_data == "portfolio:cancel_order:0"
+    # Digest-addressed cancel: immune to list reordering between render and tap.
+    assert kb.inline_keyboard[0][0].callback_data == "portfolio:cancel_order:d:new"
 
 
 def test_positions_cancel_indices_paginate_correctly():
@@ -182,7 +183,13 @@ def test_positions_cancel_indices_paginate_correctly():
         for btn in row
         if btn.callback_data and btn.callback_data.startswith("portfolio:cancel_order:")
     ]
-    assert cancel_callbacks == ["portfolio:cancel_order:4", "portfolio:cancel_order:5", "portfolio:cancel_order:6"]
+    # Sorted newest-first: ORD7..ORD1; ord page 1 (size 4) shows ORD3, ORD2,
+    # ORD1 — addressed by digest, not list position.
+    assert cancel_callbacks == [
+        "portfolio:cancel_order:d:3",
+        "portfolio:cancel_order:d:2",
+        "portfolio:cancel_order:d:1",
+    ]
 
 
 def test_session_card_template_and_card_generation(tmp_path):
@@ -203,3 +210,89 @@ def test_session_card_template_and_card_generation(tmp_path):
     )
     assert Path(out).exists()
     assert Path(out).stat().st_size > 0
+
+
+def test_deck_upnl_dot_matches_sign():
+    # Screenshot bug 2026-06-10: a green dot rendered next to uPnL -19.19.
+    snapshot = _snapshot()
+    snapshot["positions"][0]["est_pnl"] = "-19.19"
+    text, _ = render_portfolio_deck(snapshot)
+    assert "<b>Unrealized PnL</b>  🔴 -$19.19" in text
+    snapshot["positions"][0]["est_pnl"] = "19.19"
+    text, _ = render_portfolio_deck(snapshot)
+    assert "<b>Unrealized PnL</b>  🟢 +$19.19" in text
+
+
+def test_deck_funding_direction_label():
+    snapshot = _snapshot()
+    snapshot["stats"]["funding_windows"] = {"24h": "0.12"}
+    text, _ = render_portfolio_deck(snapshot)
+    assert "Funding   -$0.12 (paid)" in text
+    snapshot["stats"]["funding_windows"] = {"24h": "-0.12"}
+    text, _ = render_portfolio_deck(snapshot)
+    assert "Funding   +$0.12 (received)" in text
+
+
+def test_deck_refreshing_banner():
+    text, _ = render_portfolio_deck(_snapshot(), refreshing=True)
+    assert "🔄 Refreshing" in text
+    text, _ = render_portfolio_deck(_snapshot(), refreshing=False)
+    assert "🔄 Refreshing" not in text
+
+
+def test_deck_hides_pct_when_unknown():
+    # upnl_pct=None must render no percentage, not a fake (+0.00%).
+    snapshot = _snapshot()
+    snapshot["positions"][0]["upnl_pct"] = None
+    text, _ = render_portfolio_deck(snapshot)
+    assert "(+0.00%)" not in text
+
+
+def test_sync_resolves_placeholder_product_names():
+    from unittest.mock import patch
+
+    from src.nadobro.services.nado_sync import _resolve_product_names
+
+    positions = [{"product_id": 2, "symbol": "Product_2", "product_name": ""}]
+    orders = [{"product_id": 4, "product_name": "Product_4"}]
+    matches = [{"product_id": 2, "product_name": ""}]
+    with patch(
+        "src.nadobro.config.get_product_name",
+        side_effect=lambda pid, network=None: {2: "BTC-PERP", 4: "ETH-PERP"}[int(pid)],
+    ):
+        _resolve_product_names(positions, orders, matches, "mainnet")
+    assert positions[0]["symbol"] == "BTC-PERP"
+    assert positions[0]["product_name"] == "BTC-PERP"
+    assert orders[0]["product_name"] == "ETH-PERP"
+    assert matches[0]["product_name"] == "BTC-PERP"
+    # Real names are never overwritten.
+    keep = [{"product_id": 2, "symbol": "KBTC", "product_name": "KBTC"}]
+    _resolve_product_names(keep, [], [], "mainnet")
+    assert keep[0]["symbol"] == "KBTC"
+
+
+def test_unrealized_pnl_pct_cross_falls_back_to_margin_used():
+    from decimal import Decimal
+
+    from src.nadobro.services.portfolio_calculator import unrealized_pnl_pct
+
+    # SDK cross rows often omit leverage; margin_used must back the pct
+    # instead of returning None (rendered as a fake 0.00%).
+    value = unrealized_pnl_pct(
+        est_pnl=Decimal("-19.19"),
+        margin_used=Decimal("82"),
+        notional_value=Decimal("164"),
+        leverage=None,
+        isolated=False,
+    )
+    assert value is not None and value < 0
+
+
+def test_cancel_callback_falls_back_to_index_without_digest():
+    from src.nadobro.handlers.orders_view import cancel_callback_for
+
+    assert cancel_callback_for({"digest": "0xABCDEF1234567890ffff"}, 3) == (
+        "portfolio:cancel_order:d:abcdef1234567890"
+    )
+    assert cancel_callback_for({"order_digest": "0x99"}, 3) == "portfolio:cancel_order:d:99"
+    assert cancel_callback_for({}, 3) == "portfolio:cancel_order:3"

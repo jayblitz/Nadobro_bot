@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.nadobro.db import query_all
-from src.nadobro.utils.visual import divider, money, signed
+from src.nadobro.utils.visual import b, divider, esc, money, pnl_dot, signed, signed_money
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -49,7 +49,8 @@ def render_performance_view(
     sessions = sessions[:page_size]
 
     lines = [
-        f"📊 Performance · {network.upper()}  (page {page + 1})",
+        f"📊 <b>Performance</b> · {esc(network.upper())} · page {page + 1}",
+        "Strategy sessions, newest first",
         divider(),
     ]
     rows: list[list[InlineKeyboardButton]] = []
@@ -81,18 +82,16 @@ def _render_session_card(
     funding = _dec(session.get("total_funding_paid") or 0)
     pnl = _dec(session.get("realized_pnl") or 0)
     state = str(session.get("status") or "stopped").lower()
-    badge = "🟢 RUNNING" if state == "running" else "⏹ ENDED"
+    badge = "🟢 running" if state == "running" else "⏹ ended"
     cost_per_million = (
         (fees + abs(funding)) / volume * Decimal("1000000") if volume > 0 else Decimal("0")
     )
 
     lines.extend([
-        f"#{display_idx} · {strategy.upper()} · {pair} · {badge}",
-        f"   🕐 {_fmt_dt(session.get('started_at'))} · ⏱ {_duration(session)}",
-        f"   💰 Volume {money(volume)}",
-        f"   🏷 Fees -{money(fees)}    🔵 Funding {signed(funding)}",
-        f"   🏆 Realized PnL {signed(pnl)}",
-        f"   📐 Cost/$1M {money(cost_per_million)}",
+        f"{display_idx}. {b(strategy.upper())} · {b(pair)}  {badge}",
+        f"    {_fmt_dt(session.get('started_at'))} · ran {_duration(session)}",
+        f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Vol {money(volume)}",
+        f"    Fees -{money(fees)} · Funding {signed_money(-funding)} · Cost/$1M {money(cost_per_million)}",  # paid > 0 is a cost
         "",
     ])
     return [[

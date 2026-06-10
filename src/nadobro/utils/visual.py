@@ -1,8 +1,9 @@
+import html as _html
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
-DIVIDER = "─────────────────────────"
+DIVIDER = "──────────────────"
 
 
 def _d(value) -> Decimal:
@@ -15,12 +16,29 @@ def divider() -> str:
     return DIVIDER
 
 
+def esc(value) -> str:
+    """Escape a dynamic value for Telegram HTML parse mode."""
+    return _html.escape(str(value), quote=False)
+
+
+def b(text) -> str:
+    """Bold a (dynamic, escaped) value for Telegram HTML parse mode."""
+    return f"<b>{esc(text)}</b>"
+
+
 def header(emoji: str, label: str) -> str:
-    return f"*{emoji} {label}*"
+    # Telegram HTML parse mode (portfolio views are sent with
+    # parse_mode=HTML; the old Markdown ``*...*`` rendered as literal
+    # asterisks because these screens never set a parse mode).
+    return f"<b>{emoji} {esc(label)}</b>"
 
 
 def kv(label: str, value: str) -> str:
     return f"{label} {value}"
+
+
+def pnl_dot(value: Decimal) -> str:
+    return "🟢" if _d(value) >= 0 else "🔴"
 
 
 def _quantize(value: Decimal, decimals: int) -> Decimal:
@@ -32,6 +50,13 @@ def signed(amount: Decimal, decimals: int = 2) -> str:
     value = _quantize(_d(amount), decimals)
     sign = "+" if value >= 0 else "-"
     return f"{sign}{abs(value):,.{max(0, int(decimals))}f}"
+
+
+def signed_money(amount: Decimal, decimals: int = 2) -> str:
+    """Signed dollar amount: +$12.30 / -$19.19 (PnL, funding, fees deltas)."""
+    value = _quantize(_d(amount), decimals)
+    sign = "+" if value >= 0 else "-"
+    return f"{sign}${abs(value):,.{max(0, int(decimals))}f}"
 
 
 def pct(value: Decimal) -> str:

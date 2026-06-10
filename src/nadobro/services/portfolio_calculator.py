@@ -144,7 +144,16 @@ def unrealized_pnl_pct(
     if isolated:
         denominator = margin_used
     else:
-        denominator = (notional_value / leverage) if leverage and leverage != ZERO else None
+        # Prefer notional/leverage (margin actually committed); the SDK
+        # summary often omits ``leverage`` for cross rows, so fall back to
+        # margin_used rather than returning None (which renders as a fake
+        # 0.00% in the deck).
+        if leverage and leverage != ZERO:
+            denominator = notional_value / leverage
+        elif margin_used and margin_used != ZERO:
+            denominator = margin_used
+        else:
+            denominator = None
     if denominator is None or denominator == ZERO:
         return None
     return (est_pnl / denominator) * Decimal(100)
