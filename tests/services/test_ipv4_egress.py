@@ -15,8 +15,17 @@ def fresh_ipv4():
     return ipv4_egress
 
 
-def test_force_ipv4_enabled_defaults_on(fresh_ipv4, monkeypatch):
+def test_force_ipv4_enabled_defaults_off(fresh_ipv4, monkeypatch):
+    # Default is dual-stack (IPv4 + IPv6) egress: Fly static egress is an
+    # IPv4+IPv6 pair and forcing IPv4-only broke IPv6-only upstreams
+    # (e.g. Supabase direct host). Opt in with NADO_FORCE_IPV4=1.
     monkeypatch.delenv("NADO_FORCE_IPV4", raising=False)
+    assert fresh_ipv4.force_ipv4_enabled() is False
+
+
+@pytest.mark.parametrize("value", ("1", "true", "yes", "on"))
+def test_force_ipv4_can_be_enabled(fresh_ipv4, monkeypatch, value):
+    monkeypatch.setenv("NADO_FORCE_IPV4", value)
     assert fresh_ipv4.force_ipv4_enabled() is True
 
 

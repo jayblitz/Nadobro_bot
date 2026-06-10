@@ -20,9 +20,14 @@ def test_map_grid_config_centers_band_and_sets_barriers():
     assert cfg["max_open_orders"] == 2
     assert cfg["total_amount_quote"] == Decimal("75")
     assert cfg["leverage"] == 3
-    # band = 100 * 0.0004 * 2 = 0.08
-    assert cfg["start_price"] == Decimal("99.92")
-    assert cfg["end_price"] == Decimal("100.08")
+    # NO_ORDERS_AUDIT-FIX-R4: spread_bp is the per-level STEP; a BUY grid's
+    # band steps DOWN from mid so post-only buys never cross the book.
+    # span = (levels - 1) * step = 1 * 0.0004 -> start = 100 * (1 - 0.0004).
+    assert cfg["start_price"] == Decimal("99.96")
+    assert cfg["end_price"] == Decimal("100")
+    # Knobs for DynamicGridController side-correct band rebuilds.
+    assert cfg["step_pct"] == Decimal("0.0004")
+    assert cfg["levels_count"] == 2
     # long grid hard stop below: 100 * (1 - 0.005)
     assert cfg["limit_price"] == Decimal("99.5")
     tb = cfg["triple_barrier_config"]

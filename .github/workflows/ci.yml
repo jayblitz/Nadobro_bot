@@ -29,17 +29,11 @@ jobs:
       # NADO_TEST_DATABASE_URL=postgresql://nadobro:nadobro@127.0.0.1:5432/nadobro_test
       # — validate the DB tests pass against it first.
       #
-      # KNOWN FAILURES below were already failing when CI was introduced
-      # (June 2026); each is tracked in the repo audit. Remove entries as
-      # they are fixed. Do NOT add new entries — fix the test or the code.
+      # The full suite is green — keep it that way. If a test must be
+      # temporarily skipped, use --deselect with a tracking comment here;
+      # never let red tests accumulate silently again.
       - name: Run test suite
-        run: >-
-          python -m pytest -q
-          --deselect "tests/services/test_engine_runtime_mapping.py::test_map_grid_config_centers_band_and_sets_barriers"
-          --deselect "tests/services/test_ipv4_egress.py::test_force_ipv4_enabled_defaults_on"
-          --deselect "tests/test_runtime_and_leverage.py::RuntimeAndLeverageTests::test_build_portfolio_view_handles_position_failures"
-          --deselect "tests/test_runtime_and_leverage.py::RuntimeAndLeverageTests::test_ensure_task_uses_cached_loop_when_called_off_loop"
-          --deselect "tests/test_wallet_onboarding_flow.py::WalletOnboardingFlowTests::test_wallet_view_seeds_wallet_flow_when_not_linked"
+        run: python -m pytest -q
 
   typecheck:
     name: Type check (engine, mypy)
