@@ -373,7 +373,7 @@ def get_trader_stats(trader_id: int) -> dict:
                 hl_px = float(t.get("hl_price") or 0.0)
                 notional = abs(nado_sz * nado_px) if nado_sz and nado_px else abs(hl_sz * hl_px)
                 stats["volume_usd"] += float(notional or 0.0)
-            except Exception:
+            except Exception:  # policy: degrade-ok(stats row malformed; dashboard tolerates undercount)
                 pass
 
     # We currently don't persist per-trade realized PnL in copy_trades, so
@@ -404,7 +404,7 @@ def get_trader_preview(trader_id: int, network: str = "mainnet", requester_user_
             size = abs(float(pos.get("amount", 0) or 0.0))
             entry = float(pos.get("entry_price", 0) or pos.get("avg_entry_price", 0) or 0.0)
             total_notional += size * entry
-        except Exception:
+        except Exception:  # policy: degrade-ok(malformed position row; preview tolerates undercount)
             continue
     return {
         "found": True,
@@ -534,8 +534,11 @@ def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict
             logger.debug("Failed to fetch orders for product %s: %s", pid, e)
     try:
         save_copy_snapshot(trader_id, network, json.dumps(list(leader_pos_map.values())))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "copy snapshot not persisted for trader %s (%s) — dashboard may show stale leader state: %s",
+            trader_id, network, e,
+        )
     return leader_pos_map
 
 
@@ -902,8 +905,12 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
                 if digest:
                     try:
                         client.cancel_order(pid, digest)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            "old TP/SL cancel failed for product %s digest %s — "
+                            "stale protective order may still be resting: %s",
+                            pid, digest, e,
+                        )
     except Exception as e:
         logger.debug("Failed to cancel old TP/SL: %s", e)
 

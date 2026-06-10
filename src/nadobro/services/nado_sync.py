@@ -186,7 +186,7 @@ async def sync_active_users(reason: str = "poll") -> None:
             if is_circuit_open(NADO_MAINNET_REST) and is_circuit_open(NADO_TESTNET_REST):
                 logger.debug("portfolio sync skipped: Cloudflare circuit open on both gateways")
                 return
-        except Exception:
+        except Exception:  # policy: degrade-ok(circuit probe is best-effort; sync proceeds)
             pass
 
     tick_budget = max(5.0, portfolio_sync_interval_seconds() * 0.85)
@@ -319,7 +319,7 @@ async def sync_user(
                         stale = deepcopy(prior)
                         stale.update({"stale": False, "reason": "ws_cached", "ws_healthy": True})
                         return stale
-            except Exception:
+            except Exception:  # policy: degrade-ok(ws-cache fast path; falls through to full sync)
                 pass
 
         # Gateway circuit short-circuit for ALL sync reasons (not just poll):
@@ -826,14 +826,14 @@ def _resolve_leverage(pos: dict[str, Any]) -> str:
             value = Decimal(str(raw))
             if value > 0:
                 return str(value)
-        except Exception:
+        except Exception:  # policy: degrade-ok(malformed venue leverage; falls back to derived value)
             pass
     try:
         notional = Decimal(str(pos.get("notional_value") or 0))
         margin = Decimal(str(pos.get("margin_used") or 0))
         if margin > 0 and notional > 0:
             return str(notional / margin)
-    except Exception:
+    except Exception:  # policy: degrade-ok(malformed venue fields; defaults to 1x)
         pass
     return "1"
 
