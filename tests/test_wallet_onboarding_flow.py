@@ -13,13 +13,22 @@ from src.nadobro.handlers import callbacks, commands
 
 class WalletOnboardingFlowTests(unittest.TestCase):
     def test_wallet_view_seeds_wallet_flow_when_not_linked(self):
+        # The pending signer is persisted to bot_state (c058654: survive
+        # multi-worker / restarts); stub that layer so the test stays DB-free.
+        from src.nadobro.handlers import wallet_view
+
         query = SimpleNamespace(edit_message_text=AsyncMock())
         context = SimpleNamespace(user_data={})
         fake_key = SimpleNamespace(hex=lambda: "0xabc123")
         fake_account = SimpleNamespace(key=fake_key, address="0x1111111111111111111111111111111111111111")
+        persisted = []
 
         with patch.object(callbacks, "get_user_wallet_info", return_value={"linked_signer_address": None}), patch(
             "eth_account.Account.create", return_value=fake_account
+        ), patch.object(wallet_view, "load_wallet_pending_flow", return_value=None), patch.object(
+            wallet_view,
+            "persist_wallet_pending_flow",
+            side_effect=lambda telegram_id, **kw: persisted.append((telegram_id, kw)),
         ):
             asyncio.run(callbacks._handle_wallet(query, "wallet:view", 1, context))
 
@@ -30,6 +39,11 @@ class WalletOnboardingFlowTests(unittest.TestCase):
             "0x1111111111111111111111111111111111111111",
         )
         query.edit_message_text.assert_awaited()
+        # Freshly seeded signer must be persisted so other workers can load it.
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(persisted[0][0], 1)
+        self.assertEqual(persisted[0][1].get("pk_hex"), "0xabc123")
+        self.assertEqual(persisted[0][1].get("flow"), "awaiting_main_address")
 
     def test_cmd_start_shows_tos_screen_when_language_already_set(self):
         calls = []

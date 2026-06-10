@@ -43,16 +43,19 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
         asyncio.run(_run())
 
-    def test_build_portfolio_view_handles_position_failures(self):
-        class FailingClient:
-            def get_all_positions(self):
-                raise RuntimeError("boom")
+    def test_portfolio_view_handles_snapshot_failures(self):
+        # ``build_portfolio_view`` was retired in the portfolio deck redesign
+        # (2026-05); the deck path (_view_portfolio_text -> snapshot_for_user)
+        # must degrade to the "temporarily unavailable" card when the
+        # snapshot fails, instead of raising into the handler.
+        from src.nadobro.handlers import portfolio_deck
 
-        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value="mainnet"))
-        with patch.object(home_card, "get_user", return_value=fake_user), patch.object(
-            home_card, "get_user_readonly_client", return_value=FailingClient()
+        with patch.object(
+            portfolio_deck,
+            "snapshot_for_user",
+            AsyncMock(side_effect=RuntimeError("boom")),
         ):
-            text, reply_markup = home_card.build_portfolio_view(telegram_id=7)
+            text, reply_markup = asyncio.run(home_card._view_portfolio_text(telegram_id=7))
 
         self.assertIn("Portfolio refresh is temporarily unavailable", text)
         self.assertIsNotNone(reply_markup)
@@ -719,6 +722,10 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertTrue(ok, msg)
 
     def test_ensure_task_uses_cached_loop_when_called_off_loop(self):
+        # Legacy per-user loop path: only taken when the central strategy
+        # scheduler feature flag is OFF (it defaults ON), so pin it off here.
+        from src.nadobro.services import feature_flags
+
         calls = []
 
         class FakeLoop:
@@ -734,13 +741,30 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         try:
             bot_runtime._runtime_loop = FakeLoop()
             bot_runtime._tasks = {}
-            with patch.object(bot_runtime, "_schedule_task_on_loop") as schedule_mock:
+            with patch.object(
+                feature_flags, "strategy_scheduler_enabled", return_value=False
+            ), patch.object(bot_runtime, "_schedule_task_on_loop") as schedule_mock:
                 bot_runtime._ensure_task(telegram_id=123, network="testnet")
                 schedule_mock.assert_called_once_with(123, "testnet")
             self.assertEqual(len(calls), 1)
         finally:
             bot_runtime._runtime_loop = old_loop
             bot_runtime._tasks = old_tasks
+
+    def test_ensure_task_registers_with_central_scheduler_when_enabled(self):
+        # Default path: NADO_STRATEGY_SCHEDULER is on, so _ensure_task hands
+        # the session to the central scheduler instead of spawning a loop.
+        from unittest.mock import MagicMock
+
+        from src.nadobro.services import feature_flags, strategy_scheduler
+
+        sched = SimpleNamespace(register=MagicMock())
+        with patch.object(
+            feature_flags, "strategy_scheduler_enabled", return_value=True
+        ), patch.object(strategy_scheduler, "get_scheduler", return_value=sched):
+            bot_runtime._ensure_task(telegram_id=9, network="mainnet")
+
+        sched.register.assert_called_once_with(9, "mainnet")
 
     def test_parse_interaction_intent_routes_current_pnl_question(self):
         intent = parse_interaction_intent("What is my current pnl?")

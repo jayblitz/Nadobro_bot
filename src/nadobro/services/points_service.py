@@ -93,6 +93,14 @@ _NO_POINTS_HINT_RE = re.compile(
     r"(no\s+points|no\s+data|no\s+trades|nothing\s+found|not\s+found|0\s*points?)",
     re.IGNORECASE,
 )
+# Mid-flow LOWIQPTS prompts often embed Points:/Volume: previews and "no
+# trades" phrasing while still asking for input (extra costs, "send 0", ...).
+# Never treat a message that matches this as terminal: completing the pending
+# request here drops relay state before the user's "0" / Yes reply arrives.
+# (Restored from the batch5 hardening that commit 6305681 reverted to bisect.)
+_LOWIQPTS_INTERACTIVE_PROMPT_RE = re.compile(
+    r"(?i)(\bextra\s+costs?\b|\bsend\s+0\b|\balready\s+fetched\s+from\s+api\b|\benter\s+(your\s+)?extras?\b)",
+)
 # Bare numbers ("0", "0.5") and yes/no are the typical replies LOWIQPTS expects.
 # When persistence/rehydration ever misses an edge case, these would otherwise fall
 # through the message handler chain into the AI chat — surface "session expired"
@@ -547,6 +555,12 @@ def parse_lowiq_points_reply(text: str) -> Optional[dict]:
     )
     explicit_fields = bool(points_match or volume_match or cpp_match)
     if not explicit_fields and _NO_POINTS_HINT_RE.search(text):
+        # "no trades"-style copy inside an interactive prompt is NOT terminal —
+        # LOWIQPTS sends it mid-flow while still waiting for the user's
+        # "0"/Yes reply. Only a terminal no-activity message (no prompt
+        # phrasing) completes with a zero snapshot.
+        if _LOWIQPTS_INTERACTIVE_PROMPT_RE.search(text):
+            return None
         return {
             "points": 0.0,
             "volume_usd": 0.0,
@@ -879,6 +893,13 @@ async def _process_relay_event(bot_app, bot_data: dict, event: dict) -> None:
         return
 
     if not parsed:
+        _schedule_timeout(bot_app, str(req.get("req_id", "")))
+        return
+
+    if _LOWIQPTS_INTERACTIVE_PROMPT_RE.search(text):
+        # Mid-flow prompt embedding Points:/Volume: previews — the relay is
+        # still waiting on the user's reply, so keep the request pending.
+        _touch_pending_request(req)
         _schedule_timeout(bot_app, str(req.get("req_id", "")))
         return
 
