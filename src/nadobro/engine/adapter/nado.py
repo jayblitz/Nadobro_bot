@@ -510,7 +510,11 @@ class NadoAdapter(NadoAdapterBase):
                 open_orders = await asyncio.to_thread(
                     self._client.get_open_orders, meta.product_id, True,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "reconcile: get_open_orders failed for %s (skipping product): %s",
+                    pair, exc,
+                )
                 continue
             resting = self._find_open(open_orders, order_id)
             if resting is None:

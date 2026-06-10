@@ -16,10 +16,13 @@ Implemented in Phase 3.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from src.nadobro.engine.adapter.base import Fill, NadoAdapterBase, NadoOrder, OrderState
 from src.nadobro.engine.executor_base import Executor
@@ -190,16 +193,22 @@ class TWAPExecutor(Executor):
         oid = self.current_order.id
         try:
             await self._guard(lambda: self.adapter.cancel_order(oid), label="twap_cancel")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "twap %s: slice cancel failed for %s — order may still be resting: %s",
+                self.id, oid, exc,
+            )
         try:
             refreshed = await self._guard(
                 lambda: self.adapter.order_status(oid), label="twap_post_cancel_status",
             )
             self.current_order = refreshed
             self._ingest_current(refreshed)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "twap %s: post-cancel status failed for %s — last fills may be unbooked: %s",
+                self.id, oid, exc,
+            )
 
     async def _advance(self, mid: Decimal) -> None:
         # BUG-TWAP-4 fix: capture partial fills before cancelling.

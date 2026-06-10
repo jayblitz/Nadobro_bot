@@ -433,8 +433,11 @@ class ExecutorOrchestrator:
         if controller is not None:
             try:
                 await controller.on_stop(reason)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "controller %s on_stop hook failed (continuing with executor cancel): %s",
+                    controller_id, exc,
+                )
             controller._set_stopped()
         targets = self.list(controller_id, active_only=True)
         await asyncio.gather(*(self.stop(e.id, close_type) for e in targets))

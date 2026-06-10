@@ -15,11 +15,14 @@ Implemented in Phase 1.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from src.nadobro.engine.adapter.base import Fill, NadoAdapterBase, NadoOrder, OrderState
 from src.nadobro.engine.executor_base import Executor
@@ -466,8 +469,11 @@ class PositionExecutor(Executor):
                         lambda: self.adapter.cancel_order(entry.id),
                         label="cancel_entry",
                     )
-                except Exception:  # noqa: BLE001 - cancel failures handled by status probe below
-                    pass
+                except Exception as exc:  # noqa: BLE001 - status probe below reconciles
+                    logger.warning(
+                        "position %s: entry cancel failed for %s — relying on status probe: %s",
+                        self.id, entry.id, exc,
+                    )
                 # Always re-probe so we ingest any final fills and learn the
                 # real venue state.
                 try:
@@ -533,8 +539,12 @@ class PositionExecutor(Executor):
                         lambda: self.adapter.cancel_order(existing.id),
                         label="cancel_close_on_stop",
                     )
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "position %s: close-order cancel failed for %s — "
+                        "order may still be resting before escalation: %s",
+                        self.id, existing.id, exc,
+                    )
                 # Refresh state once after cancel
                 try:
                     refreshed = await self._guard(
@@ -543,8 +553,12 @@ class PositionExecutor(Executor):
                     )
                     self.close_order = refreshed
                     self._ingest_exit(refreshed)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "position %s: post-cancel close status failed for %s — "
+                        "exit fills may be unbooked before escalation: %s",
+                        self.id, existing.id, exc,
+                    )
             if not self.is_terminated:
                 await self._escalate_close()
             return

@@ -10,11 +10,14 @@ Implemented in Phase 3.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 from typing import List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from src.nadobro.engine.adapter.base import Fill, NadoAdapterBase, NadoOrder, OrderState
 from src.nadobro.engine.executor_base import Executor
@@ -202,8 +205,11 @@ class DCAExecutor(Executor):
                             lambda: self.adapter.cancel_order(captured),
                             label="dca_rollback_cancel",
                         )
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "dca %s: rollback cancel failed for %s — order may still be resting: %s",
+                            self.id, captured, exc,
+                        )
                 raise
 
     async def on_tick(self) -> None:
@@ -302,12 +308,18 @@ class DCAExecutor(Executor):
                         lambda: self.adapter.order_status(oid), label="dca_pre_cancel_status",
                     )
                     self._ingest_rung(rung, pre)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "dca %s: pre-cancel status failed for %s — last fills may be unbooked: %s",
+                        self.id, oid, exc,
+                    )
                 try:
                     await self._guard(lambda: self.adapter.cancel_order(oid), label="dca_cancel")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "dca %s: stop cancel failed for %s — order may still be resting: %s",
+                        self.id, oid, exc,
+                    )
 
     async def _poll_close(self) -> None:
         if self.close_order is None:
