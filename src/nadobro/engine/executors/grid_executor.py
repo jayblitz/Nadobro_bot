@@ -15,11 +15,14 @@ Implemented in Phase 3.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from src.nadobro.engine.adapter.base import Fill, NadoAdapterBase, NadoOrder, OrderState
 from src.nadobro.engine.executor_base import Executor
@@ -305,15 +308,21 @@ class GridExecutor(Executor):
                 # treat the level as opened and book the close leg.
                 try:
                     await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_cancel")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "grid %s: out-of-bounds cancel failed for %s — order may still be resting: %s",
+                        self.id, oid, exc,
+                    )
                 try:
                     post_cancel = await self._guard(
                         lambda: self.adapter.order_status(oid), label="grid_open_post_cancel",
                     )
                     self._ingest(level, post_cancel, self.open_side, opening=True)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "grid %s: post-cancel status probe failed for %s — last fills may be unbooked: %s",
+                        self.id, oid, exc,
+                    )
                 level.open_order_id = None
                 if level.filled_base > 0:
                     level.state = GridLevelState.OPEN_ORDER_FILLED
@@ -349,8 +358,11 @@ class GridExecutor(Executor):
                     cid = oid
                     try:
                         await self._guard(lambda: self.adapter.cancel_order(cid), label="grid_cancel_all")
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "grid %s: cancel-all failed for %s — order may still be resting: %s",
+                            self.id, cid, exc,
+                        )
 
     def _net_base(self) -> Decimal:
         opened = sum((lv.filled_base for lv in self.levels), Decimal(0))
@@ -374,8 +386,12 @@ class GridExecutor(Executor):
                         lambda: self.adapter.order_status(captured), label=label,
                     )
                     self._ingest(level, refreshed, self.open_side if opening else self.close_side, opening=opening)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "grid %s: stop-out status refresh (%s) failed for %s — "
+                        "flatten size may miss last fills: %s",
+                        self.id, label, oid, exc,
+                    )
         net = self._net_base()
         if not self.config.keep_position and net > 0:
             flat = await self._guard(

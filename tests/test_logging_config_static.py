@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -10,8 +11,12 @@ def test_main_reduces_noisy_third_party_loggers():
 
 
 def test_pinecone_dependency_uses_current_package():
+    # The package must be the modern ``pinecone`` (the deprecated
+    # ``pinecone-client`` is a different distribution). A version pin on the
+    # correct package is fine — and wanted, for reproducible builds.
     requirements = Path("requirements.txt").read_text()
     pyproject = Path("pyproject.toml").read_text()
     assert "pinecone-client" not in requirements
-    assert "pinecone\n" in requirements
-    assert '"pinecone"' in pyproject
+    assert "pinecone-client" not in pyproject
+    assert re.search(r"^pinecone(\s*$|[=<>!\[])", requirements, re.MULTILINE)
+    assert re.search(r'"pinecone([=<>!\["])', pyproject)

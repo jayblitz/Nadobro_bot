@@ -16,8 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc libpq-dev build-essential \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt --target=/build/site-packages
+# Install from the hash-pinned export of uv.lock so every image build
+# resolves the exact same dependency set (and a tampered wheel fails the
+# hash check). Regenerate after editing requirements.txt/pyproject.toml:
+#   uv lock && uv export --format requirements-txt -o requirements.lock.txt
+COPY requirements.lock.txt .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock.txt --target=/build/site-packages
 
 FROM base AS runtime
 ARG APP_USER=nadobro

@@ -258,8 +258,11 @@ class OrderExecutor(Executor):
                 lambda: self.adapter.cancel_order(order.id),
                 label="cancel_order_stop",
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "order-executor %s: stop cancel failed for %s — order may still be resting: %s",
+                self.id, order.id, exc,
+            )
 
         try:
             refreshed = await self._guard(
