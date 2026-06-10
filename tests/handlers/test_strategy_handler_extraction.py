@@ -67,10 +67,15 @@ def test_copy_bro_portfolio_shims_delegate():
     # telegram_id before context; portfolio takes no context at all).
     # The shim must mirror its implementation exactly — a uniform shim
     # silently swaps arguments.
+    from src.nadobro.handlers import alerts_handler, settings_handler, wallet_handler
+
     for module, name, args in (
         (copy_handler, "_handle_copy", ("query", "x:menu", "ctx", 7)),
         (bro_handler, "_handle_bro", ("query", "x:menu", 7, "ctx")),
         (portfolio_handler, "_handle_portfolio", ("query", "x:menu", 7)),
+        (settings_handler, "_handle_settings", ("query", "x:menu", 7, "ctx")),
+        (wallet_handler, "_handle_wallet", ("query", "x:menu", 7, "ctx")),
+        (alerts_handler, "_handle_alert", ("query", "x:menu", 7, "ctx")),
     ):
         assert inspect.signature(getattr(callbacks, name)) == inspect.signature(
             getattr(module, name)
