@@ -15,7 +15,9 @@ class WalletOnboardingFlowTests(unittest.TestCase):
     def test_wallet_view_seeds_wallet_flow_when_not_linked(self):
         # The pending signer is persisted to bot_state (c058654: survive
         # multi-worker / restarts); stub that layer so the test stays DB-free.
-        from src.nadobro.handlers import wallet_view
+        # _handle_wallet lives in handlers/wallet_handler.py since the
+        # callbacks.py decomposition; patch names where they now resolve.
+        from src.nadobro.handlers import wallet_handler, wallet_view
 
         query = SimpleNamespace(edit_message_text=AsyncMock())
         context = SimpleNamespace(user_data={})
@@ -23,7 +25,7 @@ class WalletOnboardingFlowTests(unittest.TestCase):
         fake_account = SimpleNamespace(key=fake_key, address="0x1111111111111111111111111111111111111111")
         persisted = []
 
-        with patch.object(callbacks, "get_user_wallet_info", return_value={"linked_signer_address": None}), patch(
+        with patch.object(wallet_handler, "get_user_wallet_info", return_value={"linked_signer_address": None}), patch(
             "eth_account.Account.create", return_value=fake_account
         ), patch.object(wallet_view, "load_wallet_pending_flow", return_value=None), patch.object(
             wallet_view,

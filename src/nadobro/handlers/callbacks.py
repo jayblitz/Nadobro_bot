@@ -811,101 +811,12 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
 
 
 async def _handle_wallet(query, data, telegram_id, context):
-    parts = data.split(":")
-    action = parts[1] if len(parts) > 1 else "view"
+    """Shim: the wallet domain lives in wallet_handler.py (lazy import avoids a cycle)."""
+    from src.nadobro.handlers.wallet_handler import _handle_wallet as _impl
 
-    if action == "view":
-        show_connect = False
-        try:
-            info = get_user_wallet_info(telegram_id, verify_signer=True)
-            is_linked = bool(info and info.get("is_linked"))
-            if not is_linked and context is not None:
-                from src.nadobro.handlers.wallet_view import _ensure_pending_wallet_signer
+    return await _impl(query, data, telegram_id, context)
 
-                pk_hex, _ = _ensure_pending_wallet_signer(context, telegram_id)
-                msg, kb = fmt_wallet_connect_card(pk_hex), wallet_kb_not_linked()
-                show_connect = True
-            else:
-                msg, kb = fmt_wallet_info(info), (wallet_kb() if is_linked else wallet_kb_not_linked())
-        except Exception:
-            msg, kb = build_wallet_view_payload(telegram_id, context=context, verify_signer=True)
-        await _edit_loc(query,
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=kb,
-        )
-        # SECURITY: this message renders the 1CT signer private key. Remember its
-        # coordinates so we can delete it from chat history the moment the wallet
-        # is linked (the key is no longer needed once it's on Nado + encrypted).
-        if show_connect and context is not None and getattr(query, "message", None) is not None:
-            context.user_data["wallet_connect_msg"] = {
-                "chat_id": query.message.chat_id,
-                "message_id": query.message.message_id,
-            }
-    elif action == "balance":
-        client = get_user_readonly_client(telegram_id)
-        if not client:
-            await _edit_loc(query, 
-                fmt_wallet_balance_error(),
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=wallet_kb(),
-            )
-            return
-        try:
-            bal = client.get_balance()
-            usdt = (bal.get("balances") or {}).get(0, 0) or (bal.get("balances") or {}).get("0", 0)
-            msg = fmt_wallet_balance_card(float(usdt or 0))
-        except Exception:
-            msg = fmt_wallet_balance_error()
-        await _edit_loc(query, msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=wallet_kb())
-    elif action == "revoke_steps":
-        await _edit_loc(query, fmt_wallet_revoke_steps_card(), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=wallet_revoke_confirm_kb())
-    elif action == "revoke_confirm":
-        user = get_user(telegram_id)
-        network = user.network_mode.value if user else "testnet"
-        ok, msg = remove_user_private_key(telegram_id, network)
-        success_msg = "✅ Key reset! Your stored signer has been cleared. Tap 👛 Wallet to link a new 1CT key."
-        fail_msg = "❌ {msg}"
-        if ok:
-            await _edit_loc(query, success_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb_not_linked())
-        else:
-            await _edit_loc(query, fail_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=wallet_kb(), msg=escape_md(msg))
-    elif action == "remove_active":
-        user = get_user(telegram_id)
-        network = user.network_mode.value if user else "testnet"
-        ok, msg = remove_user_private_key(telegram_id, network)
-        prefix = "✅" if ok else "❌"
-        await _edit_loc(query, 
-            "{prefix} {msg}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=wallet_kb(),
-            prefix=prefix,
-            msg=escape_md(msg),
-        )
-    elif action == "network" and len(parts) >= 3:
-        net = parts[2]
-        if net not in ("testnet", "mainnet"):
-            return
 
-        success, result_msg = await run_blocking(switch_network, telegram_id, net)
-
-        if success:
-            info = get_user_wallet_info(telegram_id)
-            msg = fmt_wallet_info(info)
-            await _edit_loc(query, 
-                "{switch_msg}\n\n{wallet_info}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=wallet_kb(),
-                switch_msg=escape_md(result_msg),
-                wallet_info=msg,
-            )
-        else:
-            await _edit_loc(query, 
-                "❌ {msg}",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=wallet_kb(),
-                msg=escape_md(result_msg),
-            )
 
 
 async def _handle_points(query, data, telegram_id, context):
@@ -1003,209 +914,21 @@ async def _handle_points(query, data, telegram_id, context):
 
 
 async def _handle_alert(query, data, telegram_id, context):
-    parts = data.split(":")
-    action = parts[1] if len(parts) > 1 else ""
-    user = get_user(telegram_id)
-    network = user.network_mode.value if user else "mainnet"
+    """Shim: the alerts domain lives in alerts_handler.py (lazy import avoids a cycle)."""
+    from src.nadobro.handlers.alerts_handler import _handle_alert as _impl
 
-    if action == "menu":
-        await _edit_loc(query, 
-            fmt_alert_menu_intro(),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=alerts_kb(),
-        )
+    return await _impl(query, data, telegram_id, context)
 
-    elif action == "set":
-        await _edit_loc(query, 
-            fmt_alert_product_prompt(),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=alert_product_kb(network=network),
-        )
 
-    elif action == "product" and len(parts) >= 3:
-        product = parts[2]
-        context.user_data["pending_alert"] = {"product": product}
-        await _edit_loc(query,
-            fmt_alert_condition_prompt(product),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=alert_condition_kb(product),
-        )
-
-    elif action == "cond" and len(parts) >= 4:
-        product = parts[2]
-        condition = parts[3]
-        context.user_data["pending_alert"] = {"product": product, "condition": condition}
-        _lang = get_active_language()
-        condition_labels = {
-            "above": "Price Above",
-            "below": "Price Below",
-            "funding_above": "Funding Rate Above",
-            "funding_below": "Funding Rate Below",
-            "pnl_above": "PnL Above",
-            "pnl_below": "PnL Below",
-        }
-        label = condition_labels.get(condition, condition)
-        if condition.startswith("funding"):
-            example = localize_text("Example: `0.01` (funding rate in %)", _lang)
-        elif condition.startswith("pnl"):
-            example = localize_text("Example: `50` (PnL in USD)", _lang)
-        else:
-            example = localize_text("Example: `100000` (price in USD)", _lang)
-        await _edit_loc(query,
-            fmt_alert_target_prompt(product, label, example),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=back_kb(),
-        )
-
-    elif action == "view":
-        alerts = get_user_alerts(telegram_id)
-        msg = fmt_alerts(alerts)
-        kb = alert_delete_kb(alerts) if alerts else back_kb()
-        await _edit_loc(query,
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=kb,
-        )
-
-    elif action == "del" and len(parts) >= 3:
-        alert_id = int(parts[2])
-        result = delete_alert(telegram_id, alert_id)
-
-        if result["success"]:
-            msg = f"✅ {escape_md(result['message'])}"
-        else:
-            msg = f"❌ {escape_md(result['error'])}"
-
-        alerts = get_user_alerts(telegram_id)
-        alerts_msg = fmt_alerts(alerts)
-        final_msg = f"{msg}\n\n{alerts_msg}"
-
-        kb = alert_delete_kb(alerts) if alerts else back_kb()
-        await _edit_loc(query, 
-            final_msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=kb,
-        )
 
 
 async def _handle_settings(query, data, telegram_id, context):
-    parts = data.split(":")
-    action = parts[1] if len(parts) > 1 else "view"
+    """Shim: the settings domain lives in settings_handler.py (lazy import avoids a cycle)."""
+    from src.nadobro.handlers.settings_handler import _handle_settings as _impl
 
-    user_settings = _get_user_settings(telegram_id, context)
+    return await _impl(query, data, telegram_id, context)
 
-    if action == "view":
-        msg = fmt_settings(user_settings)
-        lev = user_settings.get("default_leverage", 1)
-        slip = user_settings.get("slippage", 1)
-        await _edit_loc(query, 
-            msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_kb(lev, slip),
-        )
 
-    elif action == "leverage_menu":
-        await _edit_loc(query, 
-            "⚡ *Default Leverage*\n\nChoose the leverage Nadobro should prefill for manual trades\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_leverage_kb(),
-        )
-    elif action == "risk_menu":
-        await _edit_loc(query, 
-            "🛡 *Risk Profile*\n\n"
-            "This presets leverage and slippage so trades are faster and more consistent\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=risk_profile_kb(),
-        )
-
-    elif action == "leverage" and len(parts) >= 3:
-        lev = int(parts[2])
-        _, user_settings = update_user_settings(
-            telegram_id, lambda s: s.update({"default_leverage": lev})
-        )
-        msg = fmt_settings(user_settings)
-        slip = user_settings.get("slippage", 1)
-        await _edit_loc(query, 
-            "✅ *Default leverage updated*\n\n{settings}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_kb(lev, slip),
-            lev=escape_md(str(lev)),
-            settings=msg,
-        )
-
-    elif action == "slippage_menu":
-        await _edit_loc(query, 
-            "📊 *Slippage*\n\nChoose the default slippage tolerance used for manual trades\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_slippage_kb(),
-        )
-    elif action == "language_menu":
-        user = get_user(telegram_id)
-        lang = (getattr(user, "language", None) or "en").lower()
-        await _edit_loc(query, 
-            "🌐 *Select Language*\n\nChoose your preferred language for onboarding and UI copy\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_language_kb(lang),
-        )
-    elif action == "language" and len(parts) >= 3:
-        lang = (parts[2] or "").lower()
-        supported = {"en", "zh", "fr", "ar", "ru", "ko"}
-        if lang not in supported:
-            return
-        update_user_language(telegram_id, lang)
-        _ACTIVE_LANG.set(lang)
-        user = get_user(telegram_id)
-        current = (getattr(user, "language", None) or lang).lower()
-        await _edit_loc(query,
-            "✅ *Language updated* to *{lang}*\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            lang=escape_md(lang.upper()),
-            reply_markup=settings_language_kb(current),
-        )
-
-    elif action == "slippage" and len(parts) >= 3:
-        slip = float(parts[2])
-        _, user_settings = update_user_settings(
-            telegram_id, lambda s: s.update({"slippage": slip})
-        )
-        msg = fmt_settings(user_settings)
-        lev = user_settings.get("default_leverage", 1)
-        await _edit_loc(query, 
-            "✅ *Slippage updated*\n\n{settings}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_kb(lev, slip),
-            slip=escape_md(str(slip)),
-            settings=msg,
-        )
-    elif action == "risk" and len(parts) >= 3:
-        profile = parts[2]
-        presets = {
-            "conservative": {"default_leverage": 2, "slippage": 0.5},
-            "balanced": {"default_leverage": 5, "slippage": 1.0},
-            "aggressive": {"default_leverage": 10, "slippage": 2.0},
-        }
-        chosen = presets.get(profile)
-        if not chosen:
-            return
-        _, saved = update_user_settings(
-            telegram_id,
-            lambda s: s.update(
-                {
-                    "default_leverage": chosen["default_leverage"],
-                    "slippage": chosen["slippage"],
-                    "risk_profile": profile,
-                }
-            ),
-        )
-        context.user_data["settings"] = saved
-        msg = fmt_settings(chosen)
-        await _edit_loc(query, 
-            "✅ *Risk profile updated* — *{profile}*\n\n{settings}",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=settings_kb(chosen["default_leverage"], chosen["slippage"]),
-            profile=escape_md(profile.upper()),
-            settings=msg,
-        )
 
 
 async def _handle_strategy(query, data, context, telegram_id):

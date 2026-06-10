@@ -84,3 +84,23 @@ _scrub_non_local_db_env()
 # weakening production safety — the dev pepper still requires this explicit
 # flag, so production deployments without keys still hard-fail.
 os.environ.setdefault("NADOBRO_ALLOW_DEV_INVITE_PEPPER", "true")
+
+
+def pytest_sessionstart(session):
+    """Bootstrap the app schema once when a (local) test DB is configured.
+
+    DB-gated tests assume ``init_db()`` has run (bot_state, users, trades,
+    ...). With the DSN scrubbing above, any DATABASE_URL surviving to this
+    point is a deliberate test database, so creating the idempotent schema
+    here is safe — and it is exactly what CI's postgres service needs.
+    """
+    if not os.environ.get("DATABASE_URL"):
+        return
+    try:
+        from src.nadobro.models.database import init_db
+
+        init_db()
+    except Exception as exc:  # pragma: no cover - surface, don't mask
+        import warnings
+
+        warnings.warn(f"test-DB schema bootstrap failed: {exc}")
