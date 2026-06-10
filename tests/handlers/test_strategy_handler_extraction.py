@@ -18,6 +18,11 @@ from src.nadobro.handlers import callbacks, strategy_handler
 
 
 def test_callbacks_shim_delegates_to_strategy_handler():
+    import inspect
+
+    assert inspect.signature(callbacks._handle_strategy) == inspect.signature(
+        strategy_handler._handle_strategy
+    )
     impl = AsyncMock(return_value=None)
     with patch.object(strategy_handler, "_handle_strategy", impl):
         asyncio.run(callbacks._handle_strategy("query", "strategy:menu", "ctx", 7))
@@ -49,3 +54,30 @@ def test_shared_utils_are_the_same_objects():
     assert strategy_handler._edit_loc is callbacks._edit_loc
     assert strategy_handler._get_user_settings is callbacks._get_user_settings
     assert strategy_handler._handle_nav is callbacks._handle_nav
+
+
+def test_copy_bro_portfolio_shims_delegate():
+    import asyncio
+    import inspect
+    from unittest.mock import AsyncMock, patch
+
+    from src.nadobro.handlers import bro_handler, copy_handler, portfolio_handler
+
+    # NOTE: the three handlers have DIFFERENT signatures (bro takes
+    # telegram_id before context; portfolio takes no context at all).
+    # The shim must mirror its implementation exactly — a uniform shim
+    # silently swaps arguments.
+    for module, name, args in (
+        (copy_handler, "_handle_copy", ("query", "x:menu", "ctx", 7)),
+        (bro_handler, "_handle_bro", ("query", "x:menu", 7, "ctx")),
+        (portfolio_handler, "_handle_portfolio", ("query", "x:menu", 7)),
+    ):
+        assert inspect.signature(getattr(callbacks, name)) == inspect.signature(
+            getattr(module, name)
+        ), f"{name}: shim signature must mirror the implementation"
+        impl = AsyncMock(return_value=None)
+        with patch.object(module, name, impl):
+            asyncio.run(getattr(callbacks, name)(*args))
+        impl.assert_awaited_once_with(*args)
+        # Shared util identity (no forks).
+        assert module._edit_loc is callbacks._edit_loc
