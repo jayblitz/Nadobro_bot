@@ -28,8 +28,10 @@ class _FairStrategyQueue:
     def qsize(self) -> int:
         return self._size
 
-    @property
     def full(self) -> bool:
+        # Method (not property) to match the asyncio.Queue interface;
+        # enqueue_strategy/enqueue_alert call ``queue.full()`` on both
+        # queue types interchangeably.
         return self._size >= self.maxsize
 
     async def put(self, item: dict[str, Any]) -> None:
