@@ -6,7 +6,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.nadobro.utils.visual import divider, money, signed
+from src.nadobro.utils.visual import b, divider, esc, money, pnl_dot, signed_money
 
 
 PAGE_SIZE = 5
@@ -40,15 +40,14 @@ def render_history_view(
     visible = round_trips[page * page_size:(page + 1) * page_size]
 
     lines = [
-        f"📜 Trade History · {network.upper()}    Page {page + 1}/{total_pages}",
+        f"📜 <b>Trade History</b> · {esc(network.upper())} · page {page + 1}/{total_pages}",
+        "Manual trades only — strategy sessions live under Performance",
         divider(),
-        "(Non-strategy trades only — strategy sessions live under Performance.)",
-        "",
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for idx, trip in enumerate(visible, start=page * page_size + 1):
         pair = str(trip.get("pair") or trip.get("product_name") or f"ID:{trip.get('product_id')}")
-        side = "📈 LONG" if str(trip.get("side") or "").lower() == "long" else "📉 SHORT"
+        side = "📈 long" if str(trip.get("side") or "").lower() == "long" else "📉 short"
         size = _dec(trip.get("size"))
         open_px = _dec(trip.get("avg_open_price"))
         close_px = _dec(trip.get("avg_close_price"))
@@ -57,12 +56,12 @@ def render_history_view(
         funding = _dec(trip.get("funding_paid"))
         volume = _dec(trip.get("volume_usd"))
         hold = _hold_duration(trip.get("open_ts"), trip.get("close_ts"))
-        margin = "🔒 ISO" if bool(trip.get("isolated")) else "⚖️ CROSS"
+        margin = "iso" if bool(trip.get("isolated")) else "cross"
         lines.extend([
-            f"{idx} ╱ {pair} {side} {margin}",
-            f"   📦 Size {abs(size)}    🎯 {money(open_px)} → {money(close_px)}    ⏱ {hold}",
-            f"   💰 Volume {money(volume)}    🏷 Fees -{money(abs(fees))}    🔵 Funding {signed(funding)}",
-            f"   {'🟢' if pnl >= 0 else '🔴'} Realized PnL {signed(pnl)}",
+            f"{idx}. {b(pair)}  {side} · {margin}",
+            f"    {abs(size)} @ {money(open_px)} → {money(close_px)} · held {hold}",
+            f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Fees -{money(abs(fees))} · "
+            f"Funding {signed_money(funding)} · Vol {money(volume)}",
             "",
         ])
         rows.append(
@@ -72,8 +71,7 @@ def render_history_view(
             )]
         )
     if not visible:
-        lines.append("No manual trades yet.")
-    lines.append(divider())
+        lines.append("No manual trades yet")
 
     nav: list[InlineKeyboardButton] = []
     if page > 0:

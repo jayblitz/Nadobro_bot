@@ -6,7 +6,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.nadobro.handlers.orders_view import order_kind_label, sorted_orders
-from src.nadobro.utils.visual import divider, money, pct, signed
+from src.nadobro.utils.visual import b, divider, esc, money, pct, pnl_dot, signed_money
 
 # Per the workflow plan: Positions and Orders share a single screen with
 # sub-headers so users see the full live exposure (open positions cross +
@@ -51,42 +51,48 @@ def render_positions_view(
 
     marks = _mark_prices(snapshot)
 
-    lines = [f"📍 Positions & Orders · {network}", divider()]
-    lines.append(f"🚀 Open Positions ({len(positions)})")
+    lines = [
+        f"📍 <b>Positions & Orders</b> · {esc(network)}",
+        divider(),
+        f"<b>Open Positions</b> ({len(positions)})",
+        "",
+    ]
     for idx, pos in enumerate(visible_positions, start=pos_page * page_size + 1):
         symbol = str(pos.get("symbol") or pos.get("product_name") or f"ID:{pos.get('product_id')}")
-        margin = "🔒 ISO" if bool(pos.get("isolated")) else "⚖️ CROSS"
-        direction = "📈 LONG" if bool(pos.get("is_long", True)) else "📉 SHORT"
+        margin = "iso" if bool(pos.get("isolated")) else "cross"
+        is_long = bool(pos.get("is_long", True))
+        direction = "📈 long" if is_long else "📉 short"
         product_id = pos.get("product_id")
         mark_price = marks.get(int(product_id)) if product_id is not None else None
         mark_str = money(mark_price) if mark_price is not None else "—"
+        est_pnl = _dec(pos.get("est_pnl"))
+        upnl_pct = pos.get("upnl_pct")
+        pct_part = f" ({pct(_dec(upnl_pct))})" if upnl_pct is not None else ""
         liq_val = pos.get("est_liq_price")
         leverage = pos.get("leverage")
-        leverage_str = f"{_dec(leverage)}x" if leverage is not None else "—"
+        leverage_str = f"{_dec(leverage):g}x" if leverage is not None else "—"
         lines.extend([
-            f"{idx} ╱ {symbol} {margin} {direction}",
-            f"🎯 Entry {money(_dec(pos.get('avg_entry_price')))}    📡 Mark {mark_str}",
-            f"📦 Size {abs(_dec(pos.get('amount')))}       💎 Value {money(_dec(pos.get('notional_value')))}",
-            f"{'🟢' if _dec(pos.get('est_pnl')) >= 0 else '🔴'} uPnL {signed(_dec(pos.get('est_pnl')))} ({pct(_dec(pos.get('upnl_pct')) if pos.get('upnl_pct') is not None else Decimal('0'))})",
-            f"💧 Liq {money(_dec(liq_val)) if liq_val is not None else '—'}        ⚖️ Lev {leverage_str}",
+            f"{idx}. {b(symbol)}  {direction} · {margin} · {leverage_str}",
+            f"    Entry {money(_dec(pos.get('avg_entry_price')))} → Mark {mark_str}",
+            f"    Size {abs(_dec(pos.get('amount')))} · Value {money(_dec(pos.get('notional_value')))}",
+            f"    uPnL {pnl_dot(est_pnl)} {signed_money(est_pnl)}{pct_part}"
+            f" · Liq {money(_dec(liq_val)) if liq_val is not None else '—'}",
             "",
         ])
     if not positions:
-        lines.append("No open positions.")
-        lines.append("")
+        lines.extend(["No open positions", ""])
 
-    lines.append(divider())
-    lines.append(f"📋 Open Orders ({len(orders)})")
+    lines.append(f"<b>Open Orders</b> ({len(orders)})")
     order_action_rows: list[list[InlineKeyboardButton]] = []
     for idx, order in enumerate(visible_orders, start=ord_page * ord_page_size + 1):
         symbol = str(order.get("product_name") or order.get("product") or f"ID:{order.get('product_id')}")
-        side = "📈" if str(order.get("side") or "").upper() in {"LONG", "BUY"} else "📉"
+        side = "buy" if str(order.get("side") or "").upper() in {"LONG", "BUY"} else "sell"
         kind = order_kind_label(order)
-        lines.extend([
-            f"{idx} ╱ {symbol} {side} {kind}",
-            f"📦 Size {abs(_dec(order.get('amount') or order.get('size')))}    🎯 Limit {money(_dec(order.get('price') or order.get('limit_price')))}",
-            "",
-        ])
+        lines.append(
+            f"{idx}. {b(symbol)}  {side} · {esc(kind)} · "
+            f"size {abs(_dec(order.get('amount') or order.get('size')))} @ "
+            f"{money(_dec(order.get('price') or order.get('limit_price')))}"
+        )
         # Translate the visible 1-based idx into the stable, snapshot-wide
         # index used by ``portfolio:cancel_order:{idx}``.
         snapshot_idx = idx - 1
@@ -94,8 +100,7 @@ def render_positions_view(
             [InlineKeyboardButton(f"🗑 Cancel {idx}", callback_data=f"portfolio:cancel_order:{snapshot_idx}")]
         )
     if not orders:
-        lines.append("No open orders.")
-    lines.append(divider())
+        lines.append("No open orders")
 
     rows: list[list[InlineKeyboardButton]] = []
     pos_nav: list[InlineKeyboardButton] = []

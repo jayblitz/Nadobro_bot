@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -397,6 +398,12 @@ async def sync_user(
             trigger_rows = [_mark_trigger_order(o) for o in _normalize_order_rows(trigger_orders)]
             all_orders = _dedupe_orders_by_digest(plain_orders + trigger_rows)
             positions = [p.to_dict() for p in positions_from_account_summary(summary or {})]
+            # The SDK's account summary labels rows "Product_{id}"; resolve
+            # real catalog names (BTC-PERP, ...) once here so every render
+            # and DB write downstream gets human symbols. Catalog lookups are
+            # cached/static-fallback but may touch the network on a cold
+            # cache, so keep them off the event loop.
+            await asyncio.to_thread(_resolve_product_names, positions, all_orders, matches or [], network)
             stats = aggregate_trading_stats(matches or [], funding or [])
             spot_balances = ((balance or {}).get("balances") or {}) if isinstance(balance, dict) else {}
             equity = compute_total_equity(summary or {}, spot_balances)
@@ -878,6 +885,60 @@ def _dedupe_orders_by_digest(orders: list[dict[str, Any]]) -> list[dict[str, Any
             seen.add(digest)
         deduped.append(order)
     return deduped
+
+
+_PLACEHOLDER_SYMBOL_RE = re.compile(r"^(?:Product[_\s-]?\d+|ID:\d+)?$", re.IGNORECASE)
+
+
+def _resolve_product_names(
+    positions: list[dict[str, Any]],
+    orders: list[dict[str, Any]],
+    matches: list[dict[str, Any]],
+    network: str,
+) -> None:
+    """Replace SDK placeholder symbols (``Product_2``) with catalog names.
+
+    Mutates rows in place. Resolution is per-product-id and memoized for the
+    snapshot, so a portfolio with N rows costs at most one catalog lookup per
+    distinct product.
+    """
+    from src.nadobro.config import get_product_name
+
+    resolved: dict[int, str] = {}
+
+    def _name_for(pid: Any) -> str | None:
+        try:
+            product_id = int(pid)
+        except (TypeError, ValueError):
+            return None
+        if product_id not in resolved:
+            try:
+                resolved[product_id] = str(get_product_name(product_id, network=network))
+            except Exception:  # policy: degrade-ok(catalog miss; placeholder stays)
+                resolved[product_id] = ""
+        name = resolved[product_id]
+        # A failed catalog lookup returns "ID:{pid}" — not an improvement.
+        return name if name and not name.startswith("ID:") else None
+
+    for row in positions:
+        current = str(row.get("symbol") or row.get("product_name") or "")
+        if _PLACEHOLDER_SYMBOL_RE.match(current):
+            name = _name_for(row.get("product_id"))
+            if name:
+                row["symbol"] = name
+                row["product_name"] = name
+    for row in orders:
+        current = str(row.get("product_name") or row.get("product") or "")
+        if _PLACEHOLDER_SYMBOL_RE.match(current):
+            name = _name_for(row.get("product_id"))
+            if name:
+                row["product_name"] = name
+    for row in matches:
+        current = str(row.get("product_name") or "")
+        if _PLACEHOLDER_SYMBOL_RE.match(current):
+            name = _name_for(row.get("product_id"))
+            if name:
+                row["product_name"] = name
 
 
 def _normalize_order_rows(value: Any) -> list[dict[str, Any]]:

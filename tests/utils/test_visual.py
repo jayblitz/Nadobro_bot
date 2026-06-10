@@ -15,9 +15,22 @@ from src.nadobro.utils.visual import (
 
 
 def test_basic_style_helpers():
-    assert divider() == "─────────────────────────"
-    assert header("🚀", "Open Positions") == "*🚀 Open Positions*"
+    assert divider() == "──────────────────"
+    # Portfolio views are sent with parse_mode=HTML; header/bold must emit
+    # HTML tags (the old Markdown ``*...*`` rendered as literal asterisks).
+    assert header("🚀", "Open Positions") == "<b>🚀 Open Positions</b>"
     assert kv("Value", "$1.00") == "Value $1.00"
+
+
+def test_html_helpers_escape_dynamic_values():
+    from src.nadobro.utils.visual import b, esc, pnl_dot
+    from decimal import Decimal
+
+    assert esc("<BTC&Co>") == "&lt;BTC&amp;Co&gt;"
+    assert b("BTC-PERP") == "<b>BTC-PERP</b>"
+    assert b("<x>") == "<b>&lt;x&gt;</b>"
+    assert pnl_dot(Decimal("0.01")) == "🟢"
+    assert pnl_dot(Decimal("-0.01")) == "🔴"
 
 
 def test_number_formatting_helpers():

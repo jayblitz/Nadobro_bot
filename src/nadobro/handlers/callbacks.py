@@ -155,12 +155,12 @@ async def _edit_loc(query, text, parse_mode=None, reply_markup=None, **fmt):
             try:
                 return await query.message.reply_text(localized, **kwargs)
             except BadRequest as e_send:
-                if "Can't parse entities" in str(e_send) and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
+                if "Can't parse entities" in str(e_send) and kwargs.get("parse_mode") in (ParseMode.MARKDOWN_V2, ParseMode.HTML):
                     fallback_kwargs = dict(kwargs)
                     fallback_kwargs.pop("parse_mode", None)
                     return await query.message.reply_text(plain_text_fallback(localized), **fallback_kwargs)
                 raise
-        if "Can't parse entities" in msg and kwargs.get("parse_mode") == ParseMode.MARKDOWN_V2:
+        if "Can't parse entities" in msg and kwargs.get("parse_mode") in (ParseMode.MARKDOWN_V2, ParseMode.HTML):
             fallback_kwargs = dict(kwargs)
             fallback_kwargs.pop("parse_mode", None)
             try:

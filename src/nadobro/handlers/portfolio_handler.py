@@ -3,21 +3,85 @@
 Extracted from callbacks.py (decomposition slice, 2026-06). May import
 shared utils from callbacks at module level — callbacks only imports this
 module lazily inside its _handle_portfolio shim, so there is no cycle.
+
+Responsiveness contract (2026-06 perf fix): the read-only views (overview,
+positions, history) must answer a tap from the in-process snapshot cache
+immediately and let a background task refresh + edit the message in place.
+A tap must NEVER wait on the venue read storm inline — that was producing
+24-55s callbacks whenever the gateway was throttled or the per-user sync
+lock was held by the background poller. Destructive actions (cancel/close)
+still force an inline sync: correctness of order indices over latency.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 
 from src.nadobro.handlers.keyboards import portfolio_analytics_kb
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric
 from src.nadobro.services.trade_service import close_all_positions
 from src.nadobro.services.user_service import get_user_nado_client, get_user
+from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 from src.nadobro.handlers.callbacks import _edit_loc  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# Serve cached renders instantly; kick a background refresh when the cache
+# is older than this. The portfolio poller + WS invalidation keep actively
+# trading users well under it, so the late edit is the exception, not the rule.
+_CACHE_FRESH_SECONDS = 3.0
+
+# One in-flight background refresh per (chat, view); a second tap while one
+# is running just re-renders the cache and rides the existing refresh.
+_BG_REFRESH: dict[tuple[int, str], asyncio.Task] = {}
+
+
+def _cached_snapshot(telegram_id: int, network: str | None):
+    from src.nadobro.services.nado_sync import get_cached_snapshot, mark_user_active
+
+    mark_user_active(int(telegram_id))
+    return get_cached_snapshot(int(telegram_id), network)
+
+
+def _snapshot_age_s(snapshot: dict) -> float:
+    try:
+        return max(0.0, time.time() - float(snapshot.get("monotonic_ts") or 0))
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _spawn_background_refresh(query, telegram_id: int, view_key: str, render_fresh, *, force: bool = False) -> None:
+    """Refresh the snapshot off the tap path, then edit the message in place.
+
+    ``render_fresh(snapshot) -> (text, kb)`` runs after the sync completes.
+    Errors are non-fatal: the user already has the cached render on screen.
+    """
+    chat = getattr(getattr(query, "message", None), "chat_id", None) or int(telegram_id)
+    key = (int(chat), view_key)
+    existing = _BG_REFRESH.get(key)
+    if existing and not existing.done():
+        return
+
+    async def _job():
+        try:
+            from src.nadobro.handlers.portfolio_deck import snapshot_for_user
+
+            snapshot = await snapshot_for_user(telegram_id, force=force)
+            text, kb = render_fresh(snapshot)
+            await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                logger.debug("portfolio bg refresh edit failed user=%s: %s", telegram_id, e)
+        except Exception as e:
+            logger.debug("portfolio bg refresh failed user=%s view=%s: %s", telegram_id, view_key, e)
+        finally:
+            _BG_REFRESH.pop(key, None)
+
+    _BG_REFRESH[key] = asyncio.create_task(_job())
 
 
 async def _handle_portfolio(query, data, telegram_id):
@@ -49,7 +113,7 @@ async def _handle_portfolio(query, data, telegram_id):
 
         snapshot = await snapshot_for_user(telegram_id, force=True)
         text, kb = render_portfolio_deck(snapshot)
-        await _edit_loc(query, text, reply_markup=kb)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action == "cancel_all_confirm":
@@ -102,7 +166,7 @@ async def _handle_portfolio(query, data, telegram_id):
         from src.nadobro.handlers.positions_view import render_positions_view
 
         text, kb = render_positions_view(snapshot)
-        await _edit_loc(query, text, reply_markup=kb)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action == "cancel_order":
@@ -119,7 +183,7 @@ async def _handle_portfolio(query, data, telegram_id):
         orders = sorted_orders(snapshot)
         if order_index < 0 or order_index >= len(orders):
             text, kb = render_positions_view(snapshot)
-            await _edit_loc(query, "⚠ Order list changed. Please try again.\n\n" + text, reply_markup=kb)
+            await _edit_loc(query, "⚠ Order list changed. Please try again.\n\n" + text, reply_markup=kb, parse_mode=ParseMode.HTML)
             return
         order = orders[order_index]
         try:
@@ -144,7 +208,7 @@ async def _handle_portfolio(query, data, telegram_id):
             return
         snapshot = await snapshot_for_user(telegram_id, force=True)
         text, kb = render_positions_view(snapshot)
-        await _edit_loc(query, text, reply_markup=kb)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action == "positions":
@@ -167,11 +231,28 @@ async def _handle_portfolio(query, data, telegram_id):
                 pos_page = int(tail[1])
             elif tail[0] == "ord" and len(tail) > 1 and tail[1].isdigit():
                 ord_page = int(tail[1])
+        network = user.network_mode.value if user else None
+        cached = _cached_snapshot(telegram_id, network)
+        if cached:
+            text, kb = render_positions_view(
+                cached, page=page, pos_page=pos_page, ord_page=ord_page
+            )
+            try:
+                await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise
+            if _snapshot_age_s(cached) > _CACHE_FRESH_SECONDS:
+                _spawn_background_refresh(
+                    query, telegram_id, f"positions:{pos_page}:{ord_page}:{page}",
+                    lambda s: render_positions_view(s, page=page, pos_page=pos_page, ord_page=ord_page),
+                )
+            return
         snapshot = await snapshot_for_user(telegram_id)
         text, kb = render_positions_view(
             snapshot, page=page, pos_page=pos_page, ord_page=ord_page
         )
-        await _edit_loc(query, text, reply_markup=kb)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action == "orders":
@@ -181,14 +262,28 @@ async def _handle_portfolio(query, data, telegram_id):
         from src.nadobro.handlers.positions_view import render_positions_view
 
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        network = user.network_mode.value if user else None
+        cached = _cached_snapshot(telegram_id, network)
+        if cached:
+            text, kb = render_positions_view(cached, ord_page=page)
+            try:
+                await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise
+            if _snapshot_age_s(cached) > _CACHE_FRESH_SECONDS:
+                _spawn_background_refresh(
+                    query, telegram_id, f"orders:{page}",
+                    lambda s: render_positions_view(s, ord_page=page),
+                )
+            return
         snapshot = await snapshot_for_user(telegram_id)
         text, kb = render_positions_view(snapshot, ord_page=page)
-        await _edit_loc(query, text, reply_markup=kb)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action == "history":
         from src.nadobro.handlers.history_view import render_history_view
-        from src.nadobro.handlers.portfolio_deck import snapshot_for_user
 
         try:
             page = max(0, int(parts[2])) if len(parts) > 2 else 0
@@ -200,19 +295,13 @@ async def _handle_portfolio(query, data, telegram_id):
                 "⚠ History unavailable — execution mode not set. Use /start to choose Testnet or Mainnet.",
             )
             return
-        try:
-            snapshot = await snapshot_for_user(telegram_id)
-        except Exception as e:
-            logger.warning("portfolio_history_snapshot_failed user=%s err=%s", telegram_id, e)
-            snapshot = {
-                "user_id": int(telegram_id),
-                "network": user.network_mode.value,
-                "matches": [],
-            }
-        if str(snapshot.get("network") or "").lower() != user.network_mode.value.lower():
-            snapshot["network"] = user.network_mode.value
-        text, kb = render_history_view(snapshot, page=page)
-        await _edit_loc(query, text, reply_markup=kb)
+        # History is pure DB (round-trips from recorded fills) — it never
+        # needed the live venue snapshot it used to wait on. The render runs
+        # in the worker pool because compute_round_trips does sync psycopg2
+        # reads, which would otherwise stall the event loop for everyone.
+        snapshot = {"user_id": int(telegram_id), "network": user.network_mode.value}
+        text, kb = await run_blocking(render_history_view, snapshot, page)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action in ("analytics", "performance"):
@@ -233,7 +322,7 @@ async def _handle_portfolio(query, data, telegram_id):
         except Exception as e:
             logger.warning("portfolio_performance_failed user=%s err=%s", telegram_id, e)
             text, kb = "📊 Performance\n\nNo performance data available.", portfolio_analytics_kb()
-        await _edit_loc(query, text, reply_markup=kb)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action == "share_pnl" and not user:
@@ -306,14 +395,39 @@ async def _handle_portfolio(query, data, telegram_id):
     # the active stats window in callback_data. The default ``view`` /
     # ``refresh`` actions keep ``24h``.
     window = parts[2] if action in ("view", "refresh") and len(parts) > 2 else "24h"
-    await _edit_loc(query, render_loading())
+    network = user.network_mode.value if user else None
+
     with timed_metric("cb.portfolio.view"):
+        cached = _cached_snapshot(telegram_id, network)
+        if cached:
+            # Instant render from cache; freshen in the background when due.
+            msg, reply_markup = render_portfolio_deck(
+                cached,
+                window=window,
+                refreshing=force_refresh or _snapshot_age_s(cached) > _CACHE_FRESH_SECONDS,
+            )
+            try:
+                await _edit_loc(query, msg, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise
+            if force_refresh or _snapshot_age_s(cached) > _CACHE_FRESH_SECONDS:
+                _spawn_background_refresh(
+                    query, telegram_id, f"deck:{window}",
+                    lambda s: render_portfolio_deck(s, window=window),
+                    force=force_refresh,
+                )
+            return
+        # Cold start (no cache yet, e.g. right after a restart): the inline
+        # sync is unavoidable once; show progress while it runs.
+        await _edit_loc(query, render_loading())
         snapshot = await snapshot_for_user(telegram_id, force=force_refresh)
         msg, reply_markup = render_portfolio_deck(snapshot, window=window)
     try:
         await _edit_loc(query,
             msg,
             reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
         )
     except BadRequest as e:
         if "Message is not modified" in str(e):
