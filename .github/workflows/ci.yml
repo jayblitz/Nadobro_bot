@@ -37,11 +37,8 @@ jobs:
           python -m pytest -q
           --deselect "tests/services/test_engine_runtime_mapping.py::test_map_grid_config_centers_band_and_sets_barriers"
           --deselect "tests/services/test_ipv4_egress.py::test_force_ipv4_enabled_defaults_on"
-          --deselect "tests/test_batch5_hardening.py::test_lowiqpts_mid_prompt_metrics_without_options_or_hints_does_not_complete"
-          --deselect "tests/test_batch5_hardening.py::test_parse_lowiq_points_reply_no_infer_zero_from_no_trades_phrase"
           --deselect "tests/test_runtime_and_leverage.py::RuntimeAndLeverageTests::test_build_portfolio_view_handles_position_failures"
           --deselect "tests/test_runtime_and_leverage.py::RuntimeAndLeverageTests::test_ensure_task_uses_cached_loop_when_called_off_loop"
-          --deselect "tests/test_schema_migrations_static.py::test_migration_sequence_has_no_gap"
           --deselect "tests/test_wallet_onboarding_flow.py::WalletOnboardingFlowTests::test_wallet_view_seeds_wallet_flow_when_not_linked"
 
   typecheck:

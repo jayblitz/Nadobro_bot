@@ -1,0 +1,13 @@
+-- Tombstone (no-op). The original 0002 migration created the Strategy
+-- Studio sessions table (added in adeda19). When Strategy Studio was
+-- replaced by Nado Vault (db53237), the file was deleted from the repo and
+-- 0006_drop_studio_and_conditional.sql dropped the objects it created.
+--
+-- Migration files are append-only history and must never be deleted: this
+-- tombstone restores a contiguous sequence (enforced by
+-- tests/test_schema_migrations_static.py::test_migration_sequence_has_no_gap).
+--
+-- Fresh databases: applying this file is a no-op; 0006 already accounts for
+-- the dropped objects. Databases that applied the original 0002 are
+-- unaffected.
+SELECT 1;
