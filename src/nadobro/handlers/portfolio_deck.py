@@ -120,6 +120,10 @@ def render_portfolio_deck(
 
     if refreshing:
         sync_line = f"🔄 Refreshing · showing {time_ago(last_sync) if last_sync else 'cached'} data"
+    elif snapshot.get("stale") and snapshot.get("error"):
+        # The last refresh ATTEMPT failed (gateway circuit, venue error).
+        # Don't claim "Live" — say what the user is actually looking at.
+        sync_line = f"⚠️ Sync issue · showing {time_ago(last_sync) if last_sync else 'cached'} data"
     elif stale:
         sync_line = stale
     else:

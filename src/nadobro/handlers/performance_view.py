@@ -91,7 +91,7 @@ def _render_session_card(
         f"{display_idx}. {b(strategy.upper())} · {b(pair)}  {badge}",
         f"    {_fmt_dt(session.get('started_at'))} · ran {_duration(session)}",
         f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Vol {money(volume)}",
-        f"    Fees -{money(fees)} · Funding {signed_money(funding)} · Cost/$1M {money(cost_per_million)}",
+        f"    Fees -{money(fees)} · Funding {signed_money(-funding)} · Cost/$1M {money(cost_per_million)}",  # paid > 0 is a cost
         "",
     ])
     return [[

@@ -54,14 +54,28 @@ def _snapshot_age_s(snapshot: dict) -> float:
         return float("inf")
 
 
+# The interaction sequence each in-flight refresh expects at edit time.
+# Re-tapping the SAME view while a refresh runs updates the expectation
+# (the user still wants this screen); any OTHER tap moves the chat's
+# sequence past it, so the late edit is dropped instead of clobbering
+# whatever screen the user navigated to.
+_BG_EXPECT_SEQ: dict[tuple[int, str], int] = {}
+
+
 def _spawn_background_refresh(query, telegram_id: int, view_key: str, render_fresh, *, force: bool = False) -> None:
     """Refresh the snapshot off the tap path, then edit the message in place.
 
     ``render_fresh(snapshot) -> (text, kb)`` runs after the sync completes.
     Errors are non-fatal: the user already has the cached render on screen.
     """
+    from src.nadobro.handlers.callbacks import interaction_seq
+
     chat = getattr(getattr(query, "message", None), "chat_id", None) or int(telegram_id)
     key = (int(chat), view_key)
+    # Always (re)arm the expectation for this view — a second tap on the
+    # same view while a refresh is in flight must keep that refresh's edit
+    # deliverable (the tap bumped the chat sequence).
+    _BG_EXPECT_SEQ[key] = interaction_seq(int(chat))
     existing = _BG_REFRESH.get(key)
     if existing and not existing.done():
         return
@@ -71,6 +85,12 @@ def _spawn_background_refresh(query, telegram_id: int, view_key: str, render_fre
             from src.nadobro.handlers.portfolio_deck import snapshot_for_user
 
             snapshot = await snapshot_for_user(telegram_id, force=force)
+            if interaction_seq(int(chat)) != _BG_EXPECT_SEQ.get(key):
+                logger.debug(
+                    "portfolio bg refresh dropped (user navigated) user=%s view=%s",
+                    telegram_id, view_key,
+                )
+                return
             text, kb = render_fresh(snapshot)
             await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         except BadRequest as e:
@@ -80,6 +100,7 @@ def _spawn_background_refresh(query, telegram_id: int, view_key: str, render_fre
             logger.debug("portfolio bg refresh failed user=%s view=%s: %s", telegram_id, view_key, e)
         finally:
             _BG_REFRESH.pop(key, None)
+            _BG_EXPECT_SEQ.pop(key, None)
 
     _BG_REFRESH[key] = asyncio.create_task(_job())
 
@@ -175,17 +196,41 @@ async def _handle_portfolio(query, data, telegram_id):
         from src.nadobro.handlers.portfolio_deck import snapshot_for_user
         from src.nadobro.handlers.positions_view import render_positions_view
 
-        try:
-            order_index = int(parts[2]) if len(parts) > 2 else -1
-        except (TypeError, ValueError):
-            order_index = -1
         snapshot = await snapshot_for_user(telegram_id, force=True)
         orders = sorted_orders(snapshot)
-        if order_index < 0 or order_index >= len(orders):
-            text, kb = render_positions_view(snapshot)
-            await _edit_loc(query, "⚠ Order list changed. Please try again.\n\n" + text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            return
-        order = orders[order_index]
+        order = None
+        if len(parts) > 3 and parts[2] == "d":
+            # Digest-addressed cancel: immune to list reordering between
+            # render and tap (a positional index re-resolved against a fresh
+            # snapshot could cancel the WRONG order).
+            want = parts[3].strip().lower()
+            for candidate in orders:
+                dg = str(candidate.get("digest") or candidate.get("order_digest") or "")
+                if want and dg.lower().removeprefix("0x").startswith(want):
+                    order = candidate
+                    break
+            if order is None:
+                # Not an error: the order filled or was cancelled elsewhere.
+                text, kb = render_positions_view(snapshot)
+                await _edit_loc(
+                    query,
+                    "✓ That order is no longer open (filled or already cancelled).\n\n" + text,
+                    reply_markup=kb,
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+        else:
+            # Legacy positional index — only from buttons rendered before the
+            # digest upgrade, or for venue rows that carry no digest.
+            try:
+                order_index = int(parts[2]) if len(parts) > 2 else -1
+            except (TypeError, ValueError):
+                order_index = -1
+            if order_index < 0 or order_index >= len(orders):
+                text, kb = render_positions_view(snapshot)
+                await _edit_loc(query, "⚠ Order list changed. Please try again.\n\n" + text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                return
+            order = orders[order_index]
         try:
             product_id = int(order.get("product_id"))
         except Exception:

@@ -184,7 +184,19 @@ async def handle_callback(update: Update, context: CallbackContext):
       return await _handle_callback_inner(update, context, query, data, telegram_id, started)
 
 
+# Per-chat interaction sequence. Bumped on EVERY callback so background
+# message-edit jobs (portfolio refresh) can detect that the user has since
+# navigated elsewhere and must not clobber the current screen.
+_CB_SEQ: dict[int, int] = {}
+
+
+def interaction_seq(chat_id: int) -> int:
+    return _CB_SEQ.get(int(chat_id), 0)
+
+
 async def _handle_callback_inner(update, context, query, data, telegram_id, started):
+    _seq_chat = getattr(getattr(query, "message", None), "chat_id", None) or int(telegram_id)
+    _CB_SEQ[int(_seq_chat)] = _CB_SEQ.get(int(_seq_chat), 0) + 1
     try:
         try:
             # LOWIQPTS cancel needs a targeted answer (e.g. show_alert) when nothing is pending.

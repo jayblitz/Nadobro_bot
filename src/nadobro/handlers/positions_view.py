@@ -5,7 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.nadobro.handlers.orders_view import order_kind_label, sorted_orders
+from src.nadobro.handlers.orders_view import cancel_callback_for, order_kind_label, sorted_orders
 from src.nadobro.utils.visual import b, divider, esc, money, pct, pnl_dot, signed_money
 
 # Per the workflow plan: Positions and Orders share a single screen with
@@ -93,11 +93,8 @@ def render_positions_view(
             f"size {abs(_dec(order.get('amount') or order.get('size')))} @ "
             f"{money(_dec(order.get('price') or order.get('limit_price')))}"
         )
-        # Translate the visible 1-based idx into the stable, snapshot-wide
-        # index used by ``portfolio:cancel_order:{idx}``.
-        snapshot_idx = idx - 1
         order_action_rows.append(
-            [InlineKeyboardButton(f"🗑 Cancel {idx}", callback_data=f"portfolio:cancel_order:{snapshot_idx}")]
+            [InlineKeyboardButton(f"🗑 Cancel {idx}", callback_data=cancel_callback_for(order, idx - 1))]
         )
     if not orders:
         lines.append("No open orders")

@@ -159,7 +159,8 @@ def test_order_cancel_indices_follow_sorted_order():
     text, kb = render_orders_view(snapshot)
 
     assert text.index("NEW") < text.index("OLD")
-    assert kb.inline_keyboard[0][0].callback_data == "portfolio:cancel_order:0"
+    # Digest-addressed cancel: immune to list reordering between render and tap.
+    assert kb.inline_keyboard[0][0].callback_data == "portfolio:cancel_order:d:new"
 
 
 def test_positions_cancel_indices_paginate_correctly():
@@ -182,7 +183,13 @@ def test_positions_cancel_indices_paginate_correctly():
         for btn in row
         if btn.callback_data and btn.callback_data.startswith("portfolio:cancel_order:")
     ]
-    assert cancel_callbacks == ["portfolio:cancel_order:4", "portfolio:cancel_order:5", "portfolio:cancel_order:6"]
+    # Sorted newest-first: ORD7..ORD1; ord page 1 (size 4) shows ORD3, ORD2,
+    # ORD1 — addressed by digest, not list position.
+    assert cancel_callbacks == [
+        "portfolio:cancel_order:d:3",
+        "portfolio:cancel_order:d:2",
+        "portfolio:cancel_order:d:1",
+    ]
 
 
 def test_session_card_template_and_card_generation(tmp_path):
@@ -279,3 +286,13 @@ def test_unrealized_pnl_pct_cross_falls_back_to_margin_used():
         isolated=False,
     )
     assert value is not None and value < 0
+
+
+def test_cancel_callback_falls_back_to_index_without_digest():
+    from src.nadobro.handlers.orders_view import cancel_callback_for
+
+    assert cancel_callback_for({"digest": "0xABCDEF1234567890ffff"}, 3) == (
+        "portfolio:cancel_order:d:abcdef1234567890"
+    )
+    assert cancel_callback_for({"order_digest": "0x99"}, 3) == "portfolio:cancel_order:d:99"
+    assert cancel_callback_for({}, 3) == "portfolio:cancel_order:3"

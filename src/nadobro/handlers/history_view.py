@@ -61,7 +61,7 @@ def render_history_view(
             f"{idx}. {b(pair)}  {side} · {margin}",
             f"    {abs(size)} @ {money(open_px)} → {money(close_px)} · held {hold}",
             f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Fees -{money(abs(fees))} · "
-            f"Funding {signed_money(funding)} · Vol {money(volume)}",
+            f"Funding {signed_money(-funding)} · Vol {money(volume)}",  # funding_paid > 0 is a cost
             "",
         ])
         rows.append(
