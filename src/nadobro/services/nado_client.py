@@ -558,7 +558,7 @@ class NadoClient:
                     from src.nadobro.services.http_session import _log_cf_warning  # noqa: WPS437
 
                     _log_cf_warning(getattr(resp, "url", ""), status_code, snippet)
-                except Exception:
+                except Exception:  # policy: degrade-ok(log-dedup helper is best-effort)
                     pass
             else:
                 logger.warning(
@@ -621,7 +621,7 @@ class NadoClient:
         if hasattr(value, "dict"):
             try:
                 return NadoClient._to_plain(value.dict())
-            except Exception:
+            except Exception:  # policy: degrade-ok(serializer falls through to next strategy)
                 pass
         if hasattr(value, "__dict__"):
             return NadoClient._to_plain(
@@ -771,7 +771,7 @@ class NadoClient:
                         continue
                     try:
                         pid = int(row.get("product_id"))
-                    except Exception:
+                    except Exception:  # policy: degrade-ok(malformed price row; skipped)
                         continue
                     name = str(get_product_name(pid, network=self.network, client=self)).replace("-PERP", "")
                     bid = self._from_x18_dynamic(row.get("bid_x18") or row.get("bid") or row.get("price_x18") or row.get("price"))
@@ -844,7 +844,7 @@ class NadoClient:
                             if key:
                                 out[key] = row
                         return out
-        except Exception:
+        except Exception:  # policy: degrade-ok(payload shape unrecognized; falls through to fallback source)
             pass
         return {}
 
@@ -1125,7 +1125,8 @@ class NadoClient:
                 try:
                     amount = from_x18(int(o.amount))
                     price = from_x18(int(o.price_x18))
-                except Exception:
+                except Exception as e:
+                    logger.debug("open-order row unparsable (pid=%s) — order hidden from this read: %s", pid, e)
                     continue
                 block_orders.append(
                     {
@@ -1554,7 +1555,7 @@ class NadoClient:
                 if raw is not None:
                     try:
                         return float(self._from_x18_dynamic(raw))
-                    except Exception:
+                    except Exception:  # policy: degrade-ok(alias probe; tries next field)
                         continue
         return None
 
@@ -1577,7 +1578,7 @@ class NadoClient:
                 if obj.get(key) is not None:
                     try:
                         return float(self._from_x18_dynamic(obj[key]))
-                    except Exception:
+                    except Exception:  # policy: degrade-ok(alias probe; tries next field)
                         continue
         return None
 
@@ -1606,7 +1607,7 @@ class NadoClient:
                         v = float(self._from_x18_dynamic(raw))
                         if v > 0:
                             return v
-                    except Exception:
+                    except Exception:  # policy: degrade-ok(alias probe; tries next field)
                         continue
         return None
 
@@ -1633,7 +1634,7 @@ class NadoClient:
                         v = float(self._from_x18_dynamic(obj[key]))
                         if v > 0:
                             return v
-                    except Exception:
+                    except Exception:  # policy: degrade-ok(alias probe; tries next field)
                         continue
         return None
 
@@ -1674,7 +1675,8 @@ class NadoClient:
                     continue
                 try:
                     product_id = int(int(float(str(raw_pid).strip())))
-                except Exception:
+                except Exception as e:
+                    logger.debug("position row pid unparsable (%r) — position hidden from this read: %s", raw_pid, e)
                     continue
                 balance_obj = getattr(p, "balance", None)
                 amount_raw = None
@@ -1804,7 +1806,8 @@ class NadoClient:
                     if raw_pid is None:
                         continue
                     product_id = int(int(float(str(raw_pid).strip())))
-                except Exception:
+                except Exception as e:
+                    logger.debug("REST position row pid unparsable — position hidden from this read: %s", e)
                     continue
                 balance_dict = p.get("balance") if isinstance(p.get("balance"), dict) else None
                 amount_raw = None
@@ -2725,8 +2728,12 @@ class NadoClient:
                     try:
                         from src.nadobro.services.gateway_budget import clear_write_ban
                         clear_write_ban(self._rest_url())
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "clear_write_ban failed after confirmed execute — "
+                            "write circuit may stay armed and short-circuit healthy writes: %s",
+                            e,
+                        )
                     return {
                         "success": True,
                         "digest": result.data.digest,
@@ -2761,8 +2768,12 @@ class NadoClient:
                 try:
                     from src.nadobro.services.gateway_budget import record_ip_query_only
                     record_ip_query_only(self._rest_url())
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "record_ip_query_only failed — write circuit not armed; "
+                        "executes may keep failing with no backoff: %s",
+                        e,
+                    )
                 logger.warning(
                     "place_order rejected ip_query_only (write circuit armed) "
                     "product_id=%s sender=%s host=%s raw=%s",
@@ -2802,8 +2813,12 @@ class NadoClient:
                 try:
                     from src.nadobro.services.gateway_budget import record_ip_query_only
                     record_ip_query_only(self._rest_url())
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "record_ip_query_only failed — write circuit not armed; "
+                        "executes may keep failing with no backoff: %s",
+                        e,
+                    )
                 logger.warning(
                     "place_order raised ip_query_only (write circuit armed) "
                     "product_id=%s sender=%s host=%s raw=%s",
@@ -3083,8 +3098,12 @@ class NadoClient:
                 try:
                     from src.nadobro.services.gateway_budget import record_ip_query_only
                     record_ip_query_only(self._rest_url())
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "record_ip_query_only failed — write circuit not armed; "
+                        "executes may keep failing with no backoff: %s",
+                        e,
+                    )
                 logger.warning(
                     "cancel_order rejected ip_query_only (write circuit armed) "
                     "product_id=%s host=%s raw=%s",
@@ -3100,8 +3119,12 @@ class NadoClient:
             try:
                 from src.nadobro.services.gateway_budget import clear_write_ban
                 clear_write_ban(self._rest_url())
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "clear_write_ban failed after confirmed cancel — "
+                    "write circuit may stay armed and short-circuit healthy writes: %s",
+                    e,
+                )
             return {"success": True, "digest": digest}
         except Exception as e:
             err_str = str(e)
@@ -3110,8 +3133,12 @@ class NadoClient:
                 try:
                     from src.nadobro.services.gateway_budget import record_ip_query_only
                     record_ip_query_only(self._rest_url())
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "record_ip_query_only failed — write circuit not armed; "
+                        "executes may keep failing with no backoff: %s",
+                        e,
+                    )
                 logger.warning(
                     "cancel_order raised ip_query_only (write circuit armed) "
                     "product_id=%s host=%s raw=%s",
@@ -3194,14 +3221,14 @@ class NadoClient:
                     "spread_bps": spread_bps,
                 }
             )
-        except Exception:
+        except Exception:  # policy: degrade-ok(stats enrichment is display-only)
             pass
 
         try:
             fr = self.get_funding_rate(int(product_id)) or {}
             if isinstance(fr, dict) and fr.get("funding_rate") is not None:
                 stats["funding_rate"] = float(fr.get("funding_rate") or 0)
-        except Exception:
+        except Exception:  # policy: degrade-ok(stats enrichment is display-only)
             pass
 
         try:
@@ -3217,7 +3244,7 @@ class NadoClient:
                     if int(candidate.get("product_id")) == int(product_id):
                         row = candidate
                         break
-                except Exception:
+                except Exception:  # policy: degrade-ok(malformed catalog row; skipped)
                     continue
             if not isinstance(row, dict):
                 return stats

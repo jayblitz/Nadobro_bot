@@ -123,7 +123,7 @@ def _recent_unknown_market_submit(
             if created_ts is None or now_ts - created_ts > window_s:
                 continue
             return trade
-        except Exception:
+        except Exception:  # policy: degrade-ok(dup-scan row malformed; skipped)
             continue
     return None
 
@@ -281,7 +281,7 @@ def _trade_total_fee_value(trade: dict) -> float:
     if explicit is not None:
         try:
             return float(explicit or 0.0)
-        except Exception:
+        except Exception:  # policy: degrade-ok(malformed fee field; falls back to computed total)
             pass
     return float(trade.get("fill_fee") or 0.0) + float(trade.get("builder_fee") or 0.0)
 
@@ -391,7 +391,7 @@ def _build_logical_trade_rows(trades: list[dict]) -> list[dict]:
         if not _is_close_trade_row(row) and str(row.get("status") or "").lower() != TradeStatus.CLOSED.value:
             try:
                 logical_index_by_open_trade_id[int(row.get("id"))] = new_idx
-            except Exception:
+            except Exception:  # policy: degrade-ok(history pairing index is display-only)
                 pass
             unmatched_by_product.setdefault(product_key, []).append(new_idx)
 
@@ -423,7 +423,7 @@ def _net_abs_for_subaccount(positions: list, product_id: int, subaccount: str | 
         try:
             if int(p.get("product_id", -1)) != int(product_id):
                 continue
-        except Exception:
+        except Exception:  # policy: degrade-ok(malformed position row; skipped)
             continue
         sk = _position_subaccount_key(p)
         if hint:
@@ -697,8 +697,12 @@ def execute_market_order(
                     "again in a few seconds."
                 ),
             }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "order-intent reservation errored — proceeding WITHOUT "
+                "duplicate-order protection for this submit: %s",
+                e,
+            )
 
     trade_data = {
         "user_id": telegram_id,
@@ -722,8 +726,8 @@ def execute_market_order(
             from src.nadobro.services.order_intents import update_order_intent
 
             update_order_intent(intent_id, status="recorded", trade_id=trade_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("order-intent %s 'recorded' marker not written: %s", intent_id, e)
 
     isolated_only = is_product_isolated_only(product, network=network, client=client)
     isolated_margin = None
@@ -741,7 +745,7 @@ def execute_market_order(
     try:
         pre_mp = client.get_market_price(product_id)
         pre_order_mid = float(pre_mp.get("mid", 0) or 0)
-    except Exception:
+    except Exception:  # policy: degrade-ok(slippage display only)
         pass
 
     submit_timeout = _order_submit_timeout_seconds()
@@ -767,15 +771,19 @@ def execute_market_order(
                 },
                 network=network,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "trade %s status not updated to PENDING after unknown submit — "
+                "reconcile may misread its state: %s",
+                trade_id, e,
+            )
         if intent_id:
             try:
                 from src.nadobro.services.order_intents import update_order_intent
 
                 update_order_intent(intent_id, status="recorded", error=unknown_msg, trade_id=trade_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("order-intent %s unknown-submit marker not written: %s", intent_id, e)
         return {"success": False, "pending": True, "trade_id": trade_id, "error": unknown_msg}
     result = submit_result
 
@@ -796,8 +804,12 @@ def execute_market_order(
                     from src.nadobro.services.order_intents import update_order_intent
 
                     update_order_intent(intent_id, status="submitted", trade_id=trade_id, order_digest=digest)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "order-intent %s not marked submitted (order IS on venue) — "
+                    "duplicate-protection state stale: %s",
+                    intent_id, e,
+                )
         try:
             fill_data = _resolve_fill_data(client, digest, network)
             if (not fill_data or not float(fill_data.get("fill_price") or 0)) and digest:
@@ -824,8 +836,12 @@ def execute_market_order(
                         fill_price=update_data.get("fill_price"),
                         filled_at=update_data.get("filled_at"),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        "order-intent %s not marked filled/submitted (order IS on venue) — "
+                        "duplicate-protection state stale: %s",
+                        intent_id, e,
+                    )
 
             # Enqueue for background sync if archive didn't resolve
             if not fill_data:
@@ -835,8 +851,11 @@ def execute_market_order(
             if digest:
                 try:
                     _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
-                except Exception:
-                    pass
+                except Exception as e2:
+                    logger.warning(
+                        "fill-sync enqueue failed for trade %s — fill may never be booked: %s",
+                        trade_id, e2,
+                    )
     else:
         try:
             update_trade(trade_id, {
@@ -909,8 +928,11 @@ def execute_market_order(
                 f"source={source} net={network} product={payload.get('product')} "
                 f"side={payload['side']} size={size} lev={leverage}",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "audit-log entry missing for signed order (user %s): %s",
+                telegram_id, e,
+            )
         return payload
 
     return result
@@ -1047,8 +1069,12 @@ def execute_spot_market_order(
                 },
                 network=network,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "trade %s status not updated to PENDING after unknown submit — "
+                "reconcile may misread its state: %s",
+                trade_id, e,
+            )
         return {"success": False, "pending": True, "trade_id": trade_id, "error": unknown_msg}
     result = submit_result
     if result.get("success"):
@@ -1479,8 +1505,12 @@ def execute_limit_order(
                     "again in a few seconds."
                 ),
             }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "order-intent reservation errored — proceeding WITHOUT "
+                "duplicate-order protection for this submit: %s",
+                e,
+            )
 
     trade_id = insert_trade(limit_trade_data, network=network)
     if not trade_id:
@@ -1490,8 +1520,8 @@ def execute_limit_order(
             from src.nadobro.services.order_intents import update_order_intent
 
             update_order_intent(intent_id, status="recorded", trade_id=trade_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("order-intent %s 'recorded' marker not written: %s", intent_id, e)
 
     isolated_only = is_product_isolated_only(product, network=network, client=client)
     isolated_margin = None
@@ -1533,8 +1563,12 @@ def execute_limit_order(
                     from src.nadobro.services.order_intents import update_order_intent
 
                     update_order_intent(intent_id, status="submitted", trade_id=trade_id, order_digest=digest)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        "order-intent %s not marked submitted (limit order IS on venue) — "
+                        "duplicate-protection state stale: %s",
+                        intent_id, e,
+                    )
             # Enqueue for background fill sync (limit orders fill asynchronously)
             _enqueue_fill_sync(trade_id, network, telegram_id, client, digest, product_id)
         except Exception as e:
@@ -1549,8 +1583,8 @@ def execute_limit_order(
                 from src.nadobro.services.order_intents import update_order_intent
 
                 update_order_intent(intent_id, status="failed", error=result.get("error", "Unknown error"), trade_id=trade_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("order-intent %s failed-marker not written: %s", intent_id, e)
 
     if result["success"]:
         _clear_portfolio_caches(telegram_id, network)
@@ -1931,7 +1965,12 @@ def _normalize_net_positions(positions: list) -> dict[int, dict]:
             )
             current["signed_amount"] = float(current.get("signed_amount", 0.0)) + signed
             bucket_net[bkey] = current
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "position row skipped during flatten netting — residual exposure "
+                "may be undercounted: %s",
+                e,
+            )
             continue
 
     by_pid: dict[int, list[dict]] = defaultdict(list)
@@ -2026,8 +2065,12 @@ def _record_close_in_db(
             try:
                 price_data = client.get_market_price(product_id)
                 close_price = float(price_data.get("mid", 0) or 0)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "close price unresolved for product %s — close PnL may be "
+                    "recorded against a stale/zero price: %s",
+                    product_id, e,
+                )
 
         open_trade = None
         if open_trade_id:
@@ -2137,8 +2180,12 @@ def _record_close_in_db(
                     update_trade_stats(telegram_id, close_size * close_price, increment_trade_count=True, network=selected_network)
                 else:
                     update_trade_stats(telegram_id, 0.0, increment_trade_count=True, network=selected_network)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "trade stats not updated for user %s — volume counters "
+                    "(points/referrals) will undercount: %s",
+                    telegram_id, e,
+                )
         else:
             close_trade_data = {
                 "user_id": telegram_id,
@@ -2195,8 +2242,12 @@ def _record_close_in_db(
                     update_trade_stats(telegram_id, close_size * close_price, increment_trade_count=True, network=selected_network)
                 else:
                     update_trade_stats(telegram_id, 0.0, increment_trade_count=True, network=selected_network)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "trade stats not updated for user %s — volume counters "
+                    "(points/referrals) will undercount: %s",
+                    telegram_id, e,
+                )
             logger.info(
                 "Close trade recorded (no matching open): %s %s size=%.4f price=%.2f fee=%.4f",
                 side, get_product_name(product_id, network=selected_network), close_size, close_price, close_fee + close_builder_fee,
@@ -2600,7 +2651,12 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
                 continue
             try:
                 remaining_orders += len(client.get_open_orders(pid, sender=snd) or [])
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "open-orders read failed for product %s during stop-all report — "
+                    "remaining-orders count may understate: %s",
+                    pid, e,
+                )
                 continue
     if remaining_orders > 0:
         result["success"] = False

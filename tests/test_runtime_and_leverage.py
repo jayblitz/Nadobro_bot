@@ -69,11 +69,15 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         view_mock.assert_awaited_once_with(5)
 
     def test_handle_portfolio_history_invalid_page_does_not_raise(self):
+        # _handle_portfolio lives in handlers/portfolio_handler.py since the
+        # callbacks.py decomposition; patch names where they now resolve.
+        from src.nadobro.handlers import portfolio_handler
+
         query = SimpleNamespace()
         edit_mock = AsyncMock()
 
         async def _run_blocking_stub(func, *args, **kwargs):
-            if func is callbacks.get_trade_history:
+            if func is portfolio_handler.get_trade_history:
                 return [
                     {
                         "product": "BTC-PERP",
@@ -87,8 +91,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
                 ]
             return func(*args, **kwargs)
 
-        with patch.object(callbacks, "run_blocking", side_effect=_run_blocking_stub), patch.object(
-            callbacks, "_edit_loc", edit_mock
+        with patch.object(portfolio_handler, "run_blocking", side_effect=_run_blocking_stub), patch.object(
+            portfolio_handler, "_edit_loc", edit_mock
         ):
             asyncio.run(callbacks._handle_portfolio(query, "portfolio:history:not-a-number", telegram_id=77))
 
