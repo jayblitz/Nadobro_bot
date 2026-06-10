@@ -2020,7 +2020,7 @@ class NadoClient:
         applies to the whole wallet for the life of the socket.
 
         Returns the exact JSON dict to send over the websocket:
-        ``{"method":"authenticate","sender":<hex>,"expiration":<ms>,"signature":<0x..>}``.
+        ``{"method":"authenticate","id":<n>,"tx":{"sender":<hex>,"expiration":"<ms>"},"signature":<0x..>}``.
         Raises ``RuntimeError`` if the client has no signer (read-only client).
         """
         if not self._initialized or not self.client:

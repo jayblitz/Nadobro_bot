@@ -40,26 +40,42 @@ def test_portfolio_streams_are_documented_types():
         "order_update", "trade", "best_bid_offer", "fill", "position_change",
         "book_depth", "liquidation", "latest_candlestick", "funding_payment", "funding_rate",
     }
-    assert set(_PORTFOLIO_STREAMS) <= valid
-    # order_update + fill are the auth-required lifecycle streams we need.
-    assert "order_update" in _PORTFOLIO_STREAMS
-    assert "fill" in _PORTFOLIO_STREAMS
+    # Each entry is (stream_type, requires_auth, per_subaccount).
+    names = {name for name, _requires_auth, _per_subaccount in _PORTFOLIO_STREAMS}
+    assert names <= valid
+    # order_update + fill are the lifecycle streams we need.
+    assert "order_update" in names
+    assert "fill" in names
+    # Documented semantics: order_update is the ONLY auth-required stream;
+    # funding_payment is per-product (no subaccount field).
+    flags = {name: (auth, per_sub) for name, auth, per_sub in _PORTFOLIO_STREAMS}
+    assert flags["order_update"] == (True, True)
+    assert flags["fill"] == (False, True)
+    assert flags["funding_payment"] == (False, False)
+    auth_required = {name for name, auth, _per_sub in _PORTFOLIO_STREAMS if auth}
+    assert auth_required == {"order_update"}
 
 
 def test_subscribe_message_schema_matches_docs():
     # Reconstruct the exact subscribe frame the client sends and assert shape.
     subaccount = "0x" + "ab" * 32
-    for idx, stream_type in enumerate(_PORTFOLIO_STREAMS, start=1):
-        frame = {
-            "method": "subscribe",
-            "stream": {"type": stream_type, "product_id": None, "subaccount": subaccount},
-            "id": idx,
-        }
+    for idx, (stream_type, _requires_auth, per_subaccount) in enumerate(
+        _PORTFOLIO_STREAMS, start=1
+    ):
+        stream = {"type": stream_type, "product_id": None}
+        # ``subaccount`` only where the stream accepts it — an extra field
+        # gets the subscription rejected (funding_payment is per-product).
+        if per_subaccount:
+            stream["subaccount"] = subaccount
+        frame = {"method": "subscribe", "stream": stream, "id": idx}
         # Must be JSON-serializable and use method/stream/id (not type/channels).
         decoded = json.loads(json.dumps(frame))
         assert decoded["method"] == "subscribe"
         assert decoded["stream"]["type"] == stream_type
-        assert decoded["stream"]["subaccount"] == subaccount
+        if per_subaccount:
+            assert decoded["stream"]["subaccount"] == subaccount
+        else:
+            assert "subaccount" not in decoded["stream"]
         assert "product_id" in decoded["stream"]
         assert isinstance(decoded["id"], int)
 
@@ -88,8 +104,9 @@ def test_route_lifecycle_feeds_order_update_and_fill():
 
 
 def test_sign_stream_authentication_message_shape(monkeypatch):
-    """The signed authenticate frame uses method=authenticate + sender/expiration/
-    signature, signed with the StreamAuthentication EIP-712 type."""
+    """The signed authenticate frame uses method=authenticate + id + tx{sender,
+    expiration} + signature (ws-v2 frame shape), signed with the
+    StreamAuthentication EIP-712 type. expiration is a stringified ms value."""
     from eth_account import Account
     from src.nadobro.services.nado_client import NadoClient
 
@@ -112,9 +129,12 @@ def test_sign_stream_authentication_message_shape(monkeypatch):
     c.client = _FakeSDK()
     c.subaccount_hex = subaccount
 
-    msg = c.sign_stream_authentication(expiration_ms=1900000000000, sender=subaccount)
+    msg = c.sign_stream_authentication(
+        expiration_ms=1900000000000, sender=subaccount, auth_id=0
+    )
     assert msg["method"] == "authenticate"
-    assert msg["sender"] == subaccount
-    assert msg["expiration"] == 1900000000000
+    assert msg["id"] == 0
+    assert msg["tx"]["sender"] == subaccount
+    assert msg["tx"]["expiration"] == "1900000000000"
     assert msg["signature"].startswith("0x")
     assert len(msg["signature"]) == 132  # 65-byte ECDSA sig hex + 0x

@@ -594,7 +594,10 @@ class NadoClientPortfolioWrapperTests(unittest.IsolatedAsyncioTestCase):
             sys.modules,
             {
                 "nado_protocol.engine_client.types.execute": SimpleNamespace(
-                    CancelOrdersParams=_Params
+                    CancelOrdersParams=_Params,
+                    # _dispatch_execute imports ExecuteResponse unconditionally
+                    # (used only on the ws-v2 path; v2 is off by default here).
+                    ExecuteResponse=SimpleNamespace,
                 )
             },
         ):
