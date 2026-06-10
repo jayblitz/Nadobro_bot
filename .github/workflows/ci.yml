@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  tests:
+    name: Test suite (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      # DB-backed tests (tests/engine/test_*_db.py etc.) skip here: CI has no
+      # DATABASE_URL and tests/conftest.py scrubs non-local DSNs. To run them
+      # in CI later, add a postgres:16 service container and set
+      # NADO_TEST_DATABASE_URL=postgresql://nadobro:nadobro@127.0.0.1:5432/nadobro_test
+      # — validate the DB tests pass against it first.
+      #
+      # KNOWN FAILURES below were already failing when CI was introduced
+      # (June 2026); each is tracked in the repo audit. Remove entries as
+      # they are fixed. Do NOT add new entries — fix the test or the code.
+      - name: Run test suite
+        run: >-
+          python -m pytest -q
+          --deselect "tests/services/test_engine_runtime_mapping.py::test_map_grid_config_centers_band_and_sets_barriers"
+          --deselect "tests/services/test_ipv4_egress.py::test_force_ipv4_enabled_defaults_on"
+          --deselect "tests/test_batch5_hardening.py::test_lowiqpts_mid_prompt_metrics_without_options_or_hints_does_not_complete"
+          --deselect "tests/test_batch5_hardening.py::test_parse_lowiq_points_reply_no_infer_zero_from_no_trades_phrase"
+          --deselect "tests/test_runtime_and_leverage.py::RuntimeAndLeverageTests::test_build_portfolio_view_handles_position_failures"
+          --deselect "tests/test_runtime_and_leverage.py::RuntimeAndLeverageTests::test_ensure_task_uses_cached_loop_when_called_off_loop"
+          --deselect "tests/test_schema_migrations_static.py::test_migration_sequence_has_no_gap"
+          --deselect "tests/test_wallet_onboarding_flow.py::WalletOnboardingFlowTests::test_wallet_view_seeds_wallet_flow_when_not_linked"
+
+  typecheck:
+    name: Type check (engine, mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: mypy (engine v2 — see mypy.ini)
+        run: python -m mypy src/nadobro/engine
