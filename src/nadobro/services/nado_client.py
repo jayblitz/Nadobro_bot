@@ -1348,7 +1348,9 @@ class NadoClient:
                 productIds=[int(product_id)],
                 digests=clean_digests,
             )
-            response = await asyncio.to_thread(self.client.market.cancel_orders, cancel_params)
+            response = await asyncio.to_thread(
+                self._dispatch_execute, cancel_params, "cancel_orders"
+            )
             # BUG-CANCEL-1: detect a transient ip_query_only downgrade in the
             # response and retry once (verified signer), instead of falsely
             # reporting a successful batch cancel and leaving orders live.
@@ -2003,9 +2005,10 @@ class NadoClient:
         return merged
 
     def sign_stream_authentication(
-        self, *, expiration_ms: Optional[int] = None, sender: Optional[str] = None
+        self, *, expiration_ms: Optional[int] = None, sender: Optional[str] = None,
+        auth_id: int = 0,
     ) -> dict:
-        """Build a signed ``authenticate`` message for the subscriptions WS v2.
+        """Build a signed ``authenticate`` message for the subscriptions (streams) websocket.
 
         The subscriptions gateway (``/v1/subscribe``) requires a one-time
         EIP-712 ``StreamAuthentication`` before subscribing to the
@@ -2052,8 +2055,11 @@ class NadoClient:
         sig = sig if str(sig).startswith("0x") else "0x" + str(sig)
         return {
             "method": "authenticate",
-            "sender": sender_hex if sender_hex.startswith("0x") else "0x" + sender_hex,
-            "expiration": int(expiration_ms),
+            "id": int(auth_id),
+            "tx": {
+                "sender": sender_hex if sender_hex.startswith("0x") else "0x" + sender_hex,
+                "expiration": str(int(expiration_ms)),
+            },
             "signature": sig,
         }
 
@@ -2492,6 +2498,72 @@ class NadoClient:
         except Exception as e:
             logger.debug("Could not warm product increment cache for %s: %s", product_id, e)
 
+    def _build_signed_request(self, params, op, *, product_id=None):
+        """Run the SDK prepare->sign pipeline WITHOUT sending.
+
+        ``op`` is "place_order" or "cancel_orders". Returns (signed_params,
+        body_dict) where body_dict is the exact JSON the gateway accepts on BOTH
+        /execute (REST) and /ws/v2. We reuse the SDK's own prepare_execute_params
+        / _sign / to_execute_request so the signature, nonce and digest are
+        byte-identical to the REST path — no re-derivation.
+        """
+        from nado_protocol.engine_client.types.execute import to_execute_request
+        from nado_protocol.contracts.types import NadoExecuteType
+
+        exec_type = (
+            NadoExecuteType.PLACE_ORDER if op == "place_order"
+            else NadoExecuteType.CANCEL_ORDERS
+        )
+        eng = self.client.context.engine_client
+        if hasattr(params, "order"):
+            params.order = eng.prepare_execute_params(params.order, True)
+            if not getattr(params, "signature", None):
+                params.signature = eng._sign(
+                    exec_type, params.order.dict(), product_id
+                )
+        else:
+            params = eng.prepare_execute_params(params, True)
+            if not getattr(params, "signature", None):
+                params.signature = eng._sign(exec_type, params.dict())
+        body = to_execute_request(params).dict()
+        return params, body
+
+    def _dispatch_execute(self, params, op, *, product_id=None):
+        """Send a signed execute over /ws/v2 when enabled+healthy, else REST.
+
+        ``op`` is "place_order" or "cancel_orders". Always returns an SDK
+        ``ExecuteResponse`` object so every existing caller
+        (``hasattr(result, "data")`` etc.) works unchanged: the v2 socket
+        returns a raw dict, which we parse back into ``ExecuteResponse``. On ANY
+        v2 transport fault we fall back to the SDK REST send using the SAME
+        signed params, so a socket hiccup never drops an order.
+        """
+        from nado_protocol.engine_client.types.execute import ExecuteResponse
+        from src.nadobro.services import nado_ws_actions
+
+        is_place = op == "place_order"
+        send_rest = (
+            self.client.market.place_order if is_place
+            else self.client.market.cancel_orders
+        )
+        if nado_ws_actions.v2_enabled():
+            try:
+                params, body = self._build_signed_request(
+                    params, op, product_id=product_id
+                )
+                inner = next(iter(body.values()))
+                resp = nado_ws_actions.send_execute_sync(self.network, op, inner)
+                if isinstance(resp, dict):
+                    return ExecuteResponse.parse_obj(resp)
+                return resp
+            except Exception as exc:  # noqa: BLE001 - degrade to REST on v2 fault
+                logger.warning(
+                    "ws v2 send failed (%s); falling back to REST: %s",
+                    op, _format_sdk_error(exc),
+                )
+                return send_rest(params)
+        return send_rest(params)
+
     def place_order(
         self,
         product_id: int,
@@ -2644,7 +2716,7 @@ class NadoClient:
             )
 
             params = PlaceOrderParams(product_id=product_id, order=order, id=tag)
-            result = self.client.market.place_order(params)
+            result = self._dispatch_execute(params, "place_order", product_id=product_id)
 
             if hasattr(result, 'data') and result.data:
                 if hasattr(result.data, 'digest') and result.data.digest:

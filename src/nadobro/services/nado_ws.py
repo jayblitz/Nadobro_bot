@@ -18,12 +18,24 @@ logger = logging.getLogger(__name__)
 _DEBOUNCE_SECONDS = float(os.environ.get("NADO_WS_DEBOUNCE_SECONDS", "2.0"))
 _pending_sync: dict[tuple[int, str], float] = {}
 
-# Subscriptions WS v2 streams we care about for portfolio invalidation. Per the
-# Nado docs these are subaccount-scoped; ``order_update`` and ``fill`` require a
-# prior ``authenticate`` on the connection. ``product_id: null`` means "all
-# products" so a single subscription per stream covers every market.
-#   docs: https://docs.nado.xyz/developer-resources/api/subscriptions/streams
-_PORTFOLIO_STREAMS = ("order_update", "fill", "position_change", "funding_payment")
+# Subscriptions (streams) WebSocket streams we use for portfolio invalidation.
+# NOTE: this is the live-data SUBSCRIPTIONS socket (/v1/subscribe). It is NOT
+# "WebSocket v2" — v2 (/ws/v2) is the concurrent-dispatch ACTION socket for
+# executes/queries (see services/nado_ws_actions.py). Subscriptions are
+# unaffected by the v1<->v2 action-socket distinction.
+#
+# Per the Nado docs (https://docs.nado.xyz/developer-resources/api/subscriptions/streams):
+#   - order_update is the ONLY stream that requires a prior ``authenticate``.
+#   - order_update / fill / position_change are per-subaccount (product_id may
+#     be null = all products).
+#   - funding_payment is PER-PRODUCT (no subaccount field).
+# Each tuple: (stream_type, requires_auth, per_subaccount).
+_PORTFOLIO_STREAMS = (
+    ("order_update", True, True),
+    ("fill", False, True),
+    ("position_change", False, True),
+    ("funding_payment", False, False),
+)
 
 # Event ``type`` (or ``reason``) values that mean our cached portfolio snapshot
 # is now stale and should be refreshed.
@@ -114,7 +126,7 @@ class NadoPortfolioWs:
             client = get_user_nado_client(int(sub.user_id), network=sub.network)
             if client is None:
                 return None
-            return client.sign_stream_authentication(sender=sub.subaccount)
+            return client.sign_stream_authentication(sender=sub.subaccount, auth_id=0)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "portfolio ws auth signing failed user=%s network=%s: %s",
@@ -134,7 +146,8 @@ class NadoPortfolioWs:
             compression="deflate",
             **websocket_connect_kwargs(),
         ) as ws:
-            # 1) Authenticate (required before order_update / fill).
+            # 1) Authenticate. Only ``order_update`` requires auth; we send
+            #    authenticate once up-front so it is in place before subscribe.
             auth_msg = await asyncio.to_thread(self._build_auth_message, sub)
             if auth_msg is not None:
                 await ws.send(json.dumps(auth_msg))
@@ -142,14 +155,21 @@ class NadoPortfolioWs:
             # 2) Subscribe to each portfolio stream as its own message. The
             #    subscriptions API takes ONE ``stream`` per ``subscribe`` (not a
             #    ``channels`` array) and echoes the ``id`` back in the response.
-            for idx, stream_type in enumerate(_PORTFOLIO_STREAMS, start=1):
+            for idx, (stream_type, _auth, per_subaccount) in enumerate(
+                _PORTFOLIO_STREAMS, start=1
+            ):
+                stream: dict[str, Any] = {
+                    "type": stream_type,
+                    "product_id": None,  # all products
+                }
+                # funding_payment is per-product only; the others are
+                # per-subaccount. Only add ``subaccount`` where the stream
+                # actually accepts it (an extra field gets the sub rejected).
+                if per_subaccount:
+                    stream["subaccount"] = sub.subaccount
                 await ws.send(json.dumps({
                     "method": "subscribe",
-                    "stream": {
-                        "type": stream_type,
-                        "product_id": None,  # all products
-                        "subaccount": sub.subaccount,
-                    },
+                    "stream": stream,
                     "id": idx,
                 }))
 
