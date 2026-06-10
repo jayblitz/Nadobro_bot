@@ -16,6 +16,18 @@ from src.nadobro.services.wallet_pending_flow import (
 
 
 class WalletPendingFlowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # The round-trip test does REAL Fernet encryption of the pending pk.
+        # Tests must not depend on a developer's .env key — generate one.
+        if not os.environ.get("ENCRYPTION_KEY") and not os.environ.get("ENCRYPTION_KEYS"):
+            from cryptography.fernet import Fernet
+
+            os.environ["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+            from src.nadobro.services import crypto
+
+            crypto._fernet_instance = None  # drop any cached (key-less) instance
+
     @unittest.skipUnless(
         os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DATABASE_URL"),
         "PostgreSQL required (set DATABASE_URL or SUPABASE_DATABASE_URL)",
