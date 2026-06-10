@@ -762,6 +762,6 @@ async def run_engine_cycle(
                 "engine_ticked user=%s strategy=%s active_executors=%s",
                 telegram_id, strategy, active_n,
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(diagnostics-only block)
         pass
     return {"success": True, "action": "engine_ticked", "strategy": strategy}

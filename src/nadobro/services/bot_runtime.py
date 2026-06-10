@@ -1169,8 +1169,11 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
 
         if strategy_scheduler_enabled():
             get_scheduler().unregister(telegram_id, network)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "scheduler unregister failed for user %s on %s — stopped session may keep ticking: %s",
+            telegram_id, network, e,
+        )
 
     engine_ok, engine_error = _stop_engine_runtime_for_state(telegram_id, network, state)
 
@@ -1289,7 +1292,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
             row_state = json.loads(row.get("value") or "{}")
             if row_state.get("running"):
                 other_running_networks.append(row_network)
-    except Exception:
+    except Exception:  # policy: degrade-ok(status display; cross-network list may be incomplete)
         pass
 
     running_sessions: list[dict] = []
@@ -1303,7 +1306,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
                 "started_at": row.get("started_at"),
                 "total_cycles": int(row.get("total_cycles") or 0),
             })
-    except Exception:
+    except Exception:  # policy: degrade-ok(status display; session list may be incomplete)
         pass
 
     session_analytics = {"total_trades": 0}
@@ -1538,7 +1541,12 @@ def restore_running_bots(enabled: bool = False):
                     )
                     continue
                 _ensure_task(user_id, network)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "restore_running_bots: skipping state row %r — a running strategy "
+                "may not have been restored after restart: %s",
+                row.get("key") if isinstance(row, dict) else row, e,
+            )
             continue
 
 
@@ -1657,7 +1665,7 @@ async def handle_strategy_job(payload: dict):
                 last_error(telegram_id, network),
             )
             return
-    except Exception:
+    except Exception:  # policy: degrade-ok(circuit probe is best-effort; cycle proceeds)
         pass
     key = _task_key(telegram_id, network)
     lock = _job_locks.setdefault(key, asyncio.Lock())
@@ -1810,8 +1818,8 @@ async def handle_strategy_job(payload: dict):
                         from src.nadobro.services.user_circuit import record_success
 
                         record_success(telegram_id, network)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("user-circuit record_success failed: %s", e)
                     if _cycle_result_label(ok, error_msg) == "ok":
                         refreshed = _load_state(telegram_id, network)
                         if refreshed.get("error_streak") or refreshed.get("last_error"):
@@ -1825,8 +1833,12 @@ async def handle_strategy_job(payload: dict):
                         from src.nadobro.services.user_circuit import record_failure
 
                         record_failure(telegram_id, network, error_msg or "unknown cycle error")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            "user-circuit record_failure failed for user %s — "
+                            "breaker may not open for a failing strategy: %s",
+                            telegram_id, e,
+                        )
                     await _mark_cycle_error(telegram_id, network, error_msg or "unknown cycle error")
             except Exception as e:
                 _job_stats["cycles_failed"] += 1
@@ -1836,8 +1848,12 @@ async def handle_strategy_job(payload: dict):
                     from src.nadobro.services.user_circuit import record_failure
 
                     record_failure(telegram_id, network, str(e))
-                except Exception:
-                    pass
+                except Exception as circuit_err:
+                    logger.warning(
+                        "user-circuit record_failure failed for user %s — "
+                        "breaker may not open for a failing strategy: %s",
+                        telegram_id, circuit_err,
+                    )
                 await _mark_cycle_error(telegram_id, network, f"{strategy_name}[cycle/crash]: {str(e)[:220]}")
             finally:
                 elapsed_ms = (time.perf_counter() - cycle_started) * 1000.0
@@ -1910,7 +1926,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         from src.nadobro.services.strategy_fsm import PHASE_SCANNING, apply_phase
 
         apply_phase(state, PHASE_SCANNING, "Strategy cycle started.")
-    except Exception:
+    except Exception:  # policy: degrade-ok(phase indicator is display-only)
         pass
     # Apply latest saved strategy parameters (margin, spreads, etc.) every cycle so edits
     # in the UI take effect without restarting the loop.
@@ -2075,8 +2091,12 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                     pnl=float(result.get("pnl", 0) or 0),
                     volume=float(result.get("placed_notional_usd", 0) or 0),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "session metrics not recorded for session %s — "
+                    "cycle/PnL/volume counters will undercount: %s",
+                    session_id, e,
+                )
 
         if not result.get("success", True):
             return False, str(result.get("error") or result.get("order_error") or "unknown")[:300]
@@ -2442,8 +2462,11 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                     or 0
                 ),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "session metrics not recorded — cycle/PnL/volume counters will undercount: %s",
+                e,
+            )
 
     if not result.get("success", True):
         error_msg = _format_cycle_failure_error(strategy, result)
