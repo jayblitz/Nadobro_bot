@@ -25,9 +25,9 @@ ENGINE_ROOT = REPO_ROOT / "src" / "nadobro" / "engine"
 # Services money modules: frozen debt counts as of 2026-06-10 (the date the
 # policy landed). Lower these as files are cleaned up. NEVER raise one.
 SERVICES_BASELINE: dict[str, int] = {
-    "src/nadobro/services/trade_service.py": 23,
     "src/nadobro/services/nado_client.py": 20,
     # Cleaned 2026-06-10 (warnings added / degrade-ok tags) — keep at zero.
+    "src/nadobro/services/trade_service.py": 0,
     "src/nadobro/services/bot_runtime.py": 0,
     "src/nadobro/services/engine_runtime.py": 0,
     "src/nadobro/services/copy_service.py": 0,
