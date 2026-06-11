@@ -24,6 +24,7 @@ from src.nadobro.engine.controllers.copy_trading import CopyController
 from src.nadobro.engine.controllers.delta_neutral import DeltaNeutralController
 from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
 from src.nadobro.engine.controllers.grid_trading import GridController
+from src.nadobro.engine.controllers.fill_anchored import FillAnchoredQuotingController
 from src.nadobro.engine.controllers.market_making import MarketMakingController
 from src.nadobro.engine.controllers.reverse_grid import ReverseGridController
 from src.nadobro.engine.controllers.volume_bot import VolumeBotController
@@ -94,6 +95,10 @@ def build_controller(
     controller_id: Optional[str] = None,
 ) -> Controller:
     cls = CONTROLLER_REGISTRY.get(strategy)
+    # Phase 4 opt-in: TreadFi-style fill-anchored quoting replaces the
+    # classic ladder for grid/rgrid when the user enables ``fill_anchored``.
+    if configs.get("controller_override") == "fill_anchored":
+        cls = FillAnchoredQuotingController
     if cls is None:
         raise ValueError(f"no engine controller for strategy '{strategy}'")
     return cls(
@@ -415,6 +420,25 @@ def map_strategy_config(
             "leverage": 1,
         }
     # grid / rgrid / dgrid family.
+    #
+    # Phase 4 opt-in: fill-anchored quoting (TreadFi Grid/RGrid semantics).
+    # One bid + one ask around a fill-anchored reference instead of a static
+    # ladder; reset_threshold_pct uses TreadFi's defaults (0.25% grid /
+    # 0.125% rgrid) unless overridden.
+    if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", 0.0)):
+        default_reset = 0.25 if strategy == "grid" else 0.125
+        return {
+            "trading_pair": product,
+            "controller_override": "fill_anchored",
+            "anchor_mode": strategy,
+            "reset_threshold_pct": Decimal(str(_f(settings, "reset_threshold_pct", default_reset))) / Decimal(100),
+            "spread_bid_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
+            "spread_ask_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
+            "order_amount_quote": Decimal(str(notional)) / Decimal(levels),
+            "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
+            "leverage": leverage,
+            **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
+        }
     #
     # NO_ORDERS_AUDIT-FIX-R4: spread_bp is now interpreted as the per-level
     # STEP (distance between adjacent grid levels), not the total band. With

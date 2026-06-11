@@ -25,7 +25,7 @@ from src.nadobro.engine.types import ExecutionStrategy, TradeType, _dec
 
 class MarketMakingController(Controller):
     def __init__(self, **kwargs: object) -> None:
-        super().__init__(name="market_making", **kwargs)  # type: ignore[arg-type]
+        super().__init__(name=kwargs.pop("name", "market_making"), **kwargs)  # type: ignore[arg-type]
         self.trading_pair = str(self.cfg("trading_pair"))
         self.spread_bid_pct = _dec(self.cfg("spread_bid_pct", "0.001"))
         self.spread_ask_pct = _dec(self.cfg("spread_ask_pct", "0.001"))

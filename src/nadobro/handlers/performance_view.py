@@ -66,7 +66,10 @@ def render_performance_view(
         nav.append(InlineKeyboardButton("Next ➡", callback_data=f"portfolio:performance:{page + 1}"))
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton("📜 History", callback_data="portfolio:history")])
+    rows.append([
+        InlineKeyboardButton("📜 History", callback_data="portfolio:history"),
+        InlineKeyboardButton("📅 Best Hours", callback_data="portfolio:hours"),
+    ])
     rows.append([InlineKeyboardButton("⬅ Portfolio", callback_data="portfolio:view")])
     return "\n".join(lines)[:3500], InlineKeyboardMarkup(rows)
 
@@ -182,3 +185,80 @@ def _duration(row: dict[str, Any]) -> str:
         seconds = int((end - start).total_seconds())
         return f"{max(0, seconds) // 3600:02d}:{(max(0, seconds) % 3600) // 60:02d}"
     return "—"
+
+
+# --------------------------------------------------------------------------
+# Hour x day self-analytics ("verify, don't assume" — measure YOUR runs)
+# --------------------------------------------------------------------------
+_DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_HOUR_BLOCKS = ((0, 4), (4, 8), (8, 12), (12, 16), (16, 20), (20, 24))
+
+
+def render_hours_view(user_id: int, network: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Bucket the user's OWN finished sessions by day-of-week x 4h UTC block.
+
+    The grid post-mortem lesson: don't memorize schedules — measure when
+    your strategy's preferred condition appears in your own data. Net PnL
+    (gross − fees − funding) per bucket, with session counts so thin
+    samples are visible instead of misleading.
+    """
+    sessions = query_all(
+        """
+        SELECT started_at, realized_pnl, total_fees_paid, total_funding_paid
+        FROM strategy_sessions
+        WHERE user_id = %s AND network = %s AND started_at IS NOT NULL
+          AND status != 'running'
+        ORDER BY started_at DESC
+        LIMIT 500
+        """,
+        (int(user_id), network),
+    )
+    buckets: dict[tuple[int, int], dict[str, Decimal | int]] = {}
+    for row in sessions:
+        started = row.get("started_at")
+        if not isinstance(started, datetime):
+            continue
+        started = started if started.tzinfo else started.replace(tzinfo=timezone.utc)
+        started = started.astimezone(timezone.utc)
+        block = next(i for i, (lo, hi) in enumerate(_HOUR_BLOCKS) if lo <= started.hour < hi)
+        key = (started.weekday(), block)
+        b = buckets.setdefault(key, {"net": Decimal(0), "n": 0})
+        net = (_dec(row.get("realized_pnl") or 0)
+               - abs(_dec(row.get("total_fees_paid") or 0))
+               - _dec(row.get("total_funding_paid") or 0))
+        b["net"] = _dec(b["net"]) + net
+        b["n"] = int(b["n"]) + 1
+
+    lines = [
+        f"📅 <b>Your Hours</b> · {esc(network.upper())}",
+        "Net session PnL by day x 4h UTC block — your data, not a schedule",
+        divider(),
+    ]
+    if not buckets:
+        lines.append("No finished sessions yet — run a few strategies first.")
+    else:
+        ranked = sorted(buckets.items(), key=lambda kv: _dec(kv[1]["net"]), reverse=True)
+
+        def _fmt(key: tuple[int, int], stats: dict) -> str:
+            dow, block = key
+            lo, hi = _HOUR_BLOCKS[block]
+            net = _dec(stats["net"])
+            n = int(stats["n"])
+            thin = " ·⚠ thin sample" if n < 3 else ""
+            return (f"{pnl_dot(net)} {_DOW[dow]} {lo:02d}–{hi:02d} UTC  "
+                    f"{signed_money(net)} ({n} session{'' if n == 1 else 's'}{thin})")
+
+        lines.append("<b>Best blocks</b>")
+        lines.extend(_fmt(k, v) for k, v in ranked[:3])
+        if len(ranked) > 3:
+            lines.append("")
+            lines.append("<b>Worst blocks</b>")
+            lines.extend(_fmt(k, v) for k, v in ranked[-3:][::-1])
+        total_n = sum(int(v["n"]) for v in buckets.values())
+        lines.append("")
+        lines.append(f"{total_n} finished sessions measured. Patterns drift — re-check monthly.")
+    rows = [
+        [InlineKeyboardButton("📊 Performance", callback_data="portfolio:performance")],
+        [InlineKeyboardButton("⬅ Portfolio", callback_data="portfolio:view")],
+    ]
+    return "\n".join(lines)[:3500], InlineKeyboardMarkup(rows)
