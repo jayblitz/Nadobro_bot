@@ -29,6 +29,11 @@ class Executor(abc.ABC):
     MAX_ATTEMPTS = 3
     BASE_BACKOFF = 0.01  # seconds; exponential per attempt
 
+    # Regime gate / inventory cap: set by the owning controller to stop NEW
+    # opening orders while exits, close legs, and stops keep running.
+    # Executors that don't open new exposure simply ignore it.
+    suppress_new_entries: bool = False
+
     def __init__(
         self,
         *,

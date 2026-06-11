@@ -349,6 +349,17 @@ async def _handle_portfolio(query, data, telegram_id):
         await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
+    if action == "hours":
+        from src.nadobro.handlers.performance_view import render_hours_view
+
+        if not user:
+            await _edit_loc(query, "⚠ Analytics unavailable — execution mode not set.")
+            return
+        # Pure DB — run off the event loop like the other performance reads.
+        text, kb = await run_blocking(render_hours_view, telegram_id, user.network_mode.value)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        return
+
     if action in ("analytics", "performance"):
         from src.nadobro.handlers.performance_view import render_performance_view
 

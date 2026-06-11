@@ -25,7 +25,7 @@ from src.nadobro.engine.types import ExecutionStrategy, TradeType, _dec
 
 class MarketMakingController(Controller):
     def __init__(self, **kwargs: object) -> None:
-        super().__init__(name="market_making", **kwargs)  # type: ignore[arg-type]
+        super().__init__(name=kwargs.pop("name", "market_making"), **kwargs)  # type: ignore[arg-type]
         self.trading_pair = str(self.cfg("trading_pair"))
         self.spread_bid_pct = _dec(self.cfg("spread_bid_pct", "0.001"))
         self.spread_ask_pct = _dec(self.cfg("spread_ask_pct", "0.001"))
@@ -36,6 +36,13 @@ class MarketMakingController(Controller):
         _nb = self.cfg("min_base_quote")
         self.min_base_quote = _dec(_nb) if _nb is not None else None
         self.profit_protection = bool(self.cfg("profit_protection", False))
+        # ATR auto-spread (Phase 3): when enabled, the per-side spread tracks
+        # k x ATR / 2, clamped to [floor, cap]. The floor must clear fees +
+        # adverse selection — quoting below it pays to trade.
+        self.auto_spread = bool(self.cfg("auto_spread", False))
+        self.auto_spread_k = _dec(self.cfg("auto_spread_k", "1.5"))
+        self.spread_floor_half_pct = _dec(self.cfg("spread_floor_half_pct", "0.00015"))
+        self.spread_cap_half_pct = _dec(self.cfg("spread_cap_half_pct", "0.005"))
         self._bid_id: Optional[str] = None
         self._bid_price: Optional[Decimal] = None
         self._ask_id: Optional[str] = None
@@ -71,6 +78,30 @@ class MarketMakingController(Controller):
         allow_sell = not at_min         # stop selling below the inventory floor
         if self.profit_protection and at_max and self._unrealized(mid) < 0:
             allow_buy = allow_sell = False
+
+        # Inventory cap (Phase 1): margin-relative net-exposure backstop with
+        # hysteresis — suppress the side that worsens exposure, keep the
+        # reducing side quoting so the book can trim back toward neutral.
+        exposure = self.exposure_allowed_sides(self.trading_pair, mid)
+        allow_buy = allow_buy and exposure["buy"]
+        allow_sell = allow_sell and exposure["sell"]
+
+        # Regime gate (Phase 2): in PAUSE, place no NEW exposure — quote only
+        # the side that reduces the current net position (the exit path); a
+        # flat book quotes nothing until the regime reads ranging again.
+        await self.evaluate_quote_gate(self.trading_pair)
+        if self.gate_paused:
+            net = base_value
+            allow_buy = allow_buy and net < 0    # buying only reduces a short
+            allow_sell = allow_sell and net > 0  # selling only reduces a long
+
+        # ATR auto-spread (Phase 3): scale the quoted spread with realized
+        # volatility so captured edge stays ahead of fees as conditions move.
+        if self.auto_spread and self.gate_atr_pct > 0:
+            half = _dec(str(self.gate_atr_pct)) * self.auto_spread_k / Decimal(2)
+            half = max(self.spread_floor_half_pct, min(half, self.spread_cap_half_pct))
+            self.spread_bid_pct = half
+            self.spread_ask_pct = half
 
         target_bid = mid * (Decimal(1) - self.spread_bid_pct)
         target_ask = mid * (Decimal(1) + self.spread_ask_pct)

@@ -40,6 +40,15 @@ class GridController(Controller):
         self._executor_id: Optional[str] = None
 
     async def on_start(self) -> None:
+        # Regime gate: never ARM a grid into a trending/breakout market —
+        # the post-mortem failure was "reset re-armed just in time for the
+        # next leg down". A paused start defers the spawn to a later tick.
+        await self.evaluate_quote_gate(str(self.configs.get("trading_pair")))
+        if self.gate_paused:
+            return
+        await self._spawn()
+
+    async def _spawn(self) -> None:
         cfg = build_grid_config(self.configs, self.SIDE)
         ex = self.EXECUTOR_CLS(
             cfg, user_id=self.user_id, controller_id=self.id, adapter=self.adapter,
@@ -53,5 +62,22 @@ class GridController(Controller):
             self._executor_id = ex.id
 
     async def on_tick(self) -> None:
-        for ex in self.my_executors():
+        pair = str(self.configs.get("trading_pair"))
+        await self.evaluate_quote_gate(pair)
+        active = self.my_executors()
+        if not active and self._executor_id is None and not self.gate_paused:
+            # Spawn was gate-deferred at on_start; the regime is now ranging.
+            await self._spawn()
+            active = self.my_executors()
+        # Inventory cap: a long grid's only worsening side is its entries.
+        try:
+            mid = await self.adapter.mid_price(pair)
+        except Exception:  # noqa: BLE001 - cap check degrades to gate-only
+            mid = None
+        exposure = self.exposure_allowed_sides(pair, mid) if mid else {"buy": True, "sell": True}
+        entry_side_allowed = exposure["buy"] if self.SIDE is TradeType.BUY else exposure["sell"]
+        for ex in active:
+            # PAUSE / cap blocks NEW entry levels only; fills, close legs and
+            # stops keep managing through the executor tick below.
+            ex.suppress_new_entries = self.gate_paused or not entry_side_allowed
             await self.orchestrator.tick(ex.id)

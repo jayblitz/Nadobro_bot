@@ -1184,7 +1184,47 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
     if not engine_ok:
         return False, f"Strategy loop stopped, but engine cleanup failed: {engine_error or 'unknown'}"
 
-    return True, "Strategy bot stopped. Open orders cancellation requested."
+    summary = _session_fee_truth_summary(state)
+    base_msg = "Strategy bot stopped. Open orders cancellation requested."
+    return True, f"{base_msg}\n{summary}" if summary else base_msg
+
+
+def _session_fee_truth_summary(state: dict) -> str:
+    """One-line gross/fees/funding -> net decomposition for the ended session.
+
+    The nine-run grid post-mortem lesson: judge by net-of-fees PnL, never by
+    volume — volume is a cost. Surfacing the split at every stop makes fee
+    drag impossible to miss.
+    """
+    session_id = state.get("strategy_session_id")
+    if not session_id:
+        return ""
+    try:
+        from src.nadobro.db import query_one
+
+        row = query_one(
+            "SELECT realized_pnl, total_fees_paid, total_funding_paid, total_volume_usd "
+            "FROM strategy_sessions WHERE id = %s",
+            (int(session_id),),
+        )
+    except Exception:  # policy: degrade-ok(summary is informational)
+        return ""
+    if not row:
+        return ""
+    gross = float(row.get("realized_pnl") or 0.0)
+    fees = abs(float(row.get("total_fees_paid") or 0.0))
+    funding = float(row.get("total_funding_paid") or 0.0)
+    volume = float(row.get("total_volume_usd") or 0.0)
+    net = gross - fees - funding
+    funding_part = f" − funding ${funding:,.2f}" if funding > 0 else (
+        f" + funding ${abs(funding):,.2f}" if funding < 0 else ""
+    )
+    return (
+        f"Session result: gross {'+' if gross >= 0 else '-'}${abs(gross):,.2f}"
+        f" − fees ${fees:,.2f}{funding_part}"
+        f" = net {'+' if net >= 0 else '-'}${abs(net):,.2f}\n"
+        f"Volume ${volume:,.0f} (volume is a cost — fees scale with it)"
+    )
 
 
 def stop_all_user_bots(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, str]:
@@ -2221,6 +2261,33 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             result = await run_engine_cycle(
                 telegram_id, network, state, client, mid, product, product_id
             )
+        # Regime-gate flip: tell the user once per transition. Pause never
+        # touches open positions — exits/close legs keep managing; only NEW
+        # opening quotes wait for the range to return.
+        gate_event = result.get("gate_event") if isinstance(result, dict) else None
+        if gate_event:
+            _gate_reasons = {
+                "trending_up": "market trending up",
+                "trending_down": "market trending down",
+                "breakout": "price broke out of its range",
+                "expansion": "range is expanding",
+            }
+            if str(gate_event.get("state")) == "PAUSE":
+                await _notify(
+                    telegram_id,
+                    "⏸ {strategy} paused new quotes on {product} ({network}) — {why}.\n"
+                    "Open positions and exits keep running; quoting resumes "
+                    "automatically when the market ranges again.",
+                    strategy=strategy.upper(), product=product, network=network,
+                    why=_gate_reasons.get(str(gate_event.get("reason")), "unfavourable regime"),
+                )
+            else:
+                await _notify(
+                    telegram_id,
+                    "▶️ {strategy} resumed quoting on {product} ({network}) — "
+                    "market is ranging again.",
+                    strategy=strategy.upper(), product=product, network=network,
+                )
     elif strategy in ENGINE_MAPPED_STRATEGIES:
         # BUG-BR-1 fix: engine-mapped strategy but engine disabled. The
         # legacy run_cycle path was removed, so this would silently no-op

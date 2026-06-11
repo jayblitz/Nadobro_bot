@@ -228,6 +228,11 @@ class GridExecutor(Executor):
         await self._maybe_place_opens()
 
     async def _maybe_place_opens(self) -> None:
+        # Regime gate / inventory cap: the owning controller sets this flag
+        # to stop NEW entry orders while letting existing close legs, stops,
+        # and fills keep managing. Pause is "stop digging", never "flatten".
+        if self.suppress_new_entries:
+            return
         if self.config.order_frequency > 0:
             if time.time() - self._last_place_ts < self.config.order_frequency:
                 return

@@ -87,6 +87,124 @@ class Controller(abc.ABC):
     def cfg(self, key: str, default: Any = None) -> Any:
         return self.configs.get(key, default)
 
+    # -- regime gate (grid family + MM) ------------------------------------
+    # Pause semantics: PAUSE blocks NEW opening quotes only. Existing
+    # positions, close legs, barriers, and the inventory cap keep running —
+    # pause is "stop digging", never "flatten". The gate transition is
+    # surfaced via ``consume_gate_event`` so the runtime can notify the user
+    # exactly once per flip.
+    async def evaluate_quote_gate(self, trading_pair: str, *, pause_on_trend: bool = True) -> str:
+        """Refresh ``self.gate_verdict`` from the regime-gate routine.
+
+        Requires ``regime_gate_enabled`` in configs and a ``candle_provider``;
+        without either, the gate stays inactive (verdict QUOTE) — a missing
+        candle feed must degrade to ungated behavior, not silence.
+
+        ``pause_on_trend=False`` (dgrid): the controller's own regime
+        selector TRADES trends (ReverseGrid), so a trend verdict is treated
+        as QUOTE and only breakout/expansion (no acceptance anywhere) pauses.
+
+        Transition discipline is asymmetric: a PAUSE commits IMMEDIATELY
+        (protection first), but resuming to QUOTE requires
+        ``gate_resume_confirm_ticks`` consecutive QUOTE verdicts — a regime
+        flickering at the threshold must not churn cancels or spam the user
+        with pause/resume notifications.
+        """
+        if not getattr(self, "gate_verdict", None):
+            self.gate_verdict: str = "QUOTE"
+            self.gate_reason: str = ""
+            self.gate_atr_pct: float = 0.0
+            self._gate_event: Optional[Dict[str, str]] = None
+            self._gate_resume_streak: int = 0
+        if not bool(self.cfg("regime_gate_enabled", False)):
+            return self.gate_verdict
+        provider = self.cfg("candle_provider")
+        if provider is None:
+            return self.gate_verdict
+        try:
+            import inspect as _inspect
+
+            from src.nadobro.engine.routines import regime_gate
+
+            raw = provider(trading_pair)  # type: ignore[operator]
+            if _inspect.isawaitable(raw):
+                raw = await raw
+            result = await regime_gate.run(trading_pair, list(raw or []))
+        except Exception:  # policy: degrade-ok(gate eval is best-effort; stay on last verdict)
+            return self.gate_verdict
+        new_verdict = str(result.get("verdict") or "QUOTE")
+        new_reason = str(result.get("reason") or "")
+        self.gate_atr_pct = float(str(result.get("atr_pct") or 0.0))
+        if not pause_on_trend and new_reason in ("trending_up", "trending_down"):
+            new_verdict, new_reason = "QUOTE", ""
+
+        if new_verdict == "PAUSE":
+            self._gate_resume_streak = 0
+            if self.gate_verdict != "PAUSE":
+                self._gate_event = {"state": "PAUSE", "reason": new_reason}
+            self.gate_verdict, self.gate_reason = "PAUSE", new_reason
+            return self.gate_verdict
+
+        # new_verdict == QUOTE
+        if self.gate_verdict == "PAUSE":
+            confirm = int(self.cfg("gate_resume_confirm_ticks", 2) or 2)
+            self._gate_resume_streak += 1
+            if self._gate_resume_streak < max(1, confirm):
+                return self.gate_verdict  # stay paused until the range confirms
+            self._gate_event = {"state": "QUOTE", "reason": new_reason}
+        self._gate_resume_streak = 0
+        self.gate_verdict, self.gate_reason = "QUOTE", new_reason
+        return self.gate_verdict
+
+    @property
+    def gate_paused(self) -> bool:
+        return getattr(self, "gate_verdict", "QUOTE") == "PAUSE"
+
+    def consume_gate_event(self) -> Optional[Dict[str, str]]:
+        """Pop the pending QUOTE<->PAUSE transition (None if no flip)."""
+        event = getattr(self, "_gate_event", None)
+        self._gate_event = None
+        return event
+
+    # -- inventory cap (backstop behind the gate) ---------------------------
+    # Suppress the side that WORSENS net exposure once it exceeds
+    # ``max_net_exposure_pct`` of allocated margin; re-allow below
+    # ``resume_frac`` of the cap (hysteresis, no flapping). Reduce-only
+    # quoting always continues — this caps how lopsided the book can get
+    # before the session stop would have to act.
+    def exposure_allowed_sides(self, trading_pair: str, mid: object) -> Dict[str, bool]:
+        from decimal import Decimal
+
+        allowed = {"buy": True, "sell": True}
+        if self.inventory is None:
+            return allowed
+        cap_pct = self.cfg("max_net_exposure_pct")
+        margin = self.cfg("margin_quote")
+        try:
+            cap_frac = Decimal(str(cap_pct)) / Decimal(100)
+            margin_quote = Decimal(str(margin))
+            mid_d = Decimal(str(mid))
+        except Exception:  # policy: degrade-ok(cap unset/malformed; cap inactive)
+            return allowed
+        if cap_frac <= 0 or margin_quote <= 0 or mid_d <= 0:
+            return allowed
+        net_quote = self.inventory.get(self.user_id, trading_pair, self.id).net_amount_base * mid_d
+        cap_quote = margin_quote * cap_frac
+        resume_quote = cap_quote * Decimal(str(self.cfg("exposure_resume_frac", "0.7")))
+        capped = bool(getattr(self, "_exposure_capped", False))
+        if abs(net_quote) >= cap_quote:
+            capped = True
+        elif abs(net_quote) <= resume_quote:
+            capped = False
+        self._exposure_capped = capped
+        self.exposure_net_quote = net_quote
+        if capped:
+            if net_quote > 0:
+                allowed["buy"] = False   # long over cap: only reduce
+            else:
+                allowed["sell"] = False  # short over cap: only reduce
+        return allowed
+
     # -- lifecycle hooks --------------------------------------------------
     @abc.abstractmethod
     async def on_start(self) -> None:
