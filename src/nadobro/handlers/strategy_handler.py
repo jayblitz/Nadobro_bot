@@ -53,6 +53,10 @@ def _strategy_available_products(strategy_id: str, network: str, vol_market: str
 # Python dict ops are atomic at the GIL level, and a duplicate concurrent fetch
 # is idempotent.
 _BALANCE_CACHE_TTL_SECONDS = 3.0
+# Moved from callbacks.py with _cached_user_balance: the extraction's AST
+# mover collected Assign nodes but not AnnAssign, so this annotated dict
+# was left behind while its consumer moved (prod NameError 2026-06-11).
+_balance_cache: dict[int, tuple[float, dict]] = {}
 
 
 def _cached_user_balance(telegram_id: int) -> dict:

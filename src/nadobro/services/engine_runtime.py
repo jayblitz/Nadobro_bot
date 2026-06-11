@@ -813,10 +813,14 @@ async def run_engine_cycle(
     # Regime-gate transition: surfaced exactly once per QUOTE<->PAUSE flip so
     # bot_runtime can notify the user ("paused — trending; resumes on range").
     gate_event = None
+    dn_events: list = []
     try:
         controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
         if controller is not None:
             gate_event = controller.consume_gate_event()
+            consume_dn = getattr(controller, "consume_dn_events", None)
+            if callable(consume_dn):
+                dn_events = consume_dn() or []
     except Exception:  # policy: degrade-ok(gate notify is best-effort)
         gate_event = None
     # NO_ORDERS_AUDIT-FIX-DIAG: surface executor count after each tick too,
@@ -835,4 +839,6 @@ async def run_engine_cycle(
     result: Dict[str, Any] = {"success": True, "action": "engine_ticked", "strategy": strategy}
     if gate_event:
         result["gate_event"] = gate_event
+    if dn_events:
+        result["dn_events"] = dn_events
     return result

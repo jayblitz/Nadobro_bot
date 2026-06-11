@@ -2288,6 +2288,35 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                     "market is ranging again.",
                     strategy=strategy.upper(), product=product, network=network,
                 )
+        # Delta Neutral execution alerts: a hedge that is no longer a hedge
+        # must NEVER be silent. One message per event, with the consequence.
+        for dn_event in (result.get("dn_events") or []) if isinstance(result, dict) else []:
+            kind = str(dn_event.get("kind") or "")
+            detail = str(dn_event.get("detail") or "")
+            dn_messages = {
+                "leg_rollback": (
+                    "⚠️ Delta Neutral on {product} ({network}): one leg failed to open — "
+                    "rolling the other back so you are not left directional.\n{detail}"
+                ),
+                "leg_dead": (
+                    "⚠️ Delta Neutral on {product} ({network}): one leg of your hedge died — "
+                    "closing both legs now to avoid directional exposure.\n{detail}"
+                ),
+                "close_stuck": (
+                    "🚨 Delta Neutral on {product} ({network}): the exit is taking longer than "
+                    "expected — the bot keeps retrying every cycle.\n{detail}"
+                ),
+                "residual_exposure": (
+                    "🚨 Delta Neutral on {product} ({network}): a position remainder could not be "
+                    "flattened after 3 attempts — check your positions.\n{detail}"
+                ),
+            }
+            template = dn_messages.get(kind)
+            if template:
+                await _notify(
+                    telegram_id, template,
+                    product=product, network=network, detail=detail,
+                )
     elif strategy in ENGINE_MAPPED_STRATEGIES:
         # BUG-BR-1 fix: engine-mapped strategy but engine disabled. The
         # legacy run_cycle path was removed, so this would silently no-op
