@@ -62,6 +62,14 @@ class DynamicGridController(Controller):
             return {}
         step = _dec(self.cfg("step_pct", 0) or 0)
         levels = int(self.cfg("levels_count", 0) or 0)
+        if step <= 0 and bool(self.cfg("auto_spread", False)) and self.gate_atr_pct > 0:
+            # ATR auto-step (Phase 3): level spacing tracks k x ATR so the
+            # captured edge scales with realized volatility; floored so the
+            # round trip clears fees, capped to stay a market-making grid.
+            k = _dec(self.cfg("auto_spread_k", "1.5"))
+            floor = _dec(self.cfg("spread_floor_half_pct", "0.00015")) * 2
+            cap = _dec(self.cfg("spread_cap_half_pct", "0.005")) * 2
+            step = max(floor, min(_dec(str(self.gate_atr_pct)) * k, cap))
         if step <= 0 or levels < 1:
             return {}
         span = step * Decimal(max(levels - 1, 1))
@@ -80,11 +88,29 @@ class DynamicGridController(Controller):
         }
 
     async def on_tick(self) -> None:
+        pair = self.trading_pair
+        await self.evaluate_quote_gate(pair)
         active = self.my_executors(active_only=True)
         if active:
+            try:
+                mid = await self.adapter.mid_price(pair)
+            except Exception:  # noqa: BLE001 - cap check degrades to gate-only
+                mid = None
+            exposure = self.exposure_allowed_sides(pair, mid) if mid else {"buy": True, "sell": True}
             for ex in active:
+                worsening_allowed = (
+                    exposure["buy"] if ex.__class__ is GridExecutor else exposure["sell"]
+                )
+                # PAUSE blocks new entry levels; close legs/stops keep running.
+                ex.suppress_new_entries = self.gate_paused or not worsening_allowed
                 await self.orchestrator.tick(ex.id)
             return  # no mid-flight swap
+
+        # Third state (sit out): with no executor live and the gate reading
+        # trend/breakout, do NOT re-arm. This is the "reset re-entered into
+        # the next leg" fix — the bot waits for range to return.
+        if self.gate_paused:
+            return
 
         candles = await self._candles()
         if not candles:

@@ -87,11 +87,13 @@ def _render_session_card(
         (fees + abs(funding)) / volume * Decimal("1000000") if volume > 0 else Decimal("0")
     )
 
+    net = pnl - fees - funding
     lines.extend([
         f"{display_idx}. {b(strategy.upper())} · {b(pair)}  {badge}",
         f"    {_fmt_dt(session.get('started_at'))} · ran {_duration(session)}",
-        f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Vol {money(volume)}",
-        f"    Fees -{money(fees)} · Funding {signed_money(-funding)} · Cost/$1M {money(cost_per_million)}",  # paid > 0 is a cost
+        f"    Net {pnl_dot(net)} {signed_money(net)}  (gross {signed_money(pnl)} − fees {money(fees)}"
+        f" {'−' if funding >= 0 else '+'} funding {money(abs(funding))})",
+        f"    Vol {money(volume)} · Cost/$1M {money(cost_per_million)}",
         "",
     ])
     return [[

@@ -303,6 +303,27 @@ def _f(settings: Dict[str, Any], key: str, default: float) -> float:
         return default
 
 
+def _quote_defense_defaults(settings, notional, *, auto_spread: bool) -> dict:
+    """Regime gate / inventory cap / ATR-spread knobs for grid family + MM.
+
+    Defaults per the 2026-06 grid post-mortem plan: gate ON (pause new quotes
+    in trends/breakouts, notify once per flip), net-exposure cap at 30% of
+    allocated margin with resume at 70% of the cap, ATR(14, 1m) x 1.5 spread
+    with a fee floor (1.5 bp/side) when the user didn't pin a spread.
+    """
+    return {
+        "regime_gate_enabled": bool(_f(settings, "regime_gate_enabled", 1.0)),
+        "max_net_exposure_pct": _f(settings, "max_net_exposure_pct", 30.0),
+        "exposure_resume_frac": 0.7,
+        "margin_quote": Decimal(str(notional)),
+        "auto_spread": auto_spread,
+        "auto_spread_k": Decimal(str(_f(settings, "auto_spread_k", 1.5))),
+        "spread_floor_half_pct": Decimal("0.00015"),
+        "spread_cap_half_pct": Decimal("0.005"),
+        "candle_provider": None,  # injected in run_engine_cycle (client there)
+    }
+
+
 def map_strategy_config(
     strategy: str, settings: Dict[str, Any], mid: Decimal, *, product: str, leverage: int = 1
 ) -> Dict[str, object]:
@@ -325,6 +346,9 @@ def map_strategy_config(
             "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", notional))),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": leverage,
+            # Regime gate + inventory cap + ATR auto-spread (2026-06 upgrade).
+            # auto_spread engages when the user left spread unset/zero.
+            **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
         }
     if strategy == "dn":
         # NO_ORDERS_AUDIT-FIX-R1: DN config keys for DeltaNeutralController.
@@ -450,6 +474,8 @@ def map_strategy_config(
         "levels_count": levels,
         "tp_pct": tp,
         "sl_pct": sl,
+        # Regime gate + inventory cap + ATR auto-step (2026-06 upgrade).
+        **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
     }
     # NO_ORDERS_AUDIT-FIX-R2: DynamicGridController requires a candle_provider
     # callable to classify the volatility regime. Without one, _candles()
@@ -672,7 +698,7 @@ async def run_engine_cycle(
     # this is where ``client`` and ``product_id`` are available. The provider
     # closure is recreated on every cycle, which is fine — the controller only
     # caches a reference at on_start.
-    if strategy == "dgrid" and configs.get("candle_provider") is None:
+    if strategy in ("grid", "rgrid", "dgrid", "mid") and configs.get("candle_provider") is None:
         _cli = client
         _pid = int(product_id)
 
@@ -682,7 +708,7 @@ async def run_engine_cycle(
                 return _cli.get_candlesticks(_pid, timeframe="1m", limit=200) or []  # type: ignore[attr-defined]
             except Exception:  # noqa: BLE001 - never let candle fetch break a tick
                 logger.warning(
-                    "dgrid candle_provider failed for pair=%s product_id=%s",
+                    "candle_provider failed for pair=%s product_id=%s",
                     _pair, _pid, exc_info=True,
                 )
                 return []
@@ -751,6 +777,15 @@ async def run_engine_cycle(
         return {"success": True, "action": action, "strategy": strategy}
 
     await RUNTIME.tick(telegram_id, network, strategy)
+    # Regime-gate transition: surfaced exactly once per QUOTE<->PAUSE flip so
+    # bot_runtime can notify the user ("paused — trending; resumes on range").
+    gate_event = None
+    try:
+        controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        if controller is not None:
+            gate_event = controller.consume_gate_event()
+    except Exception:  # policy: degrade-ok(gate notify is best-effort)
+        gate_event = None
     # NO_ORDERS_AUDIT-FIX-DIAG: surface executor count after each tick too,
     # bucketed at INFO every ~10 ticks. Comment out if too chatty.
     try:
@@ -764,4 +799,7 @@ async def run_engine_cycle(
             )
     except Exception:  # noqa: BLE001  # policy: degrade-ok(diagnostics-only block)
         pass
-    return {"success": True, "action": "engine_ticked", "strategy": strategy}
+    result: Dict[str, Any] = {"success": True, "action": "engine_ticked", "strategy": strategy}
+    if gate_event:
+        result["gate_event"] = gate_event
+    return result
