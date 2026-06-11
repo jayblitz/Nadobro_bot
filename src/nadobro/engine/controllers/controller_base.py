@@ -93,18 +93,29 @@ class Controller(abc.ABC):
     # pause is "stop digging", never "flatten". The gate transition is
     # surfaced via ``consume_gate_event`` so the runtime can notify the user
     # exactly once per flip.
-    async def evaluate_quote_gate(self, trading_pair: str) -> str:
+    async def evaluate_quote_gate(self, trading_pair: str, *, pause_on_trend: bool = True) -> str:
         """Refresh ``self.gate_verdict`` from the regime-gate routine.
 
         Requires ``regime_gate_enabled`` in configs and a ``candle_provider``;
         without either, the gate stays inactive (verdict QUOTE) — a missing
         candle feed must degrade to ungated behavior, not silence.
+
+        ``pause_on_trend=False`` (dgrid): the controller's own regime
+        selector TRADES trends (ReverseGrid), so a trend verdict is treated
+        as QUOTE and only breakout/expansion (no acceptance anywhere) pauses.
+
+        Transition discipline is asymmetric: a PAUSE commits IMMEDIATELY
+        (protection first), but resuming to QUOTE requires
+        ``gate_resume_confirm_ticks`` consecutive QUOTE verdicts — a regime
+        flickering at the threshold must not churn cancels or spam the user
+        with pause/resume notifications.
         """
         if not getattr(self, "gate_verdict", None):
             self.gate_verdict: str = "QUOTE"
             self.gate_reason: str = ""
             self.gate_atr_pct: float = 0.0
             self._gate_event: Optional[Dict[str, str]] = None
+            self._gate_resume_streak: int = 0
         if not bool(self.cfg("regime_gate_enabled", False)):
             return self.gate_verdict
         provider = self.cfg("candle_provider")
@@ -124,10 +135,25 @@ class Controller(abc.ABC):
         new_verdict = str(result.get("verdict") or "QUOTE")
         new_reason = str(result.get("reason") or "")
         self.gate_atr_pct = float(str(result.get("atr_pct") or 0.0))
-        if new_verdict != self.gate_verdict:
-            self._gate_event = {"state": new_verdict, "reason": new_reason}
-        self.gate_verdict = new_verdict
-        self.gate_reason = new_reason
+        if not pause_on_trend and new_reason in ("trending_up", "trending_down"):
+            new_verdict, new_reason = "QUOTE", ""
+
+        if new_verdict == "PAUSE":
+            self._gate_resume_streak = 0
+            if self.gate_verdict != "PAUSE":
+                self._gate_event = {"state": "PAUSE", "reason": new_reason}
+            self.gate_verdict, self.gate_reason = "PAUSE", new_reason
+            return self.gate_verdict
+
+        # new_verdict == QUOTE
+        if self.gate_verdict == "PAUSE":
+            confirm = int(self.cfg("gate_resume_confirm_ticks", 2) or 2)
+            self._gate_resume_streak += 1
+            if self._gate_resume_streak < max(1, confirm):
+                return self.gate_verdict  # stay paused until the range confirms
+            self._gate_event = {"state": "QUOTE", "reason": new_reason}
+        self._gate_resume_streak = 0
+        self.gate_verdict, self.gate_reason = "QUOTE", new_reason
         return self.gate_verdict
 
     @property

@@ -726,10 +726,19 @@ async def run_engine_cycle(
         _cli = client
         _pid = int(product_id)
 
-        def _candle_provider(_pair: str) -> list:
+        async def _candle_provider(_pair: str) -> list:
+            # ASYNC: get_candlesticks is a sync SDK/REST call; with the gate
+            # this provider now runs on EVERY tick of four strategies, so it
+            # must go through the SDK thread pool instead of blocking the
+            # event loop (the exact starvation class the blocking lint guards
+            # — invisible here because the call is one level indirect).
             try:
+                from src.nadobro.services.async_utils import run_blocking_sdk
+
                 # 1m candles, last 200 — enough for ema_slow_period=50 + atr_window=14.
-                return _cli.get_candlesticks(_pid, timeframe="1m", limit=200) or []  # type: ignore[attr-defined]
+                return await run_blocking_sdk(
+                    _cli.get_candlesticks, _pid, timeframe="1m", limit=200  # type: ignore[attr-defined]
+                ) or []
             except Exception:  # noqa: BLE001 - never let candle fetch break a tick
                 logger.warning(
                     "candle_provider failed for pair=%s product_id=%s",

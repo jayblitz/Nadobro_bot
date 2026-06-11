@@ -89,7 +89,10 @@ class DynamicGridController(Controller):
 
     async def on_tick(self) -> None:
         pair = self.trading_pair
-        await self.evaluate_quote_gate(pair)
+        # dgrid's OWN regime selector trades trends (ReverseGrid on
+        # TRENDING_DOWN) — the gate must not pre-empt it. Only breakout /
+        # expansion (price accepted nowhere) makes dgrid sit out.
+        await self.evaluate_quote_gate(pair, pause_on_trend=False)
         active = self.my_executors(active_only=True)
         if active:
             try:
@@ -107,8 +110,9 @@ class DynamicGridController(Controller):
             return  # no mid-flight swap
 
         # Third state (sit out): with no executor live and the gate reading
-        # trend/breakout, do NOT re-arm. This is the "reset re-entered into
-        # the next leg" fix — the bot waits for range to return.
+        # breakout/expansion (price accepted nowhere — not a tradeable trend),
+        # do NOT re-arm. Trends themselves are handled below by spawning the
+        # side-correct grid.
         if self.gate_paused:
             return
 

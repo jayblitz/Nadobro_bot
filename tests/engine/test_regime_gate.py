@@ -273,8 +273,11 @@ def test_grid_defers_arming_into_a_trend_then_arms_on_range():
         assert c.my_executors() == [], "must not arm a grid into a trend"
         await orch.tick_controller(c.id)
         assert c.my_executors() == [], "must not re-arm while trending"
-        # Range returns -> next tick arms.
+        # Range returns -> resume needs gate_resume_confirm_ticks (2)
+        # consecutive QUOTE verdicts (anti-flap hysteresis), then arms.
         candles_box["data"] = ranging_candles()
+        await orch.tick_controller(c.id)
+        assert c.my_executors() == [], "one QUOTE verdict must not re-arm yet"
         await orch.tick_controller(c.id)
         assert len(c.my_executors()) == 1
 
@@ -310,28 +313,93 @@ def test_paused_grid_suppresses_new_entries_but_close_legs_continue():
     asyncio.run(body())
 
 
-def test_dgrid_sits_out_a_trend_instead_of_rearming():
+def _dgrid(adapter, candle_box):
+    orch = ExecutorOrchestrator()
+    c = DynamicGridController(
+        user_id=1, orchestrator=orch, adapter=adapter,
+        inventory=InventoryRepository(),
+        configs={
+            "trading_pair": PAIR,
+            "total_amount_quote": Decimal(100),
+            "min_spread_between_orders": Decimal("0.002"),
+            "start_price": Decimal("99"), "end_price": Decimal("100"),
+            "limit_price": Decimal(0),
+            "step_pct": Decimal("0.002"), "levels_count": 3,
+            "regime_gate_enabled": True,
+            "candle_provider": lambda _p: candle_box["data"],
+        },
+        controller_id="DG",
+    )
+    return orch, c
+
+
+def test_dgrid_trades_a_trend_with_reverse_grid():
+    # The gate must NOT pre-empt dgrid's defining behavior: TRENDING_DOWN
+    # spawns a ReverseGrid (pause_on_trend=False for dgrid).
+    from src.nadobro.engine.executors.reverse_grid_executor import ReverseGridExecutor
+
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
-        candles = trending_candles()
-        orch = ExecutorOrchestrator()
-        c = DynamicGridController(
-            user_id=1, orchestrator=orch, adapter=adapter,
-            inventory=InventoryRepository(),
-            configs={
-                "trading_pair": PAIR,
-                "total_amount_quote": Decimal(100),
-                "min_spread_between_orders": Decimal("0.002"),
-                "start_price": Decimal("99"), "end_price": Decimal("100"),
-                "limit_price": Decimal(0),
-                "step_pct": Decimal("0.002"), "levels_count": 3,
-                "regime_gate_enabled": True,
-                "candle_provider": lambda _p: candles,
-            },
-            controller_id="DG",
-        )
+        orch, c = _dgrid(adapter, {"data": trending_candles(step=-0.4)})
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)
-        assert c.my_executors() == [], "dgrid must SIT OUT a trend (third state)"
+        executors = c.my_executors()
+        assert len(executors) == 1, "dgrid must trade a downtrend"
+        assert isinstance(executors[0], ReverseGridExecutor)
+
+    asyncio.run(body())
+
+
+def expansion_candles(n: int = 80, base: float = 100.0) -> list[dict]:
+    """Flat EMAs (alternating closes) but volume smeared across a WIDE range:
+    no acceptance anywhere — the chaos dgrid must sit out, NOT a trend."""
+    out = []
+    for i in range(n):
+        px = base * (1.02 if i % 2 == 0 else 0.98)
+        out.append({
+            "open": base, "high": px + 0.05, "low": px - 0.05,
+            "close": px, "volume": 1000.0,
+        })
+    return out
+
+
+def test_dgrid_sits_out_expansion_chaos():
+    # Expansion (price accepted nowhere) is NOT a tradeable trend: the third
+    # state — sit out, no re-arm, retry next tick. (A clean trend, by
+    # contrast, spawns a ReverseGrid — see the test above.)
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        box = {"data": expansion_candles()}
+        orch, c = _dgrid(adapter, box)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        assert c.my_executors() == [], (
+            f"expected sit-out, gate={c.gate_verdict}/{c.gate_reason}"
+        )
+        assert c.gate_reason == "expansion"
+
+    asyncio.run(body())
+
+
+def test_gate_resume_requires_consecutive_quote_verdicts():
+    # PAUSE commits immediately (protection first); resuming needs
+    # gate_resume_confirm_ticks consecutive QUOTE verdicts so a regime
+    # flickering at the threshold can't churn quotes or spam notifications.
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        box = {"data": trending_candles()}
+        orch, c = _mm(adapter, None, extra={"candle_provider": lambda _p: box["data"]})
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        assert c.gate_paused and c.consume_gate_event() == {"state": "PAUSE", "reason": "trending_up"}
+        # One ranging evaluation: NOT enough to resume.
+        box["data"] = ranging_candles()
+        await orch.tick_controller(c.id)
+        assert c.gate_paused, "single QUOTE verdict must not resume"
+        assert c.consume_gate_event() is None
+        # Second consecutive ranging evaluation: resume + one event.
+        await orch.tick_controller(c.id)
+        assert not c.gate_paused
+        assert c.consume_gate_event() == {"state": "QUOTE", "reason": ""}
 
     asyncio.run(body())
