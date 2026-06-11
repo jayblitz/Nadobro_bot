@@ -112,7 +112,6 @@ async def _show_trading_readiness_block(query, readiness) -> None:
 
 
 
-_balance_cache: dict[int, tuple[float, dict]] = {}
 
 
 

@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import logging
 
-from src.nadobro.handlers.formatters import escape_md, fmt_alert_menu_intro, fmt_alert_product_prompt, fmt_alert_target_prompt, fmt_alerts
+from src.nadobro.handlers.formatters import (
+    escape_md,
+    fmt_alert_condition_prompt,  # was NEVER imported, even pre-split: latent prod NameError
+    fmt_alert_menu_intro,
+    fmt_alert_product_prompt,
+    fmt_alert_target_prompt,
+    fmt_alerts,
+)
 from src.nadobro.handlers.keyboards import alerts_kb, alert_product_kb, alert_condition_kb, alert_delete_kb, back_kb
 from src.nadobro.i18n import localize_text, get_active_language
 from src.nadobro.services.alert_service import get_user_alerts, delete_alert
