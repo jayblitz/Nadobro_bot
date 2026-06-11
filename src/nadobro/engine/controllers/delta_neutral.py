@@ -36,10 +36,17 @@ from typing import Optional
 
 from src.nadobro.engine.controllers.controller_base import Controller
 from src.nadobro.engine.executor_base import Executor
-from src.nadobro.engine.executors.order_executor import OrderExecutorConfig
+from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExecutorConfig
 from src.nadobro.engine.executors.position_executor import PositionExecutor, PositionExecutorConfig
 from src.nadobro.engine.risk import ExecutorRequest
-from src.nadobro.engine.types import CloseType, ExecutionStrategy, TradeType, TripleBarrierConfig, _dec
+from src.nadobro.engine.types import (
+    CloseType,
+    ExecutionStrategy,
+    PositionAction,
+    TradeType,
+    TripleBarrierConfig,
+    _dec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +109,52 @@ class DeltaNeutralController(Controller):
         self.cumulative_funding: Decimal = Decimal(0)
         self._funding_reported: Decimal = Decimal(0)
 
+        # Execution hardening (2026-06): one leg live while the other hangs is
+        # the worst failure a "neutral" strategy can have. CLOSING re-issues
+        # stops every tick (on_stop is idempotent), alerts once past the
+        # deadline, and the cycle only counts as complete after the INVENTORY
+        # confirms both pairs are flat — residue is swept with reduce-only
+        # MARKET orders before anything else may happen.
+        self.close_deadline_seconds = max(30, _int_cfg(self.cfg("close_deadline_seconds"), 180))
+        self._close_deadline: Optional[float] = None
+        self._close_stuck_notified = False
+        self._residual_ids: list[str] = []
+        self._residual_attempts = 0
+        self._residual_alerted = False
+        # User-facing execution events, drained by engine_runtime each tick
+        # (same transport as the regime gate's pause/resume notifications).
+        self._dn_events: list[dict] = []
+
     # -- helpers ----------------------------------------------------------
+    def _emit_dn(self, kind: str, detail: str = "") -> None:
+        self._dn_events.append({"kind": kind, "detail": str(detail)[:200]})
+
+    def consume_dn_events(self) -> list:
+        events, self._dn_events = self._dn_events, []
+        return events
+
+    def _net_base(self, pair: str) -> Decimal:
+        if self.inventory is None:
+            return Decimal(0)
+        return self.inventory.get(self.user_id, pair, self.id).net_amount_base
+
+    async def _safe_stop(self, executor_id: Optional[str], close_type: CloseType) -> bool:
+        """Stop a leg without letting a venue hiccup strand the OTHER leg.
+        on_stop is idempotent, so callers may retry every tick until the
+        executor terminates."""
+        if not executor_id:
+            return True
+        try:
+            await self.orchestrator.stop(executor_id, close_type)
+            ex = self._ex(executor_id)
+            return ex is None or ex.is_terminated
+        except Exception as exc:  # noqa: BLE001 - never propagate past a leg stop
+            logger.warning(
+                "delta_neutral: stop failed for leg %s (will retry): %s",
+                executor_id, exc,
+            )
+            return False
+
     def _barriers(self) -> TripleBarrierConfig:
         b = self.cfg("barriers")
         return b if isinstance(b, TripleBarrierConfig) else TripleBarrierConfig()
@@ -120,20 +172,27 @@ class DeltaNeutralController(Controller):
         true per-leg notional."""
         if amount_base <= 0:
             return None
-        mid = await self.adapter.mid_price(pair)
-        amount_quote = amount_base * mid
-        oc = OrderExecutorConfig(
-            pair, side, amount_base, ExecutionStrategy.MARKET, leverage=self.leverage
-        )
-        ex = PositionExecutor(
-            PositionExecutorConfig(order_config=oc, barriers=self._barriers()),
-            user_id=self.user_id, controller_id=self.id, adapter=self.adapter,
-            inventory=self.inventory,
-        )
-        ok = await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=amount_quote, position_size_quote=amount_quote)
-        )
-        return ex.id if ok else None
+        try:
+            mid = await self.adapter.mid_price(pair)
+            amount_quote = amount_base * mid
+            oc = OrderExecutorConfig(
+                pair, side, amount_base, ExecutionStrategy.MARKET, leverage=self.leverage
+            )
+            ex = PositionExecutor(
+                PositionExecutorConfig(order_config=oc, barriers=self._barriers()),
+                user_id=self.user_id, controller_id=self.id, adapter=self.adapter,
+                inventory=self.inventory,
+            )
+            ok = await self.spawn_executor(
+                ex, ExecutorRequest(order_amount_quote=amount_quote, position_size_quote=amount_quote)
+            )
+            return ex.id if ok else None
+        except Exception as exc:  # noqa: BLE001 - caller's rollback MUST run
+            # Raising here used to skip _open_cycle's long-leg rollback and
+            # leave the user naked-long. Spawn failures are returned, never
+            # thrown — the pairing logic owns the recovery.
+            logger.warning("delta_neutral: %s leg spawn failed on %s: %s", side.name, pair, exc)
+            return None
 
     async def _open_cycle(self) -> None:
         """Open both legs atomically. Long first; short sized off the long's
@@ -162,9 +221,17 @@ class DeltaNeutralController(Controller):
         self.short_id = await self._spawn_leg(self.short_pair, TradeType.SELL, short_base)
         if self.short_id is None:
             # Roll back the long leg so we don't carry unhedged exposure.
-            await self.orchestrator.stop(self.long_id, CloseType.EARLY_STOP)
-            self.long_id = None
-            raise RuntimeError("delta_neutral: short leg failed to spawn; long leg rolled back")
+            # The rollback runs through the hardened CLOSING machinery:
+            # retried stops every tick, a stuck-alert deadline, and an
+            # inventory-verified residual sweep — a single throttled cancel
+            # must never strand the long.
+            self._emit_dn(
+                "leg_rollback",
+                f"short leg failed to open on {self.short_pair}; rolling back the long",
+            )
+            self._abort_cycles = True
+            await self._close_both_now(CloseType.EARLY_STOP)
+            return
 
         # If the short underfilled, trim the long so the hedge is balanced from
         # the start rather than waiting for the drift gate to react.
@@ -248,15 +315,20 @@ class DeltaNeutralController(Controller):
         """Fire reduce-only MARKET closes on BOTH legs concurrently so they exit
         within the same tick (⇒ same minute) — one side is never left exposed.
         Closes may not fill synchronously on a live venue; the CLOSING phase
-        keeps ticking the legs until both terminate."""
+        re-issues the stop for any leg still alive on every tick (on_stop is
+        idempotent) and alerts once if the close exceeds the deadline. The old
+        version fired each stop exactly once and DISCARDED the results
+        (gather(return_exceptions=True)) — a throttled cancel on one leg left
+        it open with no retry and no signal."""
         self.last_close_type = close_type
-        ids = [i for i in (self.long_id, self.short_id) if i]
-        if ids:
-            await asyncio.gather(
-                *(self.orchestrator.stop(i, close_type) for i in ids),
-                return_exceptions=True,
-            )
+        for eid in (self.long_id, self.short_id):
+            await self._safe_stop(eid, close_type)
         self.phase = DNPhase.CLOSING
+        self._close_deadline = time.time() + self.close_deadline_seconds
+        self._close_stuck_notified = False
+        self._residual_ids = []
+        self._residual_attempts = 0
+        self._residual_alerted = False
 
     def _both_legs_terminated(self) -> bool:
         for eid in (self.long_id, self.short_id):
@@ -265,9 +337,81 @@ class DeltaNeutralController(Controller):
                 return False
         return True
 
+    def _residual_tolerance_quote(self) -> Decimal:
+        # Dust below max($1, 0.2% of the leg) is not worth a sweep order.
+        return max(Decimal(1), self.leg_amount_quote * Decimal("0.002"))
+
+    async def _residuals_flat(self) -> bool:
+        """True only when the inventory shows BOTH pairs flat (within dust).
+
+        Residue gets a reduce-only MARKET sweep, retried up to 3 rounds; if it
+        still won't clear, the user is alerted ONCE with the exact exposure —
+        a naked remainder must never be silent."""
+        # Let in-flight sweep orders finish first.
+        live_sweeps = []
+        for sid in self._residual_ids:
+            ex = self._ex(sid)
+            if ex is not None and not ex.is_terminated:
+                live_sweeps.append(sid)
+        if live_sweeps:
+            self._residual_ids = live_sweeps
+            return False
+        self._residual_ids = []
+
+        residues: list[tuple[str, Decimal, Decimal]] = []  # (pair, net_base, value)
+        for pair in (self.long_pair, self.short_pair):
+            net = self._net_base(pair)
+            if net == 0:
+                continue
+            try:
+                mid = await self.adapter.mid_price(pair)
+            except Exception:  # noqa: BLE001 - retry valuation next tick
+                return False
+            value = abs(net) * mid
+            if value > self._residual_tolerance_quote():
+                residues.append((pair, net, value))
+        if not residues:
+            return True
+
+        if self._residual_attempts >= 3:
+            if not self._residual_alerted:
+                self._residual_alerted = True
+                detail = "; ".join(f"{pair} {net}" for pair, net, _ in residues)
+                self._emit_dn("residual_exposure", f"could not flatten after 3 sweeps: {detail}")
+            # Keep trying on subsequent ticks anyway — never give up silently —
+            # but the user has been told the hedge is not fully flat.
+        self._residual_attempts += 1
+        for pair, net, value in residues:
+            side = TradeType.SELL if net > 0 else TradeType.BUY
+            try:
+                oc = OrderExecutorConfig(
+                    pair, side, abs(net), ExecutionStrategy.MARKET,
+                    leverage=self.leverage, position_action=PositionAction.CLOSE,
+                )
+                sweep = OrderExecutor(
+                    oc, user_id=self.user_id, controller_id=self.id,
+                    adapter=self.adapter, inventory=self.inventory,
+                )
+                ok = await self.spawn_executor(
+                    sweep, ExecutorRequest(order_amount_quote=value)
+                )
+                if ok:
+                    self._residual_ids.append(sweep.id)
+                    logger.warning(
+                        "delta_neutral: sweeping residual %s %s on %s (attempt %s)",
+                        side.name, net, pair, self._residual_attempts,
+                    )
+            except Exception as exc:  # noqa: BLE001 - sweep retries next tick
+                logger.warning("delta_neutral: residual sweep spawn failed on %s: %s", pair, exc)
+        return False
+
     # -- lifecycle --------------------------------------------------------
     async def on_start(self) -> None:
         await self._open_cycle()
+        if self.phase is DNPhase.CLOSING:
+            # First-cycle rollback in flight: surface it loudly. The
+            # controller stays ACTIVE so CLOSING keeps managing the unwind.
+            logger.warning("delta_neutral: first cycle rolled back during open")
 
     async def on_tick(self) -> None:
         # Always progress child executors first (poll opening / barriers /
@@ -284,6 +428,31 @@ class DeltaNeutralController(Controller):
         # OPENING is only transient inside _open_cycle; DONE is terminal.
 
     async def _tick_holding(self) -> None:
+        # Leg integrity FIRST: the drift gate below needs both leg values > 0,
+        # so it is structurally blind to the worst case — one leg terminated
+        # (zero-filled MARKET entry, FAILED executor, barrier fired alone)
+        # while the other holds the position. Exactly-one-dead-leg means the
+        # user is directional, not neutral: close everything immediately.
+        long_ex, short_ex = self._ex(self.long_id), self._ex(self.short_id)
+        long_dead = long_ex is None or long_ex.is_terminated
+        short_dead = short_ex is None or short_ex.is_terminated
+        if long_dead != short_dead:
+            dead_pair = self.long_pair if long_dead else self.short_pair
+            live_pair = self.short_pair if long_dead else self.long_pair
+            self._emit_dn(
+                "leg_dead",
+                f"{dead_pair} leg died while {live_pair} is open — closing both",
+            )
+            self.hedge_broken = True
+            self._abort_cycles = True
+            await self._close_both_now(CloseType.EARLY_STOP)
+            return
+        if long_dead and short_dead:
+            # Both legs ended on their own (e.g. barriers) — run the full
+            # close accounting (residual sweep + cycle bookkeeping).
+            await self._close_both_now(CloseType.EARLY_STOP)
+            return
+
         # Drift gate (safety): close both immediately if the hedge breaks, and
         # do NOT start further cycles — a broken hedge signals something wrong.
         if self.hedge_ratio > 0:
@@ -303,8 +472,39 @@ class DeltaNeutralController(Controller):
             await self._close_both_now(CloseType.TIME_LIMIT)
 
     async def _tick_closing(self) -> None:
+        # 1) Re-issue stops for any leg still alive — the first attempt may
+        #    have hit a venue throttle; retrying every tick is free and
+        #    idempotent, and it is the difference between "spot closed, perp
+        #    hanging" and both legs flat one tick later.
         if not self._both_legs_terminated():
-            return  # keep ticking the legs until both flat
+            for eid in (self.long_id, self.short_id):
+                ex = self._ex(eid)
+                if ex is not None and not ex.is_terminated:
+                    await self._safe_stop(eid, self.last_close_type or CloseType.EARLY_STOP)
+            if (
+                not self._close_stuck_notified
+                and self._close_deadline is not None
+                and time.time() > self._close_deadline
+            ):
+                self._close_stuck_notified = True
+                stuck = [
+                    pair for pair, eid in
+                    ((self.long_pair, self.long_id), (self.short_pair, self.short_id))
+                    if (ex := self._ex(eid)) is not None and not ex.is_terminated
+                ]
+                self._emit_dn(
+                    "close_stuck",
+                    f"close exceeded {self.close_deadline_seconds}s; still open: {', '.join(stuck)}",
+                )
+            if not self._both_legs_terminated():
+                return
+
+        # 2) Termination is NOT flatness: a close that died mid-way leaves the
+        #    executor terminated FAILED with the position still on the venue.
+        #    Verify against the INVENTORY and sweep any residue with
+        #    reduce-only MARKET orders before the cycle may count as done.
+        if not await self._residuals_flat():
+            return
         self.cycles_completed += 1
         # Settle funding earned so far before clearing the cycle. Funding is
         # indexed with a lag, so this may lag the true total until the venue
@@ -327,4 +527,11 @@ class DeltaNeutralController(Controller):
                 await self._open_cycle()
             except Exception as exc:  # noqa: BLE001 - a failed re-open ends the run
                 logger.warning("delta_neutral: cycle re-open failed: %s", exc, exc_info=True)
-                self.phase = DNPhase.DONE
+                # A re-open may have opened the LONG before failing — never
+                # walk away from it. Route through the hardened close.
+                if self.long_id or self.short_id:
+                    self._emit_dn("leg_rollback", f"cycle re-open failed mid-way: {exc}")
+                    self._abort_cycles = True
+                    await self._close_both_now(CloseType.EARLY_STOP)
+                else:
+                    self.phase = DNPhase.DONE
