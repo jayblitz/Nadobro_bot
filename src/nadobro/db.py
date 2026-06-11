@@ -11,6 +11,26 @@ _pool_pid = None
 _DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "2"))
 _DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "30"))
 
+# Connection-level network hardening. Production runs against Supabase's
+# direct host, which is IPv6-only on Fly — when that route flaps ("No route
+# to host", 2026-06-11 incident) a timeout-less connect can hang for the OS
+# TCP timeout (minutes), wedging APScheduler ticks ("maximum number of
+# running instances reached"). connect_timeout bounds the hang; keepalives
+# detect half-dead pooled connections instead of failing the first query
+# after an outage.
+_DB_CONNECT_KWARGS = {
+    "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT_SECONDS", "10")),
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
+}
+
+# Errors that mean "this connection (or the route to the server) is dead" —
+# safe to retry a READ on a fresh connection; never auto-retried for writes
+# (the statement may have reached the server before the link died).
+_DISCONNECT_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
+
 def _prepare_db_url(url: str) -> str:
     import re
     from urllib.parse import quote
@@ -78,7 +98,9 @@ def get_pool():
                 force_ipv4_enabled = lambda: False  # noqa: E731
             if force_ipv4_enabled():
                 url = _resolve_host_ipv4(url)
-        _pool = psycopg2.pool.ThreadedConnectionPool(_DB_POOL_MIN, _DB_POOL_MAX, url)
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            _DB_POOL_MIN, _DB_POOL_MAX, url, **_DB_CONNECT_KWARGS
+        )
         _pool_pid = current_pid
         logger.info("PostgreSQL connection pool initialized (%s) min=%s max=%s", db_label, _DB_POOL_MIN, _DB_POOL_MAX)
     return _pool
@@ -88,14 +110,14 @@ def get_db():
     return get_pool().getconn()
 
 
-def put_db(conn):
+def put_db(conn, *, close: bool = False):
     try:
-        get_pool().putconn(conn)
+        get_pool().putconn(conn, close=close)
     except Exception as e:
         logger.warning("Failed to return connection to pool: %s", e)
         try:
             conn.close()
-        except Exception:
+        except Exception:  # policy: degrade-ok(best-effort close of an orphaned conn)
             pass
 
 
@@ -103,80 +125,95 @@ def pool_stats() -> dict[str, int]:
     return {"min": _DB_POOL_MIN, "max": _DB_POOL_MAX}
 
 
+def _run_statement(sql, params, consume, *, cursor_factory=None, retry_disconnect=False):
+    """Run one statement on a pooled connection with disconnect hygiene.
+
+    - A connection that raised a disconnect-class error is CLOSED instead of
+      being returned to the pool (previously every dead connection went back
+      and poisoned a later caller — after an outage, up to DB_POOL_MAX
+      queries each failed once on a corpse).
+    - ``retry_disconnect=True`` (reads only) retries ONCE on a fresh
+      connection, so a single route flap costs milliseconds, not a failed
+      scheduler tick.
+    - rollback on a dead connection raises too; it must never mask the
+      original error (it previously replaced it).
+    """
+    attempts = 2 if retry_disconnect else 1
+    last_exc = None
+    for attempt in range(attempts):
+        conn = get_db()
+        broken = False
+        try:
+            with conn.cursor(cursor_factory=cursor_factory) as cur:
+                cur.execute(sql, params)
+                result = consume(cur)
+            conn.commit()
+            return result
+        except _DISCONNECT_ERRORS as e:
+            broken = True
+            last_exc = e
+            if attempt + 1 < attempts:
+                logger.warning(
+                    "DB connection failed (%s); retrying once on a fresh connection",
+                    str(e).strip().splitlines()[0][:160],
+                )
+                continue
+            raise
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception as rb_exc:
+                broken = True
+                logger.warning("rollback failed on errored connection: %s", rb_exc)
+            raise
+        finally:
+            put_db(conn, close=broken)
+    raise last_exc  # pragma: no cover - loop always returns or raises
+
+
 def query_one(sql, params=None):
-    conn = get_db()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
-            row = cur.fetchone()
-            result = dict(row) if row else None
-        conn.commit()
-        return result
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        put_db(conn)
+    def _consume(cur):
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    return _run_statement(
+        sql, params, _consume,
+        cursor_factory=psycopg2.extras.RealDictCursor, retry_disconnect=True,
+    )
 
 
 def query_all(sql, params=None):
-    conn = get_db()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            result = [dict(r) for r in rows]
-        conn.commit()
-        return result
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        put_db(conn)
+    def _consume(cur):
+        return [dict(r) for r in cur.fetchall()]
+
+    return _run_statement(
+        sql, params, _consume,
+        cursor_factory=psycopg2.extras.RealDictCursor, retry_disconnect=True,
+    )
 
 
 def execute(sql, params=None):
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        put_db(conn)
+    # No disconnect retry: the statement may have reached the server before
+    # the link died, and replaying a non-idempotent write could double-apply.
+    _run_statement(sql, params, lambda cur: None)
 
 
 def execute_returning(sql, params=None):
-    conn = get_db()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
-            row = cur.fetchone()
-            conn.commit()
-            return dict(row) if row else None
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        put_db(conn)
+    def _consume(cur):
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    return _run_statement(
+        sql, params, _consume, cursor_factory=psycopg2.extras.RealDictCursor,
+    )
 
 
 def query_count(sql, params=None):
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            row = cur.fetchone()
-            result = row[0] if row else 0
-        conn.commit()
-        return result
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        put_db(conn)
+    def _consume(cur):
+        row = cur.fetchone()
+        return row[0] if row else 0
+
+    return _run_statement(sql, params, _consume, retry_disconnect=True)
 
 
 def init_db():

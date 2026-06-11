@@ -123,6 +123,26 @@ def install_test_stubs() -> None:
         class _RealDictCursor:
             pass
 
+        # Exception hierarchy mirroring the real driver — db.py references
+        # OperationalError/InterfaceError at import time for disconnect
+        # detection.
+        class _Error(Exception):
+            pass
+
+        class _InterfaceError(_Error):
+            pass
+
+        class _DatabaseError(_Error):
+            pass
+
+        class _OperationalError(_DatabaseError):
+            pass
+
+        psycopg2_mod.Error = _Error
+        psycopg2_mod.InterfaceError = _InterfaceError
+        psycopg2_mod.DatabaseError = _DatabaseError
+        psycopg2_mod.OperationalError = _OperationalError
+
         class _SqlFragment:
             def __init__(self, value=""):
                 self.value = value
