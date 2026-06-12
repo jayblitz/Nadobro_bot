@@ -22,6 +22,7 @@ from src.nadobro.engine.adapter.base import NadoAdapterBase
 from src.nadobro.engine.controllers.controller_base import Controller, ControllerState
 from src.nadobro.engine.controllers.copy_trading import CopyController
 from src.nadobro.engine.controllers.delta_neutral import DeltaNeutralController
+from src.nadobro.engine.controllers.desk import DeskController
 from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
 from src.nadobro.engine.controllers.grid_trading import GridController
 from src.nadobro.engine.controllers.fill_anchored import FillAnchoredQuotingController
@@ -43,6 +44,10 @@ CONTROLLER_REGISTRY: Dict[str, type] = {
     "dn": DeltaNeutralController,
     "vol": VolumeBotController,
     "copy": CopyController,
+    # Desk text-to-trade plans. NOT in ENGINE_MAPPED_STRATEGIES — desk
+    # sessions are driven by services/desk_runtime's scheduler job, not by
+    # bot_runtime strategy cycles.
+    "desk": DeskController,
 }
 
 

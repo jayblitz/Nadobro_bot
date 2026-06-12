@@ -157,6 +157,12 @@ def set_bot_app(app):
         set_time_limit_bot_app(app)
     except Exception:
         pass
+    try:
+        from src.nadobro.services.desk_runtime import set_bot_app as set_desk_bot_app
+
+        set_desk_bot_app(app)
+    except Exception:
+        pass
 
 
 def set_check_client(client: NadoClient):
@@ -868,6 +874,16 @@ def start_scheduler():
         tick_perf_slo, "interval", seconds=60,
         id="perf_slo", replace_existing=True, **_SHORT_TICK,
     )
+    # Desk text-to-trade plan runner: trigger watch + TWAP/exit driving.
+    # 5s keeps price triggers responsive without hammering the venue (mids
+    # are fetched once per product per tick inside the controller).
+    from src.nadobro.services.desk_runtime import desk_enabled, tick_desk_runner
+
+    if desk_enabled():
+        scheduler.add_job(
+            tick_desk_runner, "interval", seconds=5,
+            id="desk_runner", replace_existing=True, **_SHORT_TICK,
+        )
     scheduler.add_job(initial_ai_setup, "date", id="initial_ai_setup", replace_existing=True)
     scheduler.start()
     logger.info(

@@ -523,6 +523,15 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     if allow_operational_intents and await handle_position_management_intent(update, context, telegram_id, text):
         return
 
+    # Desk text-to-trade: TWAP / triggers / chained exits / spot, behind a
+    # confirm card. Owns Buy/Sell (spot) and Long/Short (perp) phrasing; the
+    # legacy one-shot parser below remains the fallback when Desk declines.
+    if allow_operational_intents:
+        from src.nadobro.handlers.desk_handler import handle_desk_text
+
+        if await handle_desk_text(update, context, telegram_id, text):
+            return
+
     if allow_operational_intents and await handle_trade_intent_message(update, context, telegram_id, text):
         return
 

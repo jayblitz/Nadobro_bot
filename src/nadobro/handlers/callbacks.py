@@ -260,6 +260,10 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
             await _handle_bro(query, data, telegram_id, context)
         elif data.startswith("howl:"):
             await _handle_howl(query, data, telegram_id, context)
+        elif data.startswith("desk:"):
+            from src.nadobro.handlers.desk_handler import handle_desk_callback
+
+            await handle_desk_callback(query, data, telegram_id, context)
         elif data == "home:mode":
             user = get_user(telegram_id)
             current_network = user.network_mode.value if user else "testnet"
