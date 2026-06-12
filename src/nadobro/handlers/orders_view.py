@@ -5,7 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.nadobro.utils.visual import divider, money
+from src.nadobro.utils.visual import b, divider, esc, money
 
 
 def cancel_callback_for(order, fallback_index: int) -> str:
@@ -48,22 +48,22 @@ def render_orders_view(snapshot: dict[str, Any], page: int = 0, page_size: int =
     page = max(0, min(page, total_pages - 1))
     visible = orders[page * page_size:(page + 1) * page_size]
 
-    lines = [f"📋 Open Orders ({len(orders)}) · {network}", divider()]
+    lines = [f"📋 <b>Open Orders</b> ({len(orders)}) · {esc(network)}", divider()]
     rows = []
     for idx, order in enumerate(visible, start=page * page_size + 1):
         symbol = str(order.get("product_name") or order.get("product") or f"ID:{order.get('product_id')}")
         side = "📈" if str(order.get("side") or "").upper() in {"LONG", "BUY"} else "📉"
         kind = order_kind_label(order)
         lines.extend([
-            f"{idx} ╱ {symbol} {side} {kind}",
-            f"📦 Size {abs(_dec(order.get('amount') or order.get('size')))}    🎯 Limit {money(_dec(order.get('price') or order.get('limit_price')))}",
-            f"🕐 Created {str(order.get('created_at') or '—')} UTC",
+            f"{idx}. {b(symbol)}  {side} · {esc(kind)}",
+            f"    size {abs(_dec(order.get('amount') or order.get('size')))} @ "
+            f"{money(_dec(order.get('price') or order.get('limit_price')))}"
+            f" · {esc(str(order.get('created_at') or '—'))}",
             "",
         ])
         rows.append([InlineKeyboardButton(f"🗑 Cancel {idx}", callback_data=cancel_callback_for(order, idx - 1))])
     if not visible:
-        lines.append("No open orders.")
-    lines.append(divider())
+        lines.append("No open orders")
 
     nav = []
     if page > 0:

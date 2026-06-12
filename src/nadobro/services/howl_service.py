@@ -322,39 +322,45 @@ def dismiss_all_howl(telegram_id: int, network: str) -> bool:
 
 
 def format_howl_message(howl_data: dict) -> str:
-    lines = ["🐺 *HOWL — Nightly Optimization Report*\n"]
+    """Telegram HTML. This was Markdown sent with NO parse_mode — every
+    recipient of the nightly report saw literal *asterisks* and _underscores_
+    (the 2026-06 "*hdhd*" sighting). HTML + escaped dynamics is also robust
+    against LLM-generated assessment text containing markup characters."""
+    from src.nadobro.utils.visual import esc
+
+    lines = ["🐺 <b>HOWL — Nightly Optimization Report</b>\n"]
 
     assessment = howl_data.get("overall_assessment", "")
     if assessment:
-        lines.append(f"_{assessment}_\n")
+        lines.append(f"<i>{esc(assessment)}</i>\n")
 
     metrics = howl_data.get("metrics", {})
     if metrics:
         total = metrics.get("total_trades", 0)
         wr = metrics.get("win_rate", 0)
         total_pnl = metrics.get("total_pnl", 0)
-        lines.append(f"📊 24h: {total} trades | Win rate: {wr:.0f}% | PnL: ${total_pnl:+.2f}\n")
+        lines.append(f"📊 24h: {total} trades · Win rate {wr:.0f}% · PnL ${total_pnl:+.2f}\n")
 
     suggestions = howl_data.get("suggestions", [])
     if suggestions:
-        lines.append("*Suggested Changes:*")
+        lines.append("<b>Suggested Changes</b>")
         for i, s in enumerate(suggestions):
-            param = s.get("parameter", "?")
-            current = s.get("current_value", "?")
-            new = s.get("suggested_value", "?")
+            param = esc(s.get("parameter", "?"))
+            current = esc(s.get("current_value", "?"))
+            new = esc(s.get("suggested_value", "?"))
             rationale = s.get("rationale", "")
             impact = s.get("expected_impact", "")
             status = s.get("status", "pending")
 
             if status != "pending":
                 emoji = "✅" if status == "approved" else "❌"
-                lines.append(f"\n{emoji} `{param}`: {current} → {new} [{status}]")
+                lines.append(f"\n{emoji} <code>{param}</code>: {current} → {new} [{esc(status)}]")
             else:
-                lines.append(f"\n{i+1}. `{param}`: {current} → *{new}*")
+                lines.append(f"\n{i+1}. <code>{param}</code>: {current} → <b>{new}</b>")
                 if rationale:
-                    lines.append(f"   _{rationale}_")
+                    lines.append(f"   <i>{esc(rationale)}</i>")
                 if impact:
-                    lines.append(f"   Expected: {impact}")
+                    lines.append(f"   Expected: {esc(impact)}")
     else:
         lines.append("No specific changes suggested — current parameters look good.")
 

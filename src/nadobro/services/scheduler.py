@@ -307,6 +307,7 @@ async def tick_howl():
                             await _bot_app.bot.send_message(
                                 chat_id=telegram_id,
                                 text=localize_text(msg, lang),
+                                parse_mode="HTML",
                                 reply_markup=localize_markup(howl_approval_kb(suggestions_count), lang),
                             )
                     except Exception as e:

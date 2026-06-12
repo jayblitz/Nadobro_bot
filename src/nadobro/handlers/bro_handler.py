@@ -341,9 +341,10 @@ async def _handle_bro(query, data, telegram_id, context):
             text = format_howl_message(pending)
             suggestions = pending.get("suggestions", [])
             pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
-            await _edit_loc(query, 
-                escape_md(text),
-                parse_mode=ParseMode.MARKDOWN_V2,
+            # format_howl_message is HTML — send it as such, never MD-escaped.
+            await _edit_loc(query,
+                text,
+                parse_mode=ParseMode.HTML,
                 reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
             )
         else:
