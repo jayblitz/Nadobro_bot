@@ -980,9 +980,12 @@ async def _handle_howl(query, data, telegram_id, context):
             suggestions = pending.get("suggestions", [])
             pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
             from src.nadobro.handlers.keyboards import howl_approval_kb
-            await _edit_loc(query, 
-                escape_md(f"{'✅' if ok else '⚠️'} {msg}\n\n{text}"),
-                parse_mode=ParseMode.MARKDOWN_V2,
+            # format_howl_message is HTML; escape_md-wrapping it both killed
+            # the intended formatting AND (post-HTML) showed raw tags.
+            from src.nadobro.utils.visual import esc as _esc
+            await _edit_loc(query,
+                f"{'✅' if ok else '⚠️'} {_esc(msg)}\n\n{text}",
+                parse_mode=ParseMode.HTML,
                 reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
             )
         else:
@@ -999,9 +1002,10 @@ async def _handle_howl(query, data, telegram_id, context):
             suggestions = pending.get("suggestions", [])
             pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
             from src.nadobro.handlers.keyboards import howl_approval_kb
-            await _edit_loc(query, 
-                escape_md(f"{'❌' if ok else '⚠️'} {msg}\n\n{text}"),
-                parse_mode=ParseMode.MARKDOWN_V2,
+            from src.nadobro.utils.visual import esc as _esc
+            await _edit_loc(query,
+                f"{'❌' if ok else '⚠️'} {_esc(msg)}\n\n{text}",
+                parse_mode=ParseMode.HTML,
                 reply_markup=howl_approval_kb(len(suggestions)) if pending_count > 0 else back_kb("strategy:preview:bro"),
             )
         else:
@@ -1017,8 +1021,8 @@ async def _handle_howl(query, data, telegram_id, context):
                 if s.get("status", "pending") == "pending":
                     ok, msg = approve_howl_suggestion(telegram_id, network, i)
                     results.append(f"{'✅' if ok else '⚠️'} {msg}")
-            text = "\n".join(results) if results else "No pending suggestions"
-            await _edit_loc(query, escape_md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
+            summary = "\n".join(results) if results else "No pending suggestions"
+            await _edit_loc(query, escape_md(summary), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
         else:
             await _edit_loc(query, "No pending HOWL suggestions\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
 

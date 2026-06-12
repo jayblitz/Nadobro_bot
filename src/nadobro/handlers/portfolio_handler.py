@@ -119,8 +119,10 @@ async def _handle_portfolio(query, data, telegram_id):
     if action == "close_all_confirm":
         from src.nadobro.handlers.portfolio_deck import render_close_all_confirm
 
+        # Portfolio is the HTML domain: declare it even for plain confirm
+        # text so the whole domain is uniform (and statically checkable).
         text, kb = render_close_all_confirm()
-        await _edit_loc(query, text, reply_markup=kb)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action == "close_all_yes":
@@ -141,7 +143,7 @@ async def _handle_portfolio(query, data, telegram_id):
         from src.nadobro.handlers.orders_view import render_cancel_all_confirm
 
         text, kb = render_cancel_all_confirm()
-        await _edit_loc(query, text, reply_markup=kb)
+        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
 
     if action == "cancel_all_yes":
