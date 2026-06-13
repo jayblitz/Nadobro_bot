@@ -496,12 +496,35 @@ def init_db():
                 ON vault_lp_events_{net} (user_id, event_type, submission_idx)
                 WHERE submission_idx IS NOT NULL;
         """
+        _NETWORK_DESK_PLANS_DDL = """
+            CREATE TABLE IF NOT EXISTS desk_plans_{net} (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                plan_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'draft',
+                plan_json TEXT NOT NULL,
+                state_json TEXT,
+                error TEXT,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                confirmed_at TIMESTAMPTZ,
+                started_at TIMESTAMPTZ,
+                finished_at TIMESTAMPTZ,
+                CHECK (status IN ('draft','awaiting_trigger','running',
+                                  'completed','cancelled','failed'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_desk_plans_{net}_user_status
+                ON desk_plans_{net} (user_id, status);
+            CREATE INDEX IF NOT EXISTS idx_desk_plans_{net}_active
+                ON desk_plans_{net} (status)
+                WHERE status IN ('awaiting_trigger', 'running');
+        """
         with conn.cursor() as cur:
             for net in ("testnet", "mainnet"):
                 cur.execute(_NETWORK_TRADES_DDL.format(net=net))
                 cur.execute(_NETWORK_ALERTS_DDL.format(net=net))
                 cur.execute(_NETWORK_VAULT_WATCH_DDL.format(net=net))
                 cur.execute(_NETWORK_VAULT_LP_EVENTS_DDL.format(net=net))
+                cur.execute(_NETWORK_DESK_PLANS_DDL.format(net=net))
             conn.commit()
             logger.info("Network-specific tables (trades_testnet/mainnet, alerts_testnet/mainnet) verified/created")
 

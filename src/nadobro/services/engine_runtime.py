@@ -22,6 +22,7 @@ from src.nadobro.engine.adapter.base import NadoAdapterBase
 from src.nadobro.engine.controllers.controller_base import Controller, ControllerState
 from src.nadobro.engine.controllers.copy_trading import CopyController
 from src.nadobro.engine.controllers.delta_neutral import DeltaNeutralController
+from src.nadobro.engine.controllers.desk import DeskController
 from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
 from src.nadobro.engine.controllers.grid_trading import GridController
 from src.nadobro.engine.controllers.fill_anchored import FillAnchoredQuotingController
@@ -43,6 +44,10 @@ CONTROLLER_REGISTRY: Dict[str, type] = {
     "dn": DeltaNeutralController,
     "vol": VolumeBotController,
     "copy": CopyController,
+    # Desk text-to-trade plans. NOT in ENGINE_MAPPED_STRATEGIES — desk
+    # sessions are driven by services/desk_runtime's scheduler job, not by
+    # bot_runtime strategy cycles.
+    "desk": DeskController,
 }
 
 
@@ -599,7 +604,10 @@ def build_product_meta_from_catalog(client: object) -> Dict[str, object]:
             isolated_only=bool(row.get("isolated_only")),
         )
         symbol = str(row.get("symbol") or f"{base}-PERP")
-        _register(meta, (base, symbol, f"{base}-PERP"), overwrite=True)
+        # Market-qualified aliases (``BASE-PERP``) let a caller that handles
+        # BOTH markets for the same base — the Desk controller — address the
+        # perp unambiguously even when a spot listing shares the base.
+        _register(meta, (base, symbol, f"{base}-PERP", f"{symbol}-PERP"), overwrite=True)
 
     # Spots: id + (best-effort) increments; never isolated. Don't clobber a perp
     # alias on a base collision (perps registered first).
@@ -623,7 +631,13 @@ def build_product_meta_from_catalog(client: object) -> Dict[str, object]:
             isolated_only=False,
         )
         symbol = str(row.get("symbol") or base)
+        # Base/symbol keys must NOT clobber a perp on a dual-listed base (a
+        # grid/MM strategy keyed by bare base expects its perp). But the
+        # ``BASE-SPOT`` alias is spot-only and collision-free — it's how the
+        # Desk controller routes a spot plan on a dual-listed asset (e.g.
+        # "buy 2 ETH" -> ETH-SPOT) to the SPOT product, not the perp.
         _register(meta, (base, symbol), overwrite=False)
+        _register(meta, (f"{base}-SPOT", f"{symbol}-SPOT"), overwrite=True)
 
     return out
 

@@ -20,6 +20,18 @@ def test_migration_sequence_has_no_gap():
     assert numbers == list(range(1, max(numbers) + 1))
 
 
+def test_desk_plans_migration_covers_startup_ddl():
+    sql = Path("src/nadobro/migrations/0012_desk_plans.sql").read_text()
+    for net in ("testnet", "mainnet"):
+        assert f"CREATE TABLE IF NOT EXISTS desk_plans_{net}" in sql
+        assert f"idx_desk_plans_{net}_user_status" in sql
+        assert f"idx_desk_plans_{net}_active" in sql
+    # the guarded-transition contract relies on these statuses exactly
+    for status in ("draft", "awaiting_trigger", "running",
+                   "completed", "cancelled", "failed"):
+        assert status in sql
+
+
 def test_engine_v2_migration_covers_new_tables():
     sql = Path("src/nadobro/migrations/0007_engine_v2_tables.sql").read_text()
     assert "CREATE TABLE IF NOT EXISTS engine_executors" in sql

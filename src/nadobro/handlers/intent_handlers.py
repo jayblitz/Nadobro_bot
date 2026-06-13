@@ -30,13 +30,7 @@ from src.nadobro.services.trade_service import (
 )
 from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
 from src.nadobro.config import get_product_id, get_product_max_leverage
-from src.nadobro.services.nado_tooling_service import (
-    parse_trigger_intent,
-    parse_twap_intent,
-    preview_trigger_plan,
-    preview_twap_plan,
-    tooling_enabled,
-)
+from src.nadobro.services.nado_tooling_service import tooling_enabled
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.text_trade_pending import (
     clear_text_trade_pending,
@@ -220,65 +214,10 @@ async def handle_trade_intent_message(update, context: CallbackContext, telegram
         await _reply_md_safe(update.message, msg)
         return True
 
-    if tooling_enabled():
-        twap_intent = parse_twap_intent(text)
-        if twap_intent:
-            preview = preview_twap_plan(
-                telegram_id=telegram_id,
-                product=twap_intent["product"],
-                side=twap_intent["side"],
-                quantity=twap_intent["quantity"],
-                duration_minutes=twap_intent["duration_minutes"],
-            )
-            if preview.get("success"):
-                data = preview.get("data") or {}
-                qty_txt = f"{float(data.get('quantity') or 0):.6f}"
-                notional_txt = f"${float(data.get('estimated_notional_usd') or 0):,.2f}"
-                msg = (
-                    "📊 *TWAP Preview*\\n\\n"
-                    f"• Product: *{escape_md(str(data.get('product')))}*\\n"
-                    f"• Side: *{escape_md(str(data.get('side')).upper())}*\\n"
-                    f"• Size: *{escape_md(qty_txt)}*\\n"
-                    f"• Duration: *{escape_md(str(data.get('duration_minutes')))}m*\\n"
-                    f"• Interval: *{escape_md(str(data.get('interval_seconds')))}s*\\n"
-                    f"• Slices: *{escape_md(str(data.get('estimated_slices')))}*\\n"
-                    f"• Est Notional: *{escape_md(notional_txt)}*\\n\\n"
-                    "This is a preview only\\. Execution flow will be added behind an explicit confirmation step\\."
-                )
-                await _reply_md_safe(update.message, msg)
-            else:
-                await _reply_md_safe(update.message, f"⚠️ {escape_md(str(preview.get('error') or 'TWAP preview failed'))}")
-            return True
-
-        trigger_intent = parse_trigger_intent(text)
-        if trigger_intent:
-            preview = preview_trigger_plan(
-                telegram_id=telegram_id,
-                product=trigger_intent["product"],
-                side=trigger_intent["side"],
-                trigger_price=trigger_intent["trigger_price"],
-                quantity=trigger_intent["quantity"],
-            )
-            if preview.get("success"):
-                data = preview.get("data") or {}
-                qty_txt = f"{float(data.get('quantity') or 0):.6f}"
-                trigger_txt = f"${float(data.get('trigger_price') or 0):,.2f}"
-                mid_txt = f"${float(data.get('reference_mid_price') or 0):,.2f}"
-                distance_txt = f"{float(data.get('distance_pct_from_mid') or 0):+.2f}%"
-                msg = (
-                    "🎯 *Trigger Preview*\\n\\n"
-                    f"• Product: *{escape_md(str(data.get('product')))}*\\n"
-                    f"• Side: *{escape_md(str(data.get('side')).upper())}*\\n"
-                    f"• Size: *{escape_md(qty_txt)}*\\n"
-                    f"• Trigger: *{escape_md(trigger_txt)}*\\n"
-                    f"• Mid: *{escape_md(mid_txt)}*\\n"
-                    f"• Distance: *{escape_md(distance_txt)}*\\n\\n"
-                    "This is a preview only\\. Execution flow will be added behind an explicit confirmation step\\."
-                )
-                await _reply_md_safe(update.message, msg)
-            else:
-                await _reply_md_safe(update.message, f"⚠️ {escape_md(str(preview.get('error') or 'Trigger preview failed'))}")
-            return True
+    # The preview-only TWAP/trigger scaffold that used to live here was
+    # superseded by the Desk pipeline (handlers/desk_handler.py), which parses
+    # the same phrasing AND executes behind a confirm card. messages.py routes
+    # Desk before this handler, so those messages never reach this point.
 
     user = get_user(telegram_id)
     network = user.network_mode.value if user else "mainnet"

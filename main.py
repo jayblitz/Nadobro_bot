@@ -265,6 +265,10 @@ def setup_bot():
     # Phase 3: Tread-style live MM dashboard.
     app.add_handler(CommandHandler("mm_status", with_user_serialized(cmd_mm_status)))
     app.add_handler(CommandHandler("mm_fills", with_user_serialized(cmd_mm_fills)))
+    # Desk text-to-trade plan list (TWAP / triggers / exits / spot).
+    from src.nadobro.handlers.desk_handler import cmd_desk
+
+    app.add_handler(CommandHandler("desk", with_user_serialized(cmd_desk)))
 
     app.add_handler(CallbackQueryHandler(with_user_serialized(handle_callback)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, with_user_serialized(handle_message)))
