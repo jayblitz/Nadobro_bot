@@ -119,7 +119,11 @@ async def _ensure_session(telegram_id: int, network: str) -> bool:
     from src.nadobro.services.user_service import get_user_nado_client
 
     key = (int(telegram_id), network)
-    if key in _RUNNING and RUNTIME._controllers.get((key[0], network, "desk")) is not None:  # noqa: SLF001
+    existing = RUNTIME._controllers.get((key[0], network, "desk"))  # noqa: SLF001
+    # A FAILED controller is not None but will never tick again — fall through
+    # to RUNTIME.start (which tears it down first) instead of ticking a dead
+    # session forever. Mirrors the grid-path needs_recovery guard.
+    if key in _RUNNING and existing is not None and existing.is_active:
         return True
     client = await run_blocking(get_user_nado_client, int(telegram_id), network)
     if client is None:

@@ -332,7 +332,7 @@ class DeskController(Controller):
         plan = run.plan
         if not await self._market_open(plan):
             return  # hold fire while the (stock-token) market is closed
-        mid = await self._mid(plan.product or "")
+        mid = await self._mid(plan.venue_pair())
         if mid is None:
             return
         if not trigger_satisfied(plan.entry_trigger, mid=float(mid)):
@@ -355,10 +355,13 @@ class DeskController(Controller):
 
     async def _spawn_entry(self, run: _PlanRun, mid: Decimal) -> None:
         plan = run.plan
-        product = plan.product or ""
-        if not product:
+        if not plan.product:
             await self._fail(run, "plan has no product")
             return
+        # Market-qualified key: the adapter routes spot vs perp (and the
+        # product_id) entirely from this string. A bare base would hit the
+        # perp on a dual-listed asset.
+        product = plan.venue_pair()
         leverage = int(plan.leverage or 1) if plan.market == "perp" else 1
         side = self._entry_side(plan)
 
@@ -433,7 +436,7 @@ class DeskController(Controller):
                 run.phase = PH_SUSPENDED
                 run.dirty = True
                 return
-            mid = await self._mid(plan.product or "")
+            mid = await self._mid(plan.venue_pair())
             if mid is None:
                 return
             await self._spawn_entry(run, mid)
@@ -535,7 +538,7 @@ class DeskController(Controller):
 
     async def _tick_exit_watch(self, run: _PlanRun) -> None:
         plan = run.plan
-        mid = await self._mid(plan.product or "")
+        mid = await self._mid(plan.venue_pair())
         if mid is None:
             return
         levels = self._exit_levels(run)
@@ -573,11 +576,11 @@ class DeskController(Controller):
 
     async def _spawn_exit(self, run: _PlanRun) -> None:
         plan = run.plan
-        product = plan.product or ""
         amount = run.prior_base
-        if amount <= 0 or not product:
+        if amount <= 0 or not plan.product:
             await self._complete(run)
             return
+        product = plan.venue_pair()
         close_side = TradeType.SELL if plan.side == "buy" else TradeType.BUY
         cfg = OrderExecutorConfig(
             product, close_side, amount, ExecutionStrategy.MARKET,

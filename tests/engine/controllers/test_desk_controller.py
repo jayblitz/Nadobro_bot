@@ -139,6 +139,35 @@ def test_lost_claim_places_nothing():
     asyncio.run(body())
 
 
+def test_spot_plan_addresses_the_spot_market_not_the_perp():
+    """The dual-listed-asset bug: 'buy 2 ETH' (spot) must place against the
+    SPOT product, never the perp that shares the base. The adapter routes by
+    the trading-pair string, so the controller must use the -SPOT alias."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        plan = spot_market_plan(product="ETH", market="spot", size_base=2.0)
+        orch, c, store = make_desk(adapter, [record(plan)])
+        await orch.spawn_controller(c)
+        await ticks(orch, c, 2)
+        assert adapter.placed
+        assert adapter.placed[0].trading_pair == "ETH-SPOT"
+
+    asyncio.run(body())
+
+
+def test_perp_plan_addresses_the_perp_market():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        plan = ExecutionPlan(algo="market", market="perp", product="ETH", side="buy",
+                             size_base=2.0, leverage=3)
+        orch, c, store = make_desk(adapter, [record(plan)])
+        await orch.spawn_controller(c)
+        await ticks(orch, c, 2)
+        assert adapter.placed and adapter.placed[0].trading_pair == "ETH-PERP"
+
+    asyncio.run(body())
+
+
 def test_immediate_plan_executes_and_reports():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
@@ -446,7 +475,7 @@ def test_one_bad_feed_does_not_stall_other_plans():
     async def body():
         class FlakyMid(MockNadoAdapter):
             async def mid_price(self, pair):  # type: ignore[override]
-                if pair == "BAD":
+                if pair.startswith("BAD"):  # BAD-SPOT (market-qualified)
                     raise RuntimeError("feed down")
                 return await super().mid_price(pair)
 

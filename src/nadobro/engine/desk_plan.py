@@ -152,6 +152,18 @@ class ExecutionPlan:
     def is_long(self) -> bool:
         return self.side == "buy"
 
+    def venue_pair(self) -> str:
+        """Market-qualified trading-pair key for the engine adapter.
+
+        The adapter resolves BOTH the product_id and the spot/perp margin
+        routing from a single ``ProductMeta`` keyed by this string. A bare
+        base ("ETH") resolves to the PERP on a dual-listed asset, so a spot
+        plan MUST use the ``-SPOT`` alias or "buy 2 ETH" silently opens a
+        perp. See build_product_meta_from_catalog.
+        """
+        suffix = "PERP" if self.market == "perp" else "SPOT"
+        return f"{self.product}-{suffix}"
+
     def twap_slices(self) -> Optional[int]:
         if self.algo != "twap" or not self.duration_minutes or not self.interval_seconds:
             return None

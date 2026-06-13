@@ -604,7 +604,10 @@ def build_product_meta_from_catalog(client: object) -> Dict[str, object]:
             isolated_only=bool(row.get("isolated_only")),
         )
         symbol = str(row.get("symbol") or f"{base}-PERP")
-        _register(meta, (base, symbol, f"{base}-PERP"), overwrite=True)
+        # Market-qualified aliases (``BASE-PERP``) let a caller that handles
+        # BOTH markets for the same base — the Desk controller — address the
+        # perp unambiguously even when a spot listing shares the base.
+        _register(meta, (base, symbol, f"{base}-PERP", f"{symbol}-PERP"), overwrite=True)
 
     # Spots: id + (best-effort) increments; never isolated. Don't clobber a perp
     # alias on a base collision (perps registered first).
@@ -628,7 +631,13 @@ def build_product_meta_from_catalog(client: object) -> Dict[str, object]:
             isolated_only=False,
         )
         symbol = str(row.get("symbol") or base)
+        # Base/symbol keys must NOT clobber a perp on a dual-listed base (a
+        # grid/MM strategy keyed by bare base expects its perp). But the
+        # ``BASE-SPOT`` alias is spot-only and collision-free — it's how the
+        # Desk controller routes a spot plan on a dual-listed asset (e.g.
+        # "buy 2 ETH" -> ETH-SPOT) to the SPOT product, not the perp.
         _register(meta, (base, symbol), overwrite=False)
+        _register(meta, (f"{base}-SPOT", f"{symbol}-SPOT"), overwrite=True)
 
     return out
 

@@ -178,6 +178,39 @@ def test_build_product_meta_from_catalog(monkeypatch):
     assert spot.product_id == 8 and spot.is_perp is False and spot.isolated_only is False
 
 
+def test_dual_listed_base_keeps_spot_and_perp_addressable(monkeypatch):
+    """Desk routing regression: a base with BOTH a perp and a spot listing
+    (e.g. ETH) must keep the bare base on the perp (grid/MM expect that) AND
+    expose a -SPOT alias on the spot product, or a spot 'buy 2 ETH' silently
+    opens a perp."""
+    from src.nadobro.services import product_catalog as pc
+
+    X18 = 10 ** 18
+    perps = {"perps": {"ETH": {
+        "id": 100, "symbol": "ETH-PERP",
+        "price_increment_x18": str(X18 // 100), "size_increment_x18": str(X18 // 1000),
+        "min_size_x18": str(X18),
+    }}}
+    spots = {"spots": {"ETH": {
+        "id": 200, "symbol": "ETH",
+        "price_increment_x18": str(X18 // 100), "size_increment_x18": str(X18 // 1000),
+        "min_size_x18": str(X18),
+    }}}
+    monkeypatch.setattr(pc, "get_catalog", lambda **kw: perps)
+    monkeypatch.setattr(pc, "get_spot_catalog", lambda **kw: spots)
+
+    class _Client:
+        network = "testnet"
+
+    meta = er.build_product_meta_from_catalog(_Client())
+
+    # Bare base + -PERP -> the perp (unchanged behaviour for grid/MM).
+    assert meta["ETH"].product_id == 100 and meta["ETH"].is_perp is True
+    assert meta["ETH-PERP"].product_id == 100 and meta["ETH-PERP"].is_perp is True
+    # -SPOT alias -> the SPOT product (the Desk routing fix).
+    assert meta["ETH-SPOT"].product_id == 200 and meta["ETH-SPOT"].is_perp is False
+
+
 def test_build_product_meta_handles_bad_catalog(monkeypatch):
     from src.nadobro.services import product_catalog as pc
 
