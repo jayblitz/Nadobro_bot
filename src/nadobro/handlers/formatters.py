@@ -1622,13 +1622,22 @@ def fmt_status_overview(status: dict, onboarding: dict):
     ])
     lines.extend(readiness_lines)
 
-    margin = status.get("notional_usd")
-    cyc = status.get("cycle_notional_usd")
-    if margin is not None:
-        margin_text = f"{_loc('Margin')}: *{escape_md(_fmt_compact_usd(float(margin)))}*"
-        if cyc is not None:
-            margin_text += f" \\| {_loc('Per cycle')}: *{escape_md(_fmt_compact_usd(float(cyc)))}*"
-        lines.append(margin_text)
+    if strategy == "DN":
+        # DN sizes from fixed_margin_usd; show per-leg Size (not notional_usd).
+        dn_size = status.get("dn_size_usd")
+        if dn_size is not None:
+            lines.append(
+                f"{_loc('Size')} \\(per leg\\): *{escape_md(_fmt_compact_usd(float(dn_size)))}* \\| "
+                f"{_loc('Short')}: *1x*"
+            )
+    else:
+        margin = status.get("notional_usd")
+        cyc = status.get("cycle_notional_usd")
+        if margin is not None:
+            margin_text = f"{_loc('Margin')}: *{escape_md(_fmt_compact_usd(float(margin)))}*"
+            if cyc is not None:
+                margin_text += f" \\| {_loc('Per cycle')}: *{escape_md(_fmt_compact_usd(float(cyc)))}*"
+            lines.append(margin_text)
 
     lines.extend(["", f"*{_loc('Trading Summary')}*"])
     lines.append(
@@ -1709,15 +1718,30 @@ def fmt_status_overview(status: dict, onboarding: dict):
         )
 
     if strategy == "DN":
-        dn_mode = status.get("dn_mode") or "enter_anyway"
         dn_fr = float(status.get("dn_last_funding_rate") or 0.0)
-        dn_unf = int(status.get("dn_unfavorable_count") or 0)
+        hold_s = int(status.get("dn_hold_seconds") or 3600)
+        hold_lbl = (
+            f"{hold_s // 3600}h" if hold_s % 3600 == 0
+            else (f"{hold_s // 60}m" if hold_s % 60 == 0 else f"{hold_s}s")
+        )
+        total_cycles = int(status.get("dn_cycles") or 1)
+        done_raw = status.get("dn_cycles_completed")
+        cycles_lbl = (
+            f"{int(done_raw)}/{total_cycles}" if done_raw is not None else str(total_cycles)
+        )
+        funding_earned = status.get("dn_funding_earned_usd")
         lines.extend(["", "*Delta Neutral*"])
         lines.append(
-            f"{_loc('Funding Mode')}: *{escape_md(str(dn_mode).upper())}* \\| "
-            f"{_loc('Funding')}: *{escape_md(f'{dn_fr:.6f}')}*"
+            f"{_loc('Hold')}: *{escape_md(hold_lbl)}* \\| "
+            f"{_loc('Cycles')}: *{escape_md(cycles_lbl)}*"
         )
-        lines.append(f"{_loc('Unfavorable Cycles')}: *{escape_md(str(dn_unf))}*")
+        if funding_earned is not None:
+            lines.append(
+                f"{_loc('Funding earned')}: *{escape_md(_fmt_signed_usd(float(funding_earned)))}* \\| "
+                f"{_loc('Rate')}: *{escape_md(f'{dn_fr:.6f}')}*"
+            )
+        else:
+            lines.append(f"{_loc('Funding rate')}: *{escape_md(f'{dn_fr:.6f}')}*")
 
     bro_state = status.get("bro_state") or {}
     if strategy == "BRO" and bro_state:

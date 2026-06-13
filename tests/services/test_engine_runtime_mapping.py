@@ -126,6 +126,22 @@ def test_map_risk_limits():
     assert lim.max_position_size_quote == Decimal("300")  # notional * levels fallback
 
 
+def test_map_risk_limits_dn_follows_leg_size_not_notional():
+    """Regression: DN sizes legs from fixed_margin_usd, so its risk caps must
+    follow that — not notional_usd. The old behavior capped single orders at
+    notional_usd ($50) and rejected every $250 leg (LIVE but 0 orders)."""
+    lim = er.map_risk_limits(
+        {"fixed_margin_usd": 250.0, "notional_usd": 50.0, "dn_hedge_ratio": 1.0}, "dn"
+    )
+    # cap = leg(250) * hedge(1) * 2.0 headroom = 500
+    assert lim.max_single_order_quote == Decimal("500")
+    assert lim.max_position_size_quote == Decimal("500")
+    assert lim.max_open_executors == 6
+    # A 2x hedge ratio scales the cap with the larger short leg.
+    lim2 = er.map_risk_limits({"fixed_margin_usd": 100.0, "dn_hedge_ratio": 2.0}, "dn")
+    assert lim2.max_single_order_quote == Decimal("400")  # 100 * 2 * 2
+
+
 def test_build_product_meta_from_catalog(monkeypatch):
     """Real catalog rows carry x18-scaled increments + isolated_only; the builder
     must convert them (not fall back to permissive 0.01/0.001/1 defaults) and
