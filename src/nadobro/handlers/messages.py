@@ -1576,6 +1576,10 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
         # Mid Mode accepts directional_bias as a continuous float in [-1, +1].
         "directional_bias",
+        # Delta Neutral (engine v2) custom inputs. Without these here, the DN
+        # custom-size/hold/cycles reply was rejected, the pending state cleared,
+        # and the typed number fell through to the LOWIQPTS points relay.
+        "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
     )
     if strategy not in supported or field not in supported_fields:
         context.user_data.pop("pending_strategy_input", None)

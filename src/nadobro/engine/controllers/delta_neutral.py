@@ -180,6 +180,10 @@ class DeltaNeutralController(Controller):
         risk request is sized from the leg's own mid so the Risk Engine sees the
         true per-leg notional."""
         if amount_base <= 0:
+            logger.warning(
+                "delta_neutral: %s leg NOT spawned on %s — amount_base=%s <= 0",
+                side.name, pair, amount_base,
+            )
             return None
         try:
             mid = await self.adapter.mid_price(pair)
@@ -195,7 +199,16 @@ class DeltaNeutralController(Controller):
             ok = await self.spawn_executor(
                 ex, ExecutorRequest(order_amount_quote=amount_quote, position_size_quote=amount_quote)
             )
-            return ex.id if ok else None
+            if not ok:
+                # Surface WHY (risk gate reason / kill switch) — a silent None
+                # here was the hidden cause of a leg never placing.
+                logger.warning(
+                    "delta_neutral: %s leg spawn REFUSED on %s amount_base=%s "
+                    "amount_quote=%s mid=%s reason=%s",
+                    side.name, pair, amount_base, amount_quote, mid, self._spawn_reason(),
+                )
+                return None
+            return ex.id
         except Exception as exc:  # noqa: BLE001 - caller's rollback MUST run
             # Raising here used to skip _open_cycle's long-leg rollback and
             # leave the user naked-long. Spawn failures are returned, never

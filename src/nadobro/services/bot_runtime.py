@@ -1368,16 +1368,28 @@ def get_user_bot_status(telegram_id: int) -> dict:
     # by the worker process into engine_controller_state; read it here so
     # /status reflects real progress, not just the configured cycle count.
     dn_progress: dict = {}
-    if str(state.get("strategy") or "").lower() == "dn":
+    engine_order_counts: dict = {}
+    _strat_lc = str(state.get("strategy") or "").lower()
+    try:
+        from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES as _EMS
+    except Exception:  # noqa: BLE001
+        _EMS = ()
+    if _strat_lc in _EMS:
         try:
             from src.nadobro.services.engine_runtime import deterministic_controller_id
-            from src.nadobro.services.engine_persistence import get_controller_progress
+            from src.nadobro.services.engine_persistence import (
+                get_controller_progress, count_engine_orders,
+            )
 
-            dn_progress = get_controller_progress(
-                deterministic_controller_id("dn", telegram_id, network)
-            ) or {}
+            _cid = deterministic_controller_id(_strat_lc, telegram_id, network)
+            # Real order counts from engine_executors — the engine cycle result
+            # carries none, so the legacy order_observability stays 0 (Bug 3).
+            engine_order_counts = count_engine_orders(_cid)
+            if _strat_lc == "dn":
+                dn_progress = get_controller_progress(_cid) or {}
         except Exception:  # policy: degrade-ok(status display)
             dn_progress = {}
+            engine_order_counts = {}
 
     try:
         from src.nadobro.services.strategy_fsm import infer_phase
@@ -1461,7 +1473,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "other_running_networks": other_running_networks,
         "strategy_session_id": strategy_session_id,
         "running_sessions": running_sessions,
-        "order_observability": state.get("order_observability") or {},
+        "order_observability": {**(state.get("order_observability") or {}), **engine_order_counts},
         "session_trade_count": int(session_analytics.get("total_trades") or 0),
         "session_filled_trades": int(session_analytics.get("filled") or 0),
         "session_closed_trades": int(session_analytics.get("closed") or 0),

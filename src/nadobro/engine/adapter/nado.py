@@ -235,6 +235,15 @@ class NadoAdapter(NadoAdapterBase):
         is_buy = side is TradeType.BUY
         amount = float(amount_base)
 
+        # reduce_only is a PERP concept (shrink an open position). On a SPOT
+        # product there is no position to reduce — the venue rejects a
+        # reduce-only spot order with error_code 5000 "Invalid value", which is
+        # what broke the Delta Neutral spot leg's close/rollback. Strip it for
+        # spot; the DN close sells exactly the held base, so it flattens cleanly
+        # without the flag.
+        if reduce_only and not bool(meta.is_perp):
+            reduce_only = False
+
         # Isolated-margin routing. Nado RWA perps are isolated-only: the order
         # must carry isolated_only=True and an isolated_margin amount or the
         # venue rejects it (error_code 2006). We mirror the manual trade path —
@@ -281,6 +290,15 @@ class NadoAdapter(NadoAdapterBase):
             price=(str(price) if price is not None else None),
         )
 
+        # Diagnostic: log the exact params we send so a venue rejection (e.g.
+        # error_code 5000 "Invalid value") can be matched to the order shape and
+        # compared against the working manual path.
+        logger.info(
+            "engine place_order pair=%s pid=%s side=%s type=%s amount_base=%s "
+            "is_perp=%s isolated_only=%s isolated_margin=%s reduce_only=%s leverage=%s",
+            trading_pair, meta.product_id, side.name, order_type.name, amount_base,
+            meta.is_perp, isolated_only, isolated_margin, reduce_only, leverage,
+        )
         try:
             if order_type is OrderType.MARKET:
                 resp = await asyncio.to_thread(
