@@ -215,6 +215,14 @@ class EngineRuntime:
             self._persist_executors(orch)
         self._controllers.pop(key, None)
         self._orchestrators.pop(key, None)
+        # Clear the live-progress row so a stopped strategy doesn't leave stale
+        # cycles/funding behind for the next start. Best-effort.
+        try:
+            from src.nadobro.services.engine_persistence import clear_controller_progress
+
+            clear_controller_progress(deterministic_controller_id(strategy, user_id, network))
+        except Exception:  # noqa: BLE001
+            logger.debug("clear dn progress failed", exc_info=True)
 
     def _persist_executors(self, orch: ExecutorOrchestrator) -> None:
         if self._executor_store is None:
@@ -519,7 +527,23 @@ def map_strategy_config(
     return cfg
 
 
-def map_risk_limits(settings: Dict[str, Any]) -> RiskLimits:
+def map_risk_limits(settings: Dict[str, Any], strategy: Optional[str] = None) -> RiskLimits:
+    # Delta Neutral sizes each leg from ``fixed_margin_usd`` (NOT ``notional_usd``),
+    # so its risk caps must follow the leg size or the Risk Engine rejects every
+    # leg with ``max_single_order_quote`` and the controller never places an order
+    # (the "LIVE but 0 orders" bug). Cap = per-leg notional × headroom; the
+    # base-matched short can be slightly larger than the long (mid gap / hedge
+    # ratio) and the venue may bump a leg up to its min-notional, hence the 2×.
+    if str(strategy or "").lower() == "dn":
+        leg = _f(settings, "fixed_margin_usd", _f(settings, "notional_usd", 100.0))
+        hedge = max(1.0, _f(settings, "dn_hedge_ratio", 1.0))
+        per_order_cap = max(1.0, leg * hedge) * 2.0
+        return RiskLimits(
+            # 2 legs + headroom for the close/trim and next-cycle overlap.
+            max_open_executors=6,
+            max_single_order_quote=Decimal(str(per_order_cap)),
+            max_position_size_quote=Decimal(str(per_order_cap)),
+        )
     notional = _f(settings, "notional_usd", 100.0)
     levels = max(1, int(_f(settings, "levels", 2)))
     cap = _f(settings, "session_notional_cap_usd", 0.0) or (notional * levels)
@@ -528,6 +552,47 @@ def map_risk_limits(settings: Dict[str, Any]) -> RiskLimits:
         max_single_order_quote=Decimal(str(notional)),
         max_position_size_quote=Decimal(str(cap)),
     )
+
+
+def _persist_dn_progress(telegram_id: int, network: str, strategy: str) -> None:
+    """Write the live DN controller progress (cycles-completed + funding-earned
+    + phase) to engine_controller_state so the main process can surface it in
+    /status. Cross-process via the deterministic controller id. Best-effort —
+    never breaks a cycle."""
+    if strategy != "dn":
+        return
+    try:
+        controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        if controller is None:
+            return
+        from src.nadobro.services.engine_persistence import upsert_controller_progress
+
+        upsert_controller_progress(
+            controller.id,
+            telegram_id,
+            strategy=strategy,
+            network=network,
+            cycles_completed=int(getattr(controller, "cycles_completed", 0) or 0),
+            funding_earned_usd=getattr(controller, "cumulative_funding", 0) or 0,
+            phase=str(getattr(getattr(controller, "phase", None), "value", "") or ""),
+        )
+    except Exception:  # noqa: BLE001 - persistence must not break a cycle
+        logger.debug("dn progress persist failed", exc_info=True)
+
+
+def _friendly_start_error(reason: str) -> str:
+    """Map an internal spawn-rejection reason to a user-facing message."""
+    low = str(reason or "").lower()
+    if "max_single_order_quote" in low or "max_position_size_quote" in low:
+        return ("Order size exceeds this strategy's risk limit. Lower the Size or "
+                "raise the cap, then start again.")
+    if "max_open_executors" in low:
+        return "Too many open legs for this strategy's risk limit."
+    if "kill_switch" in low:
+        return "Trading is paused (kill switch active). Try again shortly."
+    if "insufficient" in low or "margin" in low or "health" in low:
+        return "Not enough margin to open both legs. Add margin or lower the Size."
+    return f"Strategy failed to start: {reason}" if reason else "Strategy failed to start."
 
 
 def _opt_int(value: object) -> Optional[int]:
@@ -730,7 +795,7 @@ async def run_engine_cycle(
     settings = {k: v for k, v in state.items() if not isinstance(v, (dict, list))}
     configs = map_strategy_config(strategy, settings, _dec(mid), product=product,
                                   leverage=int(_f(settings, "leverage", 1)))
-    limits = map_risk_limits(settings)
+    limits = map_risk_limits(settings, strategy)
 
     # NO_ORDERS_AUDIT-FIX-R2: inject the dgrid candle_provider HERE, because
     # this is where ``client`` and ``product_id`` are available. The provider
@@ -789,35 +854,48 @@ async def run_engine_cycle(
         if strategy == "dn":
             _materialize_dn_leg_meta(meta, configs, client, network, product)
         adapter = build_adapter(client, meta)
-        await RUNTIME.start(
+        started_controller = await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),
             limits=limits,
         )
-        # NO_ORDERS_AUDIT-FIX-DIAG: log post-start executor count so an
-        # operator can immediately see "controller started but spawned 0
-        # executors" — the exact symptom this audit chased.
-        controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        # Fail loudly when the controller could not start. If on_start raised
+        # (e.g. a leg rejected by the risk gate or the venue), spawn_controller
+        # marks the controller FAILED and EngineRuntime.start unregisters it.
+        # Returning success here is what produced the silent "LIVE but 0 orders"
+        # state — instead, surface the reason and let the caller tear down.
+        registered = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
         orch = RUNTIME._orchestrators.get((telegram_id, network, strategy))      # noqa: SLF001
-        active_n = len(orch.list(controller.id, active_only=True)) if (controller and orch) else 0
-        if controller is None:
+        start_failed = registered is None or (
+            started_controller is not None
+            and started_controller.state is ControllerState.FAILED
+        )
+        if start_failed:
+            reason = (
+                getattr(started_controller, "_start_error", None)
+                or "controller failed to start"
+            )
             logger.error(
-                "engine_started but controller is None user=%s network=%s strategy=%s "
-                "— spawn_controller likely refused (risk/kill switch)",
-                telegram_id, network, strategy,
+                "engine start FAILED user=%s network=%s strategy=%s reason=%s",
+                telegram_id, network, strategy, reason,
             )
-        elif active_n == 0 and strategy in ("grid", "rgrid", "vol", "dn"):
-            # These strategies spawn executors in on_start; zero here means
-            # on_start did nothing. dgrid/mid spawn on first tick, so allow.
-            logger.warning(
-                "engine_started but 0 executors for user=%s network=%s strategy=%s "
-                "— controller on_start did not spawn any executors; check configs",
-                telegram_id, network, strategy,
-            )
-        else:
-            logger.info(
-                "engine_started user=%s network=%s strategy=%s active_executors=%s",
-                telegram_id, network, strategy, active_n,
-            )
+            try:
+                await RUNTIME.stop(telegram_id, network, strategy)
+            except Exception:  # noqa: BLE001
+                logger.warning("engine start cleanup failed after spawn failure", exc_info=True)
+            return {
+                "success": False,
+                "error": _friendly_start_error(str(reason)),
+                "action": "engine_start_failed",
+                "strategy": strategy,
+            }
+        active_n = len(orch.list(registered.id, active_only=True)) if (registered and orch) else 0
+        logger.info(
+            "engine_started user=%s network=%s strategy=%s active_executors=%s",
+            telegram_id, network, strategy, active_n,
+        )
+        # Seed progress immediately so /status shows it right after Start
+        # (DN spawns on_start, so there's no follow-up tick to wait for).
+        _persist_dn_progress(telegram_id, network, strategy)
         action = "engine_recovered" if needs_recovery else "engine_started"
         if needs_recovery:
             state["last_recovery_ts"] = time.time()
@@ -837,6 +915,9 @@ async def run_engine_cycle(
                 dn_events = consume_dn() or []
     except Exception:  # policy: degrade-ok(gate notify is best-effort)
         gate_event = None
+    # Persist DN live progress so /status (main process) can read it from the
+    # worker that runs the cycle.
+    _persist_dn_progress(telegram_id, network, strategy)
     # NO_ORDERS_AUDIT-FIX-DIAG: surface executor count after each tick too,
     # bucketed at INFO every ~10 ticks. Comment out if too chatty.
     try:

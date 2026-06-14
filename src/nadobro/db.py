@@ -891,6 +891,20 @@ def init_db():
                     reason     TEXT,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+
+                -- Live per-controller progress, written each tick by the worker
+                -- process so the main process (/status) can surface it
+                -- cross-process. Keyed by the deterministic controller id.
+                CREATE TABLE IF NOT EXISTS engine_controller_state (
+                    controller_id      TEXT PRIMARY KEY,
+                    user_id            BIGINT NOT NULL,
+                    strategy           TEXT,
+                    network            TEXT,
+                    cycles_completed   INTEGER NOT NULL DEFAULT 0,
+                    funding_earned_usd NUMERIC(38,18) NOT NULL DEFAULT 0,
+                    phase              TEXT,
+                    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
             """)
             conn.commit()
             logger.info("engine v2 tables verified/created")

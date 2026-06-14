@@ -166,6 +166,15 @@ class DeltaNeutralController(Controller):
         ex = self._ex(executor_id)
         return _dec(getattr(ex, "entry_base", Decimal(0)) or 0)
 
+    def _spawn_reason(self) -> str:
+        """Why the most recent leg spawn was refused (e.g.
+        ``risk:max_single_order_quote``), so on_start failures carry a cause the
+        runtime can surface to the user instead of a silent 'LIVE / 0 orders'."""
+        try:
+            return self.orchestrator.last_spawn_reason(self.id) or "unknown"
+        except Exception:  # noqa: BLE001
+            return "unknown"
+
     async def _spawn_leg(self, pair: str, side: TradeType, amount_base: Decimal) -> Optional[str]:
         """Spawn one leg as a MARKET PositionExecutor for ``amount_base``. The
         risk request is sized from the leg's own mid so the Risk Engine sees the
@@ -206,7 +215,7 @@ class DeltaNeutralController(Controller):
         long_base = self.leg_amount_quote / await self.adapter.mid_price(self.long_pair)
         self.long_id = await self._spawn_leg(self.long_pair, TradeType.BUY, long_base)
         if self.long_id is None:
-            raise RuntimeError("delta_neutral: long leg failed to spawn")
+            raise RuntimeError(f"delta_neutral: long leg failed to spawn ({self._spawn_reason()})")
 
         # Base-match the short to what the long actually filled. Fall back to a
         # quote-matched estimate only if the long fill isn't known yet (async

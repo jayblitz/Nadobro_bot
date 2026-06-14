@@ -306,6 +306,9 @@ class ExecutorOrchestrator:
             await controller.on_start()
         except Exception as exc:  # noqa: BLE001
             controller._set_failed()
+            # Record why so callers (EngineRuntime.start → run_engine_cycle) can
+            # surface a clear reason instead of a silent "LIVE but 0 orders".
+            controller._start_error = str(exc)  # type: ignore[attr-defined]
             # Stop any child executors the controller created mid-start.
             child_ids = [
                 ex.id for ex in self.list(controller.id, active_only=True)

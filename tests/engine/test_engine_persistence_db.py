@@ -39,10 +39,12 @@ pytestmark = pytest.mark.skipif(not _db_reachable(), reason="no reachable Postgr
 def _schema():
     from src.nadobro.db import execute
 
-    for mig in ("0007_engine_v2_tables.sql", "0009_engine_kill_switch.sql"):
+    for mig in ("0007_engine_v2_tables.sql", "0009_engine_kill_switch.sql",
+                "0013_engine_controller_state.sql"):
         execute((MIGRATIONS / mig).read_text())
     # clean slate for deterministic assertions
-    execute("TRUNCATE engine_position_hold, engine_executors, engine_kill_switch")
+    execute("TRUNCATE engine_position_hold, engine_executors, engine_kill_switch, "
+            "engine_controller_state")
     yield
 
 
@@ -62,6 +64,36 @@ def test_db_inventory_condor_example_persists_and_reads_back():
     assert hold.net_amount_base == Decimal(50)
     assert hold.breakeven is not None and round(hold.breakeven, 2) == Decimal("148.33")
     assert [h.controller_id for h in DbInventoryRepository().list_for_user(uid)] == [cid]
+
+
+def test_controller_progress_roundtrip_and_clear():
+    from decimal import Decimal
+    from src.nadobro.services.engine_persistence import (
+        upsert_controller_progress, get_controller_progress, clear_controller_progress,
+    )
+
+    cid = "delta_neutral-abc123"
+    upsert_controller_progress(
+        cid, 9100, strategy="dn", network="testnet",
+        cycles_completed=2, funding_earned_usd=Decimal("1.25"), phase="HOLDING",
+    )
+    row = get_controller_progress(cid)
+    assert row is not None
+    assert int(row["cycles_completed"]) == 2
+    assert Decimal(str(row["funding_earned_usd"])) == Decimal("1.25")
+    assert row["phase"] == "HOLDING"
+
+    # Idempotent upsert overwrites (not accumulates) — it mirrors live state.
+    upsert_controller_progress(
+        cid, 9100, strategy="dn", network="testnet",
+        cycles_completed=5, funding_earned_usd=Decimal("3.50"), phase="WAITING",
+    )
+    row2 = get_controller_progress(cid)
+    assert int(row2["cycles_completed"]) == 5
+    assert Decimal(str(row2["funding_earned_usd"])) == Decimal("3.50")
+
+    clear_controller_progress(cid)
+    assert get_controller_progress(cid) is None
 
 
 def test_db_executor_store_persists_lifecycle():

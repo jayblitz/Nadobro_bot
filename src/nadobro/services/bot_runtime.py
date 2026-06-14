@@ -916,7 +916,9 @@ def start_user_bot(
             "strategy": strategy,
             "strategy_id_v2": 1,
             "product": (product if (strategy == "vol" and vol_market_kw == "spot") else str(product).upper()),
-            "leverage": 1.0 if strategy == "vol" else float(leverage or 3.0),
+            # DN short is strictly 1x (engine forces it); vol is spot 1x. Don't
+            # seed a misleading 3x that the start notification/status would echo.
+            "leverage": 1.0 if strategy in ("vol", "dn") else float(leverage or 3.0),
             "slippage_pct": float(slippage_pct or 1.0),
             "reference_price": 0.0,
             "started_at": datetime.now(timezone.utc).isoformat(),
@@ -1070,13 +1072,18 @@ def start_user_bot(
         logger.warning("eager engine kickoff threw — scheduler will retry", exc_info=True)
 
     if strategy == "dn":
-        funding_mode = str(state.get("funding_entry_mode") or "wait").strip().lower()
-        funding_label = "wait favorable" if funding_mode == "wait" else "enter anyway"
+        leg_size = float(state.get("fixed_margin_usd") or state.get("notional_usd") or 100.0)
+        hold_s = int(state.get("dn_hold_seconds") or 3600)
+        hold_lbl = (
+            f"{hold_s // 3600}h" if hold_s % 3600 == 0
+            else (f"{hold_s // 60}m" if hold_s % 60 == 0 else f"{hold_s}s")
+        )
+        cycles = int(state.get("dn_cycles") or 1)
         return (
             True,
-            f"DN bot started with {str(dn_pair.get('spot_symbol') or product.upper())} spot long + "
-            f"{str(dn_pair.get('perp_symbol') or f'{product.upper()}-PERP')} short ({network}) "
-            f"| Funding mode {funding_label} | TP {state.get('tp_pct')}% / SL {state.get('sl_pct')}% | Leverage {state.get('leverage')}x",
+            f"DN bot started: {str(dn_pair.get('spot_symbol') or product.upper())} spot long + "
+            f"{str(dn_pair.get('perp_symbol') or f'{product.upper()}-PERP')} short 1x ({network}) "
+            f"| Size ${leg_size:,.0f}/leg | Hold {hold_lbl} | Cycles {cycles}",
         )
     if strategy == "vol":
         # Volume is spot-only as of 2026-05.
@@ -1357,6 +1364,21 @@ def get_user_bot_status(telegram_id: int) -> dict:
         except Exception:
             session_analytics = {"total_trades": 0}
 
+    # Live DN progress (cycles-completed + funding-earned) is written each tick
+    # by the worker process into engine_controller_state; read it here so
+    # /status reflects real progress, not just the configured cycle count.
+    dn_progress: dict = {}
+    if str(state.get("strategy") or "").lower() == "dn":
+        try:
+            from src.nadobro.services.engine_runtime import deterministic_controller_id
+            from src.nadobro.services.engine_persistence import get_controller_progress
+
+            dn_progress = get_controller_progress(
+                deterministic_controller_id("dn", telegram_id, network)
+            ) or {}
+        except Exception:  # policy: degrade-ok(status display)
+            dn_progress = {}
+
     try:
         from src.nadobro.services.strategy_fsm import infer_phase
 
@@ -1406,6 +1428,17 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "dn_last_funding_rate": state.get("dn_last_funding_rate"),
         "dn_unfavorable_count": state.get("dn_unfavorable_count"),
         "dn_mode": state.get("dn_mode") or state.get("funding_entry_mode"),
+        # Engine-v2 DN settings (what the controller actually runs) so /status
+        # matches the dashboard. Size = per-leg notional from fixed_margin_usd.
+        "dn_size_usd": (
+            state.get("fixed_margin_usd")
+            if state.get("fixed_margin_usd") is not None
+            else state.get("notional_usd")
+        ),
+        "dn_hold_seconds": state.get("dn_hold_seconds"),
+        "dn_cycles": state.get("dn_cycles"),
+        "dn_cycles_completed": dn_progress.get("cycles_completed"),
+        "dn_funding_earned_usd": dn_progress.get("funding_earned_usd"),
         # Reverse GRID telemetry surface for runtime status.
         "rgrid_anchor_price": state.get("grid_anchor_price"),
         "rgrid_buy_exposure_price": state.get("grid_buy_exposure_price"),

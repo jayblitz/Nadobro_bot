@@ -57,6 +57,9 @@ class Controller(abc.ABC):
         self.state = ControllerState.CREATED
         self.started_at: Optional[float] = None
         self.stopped_at: Optional[float] = None
+        # Set by the orchestrator when on_start raises, so the runtime can
+        # surface why a start failed (e.g. a leg rejected by the risk gate).
+        self._start_error: Optional[str] = None
 
     # -- state transitions (called by the orchestrator) -------------------
     @property

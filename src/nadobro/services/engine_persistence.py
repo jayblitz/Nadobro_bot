@@ -229,3 +229,58 @@ class DbKillSwitchStore(KillSwitchStore):
             "SELECT reason FROM engine_kill_switch WHERE scope=%s AND engaged=TRUE", (self.scope,)
         )
         return row["reason"] if row else None
+
+
+# --------------------------------------------------------------------------
+# Live controller progress (engine_controller_state)
+# --------------------------------------------------------------------------
+def upsert_controller_progress(
+    controller_id: str,
+    user_id: int,
+    *,
+    strategy: Optional[str] = None,
+    network: Optional[str] = None,
+    cycles_completed: int = 0,
+    funding_earned_usd: object = Decimal(0),
+    phase: Optional[str] = None,
+) -> None:
+    """Persist a controller's live progress so the main process (/status) can
+    read it cross-process. Written each tick by the worker; best-effort —
+    persistence must never break a cycle."""
+    from src.nadobro.db import execute
+
+    execute(
+        """
+        INSERT INTO engine_controller_state
+          (controller_id, user_id, strategy, network, cycles_completed,
+           funding_earned_usd, phase, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (controller_id) DO UPDATE SET
+          cycles_completed   = EXCLUDED.cycles_completed,
+          funding_earned_usd = EXCLUDED.funding_earned_usd,
+          phase              = EXCLUDED.phase,
+          updated_at         = NOW()
+        """,
+        (
+            controller_id, int(user_id), strategy, network,
+            int(cycles_completed), _dec(funding_earned_usd), phase,
+        ),
+    )
+
+
+def get_controller_progress(controller_id: str) -> Optional[dict]:
+    """Most recent persisted progress for ``controller_id``, or None."""
+    from src.nadobro.db import query_one
+
+    return query_one(
+        "SELECT cycles_completed, funding_earned_usd, phase, updated_at "
+        "FROM engine_controller_state WHERE controller_id=%s",
+        (controller_id,),
+    )
+
+
+def clear_controller_progress(controller_id: str) -> None:
+    """Remove a controller's progress row (called on stop). Best-effort."""
+    from src.nadobro.db import execute
+
+    execute("DELETE FROM engine_controller_state WHERE controller_id=%s", (controller_id,))
