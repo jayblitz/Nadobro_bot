@@ -215,6 +215,14 @@ class EngineRuntime:
             self._persist_executors(orch)
         self._controllers.pop(key, None)
         self._orchestrators.pop(key, None)
+        # Clear the live-progress row so a stopped strategy doesn't leave stale
+        # cycles/funding behind for the next start. Best-effort.
+        try:
+            from src.nadobro.services.engine_persistence import clear_controller_progress
+
+            clear_controller_progress(deterministic_controller_id(strategy, user_id, network))
+        except Exception:  # noqa: BLE001
+            logger.debug("clear dn progress failed", exc_info=True)
 
     def _persist_executors(self, orch: ExecutorOrchestrator) -> None:
         if self._executor_store is None:
@@ -546,6 +554,32 @@ def map_risk_limits(settings: Dict[str, Any], strategy: Optional[str] = None) ->
     )
 
 
+def _persist_dn_progress(telegram_id: int, network: str, strategy: str) -> None:
+    """Write the live DN controller progress (cycles-completed + funding-earned
+    + phase) to engine_controller_state so the main process can surface it in
+    /status. Cross-process via the deterministic controller id. Best-effort —
+    never breaks a cycle."""
+    if strategy != "dn":
+        return
+    try:
+        controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        if controller is None:
+            return
+        from src.nadobro.services.engine_persistence import upsert_controller_progress
+
+        upsert_controller_progress(
+            controller.id,
+            telegram_id,
+            strategy=strategy,
+            network=network,
+            cycles_completed=int(getattr(controller, "cycles_completed", 0) or 0),
+            funding_earned_usd=getattr(controller, "cumulative_funding", 0) or 0,
+            phase=str(getattr(getattr(controller, "phase", None), "value", "") or ""),
+        )
+    except Exception:  # noqa: BLE001 - persistence must not break a cycle
+        logger.debug("dn progress persist failed", exc_info=True)
+
+
 def _friendly_start_error(reason: str) -> str:
     """Map an internal spawn-rejection reason to a user-facing message."""
     low = str(reason or "").lower()
@@ -859,6 +893,9 @@ async def run_engine_cycle(
             "engine_started user=%s network=%s strategy=%s active_executors=%s",
             telegram_id, network, strategy, active_n,
         )
+        # Seed progress immediately so /status shows it right after Start
+        # (DN spawns on_start, so there's no follow-up tick to wait for).
+        _persist_dn_progress(telegram_id, network, strategy)
         action = "engine_recovered" if needs_recovery else "engine_started"
         if needs_recovery:
             state["last_recovery_ts"] = time.time()
@@ -878,6 +915,9 @@ async def run_engine_cycle(
                 dn_events = consume_dn() or []
     except Exception:  # policy: degrade-ok(gate notify is best-effort)
         gate_event = None
+    # Persist DN live progress so /status (main process) can read it from the
+    # worker that runs the cycle.
+    _persist_dn_progress(telegram_id, network, strategy)
     # NO_ORDERS_AUDIT-FIX-DIAG: surface executor count after each tick too,
     # bucketed at INFO every ~10 ticks. Comment out if too chatty.
     try:

@@ -1364,6 +1364,21 @@ def get_user_bot_status(telegram_id: int) -> dict:
         except Exception:
             session_analytics = {"total_trades": 0}
 
+    # Live DN progress (cycles-completed + funding-earned) is written each tick
+    # by the worker process into engine_controller_state; read it here so
+    # /status reflects real progress, not just the configured cycle count.
+    dn_progress: dict = {}
+    if str(state.get("strategy") or "").lower() == "dn":
+        try:
+            from src.nadobro.services.engine_runtime import deterministic_controller_id
+            from src.nadobro.services.engine_persistence import get_controller_progress
+
+            dn_progress = get_controller_progress(
+                deterministic_controller_id("dn", telegram_id, network)
+            ) or {}
+        except Exception:  # policy: degrade-ok(status display)
+            dn_progress = {}
+
     try:
         from src.nadobro.services.strategy_fsm import infer_phase
 
@@ -1422,8 +1437,8 @@ def get_user_bot_status(telegram_id: int) -> dict:
         ),
         "dn_hold_seconds": state.get("dn_hold_seconds"),
         "dn_cycles": state.get("dn_cycles"),
-        "dn_cycles_completed": state.get("dn_cycles_completed"),
-        "dn_funding_earned_usd": state.get("dn_funding_earned_usd"),
+        "dn_cycles_completed": dn_progress.get("cycles_completed"),
+        "dn_funding_earned_usd": dn_progress.get("funding_earned_usd"),
         # Reverse GRID telemetry surface for runtime status.
         "rgrid_anchor_price": state.get("grid_anchor_price"),
         "rgrid_buy_exposure_price": state.get("grid_buy_exposure_price"),
