@@ -120,6 +120,29 @@ def test_funding_since_sums_received_positive():
     asyncio.run(body())
 
 
+def test_reduce_only_stripped_on_spot_orders():
+    """reduce_only is a perp concept; Nado rejects a reduce-only SPOT order with
+    error_code 5000 'Invalid value' (this broke the DN spot leg's close). The
+    adapter must strip it for non-perp products and keep it for perps."""
+    spot = {"S": ProductMeta(2, Decimal("0.01"), Decimal("0.001"), Decimal(1),
+                             is_perp=False, isolated_only=False)}
+    perp = {"P": ProductMeta(7, Decimal("0.01"), Decimal("0.001"), Decimal(1),
+                             is_perp=True, isolated_only=True)}
+
+    async def body():
+        c1 = _CapturingClient()
+        await NadoAdapter(c1, spot).place_order(
+            "S", TradeType.SELL, OrderType.MARKET, Decimal("0.5"), reduce_only=True)
+        assert c1.market_calls[0]["reduce_only"] is False  # stripped for spot
+
+        c2 = _CapturingClient()
+        await NadoAdapter(c2, perp).place_order(
+            "P", TradeType.SELL, OrderType.MARKET, Decimal("0.5"), reduce_only=True)
+        assert c2.market_calls[0]["reduce_only"] is True   # kept for perp
+
+    asyncio.run(body())
+
+
 def test_spot_order_is_not_isolated():
     """A spot (or cross) product must NOT post isolated margin — that path is
     unchanged."""

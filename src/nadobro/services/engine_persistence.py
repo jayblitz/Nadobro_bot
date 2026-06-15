@@ -284,3 +284,34 @@ def clear_controller_progress(controller_id: str) -> None:
     from src.nadobro.db import execute
 
     execute("DELETE FROM engine_controller_state WHERE controller_id=%s", (controller_id,))
+
+
+def count_engine_orders(controller_id: str) -> dict:
+    """Per-controller order/position counts from engine_executors, so /status
+    reflects real activity. The engine cycle result carries no counts, which is
+    why the legacy order_observability stayed stuck at 0 for engine strategies.
+    Each executor opens an entry order (placed) and, if it closed, a close order.
+    """
+    from src.nadobro.db import query_one
+
+    row = query_one(
+        """
+        SELECT
+          COUNT(*)                                              AS executors,
+          COUNT(*) FILTER (WHERE terminated_at IS NOT NULL)     AS closed,
+          COUNT(*) FILTER (WHERE volume_quote > 0)              AS filled,
+          COUNT(*) FILTER (WHERE close_type = 'FAILED')         AS failed
+        FROM engine_executors WHERE controller_id = %s
+        """,
+        (controller_id,),
+    )
+    if not row:
+        return {"orders_placed": 0, "orders_filled": 0, "orders_cancelled": 0}
+    executors = int(row.get("executors") or 0)
+    closed = int(row.get("closed") or 0)
+    # placed = one entry order per executor + one close order per closed executor.
+    return {
+        "orders_placed": executors + closed,
+        "orders_filled": int(row.get("filled") or 0),
+        "orders_cancelled": int(row.get("failed") or 0),
+    }
