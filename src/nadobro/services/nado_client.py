@@ -2456,6 +2456,31 @@ class NadoClient:
                 pass
         return entry
 
+    def get_product_min_notional_usd(self, product_id: int) -> Optional[float]:
+        """Minimum order notional (USD) for a product — spot OR perp. The venue
+        bumps a smaller order up to this floor, so Delta Neutral uses it to
+        reject an undersized Size instead of silently growing both legs (the
+        "$50 set but $97 executed" surprise). Returns None when unresolved."""
+        try:
+            pid = int(product_id)
+        except (TypeError, ValueError):
+            return None
+        try:
+            payload = self._query_rest("all_products") or {}
+            data = payload.get("data") or payload
+            for key in ("perp_products", "spot_products"):
+                for p in data.get(key) or []:
+                    if not isinstance(p, dict) or int(p.get("product_id") or -1) != pid:
+                        continue
+                    book = p.get("book_info") or {}
+                    raw = (p.get("min_size_x18") or book.get("min_size_x18")
+                           or p.get("min_size") or book.get("min_size"))
+                    val = self._x18_to_float(raw)
+                    return val if (val and val > 0) else None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("get_product_min_notional_usd failed pid=%s err=%s", product_id, e)
+        return None
+
     def _warm_product_increment_cache(self, product_id: int) -> None:
         key = (self.network, product_id)
         if key in _size_increment_x18_cache and key in _price_increment_x18_cache:

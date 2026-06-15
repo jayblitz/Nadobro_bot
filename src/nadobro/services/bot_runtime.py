@@ -847,6 +847,33 @@ def start_user_bot(
         )
     if strategy == "dn" and not bool(dn_pair.get("entry_allowed", True)):
         return False, str(dn_pair.get("entry_block_reason") or f"{product.upper()} is not currently tradable for Delta Neutral.")
+    if strategy == "dn":
+        # Reject an undersized leg up front instead of letting the venue silently
+        # bump it to the spot/perp min-notional ("$50 set but $97 executed").
+        try:
+            _, _dn_cfg = get_strategy_settings(telegram_id, "dn")
+            leg_usd = float(_dn_cfg.get("fixed_margin_usd") or _dn_cfg.get("notional_usd") or 100.0)
+            _dn_client = get_user_readonly_client(telegram_id, network=network)
+            mins: list[tuple[float, str]] = []
+            if _dn_client is not None:
+                for _pid, _label in (
+                    (dn_pair.get("spot_product_id"), "spot"),
+                    (dn_pair.get("perp_product_id"), "perp"),
+                ):
+                    if _pid is not None:
+                        _m = _dn_client.get_product_min_notional_usd(int(_pid))
+                        if _m and _m > 0:
+                            mins.append((float(_m), _label))
+            if mins:
+                need, leg_label = max(mins, key=lambda t: t[0])
+                if leg_usd < need - 0.01:
+                    return False, (
+                        f"Size ${leg_usd:,.0f}/leg is below {product.upper()}'s {leg_label} "
+                        f"minimum of ${need:,.0f}. Raise the Size to at least ${need:,.0f} so "
+                        f"both legs trade at the size you set."
+                    )
+        except Exception:  # noqa: BLE001 - never block start on a resolver hiccup
+            logger.debug("dn min-notional preflight skipped", exc_info=True)
     if strategy == "vol" and vol_market_kw == "spot":
         max_leverage = 1
         leverage = 1.0
