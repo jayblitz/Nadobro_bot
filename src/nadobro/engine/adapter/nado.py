@@ -39,6 +39,7 @@ from src.nadobro.engine.adapter.base import (
 )
 from src.nadobro.engine import order_lifecycle, order_tags
 from src.nadobro.engine.types import OrderType, TradeType, _dec
+from src.nadobro.utils.x18 import from_x18
 
 # The sole permitted venue import inside the engine.
 from src.nadobro.services.nado_client import NadoClient
@@ -126,6 +127,32 @@ class OrderRegistry:
 
     def all_ids(self) -> Iterable[str]:
         return ()
+
+
+def _match_dec(value: object) -> Decimal:
+    """Convert an indexer match/fill amount to a HUMAN Decimal.
+
+    The Nado indexer returns fill fields (base_filled / quote_filled / fee /
+    priceX18) x18-scaled (value × 1e18). Reading them raw recorded fills 1e18×
+    too large — the bug that made the DN short un-placeable (base-matched off an
+    x18 fill → astronomical notional) and the long un-closeable (selling 1e18×
+    the held size → venue error_code 5000 "Invalid value"). Auto-detect so an
+    already-human value is left untouched: a big integer (≥ 1e9, no decimal
+    point) is treated as x18; anything else is taken as-is. Mirrors
+    portfolio_calculator._decimal_from_possible_x18.
+    """
+    if value is None:
+        return Decimal(0)
+    text = str(value)
+    if any(c in text for c in ".eE"):
+        return _to_dec(value)
+    try:
+        integer = int(text)
+    except (TypeError, ValueError):
+        return _to_dec(value)
+    if abs(integer) >= 1_000_000_000:
+        return from_x18(integer)
+    return Decimal(integer)
 
 
 def _to_dec(value: object, default: Decimal = Decimal(0)) -> Decimal:
@@ -488,7 +515,9 @@ class NadoAdapter(NadoAdapterBase):
 
         resting = self._find_open(open_orders, order_id)
         if resting is not None:
-            filled_base = _to_dec(_first(resting, _OPEN_FILLED_KEYS))
+            # x18-scaled on the gateway open-orders feed — convert to human so a
+            # resting/partial fill isn't recorded 1e18× too large.
+            filled_base = abs(_match_dec(_first(resting, _OPEN_FILLED_KEYS)))
             state = OrderState.PARTIALLY_FILLED if filled_base > 0 else OrderState.OPEN
             # AUDIT-FIX-2: pull real quote and fees from the match aggregate.
             # Previously this used filled_base * ref.price, which assumes every
@@ -506,7 +535,7 @@ class NadoAdapter(NadoAdapterBase):
                     return self._mk_order(order_id, ref, state, filled_base, fq, fee)
                 # Fall back to the original (less-accurate) estimate only when
                 # the matches feed has no data yet.
-                px = ref.price if ref.price is not None else _to_dec(_first(resting, _PRICE_KEYS))
+                px = ref.price if ref.price is not None else _match_dec(_first(resting, ("priceX18", "price_x18", *(_PRICE_KEYS))))
                 return self._mk_order(order_id, ref, state, filled_base, filled_base * px, Decimal(0))
             return self._mk_order(order_id, ref, state, filled_base, Decimal(0), Decimal(0))
 
@@ -583,11 +612,19 @@ class NadoAdapter(NadoAdapterBase):
         for m in matches or []:
             if str(_first(m, _DIGEST_KEYS, "")) != digest:
                 continue
-            amt = _to_dec(_first(m, _MATCH_AMOUNT_KEYS))
-            px = _to_dec(_first(m, _PRICE_KEYS))
-            fb += amt
-            fq += amt * px
-            fee += _to_dec(_first(m, _MATCH_FEE_KEYS))
+            # Use the per-match FILL fields (base_filled / quote_filled), not
+            # ``amount`` (the order's total, which over-counts on multi-match),
+            # and convert from x18 to human units (_match_dec). Take abs because
+            # the indexer signs them by direction.
+            base = abs(_match_dec(_first(m, ("base_filled", "base_filled_x18", "amount", "size", "filled_base"))))
+            quote = abs(_match_dec(_first(m, ("quote_filled", "quote_filled_x18"))))
+            if quote <= 0:
+                # Older shapes without quote_filled: derive from price × base.
+                px = _match_dec(_first(m, ("priceX18", "price_x18", *(_PRICE_KEYS))))
+                quote = base * px
+            fb += base
+            fq += quote
+            fee += abs(_match_dec(_first(m, _MATCH_FEE_KEYS)))
         return fb, fq, fee
 
     async def fill_stream(self, trading_pair: str) -> AsyncIterator[Fill]:
@@ -597,14 +634,16 @@ class NadoAdapter(NadoAdapterBase):
         except Exception as exc:  # noqa: BLE001
             raise AdapterError(f"fill_stream failed: {exc}") from exc
         for m in matches or []:
-            amt = _to_dec(_first(m, _MATCH_AMOUNT_KEYS))
+            # x18-scaled fill fields — convert to human (_match_dec).
+            amt = abs(_match_dec(_first(m, ("base_filled", "base_filled_x18", "amount", "size", "filled_base"))))
+            px = _match_dec(_first(m, ("priceX18", "price_x18", *(_PRICE_KEYS))))
             yield Fill(
                 order_id=str(_first(m, _DIGEST_KEYS, "") or ""),
                 trading_pair=trading_pair,
                 side=TradeType.BUY if m.get("is_buy") else TradeType.SELL,
                 amount_base=amt,
-                price=_to_dec(_first(m, _PRICE_KEYS)),
-                fee_quote=_to_dec(_first(m, _MATCH_FEE_KEYS)),
+                price=px,
+                fee_quote=abs(_match_dec(_first(m, _MATCH_FEE_KEYS))),
                 timestamp=float(m.get("timestamp", time.time())),
             )
 

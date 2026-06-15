@@ -173,6 +173,31 @@ def test_place_registers_order_and_market_fills():
     asyncio.run(body())
 
 
+def test_market_fill_converts_x18_match_amounts_to_human():
+    """The Nado indexer returns match fills x18-scaled (base_filled / quote_filled).
+    The adapter MUST convert to human units — reading them raw recorded a
+    0.128-SPY fill as 128000000000000000, which made the DN short un-placeable
+    (base-matched off an x18 fill) and the long un-closeable (sold 1e18× the
+    held size → venue 'Invalid value'). Regression for that root cause.
+    """
+    async def body():
+        a = _adapter()
+        # 0.128 base, 98.13 quote, 0.05 fee — all x18-scaled as the indexer sends.
+        a._client.matches = [{
+            "digest": "m1",
+            "base_filled": "128000000000000000",       # 0.128
+            "quote_filled": "98130000000000000000",     # 98.13
+            "fee": "50000000000000000",                 # 0.05
+        }]
+        o = await a.place_order(PAIR, TradeType.BUY, OrderType.MARKET, Decimal("0.128"))
+        assert o.state is OrderState.FILLED
+        assert o.filled_base == Decimal("0.128")        # NOT 1.28e17
+        assert o.filled_quote == Decimal("98.13")
+        assert o.fee_quote == Decimal("0.05")
+
+    asyncio.run(body())
+
+
 def test_place_market_with_no_inline_or_match_data_downgrades_to_partial():
     """BUG-NA-2 fix: when venue reports FILLED but no match data exists yet,
     the adapter must NOT mark FILLED with synthesized base/quote. It must
