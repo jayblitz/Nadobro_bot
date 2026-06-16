@@ -320,23 +320,55 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
     product = str(status.get("product") or state.get("product") or "BTC").upper()
     open_orders_count = int(status.get("open_orders_count") or 0)
 
+    # Engine strategies record fills to the DB, not in-memory state. Source the
+    # active session's live volume/PnL/fills so the dashboard isn't stuck at 0.
+    live_metrics = None
+    try:
+        from src.nadobro.models.database import (
+            get_active_strategy_session,
+            get_session_live_metrics,
+        )
+
+        sess = get_active_strategy_session(telegram_id, network)
+        if sess and sess.get("id") is not None:
+            live_metrics = get_session_live_metrics(int(sess["id"]), network) or None
+    except Exception:
+        live_metrics = None
+
     snapshot = mm_dashboard.build_status_snapshot(
         state=state,
         strategy_id=strategy_id,
         network=network,
         product=product,
         open_orders_count=open_orders_count,
+        live_metrics=live_metrics,
     )
     lines = mm_dashboard.render_status_lines(snapshot)
     return ("\n".join(lines), True)
 
 
 def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:
-    from src.nadobro.services.bot_runtime import get_user_bot_state
+    from src.nadobro.services.bot_runtime import get_user_bot_state, get_user_bot_status
     from src.nadobro.services import mm_dashboard
 
     state = get_user_bot_state(telegram_id) or {}
-    lines = mm_dashboard.render_fills_lines(state, limit=limit)
+    # Prefer DB-recorded fills for the active session (engine strategies record
+    # to the DB, not state); fall back to state for legacy MM paths.
+    db_fills = None
+    try:
+        from src.nadobro.models.database import (
+            get_active_strategy_session,
+            get_session_recent_fills,
+        )
+
+        status = get_user_bot_status(telegram_id) or {}
+        network = str(status.get("network") or state.get("network") or "mainnet")
+        sess = get_active_strategy_session(telegram_id, network)
+        if sess and sess.get("id") is not None:
+            db_fills = get_session_recent_fills(int(sess["id"]), network, limit=limit) or None
+    except Exception:
+        db_fills = None
+    lines = mm_dashboard.render_fills_lines(state, limit=limit, db_fills=db_fills)
     header = f"🧾 Last {limit} fills"
     return header + "\n" + "\n".join(lines)
 

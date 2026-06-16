@@ -673,6 +673,21 @@ def _finalize_session(state: dict, stop_reason: str = "stopped"):
         rollup_session_from_trades(int(session_id), network)
     except Exception as exc:
         logger.warning("Session rollup failed #%s: %s", session_id, exc)
+    # Engine strategies (grid/dgrid/dn/...) record fills via DbTradeRecorder
+    # with realized_pnl left NULL (grid PnL is portfolio-level) and funding in
+    # the separate venue feed. Source the venue-authoritative realized PnL +
+    # funding AFTER the human-column rollup so the session card matches reality.
+    # Gated to engine strategies so legacy sessions keep their rollup PnL.
+    try:
+        from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+
+        strat = _normalize_strategy_id(str(state.get("strategy") or ""))
+        if strat in ENGINE_MAPPED_STRATEGIES:
+            from src.nadobro.models.database import rollup_engine_session_pnl_funding
+
+            rollup_engine_session_pnl_funding(int(session_id), network)
+    except Exception as exc:
+        logger.warning("Engine session PnL/funding rollup failed #%s: %s", session_id, exc)
     try:
         update_strategy_session(int(session_id), {
             "status": "completed" if stop_reason in ("tp_hit", "target_reached", "target_volume_hit") else "stopped",
@@ -2635,6 +2650,36 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 "session metrics not recorded — cycle/PnL/volume counters will undercount: %s",
                 e,
             )
+        # Engine strategies don't carry fill data on the cycle result (fills are
+        # bridged to trades_<network> by DbTradeRecorder). Periodically refresh
+        # the running session's volume/fees/PnL/funding from the trade rows so
+        # the session row stays live mid-run instead of only catching up at
+        # finalize. Throttled (every 6th cycle) and offloaded via run_blocking
+        # so we don't add a per-cycle synchronous DB round-trip to the event
+        # loop — /mm_status reads live numbers on-demand regardless, and
+        # _finalize_session always does the authoritative pass at stop.
+        try:
+            from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+
+            if (
+                prev_runs % 6 == 0
+                and _normalize_strategy_id(str(state.get("strategy") or "")) in ENGINE_MAPPED_STRATEGIES
+            ):
+                _net = _resolve_session_network(state)
+                _sid = int(session_id)
+
+                def _live_session_refresh():
+                    from src.nadobro.models.database import (
+                        rollup_engine_session_pnl_funding,
+                        rollup_session_from_trades,
+                    )
+
+                    rollup_session_from_trades(_sid, _net)
+                    rollup_engine_session_pnl_funding(_sid, _net)
+
+                await run_blocking(_live_session_refresh)
+        except Exception as e:
+            logger.debug("live engine session refresh skipped #%s: %s", session_id, e)
 
     if not result.get("success", True):
         error_msg = _format_cycle_failure_error(strategy, result)

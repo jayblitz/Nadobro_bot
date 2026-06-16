@@ -299,6 +299,7 @@ def build_status_snapshot(
     product: str,
     open_orders_count: int,
     positions: Optional[list] = None,
+    live_metrics: Optional[dict] = None,
 ) -> dict:
     """Live snapshot for ``/mm_status``.
 
@@ -311,12 +312,22 @@ def build_status_snapshot(
     initial_equity = max(0.0, _safe_float(state.get("mm_initial_equity"), 0.0))
     cumulative_pnl = _safe_float(state.get("mm_cumulative_pnl"), 0.0)
     last_cycle_pnl = _safe_float(state.get("grid_last_cycle_pnl_usd"), 0.0)
+    if live_metrics:
+        # DB-sourced session volume / realized PnL override the (engine-empty)
+        # state estimates so /mm_status shows real numbers.
+        session_done = max(session_done, _safe_float(live_metrics.get("volume"), 0.0))
+        cumulative_pnl = _safe_float(live_metrics.get("realized_pnl"), cumulative_pnl)
 
     # Fill rate: ratio of executed quotes vs tracked quotes over the session.
     tracked = state.get("mm_tracked_quotes") or {}
     grid_buy_fills = state.get("grid_buy_fills") or []
     grid_sell_fills = state.get("grid_sell_fills") or []
     fill_count = len(grid_buy_fills) + len(grid_sell_fills)
+    # Engine strategies record fills to the DB, not ``state``. When the caller
+    # supplies DB-sourced live metrics, they are authoritative for the
+    # fill count / session volume / cumulative PnL the dashboard shows.
+    if live_metrics:
+        fill_count = int(live_metrics.get("fills") or fill_count)
     posted_count = max(fill_count, len(tracked))
     fill_rate = (fill_count / posted_count) if posted_count > 0 else 0.0
 
@@ -455,17 +466,33 @@ def render_status_lines(snapshot: dict) -> list[str]:
     return lines
 
 
-def render_fills_lines(state: dict, limit: int = 10) -> list[str]:
-    """Render the most recent N executions across both sides."""
-    buys = list(state.get("grid_buy_fills") or [])
-    sells = list(state.get("grid_sell_fills") or [])
+def render_fills_lines(state: dict, limit: int = 10, db_fills: Optional[list] = None) -> list[str]:
+    """Render the most recent N executions across both sides.
+
+    ``db_fills`` (rows from ``get_session_recent_fills``) take precedence over
+    the in-memory ``state`` fill lists: engine strategies record fills straight
+    to the DB via DbTradeRecorder and never populate ``state``."""
     combined: list[dict] = []
-    for f in buys:
-        if isinstance(f, dict):
-            combined.append({**f, "side": "BUY"})
-    for f in sells:
-        if isinstance(f, dict):
-            combined.append({**f, "side": "SELL"})
+    if db_fills:
+        for r in db_fills:
+            if not isinstance(r, dict):
+                continue
+            side = "BUY" if str(r.get("side") or "").lower() in ("long", "buy") else "SELL"
+            combined.append({
+                "side": side,
+                "size": _safe_float(r.get("size")),
+                "price": _safe_float(r.get("price")),
+                "ts": _safe_float(r.get("ts")),
+            })
+    else:
+        buys = list(state.get("grid_buy_fills") or [])
+        sells = list(state.get("grid_sell_fills") or [])
+        for f in buys:
+            if isinstance(f, dict):
+                combined.append({**f, "side": "BUY"})
+        for f in sells:
+            if isinstance(f, dict):
+                combined.append({**f, "side": "SELL"})
     combined.sort(key=lambda f: float(f.get("ts") or 0.0), reverse=True)
     if not combined:
         return ["No fills recorded for this session yet."]

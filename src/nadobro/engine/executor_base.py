@@ -12,13 +12,33 @@ import asyncio
 import time
 import uuid
 from decimal import Decimal
-from typing import Awaitable, Callable, Dict, Optional, TypeVar
+from typing import Awaitable, Callable, Dict, Optional, Protocol, TypeVar
 
 from src.nadobro.engine.adapter.base import AdapterError, Fill, NadoAdapterBase
 from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.types import CloseType, ExecutorState, TradeType
 
 T = TypeVar("T")
+
+
+class TradeRecorder(Protocol):
+    """Structural type for the optional fill -> ``trades_<network>`` bridge the
+    runtime injects (services.engine_persistence.DbTradeRecorder). Kept as a
+    Protocol so the DB-agnostic engine library never imports the services
+    layer; any object with a compatible ``record`` satisfies it."""
+
+    def record(
+        self,
+        controller_id: str,
+        trading_pair: str,
+        side: TradeType,
+        amount_base: Decimal,
+        price: Decimal,
+        fee_quote: Decimal,
+        order_id: Optional[str] = ...,
+        timestamp: Optional[float] = ...,
+    ) -> None:
+        ...
 
 
 class ExecutorFailed(Exception):
@@ -61,6 +81,10 @@ class Executor(abc.ABC):
         self._net_pnl_quote = Decimal(0)
         self._fees_paid_quote = Decimal(0)
         self._volume_quote = Decimal(0)
+        # Optional bridge to the legacy ``trades_<network>`` reporting tables.
+        # Injected by the orchestrator at spawn time (see orchestrator.spawn);
+        # ``None`` in unit tests / read-only modes, where recording is a no-op.
+        self.trade_recorder: Optional[TradeRecorder] = None
 
     # -- lifecycle --------------------------------------------------------
     @abc.abstractmethod
@@ -139,6 +163,26 @@ class Executor(abc.ABC):
                 fill.fee_quote,
                 fill.timestamp,
             )
+        # Bridge the fill into the legacy reporting tables so /status,
+        # /mm_status, /mm_fills, portfolio cards, and the per-session rollup
+        # reflect engine strategies. Best-effort: the recorder swallows its own
+        # errors, but guard here too so a missing/edge recorder can never break
+        # a fill.
+        recorder = self.trade_recorder
+        if recorder is not None:
+            try:
+                recorder.record(
+                    self.controller_id,
+                    self.trading_pair,
+                    fill.side,
+                    fill.amount_base,
+                    fill.price,
+                    fill.fee_quote,
+                    fill.order_id,
+                    fill.timestamp,
+                )
+            except Exception:  # noqa: BLE001  # policy: degrade-ok(trade-recording is best-effort; the recorder logs its own failures — a fill must never be lost to a reporting-bridge error)
+                pass
 
     def _record_realized(self, amount_quote: Decimal) -> None:
         self._net_pnl_quote += amount_quote

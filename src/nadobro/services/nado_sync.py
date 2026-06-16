@@ -645,6 +645,43 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             or ""
         ).strip()
         session_id, source = _back_link_intent(digest, network)
+
+        # Engine fills are written at fill time by DbTradeRecorder as
+        # ``source='strategy'`` rows carrying human columns (volume/fees) but
+        # no ``submission_idx`` / venue ``realized_pnl_x18``. Enrich the
+        # earliest such row for this digest with the authoritative venue x18
+        # PnL/fee instead of inserting a duplicate, so the row stays canonical
+        # and each match's realized PnL is counted exactly once. Scoped to
+        # ``source='strategy'`` — legacy rows are untouched.
+        if digest:
+            recorder_row = query_one(
+                f"SELECT id FROM {table} "
+                f"WHERE order_digest = %s AND source = 'strategy' AND submission_idx IS NULL "
+                f"ORDER BY id ASC LIMIT 1",
+                (digest,),
+            )
+            if recorder_row:
+                execute(
+                    f"""
+                    UPDATE {table} SET
+                      submission_idx = %s,
+                      realized_pnl_x18 = %s,
+                      fee_x18 = %s,
+                      base_filled_x18 = %s,
+                      quote_filled_x18 = %s,
+                      isolated = %s,
+                      strategy_session_id = COALESCE(strategy_session_id, %s)
+                    WHERE id = %s
+                    """,
+                    (
+                        submission_idx, pnl_x18, fee_x18, base_x18, quote_x18,
+                        bool(match.get("isolated")), session_id, recorder_row["id"],
+                    ),
+                )
+                inserted += 1
+                _maybe_increment_session_win_loss(session_id, pnl_x18)
+                continue
+
         execute(
             f"""
             INSERT INTO {table} (

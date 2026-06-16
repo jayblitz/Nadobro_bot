@@ -72,10 +72,12 @@ def build_orchestrator(
     *,
     limits: Optional[RiskLimits] = None,
     risk_state_provider: Optional[Any] = None,
+    trade_recorder: Optional[object] = None,
 ) -> ExecutorOrchestrator:
     return ExecutorOrchestrator(
         risk_engine=build_risk_engine(limits),
         risk_state_provider=risk_state_provider or (lambda _cid: RiskState()),
+        trade_recorder=trade_recorder,
     )
 
 
@@ -120,10 +122,16 @@ class EngineRuntime:
     bot_runtime's async loop: ``start`` once, ``tick`` each cycle, ``stop`` on
     teardown. Persists executor lifecycle rows after each tick."""
 
-    def __init__(self, *, executor_store: Optional[object] = None) -> None:
+    def __init__(
+        self,
+        *,
+        executor_store: Optional[object] = None,
+        trade_recorder: Optional[object] = None,
+    ) -> None:
         self._controllers: Dict[tuple, Controller] = {}
         self._orchestrators: Dict[tuple, ExecutorOrchestrator] = {}
         self._executor_store = executor_store
+        self._trade_recorder = trade_recorder
 
     def _key(self, user_id: int, network: str, strategy: str) -> tuple:
         return (user_id, network, strategy)
@@ -173,7 +181,11 @@ class EngineRuntime:
                     key, exc_info=True,
                 )
 
-        orch = build_orchestrator(limits=limits, risk_state_provider=risk_state_provider)
+        orch = build_orchestrator(
+            limits=limits,
+            risk_state_provider=risk_state_provider,
+            trade_recorder=self._trade_recorder,
+        )
         controller = build_controller(
             strategy, user_id=user_id, configs=configs, orchestrator=orch,
             adapter=adapter, inventory=inventory, limits=limits,
@@ -257,9 +269,15 @@ def _remote_active(strategy: str, user_id: int, network: str) -> bool:
 
 
 def _default_runtime() -> EngineRuntime:
-    from src.nadobro.services.engine_persistence import DbExecutorStore
+    from src.nadobro.services.engine_persistence import (
+        DbExecutorStore,
+        DbTradeRecorder,
+    )
 
-    return EngineRuntime(executor_store=DbExecutorStore())
+    return EngineRuntime(
+        executor_store=DbExecutorStore(),
+        trade_recorder=DbTradeRecorder(),
+    )
 
 
 # Process-wide runtime. MUST be driven from bot_runtime's single async event

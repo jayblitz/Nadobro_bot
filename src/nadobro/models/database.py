@@ -874,6 +874,165 @@ def rollup_session_from_trades(session_id: int, network: str) -> dict:
     return totals
 
 
+def _session_realized_pnl(session_id: int, table: str) -> float:
+    """Session realized PnL: venue-authoritative per-match ``realized_pnl_x18``
+    when fully synced, else the recorder rows' buy/sell/fee decomposition
+    (complete at fill time). Shared by the live dashboard and the finalize
+    rollup so both always agree."""
+    try:
+        row = query_one(
+            f"""
+            SELECT
+              COALESCE(SUM(realized_pnl_x18) FILTER (WHERE realized_pnl_x18 IS NOT NULL), 0) / 1e18
+                AS venue_pnl,
+              COUNT(*) FILTER (WHERE realized_pnl_x18 IS NOT NULL) AS venue_rows,
+              COUNT(*) FILTER (
+                WHERE source = 'strategy' AND fill_price IS NOT NULL AND submission_idx IS NULL
+              ) AS pending_sync,
+              COALESCE(SUM(
+                CASE WHEN side = 'short'
+                       THEN  ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+                     WHEN side = 'long'
+                       THEN -ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+                     ELSE 0 END
+              ) FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_gross,
+              COALESCE(SUM(COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0))
+                       FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_fees
+            FROM {table}
+            WHERE strategy_session_id = %s
+            """,
+            (int(session_id),),
+        )
+    except Exception:
+        return 0.0
+    if not row:
+        return 0.0
+    venue_rows = int(row.get("venue_rows") or 0)
+    pending_sync = int(row.get("pending_sync") or 0)
+    if venue_rows > 0 and pending_sync == 0:
+        return float(row.get("venue_pnl") or 0)
+    return float(row.get("recorder_gross") or 0) - float(row.get("recorder_fees") or 0)
+
+
+def get_session_live_metrics(session_id: int, network: str) -> dict:
+    """Live session totals computed straight from ``trades_<network>`` for the
+    active session — restart-safe and cross-process, used by /mm_status so the
+    dashboard reflects engine fills the moment DbTradeRecorder writes them
+    (rather than the in-memory ``state`` the engine never populates)."""
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    try:
+        row = query_one(
+            f"""
+            SELECT
+              COUNT(*) FILTER (WHERE status IN ('filled', 'closed', 'partially_filled')) AS fills,
+              COALESCE(SUM(ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)), 0)
+                AS volume,
+              COALESCE(SUM(COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0)), 0) AS fees
+            FROM {table}
+            WHERE strategy_session_id = %s
+            """,
+            (int(session_id),),
+        )
+    except Exception:
+        return {}
+    if not row:
+        return {}
+    return {
+        "fills": int(row.get("fills") or 0),
+        "volume": float(row.get("volume") or 0),
+        "fees": float(row.get("fees") or 0),
+        "realized_pnl": _session_realized_pnl(int(session_id), table),
+    }
+
+
+def get_session_recent_fills(session_id: int, network: str, limit: int = 10) -> list:
+    """Most recent recorded fills for a session, newest first — powers
+    /mm_fills for engine strategies."""
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    try:
+        return query_all(
+            f"""
+            SELECT side, COALESCE(fill_size, size) AS size,
+                   COALESCE(NULLIF(fill_price, 0), price) AS price,
+                   EXTRACT(EPOCH FROM COALESCE(filled_at, created_at)) AS ts
+            FROM {table}
+            WHERE strategy_session_id = %s
+              AND status IN ('filled', 'closed', 'partially_filled')
+            ORDER BY COALESCE(filled_at, created_at) DESC
+            LIMIT %s
+            """,
+            (int(session_id), int(max(1, limit))),
+        )
+    except Exception:
+        return []
+
+
+def rollup_engine_session_pnl_funding(session_id: int, network: str) -> dict:
+    """Engine-strategy finalize: source realized PnL + funding that the legacy
+    human-column rollup can't see, and write them onto the session.
+
+    Engine fills are bridged into ``trades_<network>`` by ``DbTradeRecorder``
+    (human volume/fees, ``realized_pnl`` left NULL — grid PnL is not per-fill).
+    The authoritative realized PnL comes from the venue's per-match
+    ``realized_pnl_x18`` (back-linked to the session once the engine writes
+    ``order_intents``); when the venue sync hasn't caught up we fall back to the
+    recorder rows' buy/sell/fee decomposition (the same math the engine's
+    ``engine_position_hold`` would give). Funding is summed from the venue
+    ``funding_payments_<network>`` feed for the session's product/window.
+
+    Must run AFTER ``rollup_session_from_trades`` (which zeroes ``realized_pnl``
+    for engine sessions); this overwrites with the correct value. Gated by the
+    caller to engine strategies so legacy sessions are never touched.
+
+    Returns the resolved ``{realized_pnl, total_funding_paid}`` (empty on error).
+    """
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    funding_table = "funding_payments_testnet" if str(network).lower() == "testnet" else "funding_payments_mainnet"
+    try:
+        sess = query_one(
+            "SELECT user_id, product_id, started_at, stopped_at FROM strategy_sessions WHERE id = %s",
+            (int(session_id),),
+        )
+    except Exception:
+        return {}
+    if not sess:
+        return {}
+
+    # 1) Venue-authoritative realized PnL (per-match), with recorder-row
+    #    buy/sell/fee fallback when the venue sync hasn't tagged matches yet.
+    #    Shared with /mm_status's live read so both surfaces agree.
+    realized_pnl = _session_realized_pnl(int(session_id), table)
+
+    # 2) Funding: realized funding payments on the session's product within the
+    #    session window (paid-positive, matching total_funding_paid convention).
+    funding = 0.0
+    product_id = sess.get("product_id")
+    started_at = sess.get("started_at")
+    stopped_at = sess.get("stopped_at")
+    if product_id is not None and started_at is not None:
+        try:
+            frow = query_one(
+                f"""
+                SELECT COALESCE(SUM(amount_x18), 0) / 1e18 AS funding
+                FROM {funding_table}
+                WHERE user_id = %s AND product_id = %s
+                  AND paid_at >= %s
+                  AND (%s IS NULL OR paid_at <= %s)
+                """,
+                (int(sess["user_id"]), int(product_id), started_at, stopped_at, stopped_at),
+            )
+            funding = float(frow.get("funding") or 0) if frow else 0.0
+        except Exception:
+            funding = 0.0
+
+    totals = {"realized_pnl": realized_pnl, "total_funding_paid": funding}
+    try:
+        update_strategy_session(int(session_id), totals)
+    except Exception:
+        pass
+    return totals
+
+
 def get_strategy_sessions_by_user(
     user_id: int,
     strategy: str = None,
