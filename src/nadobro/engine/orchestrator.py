@@ -16,7 +16,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AsyncIterator, Deque, Dict, List, Optional
 
-from src.nadobro.engine.executor_base import Executor, ExecutorFailed
+from src.nadobro.engine.executor_base import Executor, ExecutorFailed, TradeRecorder
 from src.nadobro.engine.risk import ExecutorRequest, RiskEngine
 from src.nadobro.engine.types import CloseType, RiskState
 
@@ -110,7 +110,7 @@ class ExecutorOrchestrator:
         *,
         event_log_limit: int = DEFAULT_EVENT_LOG_LIMIT,
         event_queue_limit: int = DEFAULT_EVENT_QUEUE_LIMIT,
-        trade_recorder: Optional[object] = None,
+        trade_recorder: Optional[TradeRecorder] = None,
     ) -> None:
         self.risk = risk_engine
         # callable(controller_id) -> RiskState; defaults to an empty snapshot

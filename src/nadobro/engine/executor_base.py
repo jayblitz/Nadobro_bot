@@ -12,13 +12,33 @@ import asyncio
 import time
 import uuid
 from decimal import Decimal
-from typing import Awaitable, Callable, Dict, Optional, TypeVar
+from typing import Awaitable, Callable, Dict, Optional, Protocol, TypeVar
 
 from src.nadobro.engine.adapter.base import AdapterError, Fill, NadoAdapterBase
 from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.types import CloseType, ExecutorState, TradeType
 
 T = TypeVar("T")
+
+
+class TradeRecorder(Protocol):
+    """Structural type for the optional fill -> ``trades_<network>`` bridge the
+    runtime injects (services.engine_persistence.DbTradeRecorder). Kept as a
+    Protocol so the DB-agnostic engine library never imports the services
+    layer; any object with a compatible ``record`` satisfies it."""
+
+    def record(
+        self,
+        controller_id: str,
+        trading_pair: str,
+        side: TradeType,
+        amount_base: Decimal,
+        price: Decimal,
+        fee_quote: Decimal,
+        order_id: Optional[str] = ...,
+        timestamp: Optional[float] = ...,
+    ) -> None:
+        ...
 
 
 class ExecutorFailed(Exception):
@@ -64,7 +84,7 @@ class Executor(abc.ABC):
         # Optional bridge to the legacy ``trades_<network>`` reporting tables.
         # Injected by the orchestrator at spawn time (see orchestrator.spawn);
         # ``None`` in unit tests / read-only modes, where recording is a no-op.
-        self.trade_recorder: Optional[object] = None
+        self.trade_recorder: Optional[TradeRecorder] = None
 
     # -- lifecycle --------------------------------------------------------
     @abc.abstractmethod
