@@ -110,10 +110,15 @@ class ExecutorOrchestrator:
         *,
         event_log_limit: int = DEFAULT_EVENT_LOG_LIMIT,
         event_queue_limit: int = DEFAULT_EVENT_QUEUE_LIMIT,
+        trade_recorder: Optional[object] = None,
     ) -> None:
         self.risk = risk_engine
         # callable(controller_id) -> RiskState; defaults to an empty snapshot
         self.risk_state_provider = risk_state_provider
+        # Optional bridge that mirrors engine fills into ``trades_<network>``.
+        # Stamped onto every executor at spawn time (the single funnel), so no
+        # executor/controller constructor needs to thread it. ``None`` in tests.
+        self._trade_recorder = trade_recorder
         self._executors: Dict[str, Executor] = {}
         self._controllers: Dict[str, "Controller"] = {}
         # Bounded queue: when full, oldest events are dropped (with a log).
@@ -223,6 +228,11 @@ class ExecutorOrchestrator:
                 )
                 return False
         self._executors[executor.id] = executor
+        # Stamp the trade recorder before on_create() — the entry order can
+        # fill synchronously inside on_create(), and that first fill must be
+        # recorded too.
+        if self._trade_recorder is not None and getattr(executor, "trade_recorder", None) is None:
+            executor.trade_recorder = self._trade_recorder
         try:
             await executor.on_create()
         except ExecutorFailed as exc:

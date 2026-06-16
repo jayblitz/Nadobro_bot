@@ -61,6 +61,10 @@ class Executor(abc.ABC):
         self._net_pnl_quote = Decimal(0)
         self._fees_paid_quote = Decimal(0)
         self._volume_quote = Decimal(0)
+        # Optional bridge to the legacy ``trades_<network>`` reporting tables.
+        # Injected by the orchestrator at spawn time (see orchestrator.spawn);
+        # ``None`` in unit tests / read-only modes, where recording is a no-op.
+        self.trade_recorder: Optional[object] = None
 
     # -- lifecycle --------------------------------------------------------
     @abc.abstractmethod
@@ -139,6 +143,26 @@ class Executor(abc.ABC):
                 fill.fee_quote,
                 fill.timestamp,
             )
+        # Bridge the fill into the legacy reporting tables so /status,
+        # /mm_status, /mm_fills, portfolio cards, and the per-session rollup
+        # reflect engine strategies. Best-effort: the recorder swallows its own
+        # errors, but guard here too so a missing/edge recorder can never break
+        # a fill.
+        recorder = self.trade_recorder
+        if recorder is not None:
+            try:
+                recorder.record(
+                    self.controller_id,
+                    self.trading_pair,
+                    fill.side,
+                    fill.amount_base,
+                    fill.price,
+                    fill.fee_quote,
+                    fill.order_id,
+                    fill.timestamp,
+                )
+            except Exception:  # noqa: BLE001  # policy: degrade-ok(trade-recording is best-effort; the recorder logs its own failures — a fill must never be lost to a reporting-bridge error)
+                pass
 
     def _record_realized(self, amount_quote: Decimal) -> None:
         self._net_pnl_quote += amount_quote

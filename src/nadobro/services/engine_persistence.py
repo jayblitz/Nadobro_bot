@@ -121,6 +121,210 @@ class DbInventoryRepository:
 
 
 # --------------------------------------------------------------------------
+# Trade recorder (trades_<network>) — bridges Engine v2 fills into the legacy
+# reporting tables so /status, /mm_status, /mm_fills, portfolio cards, the
+# per-session rollup, and DB-wide volume all light up for engine strategies.
+#
+# Why this exists: engine executors persist fills to ``engine_executors`` /
+# ``engine_position_hold`` only. Every user-facing reporting surface reads the
+# legacy ``trades_<network>`` table (and the ``strategy_sessions`` counters it
+# rolls up into). Without this bridge, engine strategies (grid/dgrid/dn/...)
+# show 0 fills / 0 volume / 0 PnL even after profitable runs.
+# --------------------------------------------------------------------------
+import logging as _logging
+
+_recorder_logger = _logging.getLogger(__name__)
+
+# Builder fee is locked at 1.0 bps for Nadobro routing (config:
+# NADO_BUILDER_FEE_RATE_1_BPS = 10 in 0.1-bps units → 0.0001 of notional).
+# Every engine order is routed with this builder code by NadoClient.place_order.
+# The venue match ``fee`` ALREADY INCLUDES this builder portion (confirmed), so
+# we split it out for attribution: builder_fee = notional × rate, and
+# fill_fee = venue_fee − builder_fee. Readers sum ``fill_fee + builder_fee``,
+# which then equals the true total the trader paid (no double-count).
+_BUILDER_FEE_RATE = Decimal("0.0001")
+
+
+def _parse_controller_id(controller_id: str) -> Optional[tuple[str, int, str]]:
+    """``{strategy}:{user_id}:{network}`` → (strategy, user_id, network)."""
+    parts = str(controller_id or "").split(":")
+    if len(parts) != 3:
+        return None
+    strategy, user_raw, network = parts
+    try:
+        return strategy, int(user_raw), network
+    except (TypeError, ValueError):
+        return None
+
+
+class DbTradeRecorder:
+    """Writes each engine fill into ``trades_<network>`` tagged with the
+    active ``strategy_session_id``. Injected into executors by the runtime
+    (mirrors ``DbInventoryRepository``); a no-op when no recorder is wired so
+    unit tests and read-only modes are unaffected.
+
+    Resolution is keyed entirely off ``controller_id`` (``{strategy}:{user}:
+    {network}``) — executors carry it, so no extra session plumbing is needed.
+    """
+
+    def _resolve_session_id(self, strategy: str, user_id: int, network: str) -> Optional[int]:
+        from src.nadobro.db import query_one
+
+        row = query_one(
+            "SELECT id FROM strategy_sessions "
+            "WHERE user_id = %s AND network = %s AND strategy = %s AND status = 'running' "
+            "ORDER BY started_at DESC LIMIT 1",
+            (int(user_id), str(network), str(strategy)),
+        )
+        return int(row["id"]) if row and row.get("id") is not None else None
+
+    def record(
+        self,
+        controller_id: str,
+        trading_pair: str,
+        side: TradeType,
+        amount_base: object,
+        price: object,
+        fee_quote: object,
+        order_id: Optional[str] = None,
+        timestamp: Optional[float] = None,
+        *,
+        realized_pnl: object = None,
+        is_taker: bool = False,
+    ) -> None:
+        """Best-effort: persist one engine fill. Never raises — fill recording
+        must not break execution (same policy as the inventory/registry writes).
+        """
+        try:
+            self._record(
+                controller_id, trading_pair, side, amount_base, price, fee_quote,
+                order_id, timestamp, realized_pnl=realized_pnl, is_taker=is_taker,
+            )
+        except Exception:  # noqa: BLE001 - persistence must never break a fill
+            _recorder_logger.warning(
+                "engine fill not recorded to trades for controller=%s — "
+                "session volume/PnL counters will undercount",
+                controller_id, exc_info=True,
+            )
+
+    def _record(
+        self,
+        controller_id: str,
+        trading_pair: str,
+        side: TradeType,
+        amount_base: object,
+        price: object,
+        fee_quote: object,
+        order_id: Optional[str],
+        timestamp: Optional[float],
+        *,
+        realized_pnl: object,
+        is_taker: bool,
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from src.nadobro.models.database import insert_trade
+        from src.nadobro.services.product_catalog import get_product_id
+
+        parsed = _parse_controller_id(controller_id)
+        if parsed is None:
+            return
+        strategy, user_id, network = parsed
+
+        session_id = self._resolve_session_id(strategy, user_id, network)
+        if session_id is None:
+            # Engine running outside a tracked session (e.g. manual desk use).
+            # Nothing to attribute the fill to; skip rather than orphan a row.
+            # Resolved per fill (indexed lookup) rather than cached, so a new run
+            # reusing the same controller_id never misattributes to a stale,
+            # already-finalized session.
+            return
+
+        base = abs(_dec(amount_base))
+        px = _dec(price)
+        if base <= 0 or px <= 0:
+            return
+        notional = base * px
+        venue_fee = abs(_dec(fee_quote))
+        # The venue fee already includes the 1bp builder portion — split it out
+        # so readers' ``fill_fee + builder_fee`` reconstructs the true total.
+        builder_fee = (notional * _BUILDER_FEE_RATE).quantize(Decimal("0.00000001"))
+        if builder_fee > venue_fee:
+            # Defensive: never let the split go negative (e.g. a fee-free /
+            # rebated maker fill). Attribute the whole fee to builder.
+            builder_fee = venue_fee
+        trading_fee = venue_fee - builder_fee
+
+        ts = float(timestamp) if timestamp else None
+        when = (
+            datetime.fromtimestamp(ts, tz=timezone.utc) if ts
+            else datetime.now(timezone.utc)
+        ).isoformat()
+
+        # Resolve product metadata best-effort; the volume/PnL math does not
+        # depend on product_id, so an unresolved symbol must not drop the fill.
+        try:
+            product_id = get_product_id(str(trading_pair), network=network) or 0
+        except Exception:  # noqa: BLE001
+            product_id = 0
+
+        data = {
+            "user_id": int(user_id),
+            "product_id": int(product_id),
+            "product_name": str(trading_pair),
+            "order_type": "match",
+            "side": "long" if side is TradeType.BUY else "short",
+            "size": str(base),
+            "price": str(px),
+            "fill_size": str(base),
+            "fill_price": str(px),
+            "fill_fee": str(trading_fee),
+            "builder_fee": str(builder_fee),
+            "status": "filled",
+            "source": "strategy",
+            "strategy_session_id": int(session_id),
+            "is_taker": bool(is_taker),
+            "created_at": when,
+            "filled_at": when,
+        }
+        if order_id:
+            data["order_digest"] = str(order_id)
+        if realized_pnl is not None:
+            data["realized_pnl"] = str(_dec(realized_pnl))
+        insert_trade(data, network=network)
+
+        # Link the order digest to this session in ``order_intents`` so the
+        # venue match-sync (nado_sync._write_matches) back-links the
+        # authoritative per-match ``realized_pnl_x18`` to the session and
+        # enriches this row instead of writing an untagged duplicate.
+        if order_id:
+            self._link_intent(str(order_id), int(session_id), network)
+
+    @staticmethod
+    def _link_intent(digest: str, session_id: int, network: str) -> None:
+        import json
+
+        from src.nadobro.db import execute
+
+        value = json.dumps({"strategy_session_id": int(session_id), "source": "strategy"})
+        intent_id = f"engine:{network}:{digest}"
+        try:
+            execute(
+                """
+                INSERT INTO order_intents (intent_id, status, value, order_digest, updated_at)
+                VALUES (%s, 'filled', %s::jsonb, %s, now())
+                ON CONFLICT (intent_id) DO UPDATE SET
+                  order_digest = EXCLUDED.order_digest,
+                  value = EXCLUDED.value,
+                  updated_at = now()
+                """,
+                (intent_id, value, digest),
+            )
+        except Exception:  # noqa: BLE001 - best-effort back-link tag
+            pass
+
+
+# --------------------------------------------------------------------------
 # Executors (engine_executors)
 # --------------------------------------------------------------------------
 def _strategy_type(executor: object) -> str:
