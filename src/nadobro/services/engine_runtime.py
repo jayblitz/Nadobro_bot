@@ -552,12 +552,15 @@ def map_strategy_config(
         cfg["dgrid_range_on_vr"] = _f(settings, "dgrid_range_on_variance_ratio", 1.15)
         # Confirm-ticks debounce a flip.
         cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 2)))
-        # Reset re-center is OPT-IN and OFF by default. It does a reduce-only
-        # close + rebuild of the whole ladder, so a small threshold churns fees
-        # every time price wiggles. (Do NOT fall back to grid_reset_threshold_pct
-        # — its 0.2% default would fire many times an hour, inside the grid band.)
-        # The controller additionally floors any enabled value (see __init__).
-        cfg["dgrid_reset_threshold_bp"] = _f(settings, "dgrid_reset_threshold_bp", 0.0)
+        # Reset re-center honors the user's reset setting (grid_reset_threshold_pct,
+        # default 0.2% -> 20bp). This now drives an IN-PLACE re-quote of the
+        # resting ladder (GridExecutor.recenter), not a flatten — so it cannot
+        # bleed fees. The controller still FLOORS the threshold above the grid
+        # band (see __init__) so it never fires on normal in-band oscillation.
+        cfg["dgrid_reset_threshold_bp"] = _f(
+            settings, "dgrid_reset_threshold_bp",
+            _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0,
+        )
     return cfg
 
 

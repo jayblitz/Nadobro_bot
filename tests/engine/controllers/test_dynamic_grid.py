@@ -151,9 +151,9 @@ def test_reset_off_by_default_no_churn_on_moving_mid():
     asyncio.run(body())
 
 
-def test_reset_fires_once_when_enabled_on_large_move():
-    # When explicitly enabled, reset re-centers (close + rebuild) only after a
-    # move past the floored threshold — once, not every tick.
+def test_reset_recenters_in_place_on_large_move():
+    # When enabled, reset re-quotes the SAME executor's ladder in place (no
+    # flatten, no new executor) only after a move past the floored threshold.
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
         orch = ExecutorOrchestrator()
@@ -163,16 +163,19 @@ def test_reset_fires_once_when_enabled_on_large_move():
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)
         first = orch.list(c.id, active_only=True)[0]
+        opens0 = [lv.open_price for lv in first.levels]
         # Small move (50bp) — below threshold, no re-center.
         adapter.set_mid(Decimal("100.5"))
         await orch.tick_controller(c.id)
         active = orch.list(c.id, active_only=True)
-        assert active[0] is first, "small move must not re-center"
-        # Large move (3%) — past the floored 200bp threshold: re-center once.
+        assert active[0] is first and [lv.open_price for lv in first.levels] == opens0, \
+            "small move must not re-center"
+        # Large move (3%) — past the floored 200bp threshold: re-center in place.
         adapter.set_mid(Decimal("103"))
         await orch.tick_controller(c.id)
         active = orch.list(c.id, active_only=True)
-        assert len(active) == 1 and active[0] is not first, "large move must re-center"
+        assert len(active) == 1 and active[0] is first, "re-center must reuse the same executor"
+        assert max(lv.open_price for lv in first.levels) > Decimal("102"), "ladder must move up"
         assert c.current_phase == "grid"  # same regime, not a flip
         assert c.consume_dgrid_event() is None  # re-center is not a flip notification
 

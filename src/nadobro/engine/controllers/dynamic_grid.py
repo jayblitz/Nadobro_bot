@@ -192,10 +192,13 @@ class DynamicGridController(Controller):
                     return
             else:
                 self._phase_confirm_streak = 0
-                if self.reset_threshold_bp > 0 and self.realized_move_bp >= self.reset_threshold_bp:
+                if (self.reset_threshold_bp > 0 and mid is not None
+                        and self.realized_move_bp >= self.reset_threshold_bp):
                     # Same regime, but price has run away from the grid anchor:
-                    # re-center in place (close + re-open the same side).
-                    await self._flip_to(self.current_phase, mid, reason="reset")
+                    # re-center the resting ladder IN PLACE (re-quote unfilled
+                    # opens around the new mid) WITHOUT closing the held
+                    # position — no flatten, no realized loss, no fee churn.
+                    await self._recenter(mid)
                     return
             # Manage the live grid: gate / inventory cap suppress NEW entries
             # only; fills, close legs and stops keep running.
@@ -254,6 +257,33 @@ class DynamicGridController(Controller):
                 "variance_ratio": f"{self.variance_ratio:.2f}",
                 "direction": self.last_direction,
             }
+
+    async def _recenter(self, mid: Decimal) -> None:
+        """Re-quote the live grid's resting ladder around a fresh mid without
+        closing the position (delegates to GridExecutor.recenter). Re-anchors
+        the realized-move counter so the next re-center measures from here."""
+        side = TradeType.SELL if self.current_phase == variance_regime.RGRID else TradeType.BUY
+        overlay = self._rebuild_bounds_for_side(side, _dec(mid))
+        if not overlay:
+            # No step/levels knobs -> cannot compute a side-correct band; skip.
+            return
+        start = _dec(overlay.get("start_price", 0))
+        end = _dec(overlay.get("end_price", 0))
+        if start <= 0 or end <= 0:
+            return
+        recentered = False
+        for ex in self.my_executors(active_only=True):
+            rc = getattr(ex, "recenter", None)
+            if callable(rc):
+                await rc(start, end)
+                recentered = True
+        if recentered:
+            self._grid_anchor_mid = _dec(mid)
+            self.realized_move_bp = 0.0
+            logger.info(
+                "dgrid recenter phase=%s mid=%s band=[%s, %s] move=%.1fbp (controller=%s)",
+                self.current_phase, mid, start, end, self.reset_threshold_bp, self.id,
+            )
 
     async def _spawn_phase(self, phase: str, mid: Optional[Decimal]) -> bool:
         side, cls = (

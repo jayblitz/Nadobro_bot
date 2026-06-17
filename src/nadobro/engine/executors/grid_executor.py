@@ -109,14 +109,36 @@ def generate_grid_levels(cfg: GridExecutorConfig) -> List[GridLevel]:
         prices = [lo + step * i for i in range(n)]
     cap = cfg.total_amount_quote / n
     step_frac = cfg.min_spread_between_orders + cfg.safe_extra_spread
+    return _ladder_levels(prices, cap, cfg.side, step_frac, start_index=0)
+
+
+def _ladder_levels(
+    prices: List[Decimal], cap_quote: Decimal, side: TradeType, step_frac: Decimal,
+    *, start_index: int,
+) -> List[GridLevel]:
+    """Build fresh NOT_ACTIVE grid levels from a list of open prices. The close
+    leg sits one ``step_frac`` away on the profit side (above for a long grid,
+    below for a short). Shared by initial generation and in-place re-centering.
+    """
     levels: List[GridLevel] = []
     for i, p in enumerate(prices):
-        if cfg.side is TradeType.BUY:
+        if p <= 0:
+            continue
+        if side is TradeType.BUY:
             close_price = p * (Decimal(1) + step_frac)
         else:
             close_price = p * (Decimal(1) - step_frac)
-        levels.append(GridLevel(index=i, open_price=p, close_price=close_price, amount_base=cap / p))
+        levels.append(GridLevel(index=start_index + i, open_price=p,
+                                close_price=close_price, amount_base=cap_quote / p))
     return levels
+
+
+def _ladder_prices(start: Decimal, end: Decimal, count: int) -> List[Decimal]:
+    lo, hi = sorted([start, end])
+    if count <= 1:
+        return [lo]
+    step = (hi - lo) / (count - 1)
+    return [lo + step * i for i in range(count)]
 
 
 class GridExecutor(Executor):
@@ -246,6 +268,72 @@ class GridExecutor(Executor):
                 placed += 1
         if placed:
             self._last_place_ts = time.time()
+
+    async def recenter(self, start_price: object, end_price: object) -> None:
+        """Re-quote the resting (unfilled) open ladder around a new ``[start,
+        end]`` band WITHOUT realizing the held position. Levels that hold
+        inventory (``OPEN_ORDER_FILLED`` / ``CLOSE_ORDER_PLACED``) keep their
+        close legs working at the original target — only free / completed slots
+        are cancelled and re-priced. This is a true grid re-center, NOT a
+        flatten: no market order, no reduce-only close.
+        """
+        if self.is_terminated:
+            return
+        start = _dec(start_price)
+        end = _dec(end_price)
+        if start <= 0 or end <= 0:
+            return
+
+        kept: List[GridLevel] = []
+        for lv in self.levels:
+            if lv.state in (GridLevelState.OPEN_ORDER_FILLED, GridLevelState.CLOSE_ORDER_PLACED):
+                kept.append(lv)  # holding inventory — leave the close leg working
+                continue
+            if lv.state is GridLevelState.OPEN_ORDER_PLACED and lv.open_order_id is not None:
+                # Cancel the stale resting open, then re-poll to capture any
+                # partial fill that landed before the cancel (BUG-GR-1 pattern).
+                oid = lv.open_order_id
+                try:
+                    await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_recenter_cancel")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("grid %s: recenter cancel failed for %s: %s", self.id, oid, exc)
+                try:
+                    refreshed = await self._guard(
+                        lambda: self.adapter.order_status(oid), label="grid_recenter_status")
+                    self._ingest(lv, refreshed, self.open_side, opening=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("grid %s: recenter status probe failed for %s: %s", self.id, oid, exc)
+                lv.open_order_id = None
+                if lv.filled_base > 0:
+                    # Partial inventory now held — book its close leg and keep it.
+                    lv.state = GridLevelState.OPEN_ORDER_FILLED
+                    await self._place_close(lv)
+                    kept.append(lv)
+                    continue
+            # NOT_ACTIVE, COMPLETE, or an emptied open: this slot is free to recycle.
+
+        # Re-quote the free capacity across the new band. Per-level size stays
+        # total / max_open_orders so the grid's notional-per-level is unchanged.
+        fresh_count = max(0, self.config.max_open_orders - len(kept))
+        if fresh_count > 0:
+            spread = self.config.min_spread_between_orders
+            lo, hi = sorted([start, end])
+            if spread > 0 and hi > 0:
+                max_by_spread = int((hi - lo) / (hi * spread)) + 1
+                fresh_count = max(1, min(fresh_count, max_by_spread))
+            cap = self.config.total_amount_quote / Decimal(max(1, self.config.max_open_orders))
+            step_frac = self.config.min_spread_between_orders + self.config.safe_extra_spread
+            prices = _ladder_prices(start, end, fresh_count)
+            fresh = _ladder_levels(prices, cap, self.open_side, step_frac, start_index=len(kept))
+        else:
+            fresh = []
+        self.levels = kept + fresh
+        logger.info(
+            "grid %s recentered: kept=%s holding inventory, requoted=%s opens in [%s, %s]",
+            self.id, len(kept), len(fresh), start, end,
+        )
+        # Place the re-priced opens now (subject to the usual suppress/bounds).
+        await self._maybe_place_opens()
 
     async def on_tick(self) -> None:
         if self.is_terminated:
