@@ -114,6 +114,8 @@ def test_metrics_exposed_for_dashboard():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
         orch = ExecutorOrchestrator()
+        # 25bp requested, but it must be floored above the grid band (step 20bp
+        # x (3-1) = 40bp band -> 120bp floor) so reset can't fire inside the band.
         cfg = dict(CFG, candle_provider=lambda p: _down(), dgrid_reset_threshold_bp=25.0)
         c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
                                   inventory=InventoryRepository(), configs=cfg)
@@ -122,6 +124,87 @@ def test_metrics_exposed_for_dashboard():
         m = c.dgrid_metrics()
         assert m["dgrid_phase"] == "rgrid"
         assert m["dgrid_variance_ratio"] >= 1.25
-        assert m["dgrid_reset_threshold_bp"] == 25.0
+        assert m["dgrid_reset_threshold_bp"] >= 50.0  # floored, not the raw 25
+
+
+def test_reset_off_by_default_no_churn_on_moving_mid():
+    # Finding 1 regression: with reset OFF (default), a moving mid must NOT
+    # flatten + respawn the grid every tick. The same executor must persist.
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        cfg = dict(CFG, candle_provider=lambda p: _range())  # ranging -> grid, no flip
+        assert "dgrid_reset_threshold_bp" not in cfg  # default OFF
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=InventoryRepository(), configs=cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        first = orch.list(c.id, active_only=True)[0]
+        # Walk the mid well beyond any 0.2% band, several ticks.
+        for px in (101, 99, 103, 97, 104):
+            adapter.set_mid(Decimal(px))
+            await orch.tick_controller(c.id)
+        active = orch.list(c.id, active_only=True)
+        assert len(active) == 1 and active[0] is first, "reset must be OFF by default (no churn)"
+        assert c.reset_threshold_bp == 0.0
+
+    asyncio.run(body())
+
+
+def test_reset_fires_once_when_enabled_on_large_move():
+    # When explicitly enabled, reset re-centers (close + rebuild) only after a
+    # move past the floored threshold — once, not every tick.
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), dgrid_reset_threshold_bp=200.0)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=InventoryRepository(), configs=cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        first = orch.list(c.id, active_only=True)[0]
+        # Small move (50bp) — below threshold, no re-center.
+        adapter.set_mid(Decimal("100.5"))
+        await orch.tick_controller(c.id)
+        active = orch.list(c.id, active_only=True)
+        assert active[0] is first, "small move must not re-center"
+        # Large move (3%) — past the floored 200bp threshold: re-center once.
+        adapter.set_mid(Decimal("103"))
+        await orch.tick_controller(c.id)
+        active = orch.list(c.id, active_only=True)
+        assert len(active) == 1 and active[0] is not first, "large move must re-center"
+        assert c.current_phase == "grid"  # same regime, not a flip
+        assert c.consume_dgrid_event() is None  # re-center is not a flip notification
+
+    asyncio.run(body())
+
+
+def test_flip_deferred_while_gate_paused():
+    # Finding 2 regression: a confirmed flip during a breakout/expansion PAUSE
+    # must close the old position but NOT arm a fresh grid into the chaos.
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        box = {"data": _range()}  # gate disabled in cfg; we drive the verdict
+        cfg = dict(CFG, candle_provider=lambda p: box["data"], dgrid_flip_confirm_ticks=1)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=InventoryRepository(), configs=cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        assert isinstance(orch.list(c.id, active_only=True)[0], GridExecutor)
+
+        # Regime turns down AND the gate is paused (breakout). Gate is disabled
+        # in cfg, so set the verdict directly; on_tick won't overwrite it.
+        box["data"] = _down()
+        c.gate_verdict, c.gate_reason = "PAUSE", "breakout"
+        await orch.tick_controller(c.id)
+        assert orch.list(c.id, active_only=True) == [], "must close + sit out, not arm into breakout"
+        assert c.consume_dgrid_event() is None, "no flip notification when nothing armed"
+
+        # Range/acceptance returns: now it arms the short side.
+        c.gate_verdict, c.gate_reason = "QUOTE", ""
+        await orch.tick_controller(c.id)
+        active = orch.list(c.id, active_only=True)
+        assert len(active) == 1 and isinstance(active[0], ReverseGridExecutor)
 
     asyncio.run(body())

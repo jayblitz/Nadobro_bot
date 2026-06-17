@@ -550,13 +550,14 @@ def map_strategy_config(
         cfg["dgrid_long_window"] = int(max(4, _f(settings, "dgrid_long_window_points", 12)))
         cfg["dgrid_trend_on_vr"] = _f(settings, "dgrid_trend_on_variance_ratio", 1.25)
         cfg["dgrid_range_on_vr"] = _f(settings, "dgrid_range_on_variance_ratio", 1.15)
-        # Confirm-ticks debounce a flip; reset threshold re-centers the grid in
-        # place once price has travelled this far from the spawn anchor.
+        # Confirm-ticks debounce a flip.
         cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 2)))
-        cfg["dgrid_reset_threshold_bp"] = _f(
-            settings, "dgrid_reset_threshold_bp",
-            _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0,
-        )
+        # Reset re-center is OPT-IN and OFF by default. It does a reduce-only
+        # close + rebuild of the whole ladder, so a small threshold churns fees
+        # every time price wiggles. (Do NOT fall back to grid_reset_threshold_pct
+        # — its 0.2% default would fire many times an hour, inside the grid band.)
+        # The controller additionally floors any enabled value (see __init__).
+        cfg["dgrid_reset_threshold_bp"] = _f(settings, "dgrid_reset_threshold_bp", 0.0)
     return cfg
 
 

@@ -39,6 +39,12 @@ from src.nadobro.engine.types import TradeType, _dec
 
 logger = logging.getLogger(__name__)
 
+# Reset re-center guards: when opt-in reset is enabled, never let it fire inside
+# the grid's own band (would flatten + rebuild on normal oscillation). Floor at
+# 50bp and at this multiple of the band width, whichever is larger.
+_DGRID_RESET_FLOOR_BP = 50.0
+_DGRID_RESET_BAND_MULT = 3.0
+
 
 class DynamicGridController(Controller):
     def __init__(self, **kwargs: object) -> None:
@@ -50,7 +56,16 @@ class DynamicGridController(Controller):
         self.trend_on_vr = float(self.cfg("dgrid_trend_on_vr", 1.25) or 1.25)
         self.range_on_vr = float(self.cfg("dgrid_range_on_vr", 1.15) or 1.15)
         self.flip_confirm_ticks = int(self.cfg("dgrid_flip_confirm_ticks", 2) or 2)
-        self.reset_threshold_bp = float(self.cfg("dgrid_reset_threshold_bp", 0.0) or 0.0)
+        # Reset re-center is OPT-IN (0 = OFF). When enabled it does a reduce-only
+        # close + full ladder rebuild, so it must never fire inside the grid's
+        # own band: floor it well above the band width (and a hard 50bp minimum)
+        # so a tiny value can't churn fees every tick.
+        _reset = float(self.cfg("dgrid_reset_threshold_bp", 0.0) or 0.0)
+        if _reset > 0:
+            step_bp = float(_dec(self.cfg("step_pct", 0) or 0) * Decimal(10000))
+            band_bp = step_bp * float(max(int(self.cfg("levels_count", 0) or 0) - 1, 1))
+            _reset = max(_reset, _DGRID_RESET_FLOOR_BP, band_bp * _DGRID_RESET_BAND_MULT)
+        self.reset_threshold_bp = _reset
         # Live phase + telemetry (surfaced to /status via run_engine_cycle).
         self.current_phase: str = variance_regime.GRID
         self.last_regime: Optional[str] = None  # back-compat: "TRENDING_*"/"RANGING"
@@ -130,10 +145,13 @@ class DynamicGridController(Controller):
         )
         self.variance_ratio = float(str(info.get("variance_ratio") or 0.0))
         self.last_direction = str(info.get("direction") or variance_regime.FLAT)
-        # Back-compat telemetry string for older /status readers.
-        if self.last_direction == variance_regime.DOWN:
+        # Back-compat telemetry string for older /status readers — reflect the
+        # ACTUAL variance-ratio regime, not just drift sign. Only a VR at/above
+        # the trend threshold is a trend; otherwise it is ranging (even if price
+        # is drifting).
+        if self.variance_ratio >= self.trend_on_vr and self.last_direction == variance_regime.DOWN:
             self.last_regime = "TRENDING_DOWN"
-        elif self.last_direction == variance_regime.UP:
+        elif self.variance_ratio >= self.trend_on_vr and self.last_direction == variance_regime.UP:
             self.last_regime = "TRENDING_UP"
         else:
             self.last_regime = "RANGING"
@@ -209,6 +227,16 @@ class DynamicGridController(Controller):
                 logger.warning("dgrid %s: stop of executor %s failed during %s",
                                self.id, ex.id, reason, exc_info=True)
         self._phase_confirm_streak = 0
+        # Breakout / expansion: the position is now closed (protective), but do
+        # NOT arm a fresh grid into the regime the gate says to sit out. The
+        # no-executor branch re-arms once the gate clears.
+        if self.gate_paused:
+            logger.info(
+                "dgrid %s closed on %s (%s) but gate paused (%s) — deferring re-arm "
+                "until the range returns (controller=%s)",
+                reason, old_phase, self.last_direction, self.gate_reason, self.id,
+            )
+            return
         if mid is None:
             mid = await self._mid()
         spawned = await self._spawn_phase(new_phase, mid)
@@ -217,8 +245,9 @@ class DynamicGridController(Controller):
             reason, old_phase, new_phase, self.variance_ratio, self.last_direction,
             mid, spawned, self.id,
         )
-        if reason == "flip" and old_phase != new_phase:
-            # Surfaced once per flip so the runtime can notify the user.
+        # Surfaced once per flip so the runtime can notify the user — only when a
+        # new side actually armed (a refused spawn must not claim a switch).
+        if reason == "flip" and old_phase != new_phase and spawned:
             self._dgrid_event = {
                 "from": old_phase,
                 "to": new_phase,
