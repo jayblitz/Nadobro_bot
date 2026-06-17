@@ -542,6 +542,25 @@ def map_strategy_config(
     # real provider on first start.
     if strategy == "dgrid":
         cfg["candle_provider"] = None
+        # Thread the user's Dynamic-Grid regime knobs through to the controller
+        # so the GRID<->RGRID switch actually honors them (previously dgrid ran
+        # a hardcoded EMA classifier and ignored these entirely). Defaults match
+        # the strategy hub (trend 1.25 / range 1.15, windows 4 / 12).
+        cfg["dgrid_short_window"] = int(max(2, _f(settings, "dgrid_short_window_points", 4)))
+        cfg["dgrid_long_window"] = int(max(4, _f(settings, "dgrid_long_window_points", 12)))
+        cfg["dgrid_trend_on_vr"] = _f(settings, "dgrid_trend_on_variance_ratio", 1.25)
+        cfg["dgrid_range_on_vr"] = _f(settings, "dgrid_range_on_variance_ratio", 1.15)
+        # Confirm-ticks debounce a flip.
+        cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 2)))
+        # Reset re-center honors the user's reset setting (grid_reset_threshold_pct,
+        # default 0.2% -> 20bp). This now drives an IN-PLACE re-quote of the
+        # resting ladder (GridExecutor.recenter), not a flatten — so it cannot
+        # bleed fees. The controller still FLOORS the threshold above the grid
+        # band (see __init__) so it never fires on normal in-band oscillation.
+        cfg["dgrid_reset_threshold_bp"] = _f(
+            settings, "dgrid_reset_threshold_bp",
+            _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0,
+        )
     return cfg
 
 
@@ -924,6 +943,8 @@ async def run_engine_cycle(
     # bot_runtime can notify the user ("paused — trending; resumes on range").
     gate_event = None
     dn_events: list = []
+    dgrid_event = None
+    dgrid_metrics: Dict[str, Any] = {}
     try:
         controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
         if controller is not None:
@@ -931,6 +952,15 @@ async def run_engine_cycle(
             consume_dn = getattr(controller, "consume_dn_events", None)
             if callable(consume_dn):
                 dn_events = consume_dn() or []
+            # Dynamic Grid: surface the GRID<->RGRID flip (notify once) and the
+            # live phase/variance telemetry (powers the /status dashboard,
+            # which previously always read GRID / 0.00 / 0.0bp).
+            consume_dgrid = getattr(controller, "consume_dgrid_event", None)
+            if callable(consume_dgrid):
+                dgrid_event = consume_dgrid()
+            metrics_fn = getattr(controller, "dgrid_metrics", None)
+            if callable(metrics_fn):
+                dgrid_metrics = metrics_fn() or {}
     except Exception:  # policy: degrade-ok(gate notify is best-effort)
         gate_event = None
     # Persist DN live progress so /status (main process) can read it from the
@@ -954,4 +984,8 @@ async def run_engine_cycle(
         result["gate_event"] = gate_event
     if dn_events:
         result["dn_events"] = dn_events
+    if dgrid_metrics:
+        result["dgrid_metrics"] = dgrid_metrics
+    if dgrid_event:
+        result["dgrid_event"] = dgrid_event
     return result

@@ -2425,6 +2425,34 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                     "market is ranging again.",
                     strategy=strategy.upper(), product=product, network=network,
                 )
+        # Dynamic Grid telemetry: persist live phase / variance / realized-move
+        # so /status reflects reality (it previously always read GRID / 0.00 /
+        # 0.0bp because nothing ever wrote these keys).
+        dgrid_metrics = result.get("dgrid_metrics") if isinstance(result, dict) else None
+        if dgrid_metrics:
+            for _k in ("dgrid_phase", "dgrid_variance_ratio",
+                       "dgrid_realized_move_bp", "dgrid_reset_threshold_bp"):
+                if _k in dgrid_metrics:
+                    state[_k] = dgrid_metrics[_k]
+            _save_state(telegram_id, network, state)
+        # Dynamic Grid flip: GRID<->RGRID is a directional change the user must
+        # see — the old position was just closed (reduce-only) and the opposite
+        # side armed. One message per flip.
+        dgrid_event = result.get("dgrid_event") if isinstance(result, dict) else None
+        if dgrid_event:
+            await _notify(
+                telegram_id,
+                "🔄 Dynamic GRID switched {frm} → {to} on {product} ({network}) — "
+                "{why} (variance ratio {vr}). Previous position closed; "
+                "{to} now quoting.",
+                frm=str(dgrid_event.get("from", "")).upper(),
+                to=str(dgrid_event.get("to", "")).upper(),
+                product=product, network=network,
+                why=("downtrend detected" if dgrid_event.get("direction") == "down"
+                     else "uptrend detected" if dgrid_event.get("direction") == "up"
+                     else "regime change"),
+                vr=str(dgrid_event.get("variance_ratio", "")),
+            )
         # Delta Neutral execution alerts: a hedge that is no longer a hedge
         # must NEVER be silent. One message per event, with the consequence.
         for dn_event in (result.get("dn_events") or []) if isinstance(result, dict) else []:

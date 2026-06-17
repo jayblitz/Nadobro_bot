@@ -1,0 +1,75 @@
+"""GridExecutor.recenter — in-place re-quote of the resting ladder.
+
+A true grid re-center moves the unfilled open orders to a new band around the
+current mid WITHOUT realizing the held position: levels holding inventory keep
+their close legs at the original target, and NO market / reduce-only order is
+placed. This is the non-destructive replacement for the old dgrid "flatten +
+respawn" reset that bled fees.
+"""
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+
+from tests.engine._mock_nado import MockNadoAdapter
+
+from src.nadobro.engine.executors.grid_executor import (
+    GridExecutor,
+    GridExecutorConfig,
+    GridLevelState,
+)
+from src.nadobro.engine.inventory import InventoryRepository
+from src.nadobro.engine.orchestrator import ExecutorOrchestrator
+from src.nadobro.engine.types import OrderType, TradeType
+
+
+def _cfg() -> GridExecutorConfig:
+    return GridExecutorConfig(
+        trading_pair="BTC-PERP", side=TradeType.BUY,
+        start_price=Decimal("99"), end_price=Decimal("100"), limit_price=Decimal(0),
+        total_amount_quote=Decimal(100), min_spread_between_orders=Decimal("0.002"),
+        max_open_orders=3,
+    )
+
+
+def test_recenter_requotes_free_opens_keeps_inventory_and_does_not_flatten():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_cfg(), user_id=1, controller_id="G", adapter=adapter,
+                          inventory=InventoryRepository())
+        await orch.spawn(ex)  # on_create places the opens
+
+        opens = [lv for lv in ex.levels if lv.state is GridLevelState.OPEN_ORDER_PLACED]
+        assert opens, "grid should have resting opens"
+        # Fill ONE level -> it books a close leg (held inventory).
+        adapter.fill_order(opens[0].open_order_id)
+        await orch.tick(ex.id)
+        held = next(lv for lv in ex.levels if lv.state is GridLevelState.CLOSE_ORDER_PLACED)
+        held_close_price = held.close_price
+        net_before = ex.inventory.get(1, "BTC-PERP", "G").net_amount_base
+        assert net_before > 0, "should be holding the filled inventory"
+
+        placed_before = len(adapter.placed)
+
+        # Re-center the ladder UP to a new band around ~110.
+        await ex.recenter(Decimal("109"), Decimal("110"))
+
+        # 1) Held inventory untouched: same close leg, same net position.
+        still_held = [lv for lv in ex.levels if lv.state is GridLevelState.CLOSE_ORDER_PLACED]
+        assert len(still_held) == 1 and still_held[0].close_price == held_close_price
+        assert ex.inventory.get(1, "BTC-PERP", "G").net_amount_base == net_before
+
+        # 2) Free opens re-priced into the new band (was ~99-100, now ~109-110).
+        new_opens = [lv for lv in ex.levels
+                     if lv.state in (GridLevelState.NOT_ACTIVE, GridLevelState.OPEN_ORDER_PLACED)]
+        assert new_opens, "expected re-quoted opens"
+        assert max(lv.open_price for lv in new_opens) > Decimal("108")
+
+        # 3) NOT a flatten: no MARKET / reduce-only order was placed.
+        new_orders = adapter.placed[placed_before:]
+        assert all(o.order_type is not OrderType.MARKET for o in new_orders), \
+            "recenter must not place a market/flatten order"
+        assert not ex.is_terminated
+
+    asyncio.run(body())
