@@ -595,16 +595,19 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertTrue(res["success"])
         self.assertEqual(spot_cleanup.call_args.kwargs["max_base_size"], 0.0)
 
-    def test_run_cycle_grid_price_move_does_not_trigger_generic_sl(self):
+    def _run_grid_cycle_with_snapshot(self, *, strategy, sl_pct, snapshot):
+        """Drive _run_cycle for a grid-family strategy with a mocked live
+        session snapshot, returning the close_all_positions mock + result."""
         telegram_id = 7
         network = "mainnet"
         state = {
             "running": True,
-            "strategy": "grid",
+            "strategy": strategy,
             "product": "BTC",
             "reference_price": 100.0,
-            "sl_pct": 5.0,
+            "sl_pct": sl_pct,
             "tp_pct": 0.0,
+            "notional_usd": 100.0,
             "interval_seconds": 1,
             "last_run_ts": 0.0,
         }
@@ -617,6 +620,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
                 return []
 
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
+        sess = {"id": 1, "product_id": 1, "started_at": None, "stopped_at": None}
 
         async def _run_blocking_stub(func, *args, **kwargs):
             return func(*args, **kwargs)
@@ -628,8 +632,6 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         ), patch.object(
             bot_runtime, "get_user_nado_client", return_value=FakeClient()
         ), patch(
-            # This test exercises the *legacy* SL/TP gate in _run_cycle.
-            # Bypass the engine-v2 mapping so it falls through to dispatch.
             "src.nadobro.services.engine_runtime.engine_v2_enabled",
             return_value=False,
         ), patch(
@@ -637,6 +639,18 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             set(),
         ), patch.object(
             bot_runtime, "_dispatch_strategy", return_value={"success": True, "orders_placed": 0}
+        ), patch(
+            # _run_cycle merges saved strategy settings into state each cycle;
+            # pin to no overrides so the test's sl_pct/tp_pct are authoritative
+            # regardless of whether a DB (with default sl_pct=0.5) is present.
+            "src.nadobro.services.settings_service.get_strategy_settings",
+            return_value=("mainnet", {}),
+        ), patch(
+            "src.nadobro.models.database.get_active_strategy_session", return_value=sess
+        ), patch(
+            "src.nadobro.services.live_session.get_live_session_snapshot", return_value=snapshot
+        ), patch.object(
+            bot_runtime, "_finalize_session"
         ), patch.object(
             bot_runtime, "_save_state"
         ), patch.object(
@@ -645,59 +659,26 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             bot_runtime, "_notify"
         ):
             result = asyncio.run(bot_runtime._run_cycle(telegram_id, network, state))
+        return result, close_mock
 
+    def test_run_cycle_grid_within_pnl_band_does_not_stop(self):
+        # A 10% price move (mid 90 vs ref 100) but session PnL only -0.5% of
+        # margin must NOT stop — the rail measures PnL, not price distance.
+        result, close_mock = self._run_grid_cycle_with_snapshot(
+            strategy="grid", sl_pct=5.0,
+            snapshot={"session_pnl": -0.5, "session_pnl_pct": -0.5, "margin": 100.0},
+        )
         self.assertEqual(result, (True, None))
         close_mock.assert_not_called()
 
-    def test_run_cycle_grid_uses_strategy_pnl_stop_action(self):
-        telegram_id = 8
-        network = "mainnet"
-        state = {
-            "running": True,
-            "strategy": "rgrid",
-            "product": "BTC",
-            "reference_price": 100.0,
-            "sl_pct": 0.1,  # Should not be used as primary guard for GRID now.
-            "interval_seconds": 1,
-            "last_run_ts": 0.0,
-        }
-
-        class FakeClient:
-            def get_market_price(self, _product_id):
-                return {"mid": 90.0}
-
-            def get_open_orders(self, _product_id):
-                return []
-
-        fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
-
-        async def _run_blocking_stub(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        with patch.object(bot_runtime, "is_trading_paused", return_value=False), patch.object(
-            bot_runtime, "run_blocking", side_effect=_run_blocking_stub
-        ), patch.object(bot_runtime, "get_user", return_value=fake_user), patch.object(
-            bot_runtime, "get_user_readonly_client", return_value=FakeClient()
-        ), patch.object(
-            bot_runtime, "get_user_nado_client", return_value=FakeClient()
-        ), patch(
-            # See note above — force legacy dispatch path for this regression test.
-            "src.nadobro.services.engine_runtime.engine_v2_enabled",
-            return_value=False,
-        ), patch(
-            "src.nadobro.services.engine_runtime.ENGINE_MAPPED_STRATEGIES",
-            set(),
-        ), patch.object(
-            bot_runtime, "_dispatch_strategy", return_value={"success": True, "action": "grid_stop_loss_hit", "detail": "stop"}
-        ), patch.object(
-            bot_runtime, "_save_state"
-        ), patch.object(
-            bot_runtime, "close_all_positions", return_value={"success": True}
-        ) as close_mock, patch.object(
-            bot_runtime, "_notify"
-        ):
-            result = asyncio.run(bot_runtime._run_cycle(telegram_id, network, state))
-
+    def test_run_cycle_grid_stops_on_live_session_pnl(self):
+        # Session PnL (realized + unrealized) crosses the SL (% of margin) →
+        # the rail finalizes and closes. Replaces the dead grid_stop_loss_hit
+        # action path that run_engine_cycle never emitted.
+        result, close_mock = self._run_grid_cycle_with_snapshot(
+            strategy="rgrid", sl_pct=0.1,
+            snapshot={"session_pnl": -1.0, "session_pnl_pct": -1.0, "margin": 100.0},
+        )
         self.assertEqual(result, (True, None))
         self.assertTrue(close_mock.called)
 

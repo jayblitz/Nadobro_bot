@@ -300,12 +300,15 @@ def build_status_snapshot(
     open_orders_count: int,
     positions: Optional[list] = None,
     live_metrics: Optional[dict] = None,
+    live_snapshot: Optional[dict] = None,
 ) -> dict:
     """Live snapshot for ``/mm_status``.
 
-    All values are derived from ``state`` (which the bot's run_cycle has been
-    persisting per Phase 0/1/2). No external calls — safe to invoke from a
-    webhook handler.
+    Most values are derived from ``state``. ``live_snapshot`` (from
+    ``live_session.get_live_session_snapshot``) is the authoritative Nado-sourced
+    view — open-position uPnL, realized PnL, volume, fees, fills and open-order
+    count — and overrides the state estimates so the dashboard matches Nado.
+    No external calls here — the caller fetches the snapshot.
     """
     session_done = max(0.0, _safe_float(state.get("mm_session_notional_done_usd"), 0.0))
     session_target = max(0.0, _safe_float(state.get("session_notional_cap_usd"), 0.0))
@@ -318,6 +321,16 @@ def build_status_snapshot(
         session_done = max(session_done, _safe_float(live_metrics.get("volume"), 0.0))
         cumulative_pnl = _safe_float(live_metrics.get("realized_pnl"), cumulative_pnl)
 
+    # Authoritative live Nado figures (preferred over both state and live_metrics).
+    live_snapshot = live_snapshot or {}
+    unrealized_pnl = _safe_float(live_snapshot.get("unrealized_pnl"), 0.0)
+    session_pnl = _safe_float(live_snapshot.get("session_pnl"), 0.0)
+    session_pnl_pct = _safe_float(live_snapshot.get("session_pnl_pct"), 0.0)
+    session_margin = _safe_float(live_snapshot.get("margin"), 0.0)
+    if live_snapshot:
+        session_done = max(session_done, _safe_float(live_snapshot.get("volume"), 0.0))
+        cumulative_pnl = _safe_float(live_snapshot.get("realized_pnl"), cumulative_pnl)
+
     # Fill rate: ratio of executed quotes vs tracked quotes over the session.
     tracked = state.get("mm_tracked_quotes") or {}
     grid_buy_fills = state.get("grid_buy_fills") or []
@@ -328,6 +341,9 @@ def build_status_snapshot(
     # fill count / session volume / cumulative PnL the dashboard shows.
     if live_metrics:
         fill_count = int(live_metrics.get("fills") or fill_count)
+    if live_snapshot:
+        fill_count = int(live_snapshot.get("fills") or fill_count)
+        open_orders_count = int(live_snapshot.get("open_orders") or open_orders_count)
     posted_count = max(fill_count, len(tracked))
     fill_rate = (fill_count / posted_count) if posted_count > 0 else 0.0
 
@@ -367,6 +383,16 @@ def build_status_snapshot(
         "session_progress_pct": (session_done / session_target * 100.0) if session_target > 0 else 0.0,
         "initial_equity_usd": initial_equity,
         "cumulative_pnl_usd": cumulative_pnl,
+        "unrealized_pnl_usd": unrealized_pnl,
+        "session_pnl_usd": session_pnl,
+        "session_pnl_pct": session_pnl_pct,
+        "session_margin_usd": session_margin,
+        "has_position": bool(live_snapshot.get("has_position")),
+        "position_size": _safe_float(live_snapshot.get("position_size"), 0.0),
+        "position_side": str(live_snapshot.get("position_side") or ""),
+        "entry_price": _safe_float(live_snapshot.get("entry_price"), 0.0),
+        "liq_price": _safe_float(live_snapshot.get("liq_price"), 0.0),
+        "has_live_snapshot": bool(live_snapshot),
         "last_cycle_pnl_usd": last_cycle_pnl,
         "drawdown_pct": (
             (abs(cumulative_pnl) / initial_equity * 100.0)
@@ -416,6 +442,24 @@ def render_status_lines(snapshot: dict) -> list[str]:
             + (f", drawdown {snapshot['drawdown_pct']:.2f}%" if snapshot['drawdown_pct'] > 0 else "")
             + f", last cycle ${snapshot['last_cycle_pnl_usd']:+,.2f}"
         ),
+    ]
+    # Authoritative live figures from Nado (match the Nado UI). Only shown when a
+    # live snapshot was supplied so legacy/state-only callers are unaffected.
+    if snapshot.get("has_live_snapshot"):
+        lines.append(f"Unrealized PnL: ${snapshot['unrealized_pnl_usd']:+,.2f}")
+        margin = snapshot.get("session_margin_usd") or 0.0
+        margin_note = f" of ${margin:,.2f} margin" if margin > 0 else ""
+        lines.append(
+            f"Session PnL (realized+unrealized): ${snapshot['session_pnl_usd']:+,.2f} "
+            f"({snapshot['session_pnl_pct']:+.2f}%{margin_note})"
+        )
+        if snapshot.get("has_position"):
+            lines.append(
+                f"Position: {snapshot['position_side'].upper()} {snapshot['position_size']:.4f} "
+                f"@ ${snapshot['entry_price']:,.4f}"
+                + (f" / liq ${snapshot['liq_price']:,.4f}" if snapshot.get("liq_price") else "")
+            )
+    lines += [
         (
             f"Quotes: {snapshot['open_orders_count']} open / "
             f"{snapshot['tracked_quotes_count']} tracked / "

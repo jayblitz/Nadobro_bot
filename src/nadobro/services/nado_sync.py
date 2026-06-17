@@ -645,6 +645,13 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             or ""
         ).strip()
         session_id, source = _back_link_intent(digest, network)
+        if session_id is None:
+            # Digest back-link missed (no order_intents row for this fill).
+            # Recover attribution by product + time window so the match still
+            # counts toward its session's rollup (see _resolve_session_by_window).
+            session_id = _resolve_session_by_window(
+                user_id, network, product_id, _timestamp_or_now(match.get("timestamp"))
+            )
 
         # Engine fills are written at fill time by DbTradeRecorder as
         # ``source='strategy'`` rows carrying human columns (volume/fees) but
@@ -800,6 +807,42 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str]:
             )
             return None, source
     return session_id, source
+
+
+def _resolve_session_by_window(
+    user_id: int, network: str, product_id: Any, ts: Any
+) -> int | None:
+    """Fallback session attribution when the digest back-link misses: find the
+    user's strategy session on this product whose window contains the fill.
+
+    The digest path (``_back_link_intent``) depends on the engine having written
+    an ``order_intents`` row for the order; engine fills that never got one land
+    untagged and silently vanish from per-session rollups. Attributing by
+    product + time window recovers them. Scoped to the fill's own ``network`` and
+    ``product_id`` so it can't cross-link.
+    """
+    try:
+        pid = int(product_id)
+    except (TypeError, ValueError):
+        return None
+    if ts is None:
+        return None
+    try:
+        row = query_one(
+            """
+            SELECT id FROM strategy_sessions
+            WHERE user_id = %s AND network = %s AND product_id = %s
+              AND started_at <= %s
+              AND (stopped_at IS NULL OR stopped_at >= %s)
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (int(user_id), _normalize_network(network), pid, ts, ts),
+        )
+    except Exception:
+        logger.debug("window session resolve failed pid=%s", product_id, exc_info=True)
+        return None
+    return int(row["id"]) if row and row.get("id") is not None else None
 
 
 def _write_funding(user_id: int, network: str, payments: list[dict[str, Any]]) -> int:

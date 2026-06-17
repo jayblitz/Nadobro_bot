@@ -320,20 +320,23 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
     product = str(status.get("product") or state.get("product") or "BTC").upper()
     open_orders_count = int(status.get("open_orders_count") or 0)
 
-    # Engine strategies record fills to the DB, not in-memory state. Source the
-    # active session's live volume/PnL/fills so the dashboard isn't stuck at 0.
-    live_metrics = None
+    # Authoritative live Nado view of the active session (open-position uPnL,
+    # realized PnL, volume, fees, fills, open orders) so the dashboard matches
+    # the Nado UI instead of the engine-empty in-memory ``state``.
+    live_snapshot = None
     try:
-        from src.nadobro.models.database import (
-            get_active_strategy_session,
-            get_session_live_metrics,
-        )
+        from src.nadobro.models.database import get_active_strategy_session
+        from src.nadobro.services.live_session import get_live_session_snapshot
+        from src.nadobro.services.user_service import get_user_readonly_client
 
         sess = get_active_strategy_session(telegram_id, network)
         if sess and sess.get("id") is not None:
-            live_metrics = get_session_live_metrics(int(sess["id"]), network) or None
+            client = get_user_readonly_client(telegram_id, network=network)
+            live_snapshot = get_live_session_snapshot(
+                telegram_id, network, sess, state=state, client=client
+            )
     except Exception:
-        live_metrics = None
+        live_snapshot = None
 
     snapshot = mm_dashboard.build_status_snapshot(
         state=state,
@@ -341,7 +344,7 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
         network=network,
         product=product,
         open_orders_count=open_orders_count,
-        live_metrics=live_metrics,
+        live_snapshot=live_snapshot,
     )
     lines = mm_dashboard.render_status_lines(snapshot)
     return ("\n".join(lines), True)
@@ -365,7 +368,12 @@ def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:
         network = str(status.get("network") or state.get("network") or "mainnet")
         sess = get_active_strategy_session(telegram_id, network)
         if sess and sess.get("id") is not None:
-            db_fills = get_session_recent_fills(int(sess["id"]), network, limit=limit) or None
+            # Window attribution (product + session window) rescues venue matches
+            # the engine never tagged with strategy_session_id.
+            window = (sess.get("product_id"), sess.get("started_at"), sess.get("stopped_at"))
+            db_fills = get_session_recent_fills(
+                int(sess["id"]), network, limit=limit, window=window
+            ) or None
     except Exception:
         db_fills = None
     lines = mm_dashboard.render_fills_lines(state, limit=limit, db_fills=db_fills)
