@@ -13,10 +13,11 @@ from src.nadobro.engine.types import TradeType
 class ReverseGridController(GridController):
     SIDE = TradeType.SELL
     EXECUTOR_CLS = ReverseGridExecutor
-    # A short reverse grid exists to trade DOWNtrends — only an UPtrend is
-    # adverse. Previously it inherited the default (pause on either trend),
-    # so the gate kept it sidelined in exactly the regime it is built for.
-    GATE_ADVERSE_TREND = "trending_up"
+    # A Reverse Grid is a TREND strategy — it wins in trends (up or down),
+    # re-centers, and keeps quoting. The regime gate exists to keep a *ranging*
+    # grid out of trends, so it is turned OFF for rgrid in production via
+    # ``regime_gate_enabled=0`` (see engine_runtime.map_strategy_config). No
+    # per-side trend gating here: rgrid quotes in every regime.
 
     def __init__(self, **kwargs: object) -> None:
         kwargs.setdefault("name", "reverse_grid")

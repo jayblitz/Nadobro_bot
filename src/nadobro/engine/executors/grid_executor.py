@@ -164,6 +164,12 @@ class GridExecutor(Executor):
         self.config = config
         self.levels: List[GridLevel] = generate_grid_levels(config)
         self._last_place_ts = 0.0
+        # Real venue-order activity counters (cumulative for this executor's
+        # life) so /status and the per-cycle log can report actual placements
+        # instead of the always-0 engine cycle result. Summed per controller.
+        self.orders_placed = 0
+        self.orders_filled = 0
+        self.orders_cancelled = 0
 
     @property
     def open_side(self) -> TradeType:
@@ -190,6 +196,7 @@ class GridExecutor(Executor):
         )
         level.open_order_id = order.id
         level.state = GridLevelState.OPEN_ORDER_PLACED
+        self.orders_placed += 1
 
     async def _place_close(self, level: GridLevel) -> None:
         await self._place_close_remaining(level, level.filled_base - level._close_recorded)
@@ -207,6 +214,7 @@ class GridExecutor(Executor):
         )
         level.close_order_id = order.id
         level.state = GridLevelState.CLOSE_ORDER_PLACED
+        self.orders_placed += 1
 
     def _ingest(self, level: GridLevel, order: NadoOrder, side: TradeType, *, opening: bool) -> None:
         """Record the *delta* between the venue's current cumulative fill
@@ -295,6 +303,7 @@ class GridExecutor(Executor):
                 oid = lv.open_order_id
                 try:
                     await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_recenter_cancel")
+                    self.orders_cancelled += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("grid %s: recenter cancel failed for %s: %s", self.id, oid, exc)
                 try:
@@ -382,6 +391,7 @@ class GridExecutor(Executor):
             self._ingest(level, order, self.open_side, opening=True)
             if order.state is OrderState.FILLED:
                 level.state = GridLevelState.OPEN_ORDER_FILLED
+                self.orders_filled += 1
                 await self._place_close(level)
                 return
             if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
@@ -401,6 +411,7 @@ class GridExecutor(Executor):
                 # treat the level as opened and book the close leg.
                 try:
                     await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_cancel")
+                    self.orders_cancelled += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "grid %s: out-of-bounds cancel failed for %s — order may still be resting: %s",
@@ -429,6 +440,7 @@ class GridExecutor(Executor):
             self._ingest(level, order, self.close_side, opening=False)
             if order.state is OrderState.FILLED:
                 level.state = GridLevelState.COMPLETE
+                self.orders_filled += 1
                 return
             if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
                 # BUG-GR-2 fix: re-place the close leg for the remaining base
@@ -451,6 +463,7 @@ class GridExecutor(Executor):
                     cid = oid
                     try:
                         await self._guard(lambda: self.adapter.cancel_order(cid), label="grid_cancel_all")
+                        self.orders_cancelled += 1
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "grid %s: cancel-all failed for %s — order may still be resting: %s",

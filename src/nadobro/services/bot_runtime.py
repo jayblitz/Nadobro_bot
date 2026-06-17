@@ -1440,6 +1440,16 @@ def get_user_bot_status(telegram_id: int) -> dict:
     except Exception:
         strategy_phase = {"phase": "unknown", "detail": "", "recoverable": True, "allowed_actions": []}
 
+    # Prefer the real per-order counts the worker accumulates into
+    # order_observability (placed/filled/cancelled from the executors). Fall
+    # back to the all-time engine_executors row count only when the worker
+    # hasn't populated state yet (e.g. just after a restart).
+    _state_obs = dict(state.get("order_observability") or {})
+    if int(_state_obs.get("orders_placed") or 0) > 0:
+        _order_obs = _state_obs
+    else:
+        _order_obs = {**_state_obs, **engine_order_counts}
+
     return {
         "network": network,
         "running": bool(state.get("running")),
@@ -1515,7 +1525,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "other_running_networks": other_running_networks,
         "strategy_session_id": strategy_session_id,
         "running_sessions": running_sessions,
-        "order_observability": {**(state.get("order_observability") or {}), **engine_order_counts},
+        "order_observability": _order_obs,
         "session_trade_count": int(session_analytics.get("total_trades") or 0),
         "session_filled_trades": int(session_analytics.get("filled") or 0),
         "session_closed_trades": int(session_analytics.get("closed") or 0),
@@ -2398,6 +2408,23 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             result = await run_engine_cycle(
                 telegram_id, network, state, client, mid, product, product_id
             )
+        # Real per-cycle order counts. run_engine_cycle returns the controller's
+        # CUMULATIVE placed/filled/cancelled; convert to this-cycle deltas so the
+        # log / "orders placed" notify / session metrics report actual activity
+        # (the cycle result otherwise carries no count -> always 0). The
+        # cumulative is then re-accumulated into order_observability for /status.
+        if isinstance(result, dict) and isinstance(result.get("order_counts"), dict):
+            _counts = result["order_counts"]
+            _prev = state.get("_engine_order_counts_prev") or {}
+            for _k in ("orders_placed", "orders_filled", "orders_cancelled"):
+                _cum = int(_counts.get(_k, 0) or 0)
+                _p = int(_prev.get(_k, 0) or 0)
+                # Guard a worker restart resetting the cumulative below prev.
+                result[_k] = (_cum - _p) if _cum >= _p else _cum
+            state["_engine_order_counts_prev"] = {
+                _k: int(_counts.get(_k, 0) or 0)
+                for _k in ("orders_placed", "orders_filled", "orders_cancelled")
+            }
         # Regime-gate flip: tell the user once per transition. Pause never
         # touches open positions — exits/close legs keep managing; only NEW
         # opening quotes wait for the range to return.
@@ -2428,12 +2455,20 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         # Dynamic Grid telemetry: persist live phase / variance / realized-move
         # so /status reflects reality (it previously always read GRID / 0.00 /
         # 0.0bp because nothing ever wrote these keys).
-        dgrid_metrics = result.get("dgrid_metrics") if isinstance(result, dict) else None
-        if dgrid_metrics:
-            for _k in ("dgrid_phase", "dgrid_variance_ratio",
-                       "dgrid_realized_move_bp", "dgrid_reset_threshold_bp"):
-                if _k in dgrid_metrics:
-                    state[_k] = dgrid_metrics[_k]
+        # Grid / Reverse / Dynamic telemetry: persist live phase / variance /
+        # anchor / side / reset so /status reflects reality (it previously read
+        # GRID / 0.00 / 0.0bp / Anchor n/a / Side NONE because nothing wrote
+        # these keys). dgrid_metrics also carries the shared grid_* block.
+        _telemetry: dict = {}
+        if isinstance(result, dict):
+            _telemetry.update(result.get("dgrid_metrics") or {})
+            _telemetry.update(result.get("grid_metrics") or {})
+        if _telemetry:
+            for _k in ("dgrid_phase", "dgrid_variance_ratio", "dgrid_realized_move_bp",
+                       "dgrid_reset_threshold_bp", "grid_anchor_price", "grid_reset_side",
+                       "grid_drift_from_anchor_pct", "grid_reset_active"):
+                if _k in _telemetry:
+                    state[_k] = _telemetry[_k]
             _save_state(telegram_id, network, state)
         # Dynamic Grid flip: GRID<->RGRID is a directional change the user must
         # see — the old position was just closed (reduce-only) and the opposite

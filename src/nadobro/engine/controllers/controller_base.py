@@ -87,6 +87,19 @@ class Controller(abc.ABC):
     def my_executors(self, active_only: bool = True) -> List[Executor]:
         return self.orchestrator.list(self.id, active_only=active_only)
 
+    def order_counts(self) -> Dict[str, int]:
+        """Real venue-order activity for this controller, summed across all of
+        its executors (active + terminated still held by the orchestrator) for
+        this worker's lifetime. The engine cycle result carries no per-order
+        count, so this is how /status and the per-cycle log get a true placed/
+        filled/cancelled figure instead of 0."""
+        placed = filled = cancelled = 0
+        for ex in self.my_executors(active_only=False):
+            placed += int(getattr(ex, "orders_placed", 0) or 0)
+            filled += int(getattr(ex, "orders_filled", 0) or 0)
+            cancelled += int(getattr(ex, "orders_cancelled", 0) or 0)
+        return {"orders_placed": placed, "orders_filled": filled, "orders_cancelled": cancelled}
+
     def cfg(self, key: str, default: Any = None) -> Any:
         return self.configs.get(key, default)
 

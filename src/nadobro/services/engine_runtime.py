@@ -561,6 +561,19 @@ def map_strategy_config(
             settings, "dgrid_reset_threshold_bp",
             _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0,
         )
+
+    # GRID / RGRID in-place re-center: honor the user's reset threshold so the
+    # ladder follows price ("reset and continue") instead of going stale. Drives
+    # GridExecutor.recenter (no flatten); the controller floors it above the band.
+    if strategy == "grid":
+        cfg["reset_threshold_bp"] = _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0
+    elif strategy == "rgrid":
+        cfg["reset_threshold_bp"] = _f(settings, "rgrid_reset_threshold_pct", 0.0) * 100.0
+        # A Reverse Grid is a TREND strategy (it wins in trends, resets and
+        # keeps quoting). The regime gate exists to keep a *ranging* grid out of
+        # trends, so it must NOT gate rgrid: turn it off so rgrid quotes in every
+        # regime. (User directive 2026-06-17.)
+        cfg["regime_gate_enabled"] = 0.0
     return cfg
 
 
@@ -945,6 +958,8 @@ async def run_engine_cycle(
     dn_events: list = []
     dgrid_event = None
     dgrid_metrics: Dict[str, Any] = {}
+    grid_metrics: Dict[str, Any] = {}
+    order_counts: Dict[str, Any] = {}
     try:
         controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
         if controller is not None:
@@ -961,6 +976,16 @@ async def run_engine_cycle(
             metrics_fn = getattr(controller, "dgrid_metrics", None)
             if callable(metrics_fn):
                 dgrid_metrics = metrics_fn() or {}
+            # Grid / Reverse Grid anchor/side/reset telemetry for /status.
+            grid_metrics_fn = getattr(controller, "grid_metrics", None)
+            if callable(grid_metrics_fn):
+                grid_metrics = grid_metrics_fn() or {}
+            # Real venue-order activity (placed/filled/cancelled) — the cycle
+            # result otherwise carries no count, leaving the per-cycle log and
+            # /status stuck at 0 for engine strategies.
+            counts_fn = getattr(controller, "order_counts", None)
+            if callable(counts_fn):
+                order_counts = counts_fn() or {}
     except Exception:  # policy: degrade-ok(gate notify is best-effort)
         gate_event = None
     # Persist DN live progress so /status (main process) can read it from the
@@ -986,6 +1011,10 @@ async def run_engine_cycle(
         result["dn_events"] = dn_events
     if dgrid_metrics:
         result["dgrid_metrics"] = dgrid_metrics
+    if grid_metrics:
+        result["grid_metrics"] = grid_metrics
+    if order_counts:
+        result["order_counts"] = order_counts
     if dgrid_event:
         result["dgrid_event"] = dgrid_event
     return result
