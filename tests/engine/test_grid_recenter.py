@@ -13,6 +13,8 @@ from decimal import Decimal
 
 from tests.engine._mock_nado import MockNadoAdapter
 
+from src.nadobro.engine.controllers.grid_trading import GridController
+from src.nadobro.engine.controllers.reverse_grid import ReverseGridController
 from src.nadobro.engine.executors.grid_executor import (
     GridExecutor,
     GridExecutorConfig,
@@ -71,5 +73,67 @@ def test_recenter_requotes_free_opens_keeps_inventory_and_does_not_flatten():
         assert all(o.order_type is not OrderType.MARKET for o in new_orders), \
             "recenter must not place a market/flatten order"
         assert not ex.is_terminated
+
+    asyncio.run(body())
+
+
+def _ctrl_cfg(**over):
+    cfg = {
+        "trading_pair": "BTC-PERP", "start_price": Decimal("99"), "end_price": Decimal("100"),
+        "limit_price": Decimal(0), "total_amount_quote": Decimal(100),
+        "min_spread_between_orders": Decimal("0.002"), "max_open_orders": 3,
+        "step_pct": Decimal("0.002"), "levels_count": 3,
+        "regime_gate_enabled": 0.0,  # off so it always arms (rgrid-style)
+    }
+    cfg.update(over)
+    return cfg
+
+
+def test_grid_controller_recenters_in_place_and_reports_telemetry():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("100"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = ReverseGridController(
+            user_id=1, orchestrator=orch, adapter=adapter, inventory=InventoryRepository(),
+            configs=_ctrl_cfg(reset_threshold_bp=200.0), controller_id="RG",
+        )
+        await orch.spawn_controller(c)  # on_start arms (gate off)
+        active = orch.list(c.id, active_only=True)
+        assert len(active) == 1
+        first = active[0]
+        m = c.grid_metrics()
+        assert m["grid_reset_side"] == "SELL" and m["grid_reset_active"] is True
+        assert float(m["grid_anchor_price"]) > 0
+
+        # Small move: no re-center.
+        adapter.set_mid(Decimal("100.5"))
+        await orch.tick_controller(c.id)
+        assert orch.list(c.id, active_only=True)[0] is first
+
+        # Large move past the floored 200bp threshold: re-center the SAME executor.
+        adapter.set_mid(Decimal("103"))
+        await orch.tick_controller(c.id)
+        active = orch.list(c.id, active_only=True)
+        assert len(active) == 1 and active[0] is first, "re-center must reuse the executor"
+        # SELL ladder re-quotes at/above the new mid.
+        assert min(lv.open_price for lv in first.levels) >= Decimal("102")
+
+    asyncio.run(body())
+
+
+def test_order_counts_aggregate_real_placements():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("100"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = GridController(
+            user_id=1, orchestrator=orch, adapter=adapter, inventory=InventoryRepository(),
+            configs=_ctrl_cfg(), controller_id="G",
+        )
+        await orch.spawn_controller(c)  # on_start places the opens
+        counts = c.order_counts()
+        ex = orch.list(c.id, active_only=True)[0]
+        placed_levels = [lv for lv in ex.levels if lv.state is GridLevelState.OPEN_ORDER_PLACED]
+        assert counts["orders_placed"] == len(placed_levels) > 0
+        assert counts["orders_placed"] == ex.orders_placed
 
     asyncio.run(body())

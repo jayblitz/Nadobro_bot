@@ -364,6 +364,8 @@ def expansion_candles(n: int = 80, base: float = 100.0) -> list[dict]:
 
 
 def _rgrid_configs(candle_provider):
+    # Production wires rgrid with the regime gate OFF (regime_gate_enabled=0):
+    # a Reverse Grid is a TREND strategy and must quote in every regime.
     return {
         "trading_pair": PAIR,
         "start_price": Decimal("100"),
@@ -372,38 +374,42 @@ def _rgrid_configs(candle_provider):
         "total_amount_quote": Decimal(100),
         "min_spread_between_orders": Decimal("0.002"),
         "max_open_orders": 3,
-        "regime_gate_enabled": True,
+        "regime_gate_enabled": 0.0,
         "candle_provider": candle_provider,
     }
 
 
-def test_reverse_grid_arms_in_downtrend_pauses_in_uptrend():
-    # A short reverse grid exists to trade DOWNtrends: the gate must let it arm
-    # there (GATE_ADVERSE_TREND='trending_up'), but still sit out an UPtrend.
+def test_reverse_grid_arms_in_both_trends():
+    # rgrid trades trends (up AND down) — the gate is off for it, so it arms in
+    # every regime rather than sitting out.
     from src.nadobro.engine.controllers.reverse_grid import ReverseGridController
 
     async def body():
-        # Downtrend -> arms.
-        adapter = MockNadoAdapter(mid=Decimal("100"), auto_fill_market=False)
-        orch = ExecutorOrchestrator()
-        c = ReverseGridController(
-            user_id=1, orchestrator=orch, adapter=adapter, inventory=InventoryRepository(),
-            configs=_rgrid_configs(lambda _p: trending_candles(step=-0.4)), controller_id="RG",
-        )
-        await orch.spawn_controller(c)
-        assert len(c.my_executors()) == 1, f"rgrid must trade a downtrend, gate={c.gate_reason}"
-
-        # Uptrend -> sits out.
-        orch2 = ExecutorOrchestrator()
-        c2 = ReverseGridController(
-            user_id=1, orchestrator=orch2, adapter=adapter, inventory=InventoryRepository(),
-            configs=_rgrid_configs(lambda _p: trending_candles(step=0.4)), controller_id="RG2",
-        )
-        await orch2.spawn_controller(c2)
-        assert c2.my_executors() == [], "rgrid must pause in an uptrend"
-        assert c2.gate_reason == "trending_up"
+        for step, label in ((-0.4, "downtrend"), (0.4, "uptrend")):
+            adapter = MockNadoAdapter(mid=Decimal("100"), auto_fill_market=False)
+            orch = ExecutorOrchestrator()
+            c = ReverseGridController(
+                user_id=1, orchestrator=orch, adapter=adapter, inventory=InventoryRepository(),
+                configs=_rgrid_configs(lambda _p, s=step: trending_candles(step=s)),
+                controller_id=f"RG{step}",
+            )
+            await orch.spawn_controller(c)
+            assert len(c.my_executors()) == 1, f"rgrid must trade a {label} (gate off)"
+            assert not c.gate_paused
 
     asyncio.run(body())
+
+
+def test_map_strategy_config_disables_gate_for_rgrid():
+    from decimal import Decimal as _D
+
+    from src.nadobro.services.engine_runtime import map_strategy_config
+
+    rg = map_strategy_config("rgrid", {"notional_usd": 100.0}, _D("100"), product="BTC-PERP")
+    assert float(rg.get("regime_gate_enabled", 1.0)) == 0.0
+    # grid (ranging strategy) keeps the gate ON.
+    g = map_strategy_config("grid", {"notional_usd": 100.0}, _D("100"), product="BTC-PERP")
+    assert float(g.get("regime_gate_enabled", 0.0)) == 1.0
 
 
 def test_dgrid_sits_out_expansion_chaos():

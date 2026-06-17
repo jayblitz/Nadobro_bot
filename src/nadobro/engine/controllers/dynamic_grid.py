@@ -330,10 +330,16 @@ class DynamicGridController(Controller):
         return event
 
     def dgrid_metrics(self) -> Dict[str, object]:
-        """Live phase + variance telemetry for the /status dashboard."""
+        """Live phase + variance + anchor/side telemetry for the /status card."""
+        side = "SELL" if self.current_phase == variance_regime.RGRID else "BUY"
         return {
             "dgrid_phase": self.current_phase,
             "dgrid_variance_ratio": float(self.variance_ratio),
             "dgrid_realized_move_bp": float(self.realized_move_bp),
             "dgrid_reset_threshold_bp": float(self.reset_threshold_bp),
+            # Shared grid telemetry block (Anchor / Side / Drift on the card).
+            "grid_anchor_price": float(self._grid_anchor_mid) if self._grid_anchor_mid else 0.0,
+            "grid_reset_side": side,
+            "grid_drift_from_anchor_pct": float(self.realized_move_bp) / 100.0,
+            "grid_reset_active": bool(self.reset_threshold_bp > 0),
         }
