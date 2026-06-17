@@ -2048,6 +2048,102 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
     )
 
 
+async def _evaluate_session_pnl_rail(
+    telegram_id: int,
+    network: str,
+    state: dict,
+    strategy: str,
+    product: str,
+    *,
+    client,
+    close_coro,
+    market_label: str | None = None,
+) -> tuple[bool, str | None] | None:
+    """Session-level SL/TP guard driven by *live* Nado PnL (realized +
+    unrealized) measured as a percentage of the configured margin.
+
+    Returns ``(True, None)`` when a stop fired (session finalized, positions
+    closed, user notified) so ``_run_cycle`` can return it directly; ``None``
+    when no stop is warranted and the cycle should continue.
+
+    This replaces the dead ``result["action"] == "grid_stop_loss_hit"`` branches:
+    ``run_engine_cycle`` only ever returns ``action="engine_ticked"``, so those
+    branches never fired and the session SL/TP never triggered — the bug that let
+    a $1 stop ride to a $32 loss. The threshold is now ``% of margin`` (the
+    user's intent: SL 1% of $100 = stop at -$1), not a leverage-blind
+    ``% price move``, and PnL includes the open position's unrealized PnL so an
+    open drawdown actually trips the stop.
+    """
+    sl_pct = float(state.get("sl_pct") or 0.0)
+    tp_pct = float(state.get("tp_pct") or 0.0)
+    if sl_pct <= 0 and tp_pct <= 0:
+        return None
+
+    from src.nadobro.models.database import get_active_strategy_session
+
+    sess = await run_blocking(get_active_strategy_session, telegram_id, network)
+    if not sess:
+        return None
+
+    from src.nadobro.services.live_session import get_live_session_snapshot
+
+    snap = await run_blocking(
+        get_live_session_snapshot, telegram_id, network, sess,
+        state=state, client=client,
+    )
+    if float(snap.get("margin") or 0.0) <= 0:
+        # No margin basis to measure a % against — skip rather than divide by zero.
+        return None
+    pnl = float(snap.get("session_pnl") or 0.0)
+    pct = float(snap.get("session_pnl_pct") or 0.0)
+
+    reason = ""
+    if sl_pct > 0 and pct <= -sl_pct:
+        reason = "sl_hit"
+    elif tp_pct > 0 and pct >= tp_pct:
+        reason = "tp_hit"
+    if not reason:
+        return None
+
+    _finalize_session(state, stop_reason=reason)
+    state["running"] = False
+    state["last_error"] = None if reason == "tp_hit" else (
+        f"Stopped by session SL: PnL ${pnl:,.2f} ({pct:.2f}% of "
+        f"${float(snap.get('margin') or 0.0):,.2f} margin)."
+    )
+    _save_state(telegram_id, network, state)
+
+    label = market_label or f"{product}-PERP"
+    strategy_label = _strategy_display_name(strategy)
+    close_res = await close_coro()
+    if close_res.get("success"):
+        await _notify(
+            telegram_id,
+            (
+                "✅ {strategy} target reached on {market} ({network}) — session TP hit "
+                "(PnL ${pnl} / {pct}% of margin)."
+                if reason == "tp_hit" else
+                "🛑 {strategy} stopped on {market} ({network}) — session SL hit "
+                "(PnL ${pnl} / {pct}% of margin)."
+            ),
+            strategy=strategy_label, market=label, network=network,
+            pnl=f"{pnl:,.2f}", pct=f"{pct:.2f}",
+        )
+    else:
+        logger.warning(
+            "session %s close failed for user %s on %s: %s",
+            reason, telegram_id, network, close_res.get("error", "unknown"),
+        )
+        await _notify(
+            telegram_id,
+            "⚠️ {strategy} session {kind} triggered on {market} ({network}), but cleanup "
+            "failed. Please close remaining exposure on Nado. Error: {error}",
+            strategy=strategy_label, kind=("TP" if reason == "tp_hit" else "SL"),
+            market=label, network=network, error=close_res.get("error", "unknown"),
+        )
+    return True, None
+
+
 async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
     try:
         from src.nadobro.services.strategy_fsm import PHASE_SCANNING, apply_phase
@@ -2268,63 +2364,17 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         reference_price = mid
 
     if strategy not in ("grid", "rgrid", "dgrid", "mid", "dn", "vol"):
-        move_pct = abs((mid - reference_price) / reference_price) * 100.0 if reference_price > 0 else 0.0
-        sl_pct = float(state.get("sl_pct") or 0.0)
-        tp_pct = float(state.get("tp_pct") or 0.0)
-        if sl_pct > 0 and move_pct >= sl_pct:
-            _finalize_session(state, stop_reason="sl_hit")
-            state["running"] = False
-            state["last_error"] = f"Stopped by SL at {move_pct:.2f}% move from reference."
-            _save_state(telegram_id, network, state)
-            close_res = await run_blocking(close_all_positions, telegram_id, network)
-            if close_res.get("success"):
-                await _notify(
-                    telegram_id,
-                    "🛑 {strategy} stopped on {product}-PERP ({network}) - SL hit ({pct}%).",
-                    strategy=_strategy_display_name(strategy), product=product, network=network, pct=f"{move_pct:.2f}",
-                )
-            else:
-                logger.warning(
-                    "SL stop close_all_positions reported failure for user %s on %s: %s",
-                    telegram_id,
-                    network,
-                    close_res.get("error", "unknown"),
-                )
-                await _notify(
-                    telegram_id,
-                    "⚠️ SL triggered for {strategy} on {product}-PERP ({network}), "
-                    "but full cleanup failed. Please close remaining exposure on Nado. "
-                    "Error: {error}",
-                    strategy=_strategy_display_name(strategy), product=product, network=network, error=close_res.get('error', 'unknown'),
-                )
-            return True, None
-        if tp_pct > 0 and move_pct >= tp_pct:
-            _finalize_session(state, stop_reason="tp_hit")
-            state["running"] = False
-            state["last_error"] = None
-            _save_state(telegram_id, network, state)
-            close_res = await run_blocking(close_all_positions, telegram_id, network)
-            if close_res.get("success"):
-                await _notify(
-                    telegram_id,
-                    "✅ {strategy} target reached on {product}-PERP ({network}) - TP hit ({pct}%).",
-                    strategy=_strategy_display_name(strategy), product=product, network=network, pct=f"{move_pct:.2f}",
-                )
-            else:
-                logger.warning(
-                    "TP stop close_all_positions reported failure for user %s on %s: %s",
-                    telegram_id,
-                    network,
-                    close_res.get("error", "unknown"),
-                )
-                await _notify(
-                    telegram_id,
-                    "⚠️ TP triggered for {strategy} on {product}-PERP ({network}), "
-                    "but full cleanup failed. Please close remaining exposure on Nado. "
-                    "Error: {error}",
-                    strategy=_strategy_display_name(strategy), product=product, network=network, error=close_res.get('error', 'unknown'),
-                )
-            return True, None
+        # Legacy/directional strategies: same margin-based session-PnL rail as
+        # the engine strategies (was a leverage-blind, direction-blind % price
+        # move from a reference price — wrong units and would fire on favourable
+        # moves too).
+        rail = await _evaluate_session_pnl_rail(
+            telegram_id, network, state, strategy, product,
+            client=client,
+            close_coro=lambda: run_blocking(close_all_positions, telegram_id, network),
+        )
+        if rail is not None:
+            return rail
 
     with timed_metric("runtime.open_orders.fetch"):
         if strategy == "vol":
@@ -2441,149 +2491,31 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                     client, mid, product_id, product, open_orders,
                 )
 
-    if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("action") == "grid_stop_loss_hit":
-        _finalize_session(state, stop_reason="grid_sl_hit")
-        state["running"] = False
-        strategy_label = _strategy_display_name(strategy)
-        state["last_error"] = result.get("detail") or f"{strategy_label} stop-loss triggered."
-        _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, network)
-        if close_res.get("success"):
-            await _notify(
-                telegram_id,
-                "🛑 {strategy} stopped on {product}-PERP ({network}) - PnL stop-loss triggered.\n{detail}",
-                strategy=strategy_label,
-                product=product, network=network, detail=(result.get("detail") or "")[:180],
-            )
-        else:
-            logger.warning(
-                "%s PnL stop close_all_positions failed for user %s on %s: %s",
-                strategy_label,
-                telegram_id,
-                network,
-                close_res.get("error", "unknown"),
-            )
-            await _notify(
-                telegram_id,
-                "⚠️ {strategy} PnL stop-loss triggered on {product}-PERP ({network}), "
-                "but cleanup failed. Error: {error}",
-                strategy=strategy_label,
-                product=product, network=network, error=close_res.get("error", "unknown"),
-            )
-        return True, None
-    if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("action") == "grid_take_profit_hit":
-        _finalize_session(state, stop_reason="tp_hit")
-        state["running"] = False
-        strategy_label = _strategy_display_name(strategy)
-        state["last_error"] = None
-        _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, network)
-        if close_res.get("success"):
-            await _notify(
-                telegram_id,
-                "✅ {strategy} completed on {product}-PERP ({network}) - PnL take-profit triggered.\n{detail}",
-                strategy=strategy_label,
-                product=product, network=network, detail=(result.get("detail") or "")[:180],
-            )
-        else:
-            logger.warning(
-                "%s PnL take-profit close_all_positions failed for user %s on %s: %s",
-                strategy_label,
-                telegram_id,
-                network,
-                close_res.get("error", "unknown"),
-            )
-            await _notify(
-                telegram_id,
-                "⚠️ {strategy} PnL take-profit triggered on {product}-PERP ({network}), "
-                "but cleanup failed. Error: {error}",
-                strategy=strategy_label,
-                product=product, network=network, error=close_res.get("error", "unknown"),
-            )
-        return True, None
-    if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("action") == "circuit_breaker":
-        _finalize_session(state, stop_reason="circuit_breaker")
-        state["running"] = False
-        strategy_label = _strategy_display_name(strategy)
-        state["last_error"] = result.get("error") or f"{strategy_label} circuit breaker triggered."
-        _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, network)
-        if close_res.get("success"):
-            await _notify(
-                telegram_id,
-                "🛑 {strategy} stopped on {product}-PERP ({network}) - risk circuit breaker triggered.\n{detail}",
-                strategy=strategy_label,
-                product=product,
-                network=network,
-                detail=(result.get("error") or "")[:180],
-            )
-        else:
-            await _notify(
-                telegram_id,
-                "⚠️ {strategy} circuit breaker triggered on {product}-PERP ({network}), but cleanup failed. Error: {error}",
-                strategy=strategy_label,
-                product=product,
-                network=network,
-                error=close_res.get("error", "unknown"),
-            )
-        return True, None
-    if strategy in ("grid", "rgrid", "dgrid", "mid") and result.get("done") and str(result.get("reason") or "") == "session notional cap reached":
-        _finalize_session(state, stop_reason="session_cap_hit")
-        state["running"] = False
-        strategy_label = _strategy_display_name(strategy)
-        state["last_error"] = None
-        _save_state(telegram_id, network, state)
-        close_res = await run_blocking(close_all_positions, telegram_id, network)
-        if close_res.get("success"):
-            await _notify(
-                telegram_id,
-                "✅ {strategy} stopped on {product}-PERP ({network}) - session volume cap reached.",
-                strategy=strategy_label,
-                product=product,
-                network=network,
-            )
-        else:
-            await _notify(
-                telegram_id,
-                "⚠️ {strategy} hit its session cap on {product}-PERP ({network}), but cleanup failed. Error: {error}",
-                strategy=strategy_label,
-                product=product,
-                network=network,
-                error=close_res.get("error", "unknown"),
-            )
-        return True, None
-    if strategy == "vol" and result.get("done") and str(result.get("stop_reason") or "") in ("tp_hit", "sl_hit", "target_volume_hit"):
-        stop_reason = str(result.get("stop_reason"))
-        _finalize_session(state, stop_reason=stop_reason)
-        state["running"] = False
-        state["last_error"] = None if stop_reason in ("tp_hit", "target_volume_hit") else (
-            result.get("error")
-            or f"Stopped by session SL ({float(state.get('session_realized_pnl_usd') or 0.0):.4f} USD)."
+    if strategy in ("grid", "rgrid", "dgrid", "mid"):
+        # Session SL/TP on live Nado PnL (% of margin). Replaces the dead
+        # ``result["action"] == grid_stop_loss_hit | grid_take_profit_hit |
+        # circuit_breaker`` / "session notional cap reached" branches: the engine
+        # (run_engine_cycle) only ever returns action="engine_ticked", so none of
+        # those ever fired and the session SL/TP never triggered.
+        rail = await _evaluate_session_pnl_rail(
+            telegram_id, network, state, strategy, product,
+            client=client,
+            close_coro=lambda: run_blocking(close_all_positions, telegram_id, network),
         )
-        _save_state(telegram_id, network, state)
-        close_res = await run_blocking(cleanup_strategy_positions, telegram_id, network, state)
-        market_label = _market_label_for_strategy(strategy, product, state)
-        if close_res.get("success"):
-            await _notify(
-                telegram_id,
-                "✅ Volume strategy stopped on {market} ({network}) - {reason}.",
-                market=market_label,
-                network=network,
-                reason=(
-                    "session TP hit" if stop_reason == "tp_hit"
-                    else "target volume hit" if stop_reason == "target_volume_hit"
-                    else "session SL hit"
-                ),
-            )
-        else:
-            await _notify(
-                telegram_id,
-                "⚠️ Volume strategy stop triggered on {market} ({network}), but cleanup failed. Error: {error}",
-                market=market_label,
-                network=network,
-                error=close_res.get("error", "unknown"),
-            )
-        return True, None
+        if rail is not None:
+            return rail
+    if strategy == "vol":
+        # Volume strategy session SL/TP on live Nado PnL (% of margin). Replaces
+        # the dead ``result.get("done") + stop_reason`` branch — run_engine_cycle
+        # never sets those, so the vol session stop never fired either.
+        rail = await _evaluate_session_pnl_rail(
+            telegram_id, network, state, strategy, product,
+            client=client,
+            close_coro=lambda: run_blocking(cleanup_strategy_positions, telegram_id, network, state),
+            market_label=_market_label_for_strategy(strategy, product, state),
+        )
+        if rail is not None:
+            return rail
 
     prev_runs = int(state.get("runs") or 0)
     state["last_run_ts"] = time.time()
