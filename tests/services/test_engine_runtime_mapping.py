@@ -253,3 +253,33 @@ def test_engine_v2_enabled_gate(monkeypatch):
     assert er.engine_v2_enabled() is False
     monkeypatch.setenv("NADO_ENGINE_V2_RUNTIME", "false")
     assert er.engine_v2_enabled() is False
+
+
+def test_spread_is_per_strategy_user_set():
+    """The quoting step must come from the strategy's own user-set spread, not a
+    single hardcoded spread_bp for everyone."""
+    from decimal import Decimal
+    from src.nadobro.services.engine_runtime import map_strategy_config
+
+    mid = Decimal("100")
+
+    # rgrid honors rgrid_spread_bp (20bp step), not the generic spread_bp (5).
+    rg = map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "spread_bp": 5.0, "rgrid_spread_bp": 20.0, "levels": 2},
+        mid, product="BTC-PERP",
+    )
+    assert rg["min_spread_between_orders"] == Decimal("20.0") / Decimal(10000)
+
+    # dgrid honors dgrid_spread_bp (15bp), not the default 8.
+    dg = map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "dgrid_spread_bp": 15.0, "levels": 4},
+        mid, product="BTC-PERP",
+    )
+    assert dg["step_pct"] == Decimal("15.0") / Decimal(10000)
+
+    # grid still uses spread_bp.
+    g = map_strategy_config(
+        "grid", {"notional_usd": 100.0, "spread_bp": 3.0, "levels": 2},
+        mid, product="BTC-PERP",
+    )
+    assert g["min_spread_between_orders"] == Decimal("3.0") / Decimal(10000)
