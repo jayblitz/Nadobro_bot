@@ -640,6 +640,12 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         ), patch.object(
             bot_runtime, "_dispatch_strategy", return_value={"success": True, "orders_placed": 0}
         ), patch(
+            # _run_cycle merges saved strategy settings into state each cycle;
+            # pin to no overrides so the test's sl_pct/tp_pct are authoritative
+            # regardless of whether a DB (with default sl_pct=0.5) is present.
+            "src.nadobro.services.settings_service.get_strategy_settings",
+            return_value=("mainnet", {}),
+        ), patch(
             "src.nadobro.models.database.get_active_strategy_session", return_value=sess
         ), patch(
             "src.nadobro.services.live_session.get_live_session_snapshot", return_value=snapshot
