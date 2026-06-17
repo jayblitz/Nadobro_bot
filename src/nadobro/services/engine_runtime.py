@@ -368,7 +368,18 @@ def map_strategy_config(
     """
     mid = _dec(mid)
     notional = _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0))
-    spread_frac = Decimal(str(_f(settings, "spread_bp", 5.0))) / Decimal(10000)
+    # The quoting spread is USER-SET, not one hardcoded value for everyone. Read
+    # the strategy's own spread field (the frontend writes rgrid_spread_bp /
+    # dgrid_spread_bp), falling back to the generic spread_bp. Previously this
+    # only read spread_bp, so rgrid/dgrid users' spread settings were ignored
+    # and the grid quoted at the default step regardless.
+    if strategy == "rgrid":
+        _spread_bp = _f(settings, "rgrid_spread_bp", _f(settings, "spread_bp", 10.0))
+    elif strategy == "dgrid":
+        _spread_bp = _f(settings, "dgrid_spread_bp", _f(settings, "spread_bp", 8.0))
+    else:
+        _spread_bp = _f(settings, "spread_bp", 5.0)
+    spread_frac = Decimal(str(_spread_bp)) / Decimal(10000)
     levels = max(1, int(_f(settings, "levels", 2)))
     tp = Decimal(str(_f(settings, "tp_pct", 0.6))) / Decimal(100)
     sl = Decimal(str(_f(settings, "sl_pct", 0.5))) / Decimal(100)

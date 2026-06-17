@@ -440,7 +440,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
             "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
             "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
-            "dgrid_min_spread_bp", "dgrid_max_spread_bp",
+            "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
             "auto_close_on_maintenance", "is_long_bias",
             # Mid Mode accepts directional_bias as a continuous float in [-1, +1].
@@ -499,6 +499,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "rgrid_discretion": (0.01, 0.5),
             "dgrid_trend_on_variance_ratio": (1.0, 5.0),
             "dgrid_range_on_variance_ratio": (0.1, 2.0),
+            "dgrid_spread_bp": (0.1, 200.0),
             "dgrid_min_spread_bp": (0.0, 50.0),
             "dgrid_max_spread_bp": (1.0, 200.0),
             "dgrid_short_window_points": (2, 50),
@@ -594,7 +595,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
             "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
             "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
-            "dgrid_min_spread_bp", "dgrid_max_spread_bp",
+            "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
             "directional_bias",
             # Delta Neutral (engine v2) custom inputs.
@@ -644,6 +645,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "rgrid_discretion": "Enter RGRID discretion \\(example: `0\\.06`\\)",
             "dgrid_trend_on_variance_ratio": "Enter DGRID trend switch variance ratio \\(example: `1\\.25`\\)",
             "dgrid_range_on_variance_ratio": "Enter DGRID range switch variance ratio \\(example: `1\\.15`\\)",
+            "dgrid_spread_bp": "Enter DGRID spread in bps \\(example: `8`\\)",
             "dgrid_min_spread_bp": "Enter DGRID minimum spread in bps \\(example: `2`\\)",
             "dgrid_max_spread_bp": "Enter DGRID maximum spread in bps \\(example: `50`\\)",
             "dgrid_short_window_points": "Enter DGRID short volatility window points \\(example: `4`\\)",
@@ -898,12 +900,10 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
     elif strategy == "dgrid":
         trend_on = float(conf.get("dgrid_trend_on_variance_ratio", 1.25))
         range_on = float(conf.get("dgrid_range_on_variance_ratio", 1.15))
-        min_spread = float(conf.get("dgrid_min_spread_bp", 2.0))
-        max_spread = float(conf.get("dgrid_max_spread_bp", 50.0))
+        dgrid_spread = float(conf.get("dgrid_spread_bp", conf.get("spread_bp", 8.0)))
         extra = (
             f"Auto phase: *GRID ⇄ RGRID* \\| Variance: *{escape_md(f'{range_on:.2f} / {trend_on:.2f}')}*\n"
-            f"Auto spread: *{escape_md(f'{min_spread:.1f} - {max_spread:.1f} bp')}* \\| "
-            "Reset: *auto ~4x spread*\n\n"
+            f"Spread: *{escape_md(f'{dgrid_spread:.1f} bp')}*\n\n"
         )
     elif strategy == "grid":
         threshold = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
@@ -1385,12 +1385,13 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Range 1.05", callback_data="strategy:set:dgrid:dgrid_range_on_variance_ratio:1.05"),
                 ],
                 [
-                    InlineKeyboardButton("Max 25bp", callback_data="strategy:set:dgrid:dgrid_max_spread_bp:25"),
-                    InlineKeyboardButton("Max 50bp", callback_data="strategy:set:dgrid:dgrid_max_spread_bp:50"),
+                    InlineKeyboardButton("Spread 2bp", callback_data="strategy:set:dgrid:dgrid_spread_bp:2"),
+                    InlineKeyboardButton("Spread 8bp", callback_data="strategy:set:dgrid:dgrid_spread_bp:8"),
+                    InlineKeyboardButton("Spread 15bp", callback_data="strategy:set:dgrid:dgrid_spread_bp:15"),
                 ],
                 [
                     InlineKeyboardButton("Custom Trend", callback_data="strategy:input:dgrid:dgrid_trend_on_variance_ratio"),
-                    InlineKeyboardButton("Custom Max", callback_data="strategy:input:dgrid:dgrid_max_spread_bp"),
+                    InlineKeyboardButton("✍️ Custom Spread", callback_data="strategy:input:dgrid:dgrid_spread_bp"),
                 ],
             ]
         else:

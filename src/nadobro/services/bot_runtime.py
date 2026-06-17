@@ -625,8 +625,8 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
                     "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
                     "rgrid_discretion", "rgrid_reset_threshold_pct",
                     "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
-                    "dgrid_min_spread_bp", "dgrid_max_spread_bp", "dgrid_short_window_points",
-                    "dgrid_long_window_points",
+                    "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
+                    "dgrid_short_window_points", "dgrid_long_window_points",
                     "target_volume_usd", "funding_entry_mode", "fixed_margin_usd", "vol_direction",
                     # Delta Neutral (engine v2) settings.
                     "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds",
@@ -1140,7 +1140,7 @@ def start_user_bot(
             f"| Target volume ${target_volume:,.0f} | SL {state.get('sl_pct')}%",
         )
     if strategy in ("grid", "rgrid", "dgrid", "mid"):
-        spread_key = "rgrid_spread_bp" if strategy == "rgrid" else "spread_bp"
+        spread_key = {"rgrid": "rgrid_spread_bp", "dgrid": "dgrid_spread_bp"}.get(strategy, "spread_bp")
         margin_usd = float(state.get("notional_usd") or 0.0)
         cycle_notional_cfg = float(state.get("cycle_notional_usd") or margin_usd or 0.0)
         cycle_notional = max(cycle_notional_cfg, margin_usd)
