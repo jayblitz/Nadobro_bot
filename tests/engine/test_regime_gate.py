@@ -363,6 +363,49 @@ def expansion_candles(n: int = 80, base: float = 100.0) -> list[dict]:
     return out
 
 
+def _rgrid_configs(candle_provider):
+    return {
+        "trading_pair": PAIR,
+        "start_price": Decimal("100"),
+        "end_price": Decimal("101"),
+        "limit_price": Decimal(0),
+        "total_amount_quote": Decimal(100),
+        "min_spread_between_orders": Decimal("0.002"),
+        "max_open_orders": 3,
+        "regime_gate_enabled": True,
+        "candle_provider": candle_provider,
+    }
+
+
+def test_reverse_grid_arms_in_downtrend_pauses_in_uptrend():
+    # A short reverse grid exists to trade DOWNtrends: the gate must let it arm
+    # there (GATE_ADVERSE_TREND='trending_up'), but still sit out an UPtrend.
+    from src.nadobro.engine.controllers.reverse_grid import ReverseGridController
+
+    async def body():
+        # Downtrend -> arms.
+        adapter = MockNadoAdapter(mid=Decimal("100"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = ReverseGridController(
+            user_id=1, orchestrator=orch, adapter=adapter, inventory=InventoryRepository(),
+            configs=_rgrid_configs(lambda _p: trending_candles(step=-0.4)), controller_id="RG",
+        )
+        await orch.spawn_controller(c)
+        assert len(c.my_executors()) == 1, f"rgrid must trade a downtrend, gate={c.gate_reason}"
+
+        # Uptrend -> sits out.
+        orch2 = ExecutorOrchestrator()
+        c2 = ReverseGridController(
+            user_id=1, orchestrator=orch2, adapter=adapter, inventory=InventoryRepository(),
+            configs=_rgrid_configs(lambda _p: trending_candles(step=0.4)), controller_id="RG2",
+        )
+        await orch2.spawn_controller(c2)
+        assert c2.my_executors() == [], "rgrid must pause in an uptrend"
+        assert c2.gate_reason == "trending_up"
+
+    asyncio.run(body())
+
+
 def test_dgrid_sits_out_expansion_chaos():
     # Expansion (price accepted nowhere) is NOT a tradeable trend: the third
     # state — sit out, no re-arm, retry next tick. (A clean trend, by

@@ -96,7 +96,13 @@ class Controller(abc.ABC):
     # pause is "stop digging", never "flatten". The gate transition is
     # surfaced via ``consume_gate_event`` so the runtime can notify the user
     # exactly once per flip.
-    async def evaluate_quote_gate(self, trading_pair: str, *, pause_on_trend: bool = True) -> str:
+    async def evaluate_quote_gate(
+        self,
+        trading_pair: str,
+        *,
+        pause_on_trend: bool = True,
+        adverse_trend: Optional[str] = None,
+    ) -> str:
         """Refresh ``self.gate_verdict`` from the regime-gate routine.
 
         Requires ``regime_gate_enabled`` in configs and a ``candle_provider``;
@@ -106,6 +112,12 @@ class Controller(abc.ABC):
         ``pause_on_trend=False`` (dgrid): the controller's own regime
         selector TRADES trends (ReverseGrid), so a trend verdict is treated
         as QUOTE and only breakout/expansion (no acceptance anywhere) pauses.
+
+        ``adverse_trend`` (e.g. ``"trending_up"`` for a short reverse grid):
+        pause ONLY on that one trend direction; the opposite trend — the regime
+        this directional grid exists to trade — is treated as QUOTE. A short
+        reverse grid must engage a downtrend, not sit it out. Breakout /
+        expansion still pause regardless.
 
         Transition discipline is asymmetric: a PAUSE commits IMMEDIATELY
         (protection first), but resuming to QUOTE requires
@@ -139,6 +151,9 @@ class Controller(abc.ABC):
         new_reason = str(result.get("reason") or "")
         self.gate_atr_pct = float(str(result.get("atr_pct") or 0.0))
         if not pause_on_trend and new_reason in ("trending_up", "trending_down"):
+            new_verdict, new_reason = "QUOTE", ""
+        elif adverse_trend and new_reason in ("trending_up", "trending_down") and new_reason != adverse_trend:
+            # Directional grid: the favorable trend is its purpose, not a hazard.
             new_verdict, new_reason = "QUOTE", ""
 
         if new_verdict == "PAUSE":

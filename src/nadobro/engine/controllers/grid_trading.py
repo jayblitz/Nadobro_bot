@@ -34,6 +34,10 @@ def build_grid_config(configs: dict, side: TradeType) -> GridExecutorConfig:
 class GridController(Controller):
     SIDE = TradeType.BUY
     EXECUTOR_CLS = GridExecutor
+    # When set, the gate pauses ONLY on this trend direction (the favorable
+    # trend — the one this directional grid exists to trade — is allowed).
+    # ``None`` keeps the conservative default: pause on either trend.
+    GATE_ADVERSE_TREND: Optional[str] = None
 
     def __init__(self, **kwargs: object) -> None:
         super().__init__(name=kwargs.pop("name", "grid_trading"), **kwargs)  # type: ignore[arg-type]
@@ -43,7 +47,9 @@ class GridController(Controller):
         # Regime gate: never ARM a grid into a trending/breakout market —
         # the post-mortem failure was "reset re-armed just in time for the
         # next leg down". A paused start defers the spawn to a later tick.
-        await self.evaluate_quote_gate(str(self.configs.get("trading_pair")))
+        await self.evaluate_quote_gate(
+            str(self.configs.get("trading_pair")), adverse_trend=self.GATE_ADVERSE_TREND
+        )
         if self.gate_paused:
             return
         await self._spawn()
@@ -63,7 +69,7 @@ class GridController(Controller):
 
     async def on_tick(self) -> None:
         pair = str(self.configs.get("trading_pair"))
-        await self.evaluate_quote_gate(pair)
+        await self.evaluate_quote_gate(pair, adverse_trend=self.GATE_ADVERSE_TREND)
         active = self.my_executors()
         if not active and self._executor_id is None and not self.gate_paused:
             # Spawn was gate-deferred at on_start; the regime is now ranging.
