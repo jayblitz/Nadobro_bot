@@ -75,6 +75,10 @@ class DynamicGridController(Controller):
         self._phase_confirm_streak: int = 0
         self._grid_anchor_mid: Optional[Decimal] = None
         self._dgrid_event: Optional[Dict[str, str]] = None
+        # Per-tick diagnostics surfaced to the services log so a "no orders"
+        # run is pinpointable (candle feed vs gate pause vs spawn refusal).
+        self._last_candle_count: int = 0
+        self._last_mid: Optional[Decimal] = None
 
     async def on_start(self) -> None:
         return None
@@ -128,6 +132,7 @@ class DynamicGridController(Controller):
         """Refresh telemetry from the variance-ratio routine and return the
         desired phase (holds the current phase on insufficient history)."""
         candles = await self._candles()
+        self._last_candle_count = len(candles)
         if not candles:
             # #1 reason a started dgrid "does nothing": no candle feed (cold
             # cache / gateway throttle / provider never injected). Make it loud.
@@ -180,6 +185,7 @@ class DynamicGridController(Controller):
 
         desired = await self._classify()
         mid = await self._mid()
+        self._last_mid = mid
         self._update_realized_move(mid)
 
         active = self.my_executors(active_only=True)

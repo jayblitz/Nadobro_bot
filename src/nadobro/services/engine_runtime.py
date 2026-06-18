@@ -1011,20 +1011,38 @@ async def run_engine_cycle(
     # Persist DN live progress so /status (main process) can read it from the
     # worker that runs the cycle.
     _persist_dn_progress(telegram_id, network, strategy)
-    # NO_ORDERS_AUDIT-FIX-DIAG: surface executor count after each tick too,
-    # bucketed at INFO every ~10 ticks. Comment out if too chatty.
+    # NO_ORDERS_AUDIT-FIX-DIAG: capture the decisive "why no orders" facts for
+    # the grid family (gate verdict/reason, candle count, mid, active executors,
+    # last spawn-refusal reason) so bot_runtime can log them in the SERVICES
+    # stream — the controllers log these but under engine.controllers, which is
+    # easy to miss. Surfaced as result["engine_diag"]; cheap, best-effort.
+    engine_diag: Dict[str, Any] = {}
     try:
         orch = RUNTIME._orchestrators.get((telegram_id, network, strategy))  # noqa: SLF001
         controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
-        if orch is not None and controller is not None:
-            active_n = len(orch.list(controller.id, active_only=True))
+        if controller is not None:
+            active_n = len(orch.list(controller.id, active_only=True)) if orch is not None else None
+            spawn_reason = orch.last_spawn_reason(controller.id) if orch is not None else None
+            engine_diag = {
+                "active_executors": active_n,
+                "gate_verdict": getattr(controller, "gate_verdict", None),
+                "gate_reason": getattr(controller, "gate_reason", None) or "",
+                "gate_paused": bool(getattr(controller, "gate_paused", False)),
+                "candle_count": int(getattr(controller, "_last_candle_count", 0) or 0),
+                "mid": str(getattr(controller, "_last_mid", None)),
+                "phase": getattr(controller, "current_phase", None),
+                "variance_ratio": float(getattr(controller, "variance_ratio", 0.0) or 0.0),
+                "spawn_refused": spawn_reason,
+            }
             logger.debug(
                 "engine_ticked user=%s strategy=%s active_executors=%s",
                 telegram_id, strategy, active_n,
             )
     except Exception:  # noqa: BLE001  # policy: degrade-ok(diagnostics-only block)
-        pass
+        engine_diag = {}
     result: Dict[str, Any] = {"success": True, "action": "engine_ticked", "strategy": strategy}
+    if engine_diag:
+        result["engine_diag"] = engine_diag
     if gate_event:
         result["gate_event"] = gate_event
     if dn_events:
