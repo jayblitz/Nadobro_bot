@@ -178,10 +178,11 @@ class DynamicGridController(Controller):
 
     async def on_tick(self) -> None:
         pair = self.trading_pair
-        # dgrid's regime selector TRADES trends (ReverseGrid on a downtrend) —
-        # the gate must not pre-empt it. Only breakout / expansion (price
-        # accepted nowhere) makes dgrid sit out.
-        await self.evaluate_quote_gate(pair, pause_on_trend=False)
+        # dgrid's variance-ratio selector chooses GRID vs RGRID for EVERY
+        # regime — trend, range, AND breakout/expansion — so the gate must
+        # never sit it out. Keep the gate call only for ATR/telemetry; both
+        # pause flags off => dgrid always quotes.
+        await self.evaluate_quote_gate(pair, pause_on_trend=False, pause_on_breakout=False)
 
         desired = await self._classify()
         mid = await self._mid()

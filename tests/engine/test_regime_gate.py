@@ -412,20 +412,21 @@ def test_map_strategy_config_disables_gate_for_rgrid():
     assert float(g.get("regime_gate_enabled", 0.0)) == 1.0
 
 
-def test_dgrid_sits_out_expansion_chaos():
-    # Expansion (price accepted nowhere) is NOT a tradeable trend: the third
-    # state — sit out, no re-arm, retry next tick. (A clean trend, by
-    # contrast, spawns a ReverseGrid — see the test above.)
+def test_dgrid_trades_through_breakout_expansion():
+    # dgrid trades EVERY regime via its own GRID<->RGRID selector, so a
+    # breakout/expansion must NOT sit it out (pause_on_breakout=False). It quotes
+    # rather than going flat — the no-orders-on-breakout fix.
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
         box = {"data": expansion_candles()}
         orch, c = _dgrid(adapter, box)
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)
-        assert c.my_executors() == [], (
-            f"expected sit-out, gate={c.gate_verdict}/{c.gate_reason}"
+        assert len(c.my_executors()) == 1, (
+            f"dgrid must quote through breakout/expansion, gate={c.gate_verdict}/{c.gate_reason}"
         )
-        assert c.gate_reason == "expansion"
+        # The gate verdict is forced to QUOTE for dgrid (never paused).
+        assert c.gate_paused is False
 
     asyncio.run(body())
 

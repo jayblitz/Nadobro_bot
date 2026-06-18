@@ -115,6 +115,7 @@ class Controller(abc.ABC):
         *,
         pause_on_trend: bool = True,
         adverse_trend: Optional[str] = None,
+        pause_on_breakout: bool = True,
     ) -> str:
         """Refresh ``self.gate_verdict`` from the regime-gate routine.
 
@@ -131,6 +132,12 @@ class Controller(abc.ABC):
         this directional grid exists to trade — is treated as QUOTE. A short
         reverse grid must engage a downtrend, not sit it out. Breakout /
         expansion still pause regardless.
+
+        ``pause_on_breakout=False`` (dgrid): the controller's variance-ratio
+        classifier already chooses GRID vs RGRID per regime, so a breakout /
+        expansion is a tradeable directional move for it, not a sit-out — treat
+        those verdicts as QUOTE too. With both pause flags off, dgrid quotes in
+        every regime (it is never gated out).
 
         Transition discipline is asymmetric: a PAUSE commits IMMEDIATELY
         (protection first), but resuming to QUOTE requires
@@ -167,6 +174,10 @@ class Controller(abc.ABC):
             new_verdict, new_reason = "QUOTE", ""
         elif adverse_trend and new_reason in ("trending_up", "trending_down") and new_reason != adverse_trend:
             # Directional grid: the favorable trend is its purpose, not a hazard.
+            new_verdict, new_reason = "QUOTE", ""
+        if not pause_on_breakout and new_reason in ("breakout", "expansion"):
+            # dgrid trades breakouts/expansions via its own GRID<->RGRID
+            # selector — do not sit it out.
             new_verdict, new_reason = "QUOTE", ""
 
         if new_verdict == "PAUSE":
