@@ -20,7 +20,11 @@ CREATE TABLE IF NOT EXISTS engine_executors (
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   terminated_at    TIMESTAMPTZ
 );
+-- Per-RUN tag: controller_id is stable across runs, so order/executor counts
+-- must be scoped by the run's session id to avoid bleeding across runs.
+ALTER TABLE engine_executors ADD COLUMN IF NOT EXISTS strategy_session_id INT;
 CREATE INDEX IF NOT EXISTS ix_engine_executors_user_ctrl ON engine_executors(user_id, controller_id);
+CREATE INDEX IF NOT EXISTS ix_engine_executors_session ON engine_executors(controller_id, strategy_session_id);
 CREATE INDEX IF NOT EXISTS ix_engine_executors_pair ON engine_executors(trading_pair);
 CREATE INDEX IF NOT EXISTS ix_engine_executors_state ON engine_executors(state);
 

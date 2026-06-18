@@ -116,9 +116,11 @@ class StatusRenderTests(unittest.TestCase):
             product="BTC", open_orders_count=0, live_snapshot=snap,
         )
         text = "\n".join(mm_dashboard.render_status_lines(s))
-        self.assertIn("Unrealized PnL: $-30.00", text)
-        self.assertIn("Session PnL (realized+unrealized): $-32.00", text)
+        # PnL leads with the per-run realized+unrealized session PnL, then a
+        # realized/unrealized breakdown.
+        self.assertIn("PnL (realized+unrealized): $-32.00", text)
         self.assertIn("-32.00%", text)
+        self.assertIn("realized $-2.00 | unrealized $-30.00", text)
         self.assertIn("Position: LONG", text)
 
 

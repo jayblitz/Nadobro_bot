@@ -283,3 +283,29 @@ def test_spread_is_per_strategy_user_set():
         mid, product="BTC-PERP",
     )
     assert g["min_spread_between_orders"] == Decimal("3.0") / Decimal(10000)
+
+
+def test_sl_tp_is_per_strategy_user_set():
+    """rgrid/dgrid SL/TP come from rgrid_stop_loss_pct / rgrid_take_profit_pct
+    (the fields the UI writes), not the generic sl_pct/tp_pct default."""
+    from decimal import Decimal
+    from src.nadobro.services.engine_runtime import map_strategy_config
+    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+
+    # resolver
+    assert effective_sl_tp_pct("dgrid", {"rgrid_stop_loss_pct": 10.0, "rgrid_take_profit_pct": 50.0,
+                                         "sl_pct": 0.8, "tp_pct": 1.2}) == (10.0, 50.0)
+    assert effective_sl_tp_pct("rgrid", {"sl_pct": 0.8, "tp_pct": 1.2}) == (0.8, 1.2)  # fallback
+    assert effective_sl_tp_pct("grid", {"sl_pct": 3.0, "tp_pct": 9.0,
+                                        "rgrid_stop_loss_pct": 99.0}) == (3.0, 9.0)  # grid ignores rgrid_*
+
+    # barrier honors the dgrid SL/TP the user set (10% / 50%).
+    cfg = map_strategy_config(
+        "dgrid",
+        {"notional_usd": 100.0, "levels": 4, "rgrid_stop_loss_pct": 10.0,
+         "rgrid_take_profit_pct": 50.0, "sl_pct": 0.8, "tp_pct": 1.2},
+        Decimal("100"), product="BTC-PERP",
+    )
+    tb = cfg["triple_barrier_config"]
+    assert tb.stop_loss == Decimal("10.0") / Decimal(100)
+    assert tb.take_profit == Decimal("50.0") / Decimal(100)

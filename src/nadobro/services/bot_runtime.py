@@ -1421,12 +1421,16 @@ def get_user_bot_status(telegram_id: int) -> dict:
             from src.nadobro.services.engine_runtime import deterministic_controller_id
             from src.nadobro.services.engine_persistence import (
                 get_controller_progress, count_engine_orders,
+                resolve_running_session_id,
             )
 
             _cid = deterministic_controller_id(_strat_lc, telegram_id, network)
             # Real order counts from engine_executors — the engine cycle result
             # carries none, so the legacy order_observability stays 0 (Bug 3).
-            engine_order_counts = count_engine_orders(_cid)
+            # Scope to THIS run's session so prior runs of the same strategy
+            # don't inflate the count (controller_id is stable across runs).
+            _run_session_id = resolve_running_session_id(_strat_lc, telegram_id, network)
+            engine_order_counts = count_engine_orders(_cid, _run_session_id)
             if _strat_lc == "dn":
                 dn_progress = get_controller_progress(_cid) or {}
         except Exception:  # policy: degrade-ok(status display)
@@ -2084,8 +2088,11 @@ async def _evaluate_session_pnl_rail(
     ``% price move``, and PnL includes the open position's unrealized PnL so an
     open drawdown actually trips the stop.
     """
-    sl_pct = float(state.get("sl_pct") or 0.0)
-    tp_pct = float(state.get("tp_pct") or 0.0)
+    # Honor the per-strategy SL/TP (rgrid/dgrid store them under rgrid_* keys);
+    # previously this read sl_pct/tp_pct only, so a custom rgrid/dgrid SL was
+    # ignored and the rail used the 0.8 default.
+    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+    sl_pct, tp_pct = effective_sl_tp_pct(strategy, state)
     if sl_pct <= 0 and tp_pct <= 0:
         return None
 
