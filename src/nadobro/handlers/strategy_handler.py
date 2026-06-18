@@ -1874,6 +1874,32 @@ def _build_strategy_preview_text(
     session_fees = float(bot_status.get("session_fees_usd") or 0.0) if _stats_owner else 0.0
     session_pnl = float(bot_status.get("session_analytics_pnl_usd") or 0.0) if _stats_owner else 0.0
 
+    # Route the MM dashboards through the SAME venue-authoritative, per-run
+    # source as /status (get_live_session_snapshot) for THIS strategy's latest
+    # run. PnL is per-SESSION = realized (this run, gross) + current open uPnL,
+    # updated in real time — not a per-position figure. Falls back to the
+    # bot_status values above when no session exists or the read fails.
+    _snapshot_applied = False
+    if strategy_id in ("grid", "rgrid", "dgrid", "mid"):
+        try:
+            from src.nadobro.models.database import get_strategy_sessions_by_user
+            from src.nadobro.services.live_session import get_live_session_snapshot
+
+            _runs = get_strategy_sessions_by_user(
+                telegram_id, strategy=strategy_id, network=network, limit=1
+            )
+            if _runs:
+                _snap = get_live_session_snapshot(
+                    telegram_id, network, _runs[0], state=conf, client=client
+                )
+                session_volume = float(_snap.get("volume") or 0.0)
+                session_fees = float(_snap.get("fees") or 0.0)
+                trades_count = int(_snap.get("fills") or 0)
+                session_pnl = float(_snap.get("session_pnl") or 0.0)
+                _snapshot_applied = True
+        except Exception:  # pragma: no cover - dashboard must always render
+            logger.debug("live-session snapshot for dashboard failed", exc_info=True)
+
     if strategy_id == "vol":
         # Volume is spot-only as of 2026-05. "Session margin" doubles as the
         # per-cycle notional; the bot rotates that amount through one
@@ -1944,7 +1970,7 @@ def _build_strategy_preview_text(
         variance = float(bot_status.get("dgrid_variance_ratio") or 0.0)
         realized_move = float(bot_status.get("dgrid_realized_move_bp") or 0.0)
         reset_bp = float(bot_status.get("dgrid_reset_threshold_bp") or 0.0)
-        if _stats_owner:
+        if _stats_owner and not _snapshot_applied:
             session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
             session_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
         warning = ""
@@ -1993,7 +2019,7 @@ def _build_strategy_preview_text(
         max_spread = float(conf.get("max_spread_bp", 20.0))
         reset_threshold = float(conf.get("grid_reset_threshold_pct", 0.8))
         reset_timeout = int(conf.get("grid_reset_timeout_seconds", 120))
-        if _stats_owner:
+        if _stats_owner and not _snapshot_applied:
             session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
         warning = ""
         if not wallet_ready:
@@ -2045,8 +2071,9 @@ def _build_strategy_preview_text(
         discretion = float(conf.get("rgrid_discretion", conf.get("grid_discretion", 0.06)))
         reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 1.0)))
         reset_timeout = int(conf.get("rgrid_reset_timeout_seconds", conf.get("grid_reset_timeout_seconds", 120)))
-        session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
-        session_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
+        if _stats_owner and not _snapshot_applied:
+            session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
+            session_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
         warning = ""
         if not wallet_ready:
             warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
