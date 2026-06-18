@@ -211,3 +211,21 @@ def test_flip_deferred_while_gate_paused():
         assert len(active) == 1 and isinstance(active[0], ReverseGridExecutor)
 
     asyncio.run(body())
+
+
+def test_tick_records_diagnostics_for_services_log():
+    # The per-tick diagnostics (candle count + mid) must be captured so the
+    # services-stream engine_diag line can pinpoint a no-orders run.
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        cfg = dict(CFG, candle_provider=lambda p: _down())
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=InventoryRepository(), configs=cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        assert c._last_candle_count == len(_down())
+        assert c._last_mid == Decimal(100)
+        assert c.current_phase in ("grid", "rgrid")
+
+    asyncio.run(body())

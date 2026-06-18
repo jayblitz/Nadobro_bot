@@ -2631,6 +2631,22 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 strategy, prev_runs + 1, telegram_id, reason,
             )
 
+    # NO_ORDERS_AUDIT-FIX-DIAG: one services-stream line per grid-family cycle
+    # carrying the decisive "why no orders" facts (gate verdict/reason, candle
+    # feed, mid, active executors, spawn-refusal reason). The controllers log
+    # these under engine.controllers; surface them here so a silent no-orders
+    # run is pinpointable from the same log stream as the cycle messages.
+    _diag = result.get("engine_diag") if isinstance(result, dict) else None
+    if _diag:
+        logger.info(
+            "engine_diag user=%s strategy=%s active=%s gate=%s/%s candles=%s mid=%s "
+            "phase=%s vr=%.2f spawn_refused=%s",
+            telegram_id, strategy, _diag.get("active_executors"),
+            _diag.get("gate_verdict"), _diag.get("gate_reason") or "-",
+            _diag.get("candle_count"), _diag.get("mid"), _diag.get("phase"),
+            float(_diag.get("variance_ratio") or 0.0), _diag.get("spawn_refused") or "-",
+        )
+
     # Increment strategy session metrics from cycle result
     session_id = state.get("strategy_session_id")
     if session_id and result.get("success", True):
