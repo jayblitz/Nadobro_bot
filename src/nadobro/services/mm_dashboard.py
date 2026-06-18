@@ -444,21 +444,23 @@ def render_status_lines(snapshot: dict) -> list[str]:
                 if snapshot['session_target_usd'] > 0 else ""
             )
         ),
-        (
-            f"PnL: cumulative ${snapshot['cumulative_pnl_usd']:+,.2f}"
-            + (f", drawdown {snapshot['drawdown_pct']:.2f}%" if snapshot['drawdown_pct'] > 0 else "")
-            + f", last cycle ${snapshot['last_cycle_pnl_usd']:+,.2f}"
-        ),
     ]
-    # Authoritative live figures from Nado (match the Nado UI). Only shown when a
-    # live snapshot was supplied so legacy/state-only callers are unaffected.
+    # PnL is per-RUN and realized+unrealized when a live snapshot is present
+    # (matches the strategy dashboards and the Nado UI). Lead with the session
+    # PnL, then break it down; fall back to the realized-only cumulative line for
+    # legacy/state-only callers with no snapshot.
     if snapshot.get("has_live_snapshot"):
-        lines.append(f"Unrealized PnL: ${snapshot['unrealized_pnl_usd']:+,.2f}")
         margin = snapshot.get("session_margin_usd") or 0.0
         margin_note = f" of ${margin:,.2f} margin" if margin > 0 else ""
         lines.append(
-            f"Session PnL (realized+unrealized): ${snapshot['session_pnl_usd']:+,.2f} "
+            f"PnL (realized+unrealized): ${snapshot['session_pnl_usd']:+,.2f} "
             f"({snapshot['session_pnl_pct']:+.2f}%{margin_note})"
+        )
+        lines.append(
+            f"  realized ${snapshot['cumulative_pnl_usd']:+,.2f} | "
+            f"unrealized ${snapshot['unrealized_pnl_usd']:+,.2f}"
+            + (f" | last cycle ${snapshot['last_cycle_pnl_usd']:+,.2f}"
+               if snapshot['last_cycle_pnl_usd'] else "")
         )
         if snapshot.get("has_position"):
             lines.append(
@@ -466,6 +468,12 @@ def render_status_lines(snapshot: dict) -> list[str]:
                 f"@ ${snapshot['entry_price']:,.4f}"
                 + (f" / liq ${snapshot['liq_price']:,.4f}" if snapshot.get("liq_price") else "")
             )
+    else:
+        lines.append(
+            f"PnL: cumulative ${snapshot['cumulative_pnl_usd']:+,.2f}"
+            + (f", drawdown {snapshot['drawdown_pct']:.2f}%" if snapshot['drawdown_pct'] > 0 else "")
+            + f", last cycle ${snapshot['last_cycle_pnl_usd']:+,.2f}"
+        )
     lines += [
         (
             f"Quotes: {snapshot['open_orders_count']} open / "
