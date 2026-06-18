@@ -1197,6 +1197,15 @@ def set_process_worker_mode(enabled: bool) -> None:
     _process_worker_mode = bool(enabled)
 
 
+def is_process_worker_mode() -> bool:
+    """True inside a strategy-cycle worker process (set by run_cycle_job_sync).
+    The engine build gate uses this to let the cycle-running worker ADOPT
+    (build) its own controller when it has none locally — even if another
+    (dead) process left a non-terminated executor row — without the main
+    fallback double-building."""
+    return _process_worker_mode
+
+
 def run_cycle_job_sync(payload: dict) -> dict:
     telegram_id = int(payload.get("telegram_id"))
     network = str(payload.get("network"))

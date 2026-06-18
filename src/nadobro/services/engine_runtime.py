@@ -152,6 +152,13 @@ class EngineRuntime:
         session_id = resolve_running_session_id(strategy, user_id, network)
         return _remote_active(strategy, user_id, network, session_id)
 
+    def has_local_active(self, user_id: int, network: str, strategy: str) -> bool:
+        """True only when THIS process holds a live (active) controller for the
+        strategy — the precondition for ``tick`` to do anything. Distinct from
+        ``is_running`` (which also trusts cross-process engine_executors rows)."""
+        c = self._controllers.get(self._key(user_id, network, strategy))
+        return c is not None and c.is_active
+
     def needs_recovery(self, user_id: int, network: str, strategy: str) -> bool:
         """BUG-TICK-1 recovery: True when a locally-registered controller has
         entered the terminal FAILED state. Such a controller will never tick
@@ -263,6 +270,25 @@ class EngineRuntime:
                 self._executor_store.save(ex)  # type: ignore[attr-defined]
             except Exception:  # noqa: BLE001 - persistence must not break a tick
                 logger.warning("executor persistence failed for %s", ex.id, exc_info=True)
+
+
+def _should_build_controller(
+    *, needs_recovery: bool, has_local_active: bool, worker_mode: bool, is_running: bool
+) -> bool:
+    """Decide whether THIS process must (re)build the controller before ticking.
+
+    - A locally-FAILED controller always rebuilds (recovery).
+    - With a live LOCAL controller, never rebuild (just tick).
+    - With NO local controller: the cycle-running worker ADOPTS (builds) so a
+      crashed/recycled worker doesn't no-op forever against a stale remote row;
+      a non-worker (e.g. the scheduler's local fallback) only builds when no
+      live owner exists (``not is_running``), so it never double-builds.
+    """
+    if needs_recovery:
+        return True
+    if has_local_active:
+        return False
+    return worker_mode or not is_running
 
 
 def _remote_active(
@@ -939,7 +965,25 @@ async def run_engine_cycle(
             "rebuilding (BUG-TICK-1 recovery)",
             telegram_id, network, strategy,
         )
-    if needs_recovery or not RUNTIME.is_running(telegram_id, network, strategy):
+    # Build decision. RUNTIME.tick only works on a LOCAL controller, so the
+    # process running this cycle must own one. A worker that runs cycles ADOPTS
+    # (builds) when it has no local active controller — even if a dead process
+    # left a non-terminated executor row making is_running() True — otherwise a
+    # crashed/recycled worker would no-op forever. The main/non-worker fallback
+    # still defers to a live owner (is_running True) so it never double-builds.
+    from src.nadobro.services.bot_runtime import is_process_worker_mode
+    _has_local = RUNTIME.has_local_active(telegram_id, network, strategy)
+    _worker_mode = is_process_worker_mode()
+    _should_build = _should_build_controller(
+        needs_recovery=needs_recovery,
+        has_local_active=_has_local,
+        worker_mode=_worker_mode,
+        # is_running is only needed for the non-worker defer case; skip the DB
+        # round-trip when the worker will adopt anyway.
+        is_running=(False if (_worker_mode and not _has_local)
+                    else RUNTIME.is_running(telegram_id, network, strategy)),
+    )
+    if _should_build:
         meta = build_product_meta_from_catalog(client)
         # ensure the traded pair has metadata (fallback to a permissive default)
         if product not in meta:
