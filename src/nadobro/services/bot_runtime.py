@@ -1040,8 +1040,43 @@ def start_user_bot(
         from src.nadobro.services import engine_runtime as _er
 
         if _er.engine_v2_enabled() and strategy in _er.ENGINE_MAPPED_STRATEGIES:
-            user_client = get_user_nado_client(telegram_id, network)
-            if user_client is None:
+            from src.nadobro.services.runtime_supervisor import (
+                is_multiprocess_enabled as _is_mp,
+                strategy_worker_group as _swg,
+                submit_cycle_job as _submit_job,
+            )
+            # MULTIPROCESS NO-ORDERS FIX: scheduled cycles run in the worker
+            # pool, so the controller must be BUILT there. The old in-loop
+            # kickoff built it in the MAIN process; the worker then saw
+            # is_running() True (cross-process via engine_executors) and
+            # RUNTIME.tick() no-op'd every cycle — the strategy never placed an
+            # order. Dispatch the kickoff through the SAME pool as the scheduler
+            # (a follow-up cycle for spawn-on-tick strategies so they quote
+            # within seconds rather than after one interval).
+            _mp_routed = bool(_is_mp() and _strategy_use_multiprocess(strategy))
+            if _mp_routed:
+                _wg = _swg(strategy)
+                _payload = {"telegram_id": telegram_id, "network": network,
+                            "strategy": strategy, "worker_group": _wg}
+                _n_jobs = 2 if strategy in _SPAWN_ON_TICK_STRATEGIES else 1
+                _mp_ok = True
+                _mp_err = None
+                for _ in range(_n_jobs):
+                    _mp_ok, _mp_r, _mp_err = _run_engine_start_sync(
+                        lambda: _submit_job(dict(_payload)),
+                        user_id=telegram_id, network=network, strategy=strategy,
+                    )
+                    if not _mp_ok:
+                        break
+                logger.info(
+                    "eager engine kickoff routed to worker pool user=%s strategy=%s "
+                    "group=%s jobs=%s ok=%s err=%s",
+                    telegram_id, strategy, _wg, _n_jobs, _mp_ok, _mp_err,
+                )
+            user_client = None if _mp_routed else get_user_nado_client(telegram_id, network)
+            if _mp_routed:
+                pass  # controller built + ticked in the worker pool above
+            elif user_client is None:
                 logger.warning(
                     "eager engine start: no Nado client for user=%s — skipping kickoff "
                     "(scheduler will retry on next tick)",

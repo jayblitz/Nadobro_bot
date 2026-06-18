@@ -168,3 +168,31 @@ def test_count_engine_orders_scoped_per_run():
     assert run_a["orders_placed"] == 3
     assert run_b["orders_placed"] == 1
     assert both["orders_placed"] == 4  # unscoped sums both runs
+
+
+def test_remote_active_scoped_to_run_ignores_stale_rows():
+    """A prior run's non-terminated engine_executors row must NOT make
+    is_running()/_remote_active report the strategy as running for a NEW run —
+    that is the permanent stale-row trap that blocked order placement."""
+    import uuid
+    from src.nadobro.db import execute
+    from src.nadobro.services.engine_runtime import _remote_active
+    from src.nadobro.services.engine_persistence import terminate_engine_executors
+
+    cid = "dgrid:888:mainnet"
+    # Prior run (session 1) left an ACTIVE row behind.
+    execute(
+        "INSERT INTO engine_executors (id,user_id,controller_id,strategy_type,trading_pair,side,"
+        "config_json,state,volume_quote,keep_position,created_at,strategy_session_id) "
+        "VALUES (%s,888,%s,'grid','BTC-PERP','BUY','{}'::jsonb,'ACTIVE',0,false,now(),1)",
+        (str(uuid.uuid4()), cid),
+    )
+    # New run = session 2: must NOT see the stale session-1 row.
+    assert _remote_active("dgrid", 888, "mainnet", session_id=2) is False
+    # Same run = session 1: sees it.
+    assert _remote_active("dgrid", 888, "mainnet", session_id=1) is True
+    # Unscoped (back-compat): sees any non-terminated row.
+    assert _remote_active("dgrid", 888, "mainnet") is True
+    # Cross-process stop sweep clears it.
+    terminate_engine_executors(cid)
+    assert _remote_active("dgrid", 888, "mainnet") is False

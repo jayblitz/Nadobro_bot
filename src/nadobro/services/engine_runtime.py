@@ -140,10 +140,17 @@ class EngineRuntime:
         c = self._controllers.get(self._key(user_id, network, strategy))
         if c is not None and c.is_active:
             return True
-        # BUG-ER-2 fix: cross-process visibility. Another worker process
-        # may have started this strategy; check the engine_executors table
-        # for any non-terminated rows under the deterministic controller id.
-        return _remote_active(strategy, user_id, network)
+        # BUG-ER-2 fix: cross-process visibility. Another worker process may
+        # have started this strategy; check engine_executors under the
+        # deterministic controller id. SCOPED to the CURRENT run's session id
+        # (NO-ORDERS fix): controller_id is stable across runs, so a prior run's
+        # non-terminated row would otherwise make this return True forever and
+        # the build/tick gate would skip building — strategy never places an
+        # order. Scoping to the active session means only THIS run's executors
+        # count, and stale rows from dead runs are ignored.
+        from src.nadobro.services.engine_persistence import resolve_running_session_id
+        session_id = resolve_running_session_id(strategy, user_id, network)
+        return _remote_active(strategy, user_id, network, session_id)
 
     def needs_recovery(self, user_id: int, network: str, strategy: str) -> bool:
         """BUG-TICK-1 recovery: True when a locally-registered controller has
@@ -222,9 +229,21 @@ class EngineRuntime:
         key = self._key(user_id, network, strategy)
         orch = self._orchestrators.get(key)
         controller = self._controllers.get(key)
+        cid = deterministic_controller_id(strategy, user_id, network)
         if orch is not None and controller is not None:
             await orch.stop_controller(controller.id)
             self._persist_executors(orch)
+        else:
+            # Cross-process stop: this process doesn't own the orchestrator, so
+            # mark the controller's non-terminated engine_executors rows
+            # TERMINATED in the DB. Without this a stop handled outside the owner
+            # process leaves stale ACTIVE rows that _remote_active would treat as
+            # "still running" — blocking the next run from ever building.
+            try:
+                from src.nadobro.services.engine_persistence import terminate_engine_executors
+                terminate_engine_executors(cid)
+            except Exception:  # noqa: BLE001
+                logger.debug("cross-process executor terminate sweep failed for %s", cid, exc_info=True)
         self._controllers.pop(key, None)
         self._orchestrators.pop(key, None)
         # Clear the live-progress row so a stopped strategy doesn't leave stale
@@ -246,12 +265,16 @@ class EngineRuntime:
                 logger.warning("executor persistence failed for %s", ex.id, exc_info=True)
 
 
-def _remote_active(strategy: str, user_id: int, network: str) -> bool:
-    """Check the engine_executors table for non-terminated rows under the
-    deterministic controller id. Used by ``EngineRuntime.is_running`` to
-    detect strategies started by *another worker process* (BUG-ER-2).
-    Defensive: returns False on any DB failure so a transient error does
-    not block strategy startup entirely.
+def _remote_active(
+    strategy: str, user_id: int, network: str, session_id: Optional[int] = None
+) -> bool:
+    """Check engine_executors for non-terminated rows under the deterministic
+    controller id, optionally SCOPED to a run's ``session_id``. Used by
+    ``EngineRuntime.is_running`` to detect strategies started by *another worker
+    process* (BUG-ER-2) for the CURRENT run only — a stale row from a prior run
+    (same stable controller id) must not be treated as "already running".
+    Defensive: returns False on any DB failure so a transient error does not
+    block strategy startup entirely.
     """
     try:
         from src.nadobro.db import query_count
@@ -259,6 +282,13 @@ def _remote_active(strategy: str, user_id: int, network: str) -> bool:
         return False
     cid = deterministic_controller_id(strategy, user_id, network)
     try:
+        if session_id is not None:
+            return bool(query_count(
+                "SELECT 1 FROM engine_executors "
+                "WHERE controller_id = %s AND state <> 'TERMINATED' "
+                "AND strategy_session_id = %s",
+                (cid, int(session_id)),
+            ))
         return bool(query_count(
             "SELECT 1 FROM engine_executors "
             "WHERE controller_id = %s AND state <> 'TERMINATED'",
