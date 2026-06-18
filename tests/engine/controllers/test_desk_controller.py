@@ -446,6 +446,37 @@ def test_entry_started_is_checkpointed_before_any_order_is_placed():
     asyncio.run(body())
 
 
+def test_failed_pre_spawn_checkpoint_places_nothing_until_retry():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        plan = spot_market_plan()
+        orch, c, store = make_desk(adapter, [record(plan)])
+        calls = {"n": 0}
+
+        async def flaky_checkpoint(plan_id, state):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("db temporarily unavailable")
+            store["checkpoints"][plan_id] = state
+            store.setdefault("checkpoint_log", []).append(
+                (dict(state), len(adapter.placed))
+            )
+
+        c._checkpoint = flaky_checkpoint  # noqa: SLF001 - fault injection
+        await orch.spawn_controller(c)
+
+        await ticks(orch, c, 1)
+        assert adapter.placed == []
+        assert store["checkpoints"][plan.plan_id]["entry_started"] is False
+
+        await ticks(orch, c, 1)
+        assert len(adapter.placed) == 1
+        started = [(s, n) for s, n in store["checkpoint_log"] if s["entry_started"]]
+        assert started and started[0][1] == 0
+
+    asyncio.run(body())
+
+
 def test_partial_exit_keeps_entry_vwap_for_remainder():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=True)

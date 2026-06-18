@@ -386,6 +386,12 @@ class DeskController(Controller):
         except Exception:  # noqa: BLE001 - placement still guarded by recovery rules
             logger.warning("desk[%s]: pre-spawn checkpoint failed for %s",
                            self.user_id, plan.plan_id, exc_info=True)
+            # The checkpoint is the durable marker recovery uses to avoid
+            # re-firing one-shot orders after a crash. If it did not land, do
+            # not touch the venue yet; retry the checkpoint/spawn next tick.
+            run.entry_started = False
+            run.dirty = True
+            return
 
         if plan.algo == "twap":
             total_secs = float(plan.duration_minutes or 60) * 60.0
