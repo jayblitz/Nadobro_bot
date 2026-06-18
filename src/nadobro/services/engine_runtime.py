@@ -140,10 +140,24 @@ class EngineRuntime:
         c = self._controllers.get(self._key(user_id, network, strategy))
         if c is not None and c.is_active:
             return True
-        # BUG-ER-2 fix: cross-process visibility. Another worker process
-        # may have started this strategy; check the engine_executors table
-        # for any non-terminated rows under the deterministic controller id.
-        return _remote_active(strategy, user_id, network)
+        # BUG-ER-2 fix: cross-process visibility. Another worker process may
+        # have started this strategy; check engine_executors under the
+        # deterministic controller id. SCOPED to the CURRENT run's session id
+        # (NO-ORDERS fix): controller_id is stable across runs, so a prior run's
+        # non-terminated row would otherwise make this return True forever and
+        # the build/tick gate would skip building — strategy never places an
+        # order. Scoping to the active session means only THIS run's executors
+        # count, and stale rows from dead runs are ignored.
+        from src.nadobro.services.engine_persistence import resolve_running_session_id
+        session_id = resolve_running_session_id(strategy, user_id, network)
+        return _remote_active(strategy, user_id, network, session_id)
+
+    def has_local_active(self, user_id: int, network: str, strategy: str) -> bool:
+        """True only when THIS process holds a live (active) controller for the
+        strategy — the precondition for ``tick`` to do anything. Distinct from
+        ``is_running`` (which also trusts cross-process engine_executors rows)."""
+        c = self._controllers.get(self._key(user_id, network, strategy))
+        return c is not None and c.is_active
 
     def needs_recovery(self, user_id: int, network: str, strategy: str) -> bool:
         """BUG-TICK-1 recovery: True when a locally-registered controller has
@@ -222,9 +236,21 @@ class EngineRuntime:
         key = self._key(user_id, network, strategy)
         orch = self._orchestrators.get(key)
         controller = self._controllers.get(key)
+        cid = deterministic_controller_id(strategy, user_id, network)
         if orch is not None and controller is not None:
             await orch.stop_controller(controller.id)
             self._persist_executors(orch)
+        else:
+            # Cross-process stop: this process doesn't own the orchestrator, so
+            # mark the controller's non-terminated engine_executors rows
+            # TERMINATED in the DB. Without this a stop handled outside the owner
+            # process leaves stale ACTIVE rows that _remote_active would treat as
+            # "still running" — blocking the next run from ever building.
+            try:
+                from src.nadobro.services.engine_persistence import terminate_engine_executors
+                terminate_engine_executors(cid)
+            except Exception:  # noqa: BLE001
+                logger.debug("cross-process executor terminate sweep failed for %s", cid, exc_info=True)
         self._controllers.pop(key, None)
         self._orchestrators.pop(key, None)
         # Clear the live-progress row so a stopped strategy doesn't leave stale
@@ -246,12 +272,35 @@ class EngineRuntime:
                 logger.warning("executor persistence failed for %s", ex.id, exc_info=True)
 
 
-def _remote_active(strategy: str, user_id: int, network: str) -> bool:
-    """Check the engine_executors table for non-terminated rows under the
-    deterministic controller id. Used by ``EngineRuntime.is_running`` to
-    detect strategies started by *another worker process* (BUG-ER-2).
-    Defensive: returns False on any DB failure so a transient error does
-    not block strategy startup entirely.
+def _should_build_controller(
+    *, needs_recovery: bool, has_local_active: bool, worker_mode: bool, is_running: bool
+) -> bool:
+    """Decide whether THIS process must (re)build the controller before ticking.
+
+    - A locally-FAILED controller always rebuilds (recovery).
+    - With a live LOCAL controller, never rebuild (just tick).
+    - With NO local controller: the cycle-running worker ADOPTS (builds) so a
+      crashed/recycled worker doesn't no-op forever against a stale remote row;
+      a non-worker (e.g. the scheduler's local fallback) only builds when no
+      live owner exists (``not is_running``), so it never double-builds.
+    """
+    if needs_recovery:
+        return True
+    if has_local_active:
+        return False
+    return worker_mode or not is_running
+
+
+def _remote_active(
+    strategy: str, user_id: int, network: str, session_id: Optional[int] = None
+) -> bool:
+    """Check engine_executors for non-terminated rows under the deterministic
+    controller id, optionally SCOPED to a run's ``session_id``. Used by
+    ``EngineRuntime.is_running`` to detect strategies started by *another worker
+    process* (BUG-ER-2) for the CURRENT run only — a stale row from a prior run
+    (same stable controller id) must not be treated as "already running".
+    Defensive: returns False on any DB failure so a transient error does not
+    block strategy startup entirely.
     """
     try:
         from src.nadobro.db import query_count
@@ -259,6 +308,13 @@ def _remote_active(strategy: str, user_id: int, network: str) -> bool:
         return False
     cid = deterministic_controller_id(strategy, user_id, network)
     try:
+        if session_id is not None:
+            return bool(query_count(
+                "SELECT 1 FROM engine_executors "
+                "WHERE controller_id = %s AND state <> 'TERMINATED' "
+                "AND strategy_session_id = %s",
+                (cid, int(session_id)),
+            ))
         return bool(query_count(
             "SELECT 1 FROM engine_executors "
             "WHERE controller_id = %s AND state <> 'TERMINATED'",
@@ -909,7 +965,25 @@ async def run_engine_cycle(
             "rebuilding (BUG-TICK-1 recovery)",
             telegram_id, network, strategy,
         )
-    if needs_recovery or not RUNTIME.is_running(telegram_id, network, strategy):
+    # Build decision. RUNTIME.tick only works on a LOCAL controller, so the
+    # process running this cycle must own one. A worker that runs cycles ADOPTS
+    # (builds) when it has no local active controller — even if a dead process
+    # left a non-terminated executor row making is_running() True — otherwise a
+    # crashed/recycled worker would no-op forever. The main/non-worker fallback
+    # still defers to a live owner (is_running True) so it never double-builds.
+    from src.nadobro.services.bot_runtime import is_process_worker_mode
+    _has_local = RUNTIME.has_local_active(telegram_id, network, strategy)
+    _worker_mode = is_process_worker_mode()
+    _should_build = _should_build_controller(
+        needs_recovery=needs_recovery,
+        has_local_active=_has_local,
+        worker_mode=_worker_mode,
+        # is_running is only needed for the non-worker defer case; skip the DB
+        # round-trip when the worker will adopt anyway.
+        is_running=(False if (_worker_mode and not _has_local)
+                    else RUNTIME.is_running(telegram_id, network, strategy)),
+    )
+    if _should_build:
         meta = build_product_meta_from_catalog(client)
         # ensure the traded pair has metadata (fallback to a permissive default)
         if product not in meta:

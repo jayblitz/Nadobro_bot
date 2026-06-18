@@ -511,6 +511,24 @@ def clear_controller_progress(controller_id: str) -> None:
     execute("DELETE FROM engine_controller_state WHERE controller_id=%s", (controller_id,))
 
 
+def terminate_engine_executors(controller_id: str) -> int:
+    """Mark all non-terminated engine_executors rows for ``controller_id`` as
+    TERMINATED. Used on a cross-process stop (the owning process is gone) so
+    stale ACTIVE rows don't make ``_remote_active`` report the strategy as still
+    running and block the next run. Returns rows affected (best-effort)."""
+    from src.nadobro.db import execute
+    try:
+        execute(
+            "UPDATE engine_executors SET state = 'TERMINATED', "
+            "terminated_at = COALESCE(terminated_at, now()) "
+            "WHERE controller_id = %s AND state <> 'TERMINATED'",
+            (controller_id,),
+        )
+        return 1
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def count_engine_orders(controller_id: str, session_id: Optional[int] = None) -> dict:
     """Per-RUN order/position counts from engine_executors, so /status reflects
     THIS run's activity. ``controller_id`` is stable across runs, so a

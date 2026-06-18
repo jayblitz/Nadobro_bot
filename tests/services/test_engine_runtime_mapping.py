@@ -309,3 +309,23 @@ def test_sl_tp_is_per_strategy_user_set():
     tb = cfg["triple_barrier_config"]
     assert tb.stop_loss == Decimal("10.0") / Decimal(100)
     assert tb.take_profit == Decimal("50.0") / Decimal(100)
+
+
+def test_should_build_controller_truth_table():
+    """The build gate must let the cycle-running worker ADOPT a controller it
+    lacks locally (even against a stale remote row), while the non-worker
+    fallback defers to a live owner so it never double-builds."""
+    from src.nadobro.services.engine_runtime import _should_build_controller as B
+
+    # Local FAILED controller -> always rebuild.
+    assert B(needs_recovery=True, has_local_active=True, worker_mode=True, is_running=True) is True
+    # Live local controller -> just tick.
+    assert B(needs_recovery=False, has_local_active=True, worker_mode=False, is_running=True) is False
+    # Worker with NO local controller -> adopt, even if remote says running
+    # (crashed/recycled worker, or stale row). THIS is the no-orders fix.
+    assert B(needs_recovery=False, has_local_active=False, worker_mode=True, is_running=True) is True
+    # Non-worker (main fallback) with no local and a live remote owner -> defer
+    # (no double build).
+    assert B(needs_recovery=False, has_local_active=False, worker_mode=False, is_running=True) is False
+    # Non-worker, no local, nobody running -> build (single-process happy path).
+    assert B(needs_recovery=False, has_local_active=False, worker_mode=False, is_running=False) is True
