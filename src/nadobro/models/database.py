@@ -919,8 +919,6 @@ def _session_realized_pnl(session_id: int, table: str, window: SessionWindow = N
             SELECT
               COALESCE(SUM(realized_pnl_x18) FILTER (WHERE realized_pnl_x18 IS NOT NULL), 0) / 1e18
                 AS venue_pnl,
-              COALESCE(SUM(fee_x18) FILTER (WHERE realized_pnl_x18 IS NOT NULL), 0) / 1e18
-                AS venue_fees,
               COUNT(*) FILTER (WHERE realized_pnl_x18 IS NOT NULL) AS venue_rows,
               COUNT(*) FILTER (
                 WHERE source = 'strategy' AND fill_price IS NOT NULL AND submission_idx IS NULL
@@ -931,9 +929,7 @@ def _session_realized_pnl(session_id: int, table: str, window: SessionWindow = N
                      WHEN side = 'long'
                        THEN -ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
                      ELSE 0 END
-              ) FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_gross,
-              COALESCE(SUM(COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0))
-                       FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_fees
+              ) FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_gross
             FROM {table}
             WHERE {where}
             """,
@@ -943,15 +939,14 @@ def _session_realized_pnl(session_id: int, table: str, window: SessionWindow = N
         return 0.0
     if not row:
         return 0.0
+    # Realized PnL is GROSS of fees on BOTH paths — PnL is PnL; fees are a
+    # standalone metric (see get_session_live_metrics). The venue per-match
+    # realized_pnl is already gross; the recorder buy/sell cash-flow is gross.
     venue_rows = int(row.get("venue_rows") or 0)
     pending_sync = int(row.get("pending_sync") or 0)
     if venue_rows > 0 and pending_sync == 0:
-        # Venue realized_pnl is GROSS of fees (fees are reported separately as
-        # fee_x18); net them so realized is net-of-fees in BOTH paths and the
-        # session PnL used for SL/TP includes trading costs (the recorder path
-        # already subtracts its fees below).
-        return float(row.get("venue_pnl") or 0) - float(row.get("venue_fees") or 0)
-    return float(row.get("recorder_gross") or 0) - float(row.get("recorder_fees") or 0)
+        return float(row.get("venue_pnl") or 0)
+    return float(row.get("recorder_gross") or 0)
 
 
 def get_session_live_metrics(session_id: int, network: str, window: SessionWindow = None) -> dict:
@@ -970,9 +965,17 @@ def get_session_live_metrics(session_id: int, network: str, window: SessionWindo
             f"""
             SELECT
               COUNT(*) FILTER (WHERE status IN ('filled', 'closed', 'partially_filled')) AS fills,
-              COALESCE(SUM(ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)), 0)
-                AS volume,
-              COALESCE(SUM(COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0)), 0) AS fees
+              -- Per-fill volume/fees prefer the venue-authoritative x18 columns
+              -- (set by nado_sync on each match) so the run's totals grow as
+              -- orders fill/close, even before the recorder columns are present.
+              COALESCE(SUM(COALESCE(
+                NULLIF(quote_filled_x18, 0) / 1e18,
+                ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+              )), 0) AS volume,
+              COALESCE(SUM(COALESCE(
+                NULLIF(fee_x18, 0) / 1e18,
+                COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0)
+              )), 0) AS fees
             FROM {table}
             WHERE {where}
             """,

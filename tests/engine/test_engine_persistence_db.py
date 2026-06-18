@@ -129,3 +129,42 @@ def test_db_kill_switch_persists_across_instances():
     assert fresh.reason() == "drawdown breach"
     DbKillSwitchStore().disengage()
     assert DbKillSwitchStore().is_engaged() is False
+
+
+def test_count_engine_orders_scoped_per_run():
+    """Order/executor counts must be scoped to the run's session id — a stable
+    controller_id is reused across runs, so an unscoped count would sum every
+    past run of the same strategy into the current one."""
+    import uuid
+    from src.nadobro.db import execute
+    from src.nadobro.services.engine_persistence import count_engine_orders
+
+    cid = "grid:777:mainnet"
+    # Run A (session 101): 2 executors, one closed -> 3 placed.
+    # Run B (session 202): 1 executor -> 1 placed.
+    execute(
+        "INSERT INTO engine_executors (id,user_id,controller_id,strategy_type,trading_pair,side,"
+        "config_json,state,volume_quote,keep_position,created_at,terminated_at,strategy_session_id) "
+        "VALUES (%s,777,%s,'grid','BTC-PERP','BUY','{}'::jsonb,'ACTIVE',1,false,now(),NULL,101)",
+        (str(uuid.uuid4()), cid),
+    )
+    execute(
+        "INSERT INTO engine_executors (id,user_id,controller_id,strategy_type,trading_pair,side,"
+        "config_json,state,volume_quote,keep_position,created_at,terminated_at,strategy_session_id) "
+        "VALUES (%s,777,%s,'grid','BTC-PERP','BUY','{}'::jsonb,'TERMINATED',1,false,now(),now(),101)",
+        (str(uuid.uuid4()), cid),
+    )
+    execute(
+        "INSERT INTO engine_executors (id,user_id,controller_id,strategy_type,trading_pair,side,"
+        "config_json,state,volume_quote,keep_position,created_at,terminated_at,strategy_session_id) "
+        "VALUES (%s,777,%s,'grid','BTC-PERP','BUY','{}'::jsonb,'ACTIVE',1,false,now(),NULL,202)",
+        (str(uuid.uuid4()), cid),
+    )
+
+    run_a = count_engine_orders(cid, 101)
+    run_b = count_engine_orders(cid, 202)
+    both = count_engine_orders(cid)
+    # Run A: 2 executors + 1 closed = 3 placed; Run B: 1 executor = 1 placed.
+    assert run_a["orders_placed"] == 3
+    assert run_b["orders_placed"] == 1
+    assert both["orders_placed"] == 4  # unscoped sums both runs

@@ -157,6 +157,29 @@ def _parse_controller_id(controller_id: str) -> Optional[tuple[str, int, str]]:
         return None
 
 
+def resolve_running_session_id(strategy: str, user_id: int, network: str) -> Optional[int]:
+    """The active run's unique id (``strategy_sessions.id``) for this
+    strategy/user/network. This is the per-RUN tag used to scope fills and
+    executors so one run's stats never bleed into the next."""
+    from src.nadobro.db import query_one
+
+    row = query_one(
+        "SELECT id FROM strategy_sessions "
+        "WHERE user_id = %s AND network = %s AND strategy = %s AND status = 'running' "
+        "ORDER BY started_at DESC LIMIT 1",
+        (int(user_id), str(network), str(strategy)),
+    )
+    return int(row["id"]) if row and row.get("id") is not None else None
+
+
+def resolve_session_id_for_controller(controller_id: str) -> Optional[int]:
+    parsed = _parse_controller_id(controller_id)
+    if parsed is None:
+        return None
+    strategy, user_id, network = parsed
+    return resolve_running_session_id(strategy, user_id, network)
+
+
 class DbTradeRecorder:
     """Writes each engine fill into ``trades_<network>`` tagged with the
     active ``strategy_session_id``. Injected into executors by the runtime
@@ -168,15 +191,7 @@ class DbTradeRecorder:
     """
 
     def _resolve_session_id(self, strategy: str, user_id: int, network: str) -> Optional[int]:
-        from src.nadobro.db import query_one
-
-        row = query_one(
-            "SELECT id FROM strategy_sessions "
-            "WHERE user_id = %s AND network = %s AND strategy = %s AND status = 'running' "
-            "ORDER BY started_at DESC LIMIT 1",
-            (int(user_id), str(network), str(strategy)),
-        )
-        return int(row["id"]) if row and row.get("id") is not None else None
+        return resolve_running_session_id(strategy, user_id, network)
 
     def record(
         self,
@@ -359,14 +374,18 @@ class DbExecutorStore:
         close_type_val: Optional[str] = None
         if close_type is not None:
             close_type_val = close_type.value
+        # Tag the executor with the RUN's unique session id so per-run order
+        # counts don't bleed across runs (controller_id is stable across runs).
+        # Resolved once at first insert; ON CONFLICT never overwrites it.
+        session_id = resolve_session_id_for_controller(executor.controller_id)  # type: ignore[attr-defined]
         execute(
             """
             INSERT INTO engine_executors
               (id, user_id, controller_id, strategy_type, trading_pair, side, config_json,
                state, close_type, net_pnl_quote, fees_paid_quote, volume_quote,
-               duration_seconds, keep_position, created_at, terminated_at)
+               duration_seconds, keep_position, created_at, terminated_at, strategy_session_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s,
-                    to_timestamp(%s), to_timestamp(%s))
+                    to_timestamp(%s), to_timestamp(%s), %s)
             ON CONFLICT (id) DO UPDATE SET
               state = EXCLUDED.state,
               close_type = EXCLUDED.close_type,
@@ -374,7 +393,8 @@ class DbExecutorStore:
               fees_paid_quote = EXCLUDED.fees_paid_quote,
               volume_quote = EXCLUDED.volume_quote,
               duration_seconds = EXCLUDED.duration_seconds,
-              terminated_at = EXCLUDED.terminated_at
+              terminated_at = EXCLUDED.terminated_at,
+              strategy_session_id = COALESCE(engine_executors.strategy_session_id, EXCLUDED.strategy_session_id)
             """,
             (
                 executor.id, executor.user_id, executor.controller_id,  # type: ignore[attr-defined]
@@ -384,6 +404,7 @@ class DbExecutorStore:
                 m["net_pnl_quote"], m["fees_paid_quote"], m["volume_quote"],
                 int(m["duration_seconds"]), executor.keep_position,  # type: ignore[attr-defined]
                 executor.created_at, executor.terminated_at,  # type: ignore[attr-defined]
+                session_id,
             ),
         )
 
@@ -490,24 +511,30 @@ def clear_controller_progress(controller_id: str) -> None:
     execute("DELETE FROM engine_controller_state WHERE controller_id=%s", (controller_id,))
 
 
-def count_engine_orders(controller_id: str) -> dict:
-    """Per-controller order/position counts from engine_executors, so /status
-    reflects real activity. The engine cycle result carries no counts, which is
-    why the legacy order_observability stayed stuck at 0 for engine strategies.
+def count_engine_orders(controller_id: str, session_id: Optional[int] = None) -> dict:
+    """Per-RUN order/position counts from engine_executors, so /status reflects
+    THIS run's activity. ``controller_id`` is stable across runs, so a
+    ``session_id`` (the run's unique tag) scopes the count to the current run —
+    without it, every past run of the same strategy would be summed in.
     Each executor opens an entry order (placed) and, if it closed, a close order.
     """
     from src.nadobro.db import query_one
 
+    where = "controller_id = %s"
+    params: list = [controller_id]
+    if session_id is not None:
+        where += " AND strategy_session_id = %s"
+        params.append(int(session_id))
     row = query_one(
-        """
+        f"""
         SELECT
           COUNT(*)                                              AS executors,
           COUNT(*) FILTER (WHERE terminated_at IS NOT NULL)     AS closed,
           COUNT(*) FILTER (WHERE volume_quote > 0)              AS filled,
           COUNT(*) FILTER (WHERE close_type = 'FAILED')         AS failed
-        FROM engine_executors WHERE controller_id = %s
+        FROM engine_executors WHERE {where}
         """,
-        (controller_id,),
+        tuple(params),
     )
     if not row:
         return {"orders_placed": 0, "orders_filled": 0, "orders_cancelled": 0}

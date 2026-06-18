@@ -15,11 +15,9 @@ PnL convention
 ``session_pnl = realized_pnl + unrealized_pnl - funding_paid``
 
 * ``realized_pnl`` — venue-authoritative per-match PnL when synced, else the
-  recorder rows' buy/sell/fee decomposition (see ``_session_realized_pnl``).
-  It is **net of trading fees in BOTH paths** (the venue path subtracts the
-  per-match ``fee_x18``; the recorder path subtracts its fill/builder fees), so
-  the SL/TP basis includes trading costs. ``fees`` is also surfaced separately
-  for display — do NOT subtract it again here or fees would be double-counted.
+  recorder rows' buy/sell cash-flow (see ``_session_realized_pnl``). It is
+  **GROSS of fees** — PnL is PnL. Fees are a standalone metric (``fees``),
+  tracked per run and surfaced separately, NOT folded into PnL.
 * ``unrealized_pnl`` — the open position's ``est_pnl`` (exactly the uPnL Nado
   shows). The $32-loss bug was an *open* position, so a realized-only basis
   would never have tripped the stop — uPnL is the dominant term in-flight.
