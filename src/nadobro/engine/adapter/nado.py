@@ -546,7 +546,10 @@ class NadoAdapter(NadoAdapterBase):
         if unfilled <= lot:
             state = OrderState.FILLED
         elif filled_base > 0:
-            state = OrderState.PARTIALLY_FILLED
+            # The order is no longer in the open book, so any unfilled
+            # remainder is terminal. Preserve the partial fill amounts while
+            # reporting CANCELLED so executors can manage the inventory.
+            state = OrderState.CANCELLED
         else:
             state = OrderState.CANCELLED
         return self._mk_order(order_id, ref, state, filled_base, filled_quote, fee)
