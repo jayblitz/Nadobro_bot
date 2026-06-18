@@ -164,7 +164,10 @@ def build_pretrade_breakdown(
     """
     notional_usd = max(0.0, _safe_float(conf.get("notional_usd"), 100.0))
     cycle_cfg = max(0.0, _safe_float(conf.get("cycle_notional_usd"), notional_usd))
-    sl_pct = max(0.0, _safe_float(conf.get("sl_pct"), 0.0))
+    # Honor the per-strategy SL field (rgrid/dgrid store it as rgrid_stop_loss_pct)
+    # so the "max loss" preview matches the SL the engine actually enforces.
+    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+    sl_pct = max(0.0, effective_sl_tp_pct(strategy_id, conf)[0])
     # F8 (Phase 5 audit): mirror mm_bot.run_cycle's safety-factor logic exactly.
     # mm_bot only honors a state-set safety factor when it's >= 1.0; otherwise
     # it falls back to the constant default. Using ``max(1.0, …)`` here would
@@ -222,9 +225,13 @@ def build_pretrade_breakdown(
         maker_fee_fraction=maker_rate_fraction,
     )
 
+    # Max loss is SL% of the SESSION margin (the collateral the user committed),
+    # matching the session-PnL rail's basis (_resolve_margin = notional). Do NOT
+    # divide by leverage here — that produced a misleading per-quote figure
+    # (e.g. $0.02 instead of $0.80 at 0.8% on $100).
     max_loss_usd = compute_max_loss_usd(
         notional_usd=notional_usd,
-        leverage=leverage,
+        leverage=1.0,
         sl_pct=sl_pct,
     )
 

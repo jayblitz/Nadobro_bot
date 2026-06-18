@@ -1864,10 +1864,15 @@ def _build_strategy_preview_text(
     recommended_available = required_margin + (inventory_soft_limit / max(leverage, 1.0)) + recommended_buffer
     mid_str = f"${fmt_price(mid, product)}" if mid > 0 else "N/A"
 
-    trades_count = int(bot_status.get("session_trade_count") or 0)
-    session_volume = float(bot_status.get("session_volume_usd") or 0.0)
-    session_fees = float(bot_status.get("session_fees_usd") or 0.0)
-    session_pnl = float(bot_status.get("session_analytics_pnl_usd") or 0.0)
+    # Stats belong to the ONE strategy currently held in bot_status. Only show
+    # them on that strategy's dashboard — otherwise the last run (e.g. D-Grid)
+    # leaks its volume/PnL onto every other mode's dashboard. Each mode is
+    # unique and shows only its own session.
+    _stats_owner = str(bot_status.get("strategy") or "").lower() == strategy_id
+    trades_count = int(bot_status.get("session_trade_count") or 0) if _stats_owner else 0
+    session_volume = float(bot_status.get("session_volume_usd") or 0.0) if _stats_owner else 0.0
+    session_fees = float(bot_status.get("session_fees_usd") or 0.0) if _stats_owner else 0.0
+    session_pnl = float(bot_status.get("session_analytics_pnl_usd") or 0.0) if _stats_owner else 0.0
 
     if strategy_id == "vol":
         # Volume is spot-only as of 2026-05. "Session margin" doubles as the
@@ -1882,8 +1887,9 @@ def _build_strategy_preview_text(
         volume_remaining = float(
             bot_status.get("volume_remaining_usd") or max(0.0, target_volume - volume_done)
         )
-        session_fees = float(bot_status.get("session_fees_usd") or session_fees)
-        session_pnl = float(bot_status.get("session_realized_pnl_usd") or session_pnl)
+        if _stats_owner:
+            session_fees = float(bot_status.get("session_fees_usd") or session_fees)
+            session_pnl = float(bot_status.get("session_realized_pnl_usd") or session_pnl)
         # Each cycle pushes 2× session_margin of volume (buy leg + sell leg).
         est_cycles = max(1, int((target_volume + (2 * session_margin) - 1) // (2 * session_margin))) if session_margin > 0 else 0
         est_fees_usd = target_volume * (maker_fee_bp / 10_000.0)
@@ -1938,8 +1944,9 @@ def _build_strategy_preview_text(
         variance = float(bot_status.get("dgrid_variance_ratio") or 0.0)
         realized_move = float(bot_status.get("dgrid_realized_move_bp") or 0.0)
         reset_bp = float(bot_status.get("dgrid_reset_threshold_bp") or 0.0)
-        session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
-        session_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
+        if _stats_owner:
+            session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
+            session_pnl = float(bot_status.get("rgrid_last_cycle_pnl_usd") or session_pnl)
         warning = ""
         if not wallet_ready:
             warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
@@ -1986,7 +1993,8 @@ def _build_strategy_preview_text(
         max_spread = float(conf.get("max_spread_bp", 20.0))
         reset_threshold = float(conf.get("grid_reset_threshold_pct", 0.8))
         reset_timeout = int(conf.get("grid_reset_timeout_seconds", 120))
-        session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
+        if _stats_owner:
+            session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)
         warning = ""
         if not wallet_ready:
             warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
@@ -2080,6 +2088,52 @@ def _build_strategy_preview_text(
             f"• Est\\. quote depth cap: *{escape_md(str(mm_max_quotes_est))}* resting \\(wallet \\& collateral limited\\)\n\n"
             "ℹ️ *How it works*\n"
             "Anchors to exposure and places buy above / sell below to capture continuation\\."
+            + (f"\n\n{warning}" if warning else "")
+        )
+
+    if strategy_id == "mid":
+        levels = int(conf.get("levels", 2) or 2)
+        directional_bias = float(conf.get("directional_bias", 0.0) or 0.0)
+        warning = ""
+        if not wallet_ready:
+            warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
+        elif available_margin < required_margin:
+            warning = (
+                f"⚠️ Recommended available margin {escape_md(_fmt_usd(recommended_available))} "
+                f"\\(trade {escape_md(_fmt_usd(required_margin))} + buffer {escape_md(_fmt_usd(recommended_available - required_margin))}\\)\\."
+            )
+        if not mm_budget_ok:
+            warning = (
+                f"⚠️ Collateral looks tight for MM quoting \\(each resting order ~*{escape_md(_fmt_usd(mm_min_order_notional))}* notional\\)\\.\n"
+                f"Budget after wallet cap: *{escape_md(_fmt_usd(mm_collateral_budget))}* · Need ~*{escape_md(_fmt_usd(mm_required_min_collateral))}* for one quote "
+                f"\\(~*{escape_md(_fmt_usd(mm_margin_per_quote_est))}* est\\. margin at *{escape_md(f'{leverage:.0f}x')}*\\)\\."
+            )
+        return (
+            "📈 *Mid Mode Dashboard*\n"
+            f"Status: {status_emoji} *{status_label}*\n\n"
+            "🔑 *Account*\n"
+            f"• Status: *{escape_md(account_status)}*\n"
+            f"• Wallet: `{escape_md(wallet_short)}`\n"
+            f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
+            "⚙️ *Configuration*\n"
+            f"• Market: *{escape_md(product)}\\-PERP*\n"
+            f"• Margin \\(collateral cap\\): *{escape_md(_fmt_usd(margin_usd))}*\n"
+            f"• Est\\. max resting quotes: *{escape_md(str(mm_max_quotes_est))}* \\| "
+            f"*~{escape_md(_fmt_usd(mm_margin_per_quote_est))}* margin/quote \\(est\\.\\)\n"
+            f"• Levels: *{escape_md(str(levels))}*\n"
+            f"• Spread: *{escape_md(f'{spread_bp:.0f}bp')}*\n"
+            f"• Directional bias: *{escape_md(f'{directional_bias:+.2f}')}*\n"
+            f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"• Leverage: *{escape_md(f'MAX ({leverage:.0f}x per-asset)')}*\n"
+            f"• TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n\n"
+            "📊 *Statistics*\n"
+            f"• Total Volume: *{escape_md(_fmt_usd(session_volume))}*\n"
+            f"• Total Trades: *{escape_md(str(trades_count))}*\n"
+            f"• Fees Paid: *{escape_md(_fmt_usd(session_fees))}*\n"
+            f"• PnL: *{escape_md(f'{session_pnl:+,.2f} USD')}*\n\n"
+            "ℹ️ *How it works*\n"
+            "Quotes a two\\-sided market around mid \\(maker\\-only\\) to capture the "
+            "spread; optional directional bias skews the quotes\\."
             + (f"\n\n{warning}" if warning else "")
         )
 

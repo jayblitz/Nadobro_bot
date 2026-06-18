@@ -2084,8 +2084,11 @@ async def _evaluate_session_pnl_rail(
     ``% price move``, and PnL includes the open position's unrealized PnL so an
     open drawdown actually trips the stop.
     """
-    sl_pct = float(state.get("sl_pct") or 0.0)
-    tp_pct = float(state.get("tp_pct") or 0.0)
+    # Honor the per-strategy SL/TP (rgrid/dgrid store them under rgrid_* keys);
+    # previously this read sl_pct/tp_pct only, so a custom rgrid/dgrid SL was
+    # ignored and the rail used the 0.8 default.
+    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+    sl_pct, tp_pct = effective_sl_tp_pct(strategy, state)
     if sl_pct <= 0 and tp_pct <= 0:
         return None
 

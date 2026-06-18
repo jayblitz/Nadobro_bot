@@ -36,6 +36,34 @@ MARKET_MAKING_STRATEGIES: tuple[str, ...] = (
     STRATEGY_MID,
 )
 
+# Reverse/Dynamic Grid store their PnL stop/take (as % of margin) under the
+# rgrid_* keys in the UI, but the engine (session rail + grid barrier) reads
+# sl_pct/tp_pct. Resolve the strategy's own field with a fallback so a user's
+# custom SL/TP is actually honored instead of the sl_pct default.
+_RGRID_SLTP_STRATEGIES: tuple[str, ...] = (STRATEGY_RGRID, STRATEGY_DGRID)
+
+
+def effective_sl_tp_pct(strategy: str, conf: Mapping) -> tuple[float, float]:
+    """Return ``(sl_pct, tp_pct)`` honoring the per-strategy SL/TP fields.
+
+    rgrid/dgrid: ``rgrid_stop_loss_pct`` / ``rgrid_take_profit_pct`` (fallback to
+    ``sl_pct`` / ``tp_pct``). All other strategies: ``sl_pct`` / ``tp_pct``.
+    """
+    def _f(value: object) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0.0
+
+    s = str(strategy or "").lower()
+    if s in _RGRID_SLTP_STRATEGIES:
+        sl = conf.get("rgrid_stop_loss_pct")
+        sl = conf.get("sl_pct") if sl is None else sl
+        tp = conf.get("rgrid_take_profit_pct")
+        tp = conf.get("tp_pct") if tp is None else tp
+        return _f(sl), _f(tp)
+    return _f(conf.get("sl_pct")), _f(conf.get("tp_pct"))
+
 STRATEGY_ALIASES: Mapping[str, str] = {
     "mm": STRATEGY_GRID,
     "market_making": STRATEGY_GRID,

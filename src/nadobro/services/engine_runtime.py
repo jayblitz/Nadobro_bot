@@ -381,8 +381,17 @@ def map_strategy_config(
         _spread_bp = _f(settings, "spread_bp", 5.0)
     spread_frac = Decimal(str(_spread_bp)) / Decimal(10000)
     levels = max(1, int(_f(settings, "levels", 2)))
-    tp = Decimal(str(_f(settings, "tp_pct", 0.6))) / Decimal(100)
-    sl = Decimal(str(_f(settings, "sl_pct", 0.5))) / Decimal(100)
+    # SL/TP honor the per-strategy fields (rgrid/dgrid store them under
+    # rgrid_stop_loss_pct / rgrid_take_profit_pct), so a user's custom value
+    # drives the barrier instead of the sl_pct/tp_pct default.
+    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+    _sl_pct, _tp_pct = effective_sl_tp_pct(strategy, settings)
+    if _tp_pct <= 0:
+        _tp_pct = _f(settings, "tp_pct", 0.6)
+    if _sl_pct <= 0:
+        _sl_pct = _f(settings, "sl_pct", 0.5)
+    tp = Decimal(str(_tp_pct)) / Decimal(100)
+    sl = Decimal(str(_sl_pct)) / Decimal(100)
 
     if strategy == "mid":
         return {
