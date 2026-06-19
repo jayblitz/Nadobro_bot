@@ -191,3 +191,10 @@ class InventoryRepository:
                 for h in self._holds.values()
                 if h.user_id == user_id and h.controller_id == controller_id
             ]
+
+    def clear_for_controller(self, controller_id: str) -> None:
+        """Drop holds for a controller so a new run starts from a clean
+        position (the controller id is stable across runs)."""
+        with self._lock:
+            for k in [k for k, h in self._holds.items() if h.controller_id == controller_id]:
+                self._holds.pop(k, None)

@@ -195,6 +195,18 @@ class EngineRuntime:
                     key, exc_info=True,
                 )
 
+        # Fresh run = clean inventory. controller_id is stable across runs, so a
+        # new session must NOT inherit the prior run's engine_position_hold (it
+        # would skew exposure caps / sizing). PnL is already session-scoped via
+        # trades_<network>; this keeps the engine's own position view per-run.
+        cid = deterministic_controller_id(strategy, user_id, network)
+        clear_inv = getattr(inventory, "clear_for_controller", None)
+        if callable(clear_inv):
+            try:
+                clear_inv(cid)
+            except Exception:  # noqa: BLE001 - best-effort; never block start
+                logger.debug("inventory clear_for_controller failed for %s", cid, exc_info=True)
+
         orch = build_orchestrator(
             limits=limits,
             risk_state_provider=risk_state_provider,

@@ -7,7 +7,6 @@ fired. The rail now reads live Nado session PnL (realized + unrealized) measured
 as a percentage of the configured margin.
 """
 
-import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -15,7 +14,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import bot_runtime, live_session, mm_dashboard
+from src.nadobro.services import bot_runtime, engine_runtime, live_session, mm_dashboard
 
 
 async def _fake_run_blocking(fn, *args, **kwargs):
@@ -32,9 +31,11 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
             return {"success": True}
 
         sess = {"id": 1, "product_id": 2, "started_at": None, "stopped_at": None}
+        self._engine_stop = AsyncMock()
         with patch.object(bot_runtime, "run_blocking", _fake_run_blocking), \
              patch("src.nadobro.models.database.get_active_strategy_session", return_value=sess), \
              patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=snap), \
+             patch.object(engine_runtime.RUNTIME, "stop", new=self._engine_stop), \
              patch.object(bot_runtime, "_finalize_session") as fin, \
              patch.object(bot_runtime, "_save_state"), \
              patch.object(bot_runtime, "_notify", new=AsyncMock()), \
@@ -54,6 +55,9 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state["running"])
         fin.assert_called_once()
         self.assertEqual(fin.call_args.kwargs.get("stop_reason"), "sl_hit")
+        # INVARIANT (Cleanup): the engine controller is stopped (resting orders
+        # cancelled via _stop_out) BEFORE the position is flattened.
+        self._engine_stop.assert_awaited_once_with(42, "mainnet", "dgrid")
 
     async def test_tp_fires_when_pct_above_target(self):
         snap = {"session_pnl": 2.5, "session_pnl_pct": 2.5, "margin": 100.0}
@@ -78,29 +82,94 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LiveSnapshotMathTests(unittest.TestCase):
-    def test_session_pnl_includes_unrealized(self):
-        rows = [{
-            "side": "long", "size": 0.0527, "avg_entry_price": 65558.0,
-            "est_liq_price": 61765.0, "est_pnl": -30.0, "margin_used": 100.0,
-            "leverage": 16.7, "isolated": False, "synced_ts": time.time(),
-        }]
+    def _snap(self, metrics, *, mark, client=None, margin=100.0, sess=None):
+        sess = sess or {"id": 1, "product_id": 2, "started_at": None, "stopped_at": None}
         with patch("src.nadobro.models.database.get_session_live_metrics",
-                   return_value={"fills": 4, "volume": 1000.0, "fees": 0.5, "realized_pnl": -2.0}), \
-             patch("src.nadobro.models.database.get_open_position_rows_for_product",
-                   return_value=rows), \
+                   return_value=metrics), \
              patch("src.nadobro.models.database.count_open_orders_for_product", return_value=1):
-            snap = live_session.get_live_session_snapshot(
-                42, "mainnet",
-                {"id": 1, "product_id": 2, "started_at": None, "stopped_at": None},
-                state={"notional_usd": 100.0}, client=None,
+            return live_session.get_live_session_snapshot(
+                42, "mainnet", sess,
+                state={"notional_usd": margin}, client=client, mark=mark,
             )
+
+    def test_session_pnl_includes_unrealized(self):
+        # The -$32 scenario, now sourced from the session's OWN net base marked
+        # to the live mid: net_base*mark + signed_cash = realized + unrealized.
+        # net_base=0.05 @ mark=100000 -> +5000 of base value; signed_cash chosen
+        # so gross = -32, with realized -2 -> unrealized -30.
+        metrics = {
+            "fills": 4, "volume": 1000.0, "fees": 0.5, "realized_pnl": -2.0,
+            "net_base": 0.05, "signed_cash": -5032.0,
+        }
+        snap = self._snap(metrics, mark=100000.0)
         self.assertAlmostEqual(snap["unrealized_pnl"], -30.0)
         self.assertAlmostEqual(snap["realized_pnl"], -2.0)
-        # realized + unrealized - funding = -2 + -30 - 0
         self.assertAlmostEqual(snap["session_pnl"], -32.0)
         self.assertAlmostEqual(snap["session_pnl_pct"], -32.0)
         self.assertTrue(snap["has_position"])
         self.assertEqual(snap["position_side"], "long")
+
+    def test_isolation_account_position_does_not_contaminate(self):
+        # INVARIANT (Isolation): the session only bought 0.0016 BTC (real PnL
+        # ~ -$0.13), but the ACCOUNT holds a -$302 position on the same product.
+        # The snapshot must reflect ONLY the session's own fills, never the
+        # account aggregate (the false-SL bug, session #40).
+        class _BigPosClient:
+            def get_all_positions(self):
+                return [{"product_id": 2, "amount": 5.0, "side": "LONG",
+                         "signed_amount": 5.0, "unrealized_pnl": -302.0,
+                         "price": 65000.0, "liquidation_price": 61000.0}]
+            def get_market_price(self, pid):
+                return {"mid": 64990.0}
+            def get_open_orders(self, pid):
+                return []
+        # session bought 0.0016 @ ~65000 -> signed_cash = -(0.0016*65000) = -104.0
+        metrics = {
+            "fills": 1, "volume": 104.0, "fees": 0.05, "realized_pnl": 0.0,
+            "net_base": 0.0016, "signed_cash": -104.0,
+        }
+        snap = self._snap(metrics, mark=64990.0, client=_BigPosClient())
+        # session uPnL = 0.0016*(64990-65000) = -0.016, NOT -302.
+        self.assertAlmostEqual(snap["session_pnl"], 0.0016 * 64990.0 - 104.0, places=6)
+        self.assertGreater(snap["session_pnl"], -1.0)
+        self.assertNotAlmostEqual(snap["session_pnl"], -302.0, places=1)
+        self.assertAlmostEqual(snap["position_size"], 0.0016)
+
+    def test_conservation_gross_equals_realized_plus_unrealized(self):
+        # INVARIANT (Conservation): session_pnl == realized + unrealized (funding 0).
+        metrics = {
+            "fills": 6, "volume": 2000.0, "fees": 1.0, "realized_pnl": 3.5,
+            "net_base": 0.02, "signed_cash": -1290.0,
+        }
+        snap = self._snap(metrics, mark=64000.0)
+        gross = snap["realized_pnl"] + snap["unrealized_pnl"]
+        self.assertAlmostEqual(snap["session_pnl"], gross)
+        self.assertAlmostEqual(gross, -1290.0 + 0.02 * 64000.0)
+
+    def test_no_mark_open_leg_reports_zero_upnl_not_phantom_loss(self):
+        # INVARIANT (No false SL): with an OPEN long but NO live mark available
+        # (client None, no mark passed), the open leg must read uPnL=0 (realized
+        # basis), NOT signed_cash (-$104) which would trip a phantom SL.
+        metrics = {
+            "fills": 1, "volume": 104.0, "fees": 0.05, "realized_pnl": 0.0,
+            "net_base": 0.0016, "signed_cash": -104.0,
+        }
+        snap = self._snap(metrics, mark=0.0, client=None)
+        self.assertAlmostEqual(snap["unrealized_pnl"], 0.0)
+        self.assertAlmostEqual(snap["session_pnl"], 0.0)  # == realized (0)
+        self.assertGreater(snap["session_pnl_pct"], -1.0)
+
+    def test_conservation_closed_session_has_zero_unrealized(self):
+        # When fully closed (net_base==0), gross == realized, unrealized == 0.
+        metrics = {
+            "fills": 8, "volume": 4000.0, "fees": 2.0, "realized_pnl": 5.0,
+            "net_base": 0.0, "signed_cash": 5.0,
+        }
+        snap = self._snap(metrics, mark=64000.0)
+        self.assertAlmostEqual(snap["unrealized_pnl"], 0.0)
+        self.assertAlmostEqual(snap["session_pnl"], 5.0)
+        self.assertFalse(snap["has_position"])
+        self.assertEqual(snap["position_side"], "")
 
 
 class StatusRenderTests(unittest.TestCase):

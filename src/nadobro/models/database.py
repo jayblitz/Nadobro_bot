@@ -874,45 +874,50 @@ def rollup_session_from_trades(session_id: int, network: str) -> dict:
     return totals
 
 
-SessionWindow = Optional[tuple]  # (product_id, started_at, stopped_at)
+def _resolve_session_user_id(session_id: int) -> Optional[int]:
+    """Owner of a session (``strategy_sessions.user_id``). Used to force every
+    session query to be scoped to the owning user, even when a caller forgot to
+    pass ``user_id`` — a session belongs to exactly one user, so this is the
+    authoritative cross-user guard."""
+    try:
+        row = query_one(
+            "SELECT user_id FROM strategy_sessions WHERE id = %s", (int(session_id),)
+        )
+    except Exception:
+        return None
+    return int(row["user_id"]) if row and row.get("user_id") is not None else None
 
 
-def _session_match_where(session_id: int, window: SessionWindow) -> tuple[str, list]:
+def _session_match_where(session_id: int, user_id: Optional[int] = None) -> tuple[str, list]:
     """WHERE clause + params selecting a session's fills in ``trades_<network>``.
 
-    Default: rows tagged with ``strategy_session_id``. The engine's session tag
-    is unreliable (it depends on DbTradeRecorder writing the fill AND
-    nado_sync back-linking the venue match digest to an ``order_intents`` row);
-    when either misses, venue matches land UNTAGGED and every counter reads 0.
-
-    When ``window`` (product_id, started_at, stopped_at) is supplied we also
-    attribute UNTAGGED rows on that product within the session's time window.
-    This is the same product+window attribution the live dashboard uses, so the
-    stored-row surfaces agree with Nado without depending on the tag. Tagged
-    rows belonging to *other* sessions are never pulled in, so there is no
-    double counting. Caveat: a pre-existing manual position on the same product
-    during the run would be attributed here — acceptable since the bot owns its
-    product for the session's duration.
+    Scoped by ``strategy_session_id`` AND ``user_id`` (per-user, per-run). The
+    session id is a global ``strategy_sessions.id`` (unique across users), so it
+    alone identifies one run — but we ALSO pin ``user_id`` as defense in depth so
+    a mis-tagged or future venue-synced row can never leak another user's fills
+    into this user's PnL/SL. (The previous product+time-window fallback that
+    pulled untagged fills on the product into the session is gone — that was the
+    false-SL contamination.)
     """
-    if not window or window[0] is None or window[1] is None:
+    if user_id is None:
         return "strategy_session_id = %s", [int(session_id)]
-    product_id, started_at, stopped_at = window
-    sql = (
-        "(strategy_session_id = %s "
-        "OR (strategy_session_id IS NULL AND product_id = %s "
-        "AND COALESCE(filled_at, created_at) >= %s "
-        "AND (%s::timestamptz IS NULL OR COALESCE(filled_at, created_at) <= %s)))"
-    )
-    return sql, [int(session_id), int(product_id), started_at, stopped_at, stopped_at]
+    return "strategy_session_id = %s AND user_id = %s", [int(session_id), int(user_id)]
 
 
-def _session_realized_pnl(session_id: int, table: str, window: SessionWindow = None) -> float:
+def _session_realized_pnl(
+    session_id: int, table: str, user_id: Optional[int] = None
+) -> float:
     """Session realized PnL: venue-authoritative per-match ``realized_pnl_x18``
     when fully synced, else the recorder rows' buy/sell/fee decomposition
     (complete at fill time). Shared by the live dashboard and the finalize
-    rollup so both always agree. ``window`` broadens attribution to untagged
-    fills on the product within the session window (see _session_match_where)."""
-    where, params = _session_match_where(session_id, window)
+    rollup so both always agree. Scoped per ``user_id`` + ``strategy_session_id``
+    (see _session_match_where). ``user_id`` is auto-resolved from the session
+    when not supplied, and a fully unscoped query is never run."""
+    if user_id is None:
+        user_id = _resolve_session_user_id(session_id)
+        if user_id is None:
+            return 0.0
+    where, params = _session_match_where(session_id, user_id)
     try:
         row = query_one(
             f"""
@@ -949,17 +954,25 @@ def _session_realized_pnl(session_id: int, table: str, window: SessionWindow = N
     return float(row.get("recorder_gross") or 0)
 
 
-def get_session_live_metrics(session_id: int, network: str, window: SessionWindow = None) -> dict:
+def get_session_live_metrics(
+    session_id: int, network: str, user_id: Optional[int] = None
+) -> dict:
     """Live session totals computed straight from ``trades_<network>`` for the
     active session — restart-safe and cross-process, used by /mm_status so the
     dashboard reflects engine fills the moment DbTradeRecorder writes them
     (rather than the in-memory ``state`` the engine never populates).
 
-    ``window`` (product_id, started_at, stopped_at) broadens attribution to
-    untagged venue matches on the product within the session window, so the
-    counters are correct even when the session tag was never written."""
+    Scoped per ``user_id`` + ``strategy_session_id`` so the numbers are unique
+    per user AND per run — one user's fills can never leak into another's PnL/SL
+    (see _session_match_where). ``user_id`` is auto-resolved from the session
+    when not supplied; an unresolvable owner yields empty rather than an
+    account-wide query."""
     table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
-    where, params = _session_match_where(session_id, window)
+    if user_id is None:
+        user_id = _resolve_session_user_id(session_id)
+        if user_id is None:
+            return {}
+    where, params = _session_match_where(session_id, user_id)
     try:
         row = query_one(
             f"""
@@ -975,7 +988,26 @@ def get_session_live_metrics(session_id: int, network: str, window: SessionWindo
               COALESCE(SUM(COALESCE(
                 NULLIF(fee_x18, 0) / 1e18,
                 COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0)
-              )), 0) AS fees
+              )), 0) AS fees,
+              -- The session's OWN net open base and signed cash flow, so PnL can
+              -- be marked to the live mid against THIS run's position only (no
+              -- account-aggregate contamination). base/quote prefer venue x18.
+              COALESCE(SUM(
+                CASE WHEN side = 'long'
+                       THEN  ABS(COALESCE(NULLIF(base_filled_x18, 0) / 1e18, fill_size, size, 0))
+                     WHEN side = 'short'
+                       THEN -ABS(COALESCE(NULLIF(base_filled_x18, 0) / 1e18, fill_size, size, 0))
+                     ELSE 0 END
+              ), 0) AS net_base,
+              COALESCE(SUM(
+                CASE WHEN side = 'short'
+                       THEN  ABS(COALESCE(NULLIF(quote_filled_x18, 0) / 1e18,
+                                          ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)))
+                     WHEN side = 'long'
+                       THEN -ABS(COALESCE(NULLIF(quote_filled_x18, 0) / 1e18,
+                                          ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)))
+                     ELSE 0 END
+              ), 0) AS signed_cash
             FROM {table}
             WHERE {where}
             """,
@@ -989,18 +1021,25 @@ def get_session_live_metrics(session_id: int, network: str, window: SessionWindo
         "fills": int(row.get("fills") or 0),
         "volume": float(row.get("volume") or 0),
         "fees": float(row.get("fees") or 0),
-        "realized_pnl": _session_realized_pnl(int(session_id), table, window),
+        "net_base": float(row.get("net_base") or 0),
+        "signed_cash": float(row.get("signed_cash") or 0),
+        "realized_pnl": _session_realized_pnl(int(session_id), table, user_id),
     }
 
 
 def get_session_recent_fills(
-    session_id: int, network: str, limit: int = 10, window: SessionWindow = None
+    session_id: int, network: str, limit: int = 10, user_id: Optional[int] = None
 ) -> list:
     """Most recent recorded fills for a session, newest first — powers
-    /mm_fills for engine strategies. ``window`` broadens attribution to untagged
-    venue matches on the product within the session window."""
+    /mm_fills for engine strategies. Scoped per ``user_id`` + ``strategy_session_id``
+    (see _session_match_where); ``user_id`` auto-resolves from the session and an
+    unresolvable owner yields [] rather than an account-wide query."""
     table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
-    where, params = _session_match_where(session_id, window)
+    if user_id is None:
+        user_id = _resolve_session_user_id(session_id)
+        if user_id is None:
+            return []
+    where, params = _session_match_where(session_id, user_id)
     try:
         return query_all(
             f"""
@@ -1090,14 +1129,14 @@ def rollup_engine_session_pnl_funding(session_id: int, network: str) -> dict:
 
     # 1) Venue-authoritative realized PnL (per-match), with recorder-row
     #    buy/sell/fee fallback when the venue sync hasn't tagged matches yet.
-    #    Shared with /mm_status's live read so both surfaces agree. The window
-    #    also rescues untagged venue matches on the product (see
-    #    _session_match_where) so finalize totals don't undercount.
+    #    Shared with /mm_status's live read so both surfaces agree. Scoped to
+    #    the session owner so finalize never mixes in another user's fills.
     product_id = sess.get("product_id")
     started_at = sess.get("started_at")
     stopped_at = sess.get("stopped_at")
-    window = (product_id, started_at, stopped_at)
-    realized_pnl = _session_realized_pnl(int(session_id), table, window)
+    realized_pnl = _session_realized_pnl(
+        int(session_id), table, int(sess["user_id"]) if sess.get("user_id") is not None else None
+    )
 
     # 2) Funding: realized funding payments on the session's product within the
     #    session window (paid-positive, matching total_funding_paid convention).

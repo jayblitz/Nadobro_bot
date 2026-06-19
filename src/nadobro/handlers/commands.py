@@ -368,11 +368,10 @@ def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:
         network = str(status.get("network") or state.get("network") or "mainnet")
         sess = get_active_strategy_session(telegram_id, network)
         if sess and sess.get("id") is not None:
-            # Window attribution (product + session window) rescues venue matches
-            # the engine never tagged with strategy_session_id.
-            window = (sess.get("product_id"), sess.get("started_at"), sess.get("stopped_at"))
+            # Scoped per user + per session so /mm_fills only ever shows THIS
+            # user's fills for THIS run (not the whole product, not other users).
             db_fills = get_session_recent_fills(
-                int(sess["id"]), network, limit=limit, window=window
+                int(sess["id"]), network, limit=limit, user_id=int(telegram_id)
             ) or None
     except Exception:
         db_fills = None

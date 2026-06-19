@@ -14,32 +14,33 @@ PnL convention
 --------------
 ``session_pnl = realized_pnl + unrealized_pnl - funding_paid``
 
+Everything is sourced from the session's OWN tagged fills (``strategy_session_id``)
+in ``trades_<network>``, marked to the live mid — never the account-aggregate
+position on the product. This is the fix for the false-SL bug (session #40): a
+pre-existing / overlapping / untagged position on the same product can no longer
+contaminate a run's PnL.
+
+* ``session_pnl_gross = signed_cash + net_base * mark`` — exactly the session's
+  realized + open-leg unrealized, with no VWAP matching needed. ``net_base`` is
+  the session's signed open base (long +, short −) and ``signed_cash`` its signed
+  cash flow (short +quote, long −quote), both from the session's tagged fills.
 * ``realized_pnl`` — venue-authoritative per-match PnL when synced, else the
-  recorder rows' buy/sell cash-flow (see ``_session_realized_pnl``). It is
-  **GROSS of fees** — PnL is PnL. Fees are a standalone metric (``fees``),
-  tracked per run and surfaced separately, NOT folded into PnL.
-* ``unrealized_pnl`` — the open position's ``est_pnl`` (exactly the uPnL Nado
-  shows). The $32-loss bug was an *open* position, so a realized-only basis
-  would never have tripped the stop — uPnL is the dominant term in-flight.
+  recorder rows' buy/sell cash-flow (see ``_session_realized_pnl``). **GROSS of
+  fees** — PnL is PnL. Fees are a standalone metric (``fees``), tracked per run
+  and surfaced separately, NOT folded into PnL.
+* ``unrealized_pnl = session_pnl_gross - realized_pnl`` — the open leg marked to
+  the live mid. uPnL is the dominant term in-flight (the $32-loss bug was an open
+  position), so a realized-only basis would never have tripped the stop.
 * ``funding_paid`` — paid-positive; reduces PnL. Best-effort from the session
   row during a live run (funding is rolled up authoritatively at finalize).
-
-Attribution is by ``product_id`` + session time window rather than the fragile
-``strategy_session_id`` tag, so the numbers are correct even when the engine
-never wrote an ``order_intents`` digest for a fill.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
-
-# A positions row older than this (vs its ``synced_at``) is treated as stale and
-# the snapshot tries a direct venue read instead. ~2 portfolio-sync ticks.
-_POSITION_STALE_SECONDS = 90.0
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -67,85 +68,6 @@ def _resolve_margin(state: Optional[dict], session: Optional[dict]) -> float:
     return 0.0
 
 
-def _aggregate_db_position(rows: list) -> dict:
-    """Net an open product's cross + isolated rows into a single position view."""
-    net_signed = 0.0
-    unrealized = 0.0
-    margin_used = 0.0
-    dominant = None
-    dominant_abs = -1.0
-    newest_sync = 0.0
-    for r in rows:
-        size = abs(_f(r.get("size")))
-        side = str(r.get("side") or "").lower()
-        signed = size if side == "long" else -size
-        net_signed += signed
-        unrealized += _f(r.get("est_pnl"))
-        margin_used += _f(r.get("margin_used"))
-        newest_sync = max(newest_sync, _f(r.get("synced_ts")))
-        if size > dominant_abs:
-            dominant_abs = size
-            dominant = r
-    side = "long" if net_signed > 0 else "short" if net_signed < 0 else ""
-    return {
-        "has_position": abs(net_signed) > 0,
-        "position_size": abs(net_signed),
-        "position_side": side,
-        "entry_price": _f(dominant.get("avg_entry_price")) if dominant else 0.0,
-        "liq_price": _f(dominant.get("est_liq_price")) if dominant else 0.0,
-        "leverage": _f(dominant.get("leverage")) if dominant else 0.0,
-        "margin_used": margin_used,
-        "unrealized_pnl": unrealized,
-        "synced_ts": newest_sync,
-    }
-
-
-def _live_position_from_client(client, product_id: int) -> Optional[dict]:
-    """Fresh position read straight from Nado for one product (best-effort)."""
-    if client is None:
-        return None
-    try:
-        positions = client.get_all_positions() or []
-    except Exception:  # noqa: BLE001 - display/guard path must never raise
-        logger.debug("live position read failed pid=%s", product_id, exc_info=True)
-        return None
-    net_signed = 0.0
-    unrealized = 0.0
-    dominant = None
-    dominant_abs = -1.0
-    matched = False
-    for p in positions:
-        if int(p.get("product_id") or 0) != int(product_id):
-            continue
-        matched = True
-        size = abs(_f(p.get("amount")))
-        signed = _f(p.get("signed_amount"), size if str(p.get("side")).upper() == "LONG" else -size)
-        net_signed += signed
-        unrealized += _f(p.get("unrealized_pnl"))
-        if size > dominant_abs:
-            dominant_abs = size
-            dominant = p
-    if not matched:
-        # Nado authoritatively reports no position on this product → flat.
-        return {
-            "has_position": False, "position_size": 0.0, "position_side": "",
-            "entry_price": 0.0, "liq_price": 0.0, "leverage": 0.0,
-            "margin_used": 0.0, "unrealized_pnl": 0.0, "synced_ts": time.time(),
-        }
-    side = "long" if net_signed > 0 else "short" if net_signed < 0 else ""
-    return {
-        "has_position": abs(net_signed) > 0,
-        "position_size": abs(net_signed),
-        "position_side": side,
-        "entry_price": _f(dominant.get("price")) if dominant else 0.0,
-        "liq_price": _f(dominant.get("liquidation_price")) if dominant else 0.0,
-        "leverage": 0.0,
-        "margin_used": 0.0,
-        "unrealized_pnl": unrealized,
-        "synced_ts": time.time(),
-    }
-
-
 def get_live_session_snapshot(
     telegram_id: int,
     network: str,
@@ -153,44 +75,78 @@ def get_live_session_snapshot(
     *,
     state: Optional[dict] = None,
     client=None,
+    mark: Optional[float] = None,
 ) -> dict:
-    """Return the live figures Nado shows for ``session`` (an active
-    ``strategy_sessions`` row). Read-only and best-effort: never raises, and
-    degrades to whatever sources are reachable. Blocking (DB + optional venue
-    call) — call via ``run_blocking`` from a coroutine.
+    """Live figures for ``session`` (a ``strategy_sessions`` row), scoped to
+    THIS run only. Read-only, best-effort, never raises. Blocking — call via
+    ``run_blocking``.
+
+    PnL integrity: realized/volume/fees AND the open position come exclusively
+    from this session's tagged fills in ``trades_<network>`` (NOT the account's
+    aggregate position on the product). The session's net base is marked to the
+    live ``mark`` so ``session_pnl`` reflects only what this run did — a
+    pre-existing or other-source position on the same product can never
+    contaminate it (the false-SL bug). The account/portfolio view shows the
+    Nado aggregate separately.
     """
     from src.nadobro.models.database import (
         count_open_orders_for_product,
-        get_open_position_rows_for_product,
         get_session_live_metrics,
     )
 
     session = session or {}
     product_id = session.get("product_id")
-    started_at = session.get("started_at")
-    stopped_at = session.get("stopped_at")
-    window = (product_id, started_at, stopped_at)
-
     session_id = int(session.get("id") or 0)
-    metrics = get_session_live_metrics(session_id, network, window) if session_id else {}
+    # Scope to BOTH this session AND this user — stats are unique per user, per
+    # run. A session id is globally unique, but pinning user_id too means a
+    # mis-tagged/venue-synced row can never leak another user's PnL here.
+    metrics = (
+        get_session_live_metrics(session_id, network, user_id=int(telegram_id))
+        if session_id else {}
+    )
 
-    # --- open position / unrealized PnL (DB first, fresh venue read if stale) --
-    position = {
-        "has_position": False, "position_size": 0.0, "position_side": "",
-        "entry_price": 0.0, "liq_price": 0.0, "leverage": 0.0,
-        "margin_used": 0.0, "unrealized_pnl": 0.0, "synced_ts": 0.0,
-    }
-    if product_id is not None:
-        rows = get_open_position_rows_for_product(int(telegram_id), network, int(product_id))
-        if rows:
-            position = _aggregate_db_position(rows)
-        stale = (time.time() - _f(position.get("synced_ts"), 0.0)) > _POSITION_STALE_SECONDS
-        if (not rows or stale) and client is not None:
-            live = _live_position_from_client(client, int(product_id))
-            if live is not None:
-                position = live
+    # Live mark for valuing the session's open base. Prefer the caller-supplied
+    # mark (the rail already has the cycle mid); else read it once.
+    mark_f = _f(mark, 0.0)
+    if mark_f <= 0 and client is not None and product_id is not None:
+        try:
+            mp = client.get_market_price(int(product_id)) or {}
+            mark_f = _f(mp.get("mid"), 0.0)
+        except Exception:  # noqa: BLE001 - display/guard path must never raise
+            logger.debug("live mark read failed pid=%s", product_id, exc_info=True)
 
-    # --- open orders (DB first, fresh venue read as fallback) ------------------
+    realized = _f(metrics.get("realized_pnl"))
+    fees = _f(metrics.get("fees"))
+    volume = _f(metrics.get("volume"))
+    fills = int(metrics.get("fills") or 0)
+    net_base = _f(metrics.get("net_base"))
+    signed_cash = _f(metrics.get("signed_cash"))
+    funding_paid = _f((session or {}).get("total_funding_paid"))
+
+    # Safety: if we hold open base but couldn't read a live mark (client down /
+    # market read failed), DO NOT value the open leg as ``signed_cash`` alone —
+    # that is the raw cash spent and reads as a huge phantom loss, which would
+    # trip a FALSE SL (the exact bug class we're fixing). Fall back to the mark
+    # that zeroes the open-leg uPnL (== realized-only basis): we simply don't
+    # know the unrealized yet, so report 0 rather than fabricate a loss.
+    if mark_f <= 0 and abs(net_base) > 1e-12:
+        mark_f = (realized - signed_cash) / net_base
+
+    # session realized + unrealized (gross), marked to the live mark, from this
+    # run's own fills. signed_cash + net_base*mark == realized + open-leg uPnL.
+    session_pnl_gross = signed_cash + net_base * mark_f
+    unrealized = session_pnl_gross - realized
+    session_pnl = session_pnl_gross - funding_paid
+    margin = _resolve_margin(state, session)
+    session_pnl_pct = (session_pnl / margin * 100.0) if margin > 0 else 0.0
+
+    # Position view = the SESSION's own net base (not the account aggregate).
+    has_position = abs(net_base) > 1e-12
+    position_side = "long" if net_base > 0 else "short" if net_base < 0 else ""
+    # Effective breakeven from the marked uPnL: uPnL = net_base*(mark - entry).
+    entry_price = (mark_f - unrealized / net_base) if net_base else 0.0
+
+    # --- open orders for the product (session owns the product during a run) ---
     open_orders = 0
     if product_id is not None:
         open_orders = count_open_orders_for_product(int(telegram_id), network, int(product_id))
@@ -199,17 +155,6 @@ def get_live_session_snapshot(
                 open_orders = len(client.get_open_orders(int(product_id)) or [])
             except Exception:  # noqa: BLE001
                 logger.debug("live open-orders read failed pid=%s", product_id, exc_info=True)
-
-    realized = _f(metrics.get("realized_pnl"))
-    fees = _f(metrics.get("fees"))
-    volume = _f(metrics.get("volume"))
-    fills = int(metrics.get("fills") or 0)
-    unrealized = _f(position.get("unrealized_pnl"))
-    funding_paid = _f((session or {}).get("total_funding_paid"))
-
-    session_pnl = realized + unrealized - funding_paid
-    margin = _resolve_margin(state, session)
-    session_pnl_pct = (session_pnl / margin * 100.0) if margin > 0 else 0.0
 
     return {
         "product_id": product_id,
@@ -223,5 +168,13 @@ def get_live_session_snapshot(
         "session_pnl": session_pnl,
         "margin": margin,
         "session_pnl_pct": session_pnl_pct,
-        **position,
+        "mark": mark_f,
+        "has_position": has_position,
+        "position_size": abs(net_base),
+        "position_side": position_side,
+        "entry_price": entry_price,
+        "liq_price": 0.0,
+        "leverage": _f((state or {}).get("leverage"), 0.0),
+        "margin_used": 0.0,
+        "net_base": net_base,
     }
