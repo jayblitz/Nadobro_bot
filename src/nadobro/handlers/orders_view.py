@@ -82,7 +82,7 @@ def render_cancel_all_confirm() -> tuple[str, InlineKeyboardMarkup]:
     return (
         "🗑 Cancel all open orders?\n\nThis will cancel known open plain orders, then refresh Portfolio from Nado.",
         InlineKeyboardMarkup([
-            [InlineKeyboardButton("Yes — cancel all", callback_data="portfolio:cancel_all_yes")],
+            [InlineKeyboardButton("Yes, cancel all", callback_data="portfolio:cancel_all_yes")],
             [InlineKeyboardButton("Cancel", callback_data="portfolio:positions")],
         ]),
     )

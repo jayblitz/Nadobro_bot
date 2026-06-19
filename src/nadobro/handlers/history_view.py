@@ -41,7 +41,7 @@ def render_history_view(
 
     lines = [
         f"📜 <b>Trade History</b> · {esc(network.upper())} · page {page + 1}/{total_pages}",
-        "Manual trades only — strategy sessions live under Performance",
+        "Manual trades only. Strategy sessions live under Performance",
         divider(),
     ]
     rows: list[list[InlineKeyboardButton]] = []

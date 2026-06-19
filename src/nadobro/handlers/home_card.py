@@ -134,13 +134,13 @@ def build_positions_view(telegram_id: int):
     network = user.network_mode.value if user else "mainnet"
     client = get_user_readonly_client(telegram_id, network=network)
     if not client:
-        return localize_text("⚠️ Wallet not initialized\\. Use /start first\\.", get_active_language()), home_card_kb()
+        return localize_text("⚠️ Wallet's not set up yet\\. Hit /start to link it\\.", get_active_language()), home_card_kb()
     try:
         positions = client.get_all_positions() or []
     except Exception as e:
         logger.warning("positions_view_failed user=%s err=%s", telegram_id, e)
         return localize_text(
-            "⚠️ Positions refresh is temporarily unavailable\\. Try again shortly\\.",
+            "⚠️ Can't pull positions right now\\. Give it a sec and tap again\\.",
             get_active_language(),
         ), home_card_kb()
     prices = None
@@ -188,7 +188,7 @@ async def _edit_or_send_card(
 
     if not context.user_data.get(KEYBOARD_REMOVED_KEY):
         try:
-            shortcut_text = localize_text("Home shortcut enabled.", lang)
+            shortcut_text = localize_text("Keyboard's ready 👇", lang)
             shortcut_kb = localize_markup(persistent_menu_kb(), lang)
             shortcut_msg = await context.bot.send_message(
                 chat_id=chat_id,
@@ -302,7 +302,7 @@ async def _view_portfolio_text(telegram_id: int):
     except Exception as e:
         logger.warning("portfolio_deck_unavailable user=%s err=%s", telegram_id, e)
         return localize_text(
-            "⚠️ Portfolio refresh is temporarily unavailable\\. Try again shortly\\.",
+            "⚠️ Can't pull your portfolio right now\\. Give it a sec and tap again\\.",
             get_active_language(),
         ), home_card_kb()
 
@@ -351,7 +351,7 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
         return await run_blocking_sdk_capped(
             _view_wallet_text, telegram_id,
             timeout_seconds=_DATA_VIEW_CEILING_SECONDS,
-            default=_refreshing_placeholder("⏳ Refreshing wallet… tap again in a moment\\."),
+            default=_refreshing_placeholder("⏳ Refreshing wallet… tap again in a sec\\."),
         )
     if callback_data == "portfolio:view":
         return await _view_portfolio_text(telegram_id)
@@ -359,7 +359,7 @@ async def resolve_home_view(callback_data: str, telegram_id: int):
         return await run_blocking_sdk_capped(
             _view_positions_text, telegram_id,
             timeout_seconds=_DATA_VIEW_CEILING_SECONDS,
-            default=_refreshing_placeholder("⏳ Refreshing positions… tap again in a moment\\."),
+            default=_refreshing_placeholder("⏳ Refreshing positions… tap again in a sec\\."),
         )
     if callback_data == "points:view":
         return await run_blocking(_view_points_text, telegram_id)
@@ -377,7 +377,7 @@ async def open_home_card_view_from_message(update, context: CallbackContext, tel
         text, kb = await run_blocking_sdk_capped(
             build_wallet_view_payload, telegram_id, context, True,
             timeout_seconds=_DATA_VIEW_CEILING_SECONDS,
-            default=_refreshing_placeholder("⏳ Refreshing wallet… tap again in a moment\\."),
+            default=_refreshing_placeholder("⏳ Refreshing wallet… tap again in a sec\\."),
         )
         await _edit_or_send_card(update, context, text, kb, prefer_reply_to_message=True)
         return

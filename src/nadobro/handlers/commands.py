@@ -71,16 +71,16 @@ def _safe_text(text: str | None, fallback: str) -> str:
 # New onboarding messages (exact copy from spec)
 WELCOME_MSG = """Welcome to Nadobro 👋
 
-Trade perps on Nado DEX from Telegram with guided execution, portfolio tools, automation, and AI support.
+Trade perps on Nado straight from Telegram. Type the trade, tap to confirm, done. Automation, portfolio, and AI are all here too.
 
 Pick your language:"""
 
-WELCOME_CARD_MSG = """🔥 You're in!
+WELCOME_CARD_MSG = """🔥 You're in.
 
-By tapping *"Let's Get It"* you accept the Terms of Use & Privacy Policy.
+Tapping *"Let's Get It"* means you're good with the Terms of Use & Privacy Policy.
 
 🔐 How it works:
-We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
+We spin up a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke whenever you want.
 
 Ready?"""
 

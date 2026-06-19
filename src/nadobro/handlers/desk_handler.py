@@ -98,7 +98,7 @@ def _balance_note(telegram_id: int, plan: ExecutionPlan, network: str, mid: floa
         need = notional / float(plan.leverage or 1) if plan.market == "perp" else notional
         ok = usdt0 >= need * 0.98
         what = "margin" if plan.market == "perp" else "USDT0"
-        return f"{'✅' if ok else '⚠️'} Needs ~${need:,.2f} {what} — you have ${usdt0:,.2f}"
+        return f"{'✅' if ok else '⚠️'} Needs ~${need:,.2f} {what}, you have ${usdt0:,.2f}"
     except Exception:  # noqa: BLE001 - preview must render even if balances are down
         logger.warning("desk: balance note failed", exc_info=True)
         return ""
@@ -139,7 +139,7 @@ def render_preview_card(plan: ExecutionPlan, mid: float, balance_note: str) -> s
     lines = [
         f"🧾 {b('Desk plan preview')}  ·  {b(esc(market_badge))}",
         divider(),
-        f"{b(esc(side_txt))} {b(esc(plan.product or '?'))} — {esc(size_txt)}",
+        f"{b(esc(side_txt))} {b(esc(plan.product or '?'))} · {esc(size_txt)}",
     ]
     if plan.algo == "twap":
         slices = plan.twap_slices() or 0
@@ -210,7 +210,7 @@ def render_desk_view(active: list[dict], recent: list[dict]) -> str:
             plan = rec["plan"]
             badge = _STATUS_BADGE.get(str(rec.get("status")), str(rec.get("status")))
             err = rec.get("error")
-            tail = f" — {err}" if err else ""
+            tail = f": {err}" if err else ""
             lines.append(esc(f"{badge}: {plan.describe()}{tail}"))
     return "\n".join(lines)
 
@@ -269,7 +269,7 @@ async def handle_desk_text(update, context, telegram_id: int, text: str) -> bool
     step = await run_blocking(get_resume_step, telegram_id)
     if step != "complete":
         await update.message.reply_text(
-            localize_text("⚠️ Finish onboarding first — resume at {step}.", lang)
+            localize_text("⚠️ Finish onboarding first. Resume at {step}.", lang)
             .format(step=str(step).upper()),
         )
         return True
@@ -281,7 +281,7 @@ async def handle_desk_text(update, context, telegram_id: int, text: str) -> bool
     if result.clarify:
         wants = "; ".join(_CLARIFY_HINTS.get(c, c) for c in result.clarify)
         await update.message.reply_text(
-            localize_text("Almost there — I still need: {wants}.", lang).format(wants=wants)
+            localize_text("Almost there. I still need: {wants}.", lang).format(wants=wants)
             + "\n" + localize_text("Reply with the full instruction in one message.", lang),
         )
         return True
@@ -316,7 +316,7 @@ async def handle_desk_text(update, context, telegram_id: int, text: str) -> bool
     balance_note = await run_blocking(_balance_note, telegram_id, plan, network, mid)
     row_id = await run_blocking(desk_store.insert_draft, telegram_id, plan, network)
     if row_id is None:
-        await update.message.reply_text(localize_text("Could not stage the plan — try again.", lang))
+        await update.message.reply_text(localize_text("Could not stage the plan. Try again.", lang))
         return True
 
     await update.message.reply_text(
@@ -351,10 +351,10 @@ async def handle_desk_callback(query, data: str, telegram_id: int, context) -> N
 
     if action == "confirm":
         if not rec or int(rec.get("user_id") or 0) != int(telegram_id):
-            await _edit_loc(query, localize_text("This plan is gone — send the instruction again.", lang))
+            await _edit_loc(query, localize_text("This plan is gone. Send the instruction again.", lang))
             return
         if rec.get("status") != ST_DRAFT:
-            await _edit_loc(query, localize_text("Already handled — check My Desk.", lang),
+            await _edit_loc(query, localize_text("Already handled. Check My Desk.", lang),
                             reply_markup=_preview_kb_view_only())
             return
         plan: ExecutionPlan = rec["plan"]
@@ -371,7 +371,7 @@ async def handle_desk_callback(query, data: str, telegram_id: int, context) -> N
             return
         ok = await run_blocking(desk_store.confirm_plan, plan_id, telegram_id, network, plan)
         if not ok:
-            await _edit_loc(query, localize_text("Could not arm the plan — it may have expired.", lang))
+            await _edit_loc(query, localize_text("Could not arm the plan. It may have expired.", lang))
             return
         await _edit_loc(
             query,
@@ -385,14 +385,14 @@ async def handle_desk_callback(query, data: str, telegram_id: int, context) -> N
     if action == "discard":
         if rec and rec.get("status") == ST_DRAFT and int(rec.get("user_id") or 0) == int(telegram_id):
             await run_blocking(desk_store.discard_draft, plan_id, telegram_id, network)
-        await _edit_loc(query, localize_text("Plan discarded — nothing was placed.", lang))
+        await _edit_loc(query, localize_text("Plan discarded. Nothing was placed.", lang))
         return
 
     if action == "stop":
         ok = await run_blocking(desk_store.cancel_plan, plan_id, telegram_id, network)
         if ok:
             await _edit_loc(query, localize_text(
-                "🛑 Cancelling — resting orders are being pulled; anything already "
+                "🛑 Cancelling. Resting orders are being pulled. Anything already "
                 "filled stays in your account.", lang),
                 reply_markup=_preview_kb_view_only())
         else:

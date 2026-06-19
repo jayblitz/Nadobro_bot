@@ -132,7 +132,7 @@ async def _handle_settings(query, data, telegram_id, context):
         context.user_data["settings"] = saved
         msg = fmt_settings(chosen)
         await _edit_loc(query, 
-            "✅ *Risk profile updated* — *{profile}*\n\n{settings}",
+            "✅ *Risk profile updated:* *{profile}*\n\n{settings}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=settings_kb(chosen["default_leverage"], chosen["slippage"]),
             profile=escape_md(profile.upper()),

@@ -15,7 +15,7 @@ class TelegramUiFormatterTests(unittest.TestCase):
         self.assertIn("*Quick snapshot*", text)
         self.assertIn("*Your toolkit*", text)
         self.assertIn("└ 🌐 *Execution Mode*", text)
-        self.assertIn("Q\\&A", text)
+        self.assertIn("place trades in plain English", text)
 
     def test_dashboard_home_returns_non_empty_message(self):
         text = formatters.fmt_dashboard_home()
@@ -26,9 +26,9 @@ class TelegramUiFormatterTests(unittest.TestCase):
     def test_strategy_hub_intro_uses_tree_sections(self):
         text = formatters.fmt_strategy_hub_intro()
         self.assertIn("🧠 *Nadobro Strategy Lab*", text)
-        self.assertIn("*Your toolkit*", text)
-        self.assertIn("├ Open any strategy cockpit dashboard", text)
-        self.assertIn("pre\\-trade analytics", text)
+        self.assertIn("*How it works*", text)
+        self.assertIn("├ Pick a strategy and I'll open its cockpit", text)
+        self.assertIn("pre\\-trade readout", text)
 
     def test_wallet_connect_card_escapes_private_key(self):
         text = formatters.fmt_wallet_connect_card("0xabc_def")
@@ -41,9 +41,9 @@ class TelegramUiFormatterTests(unittest.TestCase):
 
     def test_alert_menu_intro_uses_new_toolkit_copy(self):
         text = formatters.fmt_alert_menu_intro()
-        self.assertIn("*Your toolkit*", text)
-        self.assertIn("├ Create price alerts", text)
-        self.assertIn("└ Track PnL triggers", text)
+        self.assertIn("*What you can set*", text)
+        self.assertIn("├ Price alerts", text)
+        self.assertIn("└ PnL triggers", text)
 
     def test_home_keyboard_emoji_semantics_match(self):
         self.assertEqual(keyboards.HOME_MODULE_EMOJIS["trade"], "🤖")

@@ -209,7 +209,7 @@ def render_close_all_confirm() -> tuple[str, InlineKeyboardMarkup]:
     return (
         "❌ Close all open positions?\n\nThis will submit reduce-only market closes, then refresh Portfolio from Nado.",
         InlineKeyboardMarkup([
-            [InlineKeyboardButton("Yes — close all", callback_data="portfolio:close_all_yes")],
+            [InlineKeyboardButton("Yes, close all", callback_data="portfolio:close_all_yes")],
             [InlineKeyboardButton("Cancel", callback_data="portfolio:view")],
         ]),
     )
@@ -273,7 +273,7 @@ def render_per_controller_pnl(state: Any) -> str:
     lines = ["", "*Strategy PnL (per controller)*"]
     for cid, pnl in per.items():
         lines.append(
-            f"`{cid}` — net ${pnl.net:.2f} "
+            f"`{cid}` · net ${pnl.net:.2f} "
             f"(realized ${pnl.realized:.2f} · unrealized ${pnl.unrealized:.2f} · "
             f"fees ${pnl.fees:.2f}) · {pnl.open_executors} open"
         )

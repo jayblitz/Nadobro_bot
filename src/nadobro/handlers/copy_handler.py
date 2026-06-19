@@ -54,7 +54,7 @@ async def _handle_copy(query, data, context, telegram_id):
                 pnl = stats["pnl_usd"]
                 pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 lines.append(
-                    f"• *{escape_md(t['label'])}*{curated} — `{wallet_snip}`\n"
+                    f"• *{escape_md(t['label'])}*{curated} · `{wallet_snip}`\n"
                     f"  {l_pnl}: *{escape_md(pnl_str)}* \\| {l_vol}: {escape_md(vol_str)} \\| {l_wr}: {escape_md(wr_str)} \\| {l_trades}: {stats['total_trades']}"
                 )
             lines.append("\n" + localize_text("Select a trader to view details and start copying\\.", lang))
@@ -296,7 +296,7 @@ async def _handle_copy(query, data, context, telegram_id):
                 pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 pnl_str = escape_md(pnl_str)
                 lines.append(
-                    f"• *{escape_md(m['trader_label'])}* — {status_icon}\n"
+                    f"• *{escape_md(m['trader_label'])}* · {status_icon}\n"
                     f"  {l_alloc}: ${float(m.get('total_allocated_usd', 0) or 0):.0f} \\| "
                     f"{l_margin}: ${float(m.get('margin_per_trade', 0) or 0):.0f} \\| {l_lev}: {float(m.get('max_leverage', 0) or 0):.0f}x\n"
                     f"  {l_positions}: {int(m.get('open_positions', 0) or 0)}\n"

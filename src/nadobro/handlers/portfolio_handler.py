@@ -339,7 +339,7 @@ async def _handle_portfolio(query, data, telegram_id):
         if not user:
             await _edit_loc(
                 query,
-                "⚠ History unavailable — execution mode not set. Use /start to choose Testnet or Mainnet.",
+                "⚠ History unavailable. Execution mode not set. Use /start to choose Testnet or Mainnet.",
             )
             return
         # History is pure DB (round-trips from recorded fills) — it never
@@ -355,7 +355,7 @@ async def _handle_portfolio(query, data, telegram_id):
         from src.nadobro.handlers.performance_view import render_hours_view
 
         if not user:
-            await _edit_loc(query, "⚠ Analytics unavailable — execution mode not set.")
+            await _edit_loc(query, "⚠ Analytics unavailable. Execution mode not set.")
             return
         # Pure DB — run off the event loop like the other performance reads.
         text, kb = await run_blocking(render_hours_view, telegram_id, user.network_mode.value)
@@ -368,7 +368,7 @@ async def _handle_portfolio(query, data, telegram_id):
         if not user:
             await _edit_loc(
                 query,
-                "⚠ Performance unavailable — execution mode not set. Use /start to choose Testnet or Mainnet.",
+                "⚠ Performance unavailable. Execution mode not set. Use /start to choose Testnet or Mainnet.",
             )
             return
         network = user.network_mode.value

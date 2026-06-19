@@ -1386,7 +1386,7 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
     if flow == "awaiting_main_address":
         if not _is_valid_main_address(text):
             await _reply_loc(update.message, 
-                "❌ That doesn't look right. Send your main wallet address — starts with 0x followed by 40 hex characters.",
+                "❌ That doesn't look right. Send your main wallet address. It starts with 0x followed by 40 hex characters.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return True
