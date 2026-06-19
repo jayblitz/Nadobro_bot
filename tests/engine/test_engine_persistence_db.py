@@ -242,6 +242,30 @@ def _insert_fill(user_id, sid, side, base, price, *, fee=0.0, product_id=2):
     )
 
 
+def test_session_realized_is_flat_aware():
+    """realized must be the venue per-match PnL, and the recorder cash-flow
+    fallback may ONLY be used when the run is flat. An OPEN position must report
+    realized 0 (NOT the raw cash spent) — the bogus -$506 bug."""
+    from src.nadobro.db import execute
+    from src.nadobro.models.database import get_session_live_metrics
+
+    execute(_TRADES_DDL)
+    execute("DELETE FROM trades_mainnet WHERE user_id = 4044")
+    uid = 4044
+    # OPEN session (only a buy) — cash spent is ~-650 but realized must be 0.
+    _insert_fill(uid, 501, "long", 0.01, 65000.0, fee=0.1)
+    m_open = get_session_live_metrics(501, "mainnet", user_id=uid)
+    assert abs(m_open["net_base"] - 0.01) < 1e-9
+    assert abs(m_open["realized_pnl"]) < 1e-9          # NOT -650
+
+    # FLAT round-trip session — buy 0.01@65000, sell 0.01@65100 -> realized +1.
+    _insert_fill(uid, 502, "long", 0.01, 65000.0, fee=0.1)
+    _insert_fill(uid, 502, "short", 0.01, 65100.0, fee=0.1)
+    m_flat = get_session_live_metrics(502, "mainnet", user_id=uid)
+    assert abs(m_flat["net_base"]) < 1e-9
+    assert abs(m_flat["realized_pnl"] - 1.0) < 1e-6    # 651 - 650 = +1
+
+
 def test_session_live_metrics_strict_per_session_isolation():
     from src.nadobro.db import execute
     from src.nadobro.models.database import get_session_live_metrics
