@@ -231,13 +231,14 @@ CREATE TABLE IF NOT EXISTS trades_mainnet (
 
 
 def _insert_fill(user_id, sid, side, base, price, *, fee=0.0, product_id=2):
-    """Insert a recorder-style fill (no x18 venue columns yet) for a session."""
+    """Insert a recorder-style fill (no x18 venue columns yet) for a session.
+    Mirrors DbTradeRecorder's NOT NULL columns (product_name/order_type/size)."""
     from src.nadobro.db import execute
     execute(
-        "INSERT INTO trades_mainnet (user_id,product_id,side,status,source,"
-        "fill_size,fill_price,fill_fee,strategy_session_id) "
-        "VALUES (%s,%s,%s,'filled','strategy',%s,%s,%s,%s)",
-        (user_id, product_id, side, base, price, fee, sid),
+        "INSERT INTO trades_mainnet (user_id,product_id,product_name,order_type,side,status,source,"
+        "size,price,fill_size,fill_price,fill_fee,strategy_session_id) "
+        "VALUES (%s,%s,'BTC-PERP','match',%s,'filled','strategy',%s,%s,%s,%s,%s,%s)",
+        (user_id, product_id, side, base, price, base, price, fee, sid),
     )
 
 
@@ -249,6 +250,8 @@ def test_session_live_metrics_strict_per_session_isolation():
     execute("DELETE FROM trades_mainnet WHERE user_id = 4040")
 
     uid = 4040
+    other = 7777
+    execute("DELETE FROM trades_mainnet WHERE user_id = %s", (other,))
     # Session 301: the real dgrid run — one tiny long, 0.0016 @ 65000.
     _insert_fill(uid, 301, "long", 0.0016, 65000.0, fee=0.05)
     # Session 302: a DIFFERENT overlapping run on the same product — big short.
@@ -256,27 +259,38 @@ def test_session_live_metrics_strict_per_session_isolation():
     # Untagged account-only match on the same product (NULL session): must be
     # excluded from BOTH sessions (this is what used to contaminate via window).
     execute(
-        "INSERT INTO trades_mainnet (user_id,product_id,side,status,source,"
-        "fill_size,fill_price,fill_fee,strategy_session_id) "
-        "VALUES (%s,2,'long','filled','strategy',3.0,64000.0,7.0,NULL)",
+        "INSERT INTO trades_mainnet (user_id,product_id,product_name,order_type,side,status,source,"
+        "size,price,fill_size,fill_price,fill_fee,strategy_session_id) "
+        "VALUES (%s,2,'BTC-PERP','match','long','filled','strategy',3.0,64000.0,3.0,64000.0,7.0,NULL)",
         (uid,),
     )
+    # CROSS-USER contamination row: ANOTHER user's fill mistakenly carrying the
+    # SAME strategy_session_id (301). The user pin must exclude it — no user's
+    # PnL may ever leak into another's (the -$302-across-platform concern).
+    _insert_fill(other, 301, "short", 100.0, 65000.0, fee=999.0)
 
-    m301 = get_session_live_metrics(301, "mainnet")
-    m302 = get_session_live_metrics(302, "mainnet")
+    m301 = get_session_live_metrics(301, "mainnet", user_id=uid)
+    m302 = get_session_live_metrics(302, "mainnet", user_id=uid)
 
-    # Uniqueness + Isolation: each session sees ONLY its own fill.
+    # Uniqueness + Isolation: each session sees ONLY this user's own fill.
     assert m301["fills"] == 1
     assert m302["fills"] == 1
-    # net_base: long +0.0016 for 301; short -5.0 for 302.
+    # net_base: long +0.0016 for 301 (NOT polluted by the other user's -100 short);
+    # short -5.0 for 302.
     assert abs(m301["net_base"] - 0.0016) < 1e-9
     assert abs(m302["net_base"] - (-5.0)) < 1e-9
     # signed_cash: long -> -quote; short -> +quote.
     assert abs(m301["signed_cash"] - (-(0.0016 * 65000.0))) < 1e-6
     assert abs(m302["signed_cash"] - (5.0 * 65000.0)) < 1e-6
-    # fees are per-session, not summed across runs or the untagged row.
+    # fees are per-user, per-session — not summed across runs, the untagged row,
+    # or the other user's 999.0 fee.
     assert abs(m301["fees"] - 0.05) < 1e-9
     assert abs(m302["fees"] - 10.0) < 1e-9
+
+    # And the OTHER user's session-301 view sees only THEIR fill, never uid's.
+    m_other = get_session_live_metrics(301, "mainnet", user_id=other)
+    assert m_other["fills"] == 1
+    assert abs(m_other["net_base"] - (-100.0)) < 1e-9
 
 
 def test_session_pnl_marked_to_mark_not_account_aggregate():

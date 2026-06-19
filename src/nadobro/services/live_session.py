@@ -97,7 +97,13 @@ def get_live_session_snapshot(
     session = session or {}
     product_id = session.get("product_id")
     session_id = int(session.get("id") or 0)
-    metrics = get_session_live_metrics(session_id, network) if session_id else {}
+    # Scope to BOTH this session AND this user — stats are unique per user, per
+    # run. A session id is globally unique, but pinning user_id too means a
+    # mis-tagged/venue-synced row can never leak another user's PnL here.
+    metrics = (
+        get_session_live_metrics(session_id, network, user_id=int(telegram_id))
+        if session_id else {}
+    )
 
     # Live mark for valuing the session's open base. Prefer the caller-supplied
     # mark (the rail already has the cycle mid); else read it once.

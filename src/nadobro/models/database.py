@@ -874,31 +874,50 @@ def rollup_session_from_trades(session_id: int, network: str) -> dict:
     return totals
 
 
-SessionWindow = Optional[tuple]  # (product_id, started_at, stopped_at)
+def _resolve_session_user_id(session_id: int) -> Optional[int]:
+    """Owner of a session (``strategy_sessions.user_id``). Used to force every
+    session query to be scoped to the owning user, even when a caller forgot to
+    pass ``user_id`` — a session belongs to exactly one user, so this is the
+    authoritative cross-user guard."""
+    try:
+        row = query_one(
+            "SELECT user_id FROM strategy_sessions WHERE id = %s", (int(session_id),)
+        )
+    except Exception:
+        return None
+    return int(row["user_id"]) if row and row.get("user_id") is not None else None
 
 
-def _session_match_where(session_id: int, window: SessionWindow = None) -> tuple[str, list]:
+def _session_match_where(session_id: int, user_id: Optional[int] = None) -> tuple[str, list]:
     """WHERE clause + params selecting a session's fills in ``trades_<network>``.
 
-    STRICT by ``strategy_session_id`` (PnL-integrity fix). The previous
-    product+time-window fallback attributed UNTAGGED fills on the product to the
-    session, which contaminated a run's stats with manual trades / overlapping
-    runs / a pre-existing position — producing false session PnL and SL trips.
-    Each run is now unique: only its own tagged fills count. Untagged venue
-    matches are reconciled into the account view, never into a session. The
-    ``window`` arg is accepted for call-site compatibility but intentionally
-    ignored.
+    Scoped by ``strategy_session_id`` AND ``user_id`` (per-user, per-run). The
+    session id is a global ``strategy_sessions.id`` (unique across users), so it
+    alone identifies one run — but we ALSO pin ``user_id`` as defense in depth so
+    a mis-tagged or future venue-synced row can never leak another user's fills
+    into this user's PnL/SL. (The previous product+time-window fallback that
+    pulled untagged fills on the product into the session is gone — that was the
+    false-SL contamination.)
     """
-    return "strategy_session_id = %s", [int(session_id)]
+    if user_id is None:
+        return "strategy_session_id = %s", [int(session_id)]
+    return "strategy_session_id = %s AND user_id = %s", [int(session_id), int(user_id)]
 
 
-def _session_realized_pnl(session_id: int, table: str, window: SessionWindow = None) -> float:
+def _session_realized_pnl(
+    session_id: int, table: str, user_id: Optional[int] = None
+) -> float:
     """Session realized PnL: venue-authoritative per-match ``realized_pnl_x18``
     when fully synced, else the recorder rows' buy/sell/fee decomposition
     (complete at fill time). Shared by the live dashboard and the finalize
-    rollup so both always agree. STRICT per ``strategy_session_id`` — ``window``
-    is accepted for compat but ignored (see _session_match_where)."""
-    where, params = _session_match_where(session_id, window)
+    rollup so both always agree. Scoped per ``user_id`` + ``strategy_session_id``
+    (see _session_match_where). ``user_id`` is auto-resolved from the session
+    when not supplied, and a fully unscoped query is never run."""
+    if user_id is None:
+        user_id = _resolve_session_user_id(session_id)
+        if user_id is None:
+            return 0.0
+    where, params = _session_match_where(session_id, user_id)
     try:
         row = query_one(
             f"""
@@ -935,17 +954,25 @@ def _session_realized_pnl(session_id: int, table: str, window: SessionWindow = N
     return float(row.get("recorder_gross") or 0)
 
 
-def get_session_live_metrics(session_id: int, network: str, window: SessionWindow = None) -> dict:
+def get_session_live_metrics(
+    session_id: int, network: str, user_id: Optional[int] = None
+) -> dict:
     """Live session totals computed straight from ``trades_<network>`` for the
     active session — restart-safe and cross-process, used by /mm_status so the
     dashboard reflects engine fills the moment DbTradeRecorder writes them
     (rather than the in-memory ``state`` the engine never populates).
 
-    STRICT per ``strategy_session_id`` — only this run's own tagged fills count,
-    so one run's stats never bleed into another. ``window`` is accepted for
-    call-site compatibility but ignored (see _session_match_where)."""
+    Scoped per ``user_id`` + ``strategy_session_id`` so the numbers are unique
+    per user AND per run — one user's fills can never leak into another's PnL/SL
+    (see _session_match_where). ``user_id`` is auto-resolved from the session
+    when not supplied; an unresolvable owner yields empty rather than an
+    account-wide query."""
     table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
-    where, params = _session_match_where(session_id, window)
+    if user_id is None:
+        user_id = _resolve_session_user_id(session_id)
+        if user_id is None:
+            return {}
+    where, params = _session_match_where(session_id, user_id)
     try:
         row = query_one(
             f"""
@@ -996,18 +1023,23 @@ def get_session_live_metrics(session_id: int, network: str, window: SessionWindo
         "fees": float(row.get("fees") or 0),
         "net_base": float(row.get("net_base") or 0),
         "signed_cash": float(row.get("signed_cash") or 0),
-        "realized_pnl": _session_realized_pnl(int(session_id), table, window),
+        "realized_pnl": _session_realized_pnl(int(session_id), table, user_id),
     }
 
 
 def get_session_recent_fills(
-    session_id: int, network: str, limit: int = 10, window: SessionWindow = None
+    session_id: int, network: str, limit: int = 10, user_id: Optional[int] = None
 ) -> list:
     """Most recent recorded fills for a session, newest first — powers
-    /mm_fills for engine strategies. STRICT per ``strategy_session_id`` —
-    ``window`` is accepted for compat but ignored (see _session_match_where)."""
+    /mm_fills for engine strategies. Scoped per ``user_id`` + ``strategy_session_id``
+    (see _session_match_where); ``user_id`` auto-resolves from the session and an
+    unresolvable owner yields [] rather than an account-wide query."""
     table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
-    where, params = _session_match_where(session_id, window)
+    if user_id is None:
+        user_id = _resolve_session_user_id(session_id)
+        if user_id is None:
+            return []
+    where, params = _session_match_where(session_id, user_id)
     try:
         return query_all(
             f"""
@@ -1097,14 +1129,14 @@ def rollup_engine_session_pnl_funding(session_id: int, network: str) -> dict:
 
     # 1) Venue-authoritative realized PnL (per-match), with recorder-row
     #    buy/sell/fee fallback when the venue sync hasn't tagged matches yet.
-    #    Shared with /mm_status's live read so both surfaces agree. The window
-    #    also rescues untagged venue matches on the product (see
-    #    _session_match_where) so finalize totals don't undercount.
+    #    Shared with /mm_status's live read so both surfaces agree. Scoped to
+    #    the session owner so finalize never mixes in another user's fills.
     product_id = sess.get("product_id")
     started_at = sess.get("started_at")
     stopped_at = sess.get("stopped_at")
-    window = (product_id, started_at, stopped_at)
-    realized_pnl = _session_realized_pnl(int(session_id), table, window)
+    realized_pnl = _session_realized_pnl(
+        int(session_id), table, int(sess["user_id"]) if sess.get("user_id") is not None else None
+    )
 
     # 2) Funding: realized funding payments on the session's product within the
     #    session window (paid-positive, matching total_funding_paid convention).
