@@ -82,94 +82,86 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LiveSnapshotMathTests(unittest.TestCase):
-    def _snap(self, metrics, *, mark, client=None, margin=100.0, sess=None):
-        sess = sess or {"id": 1, "product_id": 2, "started_at": None, "stopped_at": None}
-        with patch("src.nadobro.models.database.get_session_live_metrics",
-                   return_value=metrics), \
+    """Unrealized PnL + position come from the live VENUE position (baseline-
+    adjusted) so the strategy SL agrees with Portfolio; realized/fees from the
+    run's own tagged fills; volume from venue turnover."""
+
+    def _snap(self, *, venue, metrics=None, mark, margin=100.0, baseline=None,
+              turnover=None, client=None):
+        metrics = metrics or {"fills": 0, "volume": 0.0, "fees": 0.0, "realized_pnl": 0.0}
+        turnover = turnover or {"volume": 0.0, "fills": 0}
+        sess = {"id": 1, "product_id": 2, "started_at": None, "stopped_at": None}
+        if baseline:
+            import json as _json
+            sess["config_snapshot"] = _json.dumps(baseline)
+        with patch.object(live_session, "_venue_position", return_value=venue), \
+             patch("src.nadobro.models.database.get_session_live_metrics", return_value=metrics), \
+             patch("src.nadobro.models.database.get_session_turnover", return_value=turnover), \
              patch("src.nadobro.models.database.count_open_orders_for_product", return_value=1):
             return live_session.get_live_session_snapshot(
                 42, "mainnet", sess,
                 state={"notional_usd": margin}, client=client, mark=mark,
             )
 
-    def test_session_pnl_includes_unrealized(self):
-        # The -$32 scenario, now sourced from the session's OWN net base marked
-        # to the live mid: net_base*mark + signed_cash = realized + unrealized.
-        # net_base=0.05 @ mark=100000 -> +5000 of base value; signed_cash chosen
-        # so gross = -32, with realized -2 -> unrealized -30.
-        metrics = {
-            "fills": 4, "volume": 1000.0, "fees": 0.5, "realized_pnl": -2.0,
-            "net_base": 0.05, "signed_cash": -5032.0,
-        }
-        snap = self._snap(metrics, mark=100000.0)
-        self.assertAlmostEqual(snap["unrealized_pnl"], -30.0)
-        self.assertAlmostEqual(snap["realized_pnl"], -2.0)
-        self.assertAlmostEqual(snap["session_pnl"], -32.0)
-        self.assertAlmostEqual(snap["session_pnl_pct"], -32.0)
+    def test_session_pnl_is_venue_upnl(self):
+        # The screenshot SL scenario: venue position uPnL = -$10.38 on $100
+        # margin, SL 10%. Session PnL must reflect the REAL -10.38% so the rail
+        # fires (the bug: reconstructed fills read ~-0.9%).
+        venue = {"size_signed": 0.08, "entry": 63266.0, "liq": 60953.0,
+                 "leverage": 49.0, "margin_used": 100.0, "upnl": -10.38, "synced_ts": 9e18}
+        snap = self._snap(venue=venue, mark=63135.0)
+        self.assertAlmostEqual(snap["unrealized_pnl"], -10.38)
+        self.assertAlmostEqual(snap["session_pnl"], -10.38)
+        self.assertAlmostEqual(snap["session_pnl_pct"], -10.38)
         self.assertTrue(snap["has_position"])
         self.assertEqual(snap["position_side"], "long")
+        self.assertAlmostEqual(snap["position_size"], 0.08)
+        self.assertAlmostEqual(snap["position_value"], 0.08 * 63135.0)
+        self.assertAlmostEqual(snap["liq_price"], 60953.0)
 
-    def test_isolation_account_position_does_not_contaminate(self):
-        # INVARIANT (Isolation): the session only bought 0.0016 BTC (real PnL
-        # ~ -$0.13), but the ACCOUNT holds a -$302 position on the same product.
-        # The snapshot must reflect ONLY the session's own fills, never the
-        # account aggregate (the false-SL bug, session #40).
-        class _BigPosClient:
-            def get_all_positions(self):
-                return [{"product_id": 2, "amount": 5.0, "side": "LONG",
-                         "signed_amount": 5.0, "unrealized_pnl": -302.0,
-                         "price": 65000.0, "liquidation_price": 61000.0}]
-            def get_market_price(self, pid):
-                return {"mid": 64990.0}
-            def get_open_orders(self, pid):
-                return []
-        # session bought 0.0016 @ ~65000 -> signed_cash = -(0.0016*65000) = -104.0
-        metrics = {
-            "fills": 1, "volume": 104.0, "fees": 0.05, "realized_pnl": 0.0,
-            "net_base": 0.0016, "signed_cash": -104.0,
-        }
-        snap = self._snap(metrics, mark=64990.0, client=_BigPosClient())
-        # session uPnL = 0.0016*(64990-65000) = -0.016, NOT -302.
-        self.assertAlmostEqual(snap["session_pnl"], 0.0016 * 64990.0 - 104.0, places=6)
-        self.assertGreater(snap["session_pnl"], -1.0)
-        self.assertNotAlmostEqual(snap["session_pnl"], -302.0, places=1)
-        self.assertAlmostEqual(snap["position_size"], 0.0016)
+    def test_baseline_excludes_preexisting_position(self):
+        # A position pre-existed at run start (5.0 BTC @ 60050). Venue now shows
+        # 5.02 BTC with -$302 total uPnL. The run only added 0.02 — its PnL must
+        # EXCLUDE the baseline's uPnL (no contamination from a manual position).
+        mark = 60000.0
+        baseline = {"baseline_size": 5.0, "baseline_entry": 60050.0}
+        venue = {"size_signed": 5.02, "entry": 60048.0, "liq": 0.0,
+                 "leverage": 0.0, "margin_used": 0.0, "upnl": -302.0, "synced_ts": 9e18}
+        snap = self._snap(venue=venue, mark=mark, baseline=baseline)
+        baseline_upnl = 5.0 * (mark - 60050.0)        # = -250
+        self.assertAlmostEqual(snap["unrealized_pnl"], -302.0 - baseline_upnl)  # run-only
+        self.assertGreater(snap["session_pnl"], -302.0)   # nowhere near the full -302
+        self.assertAlmostEqual(snap["position_size"], 0.02)
 
-    def test_conservation_gross_equals_realized_plus_unrealized(self):
-        # INVARIANT (Conservation): session_pnl == realized + unrealized (funding 0).
-        metrics = {
-            "fills": 6, "volume": 2000.0, "fees": 1.0, "realized_pnl": 3.5,
-            "net_base": 0.02, "signed_cash": -1290.0,
-        }
-        snap = self._snap(metrics, mark=64000.0)
-        gross = snap["realized_pnl"] + snap["unrealized_pnl"]
-        self.assertAlmostEqual(snap["session_pnl"], gross)
-        self.assertAlmostEqual(gross, -1290.0 + 0.02 * 64000.0)
-
-    def test_no_mark_open_leg_reports_zero_upnl_not_phantom_loss(self):
-        # INVARIANT (No false SL): with an OPEN long but NO live mark available
-        # (client None, no mark passed), the open leg must read uPnL=0 (realized
-        # basis), NOT signed_cash (-$104) which would trip a phantom SL.
-        metrics = {
-            "fills": 1, "volume": 104.0, "fees": 0.05, "realized_pnl": 0.0,
-            "net_base": 0.0016, "signed_cash": -104.0,
-        }
-        snap = self._snap(metrics, mark=0.0, client=None)
-        self.assertAlmostEqual(snap["unrealized_pnl"], 0.0)
-        self.assertAlmostEqual(snap["session_pnl"], 0.0)  # == realized (0)
-        self.assertGreater(snap["session_pnl_pct"], -1.0)
-
-    def test_conservation_closed_session_has_zero_unrealized(self):
-        # When fully closed (net_base==0), gross == realized, unrealized == 0.
-        metrics = {
-            "fills": 8, "volume": 4000.0, "fees": 2.0, "realized_pnl": 5.0,
-            "net_base": 0.0, "signed_cash": 5.0,
-        }
-        snap = self._snap(metrics, mark=64000.0)
+    def test_no_position_reports_zero_unrealized(self):
+        # Flat venue position -> unrealized 0, session_pnl == realized.
+        venue = {"size_signed": 0.0, "entry": 0.0, "liq": 0.0, "leverage": 0.0,
+                 "margin_used": 0.0, "upnl": 0.0, "synced_ts": 9e18}
+        snap = self._snap(venue=venue, mark=64000.0,
+                          metrics={"fills": 8, "volume": 0.0, "fees": 2.0, "realized_pnl": 5.0})
         self.assertAlmostEqual(snap["unrealized_pnl"], 0.0)
         self.assertAlmostEqual(snap["session_pnl"], 5.0)
         self.assertFalse(snap["has_position"])
         self.assertEqual(snap["position_side"], "")
+
+    def test_conservation_pnl_is_realized_plus_unrealized(self):
+        venue = {"size_signed": 0.02, "entry": 63000.0, "liq": 0.0, "leverage": 0.0,
+                 "margin_used": 0.0, "upnl": 7.5, "synced_ts": 9e18}
+        snap = self._snap(venue=venue, mark=63375.0,
+                          metrics={"fills": 6, "volume": 0.0, "fees": 1.0, "realized_pnl": 3.5})
+        self.assertAlmostEqual(snap["session_pnl"],
+                               snap["realized_pnl"] + snap["unrealized_pnl"])
+
+    def test_volume_uses_venue_turnover(self):
+        # Session volume = real turnover on the product (matches Nado), not the
+        # under-counted tagged-fill sum.
+        venue = {"size_signed": 0.08, "entry": 63266.0, "liq": 0.0, "leverage": 0.0,
+                 "margin_used": 0.0, "upnl": -10.0, "synced_ts": 9e18}
+        snap = self._snap(venue=venue, mark=63135.0,
+                          metrics={"fills": 4, "volume": 2330.0, "fees": 0.5, "realized_pnl": 0.0},
+                          turnover={"volume": 6100.0, "fills": 40})
+        self.assertAlmostEqual(snap["volume"], 6100.0)
+        self.assertEqual(snap["fills"], 40)
 
 
 class StatusRenderTests(unittest.TestCase):

@@ -60,12 +60,16 @@ def test_range_reads_low_vr_and_picks_grid():
 def test_hysteresis_band_holds_current_phase():
     # Force a ratio between range_on and trend_on by widening the band so any
     # finite VR lands inside it: the routine must hold whatever phase it had.
+    # Drift filter disabled (trend_drift_pct=0) to isolate the VR-band path —
+    # otherwise the monotonic decline correctly flips short on the drift signal.
     candles = trending_candles(step=-0.4)
     held_rgrid = asyncio.run(
-        vr.run(PAIR, candles, trend_on=99.0, range_on=0.0, current_phase=vr.RGRID)
+        vr.run(PAIR, candles, trend_on=99.0, range_on=0.0,
+               trend_drift_pct=0.0, current_phase=vr.RGRID)
     )
     held_grid = asyncio.run(
-        vr.run(PAIR, candles, trend_on=99.0, range_on=0.0, current_phase=vr.GRID)
+        vr.run(PAIR, candles, trend_on=99.0, range_on=0.0,
+               trend_drift_pct=0.0, current_phase=vr.GRID)
     )
     assert held_rgrid["phase"] == vr.RGRID
     assert held_grid["phase"] == vr.GRID
@@ -90,3 +94,45 @@ def test_user_windows_change_required_history():
         vr.run(PAIR, trending_candles(n=40, step=-0.4), short_window=4, long_window=30)
     )
     assert enough["insufficient_history"] is False
+
+
+def _ranging_then_decline(n=200, base=63300.0):
+    """Long ranging history then a recent grind-down in the last ~15 bars — the
+    real-market case where VR (computed over the WHOLE window) stays < the trend
+    cutoff (~0.88 in the logs) yet price is clearly trending down right now."""
+    out = []
+    for i in range(n):
+        c = base + 40.0 * math.sin(2 * math.pi * i / 9)
+        if i >= n - 15:
+            c -= 30.0 * (i - (n - 15))
+        out.append({"close": c})
+    return out
+
+
+def test_drift_filter_flips_short_on_recent_grind_even_when_vr_low():
+    # The dgrid-blind bug: a long ranging history keeps VR < trend_on, so the
+    # VR-only classifier called it "ranging" and the long grid kept buying into
+    # the decline. The directional-drift filter must flip it to rgrid (short).
+    candles = _ranging_then_decline()
+    r = asyncio.run(vr.run(PAIR, candles, trend_drift_pct=0.30))
+    assert float(r["variance_ratio"]) < 1.25      # VR alone says "ranging"
+    assert r["direction"] == vr.DOWN
+    assert r["trend_by_drift"] is True
+    assert r["phase"] == vr.RGRID                 # flips short on the drift
+
+
+def test_drift_filter_off_reproduces_blind_grid_bug():
+    # With the filter disabled, the same recent decline is mis-classified as a
+    # range and stays a long GRID — the original blind behavior.
+    candles = _ranging_then_decline()
+    r = asyncio.run(vr.run(PAIR, candles, trend_drift_pct=0.0))
+    assert float(r["variance_ratio"]) < 1.25
+    assert r["phase"] == vr.GRID
+
+
+def test_flat_range_does_not_false_trigger_drift_trend():
+    # A pure oscillating range (no net drift) must NOT trip the drift filter.
+    candles = [{"close": 63300.0 + 60.0 * math.sin(2 * math.pi * i / 7)} for i in range(120)]
+    r = asyncio.run(vr.run(PAIR, candles, trend_drift_pct=0.30))
+    assert r["trend_by_drift"] is False
+    assert r["phase"] == vr.GRID

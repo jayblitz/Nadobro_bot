@@ -293,25 +293,43 @@ def test_session_live_metrics_strict_per_session_isolation():
     assert abs(m_other["net_base"] - (-100.0)) < 1e-9
 
 
-def test_session_pnl_marked_to_mark_not_account_aggregate():
-    """End-to-end: the snapshot's session PnL for the tiny 0.0016 BTC run is ~0,
-    NOT the -$302 the account-aggregate path used to report (the false SL)."""
+def test_snapshot_uses_venue_upnl_and_real_turnover():
+    """End-to-end against real Postgres: session unrealized == the VENUE position
+    uPnL (so the SL agrees with Portfolio), volume == real turnover on the product
+    (not the under-counted tagged-fill sum), realized == venue per-match PnL."""
+    from unittest.mock import patch
+    from datetime import datetime, timezone
     from src.nadobro.db import execute
-    from src.nadobro.services.live_session import get_live_session_snapshot
+    from src.nadobro.services import live_session
 
     execute(_TRADES_DDL)
     execute("DELETE FROM trades_mainnet WHERE user_id = 4041")
     uid = 4041
-    _insert_fill(uid, 401, "long", 0.0016, 65000.0, fee=0.05)
-
-    # Mark essentially flat vs entry -> session PnL ~ 0, regardless of any
-    # unrelated account position on the product.
-    snap = get_live_session_snapshot(
-        uid, "mainnet",
-        {"id": 401, "product_id": 2, "started_at": None, "stopped_at": None},
-        state={"notional_usd": 100.0}, client=None, mark=65000.0,
+    started = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    # Real turnover: several fills on the product in the run window (some tagged
+    # to the session, some not) — turnover counts ALL of them for user+product.
+    _insert_fill(uid, 401, "long", 0.03, 65000.0, fee=0.5)
+    _insert_fill(uid, 401, "long", 0.03, 64000.0, fee=0.5)
+    # An untagged fill on the same product (e.g. position close via archive path)
+    # — excluded from the tagged metric but INCLUDED in turnover (matches Nado).
+    execute(
+        "INSERT INTO trades_mainnet (user_id,product_id,product_name,order_type,side,status,source,"
+        "size,price,fill_size,fill_price,fill_fee,strategy_session_id) "
+        "VALUES (%s,2,'BTC-PERP','match','long','filled','strategy',0.02,63000.0,0.02,63000.0,0.3,NULL)",
+        (uid,),
     )
-    assert abs(snap["session_pnl"]) < 1.0
-    assert snap["session_pnl_pct"] > -5.0   # nowhere near the false -302%
-    assert abs(snap["position_size"] - 0.0016) < 1e-9
-    assert snap["position_side"] == "long"
+
+    sess = {"id": 401, "product_id": 2, "started_at": started, "stopped_at": None}
+    venue = {"size_signed": 0.08, "entry": 64000.0, "liq": 60000.0, "leverage": 49.0,
+             "margin_used": 100.0, "upnl": -10.38, "synced_ts": 9e18}
+    with patch.object(live_session, "_venue_position", return_value=venue):
+        snap = live_session.get_live_session_snapshot(
+            uid, "mainnet", sess, state={"notional_usd": 100.0}, client=None, mark=63135.0,
+        )
+    # Unrealized is the venue uPnL (baseline 0) -> SL of 10% would fire here.
+    assert abs(snap["unrealized_pnl"] - (-10.38)) < 1e-9
+    assert abs(snap["session_pnl_pct"] - (-10.38)) < 0.5
+    assert abs(snap["position_size"] - 0.08) < 1e-9
+    # Turnover spans all three fills on the product: 0.03*65000 + 0.03*64000 + 0.02*63000
+    expected_turnover = 0.03 * 65000.0 + 0.03 * 64000.0 + 0.02 * 63000.0
+    assert abs(snap["volume"] - expected_turnover) < 1e-3

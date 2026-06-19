@@ -1007,7 +1007,25 @@ def get_session_live_metrics(
                        THEN -ABS(COALESCE(NULLIF(quote_filled_x18, 0) / 1e18,
                                           ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)))
                      ELSE 0 END
-              ), 0) AS signed_cash
+              ), 0) AS signed_cash,
+              -- Realized PnL building blocks (flat-aware decision below). The
+              -- venue per-match realized_pnl_x18 is authoritative; the recorder
+              -- buy/sell cash-flow is ONLY equal to realized PnL when the run is
+              -- flat — for an OPEN position it is just net cash spent and must
+              -- NEVER be shown as "realized" (that produced the bogus -$506).
+              COALESCE(SUM(realized_pnl_x18) FILTER (WHERE realized_pnl_x18 IS NOT NULL), 0) / 1e18
+                AS venue_pnl,
+              COUNT(*) FILTER (WHERE realized_pnl_x18 IS NOT NULL) AS venue_rows,
+              COUNT(*) FILTER (
+                WHERE source = 'strategy' AND fill_price IS NOT NULL AND submission_idx IS NULL
+              ) AS pending_sync,
+              COALESCE(SUM(
+                CASE WHEN side = 'short'
+                       THEN  ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+                     WHEN side = 'long'
+                       THEN -ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+                     ELSE 0 END
+              ) FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_gross
             FROM {table}
             WHERE {where}
             """,
@@ -1017,14 +1035,68 @@ def get_session_live_metrics(
         return {}
     if not row:
         return {}
+    net_base = float(row.get("net_base") or 0)
+    venue_rows = int(row.get("venue_rows") or 0)
+    pending_sync = int(row.get("pending_sync") or 0)
+    is_flat = abs(net_base) <= 1e-9
+    if venue_rows > 0 and pending_sync == 0:
+        # Venue per-match realized is authoritative (gross of fees) — valid open
+        # or flat: it only ever counts CLOSED size.
+        realized = float(row.get("venue_pnl") or 0)
+    elif is_flat:
+        # Run is flat and the venue hasn't tagged matches yet: the recorder
+        # cash-flow == realized PnL exactly (buys and sells fully offset).
+        realized = float(row.get("recorder_gross") or 0)
+    else:
+        # Open position, venue not synced yet: realized is unknown. Report 0 and
+        # let the open-leg unrealized (from the venue position) carry the PnL —
+        # never the raw cash spent.
+        realized = 0.0
     return {
         "fills": int(row.get("fills") or 0),
         "volume": float(row.get("volume") or 0),
         "fees": float(row.get("fees") or 0),
-        "net_base": float(row.get("net_base") or 0),
+        "net_base": net_base,
         "signed_cash": float(row.get("signed_cash") or 0),
-        "realized_pnl": _session_realized_pnl(int(session_id), table, user_id),
+        "realized_pnl": realized,
     }
+
+
+def get_session_turnover(
+    user_id: int, network: str, product_id: int, started_at, stopped_at=None
+) -> dict:
+    """Real traded turnover for THIS user on THIS product since the run started —
+    the "accumulated position value" the user expects as Session Volume. Unlike
+    the strict session-tagged volume (which undercounts because position closes
+    flow through a separate archive path and not every fill is tagged), this
+    reflects what Nado shows: every fill on the product in the run's window.
+
+    Scoped to user_id + product_id + the session time window, so it never mixes
+    in another user or another product. Returns {volume, fills}."""
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    if product_id is None or started_at is None:
+        return {"volume": 0.0, "fills": 0}
+    try:
+        row = query_one(
+            f"""
+            SELECT
+              COUNT(*) FILTER (WHERE status IN ('filled', 'closed', 'partially_filled')) AS fills,
+              COALESCE(SUM(COALESCE(
+                NULLIF(quote_filled_x18, 0) / 1e18,
+                ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+              )), 0) AS volume
+            FROM {table}
+            WHERE user_id = %s AND product_id = %s
+              AND COALESCE(filled_at, created_at) >= %s
+              AND (%s IS NULL OR COALESCE(filled_at, created_at) <= %s)
+            """,
+            (int(user_id), int(product_id), started_at, stopped_at, stopped_at),
+        )
+    except Exception:
+        return {"volume": 0.0, "fills": 0}
+    if not row:
+        return {"volume": 0.0, "fills": 0}
+    return {"volume": float(row.get("volume") or 0), "fills": int(row.get("fills") or 0)}
 
 
 def get_session_recent_fills(

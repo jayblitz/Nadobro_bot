@@ -106,11 +106,20 @@ async def run(
     long_window: int = 12,
     trend_on: float = 1.25,
     range_on: float = 1.15,
+    trend_drift_pct: float = 0.30,
     current_phase: str = GRID,
 ) -> Dict[str, object]:
     """Classify the regime and recommend a grid phase.
 
-    Returns ``{phase, variance_ratio, direction, drift_pct,
+    Two trend signals, EITHER of which flips direction:
+    * **variance ratio** ``VR >= trend_on`` — bursty / accelerating moves.
+    * **directional drift** ``|drift over long window| >= trend_drift_pct`` — a
+      sustained one-way grind. This is the case a long grid bleeds in but the VR
+      misses: a slow steady decline keeps ``VR < 1`` (looks "mean-reverting")
+      even as price trends down. Without this filter dgrid stayed long GRID and
+      kept buying into the drop. ``trend_drift_pct`` is a percent (0.30 = 0.30%).
+
+    Returns ``{phase, variance_ratio, direction, drift_pct, trend_by_drift,
     insufficient_history}``. On insufficient history the verdict holds
     ``current_phase`` so the caller never flips on noise.
     """
@@ -141,10 +150,15 @@ async def run(
             "required_candles": required,
         }
 
-    # Direction over the long horizon: where has price actually gone?
-    p_now = closes[-1]
-    p_then = closes[-1 - long_window]
-    drift = ((p_now - p_then) / p_then) if p_then > 0 else 0.0
+    # Direction over the long horizon: where has price actually gone? A single
+    # endpoint-to-endpoint diff samples oscillation phase noise (a choppy decline
+    # can read "up" by luck), so compare the mean of the most-recent segment to
+    # the mean of the oldest segment across the long window — robust to chop.
+    seg = closes[-(long_window + 1):]
+    k = max(2, len(seg) // 3)
+    older = sum(seg[:k]) / k
+    recent = sum(seg[-k:]) / k
+    drift = ((recent - older) / older) if older > 0 else 0.0
     if drift > 0:
         direction = UP
     elif drift < 0:
@@ -152,21 +166,30 @@ async def run(
     else:
         direction = FLAT
 
+    drift_threshold = max(0.0, float(trend_drift_pct)) / 100.0
+    trend_by_drift = drift_threshold > 0 and abs(drift) >= drift_threshold
+    trend_by_vr = vr >= trend_on
+
     current_phase = RGRID if str(current_phase) == RGRID else GRID
     phase = current_phase
-    if vr >= trend_on:
-        # Trending: trade the direction. Down -> short reverse grid; up keeps
-        # the long grid (a reverse grid bleeds in an uptrend).
-        phase = RGRID if direction == DOWN else GRID
+    if trend_by_vr or trend_by_drift:
+        # Trending (by burst OR by sustained drift): trade the direction. Down ->
+        # short reverse grid; up keeps the long grid (a reverse grid bleeds in an
+        # uptrend). A flat direction with a borderline VR holds the phase.
+        if direction == DOWN:
+            phase = RGRID
+        elif direction == UP:
+            phase = GRID
     elif vr <= range_on:
-        # Ranging: classic long grid.
+        # Ranging AND no strong drift: classic long grid.
         phase = GRID
-    # else: inside the hysteresis band -> hold current_phase.
+    # else: inside the hysteresis band, no drift trend -> hold current_phase.
 
     return {
         "phase": phase,
         "variance_ratio": float(vr),
         "direction": direction,
         "drift_pct": float(drift * 100.0),
+        "trend_by_drift": bool(trend_by_drift),
         "insufficient_history": False,
     }

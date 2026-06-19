@@ -229,3 +229,61 @@ def test_tick_records_diagnostics_for_services_log():
         assert c.current_phase in ("grid", "rgrid")
 
     asyncio.run(body())
+
+
+def test_profit_booking_scales_out_on_tier_cross():
+    """Tiered profit-booking: as the run's uPnL crosses rising tiers (% of
+    margin), a fraction of the position is closed reduce-only; each tier books
+    once."""
+    from src.nadobro.engine.types import OrderType, TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(102))
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=cfg)
+        # Seed a 1.0-base long @ 100 (margin 100): uPnL = net*(mark-entry).
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+
+        # mid 102 -> uPnL +2 = +2% of margin -> only tier 1 (2%) books.
+        await c._maybe_book_profit(Decimal("102"))
+        sells = [o for o in adapter.placed if o.side == TradeType.SELL]
+        assert len(sells) == 1
+        assert sells[0].order_type == OrderType.MARKET
+        assert abs(float(sells[0].amount_base) - 0.33) < 1e-9   # 33% of 1.0
+        assert c._booked_tiers == {0}
+
+        # Same tier again -> nothing new (booked once).
+        await c._maybe_book_profit(Decimal("102"))
+        assert len([o for o in adapter.placed if o.side == TradeType.SELL]) == 1
+
+        # Jump to +6 (mid 106) -> tiers 4% and 6% both book this tick.
+        await c._maybe_book_profit(Decimal("106"))
+        sells = [o for o in adapter.placed if o.side == TradeType.SELL]
+        assert len(sells) == 2
+        assert c._booked_tiers == {0, 1, 2}
+
+    asyncio.run(body())
+
+
+def test_profit_booking_skips_when_below_tier():
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(101))
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=cfg)
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        # mid 101 -> uPnL +1 = +1% < first tier (2%): no booking.
+        await c._maybe_book_profit(Decimal("101"))
+        assert [o for o in adapter.placed if o.side == TradeType.SELL] == []
+        assert c._booked_tiers == set()
+
+    asyncio.run(body())

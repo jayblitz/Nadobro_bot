@@ -607,18 +607,43 @@ async def _retire_legacy_vol_perp_state(telegram_id: int, network: str, state: d
     return False, latest["last_error"]
 
 
+def _capture_position_baseline(telegram_id: int, network: str, product_id) -> dict:
+    """Signed size + avg entry of any position that ALREADY exists on the product
+    when a run starts, so the run's PnL/SL excludes it (baseline-adjusted). The
+    common case is flat -> (0, 0). Best-effort; never blocks session creation."""
+    if product_id is None:
+        return {}
+    try:
+        from src.nadobro.models.database import get_open_position_rows_for_product
+        rows = get_open_position_rows_for_product(int(telegram_id), network, int(product_id)) or []
+    except Exception:  # noqa: BLE001
+        return {}
+    net_signed = 0.0
+    entry = 0.0
+    dom_abs = -1.0
+    for r in rows:
+        try:
+            size = abs(float(r.get("size") or 0))
+            signed = size if str(r.get("side") or "").lower() == "long" else -size
+            net_signed += signed
+            if size > dom_abs:
+                dom_abs = size
+                entry = float(r.get("avg_entry_price") or 0)
+        except (TypeError, ValueError):
+            continue
+    if abs(net_signed) <= 1e-12:
+        return {}
+    return {"baseline_size": net_signed, "baseline_entry": entry}
+
+
 def _create_session(telegram_id: int, strategy: str, product: str, network: str, state: dict) -> int | None:
     """Create a strategy_sessions row and return the session_id."""
     try:
-        session_id = insert_strategy_session({
-            "user_id": telegram_id,
-            "strategy": strategy,
-            "product_name": product,
-            "product_id": get_product_id(product, network=network) if product != "MULTI" else None,
-            "network": network,
-            "config_snapshot": json.dumps({
-                k: v for k, v in state.items()
-                if k in (
+        product_id = get_product_id(product, network=network) if product != "MULTI" else None
+        baseline = _capture_position_baseline(telegram_id, network, product_id)
+        snapshot = {
+            k: v for k, v in state.items()
+            if k in (
                     "notional_usd", "cycle_notional_usd", "spread_bp", "leverage",
                     "slippage_pct", "interval_seconds", "tp_pct", "sl_pct", "levels",
                     "budget_usd", "risk_level", "max_positions", "products",
@@ -632,7 +657,17 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
                     "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds",
                     "dn_max_drift_pct", "dn_hedge_ratio",
                 )
-            }),
+        }
+        # Baseline-adjust the run's PnL: record any pre-existing position so the
+        # session SL/PnL counts only what THIS run does (see live_session).
+        snapshot.update(baseline)
+        session_id = insert_strategy_session({
+            "user_id": telegram_id,
+            "strategy": strategy,
+            "product_name": product,
+            "product_id": product_id,
+            "network": network,
+            "config_snapshot": json.dumps(snapshot),
         })
         if session_id:
             logger.info("Created strategy session #%s for user %s (%s/%s)", session_id, telegram_id, strategy, network)

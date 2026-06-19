@@ -638,6 +638,14 @@ def map_strategy_config(
         cfg["dgrid_long_window"] = int(max(4, _f(settings, "dgrid_long_window_points", 12)))
         cfg["dgrid_trend_on_vr"] = _f(settings, "dgrid_trend_on_variance_ratio", 1.25)
         cfg["dgrid_range_on_vr"] = _f(settings, "dgrid_range_on_variance_ratio", 1.15)
+        # Sustained-drift trend filter: flip the grid direction on a slow one-way
+        # grind the variance ratio misses (a steady decline keeps VR<1 yet bleeds
+        # a long grid). Percent over the long window; 0 disables.
+        cfg["dgrid_trend_drift_pct"] = _f(settings, "dgrid_trend_drift_pct", 0.30)
+        # Tiered profit-booking: scale out reduce-only as the run's uPnL climbs
+        # past these tiers (% of margin), closing dgrid_tp_fraction each time.
+        cfg["dgrid_tp_tiers_pct"] = settings.get("dgrid_tp_tiers_pct") or [2.0, 4.0, 6.0]
+        cfg["dgrid_tp_fraction"] = _f(settings, "dgrid_tp_fraction", 0.33)
         # Confirm-ticks debounce a flip.
         cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 2)))
         # Reset re-center honors the user's reset setting (grid_reset_threshold_pct,
