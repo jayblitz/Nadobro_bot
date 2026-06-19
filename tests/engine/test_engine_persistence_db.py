@@ -196,3 +196,108 @@ def test_remote_active_scoped_to_run_ignores_stale_rows():
     # Cross-process stop sweep clears it.
     terminate_engine_executors(cid)
     assert _remote_active("dgrid", 888, "mainnet") is False
+
+
+# ---------------------------------------------------------------------------
+# Per-session PnL integrity (false-SL bug, session #40)
+# ---------------------------------------------------------------------------
+# get_session_live_metrics must be STRICT by strategy_session_id: a run's
+# realized/volume/fees/net_base/signed_cash come ONLY from its own tagged fills,
+# never an overlapping run or an untagged (account-only) match on the product.
+
+_TRADES_DDL = """
+CREATE TABLE IF NOT EXISTS trades_mainnet (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT,
+  product_id INTEGER,
+  side TEXT,
+  status TEXT,
+  source TEXT,
+  size NUMERIC,
+  price NUMERIC,
+  fill_size NUMERIC,
+  fill_price NUMERIC,
+  fill_fee NUMERIC,
+  fees NUMERIC,
+  builder_fee NUMERIC,
+  submission_idx BIGINT,
+  realized_pnl_x18 NUMERIC(78,0),
+  fee_x18 NUMERIC(78,0),
+  base_filled_x18 NUMERIC(78,0),
+  quote_filled_x18 NUMERIC(78,0),
+  strategy_session_id BIGINT
+);
+"""
+
+
+def _insert_fill(user_id, sid, side, base, price, *, fee=0.0, product_id=2):
+    """Insert a recorder-style fill (no x18 venue columns yet) for a session."""
+    from src.nadobro.db import execute
+    execute(
+        "INSERT INTO trades_mainnet (user_id,product_id,side,status,source,"
+        "fill_size,fill_price,fill_fee,strategy_session_id) "
+        "VALUES (%s,%s,%s,'filled','strategy',%s,%s,%s,%s)",
+        (user_id, product_id, side, base, price, fee, sid),
+    )
+
+
+def test_session_live_metrics_strict_per_session_isolation():
+    from src.nadobro.db import execute
+    from src.nadobro.models.database import get_session_live_metrics
+
+    execute(_TRADES_DDL)
+    execute("DELETE FROM trades_mainnet WHERE user_id = 4040")
+
+    uid = 4040
+    # Session 301: the real dgrid run — one tiny long, 0.0016 @ 65000.
+    _insert_fill(uid, 301, "long", 0.0016, 65000.0, fee=0.05)
+    # Session 302: a DIFFERENT overlapping run on the same product — big short.
+    _insert_fill(uid, 302, "short", 5.0, 65000.0, fee=10.0)
+    # Untagged account-only match on the same product (NULL session): must be
+    # excluded from BOTH sessions (this is what used to contaminate via window).
+    execute(
+        "INSERT INTO trades_mainnet (user_id,product_id,side,status,source,"
+        "fill_size,fill_price,fill_fee,strategy_session_id) "
+        "VALUES (%s,2,'long','filled','strategy',3.0,64000.0,7.0,NULL)",
+        (uid,),
+    )
+
+    m301 = get_session_live_metrics(301, "mainnet")
+    m302 = get_session_live_metrics(302, "mainnet")
+
+    # Uniqueness + Isolation: each session sees ONLY its own fill.
+    assert m301["fills"] == 1
+    assert m302["fills"] == 1
+    # net_base: long +0.0016 for 301; short -5.0 for 302.
+    assert abs(m301["net_base"] - 0.0016) < 1e-9
+    assert abs(m302["net_base"] - (-5.0)) < 1e-9
+    # signed_cash: long -> -quote; short -> +quote.
+    assert abs(m301["signed_cash"] - (-(0.0016 * 65000.0))) < 1e-6
+    assert abs(m302["signed_cash"] - (5.0 * 65000.0)) < 1e-6
+    # fees are per-session, not summed across runs or the untagged row.
+    assert abs(m301["fees"] - 0.05) < 1e-9
+    assert abs(m302["fees"] - 10.0) < 1e-9
+
+
+def test_session_pnl_marked_to_mark_not_account_aggregate():
+    """End-to-end: the snapshot's session PnL for the tiny 0.0016 BTC run is ~0,
+    NOT the -$302 the account-aggregate path used to report (the false SL)."""
+    from src.nadobro.db import execute
+    from src.nadobro.services.live_session import get_live_session_snapshot
+
+    execute(_TRADES_DDL)
+    execute("DELETE FROM trades_mainnet WHERE user_id = 4041")
+    uid = 4041
+    _insert_fill(uid, 401, "long", 0.0016, 65000.0, fee=0.05)
+
+    # Mark essentially flat vs entry -> session PnL ~ 0, regardless of any
+    # unrelated account position on the product.
+    snap = get_live_session_snapshot(
+        uid, "mainnet",
+        {"id": 401, "product_id": 2, "started_at": None, "stopped_at": None},
+        state={"notional_usd": 100.0}, client=None, mark=65000.0,
+    )
+    assert abs(snap["session_pnl"]) < 1.0
+    assert snap["session_pnl_pct"] > -5.0   # nowhere near the false -302%
+    assert abs(snap["position_size"] - 0.0016) < 1e-9
+    assert snap["position_side"] == "long"

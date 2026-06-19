@@ -119,6 +119,18 @@ class DbInventoryRepository:
             "SELECT * FROM engine_position_hold WHERE user_id=%s AND controller_id=%s",
             (user_id, controller_id))]
 
+    def clear_for_controller(self, controller_id: str) -> None:
+        """Drop the controller's inventory rows. ``controller_id`` is stable
+        across runs, so a NEW run must start from a clean hold rather than
+        inheriting the prior run's net position (which would skew the engine's
+        exposure cap and sizing). Called by EngineRuntime.start."""
+        from src.nadobro.db import execute
+
+        try:
+            execute("DELETE FROM engine_position_hold WHERE controller_id=%s", (controller_id,))
+        except Exception:  # noqa: BLE001 - best-effort; a stale hold must not block start
+            pass
+
 
 # --------------------------------------------------------------------------
 # Trade recorder (trades_<network>) — bridges Engine v2 fills into the legacy

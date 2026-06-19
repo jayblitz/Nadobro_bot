@@ -2176,6 +2176,17 @@ async def _evaluate_session_pnl_rail(
 
     label = market_label or f"{product}-PERP"
     strategy_label = _strategy_display_name(strategy)
+    # Stop the engine controller FIRST so its resting maker orders are cancelled
+    # (GridExecutor._stop_out) before we flatten — otherwise close_all_positions
+    # races the still-live controller and leaves "1 open orders remain". Awaited
+    # on THIS cycle's loop (where the orchestrator was just ticked) so its
+    # loop-bound primitives are valid; close_coro is the backstop.
+    try:
+        from src.nadobro.services import engine_runtime as _er_stop
+        if strategy in _er_stop.ENGINE_MAPPED_STRATEGIES:
+            await _er_stop.RUNTIME.stop(telegram_id, network, strategy)
+    except Exception:  # noqa: BLE001 - close_coro still runs as the backstop
+        logger.warning("engine stop before SL/TP close failed user=%s", telegram_id, exc_info=True)
     close_res = await close_coro()
     if close_res.get("success"):
         await _notify(
