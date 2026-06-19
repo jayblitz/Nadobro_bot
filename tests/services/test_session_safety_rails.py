@@ -7,6 +7,7 @@ fired. The rail now reads live Nado session PnL (realized + unrealized) measured
 as a percentage of the configured margin.
 """
 
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -330,6 +331,44 @@ class DashboardSessionResolverTests(unittest.TestCase):
         self.assertTrue(is_active)
         self.assertEqual(chosen["id"], 22)
         self.assertIn("PnL (realized+unrealized): $-5.00", text)
+
+
+class MultiprocessTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delegated_timeout_does_not_run_local_fallback(self):
+        state = {
+            "running": True,
+            "strategy": "dgrid",
+            "product": "BTC",
+            "interval_seconds": 60,
+        }
+        saved = []
+        local_run = AsyncMock(return_value=(True, None))
+        mark_error = AsyncMock()
+
+        def load_state(_user, _network):
+            return dict(state)
+
+        def save_state(_user, _network, updated):
+            saved.append(dict(updated))
+
+        async def timed_out_submit(_payload):
+            raise asyncio.TimeoutError()
+
+        with patch.object(bot_runtime, "_load_state", side_effect=load_state), \
+             patch.object(bot_runtime, "_save_state", side_effect=save_state), \
+             patch.object(bot_runtime, "_run_cycle", new=local_run), \
+             patch.object(bot_runtime, "_mark_cycle_error", new=mark_error), \
+             patch.object(bot_runtime, "_strategy_use_multiprocess", return_value=True), \
+             patch.object(bot_runtime, "_strategy_cycle_timeout_seconds", return_value=0.01), \
+             patch("src.nadobro.services.runtime_supervisor.is_multiprocess_enabled", return_value=True), \
+             patch("src.nadobro.services.runtime_supervisor.strategy_worker_group", return_value="mm_grid"), \
+             patch("src.nadobro.services.runtime_supervisor.submit_cycle_job", side_effect=timed_out_submit), \
+             patch("src.nadobro.services.execution_queue.get_queue_diagnostics", return_value={}):
+            await bot_runtime._strategy_loop(42, "mainnet")
+
+        local_run.assert_not_called()
+        mark_error.assert_awaited_once()
+        self.assertTrue(any(s.get("last_cycle_result") == "error" for s in saved))
 
 
 if __name__ == "__main__":

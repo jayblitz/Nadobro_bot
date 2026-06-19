@@ -1932,7 +1932,8 @@ async def handle_strategy_job(payload: dict):
                         delegated_timed_out = True
                         _job_stats["cycle_timeouts"] += 1
                         logger.error(
-                            "Delegated strategy cycle timeout user=%s network=%s strategy=%s timeout=%.0fs; falling back to local run",
+                            "Delegated strategy cycle timeout user=%s network=%s strategy=%s timeout=%.0fs; "
+                            "not running local fallback because the worker job may still be active",
                             telegram_id,
                             network,
                             strategy,
@@ -1940,15 +1941,11 @@ async def handle_strategy_job(payload: dict):
                         )
 
                     if delegated_timed_out:
-                        try:
-                            ok, error_msg = await asyncio.wait_for(
-                                _run_cycle(telegram_id, network, state),
-                                timeout=timeout_sec,
-                            )
-                        except asyncio.TimeoutError:
-                            _job_stats["cycle_timeouts"] += 1
-                            ok = False
-                            error_msg = f"Strategy cycle timed out after {timeout_sec:.0f}s (delegated + local fallback)"
+                        ok = False
+                        error_msg = (
+                            f"Delegated strategy cycle timed out after {timeout_sec:.0f}s; "
+                            "worker may still be running"
+                        )
                         refreshed = _load_state(telegram_id, network)
                         refreshed["worker_group"] = worker_group
                         refreshed["worker_last_heartbeat"] = time.time()
