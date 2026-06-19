@@ -2140,11 +2140,46 @@ async def _evaluate_session_pnl_rail(
     if sl_pct <= 0 and tp_pct <= 0:
         return None
 
-    from src.nadobro.models.database import get_active_strategy_session
+    from src.nadobro.services.session_resolver import resolve_current_strategy_session
 
-    sess = await run_blocking(get_active_strategy_session, telegram_id, network)
+    sess = await run_blocking(
+        resolve_current_strategy_session,
+        telegram_id, network, strategy,
+        state=state,
+    )
     if not sess:
         return None
+    if str(sess.get("status") or "").lower() != "running":
+        session_id = sess.get("id") or state.get("strategy_session_id") or "unknown"
+        logger.warning(
+            "state still running for non-running strategy session #%s user=%s network=%s strategy=%s; stopping",
+            session_id, telegram_id, network, strategy,
+        )
+        state["running"] = False
+        state["last_error"] = (
+            f"Stopped because strategy session #{session_id} is no longer running; "
+            "orders were cleaned up to prevent untracked fills."
+        )
+        _save_state(telegram_id, network, state)
+        try:
+            from src.nadobro.services import engine_runtime as _er_stop
+            if strategy in _er_stop.ENGINE_MAPPED_STRATEGIES:
+                await _er_stop.RUNTIME.stop(telegram_id, network, strategy)
+        except Exception:  # noqa: BLE001 - close_coro still runs as the backstop
+            logger.warning("engine stop for stale session failed user=%s", telegram_id, exc_info=True)
+        close_res = await close_coro()
+        if not close_res.get("success"):
+            logger.warning(
+                "stale session close failed user=%s network=%s strategy=%s: %s",
+                telegram_id, network, strategy, close_res.get("error", "unknown"),
+            )
+        await _notify(
+            telegram_id,
+            "⚠️ {strategy} stopped on {network}: the tracked session was already closed, "
+            "so orders were cleaned up to prevent untracked fills.",
+            strategy=_strategy_display_name(strategy), network=network,
+        )
+        return True, None
 
     from src.nadobro.services.live_session import get_live_session_snapshot
 

@@ -23,17 +23,24 @@ async def _fake_run_blocking(fn, *args, **kwargs):
 
 class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
     async def _run_rail(self, snap, *, sl=1.0, tp=2.0):
-        state = {"sl_pct": sl, "tp_pct": tp, "strategy": "dgrid"}
+        state = {
+            "sl_pct": sl,
+            "tp_pct": tp,
+            "strategy": "dgrid",
+            "strategy_session_id": 11,
+            "running": True,
+        }
         closed = {}
 
         async def close_coro():
             closed["called"] = True
             return {"success": True}
 
-        sess = {"id": 1, "product_id": 2, "started_at": None, "stopped_at": None}
+        sess = {"id": 11, "product_id": 2, "status": "running", "started_at": None, "stopped_at": None}
         self._engine_stop = AsyncMock()
         with patch.object(bot_runtime, "run_blocking", _fake_run_blocking), \
-             patch("src.nadobro.models.database.get_active_strategy_session", return_value=sess), \
+             patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=sess), \
+             patch("src.nadobro.models.database.get_active_strategy_session_for_strategy") as active_sess, \
              patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=snap), \
              patch.object(engine_runtime.RUNTIME, "stop", new=self._engine_stop), \
              patch.object(bot_runtime, "_finalize_session") as fin, \
@@ -44,6 +51,7 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
                 42, "mainnet", state, "dgrid", "BTC",
                 client=None, close_coro=close_coro,
             )
+        active_sess.assert_not_called()
         return res, closed, state, fin
 
     async def test_sl_fires_on_unrealized_drawdown(self):
@@ -79,6 +87,83 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
         res, closed, _state, fin = await self._run_rail(snap, sl=1.0)
         self.assertIsNone(res)
         self.assertFalse(closed.get("called"))
+
+    async def test_rail_uses_state_session_not_newest_network_session(self):
+        state = {
+            "sl_pct": 1.0,
+            "tp_pct": 2.0,
+            "strategy": "dgrid",
+            "strategy_session_id": 22,
+            "running": True,
+        }
+        closed = {}
+        chosen = {}
+
+        async def close_coro():
+            closed["called"] = True
+            return {"success": True}
+
+        def fake_snapshot(_user, _network, sess, **_kwargs):
+            chosen["id"] = sess["id"]
+            return {"session_pnl": -5.0, "session_pnl_pct": -5.0, "margin": 100.0}
+
+        state_sess = {"id": 22, "product_id": 2, "status": "running"}
+        wrong_newest = {"id": 99, "product_id": 3, "status": "running"}
+        with patch.object(bot_runtime, "run_blocking", _fake_run_blocking), \
+             patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=state_sess), \
+             patch("src.nadobro.models.database.get_active_strategy_session_for_strategy", return_value=wrong_newest), \
+             patch("src.nadobro.services.live_session.get_live_session_snapshot", side_effect=fake_snapshot), \
+             patch.object(engine_runtime.RUNTIME, "stop", new=AsyncMock()), \
+             patch.object(bot_runtime, "_finalize_session"), \
+             patch.object(bot_runtime, "_save_state"), \
+             patch.object(bot_runtime, "_notify", new=AsyncMock()), \
+             patch.object(bot_runtime, "_strategy_display_name", return_value="DGRID"):
+            res = await bot_runtime._evaluate_session_pnl_rail(
+                42, "mainnet", state, "dgrid", "BTC",
+                client=None, close_coro=close_coro,
+            )
+
+        self.assertEqual(res, (True, None))
+        self.assertEqual(chosen["id"], 22)
+        self.assertTrue(closed.get("called"))
+
+    async def test_non_running_state_session_stops_to_prevent_untracked_fills(self):
+        state = {
+            "sl_pct": 1.0,
+            "tp_pct": 2.0,
+            "strategy": "dgrid",
+            "strategy_session_id": 22,
+            "running": True,
+        }
+        closed = {}
+
+        async def close_coro():
+            closed["called"] = True
+            return {"success": True}
+
+        stale_sess = {"id": 22, "product_id": 2, "status": "stopped"}
+        engine_stop = AsyncMock()
+        with patch.object(bot_runtime, "run_blocking", _fake_run_blocking), \
+             patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=stale_sess), \
+             patch("src.nadobro.services.live_session.get_live_session_snapshot") as snapshot, \
+             patch.object(engine_runtime.RUNTIME, "stop", new=engine_stop), \
+             patch.object(bot_runtime, "_finalize_session") as fin, \
+             patch.object(bot_runtime, "_save_state") as save_state, \
+             patch.object(bot_runtime, "_notify", new=AsyncMock()), \
+             patch.object(bot_runtime, "_strategy_display_name", return_value="DGRID"):
+            res = await bot_runtime._evaluate_session_pnl_rail(
+                42, "mainnet", state, "dgrid", "BTC",
+                client=None, close_coro=close_coro,
+            )
+
+        self.assertEqual(res, (True, None))
+        self.assertFalse(state["running"])
+        self.assertIn("no longer running", state["last_error"])
+        self.assertTrue(closed.get("called"))
+        engine_stop.assert_awaited_once_with(42, "mainnet", "dgrid")
+        save_state.assert_called_once()
+        fin.assert_not_called()
+        snapshot.assert_not_called()
 
 
 class LiveSnapshotMathTests(unittest.TestCase):
@@ -191,6 +276,60 @@ class StatusRenderTests(unittest.TestCase):
         self.assertIn("-32.00%", text)
         self.assertIn("realized $-2.00 | unrealized $-30.00", text)
         self.assertIn("Position: LONG", text)
+
+
+class DashboardSessionResolverTests(unittest.TestCase):
+    def test_mm_status_uses_state_session_id(self):
+        from src.nadobro.handlers import commands
+
+        state = {
+            "running": True,
+            "strategy": "dgrid",
+            "strategy_session_id": 22,
+            "notional_usd": 100.0,
+        }
+        status = {
+            "running": True,
+            "strategy": "dgrid",
+            "network": "mainnet",
+            "product": "BTC",
+            "open_orders_count": 0,
+            "strategy_session_id": 22,
+        }
+        state_sess = {"id": 22, "product_id": 2, "status": "running"}
+        wrong_newest = {"id": 99, "product_id": 3, "status": "running"}
+        chosen = {}
+
+        def fake_snapshot(_user, _network, sess, **_kwargs):
+            chosen["id"] = sess["id"]
+            return {
+                "unrealized_pnl": -3.0,
+                "session_pnl": -5.0,
+                "session_pnl_pct": -5.0,
+                "margin": 100.0,
+                "realized_pnl": -2.0,
+                "volume": 1000.0,
+                "fees": 0.5,
+                "fills": 4,
+                "open_orders": 1,
+                "has_position": True,
+                "position_size": 0.01,
+                "position_side": "long",
+                "entry_price": 65000.0,
+                "liq_price": 0.0,
+            }
+
+        with patch("src.nadobro.services.bot_runtime.get_user_bot_status", return_value=status), \
+             patch("src.nadobro.services.bot_runtime.get_user_bot_state", return_value=state), \
+             patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=state_sess), \
+             patch("src.nadobro.models.database.get_active_strategy_session_for_strategy", return_value=wrong_newest), \
+             patch("src.nadobro.services.user_service.get_user_readonly_client", return_value=None), \
+             patch("src.nadobro.services.live_session.get_live_session_snapshot", side_effect=fake_snapshot):
+            text, is_active = commands.build_mm_status_text(42)
+
+        self.assertTrue(is_active)
+        self.assertEqual(chosen["id"], 22)
+        self.assertIn("PnL (realized+unrealized): $-5.00", text)
 
 
 if __name__ == "__main__":
