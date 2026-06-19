@@ -364,7 +364,7 @@ class MultiprocessTimeoutTests(unittest.IsolatedAsyncioTestCase):
              patch("src.nadobro.services.runtime_supervisor.strategy_worker_group", return_value="mm_grid"), \
              patch("src.nadobro.services.runtime_supervisor.submit_cycle_job", side_effect=timed_out_submit), \
              patch("src.nadobro.services.execution_queue.get_queue_diagnostics", return_value={}):
-            await bot_runtime._strategy_loop(42, "mainnet")
+            await bot_runtime.handle_strategy_job({"telegram_id": 42, "network": "mainnet"})
 
         local_run.assert_not_called()
         mark_error.assert_awaited_once()
