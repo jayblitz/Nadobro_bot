@@ -28,8 +28,13 @@ def test_map_grid_config_centers_band_and_sets_barriers():
     # Knobs for DynamicGridController side-correct band rebuilds.
     assert cfg["step_pct"] == Decimal("0.0004")
     assert cfg["levels_count"] == 2
-    # long grid hard stop below: 100 * (1 - 0.005)
-    assert cfg["limit_price"] == Decimal("99.5")
+    # GRID-DUAL-UNIT fix (f391f3c): limit_price is NO LONGER auto-derived from
+    # sl_pct. A mid-anchored hard stop fired on a brief wick to mid*(1-sl) even
+    # when little had filled — a premature stop-out. SL now lives in the
+    # fill-aware avg-entry barrier (triple_barrier_config.stop_loss) + the
+    # fee-aware session rail. limit_price stays available as an explicit
+    # catastrophic stop but defaults to 0 (disabled).
+    assert cfg["limit_price"] == Decimal("0")
     tb = cfg["triple_barrier_config"]
     assert isinstance(tb, TripleBarrierConfig)
     assert tb.take_profit == Decimal("0.006") and tb.stop_loss == Decimal("0.005")
@@ -66,12 +71,20 @@ def test_map_dn_clamps_hold_and_sets_cycles():
     assert cfg["cycle_gap_seconds"] == 45
 
 
-def test_map_rgrid_hard_stop_is_above_mid():
+def test_map_rgrid_band_is_above_mid_and_stop_in_barrier():
     cfg = er.map_strategy_config(
         "rgrid", {"notional_usd": 100.0, "spread_bp": 10.0, "levels": 4, "sl_pct": 0.8},
         Decimal(100), product="BTC-USDC",
     )
-    assert cfg["limit_price"] == Decimal("100.8")  # above for a short grid
+    # A short grid's sell band steps UP from mid (start == mid, end > mid).
+    assert cfg["start_price"] == Decimal("100")
+    assert cfg["end_price"] > Decimal("100")
+    # GRID-DUAL-UNIT fix (f391f3c): no mid-anchored hard limit_price stop; the
+    # short's SL lives in the fill-aware barrier (avg-entry + sl_pct).
+    assert cfg["limit_price"] == Decimal("0")
+    tb = cfg["triple_barrier_config"]
+    assert isinstance(tb, TripleBarrierConfig)
+    assert tb.stop_loss == Decimal("0.008")  # 0.8% from avg entry, above for a short
 
 
 def test_map_mid_config():

@@ -344,6 +344,68 @@ class GridExecutor(Executor):
         # Place the re-priced opens now (subject to the usual suppress/bounds).
         await self._maybe_place_opens()
 
+    async def reduce_position(self, amount_base: object) -> Decimal:
+        """Reduce the net held inventory by up to ``amount_base`` with a single
+        reduce-only MARKET, keeping the executor's OWN accounting consistent.
+
+        DGRID-BOOK-RACE fix: dgrid tiered profit-booking used to fire a naked
+        ``adapter.place_order(... reduce_only ...)`` straight at the venue,
+        bypassing this executor. The booked reduction was then invisible here, so
+        the resting per-level close legs still tried to close the full
+        ``filled_base`` (rejected by reduce_only, but leaving levels stuck in
+        CLOSE_ORDER_PLACED) and the shared inventory net drifted from the venue.
+        Routing the reduction through here records the fill in the shared
+        inventory AND advances per-level close accounting (cancelling a fully
+        booked level's resting close leg) so the two views stay in sync. Returns
+        the base actually reduced.
+        """
+        amount = _dec(amount_base)
+        if amount <= 0 or self.is_terminated:
+            return Decimal(0)
+        held = sum((lv.filled_base - lv._close_recorded for lv in self.levels), Decimal(0))
+        held = max(Decimal(0), held)
+        reduce = min(amount, held)
+        if reduce <= 0:
+            return Decimal(0)
+        order = await self._guard(
+            lambda: self.adapter.place_order(
+                self.trading_pair, self.close_side, OrderType.MARKET,
+                reduce, None, self.config.leverage, True,
+            ),
+            label="grid_book_reduce",
+        )
+        if order is None:
+            return Decimal(0)
+        filled = order.filled_base if order.filled_base > 0 else reduce
+        price = (order.filled_quote / filled) if (order.filled_base > 0 and filled > 0) else Decimal(0)
+        # Keep the shared inventory net consistent with the venue.
+        self._record_fill(
+            Fill(order.id, self.trading_pair, self.close_side, filled, price, order.fee_quote, time.time())
+        )
+        # Advance per-level close accounting so resting close legs don't try to
+        # re-close the booked amount; cancel & complete fully booked levels.
+        remaining = filled
+        for lv in self.levels:
+            if remaining <= 0:
+                break
+            lv_held = lv.filled_base - lv._close_recorded
+            if lv_held <= 0:
+                continue
+            take = min(lv_held, remaining)
+            lv._close_recorded += take
+            remaining -= take
+            if lv._close_recorded >= lv.filled_base and lv.state is GridLevelState.CLOSE_ORDER_PLACED:
+                if lv.close_order_id is not None:
+                    cid = lv.close_order_id
+                    try:
+                        await self._guard(lambda: self.adapter.cancel_order(cid), label="grid_book_cancel_close")
+                        self.orders_cancelled += 1
+                    except Exception as exc:  # noqa: BLE001 - cancel is best-effort
+                        logger.warning("grid %s: book-reduce close cancel failed for %s: %s", self.id, cid, exc)
+                    lv.close_order_id = None
+                lv.state = GridLevelState.COMPLETE
+        return filled
+
     async def on_tick(self) -> None:
         if self.is_terminated:
             return
@@ -351,11 +413,36 @@ class GridExecutor(Executor):
         if self._stop_breached(mid):
             await self._stop_out(CloseType.STOP_LOSS)
             return
+        if self._take_profit_breached(mid):
+            # GRID-TP-DEAD fix: the configured take_profit was passed into the
+            # barrier but never read, so an executor-level TP never fired (only
+            # the per-level close legs + the session rail booked profit). Honor
+            # it now — a favorable move of ``take_profit`` from the average entry
+            # flattens the position to lock the gain.
+            await self._stop_out(CloseType.TAKE_PROFIT)
+            return
         for level in self.levels:
             await self._process_level(level, mid)
         await self._maybe_place_opens()
         if all(lv.state is GridLevelState.COMPLETE for lv in self.levels):
             self._terminate(CloseType.COMPLETED)
+
+    def _take_profit_breached(self, mid: Decimal) -> bool:
+        """True when price has moved FAVORABLY by ``take_profit`` from the
+        average entry (BUY: up; SELL: down). Mirrors ``_stop_breached``'s
+        avg-entry reference so SL and TP use one consistent basis. Inert until
+        there is a real average entry (no position ⇒ nothing to take)."""
+        tb = self.config.triple_barrier_config
+        if tb is None or tb.take_profit is None:
+            return False
+        avg = self._avg_entry()
+        if avg is None:
+            return False
+        if self.open_side is TradeType.BUY and mid >= avg * (Decimal(1) + tb.take_profit):
+            return True
+        if self.open_side is TradeType.SELL and mid <= avg * (Decimal(1) - tb.take_profit):
+            return True
+        return False
 
     def _stop_breached(self, mid: Decimal) -> bool:
         lp = self.config.limit_price
