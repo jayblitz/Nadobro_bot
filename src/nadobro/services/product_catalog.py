@@ -138,6 +138,41 @@ def _dn_underlying_key(symbol: str) -> str:
     return compact or text
 
 
+def _dn_pair_candidates(symbol: str) -> list[str]:
+    """All plausible underlying keys a spot/perp symbol could pair on.
+
+    DN-CUSTOM-ASSETS fix: ``_dn_underlying_key`` assumes a wrapped spot ticker
+    is ``w<TICKER>x`` where BOTH the leading ``W`` and trailing ``X`` are wrapper
+    markers (testnet xStocks: ``wQQQx`` -> ``QQQ``). On mainnet the RWA tickers
+    are ``QQQX`` / ``SPYX`` where the ``X`` is part of the *name*, so the spot
+    ``wQQQX`` reduces to ``QQQ`` while the perp ``QQQX-PERP`` reduces to ``QQQX``
+    — the two never match and the pair is silently dropped, leaving DN stuck on
+    BTC/ETH. Returning multiple candidate forms (full underlying key, and the
+    "strip only the leading wrapper" form that keeps the trailing X) lets the
+    pairing succeed for BOTH conventions without breaking the existing one.
+    Order = most-specific first; callers should prefer the existing
+    ``underlying_key`` match and only fall back to the broader candidates.
+    """
+    text = str(symbol or "").strip().upper()
+    if text.endswith("-PERP"):
+        text = text[:-5]
+    compact = text.replace("_", "-").replace("/", "-").strip("-").replace("-", "")
+    out: list[str] = []
+
+    def _add(value: str) -> None:
+        v = (value or "").strip().upper()
+        if v and v not in out:
+            out.append(v)
+
+    _add(_dn_underlying_key(symbol))           # e.g. wQQQX -> QQQ  (testnet form)
+    if compact.startswith("WB") and len(compact) > 2:
+        _add(compact[2:])                       # Backed wrapper: wbNVDA -> NVDA
+    if compact.startswith("W") and len(compact) > 1:
+        _add(compact[1:])                       # strip leading wrapper only: wQQQX -> QQQX
+    _add(compact)                               # bare: QQQX -> QQQX
+    return out
+
+
 def _derive_max_leverage_from_weight_x18(weight_x18) -> Optional[int]:
     """Derive max leverage from initial asset weight: lev = 1 / (1 - w).
 
@@ -590,6 +625,10 @@ def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
         return None
 
     spot_by_underlying: dict[str, list[dict]] = {}
+    # DN-CUSTOM-ASSETS fix: also index every spot under its broader candidate
+    # keys (see _dn_pair_candidates) so a perp can pair with a wrapped spot whose
+    # underlying_key was over-reduced (mainnet wQQQX/QQQX, wSPYX/SPYX).
+    spot_by_candidate: dict[str, list[dict]] = {}
     for key, row in (spot_catalog.get("spots") or {}).items():
         spot_row = dict(row or {})
         spot_row["key"] = key
@@ -597,6 +636,8 @@ def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
         if not underlying_key:
             continue
         spot_by_underlying.setdefault(underlying_key, []).append(spot_row)
+        for cand in _dn_pair_candidates(str(spot_row.get("symbol") or key)):
+            spot_by_candidate.setdefault(cand, []).append(spot_row)
 
     v2_perp_rows_by_symbol = {
         str(k).upper().strip(): v for k, v in v2_symbols.items() if str((v or {}).get("type") or "").lower() == "perp"
@@ -616,6 +657,18 @@ def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
         if not underlying_key:
             continue
         spot_candidates = list(spot_by_underlying.get(underlying_key) or [])
+        if not spot_candidates:
+            # DN-CUSTOM-ASSETS fallback: no exact underlying_key match (the
+            # wrapped-stock convention mismatch). Try the perp's broader
+            # candidate keys against the candidate-indexed spots, taking the
+            # first candidate that resolves to exactly one underlying spot so we
+            # never pair the wrong market.
+            for cand in _dn_pair_candidates(product_key) + _dn_pair_candidates(perp_symbol):
+                hits = spot_by_candidate.get(cand) or []
+                uniq_ids = {int(h.get("id", 0)) for h in hits}
+                if len(uniq_ids) == 1:
+                    spot_candidates = list(hits)
+                    break
         if not spot_candidates:
             continue
         spot_candidates.sort(key=lambda item: int(item.get("id", 0)))

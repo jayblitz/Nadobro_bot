@@ -76,15 +76,18 @@ def test_every_engine_strategy_resolves_some_sltp_without_crashing():
 # marker (strict=True makes an unexpected pass fail CI).                       #
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.xfail(strict=True, reason="VOL-MARGIN: vol ignores session_margin_usd; trades the $100 default")
 def test_vol_uses_user_session_margin():
-    """A user's vol 'Session margin' must size the run.
-
-    Today map_strategy_config reads cycle_notional_usd/notional_usd only, so
-    total_amount_quote stays at the 100.0 default even when the user set 500.
-    """
+    """A user's vol 'Session margin' must size the run. (VOL-MARGIN fixed:
+    map_strategy_config now prefers session_margin_usd over the legacy keys.)"""
     cfg = map_strategy_config("vol", {"session_margin_usd": 500}, MID, product=PRODUCT)
     assert float(cfg["total_amount_quote"]) == pytest.approx(500.0)
+
+
+def test_vol_falls_back_to_legacy_notional_keys():
+    """When session_margin_usd is unset, vol still honors cycle_notional_usd /
+    notional_usd and finally the $100 default."""
+    assert float(map_strategy_config("vol", {"cycle_notional_usd": 250}, MID, product=PRODUCT)["total_amount_quote"]) == pytest.approx(250.0)
+    assert float(map_strategy_config("vol", {}, MID, product=PRODUCT)["total_amount_quote"]) == pytest.approx(100.0)
 
 
 @pytest.mark.xfail(strict=True, reason="VOL-DEAD-SL: vol config carries no SL the controller can act on")

@@ -56,8 +56,8 @@ audit. `[test]` = covered by `tests/engine/test_sltp_invariants.py`. Fix the
 Critical/High items first.
 
 ### SL/TP (priority)
-- [ ] **DN-RAIL** (Critical) — Delta Neutral has a session SL/TP rail that fires on net two-leg PnL. *Today: no rail; user stops ignored.* `bot_runtime.py:2654,2668` (dn absent). Add integration test on fix.
-- [ ] **SLTP-GROSS** (High) — the SL/TP rail measures PnL **net of fees**. *Today: `session_pnl = realized + unrealized - funding_paid`, fees excluded.* `live_session.py:247`.
+- [x] **DN-RAIL** (Critical) — *FIXED 2026-06-20:* DN now gets a post-dispatch session SL/TP rail (`bot_runtime.py`, dn block) that flattens both legs via `close_delta_neutral_legs`. Tested in `tests/services/test_session_safety_rails.py`.
+- [x] **SLTP-GROSS** (High) — *FIXED 2026-06-20:* the snapshot exposes `session_pnl_net`/`session_pnl_pct_net` (gross minus fees) and the rail judges the stop on the net basis; displayed gross PnL unchanged. `live_session.py`, `bot_runtime.py`. Tested.
 - [ ] **GRID-DUAL-UNIT** (High) — a user's SL is applied with ONE unit semantic, not both a price-move barrier and a % -of-margin rail. `engine_runtime.py:610` + `grid_executor.py:372`. `[test]` xfail `test_grid_barrier_does_not_double_apply_margin_pct_stop`.
 - [ ] **GRID-TP-DEAD** (High) — if `take_profit` is passed to the grid barrier it is actually enforced (or stop passing it). *Today: `grid_executor.py` never reads `take_profit`.*
 - [ ] **DGRID-SHADOW-KEYS** (Med) — dgrid defaults don't carry dead `sl_pct`/`tp_pct` copies that shadow the live `rgrid_*` values. `strategy_registry.py:148,263`.
@@ -65,7 +65,7 @@ Critical/High items first.
 - [x] **SLTP-KEYS** — rgrid/dgrid resolve SL/TP from the keys the UI writes. *Fixed.* `[test]` green `test_user_sltp_is_resolved_...`.
 
 ### Volume bot
-- [ ] **VOL-MARGIN** (High) — vol sizes the run from the user's `session_margin_usd`. `engine_runtime.py:438`. `[test]` xfail `test_vol_uses_user_session_margin`.
+- [x] **VOL-MARGIN** (High) — *FIXED 2026-06-20:* the vol branch of `map_strategy_config` now prefers `session_margin_usd` (then `cycle_notional_usd`/`notional_usd`). `[test]` green `test_vol_uses_user_session_margin`.
 - [ ] **VOL-LOOP** (High) — vol cycles until target volume, then marks itself stopped. *Today: one round-trip then idles forever.* `volume_bot.py:73-96`.
 - [ ] **VOL-DEAD-SL** (Med) — the vol SL the user sets reaches the controller (or is removed from the UI). `engine_runtime.py:528-539`. `[test]` xfail `test_vol_config_carries_user_stop_loss`.
 - [ ] **VOL-NO-CAP** (Med) — a cumulative-volume / fee budget guard exists before the loop is enabled. `volume_bot.py:6-8` (docstring claims a cap that doesn't exist).
@@ -87,6 +87,9 @@ Critical/High items first.
 - [ ] **RGRID-GATE** (verify) — confirm whether the production `regime_gate_enabled=0` override for rgrid exists; if not, rgrid is gated out of its own downtrends. `reverse_grid.py:16` vs `engine_runtime.py:419`.
 
 ### Delta Neutral (economic)
+- [x] **DN-CYCLES** (High) — *FIXED 2026-06-20:* DN cycle count + funding are restored from persisted progress on rebuild (`engine_runtime.py` injects `restore_cycles_completed`/`restore_funding_usd`, gated on `runs>0`; `delta_neutral.py` resumes the count and won't open a cycle past `total_cycles`). So a restart/worker-handoff no longer ignores the configured cycle count. Tested in `tests/engine/controllers/test_delta_neutral.py`.
+- [x] **DN-CUSTOM-ASSETS** (High) — *FIXED 2026-06-20:* wrapped RWA spots (wQQQX/wSPYX) now pair with their perps so DN offers more than BTC/ETH (`product_catalog._dn_pair_candidates` + candidate fallback in `_build_dn_pair_catalog`). Tested in `tests/services/test_dn_pairing.py`.
+- [ ] **DN-HOLD-CLOCK-ON-REBUILD** (Med, remaining) — the hold timer (`opened_at`) is still memory-only; on a rebuild mid-hold the controller re-opens a fresh cycle and restarts the clock rather than ADOPTING the open legs. A full fix needs `opened_at` persisted (schema field) + venue-position adoption on rebuild + integration testing.
 - [ ] **DN-PNL-FEES** (High) — DN headline PnL = `realized + funding - fees`; warn when cumulative fees > funding. `pnl_card_builder.py:218`. (Update `test_pnl_card_builder.py:204-234` — it currently locks the overstatement in.)
 - [ ] **DN-FUNDING-WINDOW** (Low) — funding rows with unparseable timestamps are excluded from the run total. `nado.py:728-731`.
 

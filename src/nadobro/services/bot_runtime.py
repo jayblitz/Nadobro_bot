@@ -2192,11 +2192,16 @@ async def _evaluate_session_pnl_rail(
         return None
     pnl = float(snap.get("session_pnl") or 0.0)
     pct = float(snap.get("session_pnl_pct") or 0.0)
+    # SLTP-GROSS fix: judge the stop on NET-of-fees PnL so it doesn't fire late
+    # by the accumulated fee drag. Fall back to the gross basis when the net
+    # field is absent (older snapshots). The user-facing message still shows the
+    # gross figure (``pnl``/``pct``) for continuity.
+    pct_net = float(snap.get("session_pnl_pct_net", pct) or 0.0)
 
     reason = ""
-    if sl_pct > 0 and pct <= -sl_pct:
+    if sl_pct > 0 and pct_net <= -sl_pct:
         reason = "sl_hit"
-    elif tp_pct > 0 and pct >= tp_pct:
+    elif tp_pct > 0 and pct_net >= tp_pct:
         reason = "tp_hit"
     if not reason:
         return None
@@ -2672,6 +2677,23 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             telegram_id, network, state, strategy, product,
             client=client,
             close_coro=lambda: run_blocking(cleanup_strategy_positions, telegram_id, network, state),
+            market_label=_market_label_for_strategy(strategy, product, state),
+        )
+        if rail is not None:
+            return rail
+    if strategy == "dn":
+        # DN-RAIL fix: Delta Neutral had NO session SL/TP enforcement at all —
+        # it was in the engine skip-list but never got a post-dispatch rail, so a
+        # user's DN sl_pct/tp_pct was silently ignored. Wire the same margin-%
+        # rail used by the other engine strategies, measured on net (both-leg)
+        # session PnL, and flatten BOTH legs together on a hit so the hedge is
+        # never left half-open.
+        rail = await _evaluate_session_pnl_rail(
+            telegram_id, network, state, strategy, product,
+            client=client,
+            close_coro=lambda: run_blocking(
+                close_delta_neutral_legs, telegram_id, product, network, source="dn_session_rail"
+            ),
             market_label=_market_label_for_strategy(strategy, product, state),
         )
         if rail is not None:

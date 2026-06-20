@@ -201,3 +201,50 @@ def test_actual_drift_breaks_hedge():
         assert orch.list(c.id, active_only=True) == []
 
     asyncio.run(body())
+
+
+def test_restore_cycles_completed_resumes_count_on_rebuild():
+    """DN-CYCLES fix: a rebuilt controller restores cycles_completed from
+    persisted progress (injected as restore_cycles_completed) so it RESUMES the
+    configured cycle count instead of restarting from 0. With 2 of 3 done, it
+    opens the final cycle, holds (0s), closes, and finishes at 3 — not 4+."""
+    from src.nadobro.engine.controllers.delta_neutral import DNPhase
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _dn(adapter, InventoryRepository(),
+                      {"trading_pair_long": "L", "trading_pair_short": "S",
+                       "hedge_ratio": "1", "leg_amount_quote": "50",
+                       "max_drift_pct": "0.05", "hold_seconds": 0, "cycles": 3,
+                       "restore_cycles_completed": 2, "restore_funding_usd": "1.50"})
+        assert c.cycles_completed == 2
+        assert c.cumulative_funding == Decimal("1.50")
+        await orch.spawn_controller(c)
+        # 2 < 3 → the final cycle opens (both legs).
+        assert len(orch.list(c.id, active_only=True)) == 2
+        await orch.tick_controller(c.id)   # hold(0s) elapsed → close both
+        await orch.tick_controller(c.id)   # cycle completes → DONE at 3
+        assert c.cycles_completed == 3
+        assert c.phase is DNPhase.DONE
+
+    asyncio.run(body())
+
+
+def test_restore_at_or_above_total_opens_no_new_cycle():
+    """DN-CYCLES fix: if the restored count already meets the configured total,
+    on_start must NOT open another cycle (the 'ignores the cycle count on
+    restart' bug) — it goes straight to DONE with zero legs."""
+    from src.nadobro.engine.controllers.delta_neutral import DNPhase
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _dn(adapter, InventoryRepository(),
+                      {"trading_pair_long": "L", "trading_pair_short": "S",
+                       "hedge_ratio": "1", "leg_amount_quote": "50",
+                       "max_drift_pct": "0.05", "hold_seconds": 3600, "cycles": 3,
+                       "restore_cycles_completed": 3})
+        await orch.spawn_controller(c)
+        assert orch.list(c.id, active_only=True) == []
+        assert c.phase is DNPhase.DONE
+
+    asyncio.run(body())

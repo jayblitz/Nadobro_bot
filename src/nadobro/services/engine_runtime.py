@@ -520,6 +520,15 @@ def map_strategy_config(
         }
     if strategy == "vol":
         interval = max(1.0, _f(settings, "interval_seconds", 60))
+        # VOL-MARGIN fix: the vol card collects the run size under
+        # ``session_margin_usd`` (strategy_handler), but the generic ``notional``
+        # above only reads cycle_notional_usd/notional_usd — so a user who set
+        # "$500" still traded the $100 default. Prefer the user's session margin,
+        # then fall back to the legacy keys.
+        vol_notional = _f(
+            settings, "session_margin_usd",
+            _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0)),
+        )
         # Normalize the trading pair so the VolumeBotController validation
         # sees a canonical base (e.g. ``KBTC``) regardless of whether
         # ``state.product`` was stored as ``KBTC`` (current UI) or as a
@@ -532,7 +541,7 @@ def map_strategy_config(
             vol_pair = str(product or "")
         return {
             "trading_pair": vol_pair,
-            "total_amount_quote": Decimal(str(notional)),
+            "total_amount_quote": Decimal(str(vol_notional)),
             "total_duration": interval * 4,
             "order_interval": interval,
             "market": "spot",
@@ -1017,6 +1026,29 @@ async def run_engine_cycle(
         # isolated-only flag) from the DN pair catalog.
         if strategy == "dn":
             _materialize_dn_leg_meta(meta, configs, client, network, product)
+            # DN-CYCLES fix: a rebuild (restart / worker handoff / recovery) used
+            # to reset the controller's cycle counter to 0 and re-run the whole
+            # configured cycle count. Restore the persisted progress so the
+            # rebuilt controller resumes the count instead of restarting it.
+            # GUARD: only restore for a run that has already ticked at least once
+            # (state["runs"] > 0). A fresh user start has runs == 0, so a stale
+            # progress row left by a prior crashed run (the controller_id is
+            # stable across runs) can never bleed into a new run.
+            if int(_f(state, "runs", 0)) > 0:
+                try:
+                    from src.nadobro.services.engine_persistence import (
+                        get_controller_progress,
+                    )
+
+                    _cid = deterministic_controller_id(strategy, telegram_id, network)
+                    _prog = get_controller_progress(_cid) or {}
+                    if _prog:
+                        configs["restore_cycles_completed"] = int(
+                            _prog.get("cycles_completed") or 0
+                        )
+                        configs["restore_funding_usd"] = _prog.get("funding_earned_usd") or 0
+                except Exception:  # noqa: BLE001 - restore is best-effort, never block start
+                    logger.debug("dn progress restore skipped", exc_info=True)
         adapter = build_adapter(client, meta)
         started_controller = await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),
