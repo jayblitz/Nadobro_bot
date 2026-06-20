@@ -248,23 +248,69 @@ def test_profit_booking_scales_out_on_tier_cross():
         # Seed a 1.0-base long @ 100 (margin 100): uPnL = net*(mark-entry).
         inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
 
-        # mid 102 -> uPnL +2 = +2% of margin -> only tier 1 (2%) books.
+        # mid 102 -> uPnL +2 = +2% of margin -> only tier 1 (2%) books,
+        # and the filled reduce-only order is recorded back to inventory.
         await c._maybe_book_profit(Decimal("102"))
         sells = [o for o in adapter.placed if o.side == TradeType.SELL]
         assert len(sells) == 1
         assert sells[0].order_type == OrderType.MARKET
         assert abs(float(sells[0].amount_base) - 0.33) < 1e-9   # 33% of 1.0
+        assert inv.get(1, "P", c.id).net_amount_base == Decimal("0.670")
         assert c._booked_tiers == {0}
 
         # Same tier again -> nothing new (booked once).
         await c._maybe_book_profit(Decimal("102"))
         assert len([o for o in adapter.placed if o.side == TradeType.SELL]) == 1
 
-        # Jump to +6 (mid 106) -> tiers 4% and 6% both book this tick.
-        await c._maybe_book_profit(Decimal("106"))
+        # Jump high enough that the *remaining* position crosses tiers 4% and
+        # 6%; the second close must size from 0.67 base, not stale 1.0 base.
+        await c._maybe_book_profit(Decimal("109"))
         sells = [o for o in adapter.placed if o.side == TradeType.SELL]
         assert len(sells) == 2
+        assert sells[1].amount_base == Decimal("0.442")
+        assert inv.get(1, "P", c.id).net_amount_base == Decimal("0.228")
         assert c._booked_tiers == {0, 1, 2}
+
+    asyncio.run(body())
+
+
+def test_profit_booking_does_not_book_tier_on_zero_fill():
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(102), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=cfg)
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+
+        await c._maybe_book_profit(Decimal("102"))
+
+        assert c._booked_tiers == set()
+        assert inv.get(1, "P", c.id).net_amount_base == Decimal("1.0")
+
+    asyncio.run(body())
+
+
+def test_spawn_deferred_when_prior_inventory_not_flat():
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _down())
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=cfg)
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("0.5"), Decimal("50"))
+
+        spawned = await c._spawn_phase("rgrid", Decimal("100"))
+
+        assert spawned is False
+        assert orch.list(c.id, active_only=True) == []
 
     asyncio.run(body())
 
