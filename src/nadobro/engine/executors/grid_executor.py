@@ -376,8 +376,15 @@ class GridExecutor(Executor):
         )
         if order is None:
             return Decimal(0)
-        filled = order.filled_base if order.filled_base > 0 else reduce
-        price = (order.filled_quote / filled) if (order.filled_base > 0 and filled > 0) else Decimal(0)
+        filled = _dec(getattr(order, "filled_base", 0) or 0)
+        if filled <= 0:
+            # Reduce-only MARKET came back unfilled (no liquidity / already flat
+            # / venue reject — the adapter reconciles a genuine zero fill to
+            # filled_base=0). Booking `reduce` regardless would inject a phantom
+            # close at price 0 into inventory and wrongly advance per-level
+            # accounting. Record nothing and let the next tick retry.
+            return Decimal(0)
+        price = order.filled_quote / filled
         # Keep the shared inventory net consistent with the venue.
         self._record_fill(
             Fill(order.id, self.trading_pair, self.close_side, filled, price, order.fee_quote, time.time())

@@ -207,6 +207,33 @@ def test_reduce_position_caps_at_held_inventory():
     asyncio.run(body())
 
 
+def test_reduce_position_books_nothing_on_zero_fill():
+    """Regression: a reduce-only MARKET that comes back UNFILLED (no liquidity /
+    already flat / venue reject — adapter reconciles to filled_base=0) must book
+    nothing. Booking the requested size would inject a phantom close at price 0
+    into inventory and wrongly complete a level, desyncing from the venue."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(105), auto_fill_market=False)
+        inv = InventoryRepository()
+        ex = _ex(_cfg(), adapter, inv)
+        await ex.on_create()
+        lv = ex.levels[0]
+        adapter.fill_order(lv.open_order_id, price=lv.open_price)  # this fill IS scripted
+        await ex.on_tick()
+        net_before = inv.get(1, PAIR, "c").net_amount_base
+        assert net_before > 0
+        cancelled_before = len(adapter.cancelled)
+
+        # The reduce-only MARKET won't auto-fill -> nothing reduced.
+        booked = await ex.reduce_position(lv.filled_base)
+
+        assert booked == Decimal(0)
+        assert inv.get(1, PAIR, "c").net_amount_base == net_before  # no phantom close
+        assert len(adapter.cancelled) == cancelled_before           # no level advanced
+
+    asyncio.run(body())
+
+
 def test_keep_position_false_flattens_on_stop():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(105))
