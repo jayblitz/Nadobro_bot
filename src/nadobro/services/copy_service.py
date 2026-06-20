@@ -586,6 +586,24 @@ def _compute_copy_sizing(
     return copy_size, lev
 
 
+def _entry_deviation_too_far(mid: float, leader_entry: float, max_dev_pct: float) -> bool:
+    """COPY-NO-SLIPPAGE gate: True when the follower would enter too far from the
+    leader's entry. With a 30s poll, price can move a lot between the leader's
+    fill and ours; opening anyway means systematically buying higher / selling
+    lower than the trader we copy. We skip (and retry next poll) when the current
+    mid deviates from ``leader_entry`` by more than ``max_dev_pct`` percent.
+    Unknown/zero inputs => allow (can't assess, don't block)."""
+    try:
+        mid = float(mid)
+        leader_entry = float(leader_entry)
+        max_dev_pct = float(max_dev_pct)
+    except (TypeError, ValueError):
+        return False
+    if mid <= 0 or leader_entry <= 0 or max_dev_pct <= 0:
+        return False
+    return abs(mid - leader_entry) / leader_entry * 100.0 > max_dev_pct
+
+
 def _leader_max_notional(leader_pos_map: dict) -> float:
     """Largest single-position notional in the leader's book (the conviction
     anchor for proportional copy sizing)."""
@@ -688,6 +706,29 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     for cp in open_copy_positions:
         copy_pos_by_product[cp["product_id"]] = cp
 
+    # COPY-VENUE-RECONCILE: read the follower's REAL on-venue positions once so we
+    # can avoid opening a duplicate when the wallet already holds the product
+    # (e.g. a prior copy that filled on-chain but failed to record, or a manual
+    # trade). Best-effort — if the client/price is unavailable we degrade to the
+    # prior DB-only behavior rather than block copying.
+    max_entry_deviation_pct = float(mirror.get("max_entry_deviation_pct", 1.5) or 1.5)
+    venue_pos_by_product: dict = {}
+    try:
+        follower_client = await run_blocking(get_user_nado_client, user_id)
+    except Exception as e:  # noqa: BLE001 - reconcile is best-effort; degrade to DB-only
+        logger.debug("copy follower client unavailable for reconcile: %s", e)
+        follower_client = None
+    if follower_client is not None:
+        try:
+            for vp in (await run_blocking(follower_client.get_all_positions) or []):
+                try:
+                    if abs(float(vp.get("amount", 0) or 0)) > 0:
+                        venue_pos_by_product[int(vp.get("product_id", -1))] = vp
+                except (TypeError, ValueError):
+                    continue
+        except Exception as e:  # noqa: BLE001 - reconcile is best-effort
+            logger.debug("copy venue-position reconcile read failed: %s", e)
+
     # 1. Close positions that leader has closed
     for pid, cp in list(copy_pos_by_product.items()):
         if pid not in leader_pos_map:
@@ -773,6 +814,34 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
 
         if leader_entry <= 0:
             continue
+
+        # COPY-VENUE-RECONCILE: the follower already holds this product on-venue
+        # but we have no DB record of it — opening again would stack a duplicate /
+        # orphaned position outside cumulative accounting. Skip; a manual/orphan
+        # position must be reconciled before we copy it.
+        if pid in venue_pos_by_product:
+            logger.warning(
+                "copy skip open: follower already holds product %s on-venue with no "
+                "tracked copy row (mirror %s) — reconcile before copying",
+                pid, mirror_id,
+            )
+            continue
+
+        # COPY-NO-SLIPPAGE: skip a late entry that's drifted too far from the
+        # leader's fill (we'd buy higher / sell lower than the trader we copy).
+        if follower_client is not None:
+            try:
+                _mp = await run_blocking(follower_client.get_market_price, pid)
+                _mid = float((_mp or {}).get("mid") or 0.0)
+            except Exception:  # noqa: BLE001 - price read best-effort; allow if unknown
+                _mid = 0.0
+            if _entry_deviation_too_far(_mid, float(leader_entry or 0), max_entry_deviation_pct):
+                logger.info(
+                    "copy skip open: %s mid %.6f deviates >%.2f%% from leader entry %.6f "
+                    "(mirror %s) — waiting for a closer price",
+                    product_key, _mid, max_entry_deviation_pct, float(leader_entry), mirror_id,
+                )
+                continue
 
         # COPY-SIZE + COPY-LEVERAGE fix: mirror the leader's conviction (size as a
         # fraction of their largest position) and leverage, capped by the user's

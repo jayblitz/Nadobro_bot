@@ -3,9 +3,12 @@
 *supported pairs* is sourced from the live Nado spot catalog (see
 ``services.product_catalog.list_volume_spot_bases``) per execution mode, so
 new testnet/mainnet listings (e.g. ``QQQX``, ``SPYX``) are picked up
-automatically without code edits. Runs a MAKER TWAP buy half then a MAKER
-TWAP sell-cleanup half. The daily-volume cap is enforced upstream by the
-Risk Engine.
+automatically without code edits. Each cycle runs a MAKER TWAP buy half then a
+MAKER TWAP sell-cleanup half, and the controller repeats cycles until the user's
+cumulative ``target_volume_usd`` is met (or a single round-trip when no target
+is set). A hard ``max_cycles`` ceiling bounds fee burn if the target is mis-set,
+and the session SL/TP rail (bot_runtime) halts a losing run on the user's
+``sl_pct``.
 """
 from __future__ import annotations
 
@@ -50,6 +53,18 @@ class VolumeBotController(Controller):
         self.total_amount_quote = _dec(self.cfg("total_amount_quote", "50"))
         self.total_duration = float(self.cfg("total_duration", 600))
         self.order_interval = float(self.cfg("order_interval", 60))
+        # VOL-LOOP fix: keep cycling buy->sell until the user's cumulative VOLUME
+        # target is met, instead of doing one round-trip and idling forever.
+        # 0 / unset = legacy single round-trip. VOL-NO-CAP fix: a hard max-cycles
+        # safety ceiling so a mis-set target can't burn fees unbounded.
+        self.target_volume_usd = _dec(self.cfg("target_volume_usd", "0"))
+        self.max_cycles = max(1, int(self.cfg("max_cycles", 100) or 100))
+        self.session_volume_usd: Decimal = Decimal(0)
+        self.cycles_completed = 0
+        # Completion signal drained by run_engine_cycle so bot_runtime can
+        # finalize the session (was: never set, so the strategy idled "running").
+        self.completed = False
+        self.stop_reason = ""
         self.phase = "buying"
         self.buy_id: Optional[str] = None
         self.sell_id: Optional[str] = None
@@ -62,13 +77,30 @@ class VolumeBotController(Controller):
         return TWAPExecutor(cfg, user_id=self.user_id, controller_id=self.id,
                             adapter=self.adapter, inventory=self.inventory)
 
-    async def on_start(self) -> None:
+    def _target_reached(self) -> bool:
+        return self.target_volume_usd > 0 and self.session_volume_usd >= self.target_volume_usd
+
+    def _complete(self, reason: str) -> None:
+        """Finalize the run: signal completion and stop the controller so the
+        engine tears it down instead of ticking a do-nothing 'done' phase."""
+        self.phase = "done"
+        self.completed = True
+        self.stop_reason = reason
+        self._set_stopped()
+
+    async def _start_buy_cycle(self) -> bool:
         ex = self._twap(TradeType.BUY, self.total_amount_quote)
         ok = await self.spawn_executor(
             ex, ExecutorRequest(order_amount_quote=self.total_amount_quote)
         )
         if ok:
             self.buy_id = ex.id
+            self.sell_id = None
+            self.phase = "buying"
+        return ok
+
+    async def on_start(self) -> None:
+        await self._start_buy_cycle()
 
     async def on_tick(self) -> None:
         for ex in self.my_executors(active_only=True):
@@ -77,20 +109,36 @@ class VolumeBotController(Controller):
         if self.phase == "buying" and self.buy_id is not None:
             buy_ex = self.orchestrator.get(self.buy_id)
             if buy_ex is not None and buy_ex.is_terminated:
-                sell_notional = getattr(buy_ex, "filled_quote", Decimal(0)) or Decimal(0)
-                if sell_notional > 0:
-                    sell = self._twap(TradeType.SELL, sell_notional)
+                bought = getattr(buy_ex, "filled_quote", Decimal(0)) or Decimal(0)
+                self.session_volume_usd += bought
+                if bought > 0:
+                    sell = self._twap(TradeType.SELL, bought)
                     ok = await self.spawn_executor(
-                        sell, ExecutorRequest(order_amount_quote=sell_notional)
+                        sell, ExecutorRequest(order_amount_quote=bought)
                     )
                     if ok:
                         self.sell_id = sell.id
                         self.phase = "selling"
                     else:
-                        self.phase = "done"
+                        # Couldn't place the sell — finish rather than strand a
+                        # bought position un-cleaned (it remains for the user).
+                        self._complete("sell_spawn_failed")
                 else:
-                    self.phase = "done"
+                    self._complete("no_fill")
         elif self.phase == "selling" and self.sell_id is not None:
             sell_ex = self.orchestrator.get(self.sell_id)
             if sell_ex is not None and sell_ex.is_terminated:
-                self.phase = "done"
+                self.session_volume_usd += getattr(sell_ex, "filled_quote", Decimal(0)) or Decimal(0)
+                self.cycles_completed += 1
+                # Decide: loop again or finish. Legacy single round-trip when no
+                # target is set; otherwise loop until target volume or the
+                # safety cap.
+                if self.target_volume_usd <= 0:
+                    self._complete("round_trip_complete")
+                elif self._target_reached():
+                    self._complete("target_volume_hit")
+                elif self.cycles_completed >= self.max_cycles:
+                    self._complete("max_cycles")
+                else:
+                    if not await self._start_buy_cycle():
+                        self._complete("buy_spawn_failed")

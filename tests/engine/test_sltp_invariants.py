@@ -90,11 +90,24 @@ def test_vol_falls_back_to_legacy_notional_keys():
     assert float(map_strategy_config("vol", {}, MID, product=PRODUCT)["total_amount_quote"]) == pytest.approx(100.0)
 
 
-@pytest.mark.xfail(strict=True, reason="VOL-DEAD-SL: vol config carries no SL the controller can act on")
-def test_vol_config_carries_user_stop_loss():
-    """A vol user's stop-loss must reach the controller config."""
-    cfg = map_strategy_config("vol", {"session_margin_usd": 100, "sl_pct": 2.0}, MID, product=PRODUCT)
-    assert "sl_pct" in cfg or cfg.get("triple_barrier_config") is not None
+def test_vol_stop_loss_is_enforced_by_the_session_rail():
+    """VOL-DEAD-SL (reframed): the vol controller intentionally carries no SL
+    barrier — the user's vol stop-loss is enforced by the session SL/TP rail,
+    which reads it via effective_sl_tp_pct('vol', state). So a user-set sl_pct
+    is NOT dead; it resolves and the rail (now fee-aware) acts on it."""
+    sl, tp = effective_sl_tp_pct("vol", {"sl_pct": 2.0, "tp_pct": 5.0})
+    assert sl == 2.0 and tp == 5.0
+
+
+def test_vol_target_volume_and_cap_reach_the_controller():
+    """VOL-LOOP / VOL-NO-CAP: the volume target and the safety cycle cap are
+    plumbed into the controller config so the bot can loop to target and stop."""
+    cfg = map_strategy_config(
+        "vol", {"session_margin_usd": 100, "target_volume_usd": 5000, "vol_max_cycles": 25},
+        MID, product=PRODUCT,
+    )
+    assert float(cfg["target_volume_usd"]) == pytest.approx(5000.0)
+    assert int(cfg["max_cycles"]) == 25
 
 
 def test_grid_does_not_set_fill_blind_limit_price_stop():

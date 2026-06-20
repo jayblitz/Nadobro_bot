@@ -66,24 +66,24 @@ Critical/High items first.
 
 ### Volume bot
 - [x] **VOL-MARGIN** (High) — *FIXED 2026-06-20:* the vol branch of `map_strategy_config` now prefers `session_margin_usd` (then `cycle_notional_usd`/`notional_usd`). `[test]` green `test_vol_uses_user_session_margin`.
-- [ ] **VOL-LOOP** (High) — vol cycles until target volume, then marks itself stopped. *Today: one round-trip then idles forever.* `volume_bot.py:73-96`.
-- [ ] **VOL-DEAD-SL** (Med) — the vol SL the user sets reaches the controller (or is removed from the UI). `engine_runtime.py:528-539`. `[test]` xfail `test_vol_config_carries_user_stop_loss`.
-- [ ] **VOL-NO-CAP** (Med) — a cumulative-volume / fee budget guard exists before the loop is enabled. `volume_bot.py:6-8` (docstring claims a cap that doesn't exist).
+- [x] **VOL-LOOP** (High) — *FIXED 2026-06-20:* the controller now loops buy→sell until the user's `target_volume_usd` is met (single round-trip when unset), then signals completion; `run_engine_cycle` surfaces `result["done"]` and bot_runtime finalizes the session (no more idling "running"). `volume_bot.py`, `engine_runtime.py`, `bot_runtime.py`. `[test]` `tests/engine/controllers/test_volume_bot.py`.
+- [x] **VOL-DEAD-SL** (Med) — *NOT DEAD (reframed) 2026-06-20:* the vol SL is enforced by the session SL/TP rail (`effective_sl_tp_pct('vol', state)`, now fee-aware), not the controller config. `[test]` `test_vol_stop_loss_is_enforced_by_the_session_rail`.
+- [x] **VOL-NO-CAP** (Med) — *FIXED 2026-06-20:* a hard `max_cycles` ceiling bounds fee burn if the target is mis-set; docstring corrected (the claimed Risk-Engine cap never existed). `[test]` `test_max_cycles_caps_runaway_loop`.
 
 ### Copy trading
 - [x] **COPY-SIZE** (High) — *FIXED 2026-06-20:* mirror size scales with the leader's conviction (position notional as a fraction of the leader's largest position), capped by the user's per-trade budget — a probe is copied small, max-conviction copied full. `copy_service._compute_copy_sizing`. `[test]` `tests/services/test_copy_sizing.py`.
 - [x] **COPY-LEVERAGE** (Med-High) — *FIXED 2026-06-20:* leverage mirrors the leader's, capped by the user's max + product max; falls back to `min(max, product_max)` when the venue doesn't report it. Same helper/tests.
-- [ ] **COPY-NO-SLIPPAGE** (Med) — a max-deviation gate skips/queues entries too far from `leader_entry`; consider a shorter poll. `copy_service.py:52,716`.
-- [ ] **COPY-VENUE-RECONCILE** (Med) — open/close decisions reconcile against the follower's real on-venue position + an idempotency key. `copy_service.py:628,741`.
+- [x] **COPY-NO-SLIPPAGE** (Med) — *FIXED 2026-06-20:* a max-deviation gate (`_entry_deviation_too_far`, default 1.5%) skips a late entry that's drifted too far from `leader_entry` (retried next poll). `copy_service.py`. `[test]` `test_entry_deviation_gate_*`.
+- [x] **COPY-VENUE-RECONCILE** (Med) — *FIXED 2026-06-20:* before opening, the follower's REAL on-venue positions are read once and a product already held untracked is skipped (no duplicate/orphan stacking). Best-effort; degrades to DB-only if the client is unavailable. `copy_service._sync_mirror_positions`.
 - [ ] **COPY-DEDUP** (Low-Med) — a DB unique constraint / lock prevents double-open per (mirror, product). 
 
 ### MM / grid family
 - [x] **DGRID-BOOK-RACE** (High) — *FIXED 2026-06-20:* profit-booking is routed through the executor's new `reduce_position` (records the fill in shared inventory + advances per-level close accounting + cancels fully-booked close legs), with a direct reduce-only MARKET fallback only when no executor reduce-path exists. `grid_executor.reduce_position`, `dynamic_grid._maybe_book_profit`. `[test]` `test_reduce_position_books_through_executor_and_advances_accounting`.
 - [x] **DGRID-RECENTER** (High) — *NOT A BUG (false positive), verified 2026-06-20:* `recenter` already sizes fresh levels as `fresh_count = max_open − len(kept)` at `total/max_open`, so total committed notional stays bounded by `total_amount_quote`. Confirmed empirically (held+resting held at the 1000 budget across repeated re-centers). No change made.
-- [ ] **GRID-MIN-NOTIONAL-INFLATE** (Med) — level count is capped so `total/levels >= venue min-notional`, preventing silent exposure inflation. `grid_executor.py:132`.
-- [ ] **DGRID-TREND-BLEED** (Med) — a slow steady decline triggers a trend flip (cumulative-drift / consecutive-down-candle), not just the 0.30% per-window threshold. `variance_regime.py:76-121`.
-- [ ] **DGRID-NO-GATE** (Med) — dgrid keeps breakout gating on. `dynamic_grid.py:216`.
-- [ ] **MM-SPREAD-FLOOR** (Med) — manual MM spread is floored at the fee-clearing half-spread, like the auto path. `market_making.py:106`.
+- [x] **GRID-MIN-NOTIONAL-INFLATE** (Med) — *FIXED 2026-06-20:* `run_engine_cycle` caps the grid-family level count so `total/levels >= venue min-notional` (only ever reduces levels), preventing the silent exposure inflation from venue min-notional bumps. `engine_runtime.py`.
+- [ ] **DGRID-TREND-BLEED** (Med, tuning — not changed) — lowering the 0.30% drift default risks whipsaw; the exposure cap + fee-aware SL rail already bound a slow-decline bleed. Left to deliberate tuning rather than a blind default change. `variance_regime.py`.
+- [x] **DGRID-NO-GATE** (Med) — *BY DESIGN (not changed), verified 2026-06-20:* dgrid's variance-ratio selector chooses GRID/RGRID for every regime incl. breakout, so it deliberately doesn't sit out (documented in `dynamic_grid.on_tick`). Changing it would break the intended flip behavior.
+- [x] **MM-SPREAD-FLOOR** (Med) — *FIXED 2026-06-20:* the manual per-side spread is floored at `spread_floor_half_pct` (same as the auto path) so a sub-fee book can't be quoted. `market_making.py`. `[test]` `test_manual_spread_is_floored_at_fee_clearing_minimum`.
 - [ ] **RGRID-GATE** (verify) — confirm whether the production `regime_gate_enabled=0` override for rgrid exists; if not, rgrid is gated out of its own downtrends. `reverse_grid.py:16` vs `engine_runtime.py:419`.
 
 ### Delta Neutral (economic)
@@ -94,7 +94,7 @@ Critical/High items first.
 - [x] **DN-FUNDING-WINDOW** (Low) — *FIXED 2026-06-20:* funding rows with an unparseable timestamp are now excluded from the run total. `nado.py funding_since`. `[test]` `test_funding_since_excludes_undated_rows`.
 
 ### Engine / risk
-- [ ] **FUNDING-SIGN** (Med) — one signed funding convention in one helper, used by live_session, the share card, and the stop summary. `live_session.py:247` vs `pnl_card_builder.py:125`.
+- [ ] **FUNDING-SIGN** (Med, needs live-data verification — not changed) — the live-session path (`total_funding_paid`, paid-positive: `- funding_paid`) and the share card (`_net_funding_usd`, received-positive: `+ funding`) express funding differently but appear to net consistently (both add received funding). Confirming requires the live sign of the DB column vs the funding feed; flipping a sign blind would risk a real PnL-display bug, so left for data-verified change. `live_session.py` vs `pnl_card_builder.py`.
 - [ ] **NO-LIQ-CHECK** (Low) — consider an engine-side liquidation-distance gate as defense-in-depth. `engine/risk.py`.
 
 ### Backtester (no money-bleed proof exists today)

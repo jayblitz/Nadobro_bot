@@ -546,6 +546,10 @@ def map_strategy_config(
             "order_interval": interval,
             "market": "spot",
             "leverage": 1,
+            # VOL-LOOP / VOL-NO-CAP: cumulative volume target (0 = single
+            # round-trip) and a hard cycle ceiling so the loop can't run away.
+            "target_volume_usd": Decimal(str(_f(settings, "target_volume_usd", 0.0))),
+            "max_cycles": int(max(1, _f(settings, "vol_max_cycles", 100))),
         }
     # grid / rgrid / dgrid family.
     #
@@ -1027,6 +1031,29 @@ async def run_engine_cycle(
             from src.nadobro.engine.adapter.nado import ProductMeta
 
             meta[product] = ProductMeta(int(product_id), _dec("0.01"), _dec("0.001"), _dec("1"))
+        # GRID-MIN-NOTIONAL-INFLATE fix: each grid level is sized
+        # total_amount_quote / levels, but the venue bumps any sub-min-notional
+        # order UP to its minimum — so a small/many-level grid silently deploys
+        # MORE than the configured (and risk-approved) size. Cap the level count
+        # so each level is at least the venue minimum. Conservative: only ever
+        # REDUCES the level count, never raises it.
+        if strategy in ("grid", "rgrid", "dgrid"):
+            try:
+                _mn = float(getattr(meta.get(product), "min_notional", 0) or 0)
+                _tot = float(configs.get("total_amount_quote") or 0)
+                if _mn > 0 and _tot > 0:
+                    _max_levels = max(1, int(_tot // _mn))
+                    _cur = int(configs.get("max_open_orders") or 1)
+                    if _cur > _max_levels:
+                        configs["max_open_orders"] = _max_levels
+                        configs["levels_count"] = _max_levels
+                        logger.info(
+                            "grid level cap (min-notional): %s -> %s levels "
+                            "(total=%.2f min_notional=%.2f) user=%s strategy=%s",
+                            _cur, _max_levels, _tot, _mn, telegram_id, strategy,
+                        )
+            except Exception:  # noqa: BLE001 - cap is best-effort, never block start
+                logger.debug("grid min-notional level cap skipped", exc_info=True)
         # NO_ORDERS_AUDIT-FIX-R1: DN needs metadata for BOTH legs (spot long +
         # perp short), each with its OWN product_id. The old fallback keyed both
         # legs to the SAME ``product_id`` — which would have traded the perp
@@ -1175,6 +1202,20 @@ async def run_engine_cycle(
     except Exception:  # noqa: BLE001  # policy: degrade-ok(diagnostics-only block)
         engine_diag = {}
     result: Dict[str, Any] = {"success": True, "action": "engine_ticked", "strategy": strategy}
+    # VOL-LOOP completion: a controller that has finished its work (e.g. Volume
+    # reached its target volume / cap) signals it via ``completed`` so bot_runtime
+    # can finalize the session instead of leaving the strategy idling "running".
+    try:
+        _ctrl_done = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        if _ctrl_done is not None and getattr(_ctrl_done, "completed", False):
+            result["done"] = True
+            result["action"] = "engine_completed"
+            result["stop_reason"] = str(getattr(_ctrl_done, "stop_reason", "") or "completed")
+            _vol_done = getattr(_ctrl_done, "session_volume_usd", None)
+            if _vol_done is not None:
+                result["session_volume_usd"] = float(_vol_done)
+    except Exception:  # noqa: BLE001 - completion surfacing is best-effort
+        logger.debug("completion surface failed", exc_info=True)
     if engine_diag:
         result["engine_diag"] = engine_diag
     if gate_event:

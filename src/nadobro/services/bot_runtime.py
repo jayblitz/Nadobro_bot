@@ -2699,6 +2699,42 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         if rail is not None:
             return rail
 
+    # VOL-LOOP completion: the engine controller finished its work (e.g. Volume
+    # reached its target volume / cycle cap) and signalled result["done"].
+    # Finalize the session and tear the engine down — otherwise the strategy
+    # would sit "running" forever (the old idle-in-'done'-phase bug).
+    if isinstance(result, dict) and result.get("done"):
+        reason = str(result.get("stop_reason") or "completed")
+        _finalize_session(state, stop_reason=reason)
+        state["running"] = False
+        state["last_action"] = "engine_completed"
+        _save_state(telegram_id, network, state)
+        try:
+            from src.nadobro.services import engine_runtime as _er_done
+            if strategy in _er_done.ENGINE_MAPPED_STRATEGIES:
+                await _er_done.RUNTIME.stop(telegram_id, network, strategy)
+        except Exception:  # noqa: BLE001 - finalize already persisted; stop is cleanup
+            logger.warning("engine stop after completion failed user=%s", telegram_id, exc_info=True)
+        market_label = _market_label_for_strategy(strategy, product, state)
+        vol_usd = result.get("session_volume_usd")
+        if vol_usd:
+            await _notify(
+                telegram_id,
+                "✅ {strategy} completed on {market} ({network}) — {reason}. "
+                "Volume traded: ${vol}.",
+                strategy=_strategy_display_name(strategy), market=market_label,
+                network=network, reason=reason.replace("_", " "),
+                vol=f"{float(vol_usd):,.0f}",
+            )
+        else:
+            await _notify(
+                telegram_id,
+                "✅ {strategy} completed on {market} ({network}) — {reason}.",
+                strategy=_strategy_display_name(strategy), market=market_label,
+                network=network, reason=reason.replace("_", " "),
+            )
+        return True, None
+
     prev_runs = int(state.get("runs") or 0)
     state["last_run_ts"] = time.time()
     state["runs"] = prev_runs + 1
