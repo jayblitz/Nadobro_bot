@@ -21,6 +21,7 @@ Implemented in Phase 5 (backtester).
 from __future__ import annotations
 
 import asyncio
+import logging
 from decimal import Decimal
 from typing import Dict, List, Optional, Sequence
 
@@ -31,6 +32,8 @@ from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
 from src.nadobro.engine.risk import RiskEngine
 from src.nadobro.engine.types import RiskLimits, RiskState, _dec
+
+logger = logging.getLogger(__name__)
 
 
 def _permissive_limits() -> RiskLimits:
@@ -115,7 +118,16 @@ class BacktestEngine:
             try:
                 await self.orchestrator.tick_controller(self.controller.id)
             except Exception:  # noqa: BLE001 - a tick error shouldn't abort the run
-                pass
+                # Consequence: this bar produced no controller action, so the
+                # backtest report understates strategy activity for bar ``i``.
+                # Surface it (don't abort) so a recurring tick crash is visible.
+                logger.warning(
+                    "backtest tick_controller failed at bar=%s/%s ts=%s "
+                    "(controller=%s) — consequence: no strategy action this bar; "
+                    "report may understate activity; continuing run",
+                    i, len(self.candles), getattr(candle, "ts", None),
+                    self.controller.id, exc_info=True,
+                )
             self.adapter.accrue_funding()
             equity.append(self._equity(candle.close))
 

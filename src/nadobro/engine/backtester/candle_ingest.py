@@ -139,7 +139,7 @@ def resample_trades_csv(
             try:
                 price = _dec(row.get("Price"))
                 amount = _dec(row.get("Amount") or 0)
-            except Exception:  # noqa: BLE001 - skip malformed prints
+            except Exception:  # noqa: BLE001  # policy: degrade-ok(skip malformed CSV print; offline candle parse, no live money)
                 continue
             if price <= 0:
                 continue
