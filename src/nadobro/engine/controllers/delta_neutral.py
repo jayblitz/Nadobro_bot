@@ -96,7 +96,15 @@ class DeltaNeutralController(Controller):
         self.hedge_broken = False
 
         self.phase = DNPhase.OPENING
-        self.cycles_completed = 0
+        # DN-CYCLES fix: the controller is rebuilt from scratch on a process
+        # restart / worker handoff / FAILED-recovery, and its phase/cycle counter
+        # live only in memory — so each rebuild reset cycles_completed to 0 and
+        # ran the whole cycle count again, never honoring the configured number
+        # of cycles. The engine persists progress to engine_controller_state;
+        # run_engine_cycle injects it as ``restore_cycles_completed`` /
+        # ``restore_funding_usd`` so a rebuilt controller resumes the count
+        # instead of restarting it. Defaults to a clean start (0) for a fresh run.
+        self.cycles_completed = max(0, _int_cfg(self.cfg("restore_cycles_completed"), 0))
         self.opened_at: Optional[float] = None      # hold-clock start (both legs open)
         self.wait_until: Optional[float] = None      # WAITING → OPENING gate
         self._abort_cycles = False                   # set on a drift break
@@ -106,8 +114,8 @@ class DeltaNeutralController(Controller):
         # short collects funding while the hedge is open; we poll the indexer
         # funding feed via the adapter and accumulate it for the PnL card.
         self.first_cycle_open_ts: Optional[float] = None
-        self.cumulative_funding: Decimal = Decimal(0)
-        self._funding_reported: Decimal = Decimal(0)
+        self.cumulative_funding: Decimal = _dec(self.cfg("restore_funding_usd", "0") or "0")
+        self._funding_reported: Decimal = self.cumulative_funding
 
         # Execution hardening (2026-06): one leg live while the other hangs is
         # the worst failure a "neutral" strategy can have. CLOSING re-issues
@@ -429,6 +437,18 @@ class DeltaNeutralController(Controller):
 
     # -- lifecycle --------------------------------------------------------
     async def on_start(self) -> None:
+        # DN-CYCLES fix: a rebuilt controller restores cycles_completed from
+        # persisted progress. If the configured cycle count is already met, do
+        # NOT open another cycle (that was the "ignores the cycle count" bug on
+        # restart) — go straight to DONE so the run finalizes cleanly.
+        if self.cycles_completed >= self.total_cycles:
+            logger.info(
+                "delta_neutral: restored cycles_completed=%s >= total_cycles=%s — "
+                "no new cycle opened",
+                self.cycles_completed, self.total_cycles,
+            )
+            self.phase = DNPhase.DONE
+            return
         await self._open_cycle()
         if self.phase is DNPhase.CLOSING:
             # First-cycle rollback in flight: surface it loudly. The
