@@ -216,7 +216,12 @@ def build_pnl_card_data(
     # other strategies (whose realized_pnl already reflects their economics)
     # aren't double-counted.
     if str(strategy or "").lower() in ("dn", "delta_neutral"):
-        pnl = pnl + _net_funding_usd(session, network)
+        # DN-PNL-FEES fix: DN profit IS the funding captured, but DN fires four
+        # taker MARKET legs per cycle, so fees can equal or exceed the funding.
+        # The headline must be NET of fees — ``realized + funding - fees``.
+        # Previously fees were shown only on a separate line, overstating DN
+        # profit and sometimes flipping a true net loss into a displayed gain.
+        pnl = pnl + _net_funding_usd(session, network) - fees
 
     referral_code = _fetch_active_referral_code(telegram_id, network)
 

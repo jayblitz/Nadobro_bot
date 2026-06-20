@@ -517,6 +517,10 @@ def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict
             "size": abs(amount),
             "entry_price": float(pos.get("entry_price", 0) or 0),
             "unrealized_pnl": float(pos.get("unrealized_pnl", 0) or 0),
+            # COPY-LEVERAGE fix: capture the leader's leverage so the follower can
+            # mirror the leader's risk profile instead of always using its own
+            # max. 0.0 when the venue doesn't report it (we then fall back).
+            "leverage": float(pos.get("leverage", 0) or 0),
         }
         try:
             orders = leader_client.get_open_orders(pid) or []
@@ -540,6 +544,60 @@ def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict
             trader_id, network, e,
         )
     return leader_pos_map
+
+
+def _compute_copy_sizing(
+    *,
+    leader_size: float,
+    leader_entry: float,
+    leader_leverage: float,
+    leader_max_notional: float,
+    margin_per_trade: float,
+    max_leverage: float,
+    product_max_leverage: float,
+) -> tuple[float, float]:
+    """Return ``(copy_size_base, leverage)`` for a mirrored position.
+
+    COPY-SIZE fix: the old formula was ``margin_per_trade * leverage / entry`` —
+    a FIXED notional that ignored the leader's actual size, so a leader's tiny
+    probe and their max-conviction position were copied identically. We now scale
+    the committed margin by this position's conviction = its notional as a
+    fraction of the leader's LARGEST open position (their biggest bet = full
+    ``margin_per_trade``; a 10%-size probe = 10% of it), capped at
+    ``margin_per_trade``.
+
+    COPY-LEVERAGE fix: leverage mirrors the leader's, capped by the user's max
+    and the product max; falls back to ``min(max, product_max)`` when the venue
+    doesn't report the leader's leverage.
+    """
+    if leader_entry <= 0 or leader_size <= 0:
+        return 0.0, 0.0
+    lev = min(float(max_leverage), float(product_max_leverage))
+    if leader_leverage and leader_leverage > 0:
+        lev = min(float(leader_leverage), float(max_leverage), float(product_max_leverage))
+    lev = max(1.0, lev)
+    leader_notional = leader_size * leader_entry
+    if leader_max_notional and leader_max_notional > 0:
+        weight = min(1.0, leader_notional / leader_max_notional)
+    else:
+        weight = 1.0
+    copy_margin = max(0.0, float(margin_per_trade) * weight)
+    copy_size = (copy_margin * lev) / leader_entry
+    return copy_size, lev
+
+
+def _leader_max_notional(leader_pos_map: dict) -> float:
+    """Largest single-position notional in the leader's book (the conviction
+    anchor for proportional copy sizing)."""
+    best = 0.0
+    for p in (leader_pos_map or {}).values():
+        try:
+            n = float(p.get("size", 0) or 0) * float(p.get("entry_price", 0) or 0)
+        except (TypeError, ValueError):
+            n = 0.0
+        if n > best:
+            best = n
+    return best
 
 
 async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
@@ -716,10 +774,19 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         if leader_entry <= 0:
             continue
 
-        # Calculate size based on user's margin_per_trade
+        # COPY-SIZE + COPY-LEVERAGE fix: mirror the leader's conviction (size as a
+        # fraction of their largest position) and leverage, capped by the user's
+        # per-trade budget and max leverage — not a fixed max-leverage notional.
         product_max_lev = get_product_max_leverage(product_key, network=network)
-        leverage = min(max_leverage, product_max_lev)
-        copy_size = (margin_per_trade * leverage) / leader_entry
+        copy_size, leverage = _compute_copy_sizing(
+            leader_size=float(leader_pos.get("size", 0) or 0),
+            leader_entry=float(leader_entry or 0),
+            leader_leverage=float(leader_pos.get("leverage", 0) or 0),
+            leader_max_notional=_leader_max_notional(leader_pos_map),
+            margin_per_trade=margin_per_trade,
+            max_leverage=max_leverage,
+            product_max_leverage=product_max_lev,
+        )
 
         if copy_size <= 0:
             continue

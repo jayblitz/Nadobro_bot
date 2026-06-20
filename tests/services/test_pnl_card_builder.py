@@ -202,9 +202,10 @@ class TestBuildPnLCardDataShape:
         assert data["volume"] == "$500.00"
 
     def test_delta_neutral_folds_funding_into_pnl(self):
-        """For a DN session, net funding received is added to the displayed PnL
-        (price PnL nets ~0, funding is the real profit). Funding comes from the
-        synced funding_payments feed, signed received-positive."""
+        """For a DN session the displayed PnL is NET: realized + funding - fees
+        (price PnL nets ~0, funding is the real profit, and DN's taker fees MUST
+        be subtracted — DN-PNL-FEES fix). Funding comes from the synced
+        funding_payments feed, signed received-positive."""
         session = {
             "id": 5, "user_id": 42, "network": "testnet",
             "strategy": "delta_neutral", "product_name": "QQQ",
@@ -229,8 +230,9 @@ class TestBuildPnLCardDataShape:
         with patch.object(builder, "query_one", side_effect=stub):
             data = builder.build_pnl_card_data(telegram_id=42, network="testnet", session_id=5)
 
-        # 0.50 realized + 3.00 funding received = 3.50
-        assert data["pnl"] == "+$3.50"
+        # 0.50 realized + 3.00 funding received - 0.20 fees = 3.30 (net of fees)
+        assert data["pnl"] == "+$3.30"
+        assert data["net_fees"] == "-$0.20"
         assert calls["n"] == 3  # session + funding + referral
 
     def test_no_referral_omits_code_field_as_empty_string(self):

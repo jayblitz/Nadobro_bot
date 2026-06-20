@@ -598,14 +598,22 @@ def map_strategy_config(
         spread_frac = Decimal("0.0005")  # 5 bp fallback
     span = spread_frac * Decimal(max(levels - 1, 1))
 
+    # GRID-DUAL-UNIT fix: do NOT derive a hard ``limit_price`` stop from the
+    # user's sl_pct. That stop is referenced to the run/rebuild mid and ignores
+    # how much of the grid has actually filled, so it fires on a brief wick to
+    # mid*(1-sl) even when little is at risk — a premature stop-out on top of the
+    # session margin-% rail. SL is now governed consistently by (a) the executor
+    # avg-entry barrier (triple_barrier_config.stop_loss, fill-aware) and (b) the
+    # fee-aware session rail. limit_price stays available as an explicit
+    # catastrophic stop but is no longer auto-set from sl.
     if strategy == "rgrid":
         start_price = mid
         end_price = mid * (Decimal(1) + span)
-        limit_price = mid * (Decimal(1) + sl) if sl > 0 else Decimal(0)
+        limit_price = Decimal(0)
     else:  # grid OR dgrid-as-long-default; dgrid recomputes at on_tick
         start_price = mid * (Decimal(1) - span)
         end_price = mid
-        limit_price = mid * (Decimal(1) - sl) if sl > 0 else Decimal(0)
+        limit_price = Decimal(0)
 
     cfg: Dict[str, object] = {
         "trading_pair": product,

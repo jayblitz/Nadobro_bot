@@ -97,16 +97,25 @@ def test_vol_config_carries_user_stop_loss():
     assert "sl_pct" in cfg or cfg.get("triple_barrier_config") is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="GRID-DUAL-UNIT: grid barrier reuses sl_pct as a price-move fraction "
-    "AND the rail uses it as % of margin. The barrier should not double-apply "
-    "the margin-% stop. Fix: stop_loss=None on the grid barrier, or convert units.",
-)
-def test_grid_barrier_does_not_double_apply_margin_pct_stop():
+def test_grid_does_not_set_fill_blind_limit_price_stop():
+    """GRID-DUAL-UNIT fix: the grid config must NOT derive a hard ``limit_price``
+    stop from sl_pct. That stop is mid-referenced and fill-blind, firing on a
+    wick before the grid has filled — a premature stop-out on top of the
+    margin-% rail. SL is the avg-entry barrier + the fee-aware session rail."""
+    for strat in ("grid", "rgrid", "dgrid"):
+        cfg = map_strategy_config(strat, {"sl_pct": 0.5, "tp_pct": 1.0}, MID, product=PRODUCT)
+        assert float(cfg.get("limit_price") or 0) == 0.0
+
+
+def test_grid_barrier_carries_user_sl_and_tp_for_executor_enforcement():
+    """The executor barrier still carries the user's sl/tp (avg-entry based,
+    consistent with the margin rail) so the executor enforces both — including
+    take-profit, which GRID-TP-DEAD left dead."""
     cfg = map_strategy_config("grid", {"sl_pct": 0.5, "tp_pct": 1.0}, MID, product=PRODUCT)
     tbc = cfg.get("triple_barrier_config")
-    assert tbc is None or getattr(tbc, "stop_loss", None) is None
+    assert tbc is not None
+    assert float(getattr(tbc, "stop_loss", 0) or 0) > 0
+    assert float(getattr(tbc, "take_profit", 0) or 0) > 0
 
 
 # Note on DN-RAIL (Critical) and SLTP-GROSS / GRID-TP-DEAD:

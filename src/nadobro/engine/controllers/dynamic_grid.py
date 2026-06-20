@@ -143,18 +143,21 @@ class DynamicGridController(Controller):
         if step <= 0 or levels < 1:
             return {}
         span = step * Decimal(max(levels - 1, 1))
-        sl = _dec(self.cfg("sl_pct", 0) or 0)
+        # GRID-DUAL-UNIT fix: don't rebuild a fill-blind, mid-referenced hard
+        # stop from sl_pct (premature wick stop-outs on top of the margin-%
+        # rail). SL is the avg-entry barrier + the fee-aware session rail; the
+        # rebuild only adjusts the band bounds.
         if side is TradeType.SELL:
             return {
                 "start_price": mid,
                 "end_price": mid * (Decimal(1) + span),
-                "limit_price": (mid * (Decimal(1) + sl)) if sl > 0 else Decimal(0),
+                "limit_price": Decimal(0),
             }
         # BUY (long grid)
         return {
             "start_price": mid * (Decimal(1) - span),
             "end_price": mid,
-            "limit_price": (mid * (Decimal(1) - sl)) if sl > 0 else Decimal(0),
+            "limit_price": Decimal(0),
         }
 
     # -- regime classification -------------------------------------------
@@ -358,20 +361,40 @@ class DynamicGridController(Controller):
         if close_base <= 0:
             return  # below one lot — wait for a bigger position / higher tier
         close_side = TradeType.SELL if net > 0 else TradeType.BUY
-        lev = int(self.cfg("leverage", 1) or 1)
+        # DGRID-BOOK-RACE fix: route the reduction THROUGH the live grid
+        # executor (reduce_position) instead of firing a naked reduce-only
+        # MARKET at the adapter. The executor places the order, records the fill
+        # in the shared inventory, and advances its own per-level close
+        # accounting — so its resting close legs and the controller's net view
+        # can't drift apart. Falls back to nothing if no live executor.
+        booked = Decimal(0)
         try:
-            await self.adapter.place_order(
-                self.trading_pair, close_side, OrderType.MARKET, close_base, None, lev, True,
-            )
+            for ex in self.my_executors(active_only=True):
+                rp = getattr(ex, "reduce_position", None)
+                if callable(rp):
+                    booked += await rp(close_base - booked)
+                if booked >= close_base:
+                    break
+            if booked <= 0:
+                # Fallback: no live executor exposed a reduce path, but inventory
+                # is held — book directly with a reduce-only MARKET so the
+                # position can still scale out (preserves prior behavior).
+                lev = int(self.cfg("leverage", 1) or 1)
+                await self.adapter.place_order(
+                    self.trading_pair, close_side, OrderType.MARKET, close_base, None, lev, True,
+                )
+                booked = close_base
         except Exception:  # noqa: BLE001 - booking is best-effort; retry next tick
             logger.warning("dgrid book_profit failed pair=%s (controller=%s)",
                            self.trading_pair, self.id, exc_info=True)
             return
+        if booked <= 0:
+            return  # nothing reduced
         for i in to_book:
             self._booked_tiers.add(i)
         logger.info(
             "dgrid book_profit pair=%s side=%s base=%s uPnL=%.2f%% tiers=%s (controller=%s)",
-            self.trading_pair, close_side.name, close_base, upnl_pct,
+            self.trading_pair, close_side.name, booked, upnl_pct,
             [self.tp_tiers_pct[i] for i in to_book], self.id,
         )
 

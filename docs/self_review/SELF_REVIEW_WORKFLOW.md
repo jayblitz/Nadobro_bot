@@ -58,8 +58,8 @@ Critical/High items first.
 ### SL/TP (priority)
 - [x] **DN-RAIL** (Critical) — *FIXED 2026-06-20:* DN now gets a post-dispatch session SL/TP rail (`bot_runtime.py`, dn block) that flattens both legs via `close_delta_neutral_legs`. Tested in `tests/services/test_session_safety_rails.py`.
 - [x] **SLTP-GROSS** (High) — *FIXED 2026-06-20:* the snapshot exposes `session_pnl_net`/`session_pnl_pct_net` (gross minus fees) and the rail judges the stop on the net basis; displayed gross PnL unchanged. `live_session.py`, `bot_runtime.py`. Tested.
-- [ ] **GRID-DUAL-UNIT** (High) — a user's SL is applied with ONE unit semantic, not both a price-move barrier and a % -of-margin rail. `engine_runtime.py:610` + `grid_executor.py:372`. `[test]` xfail `test_grid_barrier_does_not_double_apply_margin_pct_stop`.
-- [ ] **GRID-TP-DEAD** (High) — if `take_profit` is passed to the grid barrier it is actually enforced (or stop passing it). *Today: `grid_executor.py` never reads `take_profit`.*
+- [x] **GRID-DUAL-UNIT** (High) — *FIXED 2026-06-20:* re-examined with the actual rail basis (margin = **notional**, not notional/leverage), so the price barrier and the rail are the same magnitude — there was no leverage-scaled double-stop. The real defect was the fill-blind, mid-referenced `limit_price` stop firing on a wick before the grid filled. Disabled it (`engine_runtime.py`, `grid_trading.py`, `dynamic_grid.py` set `limit_price=0`); SL is now the avg-entry barrier + the fee-aware rail. `[test]` `test_grid_does_not_set_fill_blind_limit_price_stop`.
+- [x] **GRID-TP-DEAD** (High) — *FIXED 2026-06-20:* the executor now enforces `take_profit` (avg-entry referenced, mirrors the stop). `grid_executor._take_profit_breached`. `[test]` `test_take_profit_breach_triggers_take_profit`.
 - [ ] **DGRID-SHADOW-KEYS** (Med) — dgrid defaults don't carry dead `sl_pct`/`tp_pct` copies that shadow the live `rgrid_*` values. `strategy_registry.py:148,263`.
 - [ ] **SLTP-MARGIN-BASIS** (Med) — "% of margin" is measured against true posted margin (notional/leverage), or the UI says "% of notional". `live_session.py:56`.
 - [x] **SLTP-KEYS** — rgrid/dgrid resolve SL/TP from the keys the UI writes. *Fixed.* `[test]` green `test_user_sltp_is_resolved_...`.
@@ -71,15 +71,15 @@ Critical/High items first.
 - [ ] **VOL-NO-CAP** (Med) — a cumulative-volume / fee budget guard exists before the loop is enabled. `volume_bot.py:6-8` (docstring claims a cap that doesn't exist).
 
 ### Copy trading
-- [ ] **COPY-SIZE** (High) — follower size scales with the leader's size (proportional ratio), not a fixed notional. `copy_service.py:719-723`.
-- [ ] **COPY-LEVERAGE** (Med-High) — follower uses `min(leader_leverage, max_leverage)`, not always the max. `copy_service.py:720`.
+- [x] **COPY-SIZE** (High) — *FIXED 2026-06-20:* mirror size scales with the leader's conviction (position notional as a fraction of the leader's largest position), capped by the user's per-trade budget — a probe is copied small, max-conviction copied full. `copy_service._compute_copy_sizing`. `[test]` `tests/services/test_copy_sizing.py`.
+- [x] **COPY-LEVERAGE** (Med-High) — *FIXED 2026-06-20:* leverage mirrors the leader's, capped by the user's max + product max; falls back to `min(max, product_max)` when the venue doesn't report it. Same helper/tests.
 - [ ] **COPY-NO-SLIPPAGE** (Med) — a max-deviation gate skips/queues entries too far from `leader_entry`; consider a shorter poll. `copy_service.py:52,716`.
 - [ ] **COPY-VENUE-RECONCILE** (Med) — open/close decisions reconcile against the follower's real on-venue position + an idempotency key. `copy_service.py:628,741`.
 - [ ] **COPY-DEDUP** (Low-Med) — a DB unique constraint / lock prevents double-open per (mirror, product). 
 
 ### MM / grid family
-- [ ] **DGRID-BOOK-RACE** (High) — profit-booking is routed through the executor (or mutually exclusive with its close legs), never a naked MARKET that races them. `dynamic_grid.py:328-376`.
-- [ ] **DGRID-RECENTER** (High) — re-center sizes fresh levels against `total_amount_quote - notional(kept)`, so deployed notional never ratchets above the approved size. `grid_executor.py:326-339`.
+- [x] **DGRID-BOOK-RACE** (High) — *FIXED 2026-06-20:* profit-booking is routed through the executor's new `reduce_position` (records the fill in shared inventory + advances per-level close accounting + cancels fully-booked close legs), with a direct reduce-only MARKET fallback only when no executor reduce-path exists. `grid_executor.reduce_position`, `dynamic_grid._maybe_book_profit`. `[test]` `test_reduce_position_books_through_executor_and_advances_accounting`.
+- [x] **DGRID-RECENTER** (High) — *NOT A BUG (false positive), verified 2026-06-20:* `recenter` already sizes fresh levels as `fresh_count = max_open − len(kept)` at `total/max_open`, so total committed notional stays bounded by `total_amount_quote`. Confirmed empirically (held+resting held at the 1000 budget across repeated re-centers). No change made.
 - [ ] **GRID-MIN-NOTIONAL-INFLATE** (Med) — level count is capped so `total/levels >= venue min-notional`, preventing silent exposure inflation. `grid_executor.py:132`.
 - [ ] **DGRID-TREND-BLEED** (Med) — a slow steady decline triggers a trend flip (cumulative-drift / consecutive-down-candle), not just the 0.30% per-window threshold. `variance_regime.py:76-121`.
 - [ ] **DGRID-NO-GATE** (Med) — dgrid keeps breakout gating on. `dynamic_grid.py:216`.
@@ -90,8 +90,8 @@ Critical/High items first.
 - [x] **DN-CYCLES** (High) — *FIXED 2026-06-20:* DN cycle count + funding are restored from persisted progress on rebuild (`engine_runtime.py` injects `restore_cycles_completed`/`restore_funding_usd`, gated on `runs>0`; `delta_neutral.py` resumes the count and won't open a cycle past `total_cycles`). So a restart/worker-handoff no longer ignores the configured cycle count. Tested in `tests/engine/controllers/test_delta_neutral.py`.
 - [x] **DN-CUSTOM-ASSETS** (High) — *FIXED 2026-06-20:* wrapped RWA spots (wQQQX/wSPYX) now pair with their perps so DN offers more than BTC/ETH (`product_catalog._dn_pair_candidates` + candidate fallback in `_build_dn_pair_catalog`). Tested in `tests/services/test_dn_pairing.py`.
 - [ ] **DN-HOLD-CLOCK-ON-REBUILD** (Med, remaining) — the hold timer (`opened_at`) is still memory-only; on a rebuild mid-hold the controller re-opens a fresh cycle and restarts the clock rather than ADOPTING the open legs. A full fix needs `opened_at` persisted (schema field) + venue-position adoption on rebuild + integration testing.
-- [ ] **DN-PNL-FEES** (High) — DN headline PnL = `realized + funding - fees`; warn when cumulative fees > funding. `pnl_card_builder.py:218`. (Update `test_pnl_card_builder.py:204-234` — it currently locks the overstatement in.)
-- [ ] **DN-FUNDING-WINDOW** (Low) — funding rows with unparseable timestamps are excluded from the run total. `nado.py:728-731`.
+- [x] **DN-PNL-FEES** (High) — *FIXED 2026-06-20:* DN headline PnL is now `realized + funding − fees` (was gross, overstating DN profit / hiding net losses). `pnl_card_builder.py`. `[test]` updated `test_delta_neutral_folds_funding_into_pnl` (+$3.30 net).
+- [x] **DN-FUNDING-WINDOW** (Low) — *FIXED 2026-06-20:* funding rows with an unparseable timestamp are now excluded from the run total. `nado.py funding_since`. `[test]` `test_funding_since_excludes_undated_rows`.
 
 ### Engine / risk
 - [ ] **FUNDING-SIGN** (Med) — one signed funding convention in one helper, used by live_session, the share card, and the stop summary. `live_session.py:247` vs `pnl_card_builder.py:125`.
