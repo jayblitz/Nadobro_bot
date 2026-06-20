@@ -57,7 +57,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         ):
             text, reply_markup = asyncio.run(home_card._view_portfolio_text(telegram_id=7))
 
-        self.assertIn("Portfolio refresh is temporarily unavailable", text)
+        self.assertIn("Can't pull your portfolio right now", text)
         self.assertIsNotNone(reply_markup)
 
     def test_resolve_home_view_uses_new_portfolio_deck_path(self):

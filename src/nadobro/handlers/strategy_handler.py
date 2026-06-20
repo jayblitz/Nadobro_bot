@@ -1200,7 +1200,7 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "⚙️ *Delta Neutral · Core*\n\n"
             f"Size \\(per leg\\): *{escape_md(f'${leg_size:,.0f}')}* \\| Short: *1x*\n"
             f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* \\| Cycles: *{escape_md(str(cycles))}*\n\n"
-            "Buys spot \\+ 1x\\-shorts the perp, holds, then exits both legs together — repeated per cycle\\."
+            "Buys spot \\+ 1x\\-shorts the perp, holds, then exits both legs together, repeated per cycle\\."
         )
 
     return _fmt_strategy_config_text(strategy, conf, network)
@@ -2216,7 +2216,7 @@ def _build_strategy_preview_text(
         f"• Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
         "ℹ️ *How it works*\n"
         "Buys spot \\+ 1x\\-shorts the same perp, holds for the set duration, then exits both legs "
-        "together — farming spot \\+ perp volume and funding while staying delta neutral\\. Repeats per cycle\\.\n"
+        "together, farming spot \\+ perp volume and funding while staying delta neutral\\. Repeats per cycle\\.\n"
         f"Funding now: *{escape_md(funding_bias)}* \\| Est\\. Daily Fees: *{escape_md(_fmt_usd(est_fees))}*"
         + (f"\n\n{warning}" if warning else "")
     )

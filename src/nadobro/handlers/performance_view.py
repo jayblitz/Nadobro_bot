@@ -231,11 +231,11 @@ def render_hours_view(user_id: int, network: str) -> tuple[str, InlineKeyboardMa
 
     lines = [
         f"📅 <b>Your Hours</b> · {esc(network.upper())}",
-        "Net session PnL by day x 4h UTC block — your data, not a schedule",
+        "Net session PnL by day x 4h UTC block. Your data, not a schedule",
         divider(),
     ]
     if not buckets:
-        lines.append("No finished sessions yet — run a few strategies first.")
+        lines.append("No finished sessions yet. Run a few strategies first.")
     else:
         ranked = sorted(buckets.items(), key=lambda kv: _dec(kv[1]["net"]), reverse=True)
 
@@ -256,7 +256,7 @@ def render_hours_view(user_id: int, network: str) -> tuple[str, InlineKeyboardMa
             lines.extend(_fmt(k, v) for k, v in ranked[-3:][::-1])
         total_n = sum(int(v["n"]) for v in buckets.values())
         lines.append("")
-        lines.append(f"{total_n} finished sessions measured. Patterns drift — re-check monthly.")
+        lines.append(f"{total_n} finished sessions measured. Patterns drift, so re-check monthly.")
     rows = [
         [InlineKeyboardButton("📊 Performance", callback_data="portfolio:performance")],
         [InlineKeyboardButton("⬅ Portfolio", callback_data="portfolio:view")],

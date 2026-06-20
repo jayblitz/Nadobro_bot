@@ -405,7 +405,7 @@ def fmt_trade_preview(action, product, size, price, leverage=1, est_margin=None)
         lines.append(f"💰 *{_loc_md('Est. Margin')}:* {escape_md(f'${est_margin:,.2f}')}")
 
     lines.append("")
-    lines.append(escape_md(_loc("Confirm to execute this trade.")))
+    lines.append(escape_md(_loc("Look good? Hit confirm.")))
 
     return "\n".join(lines)
 
@@ -461,7 +461,7 @@ def fmt_trade_result(result):
         order_type_u = str(result.get("type", "MARKET") or "MARKET").upper()
         status_u = str(result.get("status", "") or "").lower()
         is_limit_pending = order_type_u == "LIMIT" and status_u == "pending"
-        header = _loc("✅ *Limit order submitted*") if is_limit_pending else _loc("✅ *Trade Executed\\!*")
+        header = _loc("✅ *Limit order's in\\.*") if is_limit_pending else _loc("✅ *Filled\\.*")
         price_label = _loc_md("Limit price") if is_limit_pending else _loc_md("Fill price")
         lines = [
             header,
@@ -525,7 +525,7 @@ def fmt_bracket_result(result: dict) -> str:
                 )
         return "\n".join(lines)
     err = humanize_exchange_error(result.get("error", _loc("Unknown error")))
-    return f"❌ *{_loc('Trade Failed')}* — TP/SL\n\n{escape_md(err)}"
+    return f"❌ *{_loc('Trade Failed')}:* TP/SL\n\n{escape_md(err)}"
 
 
 def fmt_limit_close_result(result: dict) -> str:
@@ -545,7 +545,7 @@ def fmt_limit_close_result(result: dict) -> str:
         ]
         return "\n".join(lines)
     err = humanize_exchange_error(result.get("error", _loc("Unknown error")))
-    return f"❌ *{_loc('Trade Failed')}* — limit close\n\n{escape_md(err)}"
+    return f"❌ *{_loc('Trade Failed')}:* limit close\n\n{escape_md(err)}"
 
 
 def fmt_wallet_info(wallet_info):
@@ -579,7 +579,7 @@ def fmt_wallet_info(wallet_info):
     if verification:
         lines.extend(["", f"*{_loc('Verification')}*"])
         if verification.get("error"):
-            lines.append(f"⚠️ *{_loc('Signer Check')}:* {escape_md(_loc('Could not verify') + ' — ' + str(verification['error'])[:60])}")
+            lines.append(f"⚠️ *{_loc('Signer Check')}:* {escape_md(_loc('Could not verify') + ': ' + str(verification['error'])[:60])}")
         elif verification.get("verified"):
             lines.append(f"✅ *{_loc('Signer Check')}:* {_loc('1CT key is linked on Nado')}")
         elif verification.get("current_signer"):
@@ -607,17 +607,17 @@ def fmt_wallet_info(wallet_info):
 def fmt_alerts(alerts):
     if not alerts:
         return (
-            _ui_header("Alert Engine", icon="🔔")
+            _ui_header("Alerts", icon="🔔")
             + "\n"
             + md2_rule()
             + "\n\n"
-            + _loc("No active alerts\\.")
+            + _loc("No alerts set yet\\.")
             + "\n\n"
-            + _loc("Use *Set Alert* to create a new trigger for price, funding, or PnL\\.")
+            + _loc("Tap *Set Alert* to add a price, funding, or PnL trigger\\.")
         )
 
     lines = [
-        _ui_header("Alert Engine", icon="🔔"),
+        _ui_header("Alerts", icon="🔔"),
         md2_rule(),
         "",
         _ui_section("Snapshot", [f"└ 📌 *{_loc('Active alerts')}:* {escape_md(str(len(alerts)))}"]),
@@ -655,12 +655,12 @@ def fmt_alerts(alerts):
 
 def fmt_alert_menu_intro() -> str:
     return (
-        "🔔 *Alert Engine*\n"
+        "🔔 *Alerts*\n"
         f"{md2_rule()}\n\n"
-        "*Your toolkit*\n"
-        "├ Create price alerts\n"
-        "├ Watch funding thresholds\n"
-        "└ Track PnL triggers\n\n"
+        "*What you can set*\n"
+        "├ Price alerts\n"
+        "├ Funding thresholds\n"
+        "└ PnL triggers\n\n"
         "_Pick an action below\\._"
     )
 
@@ -702,17 +702,17 @@ def fmt_mode_view(current_network: str) -> str:
         "🌐 *Execution Mode*\n"
         f"{md2_rule()}\n\n"
         "*Quick snapshot*\n"
-        f"└ *Current mode* — {escape_md(network_label)}\n\n"
-        "_Choose where Nadobro should trade and read account state\\._"
+        f"└ *Current mode:* {escape_md(network_label)}\n\n"
+        "_Mainnet trades real funds\\. Testnet is your sandbox\\. Flip anytime\\._"
     )
 
 
 def fmt_close_all_confirm() -> str:
     return (
-        "⚠️ *Close All Positions*\n"
+        "⚠️ *Close everything?*\n"
         f"{md2_rule()}\n\n"
-        "This will try to close every open position for the active mode\\.\n\n"
-        "_Only continue if you want a full exit\\._"
+        "This closes every open position in your current mode\\.\n\n"
+        "_Only tap continue if you want all the way out\\._"
     )
 
 
@@ -733,7 +733,7 @@ def fmt_points_dashboard(payload: dict) -> str:
     lines = [
         "🏆 *Your Nado Points Dashboard*",
         md2_rule(),
-        _ui_section("Snapshot", [f"└ 📅 *Window* — {escape_md(window)}"]),
+        _ui_section("Snapshot", [f"└ 📅 *Window:* {escape_md(window)}"]),
         "",
     ]
     if no_activity:
@@ -1066,7 +1066,7 @@ def _ui_section(title: str, lines: list[str] | None = None, icon: str | None = N
 
 
 def _ui_tree_line(prefix: str, label: str, value: str) -> str:
-    return f"{prefix} *{_loc(label)}* — {escape_md(value)}"
+    return f"{prefix} *{_loc(label)}:* {escape_md(value)}"
 
 
 def _ui_footer_hint(text: str) -> str:
@@ -1079,7 +1079,7 @@ def fmt_home_header() -> str:
         [
             _loc("🎯 *Nadobro Command Center*"),
             _loc(
-                "_Your trading copilot is online and ready\\._"
+                "_Your trading bro's online\\. Let's get it\\._"
             ),
             "📌",
         ]
@@ -1090,15 +1090,16 @@ def _fmt_home_toolkit_tree() -> str:
     """Module map: matches reply keyboard and home card inline actions (MarkdownV2)."""
     return "\n".join(
         [
-            f"├ 💼 *Wallet Vault* — {escape_md('balances & linked signer')}",
-            f"├ 🤖 *Trade Console* — {escape_md('perp orders')}",
-            f"├ 🧠 *Strategy Lab* — {escape_md('automation')}",
-            f"├ 📁 *Portfolio Deck* — {escape_md('positions & PnL')}",
-            f"├ 🏆 *Nado Points* — {escape_md('rewards & market radar')}",
-            f"├ 🎁 *Refer Friends* — {escape_md('your custom referral code')}",
-            f"├ 🔔 *Alert Engine* — {escape_md('price & funding triggers')}",
-            f"├ ⚙️ *Control Panel* — {escape_md('leverage & slippage')}",
-            f"└ 🌐 *Execution Mode* — {escape_md('mainnet vs testnet')}",
+            f"├ 💼 *Wallet Vault* · {escape_md('balances and signer')}",
+            f"├ 🤖 *Trade Console* · {escape_md('place perp orders')}",
+            f"├ 🧠 *Strategy Lab* · {escape_md('automation')}",
+            f"├ 📁 *Portfolio Deck* · {escape_md('positions and PnL')}",
+            f"├ 💰 *Nado Vault* · {escape_md('LP deposit and withdraw')}",
+            f"├ 🏆 *Nado Points* · {escape_md('rewards and market radar')}",
+            f"├ 🎁 *Referrals* · {escape_md('your code')}",
+            f"├ 🔔 *Alerts* · {escape_md('price and funding triggers')}",
+            f"├ ⚙️ *Settings* · {escape_md('leverage and slippage')}",
+            f"└ 🌐 *Execution Mode* · {escape_md('mainnet or testnet')}",
         ]
     )
 
@@ -1109,8 +1110,8 @@ def _fmt_network_balance_snapshot(network: str, balance_str: str) -> str:
     return "\n".join(
         [
             f"*{_loc('Quick snapshot')}*",
-            f"├ {net_emoji} *Mode* — {escape_md(net_name)}",
-            f"├ 💵 *USDT* — {escape_md(balance_str)}",
+            f"├ {net_emoji} *Mode:* {escape_md(net_name)}",
+            f"├ 💵 *USDT:* {escape_md(balance_str)}",
         ]
     )
 
@@ -1126,14 +1127,14 @@ def fmt_home_command_center_card(network: str, balance_str: str) -> str:
             f"*{_loc('Your toolkit')}*",
             _fmt_home_toolkit_tree(),
             md2_rule(24),
-            "_Tap a button below, or type here for AI Q\\&A and plain\\-language trades\\._",
+            "_Tap a button, or just type\\. I'll answer questions and place trades in plain English\\._",
         ]
     )
 
 
 def fmt_dashboard_home() -> str:
     """Home dashboard banner after /start (MarkdownV2)."""
-    status = _ui_section("Status", [f"├ 🟢 *Nadobro* — {escape_md('online')} · ✅"])
+    status = _ui_section("Status", [f"├ 🟢 *Nadobro* · {escape_md('online')} ✅"])
     nxt = _ui_section(
         "Next step",
         [escape_md("Use the reply keyboard below to open modules.")],
@@ -1145,6 +1146,29 @@ def fmt_dashboard_home() -> str:
             status,
             md2_rule(28),
             nxt,
+        ]
+    )
+
+
+def fmt_getting_started() -> str:
+    """First-run guided rail shown right after a user accepts the terms."""
+    return "\n".join(
+        [
+            "🚀 *Getting Started*",
+            md2_rule(28),
+            "",
+            "Three quick steps and you're trading:",
+            "",
+            "*1\\. Link your wallet*",
+            escape_md("Open Wallet Vault and connect with the secure 1CT signer. Your main keys never move."),
+            "",
+            "*2\\. Add funds*",
+            escape_md("Deposit USDT0 on Nado so you've got margin to work with."),
+            "",
+            "*3\\. Make your first trade*",
+            "Type something like `Long BTC 0.01 at 5x`, or tap Trade Console\\.",
+            "",
+            "_Tap below to get going\\._",
         ]
     )
 
@@ -1198,8 +1222,8 @@ def fmt_referral_dashboard(payload: dict) -> str:
     if not referred_users:
         lines.append(
             escape_md(
-                "No direct referrals yet. Share your code with traders to "
-                "start tracking their volume here."
+                "No referrals yet. Drop your code in the group chats and "
+                "watch the volume roll in here."
             )
         )
     else:
@@ -1232,7 +1256,7 @@ def fmt_referral_dashboard(payload: dict) -> str:
             f"*{_loc('Your toolkit')}*",
             _fmt_home_toolkit_tree(),
             md2_rule(24),
-            "_Tap a button below, or type here for AI Q\\&A and plain\\-language trades\\._",
+            "_Tap a button, or just type\\. I'll answer questions and place trades in plain English\\._",
         ]
     )
 
@@ -1243,14 +1267,14 @@ def fmt_strategy_hub_intro() -> str:
             _ui_header("Nadobro Strategy Lab", icon="🧠"),
             md2_rule(28),
             _ui_section(
-                "Your toolkit",
+                "How it works",
                 [
-                    "├ Open any strategy cockpit dashboard",
-                    "├ Edit parameters with safety defaults",
-                    "└ Launch with pre\\-trade analytics",
+                    "├ Pick a strategy and I'll open its cockpit",
+                    "├ Tune the parameters \\(safe defaults are already in\\)",
+                    "└ Launch with a pre\\-trade readout so nothing's a surprise",
                 ],
             ),
-            _ui_footer_hint("Pick a strategy below\\."),
+            _ui_footer_hint("Pick one below\\."),
         ]
     )
 
@@ -1275,26 +1299,26 @@ def fmt_revoke_card() -> str:
         "1\\. Open Nado → Settings\n"
         "2\\. 1\\-Click Trading → Advanced 1CT\n"
         "3\\. Disable the toggle and save\n\n"
-        "_Your main wallet stays safe\\. Re\\-link anytime via Wallet\\._"
+        "_Your main wallet never moves\\. Re\\-link anytime from Wallet Vault\\._"
     )
 
 
 def fmt_managed_agent_enabled() -> str:
     return (
-        "🧠 *Managed AI mode* — *ON*\n"
+        "🧠 *Managed AI* is *ON*\n"
         f"{md2_rule()}\n\n"
-        "Hey boss — talk naturally in chat\\.\n"
-        "I route *analysis* to the backend brain and *strategies* through the normal safety checks\\.\n\n"
-        "_Tip:_ `/agent\\_status` anytime\\."
+        "Just talk to me normally\\.\n"
+        "I send *analysis* to the brain and run any *strategy* through the usual safety checks first\\.\n\n"
+        "_Check anytime with_ `/agent\\_status`\\."
     )
 
 
 def fmt_managed_agent_disabled() -> str:
     return (
-        "🧠 *Managed AI mode* — *OFF*\n"
+        "🧠 *Managed AI* is *OFF*\n"
         f"{md2_rule()}\n\n"
-        "Back to standard Nadobro chat routing\\.\n\n"
-        "_Turn on anytime:_ `/agent\\_on`"
+        "Back to standard Nadobro chat\\.\n\n"
+        "_Turn it back on anytime:_ `/agent\\_on`"
     )
 
 
@@ -1302,8 +1326,8 @@ def fmt_managed_agent_globally_disabled() -> str:
     return (
         "🧠 *Managed AI mode*\n"
         f"{md2_rule()}\n\n"
-        "⚠️ *Globally disabled* by ops right now\\.\n"
-        "Try again later, boss\\."
+        "⚠️ *Turned off by ops* right now\\.\n"
+        "Try again a bit later\\."
     )
 
 
@@ -1311,7 +1335,7 @@ def fmt_managed_agent_status(effective_on: bool, global_enabled: bool, updated_a
     eff = "ON ✅" if effective_on else "OFF"
     glob = "ENABLED ✅" if global_enabled else "DISABLED ⛔️"
     return (
-        "🧠 *Managed AI — Status*\n"
+        "🧠 *Managed AI Status*\n"
         f"{md2_rule()}\n\n"
         f"*Effective mode:* {escape_md(eff)}\n"
         f"*Global ops switch:* {escape_md(glob)}\n"
@@ -1325,11 +1349,11 @@ def fmt_settings(user_data):
     risk_profile = str(user_data.get("risk_profile", "balanced")).upper()
 
     lines = [
-        _ui_header("Control Panel", icon="⚙️"),
+        _ui_header("Settings", icon="⚙️"),
         md2_rule(),
         "",
         _ui_section(
-            "Quick snapshot",
+            "Right now",
             [
                 _ui_tree_line("├", "Risk Profile", risk_profile),
                 _ui_tree_line("├", "Default Leverage", f"{leverage}x"),
@@ -1337,7 +1361,7 @@ def fmt_settings(user_data):
             ],
         ),
         "",
-        _ui_footer_hint("Use the buttons below to change language, leverage, slippage, or risk preset\\."),
+        _ui_footer_hint("Buttons below change language, leverage, slippage, and risk preset\\."),
     ]
 
     return "\n".join(lines)
@@ -1370,7 +1394,7 @@ def fmt_wallet_balance_card(amount: float) -> str:
         [
             _ui_header("Wallet Balance", icon="💰"),
             md2_rule(),
-            _ui_section("Quick snapshot", [f"└ *Available USDT0* — {escape_md(f'${amount:,.2f}')}"]),
+            _ui_section("Quick snapshot", [f"└ *Available USDT0:* {escape_md(f'${amount:,.2f}')}"]),
         ]
     )
 
@@ -1406,56 +1430,68 @@ def fmt_wallet_revoke_steps_card() -> str:
 def fmt_help():
     _HELP_TEXT = (
         "📖 *Nadobro Guide*\n"
+        "_Your trading bro, right here in chat\\._\n"
         + escape_md("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n"
         "\n"
-        "*Available Commands:*\n"
-        "/start \\- Open the home dashboard\n"
-        "/help \\- Show commands, modules, and examples\n"
-        "/status \\- View runtime health, setup, and strategy status\n"
-        "/ops \\- View order flow and runtime diagnostics\n"
-        "/mm\\_status \\- Live MM dashboard \\(GRID / RGRID / DGRID / Mid Mode\\)\n"
-        "/mm\\_fills \\- Recent fills for the active MM strategy\n"
-        "/revoke \\- Show 1CT signer revoke steps\n"
-        "/stop\\_all \\- Stop all running strategy loops\n"
-        "/agent\\_on \\- Enable managed AI chat mode \\(bro tone \\+ guarded routing\\)\n"
-        "/agent\\_off \\- Disable managed AI chat mode\n"
-        "/agent\\_status \\- Show managed AI and ops switch status\n"
+        "*Commands*\n"
+        "/start \\- Open your home dashboard\n"
+        "/help \\- This guide\n"
+        "/status \\- Bot health, setup, and live strategies\n"
+        "/ops \\- Order flow and runtime diagnostics\n"
+        "/desk \\- Talk a trade out loud, preview it, then confirm\n"
+        "/brief \\- Your full morning market brief\n"
+        "/news \\- Latest market news \\(add a category to filter\\)\n"
+        "/mm\\_status \\- Live market\\-making dashboard \\(GRID / RGRID / DGRID / Mid\\)\n"
+        "/mm\\_fills \\- Recent fills on your active MM strategy\n"
+        "/stop\\_all \\- Stop every running strategy and flatten bot exposure\n"
+        "/revoke \\- How to revoke your 1CT signer\n"
+        "/agent\\_on \\- Turn on managed AI chat\n"
+        "/agent\\_off \\- Turn off managed AI chat\n"
+        "/agent\\_status \\- Check managed AI chat status\n"
         "\n"
-        "*Core Modules:*\n"
+        "*What's inside*\n"
         "\n"
         "💼 *Wallet Vault*\n"
-        "Link your wallet with the secure 1CT flow, check balances, and manage signer access\\.\n"
+        "Link your wallet with the secure 1CT flow, check balances, manage your signer\\.\n"
         "\n"
-        "🤖 *Trading Console*\n"
-        "Place market or limit orders from the guided flow or with plain\\-language trade commands\\.\n"
+        "🤖 *Trade Console*\n"
+        "Market and limit orders\\. Tap through the guided flow or just type the trade\\.\n"
         "\n"
         "🧠 *Strategy Lab*\n"
-        "Configure and run automated strategies including GRID, Reverse GRID, Dynamic GRID, Mid Mode, Delta Neutral, Volume, and Alpha Agent\\.\n"
-        "Each strategy dashboard includes controls, safety settings, and pre\\-trade context before launch\\.\n"
+        "Market making \\(GRID, Reverse GRID, Dynamic GRID, Mid Mode\\) plus Volume Bot, Copy Trading, and Delta Neutral\\. Bro Mode \\(AI autonomous\\) is coming soon\\.\n"
+        "Every strategy opens with controls, safety defaults, and a pre\\-trade readout\\.\n"
         "\n"
         "📁 *Portfolio Deck*\n"
-        "Refresh open positions, realized and unrealized PnL, trade history, and analytics in one place\\.\n"
+        "Open positions, realized and unrealized PnL, trade history, and analytics in one place\\.\n"
         "\n"
-        "🏆 *Points And Market Radar*\n"
-        "Check points updates, market radar, and LOWIQPTS refresh flows from the same Telegram workspace\\.\n"
+        "💰 *Nado Vault*\n"
+        "One\\-tap deposit and withdraw on Nado's market\\-making LP vault\\. We ping you when a slot opens\\.\n"
+        "\n"
+        "🔔 *Alerts*\n"
+        "Set price and funding triggers, get pinged instantly\\.\n"
+        "\n"
+        "🏆 *Nado Points \\+ Market Radar*\n"
+        "Track your Season 1 points, volume, and cost\\-per\\-point in real time, plus a live market read\\.\n"
+        "\n"
+        "🎁 *Referrals*\n"
+        "Claim your code \\(live now\\) and bring traders in\\. Fee commissions are coming soon\\.\n"
+        "\n"
+        "🌐 *Execution Mode*\n"
+        "Flip between Testnet and Mainnet anytime\\. Practice risk\\-free, then go live\\.\n"
         "\n"
         "🔒 *Security*\n"
-        "• 1CT signer keys are encrypted with server key\n"
-        "• Never share your private key or seed phrase\n"
-        "• Use dedicated wallets for automation\n"
+        "• Your 1CT signer can trade but can never withdraw\n"
+        "• Never share a private key or seed phrase\n"
+        "• Use a dedicated wallet for automation\n"
         "\n"
-        "🧠 *Ask NadoBro AI*\n"
-        "Ask docs, API, trading, and troubleshooting questions directly in chat\\.\n"
-        "\n"
-        "*Examples:*\n"
-        "  • `Long BTC 0\\.01 at 5x`\n"
-        "  • `Short ETH 0\\.05 limit 2400`\n"
+        "*Just type it*\n"
+        "  • `Long BTC 0.01 at 5x`\n"
+        "  • `Short ETH 0.05 limit 2400`\n"
         "  • `Show my portfolio`\n"
-        "  • `Show my positions`\n"
-        "  • `What is unified margin?`\n"
         "  • `Close all positions`\n"
+        "  • `What's unified margin?`\n"
         "\n"
-        "Need support? Ask in chat with the error details and the command or button flow you used\\."
+        "Stuck? Tell me what you tapped and paste the error\\. I'll sort it\\."
     )
     return _loc(_HELP_TEXT)
 
@@ -1548,20 +1584,20 @@ def fmt_status_overview(status: dict, onboarding: dict):
     if not complete:
         step = onboarding.get("missing_step") or "unknown"
         lines.extend(["", f"*{_loc('Setup')}*"])
-        lines.append(f"{_loc('Setup:')} *{_loc('IN PROGRESS')}* — {escape_md(step.replace('_', ' ').title())}")
+        lines.append(f"{_loc('Setup:')} *{_loc('IN PROGRESS')}* · {escape_md(step.replace('_', ' ').title())}")
         if not key_ready:
-            lines.append(f"{_loc('Key:')} *{_loc('NOT SET')}* — {_loc('use /onboard to continue')}")
+            lines.append(f"{_loc('Key:')} *{_loc('NOT SET')}* · {_loc('use /onboard to continue')}")
         elif not funded:
-            lines.append(f"{_loc('Funding:')} *{_loc('NEEDED')}* — {_loc('deposit to your wallet')}")
+            lines.append(f"{_loc('Funding:')} *{_loc('NEEDED')}* · {_loc('deposit to your wallet')}")
         return "\n".join(lines)
 
     readiness_lines = []
     if not key_ready or not funded:
         readiness_lines.extend(["", f"*{_loc('Trading Readiness')}*"])
         if not key_ready:
-            readiness_lines.append(f"{_loc('Wallet')}: *{_loc('NOT LINKED')}* — {_loc('open Wallet to connect your 1CT signer')}")
+            readiness_lines.append(f"{_loc('Wallet')}: *{_loc('NOT LINKED')}* · {_loc('open Wallet to connect your 1CT signer')}")
         if key_ready and not funded:
-            readiness_lines.append(f"{_loc('Funding')}: *{_loc('NEEDED')}* — {_loc('deposit to your wallet')}")
+            readiness_lines.append(f"{_loc('Funding')}: *{_loc('NEEDED')}* · {_loc('deposit to your wallet')}")
 
     if not running:
         lines.extend(["", f"*{_loc('Runtime')}*"])
@@ -1916,7 +1952,7 @@ def fmt_ops_overview(status: dict, ops: dict) -> str:
             err = str(snap.get("error") or "").strip()[:120]
             lines.append(
                 f"{_loc('Account snapshot')}: *{_loc('unavailable')}*"
-                + (f" — {escape_md(err)}" if err else "")
+                + (f": {escape_md(err)}" if err else "")
             )
 
     return "\n".join(lines)

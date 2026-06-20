@@ -328,7 +328,7 @@ async def handle_position_management_intent(update, context: CallbackContext, te
             )
         except BadRequest:
             await update.message.reply_text(
-                "⚠️ Close All Positions — type confirm or cancel.",
+                "⚠️ Close all positions? Type confirm or cancel.",
                 reply_markup=confirm_close_all_kb(),
             )
         return True

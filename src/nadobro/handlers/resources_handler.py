@@ -16,10 +16,10 @@ from src.nadobro.handlers.keyboards import resources_kb
 _RESOURCES_TEXT = (
     "📚 *Resources*\n\n"
     "Everything you need to learn the Nado stack and stay plugged into NadoBro.\n\n"
-    "• *Nado Docs* — exchange overview, products, NLP vault mechanics.\n"
-    "• *Developer Docs* — Get started, REST/WebSocket API, CLI & MCP server, "
+    "• *Nado Docs* · exchange overview, products, NLP vault mechanics.\n"
+    "• *Developer Docs* · Get started, REST/WebSocket API, CLI & MCP server, "
     "TypeScript SDK.\n"
-    "• *NadoBro* — our user docs and announcements on X.\n\n"
+    "• *NadoBro* · our user docs and announcements on X.\n\n"
     "Tap any link below to open it in your browser."
 )
 

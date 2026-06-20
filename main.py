@@ -444,17 +444,20 @@ async def run_bot():
 
     from telegram import BotCommand
     await bot_app.bot.set_my_commands([
-        BotCommand("start", "Open home dashboard"),
-        BotCommand("help", "Show guide and examples"),
-        BotCommand("status", "View bot and strategy status"),
-        BotCommand("ops", "View runtime diagnostics"),
-        BotCommand("mm_status", "Live MM strategy dashboard"),
+        BotCommand("start", "Open your home dashboard"),
+        BotCommand("help", "Guide and examples"),
+        BotCommand("desk", "Talk out a trade, then confirm"),
+        BotCommand("status", "Bot and strategy status"),
+        BotCommand("ops", "Order flow and diagnostics"),
+        BotCommand("brief", "Your morning market brief"),
+        BotCommand("news", "Latest market news"),
+        BotCommand("mm_status", "Live market-making dashboard"),
         BotCommand("mm_fills", "Recent MM fills"),
-        BotCommand("revoke", "Show signer revoke steps"),
-        BotCommand("stop_all", "Stop automation and flatten bot exposure on Nado"),
-        BotCommand("agent_on", "Enable managed AI mode"),
-        BotCommand("agent_off", "Disable managed AI mode"),
-        BotCommand("agent_status", "Check managed AI mode"),
+        BotCommand("stop_all", "Stop strategies and flatten bot exposure"),
+        BotCommand("revoke", "Revoke your 1CT signer"),
+        BotCommand("agent_on", "Turn on managed AI"),
+        BotCommand("agent_off", "Turn off managed AI"),
+        BotCommand("agent_status", "Check managed AI"),
     ])
     logger.info("Bot commands registered in Menu")
 
