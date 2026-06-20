@@ -51,6 +51,54 @@ class TelegramUiFormatterTests(unittest.TestCase):
         self.assertTrue(keyboards.HOME_BTN_ALERTS.startswith("🔔"))
         self.assertTrue(keyboards.HOME_BTN_MODE.startswith("🌐"))
 
+    # --- navigation / workflow uplift ---------------------------------------
+
+    @staticmethod
+    def _buttons(markup):
+        return [b for row in markup.inline_keyboard for b in row]
+
+    def test_module_labels_are_standardized(self):
+        # No legacy names; one name per module.
+        self.assertEqual(keyboards.HOME_BTN_ALERTS, "🔔 Alerts")
+        self.assertEqual(keyboards.HOME_BTN_SETTINGS, "⚙️ Settings")
+        self.assertEqual(keyboards.HOME_BTN_REFER, "🎁 Referrals")
+        # Legacy labels still route (backward compatible).
+        self.assertEqual(keyboards.REPLY_BUTTON_MAP.get("Control Panel"), "settings:view")
+        self.assertEqual(keyboards.REPLY_BUTTON_MAP.get("Alert Engine"), "alert:menu")
+
+    def test_home_card_surfaces_ask_nadobro_and_clean_names(self):
+        cbs = [b.callback_data for b in self._buttons(keyboards.home_card_kb())]
+        texts = [b.text for b in self._buttons(keyboards.home_card_kb())]
+        self.assertIn("desk:view", cbs)  # Ask Nadobro surfaced
+        self.assertIn("💬 Ask Nadobro", texts)
+        self.assertTrue(any(t == "🔔 Alerts" for t in texts))
+        self.assertTrue(any(t == "⚙️ Settings" for t in texts))
+        self.assertFalse(any("Alert Engine" in t or "Control Panel" in t for t in texts))
+
+    def test_getting_started_rail_links_wallet(self):
+        cbs = [b.callback_data for b in self._buttons(keyboards.getting_started_kb())]
+        self.assertIn("wallet:view", cbs)
+        self.assertIn("card:trade:start", cbs)
+        self.assertIn("nav:main", cbs)
+        self.assertIn("🚀 *Getting Started*", formatters.fmt_getting_started())
+
+    def test_empty_positions_offers_next_step_and_back(self):
+        cbs = [b.callback_data for b in self._buttons(keyboards.positions_kb([]))]
+        self.assertIn("card:trade:start", cbs)
+        self.assertIn("nav:strategy_hub", cbs)
+        self.assertIn("portfolio:view", cbs)  # Back to Portfolio
+        # With a position, show Close All instead of the empty CTA.
+        cbs2 = [b.callback_data for b in self._buttons(
+            keyboards.positions_kb([{"product_name": "BTC-PERP"}]))]
+        self.assertIn("pos:close_all", cbs2)
+        self.assertNotIn("nav:strategy_hub", cbs2)
+
+    def test_trade_confirm_puts_cancel_left_of_confirm(self):
+        first_row = keyboards.trade_confirm_kb().inline_keyboard[0]
+        self.assertEqual(len(first_row), 2)
+        self.assertIn("Cancel", first_row[0].text)
+        self.assertIn("Confirm", first_row[1].text)
+
 
 if __name__ == "__main__":
     unittest.main()

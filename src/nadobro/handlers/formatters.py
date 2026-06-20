@@ -1150,6 +1150,29 @@ def fmt_dashboard_home() -> str:
     )
 
 
+def fmt_getting_started() -> str:
+    """First-run guided rail shown right after a user accepts the terms."""
+    return "\n".join(
+        [
+            "🚀 *Getting Started*",
+            md2_rule(28),
+            "",
+            "Three quick steps and you're trading:",
+            "",
+            "*1\\. Link your wallet*",
+            escape_md("Open Wallet Vault and connect with the secure 1CT signer. Your main keys never move."),
+            "",
+            "*2\\. Add funds*",
+            escape_md("Deposit USDT0 on Nado so you've got margin to work with."),
+            "",
+            "*3\\. Make your first trade*",
+            "Type something like `Long BTC 0.01 at 5x`, or tap Trade Console\\.",
+            "",
+            "_Tap below to get going\\._",
+        ]
+    )
+
+
 def fmt_referral_dashboard(payload: dict) -> str:
     code = payload.get("share_code") or {}
     public_code = str(code.get("public_code") or "")

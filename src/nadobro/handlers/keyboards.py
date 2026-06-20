@@ -35,10 +35,10 @@ HOME_BTN_PORTFOLIO = f"{HOME_MODULE_EMOJIS['portfolio']} Portfolio Deck"
 HOME_BTN_HOME = f"{HOME_MODULE_EMOJIS['home']} Home"
 HOME_BTN_WALLET = f"{HOME_MODULE_EMOJIS['wallet']} Wallet Vault"
 HOME_BTN_POINTS = f"{HOME_MODULE_EMOJIS['points']} Nado Points"
-HOME_BTN_REFER = "🎁 Refer Friends"
+HOME_BTN_REFER = "🎁 Referrals"
 HOME_BTN_STRATEGIES = f"{HOME_MODULE_EMOJIS['strategies']} Strategy Lab"
-HOME_BTN_ALERTS = f"{HOME_MODULE_EMOJIS['alerts']} Alert Engine"
-HOME_BTN_SETTINGS = f"{HOME_MODULE_EMOJIS['settings']} Control Panel"
+HOME_BTN_ALERTS = f"{HOME_MODULE_EMOJIS['alerts']} Alerts"
+HOME_BTN_SETTINGS = f"{HOME_MODULE_EMOJIS['settings']} Settings"
 HOME_BTN_MODE = f"{HOME_MODULE_EMOJIS['mode']} Execution Mode"
 
 
@@ -88,6 +88,12 @@ REPLY_BUTTON_MAP.update({
     "Points": "points:view",
     "🎁 Refer Friends": "refer:view",
     "Refer Friends": "refer:view",
+    "🎁 Referrals": "refer:view",
+    "Referrals": "refer:view",
+    "🔔 Alert Engine": "alert:menu",
+    "Alert Engine": "alert:menu",
+    "⚙️ Control Panel": "settings:view",
+    "Control Panel": "settings:view",
     "📡 Market Radar": "points:view",
     "Market Radar": "points:view",
     "Strategies": "nav:strategy_hub",
@@ -151,29 +157,42 @@ def persistent_menu_kb():
     )
 
 
+def getting_started_kb():
+    """First-run rail: link wallet, then jump straight into trading."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💼 Link Wallet", callback_data="wallet:view")],
+        [
+            InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
+            InlineKeyboardButton("💬 Ask Nadobro", callback_data="desk:view"),
+        ],
+        [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+    ])
+
+
 def home_card_kb():
     rows = [
         [
             InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
+            InlineKeyboardButton("💬 Ask Nadobro", callback_data="desk:view"),
+        ],
+        [
             InlineKeyboardButton("📁 Portfolio Deck", callback_data="portfolio:view"),
+            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
         ],
         [
             InlineKeyboardButton("💼 Wallet Vault", callback_data="wallet:view"),
             InlineKeyboardButton("🏆 Nado Points", callback_data="points:view"),
         ],
         [
-            InlineKeyboardButton("🎁 Refer Friends", callback_data="refer:view"),
-            InlineKeyboardButton("🔔 Alert Engine", callback_data="alert:menu"),
-        ],
-        [
-            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
-            InlineKeyboardButton("⚙️ Control Panel", callback_data="settings:view"),
-        ],
-        [
             InlineKeyboardButton("💰 Nado Vault", callback_data="vault:home"),
-            InlineKeyboardButton("📚 Resources", callback_data="resources:home"),
+            InlineKeyboardButton("🔔 Alerts", callback_data="alert:menu"),
         ],
         [
+            InlineKeyboardButton("🎁 Referrals", callback_data="refer:view"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings:view"),
+        ],
+        [
+            InlineKeyboardButton("📚 Resources", callback_data="resources:home"),
             InlineKeyboardButton("🌐 Execution Mode", callback_data="home:mode"),
         ],
     ]
@@ -210,7 +229,7 @@ def bro_answer_kb(mode: str | None = None):
     elif mode == "debugging":
         rows.append([
             InlineKeyboardButton("📁 Portfolio", callback_data="portfolio:view"),
-            InlineKeyboardButton("⚙️ Control Panel", callback_data="settings:view"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings:view"),
         ])
     else:
         rows.append([
@@ -397,7 +416,7 @@ def trade_tpsl_edit_kb():
 def trade_confirm_reply_kb():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("✅ Confirm Trade"), KeyboardButton("❌ Cancel")],
+            [KeyboardButton("❌ Cancel"), KeyboardButton("✅ Confirm Trade")],
             [KeyboardButton("◀ Home")],
         ],
         resize_keyboard=True,
@@ -551,8 +570,8 @@ def trade_card_confirm_kb(session_id: str):
             InlineKeyboardButton("⏱ Auto-close at…", callback_data=trade_card_cb(session_id, "time_limit")),
         ],
         [
-            InlineKeyboardButton("✅ Confirm Trade", callback_data=trade_card_cb(session_id, "confirm")),
             InlineKeyboardButton("❌ Cancel", callback_data=trade_card_cb(session_id, "cancel")),
+            InlineKeyboardButton("✅ Confirm Trade", callback_data=trade_card_cb(session_id, "confirm")),
         ],
         [
             InlineKeyboardButton("◀ Back", callback_data=trade_card_cb(session_id, "back")),
@@ -610,8 +629,8 @@ def trade_leverage_kb(product, action, size):
 def trade_confirm_kb(trade_id="pending"):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Confirm Trade", callback_data=f"exec_trade:{trade_id}"),
             InlineKeyboardButton("❌ Cancel", callback_data="cancel_trade"),
+            InlineKeyboardButton("✅ Confirm Trade", callback_data=f"exec_trade:{trade_id}"),
         ],
     ])
 
@@ -628,7 +647,16 @@ def positions_kb(positions):
             rows.append([InlineKeyboardButton(f"❌ Close {pname}-PERP", callback_data=f"pos:close:{pname}")])
     if positions:
         rows.append([InlineKeyboardButton("❌ Close All Positions", callback_data="pos:close_all")])
-    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
+    else:
+        # Nothing open yet: point the user at the next move instead of a dead end.
+        rows.append([
+            InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
+            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
+        ])
+    rows.append([
+        InlineKeyboardButton("📁 Back to Portfolio", callback_data="portfolio:view"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 

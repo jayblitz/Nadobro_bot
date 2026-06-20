@@ -53,6 +53,12 @@ def portfolio_deck_kb(
     ]
     if has_positions:
         rows.append([InlineKeyboardButton("❌ Close All", callback_data="portfolio:close_all_confirm")])
+    elif not has_orders:
+        # Empty book: hand the user a next step instead of a dead end.
+        rows.append([
+            InlineKeyboardButton("🤖 Trade Console", callback_data="card:trade:start"),
+            InlineKeyboardButton("🧠 Strategy Lab", callback_data="nav:strategy_hub"),
+        ])
     rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
 
@@ -209,8 +215,8 @@ def render_close_all_confirm() -> tuple[str, InlineKeyboardMarkup]:
     return (
         "❌ Close all open positions?\n\nThis will submit reduce-only market closes, then refresh Portfolio from Nado.",
         InlineKeyboardMarkup([
-            [InlineKeyboardButton("Yes, close all", callback_data="portfolio:close_all_yes")],
-            [InlineKeyboardButton("Cancel", callback_data="portfolio:view")],
+            [InlineKeyboardButton("◀ Keep positions", callback_data="portfolio:view")],
+            [InlineKeyboardButton("❌ Yes, close all", callback_data="portfolio:close_all_yes")],
         ]),
     )
 
