@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+from src.nadobro.engine.adapter.base import Fill
 from src.nadobro.engine.controllers.controller_base import Controller
 from src.nadobro.engine.controllers.grid_trading import build_grid_config
 from src.nadobro.engine.executors.grid_executor import GridExecutor
@@ -201,6 +203,16 @@ class DynamicGridController(Controller):
                 abs((mid - self._grid_anchor_mid) / self._grid_anchor_mid) * Decimal(10000)
             )
 
+    def _inventory_net_base(self) -> Decimal:
+        if self.inventory is None:
+            return Decimal(0)
+        try:
+            return _dec(self.inventory.get(self.user_id, self.trading_pair, self.id).net_amount_base)
+        except Exception:  # noqa: BLE001 - inventory read failures must not crash ticks
+            logger.warning("dgrid inventory read failed pair=%s (controller=%s)",
+                           self.trading_pair, self.id, exc_info=True)
+            return Decimal(0)
+
     async def _mid(self) -> Optional[Decimal]:
         try:
             return _dec(await self.adapter.mid_price(self.trading_pair))
@@ -360,22 +372,65 @@ class DynamicGridController(Controller):
         close_side = TradeType.SELL if net > 0 else TradeType.BUY
         lev = int(self.cfg("leverage", 1) or 1)
         try:
-            await self.adapter.place_order(
+            order = await self.adapter.place_order(
                 self.trading_pair, close_side, OrderType.MARKET, close_base, None, lev, True,
             )
         except Exception:  # noqa: BLE001 - booking is best-effort; retry next tick
             logger.warning("dgrid book_profit failed pair=%s (controller=%s)",
                            self.trading_pair, self.id, exc_info=True)
             return
+        filled_base = _dec(order.filled_base)
+        if filled_base <= 0:
+            logger.warning(
+                "dgrid book_profit no-fill pair=%s side=%s requested_base=%s order=%s "
+                "state=%s (controller=%s)",
+                self.trading_pair, close_side.name, close_base, order.id,
+                getattr(order.state, "name", order.state), self.id,
+            )
+            return
+        filled_quote = _dec(order.filled_quote)
+        fill_price = (filled_quote / filled_base) if filled_quote > 0 else _dec(mid)
+        fill = Fill(
+            order.id, self.trading_pair, close_side, filled_base,
+            fill_price, _dec(order.fee_quote), time.time(),
+        )
+        active = self.my_executors(active_only=True)
+        if active and callable(getattr(active[0], "_record_fill", None)):
+            active[0]._record_fill(fill)  # type: ignore[attr-defined]
+            if hasattr(active[0], "orders_placed"):
+                active[0].orders_placed += 1  # type: ignore[attr-defined]
+            if filled_base >= close_base and hasattr(active[0], "orders_filled"):
+                active[0].orders_filled += 1  # type: ignore[attr-defined]
+        elif self.inventory is not None:
+            self.inventory.apply_fill(
+                self.user_id, self.trading_pair, self.id, close_side,
+                filled_base, filled_quote if filled_quote > 0 else filled_base * fill_price,
+                _dec(order.fee_quote), time.time(),
+            )
+        if filled_base < close_base:
+            logger.warning(
+                "dgrid book_profit partial-fill pair=%s side=%s requested_base=%s "
+                "filled_base=%s order=%s; tiers remain pending (controller=%s)",
+                self.trading_pair, close_side.name, close_base, filled_base, order.id, self.id,
+            )
+            return
         for i in to_book:
             self._booked_tiers.add(i)
         logger.info(
             "dgrid book_profit pair=%s side=%s base=%s uPnL=%.2f%% tiers=%s (controller=%s)",
-            self.trading_pair, close_side.name, close_base, upnl_pct,
+            self.trading_pair, close_side.name, filled_base, upnl_pct,
             [self.tp_tiers_pct[i] for i in to_book], self.id,
         )
 
     async def _spawn_phase(self, phase: str, mid: Optional[Decimal]) -> bool:
+        net = self._inventory_net_base()
+        if abs(net) > Decimal("1e-12"):
+            logger.warning(
+                "dgrid spawn deferred phase=%s pair=%s: controller inventory still non-flat "
+                "net_base=%s (controller=%s)",
+                phase, self.trading_pair, net, self.id,
+            )
+            return False
         side, cls = (
             (TradeType.SELL, ReverseGridExecutor) if phase == variance_regime.RGRID
             else (TradeType.BUY, GridExecutor)
