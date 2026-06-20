@@ -266,6 +266,22 @@ def test_order_status_filled_when_gone_and_matched():
     asyncio.run(body())
 
 
+def test_order_status_cancelled_with_fills_when_gone_and_partially_matched():
+    async def body():
+        a = _adapter()
+        o = await a.place_order(PAIR, TradeType.BUY, OrderType.LIMIT_MAKER, Decimal(1), Decimal(99))
+        a._client.open_orders = []  # terminal: remainder is no longer resting
+        a._client.matches = [{"digest": "d1", "amount": "0.4", "price": 99, "fee": "0.04"}]
+        st = await a.order_status(o.id)
+        assert st.id == o.id
+        assert st.state is OrderState.CANCELLED
+        assert st.filled_base == Decimal("0.4")
+        assert st.filled_quote == Decimal("39.6")
+        assert st.fee_quote == Decimal("0.04")
+
+    asyncio.run(body())
+
+
 def test_order_status_cancelled_when_gone_and_no_fills():
     async def body():
         a = _adapter()

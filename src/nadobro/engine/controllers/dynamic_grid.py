@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+from src.nadobro.engine.adapter.base import Fill
 from src.nadobro.engine.controllers.controller_base import Controller
 from src.nadobro.engine.controllers.grid_trading import build_grid_config
 from src.nadobro.engine.executors.grid_executor import GridExecutor
@@ -203,6 +205,16 @@ class DynamicGridController(Controller):
             self.realized_move_bp = float(
                 abs((mid - self._grid_anchor_mid) / self._grid_anchor_mid) * Decimal(10000)
             )
+
+    def _inventory_net_base(self) -> Decimal:
+        if self.inventory is None:
+            return Decimal(0)
+        try:
+            return _dec(self.inventory.get(self.user_id, self.trading_pair, self.id).net_amount_base)
+        except Exception:  # noqa: BLE001 - inventory read failures must not crash ticks
+            logger.warning("dgrid inventory read failed pair=%s (controller=%s)",
+                           self.trading_pair, self.id, exc_info=True)
+            return Decimal(0)
 
     async def _mid(self) -> Optional[Decimal]:
         try:
@@ -394,11 +406,19 @@ class DynamicGridController(Controller):
             self._booked_tiers.add(i)
         logger.info(
             "dgrid book_profit pair=%s side=%s base=%s uPnL=%.2f%% tiers=%s (controller=%s)",
-            self.trading_pair, close_side.name, booked, upnl_pct,
+            self.trading_pair, close_side.name, filled_base, upnl_pct,
             [self.tp_tiers_pct[i] for i in to_book], self.id,
         )
 
     async def _spawn_phase(self, phase: str, mid: Optional[Decimal]) -> bool:
+        net = self._inventory_net_base()
+        if abs(net) > Decimal("1e-12"):
+            logger.warning(
+                "dgrid spawn deferred phase=%s pair=%s: controller inventory still non-flat "
+                "net_base=%s (controller=%s)",
+                phase, self.trading_pair, net, self.id,
+            )
+            return False
         side, cls = (
             (TradeType.SELL, ReverseGridExecutor) if phase == variance_regime.RGRID
             else (TradeType.BUY, GridExecutor)
