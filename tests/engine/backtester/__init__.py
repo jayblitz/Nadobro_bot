@@ -1,1 +1,0 @@
-"""Backtester harness tests."""

@@ -247,14 +247,6 @@ def get_live_session_snapshot(
     session_pnl = realized + unrealized - funding_paid
     margin = _resolve_margin(state, session)
     session_pnl_pct = (session_pnl / margin * 100.0) if margin > 0 else 0.0
-    # SLTP-GROSS fix: ``session_pnl`` is intentionally GROSS of fees (it is the
-    # number rendered on the status / share cards). The SL/TP rail, however, must
-    # judge the user's stop on the *net* economics — otherwise a -1% stop only
-    # trips at -1% gross, i.e. the true loss is -1% minus accumulated fees, so the
-    # stop fires late by the fee drag (worst on high-turnover grid/vol/DN). Expose
-    # a net basis for the rail without changing the displayed gross PnL.
-    session_pnl_net = session_pnl - fees
-    session_pnl_pct_net = (session_pnl_net / margin * 100.0) if margin > 0 else 0.0
 
     # Volume = real turnover on the product for THIS run (matches Nado), not the
     # under-counted session-tagged sum.
@@ -291,10 +283,8 @@ def get_live_session_snapshot(
         "funding_paid": funding_paid,
         "open_orders": open_orders,
         "session_pnl": session_pnl,
-        "session_pnl_net": session_pnl_net,
         "margin": margin,
         "session_pnl_pct": session_pnl_pct,
-        "session_pnl_pct_net": session_pnl_pct_net,
         "mark": mark_f,
         "has_position": has_position,
         "position_size": abs(run_size),

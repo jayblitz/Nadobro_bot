@@ -520,15 +520,6 @@ def map_strategy_config(
         }
     if strategy == "vol":
         interval = max(1.0, _f(settings, "interval_seconds", 60))
-        # VOL-MARGIN fix: the vol card collects the run size under
-        # ``session_margin_usd`` (strategy_handler), but the generic ``notional``
-        # above only reads cycle_notional_usd/notional_usd — so a user who set
-        # "$500" still traded the $100 default. Prefer the user's session margin,
-        # then fall back to the legacy keys.
-        vol_notional = _f(
-            settings, "session_margin_usd",
-            _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0)),
-        )
         # Normalize the trading pair so the VolumeBotController validation
         # sees a canonical base (e.g. ``KBTC``) regardless of whether
         # ``state.product`` was stored as ``KBTC`` (current UI) or as a
@@ -541,15 +532,11 @@ def map_strategy_config(
             vol_pair = str(product or "")
         return {
             "trading_pair": vol_pair,
-            "total_amount_quote": Decimal(str(vol_notional)),
+            "total_amount_quote": Decimal(str(notional)),
             "total_duration": interval * 4,
             "order_interval": interval,
             "market": "spot",
             "leverage": 1,
-            # VOL-LOOP / VOL-NO-CAP: cumulative volume target (0 = single
-            # round-trip) and a hard cycle ceiling so the loop can't run away.
-            "target_volume_usd": Decimal(str(_f(settings, "target_volume_usd", 0.0))),
-            "max_cycles": int(max(1, _f(settings, "vol_max_cycles", 100))),
         }
     # grid / rgrid / dgrid family.
     #
@@ -602,22 +589,14 @@ def map_strategy_config(
         spread_frac = Decimal("0.0005")  # 5 bp fallback
     span = spread_frac * Decimal(max(levels - 1, 1))
 
-    # GRID-DUAL-UNIT fix: do NOT derive a hard ``limit_price`` stop from the
-    # user's sl_pct. That stop is referenced to the run/rebuild mid and ignores
-    # how much of the grid has actually filled, so it fires on a brief wick to
-    # mid*(1-sl) even when little is at risk — a premature stop-out on top of the
-    # session margin-% rail. SL is now governed consistently by (a) the executor
-    # avg-entry barrier (triple_barrier_config.stop_loss, fill-aware) and (b) the
-    # fee-aware session rail. limit_price stays available as an explicit
-    # catastrophic stop but is no longer auto-set from sl.
     if strategy == "rgrid":
         start_price = mid
         end_price = mid * (Decimal(1) + span)
-        limit_price = Decimal(0)
+        limit_price = mid * (Decimal(1) + sl) if sl > 0 else Decimal(0)
     else:  # grid OR dgrid-as-long-default; dgrid recomputes at on_tick
         start_price = mid * (Decimal(1) - span)
         end_price = mid
-        limit_price = Decimal(0)
+        limit_price = mid * (Decimal(1) - sl) if sl > 0 else Decimal(0)
 
     cfg: Dict[str, object] = {
         "trading_pair": product,
@@ -1031,29 +1010,6 @@ async def run_engine_cycle(
             from src.nadobro.engine.adapter.nado import ProductMeta
 
             meta[product] = ProductMeta(int(product_id), _dec("0.01"), _dec("0.001"), _dec("1"))
-        # GRID-MIN-NOTIONAL-INFLATE fix: each grid level is sized
-        # total_amount_quote / levels, but the venue bumps any sub-min-notional
-        # order UP to its minimum — so a small/many-level grid silently deploys
-        # MORE than the configured (and risk-approved) size. Cap the level count
-        # so each level is at least the venue minimum. Conservative: only ever
-        # REDUCES the level count, never raises it.
-        if strategy in ("grid", "rgrid", "dgrid"):
-            try:
-                _mn = float(getattr(meta.get(product), "min_notional", 0) or 0)
-                _tot = float(configs.get("total_amount_quote") or 0)
-                if _mn > 0 and _tot > 0:
-                    _max_levels = max(1, int(_tot // _mn))
-                    _cur = int(configs.get("max_open_orders") or 1)
-                    if _cur > _max_levels:
-                        configs["max_open_orders"] = _max_levels
-                        configs["levels_count"] = _max_levels
-                        logger.info(
-                            "grid level cap (min-notional): %s -> %s levels "
-                            "(total=%.2f min_notional=%.2f) user=%s strategy=%s",
-                            _cur, _max_levels, _tot, _mn, telegram_id, strategy,
-                        )
-            except Exception:  # noqa: BLE001 - cap is best-effort, never block start
-                logger.debug("grid min-notional level cap skipped", exc_info=True)
         # NO_ORDERS_AUDIT-FIX-R1: DN needs metadata for BOTH legs (spot long +
         # perp short), each with its OWN product_id. The old fallback keyed both
         # legs to the SAME ``product_id`` — which would have traded the perp
@@ -1061,29 +1017,6 @@ async def run_engine_cycle(
         # isolated-only flag) from the DN pair catalog.
         if strategy == "dn":
             _materialize_dn_leg_meta(meta, configs, client, network, product)
-            # DN-CYCLES fix: a rebuild (restart / worker handoff / recovery) used
-            # to reset the controller's cycle counter to 0 and re-run the whole
-            # configured cycle count. Restore the persisted progress so the
-            # rebuilt controller resumes the count instead of restarting it.
-            # GUARD: only restore for a run that has already ticked at least once
-            # (state["runs"] > 0). A fresh user start has runs == 0, so a stale
-            # progress row left by a prior crashed run (the controller_id is
-            # stable across runs) can never bleed into a new run.
-            if int(_f(state, "runs", 0)) > 0:
-                try:
-                    from src.nadobro.services.engine_persistence import (
-                        get_controller_progress,
-                    )
-
-                    _cid = deterministic_controller_id(strategy, telegram_id, network)
-                    _prog = get_controller_progress(_cid) or {}
-                    if _prog:
-                        configs["restore_cycles_completed"] = int(
-                            _prog.get("cycles_completed") or 0
-                        )
-                        configs["restore_funding_usd"] = _prog.get("funding_earned_usd") or 0
-                except Exception:  # noqa: BLE001 - restore is best-effort, never block start
-                    logger.debug("dn progress restore skipped", exc_info=True)
         adapter = build_adapter(client, meta)
         started_controller = await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),
@@ -1202,20 +1135,6 @@ async def run_engine_cycle(
     except Exception:  # noqa: BLE001  # policy: degrade-ok(diagnostics-only block)
         engine_diag = {}
     result: Dict[str, Any] = {"success": True, "action": "engine_ticked", "strategy": strategy}
-    # VOL-LOOP completion: a controller that has finished its work (e.g. Volume
-    # reached its target volume / cap) signals it via ``completed`` so bot_runtime
-    # can finalize the session instead of leaving the strategy idling "running".
-    try:
-        _ctrl_done = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
-        if _ctrl_done is not None and getattr(_ctrl_done, "completed", False):
-            result["done"] = True
-            result["action"] = "engine_completed"
-            result["stop_reason"] = str(getattr(_ctrl_done, "stop_reason", "") or "completed")
-            _vol_done = getattr(_ctrl_done, "session_volume_usd", None)
-            if _vol_done is not None:
-                result["session_volume_usd"] = float(_vol_done)
-    except Exception:  # noqa: BLE001 - completion surfacing is best-effort
-        logger.debug("completion surface failed", exc_info=True)
     if engine_diag:
         result["engine_diag"] = engine_diag
     if gate_event:

@@ -43,12 +43,6 @@ class MarketMakingController(Controller):
         self.auto_spread_k = _dec(self.cfg("auto_spread_k", "1.5"))
         self.spread_floor_half_pct = _dec(self.cfg("spread_floor_half_pct", "0.00015"))
         self.spread_cap_half_pct = _dec(self.cfg("spread_cap_half_pct", "0.005"))
-        # MM-SPREAD-FLOOR fix: the auto-spread path clamps each side to
-        # spread_floor_half_pct (the fee-clearing minimum), but a MANUAL spread
-        # was applied verbatim — a user could quote a sub-fee book that loses on
-        # every fill. Floor the manual per-side spread at the same minimum.
-        self.spread_bid_pct = max(self.spread_bid_pct, self.spread_floor_half_pct)
-        self.spread_ask_pct = max(self.spread_ask_pct, self.spread_floor_half_pct)
         self._bid_id: Optional[str] = None
         self._bid_price: Optional[Decimal] = None
         self._ask_id: Optional[str] = None

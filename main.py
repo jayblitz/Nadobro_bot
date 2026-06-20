@@ -206,7 +206,7 @@ def setup_bot():
         cmd_mm_status, cmd_mm_fills,
     )
     from src.nadobro.handlers.managed_agent import cmd_agent_on, cmd_agent_off, cmd_agent_status
-    from src.nadobro.handlers.brief_commands import cmd_market_news, cmd_morning_brief, cmd_night_howl
+    from src.nadobro.handlers.brief_commands import cmd_market_news, cmd_morning_brief
     from src.nadobro.handlers.messages import handle_message
     from src.nadobro.handlers.callbacks import handle_callback
     from src.nadobro.handlers.update_serialization import with_user_serialized
@@ -261,7 +261,6 @@ def setup_bot():
     app.add_handler(CommandHandler("agent_off", with_user_serialized(cmd_agent_off)))
     app.add_handler(CommandHandler("agent_status", with_user_serialized(cmd_agent_status)))
     app.add_handler(CommandHandler("brief", with_user_serialized(cmd_morning_brief)))
-    app.add_handler(CommandHandler("howl", with_user_serialized(cmd_night_howl)))
     app.add_handler(CommandHandler("news", with_user_serialized(cmd_market_news)))
     # Phase 3: Tread-style live MM dashboard.
     app.add_handler(CommandHandler("mm_status", with_user_serialized(cmd_mm_status)))
@@ -451,7 +450,6 @@ async def run_bot():
         BotCommand("status", "Bot and strategy status"),
         BotCommand("ops", "Order flow and diagnostics"),
         BotCommand("brief", "Your morning market brief"),
-        BotCommand("howl", "Your Night HOWL trade reports"),
         BotCommand("news", "Latest market news"),
         BotCommand("mm_status", "Live market-making dashboard"),
         BotCommand("mm_fills", "Recent MM fills"),

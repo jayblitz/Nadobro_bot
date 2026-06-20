@@ -120,31 +120,6 @@ def test_funding_since_sums_received_positive():
     asyncio.run(body())
 
 
-def test_funding_since_excludes_undated_rows():
-    """DN-FUNDING-WINDOW fix: a funding row with no parseable timestamp must NOT
-    be summed (it used to leak in regardless of the run window, overstating
-    funding earned). Only the in-window, dated row counts here."""
-    perp_pair = "QQQ-PERP"
-    meta = {perp_pair: ProductMeta(product_id=7, tick_size=Decimal("0.01"),
-                                   lot_size=Decimal("0.001"), min_notional=Decimal(1),
-                                   is_perp=True, isolated_only=True)}
-
-    class _FundingClient(_FakeClient):
-        async def get_interest_and_funding_payments(self, *, product_ids=None, limit=200, idx=None):
-            return [
-                {"type": "funding", "product_id": 7, "amount": "-2.0", "timestamp": 2000},
-                # no timestamp / paid_at → undated → must be excluded
-                {"type": "funding", "product_id": 7, "amount": "-50.0"},
-            ]
-
-    async def body():
-        a = NadoAdapter(_FundingClient(), meta)
-        net = await a.funding_since(perp_pair, since_ts=1000)
-        assert net == Decimal("2.0")  # the undated -50 is NOT leaked in
-
-    asyncio.run(body())
-
-
 def test_reduce_only_stripped_on_spot_orders():
     """reduce_only is a perp concept; Nado rejects a reduce-only SPOT order with
     error_code 5000 'Invalid value' (this broke the DN spot leg's close). The

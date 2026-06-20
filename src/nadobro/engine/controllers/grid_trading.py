@@ -105,18 +105,15 @@ class GridController(Controller):
         if step <= 0 or levels < 1:
             return {}
         span = step * Decimal(max(levels - 1, 1))
-        # GRID-DUAL-UNIT fix: don't rebuild a fill-blind, mid-referenced hard
-        # stop from sl_pct (it caused premature wick stop-outs on top of the
-        # margin-% rail). SL is the avg-entry barrier + the fee-aware session
-        # rail; the rebuild only adjusts the band bounds.
+        sl = _dec(self.cfg("sl_pct", 0) or 0)
         if self.SIDE is TradeType.SELL:
             return {
                 "start_price": mid, "end_price": mid * (Decimal(1) + span),
-                "limit_price": Decimal(0),
+                "limit_price": (mid * (Decimal(1) + sl)) if sl > 0 else Decimal(0),
             }
         return {
             "start_price": mid * (Decimal(1) - span), "end_price": mid,
-            "limit_price": Decimal(0),
+            "limit_price": (mid * (Decimal(1) - sl)) if sl > 0 else Decimal(0),
         }
 
     async def _maybe_recenter(self, mid: Optional[Decimal]) -> None:
