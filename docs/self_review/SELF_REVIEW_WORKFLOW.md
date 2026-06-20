@@ -97,8 +97,14 @@ Critical/High items first.
 - [ ] **FUNDING-SIGN** (Med, needs live-data verification — not changed) — the live-session path (`total_funding_paid`, paid-positive: `- funding_paid`) and the share card (`_net_funding_usd`, received-positive: `+ funding`) express funding differently but appear to net consistently (both add received funding). Confirming requires the live sign of the DB column vs the funding feed; flipping a sign blind would risk a real PnL-display bug, so left for data-verified change. `live_session.py` vs `pnl_card_builder.py`.
 - [ ] **NO-LIQ-CHECK** (Low) — consider an engine-side liquidation-distance gate as defense-in-depth. `engine/risk.py`.
 
-### Backtester (no money-bleed proof exists today)
-- [ ] **BT-EMPTY** (High capability gap) — implement the 5-piece harness so each strategy can be simulated. See `docs/audit/STRATEGY_SLTP_AUDIT_2026-06-20.md` §7 for the concrete plan: `candle_ingest` → cost-aware `executor_sim` (fees + funding + slippage) → `engine` time loop → net-of-fees `report` → per-strategy regression. The controllers need no changes.
+### Backtester (money-bleed proof harness)
+- [x] **BT-EMPTY** (High capability gap) — *BUILT 2026-06-20:* the `backtester/` package is implemented — `candle_ingest` (OHLC / price-path / CSV resample), cost-aware `executor_sim` (taker/maker fees + funding accrual on perps only + slippage), `engine` time loop (no look-ahead), net-of-fees `report` (equity curve + max drawdown). `run_backtest(strategy, configs, candles, costs=...)` drives the SAME controllers the live engine builds. Tests in `tests/engine/backtester/` prove the harness is honest (fees flip a winner to a loser) and that grid/rgrid/vol/dn run end-to-end — incl. the DN thesis check (net positive only when funding > fees).
+
+  Run a quick money-bleed check::
+
+      from src.nadobro.engine.backtester import run_backtest, resample_trades_csv, SimCosts
+      candles = resample_trades_csv("f14288_*_trades_*.csv", interval_s=3600, market="WTI")
+      print(run_backtest("grid", grid_cfg, candles, costs=SimCosts()).summary())
 
 ---
 
