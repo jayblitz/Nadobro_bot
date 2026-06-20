@@ -63,7 +63,7 @@ def candles_from_ohlc(rows: Iterable[dict], *, interval_s: float = 3600.0) -> Li
         lo = _dec(_g("low", "l"))
         c = _dec(_g("close", "c"))
         v = _dec(_g("volume", "v", default=0))
-        out.append(Candle(float(ts), o, h, lo, c, v))
+        out.append(Candle(float(_dec(ts)), o, h, lo, c, v))
     out.sort(key=lambda x: x.ts)
     return out
 
