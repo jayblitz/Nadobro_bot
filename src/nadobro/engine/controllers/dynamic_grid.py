@@ -392,10 +392,24 @@ class DynamicGridController(Controller):
                 # is held — book directly with a reduce-only MARKET so the
                 # position can still scale out (preserves prior behavior).
                 lev = int(self.cfg("leverage", 1) or 1)
-                await self.adapter.place_order(
+                order = await self.adapter.place_order(
                     self.trading_pair, close_side, OrderType.MARKET, close_base, None, lev, True,
                 )
-                booked = close_base
+                # DGRID-BOOK-RECORD fix: only the amount that actually FILLED
+                # reduces the position. A naked reduce-only MARKET can come back
+                # unfilled (no liquidity / venue reject); booking close_base
+                # regardless would desync inventory from the venue and mark the
+                # tier booked when nothing closed. Record the real fill so the
+                # controller's net view stays true and the next tier sizes off
+                # the remaining position.
+                filled = _dec(getattr(order, "filled_base", 0) or 0)
+                if filled > 0:
+                    self.inventory.apply_fill(
+                        self.user_id, self.trading_pair, self.id, close_side,
+                        filled, _dec(getattr(order, "filled_quote", 0) or 0),
+                        _dec(getattr(order, "fee_quote", 0) or 0),
+                    )
+                booked = filled
         except Exception:  # noqa: BLE001 - booking is best-effort; retry next tick
             logger.warning("dgrid book_profit failed pair=%s (controller=%s)",
                            self.trading_pair, self.id, exc_info=True)
@@ -406,7 +420,7 @@ class DynamicGridController(Controller):
             self._booked_tiers.add(i)
         logger.info(
             "dgrid book_profit pair=%s side=%s base=%s uPnL=%.2f%% tiers=%s (controller=%s)",
-            self.trading_pair, close_side.name, filled_base, upnl_pct,
+            self.trading_pair, close_side.name, booked, upnl_pct,
             [self.tp_tiers_pct[i] for i in to_book], self.id,
         )
 
