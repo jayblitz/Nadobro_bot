@@ -517,10 +517,6 @@ def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict
             "size": abs(amount),
             "entry_price": float(pos.get("entry_price", 0) or 0),
             "unrealized_pnl": float(pos.get("unrealized_pnl", 0) or 0),
-            # COPY-LEVERAGE fix: capture the leader's leverage so the follower can
-            # mirror the leader's risk profile instead of always using its own
-            # max. 0.0 when the venue doesn't report it (we then fall back).
-            "leverage": float(pos.get("leverage", 0) or 0),
         }
         try:
             orders = leader_client.get_open_orders(pid) or []
@@ -544,78 +540,6 @@ def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict
             trader_id, network, e,
         )
     return leader_pos_map
-
-
-def _compute_copy_sizing(
-    *,
-    leader_size: float,
-    leader_entry: float,
-    leader_leverage: float,
-    leader_max_notional: float,
-    margin_per_trade: float,
-    max_leverage: float,
-    product_max_leverage: float,
-) -> tuple[float, float]:
-    """Return ``(copy_size_base, leverage)`` for a mirrored position.
-
-    COPY-SIZE fix: the old formula was ``margin_per_trade * leverage / entry`` —
-    a FIXED notional that ignored the leader's actual size, so a leader's tiny
-    probe and their max-conviction position were copied identically. We now scale
-    the committed margin by this position's conviction = its notional as a
-    fraction of the leader's LARGEST open position (their biggest bet = full
-    ``margin_per_trade``; a 10%-size probe = 10% of it), capped at
-    ``margin_per_trade``.
-
-    COPY-LEVERAGE fix: leverage mirrors the leader's, capped by the user's max
-    and the product max; falls back to ``min(max, product_max)`` when the venue
-    doesn't report the leader's leverage.
-    """
-    if leader_entry <= 0 or leader_size <= 0:
-        return 0.0, 0.0
-    lev = min(float(max_leverage), float(product_max_leverage))
-    if leader_leverage and leader_leverage > 0:
-        lev = min(float(leader_leverage), float(max_leverage), float(product_max_leverage))
-    lev = max(1.0, lev)
-    leader_notional = leader_size * leader_entry
-    if leader_max_notional and leader_max_notional > 0:
-        weight = min(1.0, leader_notional / leader_max_notional)
-    else:
-        weight = 1.0
-    copy_margin = max(0.0, float(margin_per_trade) * weight)
-    copy_size = (copy_margin * lev) / leader_entry
-    return copy_size, lev
-
-
-def _entry_deviation_too_far(mid: float, leader_entry: float, max_dev_pct: float) -> bool:
-    """COPY-NO-SLIPPAGE gate: True when the follower would enter too far from the
-    leader's entry. With a 30s poll, price can move a lot between the leader's
-    fill and ours; opening anyway means systematically buying higher / selling
-    lower than the trader we copy. We skip (and retry next poll) when the current
-    mid deviates from ``leader_entry`` by more than ``max_dev_pct`` percent.
-    Unknown/zero inputs => allow (can't assess, don't block)."""
-    try:
-        mid = float(mid)
-        leader_entry = float(leader_entry)
-        max_dev_pct = float(max_dev_pct)
-    except (TypeError, ValueError):
-        return False
-    if mid <= 0 or leader_entry <= 0 or max_dev_pct <= 0:
-        return False
-    return abs(mid - leader_entry) / leader_entry * 100.0 > max_dev_pct
-
-
-def _leader_max_notional(leader_pos_map: dict) -> float:
-    """Largest single-position notional in the leader's book (the conviction
-    anchor for proportional copy sizing)."""
-    best = 0.0
-    for p in (leader_pos_map or {}).values():
-        try:
-            n = float(p.get("size", 0) or 0) * float(p.get("entry_price", 0) or 0)
-        except (TypeError, ValueError):
-            n = 0.0
-        if n > best:
-            best = n
-    return best
 
 
 async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
@@ -706,29 +630,6 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     for cp in open_copy_positions:
         copy_pos_by_product[cp["product_id"]] = cp
 
-    # COPY-VENUE-RECONCILE: read the follower's REAL on-venue positions once so we
-    # can avoid opening a duplicate when the wallet already holds the product
-    # (e.g. a prior copy that filled on-chain but failed to record, or a manual
-    # trade). Best-effort — if the client/price is unavailable we degrade to the
-    # prior DB-only behavior rather than block copying.
-    max_entry_deviation_pct = float(mirror.get("max_entry_deviation_pct", 1.5) or 1.5)
-    venue_pos_by_product: dict = {}
-    try:
-        follower_client = await run_blocking(get_user_nado_client, user_id)
-    except Exception as e:  # noqa: BLE001 - reconcile is best-effort; degrade to DB-only
-        logger.debug("copy follower client unavailable for reconcile: %s", e)
-        follower_client = None
-    if follower_client is not None:
-        try:
-            for vp in (await run_blocking(follower_client.get_all_positions) or []):
-                try:
-                    if abs(float(vp.get("amount", 0) or 0)) > 0:
-                        venue_pos_by_product[int(vp.get("product_id", -1))] = vp
-                except (TypeError, ValueError):
-                    continue
-        except Exception as e:  # noqa: BLE001 - reconcile is best-effort
-            logger.debug("copy venue-position reconcile read failed: %s", e)
-
     # 1. Close positions that leader has closed
     for pid, cp in list(copy_pos_by_product.items()):
         if pid not in leader_pos_map:
@@ -815,47 +716,10 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         if leader_entry <= 0:
             continue
 
-        # COPY-VENUE-RECONCILE: the follower already holds this product on-venue
-        # but we have no DB record of it — opening again would stack a duplicate /
-        # orphaned position outside cumulative accounting. Skip; a manual/orphan
-        # position must be reconciled before we copy it.
-        if pid in venue_pos_by_product:
-            logger.warning(
-                "copy skip open: follower already holds product %s on-venue with no "
-                "tracked copy row (mirror %s) — reconcile before copying",
-                pid, mirror_id,
-            )
-            continue
-
-        # COPY-NO-SLIPPAGE: skip a late entry that's drifted too far from the
-        # leader's fill (we'd buy higher / sell lower than the trader we copy).
-        if follower_client is not None:
-            try:
-                _mp = await run_blocking(follower_client.get_market_price, pid)
-                _mid = float((_mp or {}).get("mid") or 0.0)
-            except Exception:  # noqa: BLE001 - price read best-effort; allow if unknown
-                _mid = 0.0
-            if _entry_deviation_too_far(_mid, float(leader_entry or 0), max_entry_deviation_pct):
-                logger.info(
-                    "copy skip open: %s mid %.6f deviates >%.2f%% from leader entry %.6f "
-                    "(mirror %s) — waiting for a closer price",
-                    product_key, _mid, max_entry_deviation_pct, float(leader_entry), mirror_id,
-                )
-                continue
-
-        # COPY-SIZE + COPY-LEVERAGE fix: mirror the leader's conviction (size as a
-        # fraction of their largest position) and leverage, capped by the user's
-        # per-trade budget and max leverage — not a fixed max-leverage notional.
+        # Calculate size based on user's margin_per_trade
         product_max_lev = get_product_max_leverage(product_key, network=network)
-        copy_size, leverage = _compute_copy_sizing(
-            leader_size=float(leader_pos.get("size", 0) or 0),
-            leader_entry=float(leader_entry or 0),
-            leader_leverage=float(leader_pos.get("leverage", 0) or 0),
-            leader_max_notional=_leader_max_notional(leader_pos_map),
-            margin_per_trade=margin_per_trade,
-            max_leverage=max_leverage,
-            product_max_leverage=product_max_lev,
-        )
+        leverage = min(max_leverage, product_max_lev)
+        copy_size = (margin_per_trade * leverage) / leader_entry
 
         if copy_size <= 0:
             continue

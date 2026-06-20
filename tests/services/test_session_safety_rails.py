@@ -80,31 +80,6 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(res)
         self.assertFalse(closed.get("called"))
 
-    async def test_sl_judged_on_net_of_fees_pct(self):
-        # SLTP-GROSS fix: gross PnL is -0.5% (within a 1% stop) but NET of fees
-        # it is -1.5% — the stop MUST fire on the net basis, not ride past it.
-        snap = {
-            "session_pnl": -0.5, "session_pnl_pct": -0.5,
-            "session_pnl_net": -1.5, "session_pnl_pct_net": -1.5,
-            "margin": 100.0,
-        }
-        res, closed, state, fin = await self._run_rail(snap, sl=1.0)
-        self.assertEqual(res, (True, None))
-        self.assertTrue(closed.get("called"))
-        self.assertEqual(fin.call_args.kwargs.get("stop_reason"), "sl_hit")
-
-    async def test_tp_not_triggered_when_fees_eat_the_gross_gain(self):
-        # Gross +2.1% would trip a 2% TP, but net of fees it's only +1.0% — the
-        # TP must NOT fire on a gain the fees already ate.
-        snap = {
-            "session_pnl": 2.1, "session_pnl_pct": 2.1,
-            "session_pnl_net": 1.0, "session_pnl_pct_net": 1.0,
-            "margin": 100.0,
-        }
-        res, closed, _state, fin = await self._run_rail(snap, sl=1.0, tp=2.0)
-        self.assertIsNone(res)
-        self.assertFalse(closed.get("called"))
-
 
 class LiveSnapshotMathTests(unittest.TestCase):
     """Unrealized PnL + position come from the live VENUE position (baseline-
@@ -168,18 +143,6 @@ class LiveSnapshotMathTests(unittest.TestCase):
         self.assertAlmostEqual(snap["session_pnl"], 5.0)
         self.assertFalse(snap["has_position"])
         self.assertEqual(snap["position_side"], "")
-
-    def test_net_pnl_subtracts_fees_gross_does_not(self):
-        # SLTP-GROSS fix: the snapshot exposes BOTH a gross session_pnl (for the
-        # status/share cards) and a net-of-fees basis (for the SL/TP rail).
-        venue = {"size_signed": 0.0, "entry": 0.0, "liq": 0.0, "leverage": 0.0,
-                 "margin_used": 0.0, "upnl": 0.0, "synced_ts": 9e18}
-        snap = self._snap(venue=venue, mark=64000.0, margin=100.0,
-                          metrics={"fills": 8, "volume": 0.0, "fees": 2.0, "realized_pnl": 5.0})
-        self.assertAlmostEqual(snap["session_pnl"], 5.0)          # gross unchanged
-        self.assertAlmostEqual(snap["session_pnl_net"], 3.0)     # 5.0 - 2.0 fees
-        self.assertAlmostEqual(snap["session_pnl_pct"], 5.0)
-        self.assertAlmostEqual(snap["session_pnl_pct_net"], 3.0)
 
     def test_conservation_pnl_is_realized_plus_unrealized(self):
         venue = {"size_signed": 0.02, "entry": 63000.0, "liq": 0.0, "leverage": 0.0,

@@ -729,10 +729,7 @@ class NadoAdapter(NadoAdapterBase):
                 except (TypeError, ValueError):
                     pass
             ts = _funding_row_epoch(row)
-            # DN-FUNDING-WINDOW fix: skip rows we can't date (ts is None). They
-            # were previously summed regardless of the run window, leaking
-            # pre-run funding into the run total and overstating funding earned.
-            if ts is None or ts < float(since_ts):
+            if ts is not None and ts < float(since_ts):
                 continue
             paid_total += funding_payment_amount(row)
         return -paid_total
