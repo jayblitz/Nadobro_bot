@@ -613,6 +613,19 @@ class GridExecutor(Executor):
                         flat.filled_base, price, flat.fee_quote, time.time(),
                     )
                 )
+                remaining_flat = flat.filled_base
+                for level in self.levels:
+                    if remaining_flat <= 0:
+                        break
+                    held = level.filled_base - level._close_recorded
+                    if held <= 0:
+                        continue
+                    take = min(held, remaining_flat)
+                    level._close_recorded += take
+                    remaining_flat -= take
+                    if level._close_recorded >= level.filled_base:
+                        level.state = GridLevelState.COMPLETE
+                        level.close_order_id = None
             remaining = self._net_base()
             if remaining > Decimal("1e-12"):
                 logger.warning(
