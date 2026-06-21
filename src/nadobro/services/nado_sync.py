@@ -635,6 +635,11 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         base_x18 = _x18_field(match, "base_filled", "base_filled_x18")
         quote_x18 = _x18_field(match, "quote_filled", "quote_filled_x18")
         fee_x18 = _x18_field(match, "fee", "fee_x18")
+        # This venue's indexer match has NO per-fill realized PnL field (SDK
+        # ``IndexerMatch`` carries only base/quote/fee), so this is ALWAYS "0".
+        # It is persisted only for column-shape compatibility — realized PnL is
+        # DERIVED downstream from signed cash flow (see get_session_live_metrics);
+        # never treat ``realized_pnl_x18`` as authoritative PnL.
         pnl_x18 = _x18_field(match, "realized_pnl", "realized_pnl_x18")
         base_amount = from_x18(base_x18)
         digest = str(

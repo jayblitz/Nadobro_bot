@@ -266,6 +266,85 @@ def test_session_realized_is_flat_aware():
     assert abs(m_flat["realized_pnl"] - 1.0) < 1e-6    # 651 - 650 = +1
 
 
+def test_session_realized_ignores_void_venue_realized_x18():
+    """Regression for the "$24 PnL shown as 0" bug.
+
+    In production ``nado_sync`` enriches every engine fill with
+    ``realized_pnl_x18 = 0`` because this venue's indexer match has NO per-fill
+    realized PnL field. The OLD code treated a non-null ``realized_pnl_x18`` as
+    venue-authoritative and returned that 0, so a profitable flat run reported $0.
+    The fix derives realized PnL from signed cash flow regardless — a flat
+    round-trip must report +1, and an OPEN residual must report 0 (never the raw
+    cash spent)."""
+    from src.nadobro.db import execute
+    from src.nadobro.models.database import get_session_live_metrics
+
+    execute(_TRADES_DDL)
+    execute("DELETE FROM trades_mainnet WHERE user_id = 4046")
+    uid = 4046
+
+    def _synced(sid, side, base, price, sub_idx, fee=0.1):
+        # Mirrors a venue-synced row: submission_idx set, x18 cash columns set,
+        # realized_pnl_x18 = 0 (the venue provides none).
+        execute(
+            "INSERT INTO trades_mainnet (user_id,product_id,product_name,order_type,side,status,"
+            "source,size,price,fill_size,fill_price,fill_fee,submission_idx,realized_pnl_x18,"
+            "quote_filled_x18,base_filled_x18,strategy_session_id) "
+            "VALUES (%s,2,'BTC-PERP','match',%s,'filled','strategy',%s,%s,%s,%s,%s,%s,0,%s,%s,%s)",
+            (uid, side, base, price, base, price, fee, sub_idx,
+             int(round(base * price * 1e18)), int(round(base * 1e18)), sid),
+        )
+
+    # FLAT round-trip, fully venue-synced (realized_pnl_x18 = 0 on every row):
+    # realized must be the signed cash flow +1, NOT the void venue 0.
+    _synced(601, "long", 0.01, 65000.0, 1001)
+    _synced(601, "short", 0.01, 65100.0, 1002)
+    m = get_session_live_metrics(601, "mainnet", user_id=uid)
+    assert abs(m["net_base"]) < 1e-9
+    assert abs(m["realized_pnl"] - 1.0) < 1e-6
+
+    # OPEN residual, fully venue-synced: realized must be 0 (carried by uPnL),
+    # never the raw cash spent (the -$506 / ±notional bug).
+    _synced(602, "long", 0.01, 65000.0, 1003)
+    m_open = get_session_live_metrics(602, "mainnet", user_id=uid)
+    assert abs(m_open["net_base"] - 0.01) < 1e-9
+    assert abs(m_open["realized_pnl"]) < 1e-9
+
+
+def test_session_metrics_ignore_oversized_manual_flatten_row():
+    """Regression for the corrupted-attribution bug (session 47/51 style).
+
+    The account-wide stop flatten records ONE synthetic ``source='manual'`` close
+    sized to the WHOLE venue position (not the session's own size) and inherits
+    the session id from a matched open trade. A grid that opened 0.01 BTC and
+    round-tripped flat must NOT be dragged non-flat (and its PnL inflated) by an
+    oversized 0.5 BTC manual close attributed to it — that row is excluded from
+    session metrics."""
+    from src.nadobro.db import execute
+    from src.nadobro.models.database import get_session_live_metrics
+
+    execute(_TRADES_DDL)
+    execute("DELETE FROM trades_mainnet WHERE user_id = 4048")
+    uid = 4048
+
+    # Engine round-trip (source='strategy'): flat, +1 realized.
+    _insert_fill(uid, 701, "long", 0.01, 65000.0, fee=0.1)
+    _insert_fill(uid, 701, "short", 0.01, 65100.0, fee=0.1)
+    # Oversized synthetic flatten close (source='manual', no venue digest/idx),
+    # mis-tagged to this session: 0.5 BTC short — 50x the run's own size.
+    execute(
+        "INSERT INTO trades_mainnet (user_id,product_id,product_name,order_type,side,status,"
+        "source,size,price,fill_size,fill_price,fill_fee,strategy_session_id) "
+        "VALUES (%s,2,'BTC-PERP','MARKET_CLOSE','short','closed','manual',0.5,65000.0,0.5,65000.0,5.0,701)",
+        (uid,),
+    )
+
+    m = get_session_live_metrics(701, "mainnet", user_id=uid)
+    assert m["fills"] == 2                              # manual row excluded
+    assert abs(m["net_base"]) < 1e-9                    # flat — NOT -0.49
+    assert abs(m["realized_pnl"] - 1.0) < 1e-6          # +1 — NOT a huge loss
+
+
 def test_session_live_metrics_strict_per_session_isolation():
     from src.nadobro.db import execute
     from src.nadobro.models.database import get_session_live_metrics

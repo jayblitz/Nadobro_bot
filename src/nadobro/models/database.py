@@ -850,6 +850,7 @@ def rollup_session_from_trades(session_id: int, network: str) -> dict:
               ) AS losses
             FROM {table}
             WHERE strategy_session_id = %s
+              AND COALESCE(source, '') <> 'manual'
             """,
             (int(session_id),),
         )
@@ -898,60 +899,38 @@ def _session_match_where(session_id: int, user_id: Optional[int] = None) -> tupl
     into this user's PnL/SL. (The previous product+time-window fallback that
     pulled untagged fills on the product into the session is gone — that was the
     false-SL contamination.)
+
+    ALSO excludes synthetic ``source='manual'`` rows: the account-wide stop
+    flatten (``close_all_positions`` -> ``_record_close_in_db``) writes ONE
+    close row sized to the whole venue position (not the session's own size) and
+    inherits a session id from a matched open trade. Counting it corrupted the
+    run — e.g. a session that opened 0.0032 BTC booked a 0.02785 "close",
+    inflating signed cash flow far past the run's real volume. Engine fills are
+    ``source='strategy'``; DN/vol closes use their own sources, so only the
+    mis-sized flatten placeholder is dropped here.
     """
     if user_id is None:
-        return "strategy_session_id = %s", [int(session_id)]
-    return "strategy_session_id = %s AND user_id = %s", [int(session_id), int(user_id)]
+        return "strategy_session_id = %s AND COALESCE(source, '') <> 'manual'", [int(session_id)]
+    return (
+        "strategy_session_id = %s AND user_id = %s AND COALESCE(source, '') <> 'manual'",
+        [int(session_id), int(user_id)],
+    )
 
 
 def _session_realized_pnl(
     session_id: int, table: str, user_id: Optional[int] = None
 ) -> float:
-    """Session realized PnL: venue-authoritative per-match ``realized_pnl_x18``
-    when fully synced, else the recorder rows' buy/sell/fee decomposition
-    (complete at fill time). Shared by the live dashboard and the finalize
-    rollup so both always agree. Scoped per ``user_id`` + ``strategy_session_id``
-    (see _session_match_where). ``user_id`` is auto-resolved from the session
-    when not supplied, and a fully unscoped query is never run."""
-    if user_id is None:
-        user_id = _resolve_session_user_id(session_id)
-        if user_id is None:
-            return 0.0
-    where, params = _session_match_where(session_id, user_id)
-    try:
-        row = query_one(
-            f"""
-            SELECT
-              COALESCE(SUM(realized_pnl_x18) FILTER (WHERE realized_pnl_x18 IS NOT NULL), 0) / 1e18
-                AS venue_pnl,
-              COUNT(*) FILTER (WHERE realized_pnl_x18 IS NOT NULL) AS venue_rows,
-              COUNT(*) FILTER (
-                WHERE source = 'strategy' AND fill_price IS NOT NULL AND submission_idx IS NULL
-              ) AS pending_sync,
-              COALESCE(SUM(
-                CASE WHEN side = 'short'
-                       THEN  ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
-                     WHEN side = 'long'
-                       THEN -ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
-                     ELSE 0 END
-              ) FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_gross
-            FROM {table}
-            WHERE {where}
-            """,
-            tuple(params),
-        )
-    except Exception:
-        return 0.0
-    if not row:
-        return 0.0
-    # Realized PnL is GROSS of fees on BOTH paths — PnL is PnL; fees are a
-    # standalone metric (see get_session_live_metrics). The venue per-match
-    # realized_pnl is already gross; the recorder buy/sell cash-flow is gross.
-    venue_rows = int(row.get("venue_rows") or 0)
-    pending_sync = int(row.get("pending_sync") or 0)
-    if venue_rows > 0 and pending_sync == 0:
-        return float(row.get("venue_pnl") or 0)
-    return float(row.get("recorder_gross") or 0)
+    """Session realized PnL — flat-aware and DERIVED from signed cash flow.
+
+    This venue reports NO per-fill realized PnL, so realized is the run's signed
+    cash flow when flat (buys/sells fully offset) and 0 while a residual position
+    is open (carried by the venue position's unrealized PnL). Delegates to
+    ``get_session_live_metrics`` so the finalize rollup and the live dashboard
+    compute realized PnL identically and can never disagree. ``table`` selects the
+    network; ``user_id`` auto-resolves from the session when not supplied."""
+    network = "testnet" if str(table).lower().endswith("testnet") else "mainnet"
+    metrics = get_session_live_metrics(int(session_id), network, user_id=user_id)
+    return float(metrics.get("realized_pnl") or 0.0)
 
 
 def get_session_live_metrics(
@@ -1036,21 +1015,20 @@ def get_session_live_metrics(
     if not row:
         return {}
     net_base = float(row.get("net_base") or 0)
-    venue_rows = int(row.get("venue_rows") or 0)
-    pending_sync = int(row.get("pending_sync") or 0)
     is_flat = abs(net_base) <= 1e-9
-    if venue_rows > 0 and pending_sync == 0:
-        # Venue per-match realized is authoritative (gross of fees) — valid open
-        # or flat: it only ever counts CLOSED size.
-        realized = float(row.get("venue_pnl") or 0)
-    elif is_flat:
-        # Run is flat and the venue hasn't tagged matches yet: the recorder
-        # cash-flow == realized PnL exactly (buys and sells fully offset).
-        realized = float(row.get("recorder_gross") or 0)
+    # Realized PnL is DERIVED from signed cash flow, NOT read from a venue field.
+    # This venue's indexer match feed carries no per-fill realized PnL (the SDK
+    # ``IndexerMatch`` has only base/quote/fee), so ``realized_pnl_x18`` is ALWAYS
+    # 0 and must never be trusted as authoritative — doing so reported $0 for
+    # every synced run (the "$24 PnL shown as 0" bug). When the run is flat, buys
+    # and sells fully offset and the signed cash flow IS the realized PnL exactly
+    # (gross of fees; ``signed_cash`` prefers the venue ``quote_filled_x18`` and
+    # falls back to the recorder fill price). With an open residual the realized
+    # portion is unknown here, so report 0 and let the venue position's unrealized
+    # PnL carry it — never the raw cash spent (the bogus -$506 / ±notional bug).
+    if is_flat:
+        realized = float(row.get("signed_cash") or 0)
     else:
-        # Open position, venue not synced yet: realized is unknown. Report 0 and
-        # let the open-leg unrealized (from the venue position) carry the PnL —
-        # never the raw cash spent.
         realized = 0.0
     return {
         "fills": int(row.get("fills") or 0),
