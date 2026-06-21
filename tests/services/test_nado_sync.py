@@ -167,6 +167,54 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         assert params[8] == str(to_x18("0.5"))
         assert params[9] == str(to_x18("1.25"))
 
+    def test_write_matches_enriches_manual_recorder_row_no_dupe(self):
+        # A manual OPEN recorder row (which carries product_id) must be ENRICHED,
+        # not duplicated as a product_id=0 'match' row.
+        execute_calls = []
+
+        def _q(sql, *params):
+            if "source IN ('strategy', 'manual')" in sql:
+                return {"id": 99}        # manual recorder row exists for this digest
+            return None                  # dedup / back-link / window: miss
+
+        with patch.object(nado_sync, "query_one", side_effect=_q), patch.object(
+            nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)
+        ):
+            inserted = nado_sync._write_matches(42, "testnet", [{
+                "submission_idx": "5", "digest": "0xabc",
+                "base_filled": str(to_x18("1")), "quote_filled": str(to_x18("-100")),
+                "fee": str(to_x18("0.1")),
+            }])
+
+        assert inserted == 1
+        sql = execute_calls[0][0]
+        assert "UPDATE" in sql and "INSERT INTO" not in sql  # enriched, not duplicated
+
+    def test_write_matches_resolves_productid_from_open_orders_when_missing(self):
+        # IndexerMatch has no product_id; for a fill with no recorder row (desk),
+        # product_id + name are recovered from the live open_orders row.
+        execute_calls = []
+
+        def _q(sql, *params):
+            if "FROM open_orders" in sql:
+                return {"product_id": 4, "pair": "ETH-PERP"}
+            return None                  # no recorder row, no dedup/intent hit
+
+        with patch.object(nado_sync, "query_one", side_effect=_q), patch.object(
+            nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)
+        ):
+            inserted = nado_sync._write_matches(42, "testnet", [{
+                "submission_idx": "7", "digest": "0xdesk",
+                "base_filled": str(to_x18("2")), "quote_filled": str(to_x18("-200")),
+                "fee": str(to_x18("0.2")),
+            }])
+
+        assert inserted == 1
+        ins = next(c for c in execute_calls if "INSERT INTO" in c[0])
+        params = ins[1]
+        assert params[1] == 4            # product_id resolved from open_orders
+        assert params[2] == "ETH-PERP"   # product_name from open_orders.pair
+
     def test_write_open_orders_does_not_sweep_when_live_rows_have_no_digests(self):
         execute_calls = []
         with patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):

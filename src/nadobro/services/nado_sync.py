@@ -451,6 +451,26 @@ def _write_snapshot(snapshot: dict[str, Any], duration_ms: int) -> None:
     _write_open_orders(user_id, network, orders)
     fills_inserted = _write_matches(user_id, network, matches)
     funding_inserted = _write_funding(user_id, network, funding)
+
+    # Realized PnL is DERIVED position-aware from the FULL trades history (this
+    # venue reports none per-fill, so the snapshot's per-fill sum was always 0).
+    # Recompute it here — off the event loop, AFTER _write_matches has persisted
+    # the latest fills — and overwrite the always-zero pnl fields on the in-memory
+    # ``stats`` so the portfolio deck's Realized line reflects real round trips.
+    # Volume/fees windows stay as computed from the venue x18 columns.
+    try:
+        from src.nadobro.models.database import get_account_realized_pnl_windows
+
+        realized = get_account_realized_pnl_windows(user_id, network)
+        stats = snapshot.get("stats")
+        if isinstance(stats, dict) and realized:
+            stats["pnl_windows"] = realized["pnl_windows"]
+            stats["total_pnl"] = realized["total_pnl"]
+            stats["wins"] = realized["wins"]
+            stats["losses"] = realized["losses"]
+            stats["win_rate"] = realized["win_rate"]
+    except Exception as exc:  # display-only; never fail the snapshot write
+        logger.warning("realized-pnl recompute failed user=%s network=%s: %s", user_id, network, exc)
     execute(
         """
         INSERT INTO sync_log (
@@ -658,17 +678,20 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 user_id, network, product_id, _timestamp_or_now(match.get("timestamp"))
             )
 
-        # Engine fills are written at fill time by DbTradeRecorder as
-        # ``source='strategy'`` rows carrying human columns (volume/fees) but
-        # no ``submission_idx`` / venue ``realized_pnl_x18``. Enrich the
-        # earliest such row for this digest with the authoritative venue x18
-        # PnL/fee instead of inserting a duplicate, so the row stays canonical
-        # and each match's realized PnL is counted exactly once. Scoped to
-        # ``source='strategy'`` — legacy rows are untouched.
+        # Engine (``source='strategy'``) AND manual open (``source='manual'``)
+        # fills are written at fill time by a recorder row carrying human columns
+        # and — crucially — a real ``product_id`` (IndexerMatch has none). Enrich
+        # the earliest such row for this digest with the authoritative venue x18
+        # PnL/fee instead of inserting a duplicate, so the row stays canonical, the
+        # match is counted once, AND the manual fill keeps its product_id (else a
+        # product_id=0 dupe is inserted and the per-trade card can't pair it).
+        # The bot's synthetic account-wide ``MARKET_CLOSE`` rows are EXCLUDED so an
+        # oversized close never acquires a submission_idx and pollutes the ledger.
         if digest:
             recorder_row = query_one(
                 f"SELECT id FROM {table} "
-                f"WHERE order_digest = %s AND source = 'strategy' AND submission_idx IS NULL "
+                f"WHERE order_digest = %s AND source IN ('strategy', 'manual') "
+                f"AND submission_idx IS NULL AND COALESCE(order_type, '') NOT ILIKE '%%close%%' "
                 f"ORDER BY id ASC LIMIT 1",
                 (digest,),
             )
@@ -694,6 +717,26 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 _maybe_increment_session_win_loss(session_id, pnl_x18)
                 continue
 
+        # IndexerMatch carries no product_id. For a freshly-inserted fill with no
+        # recorder row to inherit from (e.g. desk — DbTradeRecorder skips when
+        # there's no session), recover product_id + name from the live open_orders
+        # row for this digest, so the fill is attributable to a product instead of
+        # collapsing into the product_id=0 bucket the per-trade card can't pair.
+        insert_pid = int(product_id or 0)
+        insert_pname = str(match.get("product_name") or "").strip()
+        if insert_pid == 0 and digest:
+            oo = query_one(
+                "SELECT product_id, pair FROM open_orders "
+                "WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 LIMIT 1",
+                (digest,),
+            )
+            if oo and oo.get("product_id"):
+                insert_pid = int(oo["product_id"])
+                if not insert_pname and oo.get("pair"):
+                    insert_pname = str(oo["pair"])
+        if not insert_pname:
+            insert_pname = f"ID:{insert_pid}"
+
         execute(
             f"""
             INSERT INTO {table} (
@@ -706,8 +749,8 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             """,
             (
                 user_id,
-                int(product_id or 0),
-                str(match.get("product_name") or f"ID:{product_id}"),
+                insert_pid,
+                insert_pname,
                 "long" if base_amount >= 0 else "short",
                 str(abs(base_amount)),
                 submission_idx,

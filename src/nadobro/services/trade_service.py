@@ -2026,6 +2026,44 @@ def _get_post_fill_price(client, product_id: int) -> float | None:
 # be updated to query actual execution data by digest.
 
 
+def _resolve_close_session_id(
+    strategy_session_id: int | None,
+    open_trade: dict | None,
+    close_size: float,
+) -> int | None:
+    """Session id to tag onto a recorded close row.
+
+    An EXPLICIT caller-provided id always wins (the caller knows which run it is
+    closing and sized the close accordingly). Otherwise we inherit the matched
+    open trade's session, but ONLY when this close isn't an account-wide flatten
+    larger than that open's own size: ``close_all_positions`` flattens the WHOLE
+    venue position and matches an arbitrary open trade via ``find_open_trade``, so
+    inheriting unconditionally let a 0.0032-BTC run book a 0.02785-BTC "close" and
+    corrupted its volume/PnL. The venue's own per-session close match (digest
+    back-linked in ``nado_sync._write_matches``) carries the correctly-sized close
+    for session attribution, so dropping the tag here loses nothing real. When the
+    open's size is unknown we keep the legacy inherit (least surprise)."""
+    if strategy_session_id is not None:
+        return int(strategy_session_id)
+    if not open_trade:
+        return None
+    inherited = open_trade.get("strategy_session_id")
+    if inherited is None:
+        return None
+    try:
+        open_size = abs(float(open_trade.get("fill_size") or open_trade.get("size") or 0) or 0.0)
+    except (TypeError, ValueError):
+        open_size = 0.0
+    try:
+        csize = abs(float(close_size or 0) or 0.0)
+    except (TypeError, ValueError):
+        csize = 0.0
+    # 1% tolerance absorbs fee/rounding drift between the open and its close.
+    if open_size <= 0 or csize <= open_size * 1.01 + 1e-9:
+        return int(inherited)
+    return None
+
+
 def _record_close_in_db(
     telegram_id: int,
     product_id: int,
@@ -2143,8 +2181,9 @@ def _record_close_in_db(
                 "source": source,
                 "open_trade_id": int(open_trade.get("id")),
             }
-            if strategy_session_id or open_trade.get("strategy_session_id"):
-                close_trade_data["strategy_session_id"] = int(strategy_session_id or open_trade.get("strategy_session_id"))
+            session_for_close = _resolve_close_session_id(strategy_session_id, open_trade, close_size)
+            if session_for_close is not None:
+                close_trade_data["strategy_session_id"] = int(session_for_close)
             if fill_data:
                 close_trade_data["fill_price"] = close_price
                 close_trade_data["fill_fee"] = close_fee + close_builder_fee
@@ -2883,6 +2922,16 @@ def compute_round_trips(
               AND strategy_session_id IS NULL
               AND COALESCE(source, 'manual') = 'manual'
               AND status IN ('filled', 'closed', 'partially_filled')
+              -- Authoritative venue fills only. submission_idx is UNIQUE (dedup
+              -- index) so each real fill appears once, and the bot's synthetic
+              -- ``MARKET_CLOSE`` rows (account-wide, no submission_idx) are excluded
+              -- so they can't double-count or over-close the FIFO inventory.
+              AND submission_idx IS NOT NULL
+              -- Product-less venue fills (product_id 0 — this indexer's match feed
+              -- carries no product_id) can't be paired per product without mixing
+              -- BTC with ETH, so they're excluded rather than shown WRONG. The
+              -- recording fix (resolve product_id at insert) lands separately.
+              AND COALESCE(product_id, 0) <> 0
             ORDER BY COALESCE(filled_at, created_at) ASC, id ASC
             """,
             (int(telegram_id),),
@@ -2904,7 +2953,6 @@ def compute_round_trips(
             continue
         price = float(row.get("px") or 0)
         fee = float(row.get("fee") or 0)
-        realized = float(row.get("realized_pnl") or 0)
         funding = float(row.get("funding_paid") or 0)
         ts = row.get("ts")
         product_name = str(row.get("product_name") or "")
@@ -2917,7 +2965,6 @@ def compute_round_trips(
         if is_close or opposite:
             remaining = size
             close_fees = fee
-            close_realized = realized
             close_funding = funding
             open_lots: list[dict] = []
             while remaining > 1e-12 and queued:
@@ -2944,6 +2991,17 @@ def compute_round_trips(
                 open_fees = sum(l["fees"] for l in open_lots)
                 open_funding = sum(l["funding"] for l in open_lots)
                 volume_usd = (total_open_qty * avg_open) + (size * price)
+                # Realized PnL is DERIVED from open/close prices, NOT read from the
+                # per-fill ``realized_pnl`` column — this venue reports none, so that
+                # column is always 0 and every venue-closed manual trade showed PnL 0.
+                # Gross of fees (fees are a separate field), consistent with the
+                # session/portfolio surfaces. FIFO-derived total over a full
+                # round-trip equals the avg-cost engine's (pair_fills_into_trades).
+                opened_long = existing_side in ("long", "buy")
+                derived_realized = sum(
+                    ((price - l["price"]) if opened_long else (l["price"] - price)) * l["size"]
+                    for l in open_lots
+                )
                 round_trips.append({
                     "trip_key": str(row.get("id")),
                     "product_id": product_id,
@@ -2958,7 +3016,7 @@ def compute_round_trips(
                     "close_ts": ts,
                     "fees": open_fees + close_fees,
                     "funding_paid": open_funding + close_funding,
-                    "realized_pnl": close_realized,
+                    "realized_pnl": derived_realized,
                     "volume_usd": volume_usd,
                 })
             if remaining > 1e-12:
