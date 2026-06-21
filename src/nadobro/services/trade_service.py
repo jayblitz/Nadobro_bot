@@ -2922,6 +2922,16 @@ def compute_round_trips(
               AND strategy_session_id IS NULL
               AND COALESCE(source, 'manual') = 'manual'
               AND status IN ('filled', 'closed', 'partially_filled')
+              -- Authoritative venue fills only. submission_idx is UNIQUE (dedup
+              -- index) so each real fill appears once, and the bot's synthetic
+              -- ``MARKET_CLOSE`` rows (account-wide, no submission_idx) are excluded
+              -- so they can't double-count or over-close the FIFO inventory.
+              AND submission_idx IS NOT NULL
+              -- Product-less venue fills (product_id 0 — this indexer's match feed
+              -- carries no product_id) can't be paired per product without mixing
+              -- BTC with ETH, so they're excluded rather than shown WRONG. The
+              -- recording fix (resolve product_id at insert) lands separately.
+              AND COALESCE(product_id, 0) <> 0
             ORDER BY COALESCE(filled_at, created_at) ASC, id ASC
             """,
             (int(telegram_id),),
@@ -2943,7 +2953,6 @@ def compute_round_trips(
             continue
         price = float(row.get("px") or 0)
         fee = float(row.get("fee") or 0)
-        realized = float(row.get("realized_pnl") or 0)
         funding = float(row.get("funding_paid") or 0)
         ts = row.get("ts")
         product_name = str(row.get("product_name") or "")
@@ -2956,7 +2965,6 @@ def compute_round_trips(
         if is_close or opposite:
             remaining = size
             close_fees = fee
-            close_realized = realized
             close_funding = funding
             open_lots: list[dict] = []
             while remaining > 1e-12 and queued:
@@ -2983,6 +2991,17 @@ def compute_round_trips(
                 open_fees = sum(l["fees"] for l in open_lots)
                 open_funding = sum(l["funding"] for l in open_lots)
                 volume_usd = (total_open_qty * avg_open) + (size * price)
+                # Realized PnL is DERIVED from open/close prices, NOT read from the
+                # per-fill ``realized_pnl`` column — this venue reports none, so that
+                # column is always 0 and every venue-closed manual trade showed PnL 0.
+                # Gross of fees (fees are a separate field), consistent with the
+                # session/portfolio surfaces. FIFO-derived total over a full
+                # round-trip equals the avg-cost engine's (pair_fills_into_trades).
+                opened_long = existing_side in ("long", "buy")
+                derived_realized = sum(
+                    ((price - l["price"]) if opened_long else (l["price"] - price)) * l["size"]
+                    for l in open_lots
+                )
                 round_trips.append({
                     "trip_key": str(row.get("id")),
                     "product_id": product_id,
@@ -2997,7 +3016,7 @@ def compute_round_trips(
                     "close_ts": ts,
                     "fees": open_fees + close_fees,
                     "funding_paid": open_funding + close_funding,
-                    "realized_pnl": close_realized,
+                    "realized_pnl": derived_realized,
                     "volume_usd": volume_usd,
                 })
             if remaining > 1e-12:

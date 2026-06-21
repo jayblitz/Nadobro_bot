@@ -383,6 +383,140 @@ def realized_pnl_windows_from_rows(
     }
 
 
+def _fill_fee(row: dict[str, Any]) -> Decimal:
+    """Total fee for a fill row (venue ``fee_x18`` preferred, else recorder
+    ``fill_fee``/``fees`` + ``builder_fee``)."""
+    if row.get("fee_x18") is not None:
+        return abs(from_x18(row.get("fee_x18")))
+    fee = abs(decimal_value(_pick(row, "fill_fee", "fees", default=0)))
+    builder = abs(decimal_value(_pick(row, "builder_fee", default=0)))
+    return fee + builder
+
+
+@dataclass(frozen=True)
+class PairedTrade:
+    """One position round-trip (flat -> flat, or the leg before a flip), built by
+    pairing fills. ``realized_pnl`` is GROSS of fees; ``fees`` is the total paid
+    across every fill in the trade; ``net_pnl`` subtracts them."""
+    product_id: int
+    direction: str            # 'long' or 'short' (the entry direction)
+    size: Decimal             # base closed (== entry base for a fully-closed trade)
+    entry_price: Decimal      # size-weighted average entry
+    exit_price: Decimal | None  # size-weighted average exit (None while open)
+    realized_pnl: Decimal     # gross of fees
+    fees: Decimal
+    opened_at: datetime | None
+    closed_at: datetime | None
+    closed: bool
+
+    @property
+    def net_pnl(self) -> Decimal:
+        return self.realized_pnl - self.fees
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["net_pnl"] = self.net_pnl
+        return d
+
+
+class _OpenLeg:
+    """Mutable accumulator for the position currently open on one product."""
+
+    __slots__ = ("pid", "direction", "pos", "entry_base", "entry_cost",
+                 "exit_base", "exit_proceeds", "realized", "fees", "opened_at", "closed_at")
+
+    def __init__(self, pid, signed_qty, price, fee, ts):
+        self.pid = pid
+        self.direction = "long" if signed_qty > ZERO else "short"
+        self.pos = signed_qty
+        self.entry_base = abs(signed_qty)
+        self.entry_cost = abs(signed_qty) * price
+        self.exit_base = ZERO
+        self.exit_proceeds = ZERO
+        self.realized = ZERO
+        self.fees = fee
+        self.opened_at = ts
+        self.closed_at = ts
+
+    def _finish(self) -> PairedTrade:
+        entry_price = (self.entry_cost / self.entry_base) if self.entry_base > ZERO else ZERO
+        exit_price = (self.exit_proceeds / self.exit_base) if self.exit_base > ZERO else None
+        return PairedTrade(
+            product_id=self.pid, direction=self.direction, size=self.exit_base,
+            entry_price=entry_price, exit_price=exit_price, realized_pnl=self.realized,
+            fees=self.fees, opened_at=self.opened_at, closed_at=self.closed_at, closed=True,
+        )
+
+    def _open_snapshot(self) -> PairedTrade:
+        entry_price = (self.entry_cost / self.entry_base) if self.entry_base > ZERO else ZERO
+        exit_price = (self.exit_proceeds / self.exit_base) if self.exit_base > ZERO else None
+        return PairedTrade(
+            product_id=self.pid, direction=self.direction, size=abs(self.pos),
+            entry_price=entry_price, exit_price=exit_price, realized_pnl=self.realized,
+            fees=self.fees, opened_at=self.opened_at, closed_at=self.closed_at, closed=False,
+        )
+
+
+def pair_fills_into_trades(rows: list[dict[str, Any]] | None) -> list[PairedTrade]:
+    """Pair a COMPLETE fill ledger into per-position round-trips.
+
+    Replays fills per product in time order on a running signed position with an
+    average entry cost (the venue reports no realized PnL, so it is derived). Each
+    time the position returns to flat (or flips) the round-trip is emitted as a
+    closed ``PairedTrade`` carrying avg entry, avg exit, realized PnL (gross of
+    fees), and the fees paid across the trade. A position still open at the end is
+    emitted last with ``closed=False`` (its ``realized_pnl`` is whatever earlier
+    partial closes booked; unrealized is left to the live position feed).
+
+    Accuracy depends on ``rows`` being the full per-product history — pass
+    venue-confirmed fills (see ``database.get_paired_trades``). Closed trades are
+    returned in close-time order; a trailing open trade (if any) comes last."""
+    norm = []
+    for row in rows or []:
+        c = _fill_signed_base_price_ts(row)
+        if c is not None:
+            pid, signed, price, ts = c
+            norm.append((pid, signed, price, _fill_fee(row), ts))
+    norm.sort(key=lambda c: c[4] or _EPOCH0)
+
+    open_legs: dict[int, _OpenLeg] = {}
+    closed: list[PairedTrade] = []
+    for pid, signed_qty, price, fee, ts in norm:
+        leg = open_legs.get(pid)
+        if leg is None:
+            open_legs[pid] = _OpenLeg(pid, signed_qty, price, fee, ts)
+            continue
+        leg.fees += fee
+        leg.closed_at = ts
+        if (leg.pos > ZERO) == (signed_qty > ZERO):
+            # Same direction: add to the position, re-weighting the avg entry.
+            leg.entry_base += abs(signed_qty)
+            leg.entry_cost += abs(signed_qty) * price
+            leg.pos += signed_qty
+            continue
+        # Opposite direction: realize PnL on the closed portion.
+        closing = min(abs(leg.pos), abs(signed_qty))
+        entry_avg = (leg.entry_cost / leg.entry_base) if leg.entry_base > ZERO else ZERO
+        leg.realized += (price - entry_avg) * closing if leg.pos > ZERO else (entry_avg - price) * closing
+        leg.exit_base += closing
+        leg.exit_proceeds += closing * price
+        if abs(signed_qty) < abs(leg.pos):
+            leg.pos += signed_qty  # partial close; entry avg unchanged
+        elif abs(signed_qty) == abs(leg.pos):
+            closed.append(leg._finish())
+            del open_legs[pid]
+        else:
+            # Flip: close the current trade fully, open a new one with the remainder.
+            closed.append(leg._finish())
+            remaining = abs(signed_qty) - abs(leg.pos)
+            signed_remaining = remaining if signed_qty > ZERO else -remaining
+            open_legs[pid] = _OpenLeg(pid, signed_remaining, price, ZERO, ts)
+
+    result = list(closed)
+    result.extend(leg._open_snapshot() for leg in open_legs.values())
+    return result
+
+
 def compute_total_equity(
     summary: dict[str, Any] | None,
     spot_balances: dict[Any, Any] | None = None,

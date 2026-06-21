@@ -1109,6 +1109,58 @@ def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> di
     return realized_pnl_windows_from_rows(rows, now=now)
 
 
+def get_paired_trades(
+    user_id: int,
+    network: str,
+    *,
+    product_id: int | None = None,
+    closed_only: bool = False,
+    limit: int | None = None,
+) -> list[dict]:
+    """Per-position round-trips for a user's NORMAL + engine trades, paired from
+    the authoritative venue fill ledger so each open is matched to its close and a
+    per-trade PnL card (entry/exit/PnL/fees) can be built.
+
+    Source = venue-confirmed fills only (``submission_idx IS NOT NULL``), deduped
+    per ``submission_idx`` so the bot's synthetic ``MARKET_CLOSE`` rows and any
+    duplicate recorder/match pair can never double-count. Pairing is position-
+    aware (see ``portfolio_calculator.pair_fills_into_trades``). Returns newest
+    closed trades first, with any still-open position last. ``[]`` on any error."""
+    from src.nadobro.services.portfolio_calculator import pair_fills_into_trades
+
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    # product_id 0 = product-less venue fills (this indexer's match feed carries no
+    # product_id); excluded so per-product pairing never mixes BTC with ETH.
+    where = ["user_id = %s", "submission_idx IS NOT NULL", "COALESCE(product_id, 0) <> 0"]
+    params: list = [int(user_id)]
+    if product_id is not None:
+        where.append("product_id = %s")
+        params.append(int(product_id))
+    try:
+        rows = query_all(
+            f"""
+            SELECT DISTINCT ON (submission_idx)
+                   product_id, side, fill_size, size, fill_price, price,
+                   base_filled_x18, quote_filled_x18, fee_x18, fill_fee, fees, builder_fee,
+                   submission_idx, COALESCE(filled_at, created_at) AS filled_at
+            FROM {table}
+            WHERE {" AND ".join(where)}
+            ORDER BY submission_idx, COALESCE(filled_at, created_at)
+            """,
+            tuple(params),
+        )
+    except Exception:
+        return []
+    trades = [t.to_dict() for t in pair_fills_into_trades(rows)]
+    if closed_only:
+        trades = [t for t in trades if t.get("closed")]
+    # Newest first (open trade, with no closed_at, sorts to the top).
+    trades.sort(key=lambda t: (t.get("closed_at") is not None, t.get("closed_at") or ""), reverse=True)
+    if limit is not None and int(limit) > 0:
+        trades = trades[: int(limit)]
+    return trades
+
+
 def get_session_recent_fills(
     session_id: int, network: str, limit: int = 10, user_id: Optional[int] = None
 ) -> list:
