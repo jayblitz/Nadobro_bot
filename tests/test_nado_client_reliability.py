@@ -676,5 +676,85 @@ class NadoClientPortfolioWrapperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["digests"], ["0xaaa"])
 
 
+class NadoNlpVaultClientTests(unittest.TestCase):
+    _SHARED_MIN = "100000000000000000000"  # every Nado spot shares this min_size
+
+    @staticmethod
+    def _all_products_payload():
+        z = {"interest_floor_x18": "0", "interest_small_cap_x18": "0",
+             "interest_large_cap_x18": "0", "withdraw_fee_x18": "0"}
+        nonzero = {"interest_floor_x18": "10000000000000000",
+                   "interest_small_cap_x18": "40000000000000000",
+                   "interest_large_cap_x18": "1000000000000000000",
+                   "withdraw_fee_x18": "10000000000000"}
+        return {"data": {"spot_products": [
+            {"product_id": 0, "book_info": {"min_size": "0"}, "config": dict(z)},        # USDT0 quote
+            {"product_id": 1, "book_info": {"min_size": NadoNlpVaultClientTests._SHARED_MIN}, "config": dict(nonzero)},  # kBTC
+            {"product_id": 3, "book_info": {"min_size": NadoNlpVaultClientTests._SHARED_MIN}, "config": dict(nonzero)},  # wETH
+            {"product_id": 11, "book_info": {"min_size": NadoNlpVaultClientTests._SHARED_MIN}, "config": dict(z)},       # NLP vault token
+        ]}}
+
+    def test_resolve_nlp_product_id_picks_vault_token_not_first_spot(self):
+        """Regression: every spot shares min_size=100e18, so the old
+        ``min_size.startswith`` scan returned the FIRST match (kBTC, pid 1, ~$64k)
+        and the vault mis-valued kBTC dust as a phantom NLP position. The resolver
+        must pick the zero-interest / zero-withdraw-fee vault token (pid 11)."""
+        client = NadoClient.from_address("0x" + "4" * 40, network="mainnet")
+        client._initialized = True
+        client._nlp_product_id = None
+        client._query_rest = lambda qt, extra=None: self._all_products_payload()
+        with patch.dict("os.environ", {"NADO_NLP_PRODUCT_ID": ""}, clear=False):
+            self.assertEqual(client.resolve_nlp_product_id(), 11)
+
+    def test_resolve_nlp_product_id_unique_candidate_without_default(self):
+        """If the known per-network id isn't present but the config uniquely
+        identifies one vault token, trust that one."""
+        client = NadoClient.from_address("0x" + "7" * 40, network="mainnet")
+        client._initialized = True
+        client._nlp_product_id = None
+        payload = self._all_products_payload()
+        # Renumber the vault token to 99 so the mainnet default (11) is absent.
+        for sp in payload["data"]["spot_products"]:
+            if sp["product_id"] == 11:
+                sp["product_id"] = 99
+        client._query_rest = lambda qt, extra=None: payload
+        with patch.dict("os.environ", {"NADO_NLP_PRODUCT_ID": ""}, clear=False):
+            self.assertEqual(client.resolve_nlp_product_id(), 99)
+
+    def test_get_max_nlp_mintable_includes_product_id(self):
+        """The gateway requires product_id (sender alone returned 0, which the UI
+        showed as 'deposits closed'). Verify it's threaded and the x18 amount parsed."""
+        client = NadoClient.from_address("0x" + "5" * 40, network="mainnet")
+        client._initialized = True
+        captured: dict = {}
+
+        def fake_query(qt, extra=None):
+            captured["qt"] = qt
+            captured["extra"] = dict(extra or {})
+            return {"data": {"max_quote_amount": str(int(round(211.57 * 1e18)))}}
+
+        client._query_rest = fake_query
+        out = client.get_max_nlp_mintable(spot_leverage=False, product_id=11)
+        self.assertEqual(captured["qt"], "max_nlp_mintable")
+        self.assertEqual(int(captured["extra"]["product_id"]), 11)
+        self.assertEqual(captured["extra"]["spot_leverage"], "false")
+        self.assertEqual(captured["extra"]["sender"], client.subaccount_hex)
+        self.assertAlmostEqual(out["max_mintable_usdt0"], 211.57, places=2)
+
+    def test_get_max_nlp_mintable_resolves_product_id_when_omitted(self):
+        client = NadoClient.from_address("0x" + "6" * 40, network="mainnet")
+        client._initialized = True
+        client._nlp_product_id = 11  # pre-seed resolver cache
+        captured: dict = {}
+
+        def fake_query(qt, extra=None):
+            captured["extra"] = dict(extra or {})
+            return {"data": {"max_quote_amount": "0"}}
+
+        client._query_rest = fake_query
+        client.get_max_nlp_mintable(spot_leverage=False)
+        self.assertEqual(int(captured["extra"]["product_id"]), 11)
+
+
 if __name__ == "__main__":
     unittest.main()

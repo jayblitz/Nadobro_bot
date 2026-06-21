@@ -3443,7 +3443,21 @@ class NadoClient:
                 return 0.0
 
     def resolve_nlp_product_id(self) -> int | None:
-        """Discover the NLP spot product id from all_products (cached per client)."""
+        """Discover the NLP spot product id from all_products (cached per client).
+
+        NLP is the only spot product configured as a zero-interest, zero-spot-
+        withdraw-fee vault token: its 4-day lock and bps fee live in the vault,
+        not the spot interest model, so ``interest_*_x18`` and ``withdraw_fee_x18``
+        are all 0 (every other spot — kBTC, wETH, RWAs — carries non-zero borrow
+        interest). We anchor to the known per-network id and validate it against
+        that config.
+
+        Bug history: the previous heuristic matched ``book_info.min_size`` starting
+        with ``100000000000000000``, but EVERY Nado spot shares
+        ``min_size=100000000000000000000`` — so the scan returned the FIRST match
+        (kBTC, pid 1, ~$64k) and the vault reported the user's kBTC dust as a
+        phantom NLP position (~$3.20 for 0.00005 kBTC) instead of $0.
+        """
         cached = getattr(self, "_nlp_product_id", None)
         if cached is not None:
             return cached
@@ -3455,19 +3469,44 @@ class NadoClient:
             except ValueError:
                 pass
         default = 11 if self.network == "mainnet" else 1
+
+        def _is_zero(cfg: dict, key: str) -> bool:
+            try:
+                return int(cfg.get(key) or 0) == 0
+            except (TypeError, ValueError):
+                return False
+
+        def _is_nlp_like(sp: dict) -> bool:
+            cfg = sp.get("config") or {}
+            # The vault token has no spot borrow interest and no spot withdraw fee.
+            return (
+                _is_zero(cfg, "interest_floor_x18")
+                and _is_zero(cfg, "interest_small_cap_x18")
+                and _is_zero(cfg, "interest_large_cap_x18")
+                and _is_zero(cfg, "withdraw_fee_x18")
+            )
+
         try:
             payload = self._query_rest("all_products") or {}
             data = payload.get("data") or payload
+            candidates: list[int] = []
             for sp in data.get("spot_products") or []:
                 if not isinstance(sp, dict):
                     continue
                 pid = sp.get("product_id")
-                book = sp.get("book_info") or {}
-                min_size = str(book.get("min_size") or "")
-                # NLP spot uses large min_size increments on mainnet.
-                if pid is not None and min_size.startswith("100000000000000000"):
-                    self._nlp_product_id = int(pid)
-                    return self._nlp_product_id
+                if pid is None or int(pid) == 0:  # 0 = USDT0 quote, never NLP
+                    continue
+                if _is_nlp_like(sp):
+                    candidates.append(int(pid))
+            # Prefer the known per-network id when the venue confirms it; else, if
+            # the config uniquely identifies one product, trust that; otherwise
+            # fall back to the per-network default.
+            if default in candidates:
+                self._nlp_product_id = default
+                return default
+            if len(candidates) == 1:
+                self._nlp_product_id = candidates[0]
+                return candidates[0]
         except Exception as e:
             logger.debug("resolve_nlp_product_id failed network=%s err=%s", self.network, e)
         self._nlp_product_id = default
@@ -3540,13 +3579,23 @@ class NadoClient:
             logger.debug("nlp_locked_balances failed user=%s err=%s", _mask_address(self.address or ""), e)
             return empty
 
-    def get_max_nlp_mintable(self, *, spot_leverage: bool = False) -> dict:
-        """Maximum USDT0 the user can mint into NLP right now."""
+    def get_max_nlp_mintable(self, *, spot_leverage: bool = False, product_id: int | None = None) -> dict:
+        """Maximum USDT0 the user can mint into NLP right now.
+
+        ``product_id`` is REQUIRED by the gateway (QueryMaxLpMintableParams =
+        sender + product_id). Omitting it returned 0 for everyone, which the UI
+        surfaced as "deposits closed" even while the vault was open. Resolve the
+        NLP product id when the caller doesn't supply it.
+        """
         try:
+            pid = int(product_id) if product_id is not None else self.resolve_nlp_product_id()
+            if pid is None:
+                return {"max_mintable_usdt0": 0.0, "raw": {}}
             payload = self._query_rest(
                 "max_nlp_mintable",
                 {
                     "sender": self.subaccount_hex,
+                    "product_id": int(pid),
                     "spot_leverage": "true" if spot_leverage else "false",
                 },
             ) or {}
