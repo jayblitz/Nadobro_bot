@@ -274,6 +274,115 @@ def aggregate_trading_stats(
     }
 
 
+_EPOCH0 = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _fill_signed_base_price_ts(
+    row: dict[str, Any],
+) -> tuple[int, Decimal, Decimal, datetime | None] | None:
+    """Normalize a fill/trade row to ``(product_id, signed_base, price, ts)``.
+
+    ``signed_base`` is +base for long/buy, -base for short/sell. ``price`` is the
+    per-unit fill price (prefers venue ``quote_filled_x18 / base_filled_x18``,
+    falls back to the recorder ``fill_price``/``price``). Returns ``None`` when the
+    row has no usable base / price / side."""
+    base = abs(_decimal_from_possible_x18(row, "base_filled_x18", "fill_size"))
+    if base <= ZERO:
+        base = abs(decimal_value(_pick(row, "fill_size", "size", default=0)))
+    if base <= ZERO:
+        return None
+    quote = abs(_decimal_from_possible_x18(row, "quote_filled_x18", "quote_filled"))
+    price = (quote / base) if quote > ZERO else decimal_value(_pick(row, "fill_price", "price", default=0))
+    if price <= ZERO:
+        return None
+    side = str(_pick(row, "side", default="")).lower()
+    if side in ("long", "buy"):
+        signed = base
+    elif side in ("short", "sell"):
+        signed = -base
+    else:
+        return None
+    pid = int(_pick(row, "product_id", default=0) or 0)
+    return pid, signed, price, _row_time(row)
+
+
+def realized_pnl_windows_from_rows(
+    rows: list[dict[str, Any]] | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Position-aware realized PnL over a COMPLETE set of fills.
+
+    This venue reports no per-fill realized PnL (the indexer match has only
+    base/quote/fee), so realized PnL MUST be derived: replay fills per product in
+    time order, keep a running signed position + average entry cost, and realize
+    PnL (gross of fees) on the portion each fill CLOSES — ``(exit - entry) * closed``
+    for longs, ``(entry - exit) * closed`` for shorts. A position flip realizes the
+    closed leg then opens the remainder at the fill price. Realized PnL is attributed
+    to the closing fill's timestamp and bucketed into 24h / 7d / 30d / all windows.
+
+    Accuracy depends on ``rows`` being the FULL per-product history — a truncated
+    feed misses earlier entry basis. Callers should pass complete
+    ``trades_<network>`` fills (see ``get_account_realized_pnl_windows``).
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    thresholds = {"24h": Decimal(24 * 3600), "7d": Decimal(7 * 24 * 3600), "30d": Decimal(30 * 24 * 3600)}
+    keys = ("24h", "7d", "30d", "all")
+    pnl_windows = {k: ZERO for k in keys}
+    wins = 0
+    losses = 0
+
+    norm = [c for c in (_fill_signed_base_price_ts(r) for r in (rows or [])) if c is not None]
+    # Chronological replay; ts-less rows (shouldn't happen for DB rows) sort oldest.
+    norm.sort(key=lambda c: c[3] or _EPOCH0)
+
+    state: dict[int, tuple[Decimal, Decimal]] = {}  # product_id -> (signed_pos, avg_entry)
+    for pid, signed_qty, price, ts in norm:
+        pos, entry = state.get(pid, (ZERO, ZERO))
+        realized = ZERO
+        if pos == ZERO or (pos > ZERO) == (signed_qty > ZERO):
+            # Opening or adding in the same direction: update the average entry.
+            new_abs = abs(pos) + abs(signed_qty)
+            entry = (entry * abs(pos) + price * abs(signed_qty)) / new_abs
+            pos = pos + signed_qty
+        else:
+            # Reducing / closing / flipping: realize PnL on the closed portion.
+            closing = min(abs(pos), abs(signed_qty))
+            realized = (price - entry) * closing if pos > ZERO else (entry - price) * closing
+            if abs(signed_qty) < abs(pos):
+                pos = pos + signed_qty  # move toward flat; entry unchanged
+            elif abs(signed_qty) == abs(pos):
+                pos, entry = ZERO, ZERO
+            else:
+                remaining = abs(signed_qty) - abs(pos)  # flip: open the remainder
+                pos = remaining if signed_qty > ZERO else -remaining
+                entry = price
+        state[pid] = (pos, entry)
+
+        if realized != ZERO:
+            pnl_windows["all"] += realized
+            if realized > ZERO:
+                wins += 1
+            elif realized < ZERO:
+                losses += 1
+            if ts is not None:
+                age = Decimal(max(0, int((now - ts.astimezone(timezone.utc)).total_seconds())))
+                for wk, thr in thresholds.items():
+                    if age <= thr:
+                        pnl_windows[wk] += realized
+
+    decisive = wins + losses
+    return {
+        "pnl_windows": pnl_windows,
+        "total_pnl": pnl_windows["all"],
+        "wins": wins,
+        "losses": losses,
+        "win_rate": (Decimal(wins) / Decimal(decisive) * Decimal(100)) if decisive else ZERO,
+    }
+
+
 def compute_total_equity(
     summary: dict[str, Any] | None,
     spot_balances: dict[Any, Any] | None = None,

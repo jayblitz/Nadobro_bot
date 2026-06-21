@@ -451,6 +451,26 @@ def _write_snapshot(snapshot: dict[str, Any], duration_ms: int) -> None:
     _write_open_orders(user_id, network, orders)
     fills_inserted = _write_matches(user_id, network, matches)
     funding_inserted = _write_funding(user_id, network, funding)
+
+    # Realized PnL is DERIVED position-aware from the FULL trades history (this
+    # venue reports none per-fill, so the snapshot's per-fill sum was always 0).
+    # Recompute it here — off the event loop, AFTER _write_matches has persisted
+    # the latest fills — and overwrite the always-zero pnl fields on the in-memory
+    # ``stats`` so the portfolio deck's Realized line reflects real round trips.
+    # Volume/fees windows stay as computed from the venue x18 columns.
+    try:
+        from src.nadobro.models.database import get_account_realized_pnl_windows
+
+        realized = get_account_realized_pnl_windows(user_id, network)
+        stats = snapshot.get("stats")
+        if isinstance(stats, dict) and realized:
+            stats["pnl_windows"] = realized["pnl_windows"]
+            stats["total_pnl"] = realized["total_pnl"]
+            stats["wins"] = realized["wins"]
+            stats["losses"] = realized["losses"]
+            stats["win_rate"] = realized["win_rate"]
+    except Exception as exc:  # display-only; never fail the snapshot write
+        logger.warning("realized-pnl recompute failed user=%s network=%s: %s", user_id, network, exc)
     execute(
         """
         INSERT INTO sync_log (

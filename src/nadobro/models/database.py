@@ -1077,6 +1077,38 @@ def get_session_turnover(
     return {"volume": float(row.get("volume") or 0), "fills": int(row.get("fills") or 0)}
 
 
+def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> dict:
+    """Account-level realized PnL (24h/7d/30d/all), DERIVED position-aware from the
+    user's COMPLETE venue-confirmed fill history in ``trades_<network>``.
+
+    This venue reports no per-fill realized PnL, so the per-fill sum that powered
+    the portfolio deck was always 0. Here we replay every real fill (excluding the
+    synthetic ``source='manual'`` flatten rows) per product in time order and
+    realize PnL on position reductions (see
+    ``portfolio_calculator.realized_pnl_windows_from_rows``). Returns an empty dict
+    on any error so the read-only display path never raises."""
+    from src.nadobro.services.portfolio_calculator import realized_pnl_windows_from_rows
+
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    try:
+        rows = query_all(
+            f"""
+            SELECT product_id, side, fill_size, size, fill_price, price,
+                   base_filled_x18, quote_filled_x18,
+                   COALESCE(filled_at, created_at) AS filled_at
+            FROM {table}
+            WHERE user_id = %s
+              AND COALESCE(source, '') <> 'manual'
+              AND status IN ('filled', 'closed', 'partially_filled')
+            ORDER BY product_id, COALESCE(filled_at, created_at), id
+            """,
+            (int(user_id),),
+        )
+    except Exception:
+        return {}
+    return realized_pnl_windows_from_rows(rows, now=now)
+
+
 def get_session_recent_fills(
     session_id: int, network: str, limit: int = 10, user_id: Optional[int] = None
 ) -> list:
