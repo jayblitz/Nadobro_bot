@@ -180,6 +180,7 @@ def get_trades_by_user(
     limit: int | None = 50,
     network: str = "mainnet",
     strategy_session_id: int | None = None,
+    since_created_at=None,
 ) -> list:
     table = _trades_table(network)
     where = ["user_id = %s"]
@@ -187,6 +188,9 @@ def get_trades_by_user(
     if strategy_session_id is not None:
         where.append("strategy_session_id = %s")
         params.append(int(strategy_session_id))
+    if since_created_at is not None:
+        where.append("created_at >= %s")
+        params.append(since_created_at)
     where_sql = " AND ".join(where)
     if limit is None or int(limit) <= 0:
         return query_all(
@@ -920,17 +924,44 @@ def _session_match_where(session_id: int, user_id: Optional[int] = None) -> tupl
 def _session_realized_pnl(
     session_id: int, table: str, user_id: Optional[int] = None
 ) -> float:
-    """Session realized PnL — flat-aware and DERIVED from signed cash flow.
+    """Session realized PnL — position-aware and DERIVED from session fills.
 
-    This venue reports NO per-fill realized PnL, so realized is the run's signed
-    cash flow when flat (buys/sells fully offset) and 0 while a residual position
-    is open (carried by the venue position's unrealized PnL). Delegates to
-    ``get_session_live_metrics`` so the finalize rollup and the live dashboard
-    compute realized PnL identically and can never disagree. ``table`` selects the
-    network; ``user_id`` auto-resolves from the session when not supplied."""
+    This venue reports NO per-fill realized PnL, so realized is replayed from the
+    run's own fills. Delegates to ``get_session_live_metrics`` so the finalize
+    rollup and the live dashboard compute realized PnL identically and can never
+    disagree. ``table`` selects the network; ``user_id`` auto-resolves from the
+    session when not supplied."""
     network = "testnet" if str(table).lower().endswith("testnet") else "mainnet"
     metrics = get_session_live_metrics(int(session_id), network, user_id=user_id)
     return float(metrics.get("realized_pnl") or 0.0)
+
+
+def _derive_session_realized_pnl(
+    table: str,
+    where: str,
+    params: list,
+    session_id: int,
+) -> float | None:
+    """Replay this session's fills to realize closed legs while residual inventory remains."""
+    from src.nadobro.services.portfolio_calculator import realized_pnl_windows_from_rows
+
+    rows = query_all(
+        f"""
+        SELECT
+          COALESCE(NULLIF(product_id, 0), (
+            SELECT product_id FROM strategy_sessions WHERE id = %s
+          )) AS product_id,
+          side, fill_size, size, fill_price, price,
+          base_filled_x18, quote_filled_x18,
+          COALESCE(filled_at, created_at) AS filled_at
+        FROM {table}
+        WHERE {where}
+          AND status IN ('filled', 'closed', 'partially_filled')
+        ORDER BY COALESCE(filled_at, created_at), id
+        """,
+        (int(session_id), *tuple(params)),
+    )
+    return float(realized_pnl_windows_from_rows(rows).get("total_pnl") or 0)
 
 
 def get_session_live_metrics(
@@ -1016,20 +1047,16 @@ def get_session_live_metrics(
         return {}
     net_base = float(row.get("net_base") or 0)
     is_flat = abs(net_base) <= 1e-9
-    # Realized PnL is DERIVED from signed cash flow, NOT read from a venue field.
-    # This venue's indexer match feed carries no per-fill realized PnL (the SDK
-    # ``IndexerMatch`` has only base/quote/fee), so ``realized_pnl_x18`` is ALWAYS
-    # 0 and must never be trusted as authoritative — doing so reported $0 for
-    # every synced run (the "$24 PnL shown as 0" bug). When the run is flat, buys
-    # and sells fully offset and the signed cash flow IS the realized PnL exactly
-    # (gross of fees; ``signed_cash`` prefers the venue ``quote_filled_x18`` and
-    # falls back to the recorder fill price). With an open residual the realized
-    # portion is unknown here, so report 0 and let the venue position's unrealized
-    # PnL carry it — never the raw cash spent (the bogus -$506 / ±notional bug).
-    if is_flat:
-        realized = float(row.get("signed_cash") or 0)
-    else:
-        realized = 0.0
+    # Realized PnL is DERIVED from session fills, NOT read from a venue field.
+    # Replay fills position-aware so partial closes count even while the run has
+    # residual inventory; open-only buys/sells still realize 0. If the replay read
+    # fails, keep the previous safe flat-only fallback rather than surfacing raw
+    # cash spent as realized PnL.
+    try:
+        replayed = _derive_session_realized_pnl(table, where, params, int(session_id))
+        realized = float(replayed or 0)
+    except Exception:
+        realized = float(row.get("signed_cash") or 0) if is_flat else 0.0
     return {
         "fills": int(row.get("fills") or 0),
         "volume": float(row.get("volume") or 0),
@@ -1093,14 +1120,17 @@ def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> di
     try:
         rows = query_all(
             f"""
-            SELECT product_id, side, fill_size, size, fill_price, price,
+            SELECT DISTINCT ON (submission_idx)
+                   product_id, side, fill_size, size, fill_price, price,
                    base_filled_x18, quote_filled_x18,
                    COALESCE(filled_at, created_at) AS filled_at
             FROM {table}
             WHERE user_id = %s
+              AND submission_idx IS NOT NULL
+              AND COALESCE(product_id, 0) <> 0
               AND COALESCE(source, '') <> 'manual'
               AND status IN ('filled', 'closed', 'partially_filled')
-            ORDER BY product_id, COALESCE(filled_at, created_at), id
+            ORDER BY submission_idx, COALESCE(filled_at, created_at), id
             """,
             (int(user_id),),
         )

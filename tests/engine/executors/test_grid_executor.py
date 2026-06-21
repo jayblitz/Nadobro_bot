@@ -250,6 +250,29 @@ def test_keep_position_false_flattens_on_stop():
     asyncio.run(body())
 
 
+def test_keep_position_false_retries_when_stop_flatten_zero_fills():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(105), auto_fill_market=False)
+        inv = InventoryRepository()
+        ex = _ex(_cfg(keep_position=False), adapter, inv)
+        await ex.on_create()
+        lvl = ex.levels[0]
+        adapter.fill_order(lvl.open_order_id, price=lvl.open_price)
+        await ex.on_tick()
+        net_before = inv.get(1, PAIR, "c").net_amount_base
+        assert net_before > 0
+
+        await ex.on_stop(CloseType.EARLY_STOP)
+
+        markets = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        assert len(markets) == 1
+        assert markets[0].filled_base == Decimal(0)
+        assert not ex.is_terminated
+        assert inv.get(1, PAIR, "c").net_amount_base == net_before
+
+    asyncio.run(body())
+
+
 def test_keep_position_true_retains_on_stop():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(105))

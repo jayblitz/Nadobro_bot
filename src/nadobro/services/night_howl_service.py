@@ -448,7 +448,13 @@ def build_report(
         tz_offset = _user_tz_offset(telegram_id)
         local_date = (now_utc + timedelta(hours=tz_offset)).strftime("%Y-%m-%d")
 
-        trades = get_trades_by_user(telegram_id, limit=None, network=network) or []
+        cutoff = now_utc - timedelta(hours=24)
+        trades = get_trades_by_user(
+            telegram_id,
+            limit=None,
+            network=network,
+            since_created_at=cutoff,
+        ) or []
         pattern = compute_user_pattern(trades, now_ts=now_utc.timestamp())
 
         # Backtest the user's live strategy (if any) over its last-24h candles.
