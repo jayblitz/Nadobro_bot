@@ -1714,11 +1714,20 @@ def insert_vault_lp_event(
     network: str = "mainnet",
 ) -> None:
     table = _vault_lp_events_table(network)
+    # Archive rows (submission_idx NOT NULL) UPSERT so a corrected re-sync can
+    # self-heal a previously mis-sized nlp_amount (e.g. rows written while the NLP
+    # product id resolved to the wrong spot). Bot-audit rows (submission_idx NULL)
+    # never match the partial unique index, so they always insert as before.
     execute(
         f"""INSERT INTO {table}
             (user_id, event_type, quote_usdt0, nlp_amount, submission_idx, tx_digest, event_ts)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING""",
+            ON CONFLICT (user_id, event_type, submission_idx) WHERE submission_idx IS NOT NULL
+            DO UPDATE SET
+                quote_usdt0 = COALESCE(EXCLUDED.quote_usdt0, {table}.quote_usdt0),
+                nlp_amount  = COALESCE(EXCLUDED.nlp_amount, {table}.nlp_amount),
+                tx_digest   = COALESCE(EXCLUDED.tx_digest, {table}.tx_digest),
+                event_ts    = COALESCE(EXCLUDED.event_ts, {table}.event_ts)""",
         (
             telegram_id,
             event_type,
