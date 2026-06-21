@@ -59,3 +59,37 @@ def test_candidates_keep_trailing_x_form():
     assert "QQQX" in cands
     # And the legacy testnet reduction is still present for the xStocks form.
     assert "QQQ" in cands
+
+
+def test_closed_equity_perp_lists_via_v2_with_entry_blocked(monkeypatch):
+    """DN-EQUITY-MARKETS (2026-06-21): an equity perp that is ``soft_reduce_only``
+    (e.g. weekend/after-hours) is dropped from the live-filtered perp catalog, but
+    the second pass pairs it from the v2 symbols against a LIVE spot leg. The pair
+    LISTS with entry_allowed=False + a clear reason, so it becomes tradable the
+    moment the market reopens without ever entering a closed book. This is exactly
+    why DN was stuck on BTC/ETH on weekends."""
+    # Live perp catalog has only BTC — the equity perp is reduce-only and filtered.
+    monkeypatch.setattr(pc, "get_catalog", lambda network=None, client=None, refresh=False: {
+        "perps": {"BTC": {"id": 2, "symbol": "BTC-PERP", "trading_status": "live"}},
+    })
+    monkeypatch.setattr(pc, "get_spot_catalog", lambda network=None, refresh=False: {
+        "spots": {
+            "KBTC":  {"id": 1,   "symbol": "KBTC",  "underlying_key": "BTC", "trading_status": "live", "market_hours": None},
+            "wQQQX": {"id": 115, "symbol": "wQQQX", "underlying_key": "QQQ", "trading_status": "live", "market_hours": None},
+        }
+    })
+    # v2 symbols carry the reduce-only, weekend-closed equity perp.
+    monkeypatch.setattr(pc, "_fetch_v2_symbols_map", lambda network=None, product_type=None: {
+        "QQQ-PERP": {"product_id": 98, "symbol": "QQQ-PERP", "type": "perp",
+                     "trading_status": "soft_reduce_only",
+                     "market_hours": {"is_open": False, "reason": "weekend"}},
+    })
+    cat = pc._build_dn_pair_catalog("mainnet")
+    pairs = cat["pairs"]
+    assert "QQQ" in pairs, "a closed equity perp with a live spot must still LIST for DN"
+    q = pairs["QQQ"]
+    assert q["perp_product_id"] == 98 and q["spot_product_id"] == 115
+    assert q["entry_allowed"] is False
+    assert "soft_reduce_only" in q["entry_block_reason"]
+    # BTC (live, no market hours) is unaffected and tradable.
+    assert pairs["BTC"]["entry_allowed"] is True

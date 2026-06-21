@@ -428,14 +428,40 @@ def _quote_defense_defaults(settings, notional, *, auto_spread: bool) -> dict:
     }
 
 
+def _effective_leverage(settings: Dict[str, Any], fallback: float = 1.0) -> float:
+    """Resolve the effective leverage that turns the user's *margin* (collateral)
+    into deployed position notional for the grid/MM family.
+
+    Precedence: an explicit ``mm_leverage_override`` (set by the Tiny Budget
+    preset / leverage selector) wins; otherwise the session ``leverage``; else
+    ``fallback``. Floored at 1x. The venue cap is NOT applied here — the start
+    guard (``_run_mm_start_guard``) already rejects leverage above the pair max
+    and the adapter re-validates at placement, so this stays a pure function of
+    settings (no catalog/network dependency in the hot mapping path).
+    """
+    raw = _f(settings, "mm_leverage_override", 0.0)
+    if raw <= 0:
+        raw = _f(settings, "leverage", 0.0)
+    if raw <= 0:
+        raw = float(fallback or 1.0)
+    return max(1.0, raw)
+
+
 def map_strategy_config(
-    strategy: str, settings: Dict[str, Any], mid: Decimal, *, product: str, leverage: int = 1
+    strategy: str, settings: Dict[str, Any], mid: Decimal, *, product: str,
+    leverage: int = 1, network: str = "mainnet",
 ) -> Dict[str, object]:
     """Derive an engine controller config from a user's saved strategy settings
     + current mid. Documented, testnet-tunable mappings (not 1:1 with legacy).
     """
     mid = _dec(mid)
+    # ``notional`` here is the user's allocated MARGIN (collateral). The grid/MM
+    # family deploys ``margin x effective_leverage`` of position notional, so a
+    # $100 margin at 5x quotes ~$500 across the ladder (and unlocks more levels).
+    # DN/Volume size their own legs and do not use ``deployed`` below.
     notional = _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0))
+    eff_lev = _effective_leverage(settings, float(leverage or 1.0))
+    deployed = notional * eff_lev
     # The quoting spread is USER-SET, not one hardcoded value for everyone. Read
     # the strategy's own spread field (the frontend writes rgrid_spread_bp /
     # dgrid_spread_bp), falling back to the generic spread_bp. Previously this
@@ -466,13 +492,14 @@ def map_strategy_config(
             "trading_pair": product,
             "spread_bid_pct": spread_frac,
             "spread_ask_pct": spread_frac,
-            "order_amount_quote": Decimal(str(notional)) / Decimal(levels),
-            "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", notional))),
+            "order_amount_quote": Decimal(str(deployed)) / Decimal(levels),
+            "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", deployed))),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
-            "leverage": leverage,
+            "leverage": int(eff_lev),
             # Regime gate + inventory cap + ATR auto-spread (2026-06 upgrade).
-            # auto_spread engages when the user left spread unset/zero.
-            **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
+            # auto_spread engages when the user left spread unset/zero. margin_quote
+            # tracks the DEPLOYED size so the net-exposure cap scales with leverage.
+            **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
         }
     if strategy == "dn":
         # NO_ORDERS_AUDIT-FIX-R1: DN config keys for DeltaNeutralController.
@@ -566,10 +593,10 @@ def map_strategy_config(
             "reset_threshold_pct": Decimal(str(_f(settings, "reset_threshold_pct", default_reset))) / Decimal(100),
             "spread_bid_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
             "spread_ask_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
-            "order_amount_quote": Decimal(str(notional)) / Decimal(levels),
+            "order_amount_quote": Decimal(str(deployed)) / Decimal(levels),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
-            "leverage": leverage,
-            **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
+            "leverage": int(eff_lev),
+            **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
         }
     #
     # NO_ORDERS_AUDIT-FIX-R4: spread_bp is now interpreted as the per-level
@@ -610,13 +637,20 @@ def map_strategy_config(
     # avg-entry barrier (triple_barrier_config.stop_loss, fill-aware) and (b) the
     # fee-aware session rail. limit_price stays available as an explicit
     # catastrophic stop but is no longer auto-set from sl.
+    # POST-ONLY-CROSS fix: the boundary level nearest mid must be a strict maker,
+    # or a post-only LIMIT_MAKER placed AT mid crosses the book and the venue
+    # rejects it (error_code 2008 — seen on every rgrid SELL and, once grids
+    # ladder past one level, on the top BUY too). Offset the near boundary by at
+    # least half a grid step (floored at 1.5 bp) onto the maker side: buys
+    # strictly below mid, sells strictly above.
+    maker_offset = max(spread_frac / Decimal(2), Decimal("0.00015"))
     if strategy == "rgrid":
-        start_price = mid
-        end_price = mid * (Decimal(1) + span)
+        start_price = mid * (Decimal(1) + maker_offset)
+        end_price = mid * (Decimal(1) + maker_offset + span)
         limit_price = Decimal(0)
     else:  # grid OR dgrid-as-long-default; dgrid recomputes at on_tick
-        start_price = mid * (Decimal(1) - span)
-        end_price = mid
+        start_price = mid * (Decimal(1) - maker_offset - span)
+        end_price = mid * (Decimal(1) - maker_offset)
         limit_price = Decimal(0)
 
     cfg: Dict[str, object] = {
@@ -624,10 +658,11 @@ def map_strategy_config(
         "start_price": start_price,
         "end_price": end_price,
         "limit_price": limit_price,
-        "total_amount_quote": Decimal(str(notional)),
+        # Deployed position notional = margin x effective leverage (see top).
+        "total_amount_quote": Decimal(str(deployed)),
         "min_spread_between_orders": spread_frac,
         "max_open_orders": levels,
-        "leverage": leverage,
+        "leverage": int(eff_lev),
         "triple_barrier_config": TripleBarrierConfig(
             take_profit=tp or None, stop_loss=sl or None
         ),
@@ -639,7 +674,9 @@ def map_strategy_config(
         "tp_pct": tp,
         "sl_pct": sl,
         # Regime gate + inventory cap + ATR auto-step (2026-06 upgrade).
-        **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
+        # margin_quote = DEPLOYED notional so the net-exposure cap scales with
+        # leverage instead of choking a leveraged ladder at 30% of collateral.
+        **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
     }
     # NO_ORDERS_AUDIT-FIX-R2: DynamicGridController requires a candle_provider
     # callable to classify the volatility regime. Without one, _candles()
@@ -669,21 +706,42 @@ def map_strategy_config(
         cfg["dgrid_tp_fraction"] = _f(settings, "dgrid_tp_fraction", 0.33)
         # Confirm-ticks debounce a flip.
         cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 2)))
+        # Trend-capture redesign (2026-06): as a run goes in profit, ratchet a
+        # trailing take-profit so a reversal still closes green, and flip
+        # long<->short on a confirmed price reversal from the run's extreme
+        # (faster than waiting for the variance classifier to cross). Percents.
+        cfg["dgrid_trail_arm_pct"] = _f(settings, "dgrid_trail_arm_pct", 1.0)
+        cfg["dgrid_trail_giveback_pct"] = _f(settings, "dgrid_trail_giveback_pct", 0.5)
+        cfg["dgrid_reversal_flip_pct"] = _f(settings, "dgrid_reversal_flip_pct", 0.4)
         # Reset re-center honors the user's reset setting (grid_reset_threshold_pct,
         # default 0.2% -> 20bp). This now drives an IN-PLACE re-quote of the
         # resting ladder (GridExecutor.recenter), not a flatten — so it cannot
         # bleed fees. The controller still FLOORS the threshold above the grid
         # band (see __init__) so it never fires on normal in-band oscillation.
+        # TREND-CAPTURE (2026-06-21): default the re-center ON (0.5% -> floored to
+        # 50bp in the controller) so the ladder FOLLOWS price as it trends instead
+        # of going stale and never filling — the "placed 2 orders and stopped"
+        # report. Explicit 0 still disables it.
         cfg["dgrid_reset_threshold_bp"] = _f(
             settings, "dgrid_reset_threshold_bp",
-            _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0,
+            _f(settings, "grid_reset_threshold_pct", 0.5) * 100.0,
         )
 
     # GRID / RGRID in-place re-center: honor the user's reset threshold so the
     # ladder follows price ("reset and continue") instead of going stale. Drives
     # GridExecutor.recenter (no flatten); the controller floors it above the band.
     if strategy == "grid":
-        cfg["reset_threshold_bp"] = _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0
+        # Default ON (0.5% -> 50bp floor) so a Grid now allowed to run in trends
+        # follows price instead of resting a never-filling ladder below mid.
+        cfg["reset_threshold_bp"] = _f(settings, "grid_reset_threshold_pct", 0.5) * 100.0
+        # GRID-IN-TRENDS (user directive 2026-06-21): plain Grid was gated OUT of
+        # trends/expansions by default and silently never quoted (the "always
+        # market paused" report). Default the regime gate OFF for grid so it
+        # quotes in every regime; the inventory net-exposure cap, the in-place
+        # recenter, and the live-session SL/TP rails remain the backstops. Still
+        # user-overridable: an explicit regime_gate_enabled=1 re-arms the gate.
+        if "regime_gate_enabled" not in settings:
+            cfg["regime_gate_enabled"] = 0.0
     elif strategy == "rgrid":
         cfg["reset_threshold_bp"] = _f(settings, "rgrid_reset_threshold_pct", 0.0) * 100.0
         # A Reverse Grid is a TREND strategy (it wins in trends, resets and
@@ -694,7 +752,9 @@ def map_strategy_config(
     return cfg
 
 
-def map_risk_limits(settings: Dict[str, Any], strategy: Optional[str] = None) -> RiskLimits:
+def map_risk_limits(
+    settings: Dict[str, Any], strategy: Optional[str] = None, *, leverage: float = 1.0,
+) -> RiskLimits:
     # Delta Neutral sizes each leg from ``fixed_margin_usd`` (NOT ``notional_usd``),
     # so its risk caps must follow the leg size or the Risk Engine rejects every
     # leg with ``max_single_order_quote`` and the controller never places an order
@@ -711,13 +771,21 @@ def map_risk_limits(settings: Dict[str, Any], strategy: Optional[str] = None) ->
             max_single_order_quote=Decimal(str(per_order_cap)),
             max_position_size_quote=Decimal(str(per_order_cap)),
         )
-    notional = _f(settings, "notional_usd", 100.0)
+    # Grid/MM family: caps must follow the DEPLOYED notional (margin x leverage),
+    # or the Risk Engine rejects every leveraged order — the same "LIVE but 0
+    # orders" failure the DN branch above guards against. With leverage=1 this is
+    # identical to the legacy margin-sized behavior (tests rely on that).
+    margin = _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0))
+    eff_lev = _effective_leverage(settings, float(leverage or 1.0))
+    deployed = margin * eff_lev
     levels = max(1, int(_f(settings, "levels", 2)))
-    cap = _f(settings, "session_notional_cap_usd", 0.0) or (notional * levels)
+    cap = _f(settings, "session_notional_cap_usd", 0.0) or (deployed * levels)
     return RiskLimits(
         max_open_executors=levels + 2,
-        max_single_order_quote=Decimal(str(notional)),
-        max_position_size_quote=Decimal(str(cap)),
+        # A single bumped level can be up to the whole deployed size (when the
+        # min-notional cap collapses the ladder to one level).
+        max_single_order_quote=Decimal(str(deployed)),
+        max_position_size_quote=Decimal(str(max(cap, deployed * 1.2))),
     )
 
 
@@ -960,9 +1028,10 @@ async def run_engine_cycle(
         return {"success": False, "error": f"strategy '{strategy}' not engine-mapped"}
 
     settings = {k: v for k, v in state.items() if not isinstance(v, (dict, list))}
+    _start_lev = _f(settings, "leverage", 1)
     configs = map_strategy_config(strategy, settings, _dec(mid), product=product,
-                                  leverage=int(_f(settings, "leverage", 1)))
-    limits = map_risk_limits(settings, strategy)
+                                  leverage=int(_start_lev), network=network)
+    limits = map_risk_limits(settings, strategy, leverage=_start_lev)
 
     # NO_ORDERS_AUDIT-FIX-R2: inject the dgrid candle_provider HERE, because
     # this is where ``client`` and ``product_id`` are available. The provider

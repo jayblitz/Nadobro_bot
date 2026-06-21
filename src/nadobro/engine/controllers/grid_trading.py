@@ -105,17 +105,22 @@ class GridController(Controller):
         if step <= 0 or levels < 1:
             return {}
         span = step * Decimal(max(levels - 1, 1))
+        # POST-ONLY-CROSS fix: keep the near-mid boundary a strict maker (buys
+        # below mid, sells above) so a post-only re-quote never crosses the book.
+        maker_offset = max(step / Decimal(2), Decimal("0.00015"))
         # GRID-DUAL-UNIT fix: don't rebuild a fill-blind, mid-referenced hard
         # stop from sl_pct (it caused premature wick stop-outs on top of the
         # margin-% rail). SL is the avg-entry barrier + the fee-aware session
         # rail; the rebuild only adjusts the band bounds.
         if self.SIDE is TradeType.SELL:
             return {
-                "start_price": mid, "end_price": mid * (Decimal(1) + span),
+                "start_price": mid * (Decimal(1) + maker_offset),
+                "end_price": mid * (Decimal(1) + maker_offset + span),
                 "limit_price": Decimal(0),
             }
         return {
-            "start_price": mid * (Decimal(1) - span), "end_price": mid,
+            "start_price": mid * (Decimal(1) - maker_offset - span),
+            "end_price": mid * (Decimal(1) - maker_offset),
             "limit_price": Decimal(0),
         }
 

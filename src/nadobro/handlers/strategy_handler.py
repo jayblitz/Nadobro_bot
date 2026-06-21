@@ -345,9 +345,21 @@ async def _handle_strategy(query, data, context, telegram_id):
             conf = settings.get("strategies", {}).get(strategy_id, {})
             section = "setup"
             context.user_data[f"strategy_config_section:{strategy_id}"] = section
+            # Confirmation note so Standard is no longer a silent no-op: it clears
+            # the Tiny override and returns to the default leverage (margin × 3x).
+            margin_std = float(conf.get("notional_usd", 100.0) or 0.0)
+            deployed_std = margin_std * _mm_effective_leverage(conf)
+            std_note = (
+                "*Standard preset applied*\n"
+                f"✅ Cleared the Tiny override — back to default leverage "
+                f"\\({escape_md(f'{_mm_effective_leverage(conf):.0f}x')}\\)\\. "
+                f"Position \\= *{escape_md(f'${deployed_std:,.0f}')}* "
+                f"\\(margin × leverage\\)\\. Pick a Lev button to override\\."
+            )
+            body_std = _strategy_config_section_text(strategy_id, conf, network, section)
             await _edit_loc(
                 query,
-                _strategy_config_section_text(strategy_id, conf, network, section),
+                f"{body_std}\n\n{std_note}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=_strategy_config_section_kb(strategy_id, section),
             )
@@ -451,6 +463,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             # per-leg size, hold duration, cycle count + gap, hedge drift gate.
             "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
             "dn_cycle_gap_seconds", "dn_max_drift_pct", "dn_hedge_ratio",
+            # MM/grid leverage: turns margin into deployed notional (margin x lev).
+            "mm_leverage_override",
         }
         if field not in allowed_numeric_fields:
             return
@@ -513,6 +527,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dn_cycle_gap_seconds": (0, 86400),
             "dn_max_drift_pct": (0.5, 50),
             "dn_hedge_ratio": (0.1, 5.0),
+            "mm_leverage_override": (1, 50),
         }
         lo, hi = limits[field]
         if value < lo or value > hi:
@@ -520,7 +535,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         int_fields = {
             "interval_seconds", "levels", "max_open_orders",
             "auto_close_on_maintenance", "is_long_bias", "rgrid_reset_timeout_seconds",
-            "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds",
+            "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds", "mm_leverage_override",
         }
 
         def _mutate(s):
@@ -597,7 +612,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
             "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
-            "directional_bias",
+            "directional_bias", "mm_leverage_override",
             # Delta Neutral (engine v2) custom inputs.
             "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
         )
@@ -652,6 +667,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_long_window_points": "Enter DGRID long volatility window points \\(example: `12`\\)",
             "session_margin_usd": "Enter session margin in USD \\(per\\-cycle notional, example: `500`\\)",
             "target_volume_usd": "Enter target cumulative volume in USD \\(example: `25000`\\)",
+            "mm_leverage_override": "Enter leverage \\(1 – 50; position size \\= margin × leverage, example: `5`\\)",
             "fixed_margin_usd": "Enter per\\-leg size in USD \\(example: `100`\\)",
             "dn_hold_seconds": "Enter hold duration in seconds \\(60 – 86400; example: `3600` for 1h\\)",
             "dn_cycles": "Enter how many open→hold→close cycles to run \\(example: `3`\\)",
@@ -1032,6 +1048,32 @@ def _strategy_config_menu_kb(strategy: str):
     return InlineKeyboardMarkup(rows)
 
 
+def _mm_effective_leverage(conf: dict) -> float:
+    """Display-side mirror of engine_runtime._effective_leverage: an explicit
+    mm_leverage_override wins, else the MM default (3x). Used so the card shows
+    the SAME leverage the engine will deploy."""
+    override = float(conf.get("mm_leverage_override", 0) or 0)
+    return override if override >= 1 else 3.0
+
+
+def _mm_sizing_line(conf: dict) -> str:
+    """'Leverage Nx -> Position $X (margin x lev)' + preset label for the Core
+    card, so picking Tiny/Standard or a leverage button VISIBLY changes the card
+    and the resulting position size (the #4 'nothing changes' fix)."""
+    margin = float(conf.get("notional_usd", 100.0) or 0.0)
+    override = float(conf.get("mm_leverage_override", 0) or 0)
+    eff_lev = _mm_effective_leverage(conf)
+    deployed = margin * eff_lev
+    preset = str(conf.get("mm_preset") or "").lower()
+    preset_label = {"tiny": "Tiny Budget", "standard": "Standard"}.get(preset, "—")
+    src = "preset/custom" if override >= 1 else "default"
+    return (
+        f"Leverage: *{escape_md(f'{eff_lev:.0f}x')}* \\({escape_md(src)}\\) \\| "
+        f"Position: *{escape_md(f'${deployed:,.0f}')}* \\(margin×lev\\)\n"
+        f"Preset: *{escape_md(preset_label)}*"
+    )
+
+
 def _strategy_config_section_text(strategy: str, conf: dict, network: str, section: str) -> str:
     if strategy == "vol":
         direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
@@ -1089,8 +1131,9 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             )
         return (
             "⚙️ *GRID · Core*\n\n"
-            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n\n"
-            "Set the main loop size and cadence\\."
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"{_mm_sizing_line(conf)}\n\n"
+            "Set the main loop size and cadence\\. *Position size \\= margin × leverage*\\."
         )
 
     if strategy == "rgrid":
@@ -1121,8 +1164,9 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "⚙️ *Reverse GRID · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Levels: *{escape_md(levels)}* \\| Spread: *{escape_md(rgrid_spread)}*\n"
-            f"POV: *{escape_md(pov_label)}*\n\n"
-            "Set the basic breakout loop here\\."
+            f"POV: *{escape_md(pov_label)}*\n"
+            f"{_mm_sizing_line(conf)}\n\n"
+            "Set the basic breakout loop here\\. *Position size \\= margin × leverage*\\."
         )
 
     if strategy == "dgrid":
@@ -1152,8 +1196,10 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "⚡ *Dynamic GRID · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Levels: *{escape_md(levels)}* \\| Starting spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
-            f"POV: *{escape_md(pov_label)}*\n\n"
-            "DGRID automatically switches between GRID and RGRID while resizing spread from realized movement\\."
+            f"POV: *{escape_md(pov_label)}*\n"
+            f"{_mm_sizing_line(conf)}\n\n"
+            "DGRID auto\\-switches GRID↔RGRID, ladders into the move, trails take\\-profit, "
+            "and flips long↔short on a confirmed reversal\\. *Position size \\= margin × leverage*\\."
         )
 
     if strategy == "mid":
@@ -1178,7 +1224,8 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Spread: *{escape_md(f'{spread_bp:+.1f} bp')}* \\| Levels: *{escape_md(levels)}*\n"
             f"Reference: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias_str)}*\n"
-            f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n\n"
+            f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n"
+            f"{_mm_sizing_line(conf)}\n\n"
             "Pure mid ± spread×level\\. No anchor, no soft\\-reset\\. "
             "Bias range −1\\.0 → \\+1\\.0; \\|1\\.0\\| adds 20% margin\\."
         )
@@ -1253,6 +1300,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:grid:notional_usd:250"),
                 ],
                 [
+                    InlineKeyboardButton("Lev 1x", callback_data="strategy:set:grid:mm_leverage_override:1"),
+                    InlineKeyboardButton("3x", callback_data="strategy:set:grid:mm_leverage_override:3"),
+                    InlineKeyboardButton("5x", callback_data="strategy:set:grid:mm_leverage_override:5"),
+                    InlineKeyboardButton("10x", callback_data="strategy:set:grid:mm_leverage_override:10"),
+                ],
+                [
                     InlineKeyboardButton("Spread 2bp", callback_data="strategy:set:grid:spread_bp:2"),
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:grid:spread_bp:5"),
                     InlineKeyboardButton("Spread 10bp", callback_data="strategy:set:grid:spread_bp:10"),
@@ -1264,6 +1317,7 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 ],
                 [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:grid:notional_usd"),
+                    InlineKeyboardButton("Custom Lev", callback_data="strategy:input:grid:mm_leverage_override"),
                     InlineKeyboardButton("Custom Interval", callback_data="strategy:input:grid:interval_seconds"),
                 ],
             ]
@@ -1353,6 +1407,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:dgrid:notional_usd:250"),
                 ],
                 [
+                    InlineKeyboardButton("Lev 1x", callback_data="strategy:set:dgrid:mm_leverage_override:1"),
+                    InlineKeyboardButton("3x", callback_data="strategy:set:dgrid:mm_leverage_override:3"),
+                    InlineKeyboardButton("5x", callback_data="strategy:set:dgrid:mm_leverage_override:5"),
+                    InlineKeyboardButton("10x", callback_data="strategy:set:dgrid:mm_leverage_override:10"),
+                ],
+                [
                     InlineKeyboardButton("Levels 3", callback_data="strategy:set:dgrid:levels:3"),
                     InlineKeyboardButton("Levels 4", callback_data="strategy:set:dgrid:levels:4"),
                     InlineKeyboardButton("Levels 6", callback_data="strategy:set:dgrid:levels:6"),
@@ -1420,6 +1480,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:rgrid:notional_usd:50"),
                     InlineKeyboardButton("Margin $100", callback_data="strategy:set:rgrid:notional_usd:100"),
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:rgrid:notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("Lev 1x", callback_data="strategy:set:rgrid:mm_leverage_override:1"),
+                    InlineKeyboardButton("3x", callback_data="strategy:set:rgrid:mm_leverage_override:3"),
+                    InlineKeyboardButton("5x", callback_data="strategy:set:rgrid:mm_leverage_override:5"),
+                    InlineKeyboardButton("10x", callback_data="strategy:set:rgrid:mm_leverage_override:10"),
                 ],
                 [
                     InlineKeyboardButton("Levels 3", callback_data="strategy:set:rgrid:levels:3"),
@@ -1515,6 +1581,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:mid:notional_usd:50"),
                     InlineKeyboardButton("Margin $100", callback_data="strategy:set:mid:notional_usd:100"),
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:mid:notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("Lev 1x", callback_data="strategy:set:mid:mm_leverage_override:1"),
+                    InlineKeyboardButton("3x", callback_data="strategy:set:mid:mm_leverage_override:3"),
+                    InlineKeyboardButton("5x", callback_data="strategy:set:mid:mm_leverage_override:5"),
+                    InlineKeyboardButton("10x", callback_data="strategy:set:mid:mm_leverage_override:10"),
                 ],
                 [
                     InlineKeyboardButton("Spread −5bp", callback_data="strategy:set:mid:spread_bp:-5"),
