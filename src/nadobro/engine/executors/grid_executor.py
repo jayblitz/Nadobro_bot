@@ -613,6 +613,13 @@ class GridExecutor(Executor):
                         flat.filled_base, price, flat.fee_quote, time.time(),
                     )
                 )
+            remaining = self._net_base()
+            if remaining > Decimal("1e-12"):
+                logger.warning(
+                    "grid %s: %s flatten left open base=%s; executor remains active for retry",
+                    self.id, close_type.name, remaining,
+                )
+                return
         self._terminate(close_type)
 
     async def on_stop(self, close_type: CloseType = CloseType.EARLY_STOP) -> None:

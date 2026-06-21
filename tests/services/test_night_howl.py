@@ -7,7 +7,7 @@ stand-in for the bot_state key-value store.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -166,6 +166,32 @@ def test_mark_and_read_last_sent(memstore):
     assert nh.last_sent_date(7, "mainnet") is None
     nh.mark_sent(7, "mainnet", "2026-06-20")
     assert nh.last_sent_date(7, "mainnet") == "2026-06-20"
+
+
+def test_build_report_bounds_trade_query_to_last_24h(monkeypatch, memstore):
+    import src.nadobro.models.database as db
+
+    captured = {}
+
+    def _trades(telegram_id, *, limit, network, since_created_at=None, **_kwargs):
+        captured["telegram_id"] = telegram_id
+        captured["limit"] = limit
+        captured["network"] = network
+        captured["since_created_at"] = since_created_at
+        return []
+
+    now = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(db, "get_trades_by_user", _trades)
+
+    report = nh.build_report(7, "mainnet", now_utc=now)
+
+    assert report is not None
+    assert captured == {
+        "telegram_id": 7,
+        "limit": None,
+        "network": "mainnet",
+        "since_created_at": now - timedelta(hours=24),
+    }
 
 
 # --------------------------------------------------------------------------- #

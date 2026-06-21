@@ -381,13 +381,14 @@ class DynamicGridController(Controller):
         # can't drift apart. Falls back to nothing if no live executor.
         booked = Decimal(0)
         try:
-            for ex in self.my_executors(active_only=True):
+            active_executors = list(self.my_executors(active_only=True))
+            for ex in active_executors:
                 rp = getattr(ex, "reduce_position", None)
                 if callable(rp):
                     booked += await rp(close_base - booked)
                 if booked >= close_base:
                     break
-            if booked <= 0:
+            if booked <= 0 and not active_executors:
                 # Fallback: no live executor exposed a reduce path, but inventory
                 # is held — book directly with a reduce-only MARKET so the
                 # position can still scale out (preserves prior behavior).

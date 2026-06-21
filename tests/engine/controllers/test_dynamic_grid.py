@@ -295,6 +295,42 @@ def test_profit_booking_does_not_book_tier_on_zero_fill():
     asyncio.run(body())
 
 
+def test_profit_booking_does_not_fallback_around_live_executor_zero_fill():
+    from src.nadobro.engine.types import TradeType
+
+    class ZeroReduceExecutor:
+        def __init__(self, controller_id):
+            self.id = "zero-reduce"
+            self.controller_id = controller_id
+            self.is_terminated = False
+            self.requests = []
+
+        async def reduce_position(self, amount):
+            self.requests.append(amount)
+            return Decimal(0)
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(102))
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=cfg)
+        fake = ZeroReduceExecutor(c.id)
+        orch._executors[fake.id] = fake
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+
+        await c._maybe_book_profit(Decimal("102"))
+
+        assert fake.requests
+        assert [o for o in adapter.placed if o.side == TradeType.SELL] == []
+        assert c._booked_tiers == set()
+        assert inv.get(1, "P", c.id).net_amount_base == Decimal("1.0")
+
+    asyncio.run(body())
+
+
 def test_spawn_deferred_when_prior_inventory_not_flat():
     from src.nadobro.engine.types import TradeType
 
