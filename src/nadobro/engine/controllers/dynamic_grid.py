@@ -82,6 +82,18 @@ class DynamicGridController(Controller):
         # steady decline keeps VR<1 yet bleeds a long grid). 0 disables it.
         self.trend_drift_pct = float(self.cfg("dgrid_trend_drift_pct", 0.30) or 0.30)
         self.flip_confirm_ticks = int(self.cfg("dgrid_flip_confirm_ticks", 2) or 2)
+        # Trend-capture (2026-06-21): once a run has gone in profit by
+        # ``trail_arm_pct`` (favorable move from the spawn anchor), a reversal of
+        # ``reversal_flip_pct`` from the run's price extreme FLIPS the side — the
+        # winner is flattened (reduce-only, in profit) and the opposite grid arms.
+        # This is the user-requested "close in profit on reversal and switch
+        # long<->short" that the slow variance classifier alone misses.
+        self.trail_arm_pct = float(self.cfg("dgrid_trail_arm_pct", 1.0) or 0.0)
+        self.trail_giveback_pct = float(self.cfg("dgrid_trail_giveback_pct", 0.5) or 0.0)
+        self.reversal_flip_pct = float(self.cfg("dgrid_reversal_flip_pct", 0.4) or 0.0)
+        self._run_extreme: Optional[Decimal] = None  # favorable price extreme since spawn
+        self._run_armed: bool = False                # peak favorable move cleared arm_pct
+        self._reversal_streak: int = 0
         # Tiered profit-booking: as the run's unrealized PnL climbs past rising
         # tiers (% of margin), close a fraction of the live position reduce-only
         # to lock in gains and keep PnL near-positive when the move reverses.
@@ -145,20 +157,25 @@ class DynamicGridController(Controller):
         if step <= 0 or levels < 1:
             return {}
         span = step * Decimal(max(levels - 1, 1))
+        # POST-ONLY-CROSS fix: offset the near-mid boundary onto the maker side
+        # by max(step/2, 1.5bp) so a post-only LIMIT_MAKER never sits AT mid and
+        # crosses the book (venue error_code 2008 — the exact failure that made
+        # every dgrid SELL flip refuse to arm).
+        maker_offset = max(step / Decimal(2), Decimal("0.00015"))
         # GRID-DUAL-UNIT fix: don't rebuild a fill-blind, mid-referenced hard
         # stop from sl_pct (premature wick stop-outs on top of the margin-%
         # rail). SL is the avg-entry barrier + the fee-aware session rail; the
         # rebuild only adjusts the band bounds.
         if side is TradeType.SELL:
             return {
-                "start_price": mid,
-                "end_price": mid * (Decimal(1) + span),
+                "start_price": mid * (Decimal(1) + maker_offset),
+                "end_price": mid * (Decimal(1) + maker_offset + span),
                 "limit_price": Decimal(0),
             }
         # BUY (long grid)
         return {
-            "start_price": mid * (Decimal(1) - span),
-            "end_price": mid,
+            "start_price": mid * (Decimal(1) - maker_offset - span),
+            "end_price": mid * (Decimal(1) - maker_offset),
             "limit_price": Decimal(0),
         }
 
@@ -222,6 +239,62 @@ class DynamicGridController(Controller):
         except Exception:  # noqa: BLE001
             return None
 
+    # -- trend capture (trailing reversal flip) --------------------------
+    def _reset_run_tracking(self, mid: Optional[Decimal]) -> None:
+        """Re-seed the favorable-extreme / arm state for a fresh run (called on
+        every spawn and flip so each leg trails from its own anchor)."""
+        self._run_extreme = _dec(mid) if (mid and mid > 0) else None
+        self._run_armed = False
+        self._reversal_streak = 0
+
+    def _is_long_phase(self) -> bool:
+        return self.current_phase != variance_regime.RGRID
+
+    def _update_run_extremes(self, mid: Optional[Decimal]) -> None:
+        """Track the most-favorable price reached this run and arm the trailing
+        reversal once the favorable move from the spawn anchor clears
+        ``trail_arm_pct`` (so we only ever 'lock & flip' a run that went green)."""
+        if mid is None or mid <= 0 or not self._grid_anchor_mid or self._grid_anchor_mid <= 0:
+            return
+        long = self._is_long_phase()
+        if self._run_extreme is None:
+            self._run_extreme = mid
+        elif long:
+            self._run_extreme = max(self._run_extreme, mid)
+        else:
+            self._run_extreme = min(self._run_extreme, mid)
+        anchor = self._grid_anchor_mid
+        fav = ((self._run_extreme - anchor) / anchor) if long else ((anchor - self._run_extreme) / anchor)
+        if self.trail_arm_pct > 0 and float(fav) * 100.0 >= self.trail_arm_pct:
+            self._run_armed = True
+
+    async def _maybe_reversal_flip(self, mid: Optional[Decimal]) -> bool:
+        """Once armed (run went in profit), a reversal of ``reversal_flip_pct``
+        from the favorable extreme flips the side — debounced by
+        ``flip_confirm_ticks``. ``_flip_to`` flattens the held position
+        reduce-only (in profit, since price only retraced the trail) and arms the
+        opposite grid. Returns True when a flip fired."""
+        if (self.reversal_flip_pct <= 0 or not self._run_armed or mid is None or mid <= 0
+                or not self._run_extreme or self._run_extreme <= 0):
+            return False
+        long = self._is_long_phase()
+        ext = self._run_extreme
+        retrace = ((ext - mid) / ext) if long else ((mid - ext) / ext)
+        if float(retrace) * 100.0 < self.reversal_flip_pct:
+            self._reversal_streak = 0
+            return False
+        self._reversal_streak += 1
+        if self._reversal_streak < max(1, self.flip_confirm_ticks):
+            return False
+        target = variance_regime.GRID if self.current_phase == variance_regime.RGRID else variance_regime.RGRID
+        logger.info(
+            "dgrid reversal flip armed pair=%s phase=%s extreme=%s mid=%s retrace=%.2f%% "
+            "(controller=%s)",
+            self.trading_pair, self.current_phase, ext, mid, float(retrace) * 100.0, self.id,
+        )
+        await self._flip_to(target, mid, reason="reversal")
+        return True
+
     async def on_tick(self) -> None:
         pair = self.trading_pair
         # dgrid's variance-ratio selector chooses GRID vs RGRID for EVERY
@@ -237,6 +310,13 @@ class DynamicGridController(Controller):
 
         active = self.my_executors(active_only=True)
         if active:
+            # Trend-capture: track the run's favorable price extreme, then flip on
+            # a confirmed reversal once the run is in profit (closes the winner in
+            # profit and arms the opposite side). Runs BEFORE the slow variance
+            # flip so a sharp turn is caught immediately.
+            self._update_run_extremes(mid)
+            if await self._maybe_reversal_flip(mid):
+                return
             flip_needed = desired != self.current_phase
             if flip_needed:
                 self._phase_confirm_streak += 1
@@ -304,13 +384,15 @@ class DynamicGridController(Controller):
             mid, spawned, self.id,
         )
         # Surfaced once per flip so the runtime can notify the user — only when a
-        # new side actually armed (a refused spawn must not claim a switch).
-        if reason == "flip" and old_phase != new_phase and spawned:
+        # new side actually armed (a refused spawn must not claim a switch). Both
+        # the variance flip and the trailing reversal flip notify.
+        if reason in ("flip", "reversal") and old_phase != new_phase and spawned:
             self._dgrid_event = {
                 "from": old_phase,
                 "to": new_phase,
                 "variance_ratio": f"{self.variance_ratio:.2f}",
                 "direction": self.last_direction,
+                "reason": reason,
             }
 
     async def _recenter(self, mid: Decimal) -> None:
@@ -463,6 +545,8 @@ class DynamicGridController(Controller):
             # Fresh position -> reset the profit-booking ladder so the new run
             # can book from its first tier again.
             self._booked_tiers = set()
+            # Fresh run -> re-seed the trailing-reversal extreme/arm from here.
+            self._reset_run_tracking(mid)
         else:
             reason = self.orchestrator.last_spawn_reason(self.id) or "unknown"
             logger.warning(

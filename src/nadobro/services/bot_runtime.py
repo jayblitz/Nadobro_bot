@@ -2585,7 +2585,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 frm=str(dgrid_event.get("from", "")).upper(),
                 to=str(dgrid_event.get("to", "")).upper(),
                 product=product, network=network,
-                why=("downtrend detected" if dgrid_event.get("direction") == "down"
+                why=("reversal — locked profit, flipping" if dgrid_event.get("reason") == "reversal"
+                     else "downtrend detected" if dgrid_event.get("direction") == "down"
                      else "uptrend detected" if dgrid_event.get("direction") == "up"
                      else "regime change"),
                 vr=str(dgrid_event.get("variance_ratio", "")),

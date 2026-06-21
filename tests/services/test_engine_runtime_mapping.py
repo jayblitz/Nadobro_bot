@@ -18,13 +18,16 @@ def test_map_grid_config_centers_band_and_sets_barriers():
     assert cfg["trading_pair"] == "BTC-USDC"
     assert cfg["min_spread_between_orders"] == Decimal("0.0004")
     assert cfg["max_open_orders"] == 2
-    assert cfg["total_amount_quote"] == Decimal("75")
+    # SIZING (2026-06-21): deployed notional = margin x effective leverage, so a
+    # $75 margin at 3x quotes $225 across the ladder (was margin-only $75).
+    assert cfg["total_amount_quote"] == Decimal("225")
     assert cfg["leverage"] == 3
-    # NO_ORDERS_AUDIT-FIX-R4: spread_bp is the per-level STEP; a BUY grid's
-    # band steps DOWN from mid so post-only buys never cross the book.
-    # span = (levels - 1) * step = 1 * 0.0004 -> start = 100 * (1 - 0.0004).
-    assert cfg["start_price"] == Decimal("99.96")
-    assert cfg["end_price"] == Decimal("100")
+    # POST-ONLY-CROSS fix: the near-mid boundary is offset onto the maker side by
+    # max(step/2, 1.5bp). step=0.0004 -> maker_offset=0.0002; span=1*0.0004.
+    # BUY band steps DOWN from (mid - maker_offset): start=100*(1-0.0002-0.0004),
+    # end=100*(1-0.0002).
+    assert cfg["start_price"] == Decimal("99.94")
+    assert cfg["end_price"] == Decimal("99.98")
     # Knobs for DynamicGridController side-correct band rebuilds.
     assert cfg["step_pct"] == Decimal("0.0004")
     assert cfg["levels_count"] == 2
@@ -76,9 +79,11 @@ def test_map_rgrid_band_is_above_mid_and_stop_in_barrier():
         "rgrid", {"notional_usd": 100.0, "spread_bp": 10.0, "levels": 4, "sl_pct": 0.8},
         Decimal(100), product="BTC-USDC",
     )
-    # A short grid's sell band steps UP from mid (start == mid, end > mid).
-    assert cfg["start_price"] == Decimal("100")
-    assert cfg["end_price"] > Decimal("100")
+    # A short grid's sell band steps UP from mid. POST-ONLY-CROSS fix: the nearest
+    # sell is offset STRICTLY above mid (was == mid, which crossed the book and
+    # the venue rejected with error_code 2008).
+    assert cfg["start_price"] > Decimal("100")
+    assert cfg["end_price"] > cfg["start_price"]
     # GRID-DUAL-UNIT fix (f391f3c): no mid-anchored hard limit_price stop; the
     # short's SL lives in the fill-aware barrier (avg-entry + sl_pct).
     assert cfg["limit_price"] == Decimal("0")
@@ -137,6 +142,38 @@ def test_map_risk_limits():
     assert lim.max_open_executors == 5            # levels + 2
     assert lim.max_single_order_quote == Decimal("100")
     assert lim.max_position_size_quote == Decimal("300")  # notional * levels fallback
+
+
+def test_deployed_notional_is_margin_times_leverage():
+    """SIZING (2026-06-21): grid/MM deploy margin x effective leverage. With no
+    leverage it stays margin-sized (back-compat); with leverage it scales."""
+    base = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product="BTC-PERP",
+    )
+    assert base["total_amount_quote"] == Decimal("100")   # eff_lev defaults to 1
+    lev5 = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product="BTC-PERP", leverage=5,
+    )
+    assert lev5["total_amount_quote"] == Decimal("500")   # 100 x 5
+    assert lev5["leverage"] == 5
+    # An explicit mm_leverage_override (Tiny preset / Lev button) wins over the
+    # session leverage.
+    over = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "mm_leverage_override": 3, "levels": 2},
+        Decimal(100), product="BTC-PERP", leverage=10,
+    )
+    assert over["total_amount_quote"] == Decimal("300")   # override 3x beats 10x
+
+
+def test_map_risk_limits_scale_with_leverage():
+    """The per-order and position caps must follow the DEPLOYED notional or the
+    Risk Engine rejects every leveraged order (the documented 'LIVE but 0 orders'
+    failure)."""
+    lim = er.map_risk_limits(
+        {"notional_usd": 100.0, "levels": 3, "session_notional_cap_usd": 0.0}, "grid", leverage=5,
+    )
+    assert lim.max_single_order_quote == Decimal("500")          # deployed = 100 x 5
+    assert lim.max_position_size_quote == Decimal("1500")        # deployed * levels
 
 
 def test_map_risk_limits_dn_follows_leg_size_not_notional():

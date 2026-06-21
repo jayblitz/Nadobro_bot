@@ -350,6 +350,43 @@ def test_dgrid_trades_a_trend_with_reverse_grid():
     asyncio.run(body())
 
 
+def test_dgrid_reversal_flip_locks_profit_and_switches_side():
+    """Trend-capture (2026-06-21): once a long run is in profit (favorable move
+    >= trail_arm_pct), a reversal of >= reversal_flip_pct off the price extreme
+    flips long->short — closing the winner reduce-only and arming the short. The
+    candles stay RANGING so the flip is driven by the price reversal, not the
+    slow variance selector."""
+    from src.nadobro.engine.executors.grid_executor import GridExecutor
+    from src.nadobro.engine.executors.reverse_grid_executor import ReverseGridExecutor
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch, c = _dgrid(adapter, {"data": ranging_candles()})
+        # Tight, deterministic trail knobs (defaults are 1.0 / 0.4 / 2 ticks).
+        c.trail_arm_pct = 1.0
+        c.reversal_flip_pct = 0.4
+        c.flip_confirm_ticks = 1
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        assert isinstance(c.my_executors()[0], GridExecutor), "starts long GRID"
+        assert c.current_phase == "grid"
+        assert not c._run_armed
+
+        # Run up 2% -> arms the trail (favorable move >= 1%); no reversal yet.
+        adapter.set_mid(Decimal("102"))
+        await orch.tick_controller(c.id)
+        assert c._run_armed, "a 1%+ favorable move must arm the trail"
+        assert c.current_phase == "grid"
+
+        # Reverse 0.78% off the 102 high (>= 0.4%) -> confirmed flip to short.
+        adapter.set_mid(Decimal("101.2"))
+        await orch.tick_controller(c.id)
+        assert c.current_phase == "rgrid", "reversal must flip long->short"
+        assert isinstance(c.my_executors()[0], ReverseGridExecutor)
+
+    asyncio.run(body())
+
+
 def expansion_candles(n: int = 80, base: float = 100.0) -> list[dict]:
     """Flat EMAs (alternating closes) but volume smeared across a WIDE range:
     no acceptance anywhere — the chaos dgrid must sit out, NOT a trend."""
@@ -407,9 +444,16 @@ def test_map_strategy_config_disables_gate_for_rgrid():
 
     rg = map_strategy_config("rgrid", {"notional_usd": 100.0}, _D("100"), product="BTC-PERP")
     assert float(rg.get("regime_gate_enabled", 1.0)) == 0.0
-    # grid (ranging strategy) keeps the gate ON.
+    # GRID-IN-TRENDS (user directive 2026-06-21): plain grid now defaults the gate
+    # OFF too (it was silently never quoting in trends/expansions). The inventory
+    # cap + recenter + session SL/TP rails are the backstops.
     g = map_strategy_config("grid", {"notional_usd": 100.0}, _D("100"), product="BTC-PERP")
-    assert float(g.get("regime_gate_enabled", 0.0)) == 1.0
+    assert float(g.get("regime_gate_enabled", 1.0)) == 0.0
+    # ...but an explicit opt-in re-arms it.
+    g_on = map_strategy_config(
+        "grid", {"notional_usd": 100.0, "regime_gate_enabled": 1.0}, _D("100"), product="BTC-PERP"
+    )
+    assert float(g_on.get("regime_gate_enabled", 0.0)) == 1.0
 
 
 def test_dgrid_trades_through_breakout_expansion():
