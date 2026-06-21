@@ -1,6 +1,10 @@
 import contextlib
 import contextvars
+import logging
+from typing import Callable, Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+
+_log = logging.getLogger(__name__)
 
 SUPPORTED_LANGS = {"en", "zh", "fr", "ar", "ru", "ko"}
 
@@ -9,7 +13,12 @@ _ACTIVE_LANG: contextvars.ContextVar[str] = contextvars.ContextVar("nadobro_acti
 
 def normalize_lang(lang: str | None) -> str:
     value = (lang or "en").strip().lower()
-    return value if value in SUPPORTED_LANGS else "en"
+    if value in SUPPORTED_LANGS:
+        return value
+    # Accept BCP-47 / device locales like "en-US", "zh-Hans", "ko_KR" by
+    # falling back to the primary subtag.
+    base = value.replace("_", "-").split("-", 1)[0]
+    return base if base in SUPPORTED_LANGS else "en"
 
 
 @contextlib.contextmanager
@@ -23,6 +32,63 @@ def language_context(lang: str | None):
 
 def get_active_language() -> str:
     return normalize_lang(_ACTIVE_LANG.get())
+
+
+# ---------------------------------------------------------------------------
+# Coverage telemetry + optional runtime auto-translation.
+#
+# Historically a catalog miss silently returned the English source string,
+# making partial coverage invisible. We now (1) record every miss so coverage
+# gaps are measurable, and (2) allow an optional translator to be registered
+# (e.g. an LLM-backed, cached translator) to fill misses at runtime. The
+# default behaviour is unchanged: with no translator registered, a miss still
+# returns the English base string.
+# ---------------------------------------------------------------------------
+_MISSING_TRANSLATIONS: set[tuple[str, str]] = set()
+_MISSING_CAP = 5000
+_AUTO_TRANSLATOR: Optional[Callable[[str, str], Optional[str]]] = None
+_AUTO_CACHE: dict[tuple[str, str], str] = {}
+
+
+def register_auto_translator(fn: Optional[Callable[[str, str], Optional[str]]]) -> None:
+    """Register a fallback translator ``fn(source_text, lang) -> translated|None``.
+
+    Pass ``None`` to disable. Results are cached per (lang, source). The default
+    (no translator) keeps the original behaviour of falling back to English.
+    """
+    global _AUTO_TRANSLATOR
+    _AUTO_TRANSLATOR = fn
+
+
+def get_missing_translations() -> list[tuple[str, str]]:
+    """Return (lang, source_string) pairs seen with no catalog entry."""
+    return sorted(_MISSING_TRANSLATIONS)
+
+
+def clear_missing_translations() -> None:
+    _MISSING_TRANSLATIONS.clear()
+
+
+def _record_missing(lang: str, text: str) -> None:
+    if len(_MISSING_TRANSLATIONS) < _MISSING_CAP:
+        _MISSING_TRANSLATIONS.add((lang, text))
+
+
+def _resolve_missing(base: str, lang: str) -> str:
+    """Resolve a catalog miss: cached → auto-translator → English base."""
+    cached = _AUTO_CACHE.get((lang, base))
+    if cached is not None:
+        return cached
+    _record_missing(lang, base)
+    if _AUTO_TRANSLATOR is not None:
+        try:
+            translated = _AUTO_TRANSLATOR(base, lang)
+            if translated:
+                _AUTO_CACHE[(lang, base)] = translated
+                return translated
+        except Exception:  # never let translation break delivery
+            _log.warning("auto-translator failed lang=%s", lang, exc_info=False)
+    return base
 
 
 def get_user_language(telegram_id: int) -> str:
@@ -43,6 +109,195 @@ LANGUAGE_LABELS = {
 
 
 _LABELS = {
+    "💬 Ask Nadobro": {
+        "zh": "💬 询问 Nadobro",
+        "fr": "💬 Demander à Nadobro",
+        "ar": "💬 اسأل نادوبرو",
+        "ru": "💬 Спросить Nadobro",
+        "ko": "💬 나도브로에게 질문",
+    },
+    "💰 Nado Vault": {
+        "zh": "💰 Nado 金库",
+        "fr": "💰 Coffre Nado",
+        "ar": "💰 خزنة نادو",
+        "ru": "💰 Хранилище Nado",
+        "ko": "💰 나도 볼트",
+    },
+    "🔔 Alerts": {
+        "zh": "🔔 提醒",
+        "fr": "🔔 Alertes",
+        "ar": "🔔 التنبيهات",
+        "ru": "🔔 Оповещения",
+        "ko": "🔔 알림",
+    },
+    "🎁 Referrals": {
+        "zh": "🎁 推荐",
+        "fr": "🎁 Parrainage",
+        "ar": "🎁 الإحالات",
+        "ru": "🎁 Рефералы",
+        "ko": "🎁 추천",
+    },
+    "⚙️ Settings": {
+        "zh": "⚙️ 设置",
+        "fr": "⚙️ Paramètres",
+        "ar": "⚙️ الإعدادات",
+        "ru": "⚙️ Настройки",
+        "ko": "⚙️ 설정",
+    },
+    "📚 Resources": {
+        "zh": "📚 资源",
+        "fr": "📚 Ressources",
+        "ar": "📚 الموارد",
+        "ru": "📚 Ресурсы",
+        "ko": "📚 리소스",
+    },
+    "◀ Back": {
+        "zh": "◀ 返回",
+        "fr": "◀ Retour",
+        "ar": "◀ رجوع",
+        "ru": "◀ Назад",
+        "ko": "◀ 뒤로",
+    },
+    "🏆 Market Radar": {
+        "zh": "🏆 市场雷达",
+        "fr": "🏆 Radar du marché",
+        "ar": "🏆 رادار السوق",
+        "ru": "🏆 Рыночный радар",
+        "ko": "🏆 마켓 레이더",
+    },
+    "📁 Portfolio": {
+        "zh": "📁 投资组合",
+        "fr": "📁 Portefeuille",
+        "ar": "📁 المحفظة",
+        "ru": "📁 Портфель",
+        "ko": "📁 포트폴리오",
+    },
+    "💼 Link Wallet": {
+        "zh": "💼 关联钱包",
+        "fr": "💼 Lier le portefeuille",
+        "ar": "💼 ربط المحفظة",
+        "ru": "💼 Привязать кошелёк",
+        "ko": "💼 지갑 연결",
+    },
+    "Next ▶": {
+        "zh": "下一页 ▶",
+        "fr": "Suivant ▶",
+        "ar": "التالي ▶",
+        "ru": "Далее ▶",
+        "ko": "다음 ▶",
+    },
+    "◀ Prev": {
+        "zh": "◀ 上一页",
+        "fr": "◀ Précédent",
+        "ar": "◀ السابق",
+        "ru": "◀ Назад",
+        "ko": "◀ 이전",
+    },
+    "⚙️ Advanced": {
+        "zh": "⚙️ 高级",
+        "fr": "⚙️ Avancé",
+        "ar": "⚙️ متقدم",
+        "ru": "⚙️ Расширенно",
+        "ko": "⚙️ 고급",
+    },
+    "🎯 Choose Asset": {
+        "zh": "🎯 选择资产",
+        "fr": "🎯 Choisir l'actif",
+        "ar": "🎯 اختر الأصل",
+        "ru": "🎯 Выбрать актив",
+        "ko": "🎯 자산 선택",
+    },
+    "📊 Performance": {
+        "zh": "📊 表现",
+        "fr": "📊 Performance",
+        "ar": "📊 الأداء",
+        "ru": "📊 Показатели",
+        "ko": "📊 성과",
+    },
+    "📊 View Performance": {
+        "zh": "📊 查看表现",
+        "fr": "📊 Voir la performance",
+        "ar": "📊 عرض الأداء",
+        "ru": "📊 Смотреть показатели",
+        "ko": "📊 성과 보기",
+    },
+    "📊 Exits": {
+        "zh": "📊 离场",
+        "fr": "📊 Sorties",
+        "ar": "📊 الخروج",
+        "ru": "📊 Выходы",
+        "ko": "📊 청산",
+    },
+    "📋 Active Alerts": {
+        "zh": "📋 活跃提醒",
+        "fr": "📋 Alertes actives",
+        "ar": "📋 التنبيهات النشطة",
+        "ru": "📋 Активные оповещения",
+        "ko": "📋 활성 알림",
+    },
+    "📜 Trade History": {
+        "zh": "📜 交易历史",
+        "fr": "📜 Historique des trades",
+        "ar": "📜 سجل الصفقات",
+        "ru": "📜 История сделок",
+        "ko": "📜 거래 내역",
+    },
+    "📜 View History": {
+        "zh": "📜 查看历史",
+        "fr": "📜 Voir l'historique",
+        "ar": "📜 عرض السجل",
+        "ru": "📜 Смотреть историю",
+        "ko": "📜 내역 보기",
+    },
+    "🔔 Create Alert": {
+        "zh": "🔔 创建提醒",
+        "fr": "🔔 Créer une alerte",
+        "ar": "🔔 إنشاء تنبيه",
+        "ru": "🔔 Создать оповещение",
+        "ko": "🔔 알림 생성",
+    },
+    "🛡 Risk": {
+        "zh": "🛡 风险",
+        "fr": "🛡 Risque",
+        "ar": "🛡 المخاطر",
+        "ru": "🛡 Риск",
+        "ko": "🛡 리스크",
+    },
+    "📁 Back to Portfolio": {
+        "zh": "📁 返回投资组合",
+        "fr": "📁 Retour au portefeuille",
+        "ar": "📁 العودة إلى المحفظة",
+        "ru": "📁 Назад к портфелю",
+        "ko": "📁 포트폴리오로",
+    },
+    "📈 Price Above": {
+        "zh": "📈 价格高于",
+        "fr": "📈 Prix au-dessus",
+        "ar": "📈 السعر أعلى من",
+        "ru": "📈 Цена выше",
+        "ko": "📈 가격 이상",
+    },
+    "📉 Price Below": {
+        "zh": "📉 价格低于",
+        "fr": "📉 Prix en dessous",
+        "ar": "📉 السعر أقل من",
+        "ru": "📉 Цена ниже",
+        "ko": "📉 가격 이하",
+    },
+    "🟢 PnL Above": {
+        "zh": "🟢 盈亏高于",
+        "fr": "🟢 PnL au-dessus",
+        "ar": "🟢 الربح/الخسارة أعلى",
+        "ru": "🟢 PnL выше",
+        "ko": "🟢 손익 이상",
+    },
+    "🔴 PnL Below": {
+        "zh": "🔴 盈亏低于",
+        "fr": "🔴 PnL en dessous",
+        "ar": "🔴 الربح/الخسارة أقل",
+        "ru": "🔴 PnL ниже",
+        "ko": "🔴 손익 이하",
+    },
     "🏠 Home": {
         "zh": "🏠 首页",
         "fr": "🏠 Accueil",
@@ -3461,7 +3716,11 @@ def _translate_lookup(source: dict[str, dict[str, str]], text: str, lang: str) -
         return text
     has_check = text.endswith(" ✅")
     base = text[:-2] if has_check else text
-    translated = source.get(base, {}).get(lang, base)
+    entry = source.get(base)
+    if entry is not None and lang in entry:
+        translated = entry[lang]
+    else:
+        translated = _resolve_missing(base, lang)
     return f"{translated} ✅" if has_check else translated
 
 

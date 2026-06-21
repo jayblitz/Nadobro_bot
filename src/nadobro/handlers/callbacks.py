@@ -343,7 +343,7 @@ async def _handle_onb_new(query, data, telegram_id, context):
             return
         lang = parts[2]
         set_new_onboarding_language(telegram_id, lang)
-        update_user_language(telegram_id, lang)
+        update_user_language(telegram_id, lang, source="onboarding")
         _ACTIVE_LANG.set(lang)
         await _edit_loc(query, _ONB_WELCOME_CARD,
             parse_mode=ParseMode.MARKDOWN,

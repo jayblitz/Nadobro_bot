@@ -26,8 +26,18 @@ User context:
 """
 
 
-def build_managed_agent_system_prompt(username: str | None) -> str:
-    return SYSTEM_PROMPT_TEMPLATE.format(username=(username or "trader"))
+def build_managed_agent_system_prompt(username: str | None, lang: str | None = None) -> str:
+    base = SYSTEM_PROMPT_TEMPLATE.format(username=(username or "trader"))
+    from src.nadobro.i18n import normalize_lang, LANGUAGE_LABELS
+
+    selected = normalize_lang(lang)
+    if selected != "en":
+        lang_name = LANGUAGE_LABELS.get(selected, "English")
+        base += (
+            f"\n\nLanguage:\n- Always respond in {lang_name}. "
+            "Keep ticker symbols, numbers, prices, code, and wallet addresses unchanged."
+        )
+    return base
 
 
 def build_style_instruction() -> str:

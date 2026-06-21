@@ -64,7 +64,9 @@ def invalidate_user_cache(telegram_id: Optional[int] = None):
             _user_cache.clear()
 
 
-def get_or_create_user(telegram_id: int, username: str = None) -> tuple[UserRow, bool, Optional[str]]:
+def get_or_create_user(
+    telegram_id: int, username: str = None, language_code: str | None = None
+) -> tuple[UserRow, bool, Optional[str]]:
     row = query_one("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
     if row:
         if username:
@@ -81,9 +83,14 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple[UserRow,
         _cache_user(user)
         return user, False, None
 
+    # Seed language from the Telegram client locale so a Korean device starts
+    # in Korean. normalize_lang() falls back to "en" for unknown/unsupported
+    # codes, preserving the previous default behaviour when no code is given.
+    from src.nadobro.i18n import normalize_lang
+    seed_lang = normalize_lang(language_code)
     execute(
         "INSERT INTO users (telegram_id, telegram_username, language, network_mode) VALUES (%s, %s, %s, %s)",
-        (telegram_id, username, "en", "mainnet"),
+        (telegram_id, username, seed_lang, "mainnet"),
     )
     row = query_one("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
     user = UserRow(row) if row else UserRow({"telegram_id": telegram_id, "network_mode": "mainnet"})
@@ -486,6 +493,36 @@ def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple
     return True, _loc("{network} wallet unlinked. You can link again via Wallet button.").format(network=network)
 
 
-def update_user_language(telegram_id: int, lang: str):
-    execute("UPDATE users SET language = %s WHERE telegram_id = %s", (lang, telegram_id))
+def update_user_language(telegram_id: int, lang: str, *, source: str = "settings"):
+    """Persist a user's language and emit an audit trail.
+
+    Previously this was a silent UPDATE, so a language switch left no trace in
+    the logs. We now normalize the value, log the change, and write an
+    append-only audit row (fail-soft) so the switch is observable.
+    """
+    from src.nadobro.i18n import normalize_lang
+
+    new_lang = normalize_lang(lang)
+    previous = None
+    try:
+        existing = query_one("SELECT language FROM users WHERE telegram_id = %s", (telegram_id,))
+        if existing:
+            previous = existing.get("language")
+    except Exception:
+        pass
+
+    execute("UPDATE users SET language = %s WHERE telegram_id = %s", (new_lang, telegram_id))
     invalidate_user_cache(telegram_id)
+
+    if previous != new_lang:
+        logger.info(
+            "language_change telegram_id=%s old=%s new=%s source=%s",
+            telegram_id, previous or "en", new_lang, source,
+        )
+        try:
+            from src.nadobro.services.audit_log import record_audit_event
+            record_audit_event(
+                telegram_id, "language_changed", f"{previous or 'en'}->{new_lang} via {source}"
+            )
+        except Exception:
+            pass
