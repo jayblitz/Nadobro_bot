@@ -2026,6 +2026,44 @@ def _get_post_fill_price(client, product_id: int) -> float | None:
 # be updated to query actual execution data by digest.
 
 
+def _resolve_close_session_id(
+    strategy_session_id: int | None,
+    open_trade: dict | None,
+    close_size: float,
+) -> int | None:
+    """Session id to tag onto a recorded close row.
+
+    An EXPLICIT caller-provided id always wins (the caller knows which run it is
+    closing and sized the close accordingly). Otherwise we inherit the matched
+    open trade's session, but ONLY when this close isn't an account-wide flatten
+    larger than that open's own size: ``close_all_positions`` flattens the WHOLE
+    venue position and matches an arbitrary open trade via ``find_open_trade``, so
+    inheriting unconditionally let a 0.0032-BTC run book a 0.02785-BTC "close" and
+    corrupted its volume/PnL. The venue's own per-session close match (digest
+    back-linked in ``nado_sync._write_matches``) carries the correctly-sized close
+    for session attribution, so dropping the tag here loses nothing real. When the
+    open's size is unknown we keep the legacy inherit (least surprise)."""
+    if strategy_session_id is not None:
+        return int(strategy_session_id)
+    if not open_trade:
+        return None
+    inherited = open_trade.get("strategy_session_id")
+    if inherited is None:
+        return None
+    try:
+        open_size = abs(float(open_trade.get("fill_size") or open_trade.get("size") or 0) or 0.0)
+    except (TypeError, ValueError):
+        open_size = 0.0
+    try:
+        csize = abs(float(close_size or 0) or 0.0)
+    except (TypeError, ValueError):
+        csize = 0.0
+    # 1% tolerance absorbs fee/rounding drift between the open and its close.
+    if open_size <= 0 or csize <= open_size * 1.01 + 1e-9:
+        return int(inherited)
+    return None
+
+
 def _record_close_in_db(
     telegram_id: int,
     product_id: int,
@@ -2143,8 +2181,9 @@ def _record_close_in_db(
                 "source": source,
                 "open_trade_id": int(open_trade.get("id")),
             }
-            if strategy_session_id or open_trade.get("strategy_session_id"):
-                close_trade_data["strategy_session_id"] = int(strategy_session_id or open_trade.get("strategy_session_id"))
+            session_for_close = _resolve_close_session_id(strategy_session_id, open_trade, close_size)
+            if session_for_close is not None:
+                close_trade_data["strategy_session_id"] = int(session_for_close)
             if fill_data:
                 close_trade_data["fill_price"] = close_price
                 close_trade_data["fill_fee"] = close_fee + close_builder_fee
