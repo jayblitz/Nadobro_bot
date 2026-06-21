@@ -678,17 +678,20 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 user_id, network, product_id, _timestamp_or_now(match.get("timestamp"))
             )
 
-        # Engine fills are written at fill time by DbTradeRecorder as
-        # ``source='strategy'`` rows carrying human columns (volume/fees) but
-        # no ``submission_idx`` / venue ``realized_pnl_x18``. Enrich the
-        # earliest such row for this digest with the authoritative venue x18
-        # PnL/fee instead of inserting a duplicate, so the row stays canonical
-        # and each match's realized PnL is counted exactly once. Scoped to
-        # ``source='strategy'`` — legacy rows are untouched.
+        # Engine (``source='strategy'``) AND manual open (``source='manual'``)
+        # fills are written at fill time by a recorder row carrying human columns
+        # and — crucially — a real ``product_id`` (IndexerMatch has none). Enrich
+        # the earliest such row for this digest with the authoritative venue x18
+        # PnL/fee instead of inserting a duplicate, so the row stays canonical, the
+        # match is counted once, AND the manual fill keeps its product_id (else a
+        # product_id=0 dupe is inserted and the per-trade card can't pair it).
+        # The bot's synthetic account-wide ``MARKET_CLOSE`` rows are EXCLUDED so an
+        # oversized close never acquires a submission_idx and pollutes the ledger.
         if digest:
             recorder_row = query_one(
                 f"SELECT id FROM {table} "
-                f"WHERE order_digest = %s AND source = 'strategy' AND submission_idx IS NULL "
+                f"WHERE order_digest = %s AND source IN ('strategy', 'manual') "
+                f"AND submission_idx IS NULL AND COALESCE(order_type, '') NOT ILIKE '%%close%%' "
                 f"ORDER BY id ASC LIMIT 1",
                 (digest,),
             )
@@ -714,6 +717,26 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 _maybe_increment_session_win_loss(session_id, pnl_x18)
                 continue
 
+        # IndexerMatch carries no product_id. For a freshly-inserted fill with no
+        # recorder row to inherit from (e.g. desk — DbTradeRecorder skips when
+        # there's no session), recover product_id + name from the live open_orders
+        # row for this digest, so the fill is attributable to a product instead of
+        # collapsing into the product_id=0 bucket the per-trade card can't pair.
+        insert_pid = int(product_id or 0)
+        insert_pname = str(match.get("product_name") or "").strip()
+        if insert_pid == 0 and digest:
+            oo = query_one(
+                "SELECT product_id, pair FROM open_orders "
+                "WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 LIMIT 1",
+                (digest,),
+            )
+            if oo and oo.get("product_id"):
+                insert_pid = int(oo["product_id"])
+                if not insert_pname and oo.get("pair"):
+                    insert_pname = str(oo["pair"])
+        if not insert_pname:
+            insert_pname = f"ID:{insert_pid}"
+
         execute(
             f"""
             INSERT INTO {table} (
@@ -726,8 +749,8 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             """,
             (
                 user_id,
-                int(product_id or 0),
-                str(match.get("product_name") or f"ID:{product_id}"),
+                insert_pid,
+                insert_pname,
                 "long" if base_amount >= 0 else "short",
                 str(abs(base_amount)),
                 submission_idx,
