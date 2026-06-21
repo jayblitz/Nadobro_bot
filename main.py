@@ -219,8 +219,17 @@ def setup_bot():
     async def _language_middleware(update: Update, context):
         user = update.effective_user
         if user:
-            from src.nadobro.i18n import _ACTIVE_LANG, get_user_language, normalize_lang
-            lang = normalize_lang(get_user_language(user.id))
+            from src.nadobro.i18n import _ACTIVE_LANG, normalize_lang
+            from src.nadobro.services.user_service import get_user
+            existing = get_user(user.id)
+            if existing is not None and getattr(existing, "language", None):
+                # Respect the user's stored choice (single source of truth).
+                lang = normalize_lang(existing.language)
+            else:
+                # Brand-new user whose row doesn't exist yet: localize the very
+                # first screen from the Telegram client locale. Creation will
+                # persist this same value (see get_or_create_user).
+                lang = normalize_lang(getattr(user, "language_code", None))
             _ACTIVE_LANG.set(lang)
 
     async def _error_handler(update: object, context) -> None:

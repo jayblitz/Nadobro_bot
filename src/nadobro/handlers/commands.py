@@ -87,8 +87,9 @@ Ready?"""
 async def cmd_start(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     username = update.effective_user.username
+    language_code = getattr(update.effective_user, "language_code", None)
 
-    user, is_new, _ = get_or_create_user(telegram_id, username)
+    user, is_new, _ = get_or_create_user(telegram_id, username, language_code=language_code)
 
     start_arg = context.args[0] if getattr(context, "args", None) else None
     if start_arg:
