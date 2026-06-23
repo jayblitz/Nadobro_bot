@@ -468,3 +468,62 @@ def test_apply_live_mid_config_updates_order_size_and_risk_limits():
     assert orch.risk_engine.limits.max_single_order_quote == Decimal("100.0")
     assert orch.stopped == ["bid-order", "ask-order"]
     assert controller._bid_id is None and controller._ask_id is None
+
+
+def test_apply_live_grid_config_requotes_without_controller_stop():
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.nadobro.engine.controllers.grid_trading import build_grid_config
+    from src.nadobro.engine.types import TradeType
+
+    old_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5}
+    new_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1}
+    old_cfg = er.map_strategy_config("grid", old_settings, Decimal("100"), product="BTC-PERP", leverage=5)
+    new_cfg = er.map_strategy_config("grid", new_settings, Decimal("100"), product="BTC-PERP", leverage=1)
+    old_limits = er.map_risk_limits(old_settings, "grid", leverage=5)
+    new_limits = er.map_risk_limits(new_settings, "grid", leverage=1)
+
+    class _Executor:
+        id = "grid-ex"
+        open_side = TradeType.BUY
+
+        def __init__(self):
+            self.config = build_grid_config(old_cfg, TradeType.BUY)
+            self.recentered = []
+
+        async def recenter(self, start_price, end_price):
+            self.recentered.append((start_price, end_price))
+
+    class _Orch:
+        def __init__(self, executor):
+            self.risk_engine = SimpleNamespace(limits=old_limits)
+            self.executor = executor
+            self.stopped = []
+
+        def list(self, controller_id, active_only=True):
+            return [self.executor]
+
+        async def stop(self, ex_id):
+            self.stopped.append(ex_id)
+
+    executor = _Executor()
+    orch = _Orch(executor)
+    controller = SimpleNamespace(
+        id="grid:7:mainnet",
+        configs=old_cfg,
+        limits=old_limits,
+        trading_pair="BTC-PERP",
+    )
+
+    asyncio.run(
+        er._apply_live_controller_update(
+            "grid", controller, orch, new_cfg, new_limits, Decimal("100")
+        )
+    )
+
+    assert executor.config.total_amount_quote == Decimal("100")
+    assert executor.config.leverage == 1
+    assert executor.recentered
+    assert orch.stopped == []
+    assert orch.risk_engine.limits.max_single_order_quote == Decimal("100.0")
