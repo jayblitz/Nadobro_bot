@@ -379,3 +379,92 @@ def test_should_build_controller_truth_table():
     assert B(needs_recovery=False, has_local_active=False, worker_mode=False, is_running=True) is False
     # Non-worker, no local, nobody running -> build (single-process happy path).
     assert B(needs_recovery=False, has_local_active=False, worker_mode=False, is_running=False) is True
+
+
+def test_live_config_signature_ignores_mid_anchor_but_detects_leverage():
+    """A price-only remap must not churn the live controller, but a leverage /
+    deployed-notional edit must be visible before the next tick."""
+    cfg_100 = er.map_strategy_config(
+        "grid",
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5},
+        Decimal("100"),
+        product="BTC-PERP",
+        leverage=5,
+    )
+    cfg_110 = er.map_strategy_config(
+        "grid",
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5},
+        Decimal("110"),
+        product="BTC-PERP",
+        leverage=5,
+    )
+    limits_5x = er.map_risk_limits(
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5},
+        "grid",
+        leverage=5,
+    )
+    assert er._live_config_signature(cfg_100, limits_5x) == er._live_config_signature(cfg_110, limits_5x)
+
+    cfg_1x = er.map_strategy_config(
+        "grid",
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1},
+        Decimal("110"),
+        product="BTC-PERP",
+        leverage=1,
+    )
+    limits_1x = er.map_risk_limits(
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1},
+        "grid",
+        leverage=1,
+    )
+    assert er._live_config_signature(cfg_100, limits_5x) != er._live_config_signature(cfg_1x, limits_1x)
+
+
+def test_apply_live_mid_config_updates_order_size_and_risk_limits():
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.nadobro.engine.controllers.market_making import MarketMakingController
+
+    old_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5}
+    new_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1}
+    old_cfg = er.map_strategy_config("mid", old_settings, Decimal("100"), product="BTC-PERP", leverage=5)
+    new_cfg = er.map_strategy_config("mid", new_settings, Decimal("100"), product="BTC-PERP", leverage=1)
+    old_limits = er.map_risk_limits(old_settings, "mid", leverage=5)
+    new_limits = er.map_risk_limits(new_settings, "mid", leverage=1)
+
+    class _Orch:
+        def __init__(self):
+            self.risk_engine = SimpleNamespace(limits=old_limits)
+            self.stopped = []
+
+        async def stop(self, ex_id):
+            self.stopped.append(ex_id)
+
+    orch = _Orch()
+    controller = MarketMakingController(
+        user_id=7,
+        configs=old_cfg,
+        orchestrator=orch,
+        adapter=object(),
+        inventory=None,
+        limits=old_limits,
+        controller_id="mid:7:mainnet",
+    )
+    controller._bid_id = "bid-order"
+    controller._ask_id = "ask-order"
+    controller._bid_price = Decimal("99")
+    controller._ask_price = Decimal("101")
+
+    asyncio.run(
+        er._apply_live_controller_update(
+            "mid", controller, orch, new_cfg, new_limits, Decimal("100")
+        )
+    )
+
+    assert controller.order_amount_quote == Decimal("50")
+    assert controller.configs["leverage"] == 1
+    assert controller.limits.max_single_order_quote == Decimal("100.0")
+    assert orch.risk_engine.limits.max_single_order_quote == Decimal("100.0")
+    assert orch.stopped == ["bid-order", "ask-order"]
+    assert controller._bid_id is None and controller._ask_id is None

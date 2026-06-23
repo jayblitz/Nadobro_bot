@@ -12,6 +12,8 @@ all the real wiring lives here.
 """
 from __future__ import annotations
 
+from dataclasses import fields, is_dataclass
+from enum import Enum
 import logging
 import os
 import time
@@ -31,7 +33,7 @@ from src.nadobro.engine.controllers.reverse_grid import ReverseGridController
 from src.nadobro.engine.controllers.volume_bot import VolumeBotController
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
 from src.nadobro.engine.risk import RiskEngine
-from src.nadobro.engine.types import RiskLimits, RiskState, TripleBarrierConfig, _dec
+from src.nadobro.engine.types import RiskLimits, RiskState, TradeType, TripleBarrierConfig, _dec
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +305,186 @@ def _should_build_controller(
     return worker_mode or not is_running
 
 
+def _fingerprint_value(value: object) -> object:
+    """Comparable representation for config/risk objects.
+
+    Decimal/dataclass/Enum instances do not always compare predictably once
+    nested inside generic dicts, and callables such as candle providers must not
+    participate in live-config equality.
+    """
+    if callable(value):
+        return "<callable>"
+    if isinstance(value, Decimal):
+        return ("Decimal", str(value))
+    if isinstance(value, Enum):
+        return ("Enum", value.value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return (
+            type(value).__name__,
+            tuple(
+                (field.name, _fingerprint_value(getattr(value, field.name)))
+                for field in fields(value)
+            ),
+        )
+    if isinstance(value, dict):
+        return tuple(
+            (str(k), _fingerprint_value(v))
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            if not callable(v)
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_fingerprint_value(v) for v in value)
+    return value
+
+
+def _live_config_signature(
+    configs: Dict[str, object], limits: Optional[RiskLimits] = None
+) -> tuple:
+    """Stable signature for parameters that should change a live controller.
+
+    Excludes mid-derived price anchors so ordinary market movement does not
+    churn a controller. Includes risk limits because leverage/notional changes
+    must also update the runtime risk engine before the next order is spawned.
+    """
+    cfg_sig = tuple(
+        (str(k), _fingerprint_value(v))
+        for k, v in sorted(configs.items(), key=lambda item: str(item[0]))
+        if k not in _LIVE_CONFIG_SIGNATURE_EXCLUDE and not callable(v)
+    )
+    return (cfg_sig, _fingerprint_value(limits) if limits is not None else None)
+
+
+def _grid_bounds_for_side(configs: Dict[str, object], side: TradeType, mid: object) -> Dict[str, object]:
+    """Rebuild side-correct grid bounds from stable step/level knobs.
+
+    This mirrors the mapping/recenter math while keeping the helper local to the
+    runtime reconfig path, where the live executor side is known.
+    """
+    mid_dec = _dec(mid)
+    if mid_dec <= 0:
+        return {}
+    step = _dec(configs.get("step_pct") or configs.get("min_spread_between_orders") or 0)
+    levels = int(configs.get("levels_count") or configs.get("max_open_orders") or 0)
+    if step <= 0 or levels < 1:
+        return {}
+    span = step * Decimal(max(levels - 1, 1))
+    maker_offset = max(step / Decimal(2), Decimal("0.00015"))
+    if side is TradeType.SELL:
+        return {
+            "start_price": mid_dec * (Decimal(1) + maker_offset),
+            "end_price": mid_dec * (Decimal(1) + maker_offset + span),
+            "limit_price": Decimal(0),
+        }
+    return {
+        "start_price": mid_dec * (Decimal(1) - maker_offset - span),
+        "end_price": mid_dec * (Decimal(1) - maker_offset),
+        "limit_price": Decimal(0),
+    }
+
+
+def _apply_mid_controller_config(controller: Controller, configs: Dict[str, object]) -> None:
+    """Refresh MarketMakingController attrs read only at __init__."""
+    controller.trading_pair = str(configs["trading_pair"])  # type: ignore[attr-defined]
+    controller.spread_bid_pct = max(  # type: ignore[attr-defined]
+        _dec(configs.get("spread_bid_pct", "0.001")),
+        _dec(configs.get("spread_floor_half_pct", "0.00015")),
+    )
+    controller.spread_ask_pct = max(  # type: ignore[attr-defined]
+        _dec(configs.get("spread_ask_pct", "0.001")),
+        _dec(configs.get("spread_floor_half_pct", "0.00015")),
+    )
+    controller.order_amount_quote = _dec(configs.get("order_amount_quote", "10"))  # type: ignore[attr-defined]
+    controller.price_distance_tolerance = _dec(  # type: ignore[attr-defined]
+        configs.get("price_distance_tolerance", "0.0005")
+    )
+    max_base = configs.get("max_base_quote")
+    min_base = configs.get("min_base_quote")
+    controller.max_base_quote = _dec(max_base) if max_base is not None else None  # type: ignore[attr-defined]
+    controller.min_base_quote = _dec(min_base) if min_base is not None else None  # type: ignore[attr-defined]
+    controller.profit_protection = bool(configs.get("profit_protection", False))  # type: ignore[attr-defined]
+    controller.auto_spread = bool(configs.get("auto_spread", False))  # type: ignore[attr-defined]
+    controller.auto_spread_k = _dec(configs.get("auto_spread_k", "1.5"))  # type: ignore[attr-defined]
+    controller.spread_floor_half_pct = _dec(configs.get("spread_floor_half_pct", "0.00015"))  # type: ignore[attr-defined]
+    controller.spread_cap_half_pct = _dec(configs.get("spread_cap_half_pct", "0.005"))  # type: ignore[attr-defined]
+
+
+async def _apply_grid_live_config(
+    strategy: str,
+    controller: Controller,
+    orch: ExecutorOrchestrator,
+    configs: Dict[str, object],
+    mid: object,
+) -> None:
+    """Apply sizing/spread/risk edits to active grid executors in place.
+
+    Recenter cancels only free/open entry orders and preserves held inventory +
+    reduce-only close legs, avoiding the flattening side effect of a full
+    controller stop.
+    """
+    from src.nadobro.engine.controllers.grid_trading import build_grid_config
+
+    controller.trading_pair = str(configs.get("trading_pair") or getattr(controller, "trading_pair", ""))  # type: ignore[attr-defined]
+    for ex in orch.list(controller.id, active_only=True):
+        recenter = getattr(ex, "recenter", None)
+        ex_config = getattr(ex, "config", None)
+        side = getattr(ex, "open_side", None)
+        if not callable(recenter) or ex_config is None or not isinstance(side, TradeType):
+            continue
+        if str(getattr(ex_config, "trading_pair", "")) != str(configs.get("trading_pair")):
+            logger.warning(
+                "live %s reconfig skipped executor %s: trading_pair changed %s -> %s",
+                strategy, getattr(ex, "id", "<unknown>"),
+                getattr(ex_config, "trading_pair", None), configs.get("trading_pair"),
+            )
+            continue
+        overlay = _grid_bounds_for_side(configs, side, mid)
+        next_cfg = build_grid_config({**configs, **overlay}, side)
+        for attr in (
+            "start_price",
+            "end_price",
+            "limit_price",
+            "total_amount_quote",
+            "min_spread_between_orders",
+            "max_open_orders",
+            "max_orders_per_batch",
+            "activation_bounds",
+            "triple_barrier_config",
+            "leverage",
+            "keep_position",
+        ):
+            setattr(ex_config, attr, getattr(next_cfg, attr))
+        await recenter(next_cfg.start_price, next_cfg.end_price)
+
+
+async def _apply_live_controller_update(
+    strategy: str,
+    controller: Controller,
+    orch: ExecutorOrchestrator,
+    configs: Dict[str, object],
+    limits: RiskLimits,
+    mid: object,
+) -> None:
+    """Apply live UI settings to a locally owned controller before ticking."""
+    controller.configs = dict(configs)
+    controller.limits = limits
+    risk_engine = getattr(orch, "risk_engine", None)
+    if risk_engine is not None:
+        risk_engine.limits = limits
+
+    if strategy == "mid":
+        _apply_mid_controller_config(controller, configs)
+        for attr_id, attr_price in (("_bid_id", "_bid_price"), ("_ask_id", "_ask_price")):
+            ex_id = getattr(controller, attr_id, None)
+            if ex_id is not None:
+                await orch.stop(ex_id)
+                setattr(controller, attr_id, None)
+                setattr(controller, attr_price, None)
+        return
+
+    if strategy in ("grid", "rgrid", "dgrid"):
+        await _apply_grid_live_config(strategy, controller, orch, configs, mid)
+
+
 def _remote_active(
     strategy: str, user_id: int, network: str, session_id: Optional[int] = None
 ) -> bool:
@@ -374,6 +556,22 @@ RUNTIME = _default_runtime()
 # DN cycle. The DeltaNeutralController has been live since Phase 4, so wire
 # it up here and emit its config keys in ``map_strategy_config``.
 ENGINE_MAPPED_STRATEGIES = ("grid", "rgrid", "dgrid", "mid", "vol", "dn")
+
+# These controllers derive live order sizing from config values that can be
+# edited from the UI while the bot remains LIVE. A price move alone changes
+# start/end anchors every cycle, so those mid-derived keys are deliberately
+# excluded from the signature below.
+_LIVE_RECONFIGURABLE_STRATEGIES = ("grid", "rgrid", "dgrid", "mid")
+_LIVE_CONFIG_SIGNATURE_EXCLUDE = frozenset({
+    "start_price",
+    "end_price",
+    "limit_price",
+    "candle_provider",
+    # DN-only restore fields; excluded defensively if a future strategy shares
+    # this helper.
+    "restore_cycles_completed",
+    "restore_funding_usd",
+})
 
 
 def engine_v2_enabled() -> bool:
@@ -1200,6 +1398,19 @@ async def run_engine_cycle(
         if needs_recovery:
             state["last_recovery_ts"] = time.time()
         return {"success": True, "action": action, "strategy": strategy}
+
+    if strategy in _LIVE_RECONFIGURABLE_STRATEGIES and _has_local:
+        controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        orch = RUNTIME._orchestrators.get((telegram_id, network, strategy))      # noqa: SLF001
+        if controller is not None and orch is not None:
+            old_sig = _live_config_signature(controller.configs, controller.limits)
+            new_sig = _live_config_signature(configs, limits)
+            if old_sig != new_sig:
+                await _apply_live_controller_update(strategy, controller, orch, configs, limits, mid)
+                logger.info(
+                    "engine live config updated user=%s network=%s strategy=%s",
+                    telegram_id, network, strategy,
+                )
 
     await RUNTIME.tick(telegram_id, network, strategy)
     # Regime-gate transition: surfaced exactly once per QUOTE<->PAUSE flip so
