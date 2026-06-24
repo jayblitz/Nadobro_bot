@@ -435,7 +435,8 @@ def test_apply_live_mid_config_updates_order_size_and_risk_limits():
 
     class _Orch:
         def __init__(self):
-            self.risk_engine = SimpleNamespace(limits=old_limits)
+            # Production ExecutorOrchestrator exposes RiskEngine as ``risk``.
+            self.risk = SimpleNamespace(limits=old_limits)
             self.stopped = []
 
         async def stop(self, ex_id):
@@ -465,7 +466,70 @@ def test_apply_live_mid_config_updates_order_size_and_risk_limits():
     assert controller.order_amount_quote == Decimal("50")
     assert controller.configs["leverage"] == 1
     assert controller.limits.max_single_order_quote == Decimal("100.0")
-    assert orch.risk_engine.limits.max_single_order_quote == Decimal("100.0")
+    assert orch.risk.limits.max_single_order_quote == Decimal("100.0")
+    assert orch.stopped == ["bid-order", "ask-order"]
+    assert controller._bid_id is None and controller._ask_id is None
+
+
+def test_apply_live_fill_anchored_grid_refreshes_mm_quotes_and_risk_limits():
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.nadobro.engine.controllers.fill_anchored import FillAnchoredQuotingController
+
+    old_settings = {
+        "notional_usd": 100.0,
+        "levels": 2,
+        "fill_anchored": 1,
+        "spread_bp": 5.0,
+        "mm_leverage_override": 5,
+    }
+    new_settings = {
+        "notional_usd": 100.0,
+        "levels": 2,
+        "fill_anchored": 1,
+        "spread_bp": 20.0,
+        "mm_leverage_override": 1,
+        "reset_threshold_pct": 0.5,
+    }
+    old_cfg = er.map_strategy_config("grid", old_settings, Decimal("100"), product="BTC-PERP", leverage=5)
+    new_cfg = er.map_strategy_config("grid", new_settings, Decimal("100"), product="BTC-PERP", leverage=1)
+    old_limits = er.map_risk_limits(old_settings, "grid", leverage=5)
+    new_limits = er.map_risk_limits(new_settings, "grid", leverage=1)
+
+    class _Orch:
+        def __init__(self):
+            self.risk = SimpleNamespace(limits=old_limits)
+            self.stopped = []
+
+        async def stop(self, ex_id):
+            self.stopped.append(ex_id)
+
+    orch = _Orch()
+    controller = FillAnchoredQuotingController(
+        user_id=7,
+        configs=old_cfg,
+        orchestrator=orch,
+        adapter=object(),
+        inventory=None,
+        limits=old_limits,
+        controller_id="grid:7:mainnet",
+    )
+    controller._bid_id = "bid-order"
+    controller._ask_id = "ask-order"
+    controller._bid_price = Decimal("99")
+    controller._ask_price = Decimal("101")
+
+    asyncio.run(
+        er._apply_live_controller_update(
+            "grid", controller, orch, new_cfg, new_limits, Decimal("100")
+        )
+    )
+
+    assert controller.order_amount_quote == Decimal("50")
+    assert controller.spread_bid_pct == Decimal("0.002")
+    assert controller.reset_threshold_pct == Decimal("0.005")
+    assert orch.risk.limits.max_single_order_quote == Decimal("100.0")
     assert orch.stopped == ["bid-order", "ask-order"]
     assert controller._bid_id is None and controller._ask_id is None
 
@@ -497,7 +561,7 @@ def test_apply_live_grid_config_requotes_without_controller_stop():
 
     class _Orch:
         def __init__(self, executor):
-            self.risk_engine = SimpleNamespace(limits=old_limits)
+            self.risk = SimpleNamespace(limits=old_limits)
             self.executor = executor
             self.stopped = []
 
@@ -526,4 +590,4 @@ def test_apply_live_grid_config_requotes_without_controller_stop():
     assert executor.config.leverage == 1
     assert executor.recentered
     assert orch.stopped == []
-    assert orch.risk_engine.limits.max_single_order_quote == Decimal("100.0")
+    assert orch.risk.limits.max_single_order_quote == Decimal("100.0")

@@ -408,6 +408,44 @@ def _apply_mid_controller_config(controller: Controller, configs: Dict[str, obje
     controller.spread_cap_half_pct = _dec(configs.get("spread_cap_half_pct", "0.005"))  # type: ignore[attr-defined]
 
 
+def _apply_orchestrator_risk_limits(orch: ExecutorOrchestrator, limits: RiskLimits) -> None:
+    """Refresh the live RiskEngine limits on the orchestrator.
+
+    ExecutorOrchestrator exposes the engine as ``risk`` in production. Keep the
+    legacy/test ``risk_engine`` spelling as a fallback so lightweight fakes still
+    exercise the same path.
+    """
+    for attr in ("risk", "risk_engine"):
+        risk_engine = getattr(orch, attr, None)
+        if risk_engine is not None:
+            try:
+                risk_engine.limits = limits
+            except Exception:  # noqa: BLE001 - bad fakes must not break a tick
+                logger.debug("risk limit refresh failed via orchestrator.%s", attr, exc_info=True)
+
+
+async def _reset_mm_quotes(controller: Controller, orch: ExecutorOrchestrator) -> None:
+    """Forget/stop current MM-style quotes so the next tick uses new sizing."""
+    for attr_id, attr_price in (("_bid_id", "_bid_price"), ("_ask_id", "_ask_price")):
+        ex_id = getattr(controller, attr_id, None)
+        if ex_id is not None:
+            await orch.stop(ex_id)
+            setattr(controller, attr_id, None)
+            setattr(controller, attr_price, None)
+
+
+def _apply_fill_anchored_controller_config(controller: Controller, configs: Dict[str, object]) -> None:
+    """Refresh FillAnchoredQuotingController attrs read only at __init__."""
+    _apply_mid_controller_config(controller, configs)
+    controller.mode = str(configs.get("anchor_mode", getattr(controller, "mode", "grid"))).lower()  # type: ignore[attr-defined]
+    controller.reset_threshold_pct = _dec(  # type: ignore[attr-defined]
+        configs.get(
+            "reset_threshold_pct",
+            "0.0025" if getattr(controller, "mode", "grid") == "grid" else "0.00125",
+        )
+    )
+
+
 async def _apply_grid_live_config(
     strategy: str,
     controller: Controller,
@@ -467,18 +505,20 @@ async def _apply_live_controller_update(
     """Apply live UI settings to a locally owned controller before ticking."""
     controller.configs = dict(configs)
     controller.limits = limits
-    risk_engine = getattr(orch, "risk_engine", None)
-    if risk_engine is not None:
-        risk_engine.limits = limits
+    _apply_orchestrator_risk_limits(orch, limits)
+
+    is_fill_anchored = (
+        configs.get("controller_override") == "fill_anchored"
+        or isinstance(controller, FillAnchoredQuotingController)
+    )
+    if is_fill_anchored:
+        _apply_fill_anchored_controller_config(controller, configs)
+        await _reset_mm_quotes(controller, orch)
+        return
 
     if strategy == "mid":
         _apply_mid_controller_config(controller, configs)
-        for attr_id, attr_price in (("_bid_id", "_bid_price"), ("_ask_id", "_ask_price")):
-            ex_id = getattr(controller, attr_id, None)
-            if ex_id is not None:
-                await orch.stop(ex_id)
-                setattr(controller, attr_id, None)
-                setattr(controller, attr_price, None)
+        await _reset_mm_quotes(controller, orch)
         return
 
     if strategy in ("grid", "rgrid", "dgrid"):
