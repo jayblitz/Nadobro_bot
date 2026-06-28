@@ -397,6 +397,7 @@ def build_status_snapshot(
         "has_position": bool(live_snapshot.get("has_position")),
         "position_size": _safe_float(live_snapshot.get("position_size"), 0.0),
         "position_side": str(live_snapshot.get("position_side") or ""),
+        "position_value": _safe_float(live_snapshot.get("position_value"), 0.0),
         "entry_price": _safe_float(live_snapshot.get("entry_price"), 0.0),
         "liq_price": _safe_float(live_snapshot.get("liq_price"), 0.0),
         "has_live_snapshot": bool(live_snapshot),
@@ -463,10 +464,12 @@ def render_status_lines(snapshot: dict) -> list[str]:
                if snapshot['last_cycle_pnl_usd'] else "")
         )
         if snapshot.get("has_position"):
+            value = snapshot.get("position_value") or 0.0
             lines.append(
                 f"Position: {snapshot['position_side'].upper()} {snapshot['position_size']:.4f} "
-                f"@ ${snapshot['entry_price']:,.4f}"
-                + (f" / liq ${snapshot['liq_price']:,.4f}" if snapshot.get("liq_price") else "")
+                f"@ ${snapshot['entry_price']:,.2f}"
+                + (f" (${value:,.2f})" if value > 0 else "")
+                + (f" / liq ${snapshot['liq_price']:,.2f}" if snapshot.get("liq_price") else "")
             )
     else:
         lines.append(

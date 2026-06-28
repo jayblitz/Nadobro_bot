@@ -607,18 +607,43 @@ async def _retire_legacy_vol_perp_state(telegram_id: int, network: str, state: d
     return False, latest["last_error"]
 
 
+def _capture_position_baseline(telegram_id: int, network: str, product_id) -> dict:
+    """Signed size + avg entry of any position that ALREADY exists on the product
+    when a run starts, so the run's PnL/SL excludes it (baseline-adjusted). The
+    common case is flat -> (0, 0). Best-effort; never blocks session creation."""
+    if product_id is None:
+        return {}
+    try:
+        from src.nadobro.models.database import get_open_position_rows_for_product
+        rows = get_open_position_rows_for_product(int(telegram_id), network, int(product_id)) or []
+    except Exception:  # noqa: BLE001
+        return {}
+    net_signed = 0.0
+    entry = 0.0
+    dom_abs = -1.0
+    for r in rows:
+        try:
+            size = abs(float(r.get("size") or 0))
+            signed = size if str(r.get("side") or "").lower() == "long" else -size
+            net_signed += signed
+            if size > dom_abs:
+                dom_abs = size
+                entry = float(r.get("avg_entry_price") or 0)
+        except (TypeError, ValueError):
+            continue
+    if abs(net_signed) <= 1e-12:
+        return {}
+    return {"baseline_size": net_signed, "baseline_entry": entry}
+
+
 def _create_session(telegram_id: int, strategy: str, product: str, network: str, state: dict) -> int | None:
     """Create a strategy_sessions row and return the session_id."""
     try:
-        session_id = insert_strategy_session({
-            "user_id": telegram_id,
-            "strategy": strategy,
-            "product_name": product,
-            "product_id": get_product_id(product, network=network) if product != "MULTI" else None,
-            "network": network,
-            "config_snapshot": json.dumps({
-                k: v for k, v in state.items()
-                if k in (
+        product_id = get_product_id(product, network=network) if product != "MULTI" else None
+        baseline = _capture_position_baseline(telegram_id, network, product_id)
+        snapshot = {
+            k: v for k, v in state.items()
+            if k in (
                     "notional_usd", "cycle_notional_usd", "spread_bp", "leverage",
                     "slippage_pct", "interval_seconds", "tp_pct", "sl_pct", "levels",
                     "budget_usd", "risk_level", "max_positions", "products",
@@ -632,7 +657,17 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
                     "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds",
                     "dn_max_drift_pct", "dn_hedge_ratio",
                 )
-            }),
+        }
+        # Baseline-adjust the run's PnL: record any pre-existing position so the
+        # session SL/PnL counts only what THIS run does (see live_session).
+        snapshot.update(baseline)
+        session_id = insert_strategy_session({
+            "user_id": telegram_id,
+            "strategy": strategy,
+            "product_name": product,
+            "product_id": product_id,
+            "network": network,
+            "config_snapshot": json.dumps(snapshot),
         })
         if session_id:
             logger.info("Created strategy session #%s for user %s (%s/%s)", session_id, telegram_id, strategy, network)
@@ -2189,11 +2224,16 @@ async def _evaluate_session_pnl_rail(
         return None
     pnl = float(snap.get("session_pnl") or 0.0)
     pct = float(snap.get("session_pnl_pct") or 0.0)
+    # SLTP-GROSS fix: judge the stop on NET-of-fees PnL so it doesn't fire late
+    # by the accumulated fee drag. Fall back to the gross basis when the net
+    # field is absent (older snapshots). The user-facing message still shows the
+    # gross figure (``pnl``/``pct``) for continuity.
+    pct_net = float(snap.get("session_pnl_pct_net", pct) or 0.0)
 
     reason = ""
-    if sl_pct > 0 and pct <= -sl_pct:
+    if sl_pct > 0 and pct_net <= -sl_pct:
         reason = "sl_hit"
-    elif tp_pct > 0 and pct >= tp_pct:
+    elif tp_pct > 0 and pct_net >= tp_pct:
         reason = "tp_hit"
     if not reason:
         return None
@@ -2577,7 +2617,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 frm=str(dgrid_event.get("from", "")).upper(),
                 to=str(dgrid_event.get("to", "")).upper(),
                 product=product, network=network,
-                why=("downtrend detected" if dgrid_event.get("direction") == "down"
+                why=("reversal — locked profit, flipping" if dgrid_event.get("reason") == "reversal"
+                     else "downtrend detected" if dgrid_event.get("direction") == "down"
                      else "uptrend detected" if dgrid_event.get("direction") == "up"
                      else "regime change"),
                 vr=str(dgrid_event.get("variance_ratio", "")),
@@ -2603,6 +2644,10 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 "residual_exposure": (
                     "🚨 Delta Neutral on {product} ({network}): a position remainder could not be "
                     "flattened after 3 attempts — check your positions.\n{detail}"
+                ),
+                "funding_flip": (
+                    "💹 Delta Neutral on {product} ({network}): funding flipped unfavorable after the "
+                    "minimum hold — closing both legs to stop paying funding.\n{detail}"
                 ),
             }
             template = dn_messages.get(kind)
@@ -2673,6 +2718,55 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         )
         if rail is not None:
             return rail
+    # DN deliberately has NO price-move session SL/TP rail. The shared
+    # _evaluate_session_pnl_rail reads get_live_session_snapshot, which measures a
+    # SINGLE product_id — but a Delta-Neutral run is a TWO-leg hedge (spot long +
+    # perp short) on two products. Measuring one leg makes a normal ~sl_pct price
+    # move look like a full session loss, so the rail fired within minutes of
+    # opening, flattened the hedge, and finalized the run — which is exactly the
+    # "doesn't hold for the configured time / cycles don't auto-restart" bug.
+    # A delta-neutral position has no directional price risk to stop out of; its
+    # real risks are covered by the controller itself: the drift gate (hedge
+    # breakage), the dead-leg gate (one leg dies), the funding-flip exit, the
+    # min/max hold, and manual close. So DN is intentionally excluded here.
+    # (A correctly NET-of-both-legs session rail could be reinstated later, but it
+    # needs a two-product snapshot — see get_live_session_snapshot.)
+
+    # VOL-LOOP completion: the engine controller finished its work (e.g. Volume
+    # reached its target volume / cycle cap) and signalled result["done"].
+    # Finalize the session and tear the engine down — otherwise the strategy
+    # would sit "running" forever (the old idle-in-'done'-phase bug).
+    if isinstance(result, dict) and result.get("done"):
+        reason = str(result.get("stop_reason") or "completed")
+        _finalize_session(state, stop_reason=reason)
+        state["running"] = False
+        state["last_action"] = "engine_completed"
+        _save_state(telegram_id, network, state)
+        try:
+            from src.nadobro.services import engine_runtime as _er_done
+            if strategy in _er_done.ENGINE_MAPPED_STRATEGIES:
+                await _er_done.RUNTIME.stop(telegram_id, network, strategy)
+        except Exception:  # noqa: BLE001 - finalize already persisted; stop is cleanup
+            logger.warning("engine stop after completion failed user=%s", telegram_id, exc_info=True)
+        market_label = _market_label_for_strategy(strategy, product, state)
+        vol_usd = result.get("session_volume_usd")
+        if vol_usd:
+            await _notify(
+                telegram_id,
+                "✅ {strategy} completed on {market} ({network}) — {reason}. "
+                "Volume traded: ${vol}.",
+                strategy=_strategy_display_name(strategy), market=market_label,
+                network=network, reason=reason.replace("_", " "),
+                vol=f"{float(vol_usd):,.0f}",
+            )
+        else:
+            await _notify(
+                telegram_id,
+                "✅ {strategy} completed on {market} ({network}) — {reason}.",
+                strategy=_strategy_display_name(strategy), market=market_label,
+                network=network, reason=reason.replace("_", " "),
+            )
+        return True, None
 
     prev_runs = int(state.get("runs") or 0)
     state["last_run_ts"] = time.time()

@@ -180,6 +180,7 @@ def get_trades_by_user(
     limit: int | None = 50,
     network: str = "mainnet",
     strategy_session_id: int | None = None,
+    since_created_at=None,
 ) -> list:
     table = _trades_table(network)
     where = ["user_id = %s"]
@@ -187,6 +188,9 @@ def get_trades_by_user(
     if strategy_session_id is not None:
         where.append("strategy_session_id = %s")
         params.append(int(strategy_session_id))
+    if since_created_at is not None:
+        where.append("created_at >= %s")
+        params.append(since_created_at)
     where_sql = " AND ".join(where)
     if limit is None or int(limit) <= 0:
         return query_all(
@@ -888,6 +892,7 @@ def rollup_session_from_trades(session_id: int, network: str) -> dict:
               ) AS losses
             FROM {table}
             WHERE strategy_session_id = %s
+              AND COALESCE(source, '') <> 'manual'
             """,
             (int(session_id),),
         )
@@ -936,60 +941,65 @@ def _session_match_where(session_id: int, user_id: Optional[int] = None) -> tupl
     into this user's PnL/SL. (The previous product+time-window fallback that
     pulled untagged fills on the product into the session is gone — that was the
     false-SL contamination.)
+
+    ALSO excludes synthetic ``source='manual'`` rows: the account-wide stop
+    flatten (``close_all_positions`` -> ``_record_close_in_db``) writes ONE
+    close row sized to the whole venue position (not the session's own size) and
+    inherits a session id from a matched open trade. Counting it corrupted the
+    run — e.g. a session that opened 0.0032 BTC booked a 0.02785 "close",
+    inflating signed cash flow far past the run's real volume. Engine fills are
+    ``source='strategy'``; DN/vol closes use their own sources, so only the
+    mis-sized flatten placeholder is dropped here.
     """
     if user_id is None:
-        return "strategy_session_id = %s", [int(session_id)]
-    return "strategy_session_id = %s AND user_id = %s", [int(session_id), int(user_id)]
+        return "strategy_session_id = %s AND COALESCE(source, '') <> 'manual'", [int(session_id)]
+    return (
+        "strategy_session_id = %s AND user_id = %s AND COALESCE(source, '') <> 'manual'",
+        [int(session_id), int(user_id)],
+    )
 
 
 def _session_realized_pnl(
     session_id: int, table: str, user_id: Optional[int] = None
 ) -> float:
-    """Session realized PnL: venue-authoritative per-match ``realized_pnl_x18``
-    when fully synced, else the recorder rows' buy/sell/fee decomposition
-    (complete at fill time). Shared by the live dashboard and the finalize
-    rollup so both always agree. Scoped per ``user_id`` + ``strategy_session_id``
-    (see _session_match_where). ``user_id`` is auto-resolved from the session
-    when not supplied, and a fully unscoped query is never run."""
-    if user_id is None:
-        user_id = _resolve_session_user_id(session_id)
-        if user_id is None:
-            return 0.0
-    where, params = _session_match_where(session_id, user_id)
-    try:
-        row = query_one(
-            f"""
-            SELECT
-              COALESCE(SUM(realized_pnl_x18) FILTER (WHERE realized_pnl_x18 IS NOT NULL), 0) / 1e18
-                AS venue_pnl,
-              COUNT(*) FILTER (WHERE realized_pnl_x18 IS NOT NULL) AS venue_rows,
-              COUNT(*) FILTER (
-                WHERE source = 'strategy' AND fill_price IS NOT NULL AND submission_idx IS NULL
-              ) AS pending_sync,
-              COALESCE(SUM(
-                CASE WHEN side = 'short'
-                       THEN  ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
-                     WHEN side = 'long'
-                       THEN -ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
-                     ELSE 0 END
-              ) FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_gross
-            FROM {table}
-            WHERE {where}
-            """,
-            tuple(params),
-        )
-    except Exception:
-        return 0.0
-    if not row:
-        return 0.0
-    # Realized PnL is GROSS of fees on BOTH paths — PnL is PnL; fees are a
-    # standalone metric (see get_session_live_metrics). The venue per-match
-    # realized_pnl is already gross; the recorder buy/sell cash-flow is gross.
-    venue_rows = int(row.get("venue_rows") or 0)
-    pending_sync = int(row.get("pending_sync") or 0)
-    if venue_rows > 0 and pending_sync == 0:
-        return float(row.get("venue_pnl") or 0)
-    return float(row.get("recorder_gross") or 0)
+    """Session realized PnL — position-aware and DERIVED from session fills.
+
+    This venue reports NO per-fill realized PnL, so realized is replayed from the
+    run's own fills. Delegates to ``get_session_live_metrics`` so the finalize
+    rollup and the live dashboard compute realized PnL identically and can never
+    disagree. ``table`` selects the network; ``user_id`` auto-resolves from the
+    session when not supplied."""
+    network = "testnet" if str(table).lower().endswith("testnet") else "mainnet"
+    metrics = get_session_live_metrics(int(session_id), network, user_id=user_id)
+    return float(metrics.get("realized_pnl") or 0.0)
+
+
+def _derive_session_realized_pnl(
+    table: str,
+    where: str,
+    params: list,
+    session_id: int,
+) -> float | None:
+    """Replay this session's fills to realize closed legs while residual inventory remains."""
+    from src.nadobro.services.portfolio_calculator import realized_pnl_windows_from_rows
+
+    rows = query_all(
+        f"""
+        SELECT
+          COALESCE(NULLIF(product_id, 0), (
+            SELECT product_id FROM strategy_sessions WHERE id = %s
+          )) AS product_id,
+          side, fill_size, size, fill_price, price,
+          base_filled_x18, quote_filled_x18,
+          COALESCE(filled_at, created_at) AS filled_at
+        FROM {table}
+        WHERE {where}
+          AND status IN ('filled', 'closed', 'partially_filled')
+        ORDER BY COALESCE(filled_at, created_at), id
+        """,
+        (int(session_id), *tuple(params)),
+    )
+    return float(realized_pnl_windows_from_rows(rows).get("total_pnl") or 0)
 
 
 def get_session_live_metrics(
@@ -1045,7 +1055,25 @@ def get_session_live_metrics(
                        THEN -ABS(COALESCE(NULLIF(quote_filled_x18, 0) / 1e18,
                                           ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)))
                      ELSE 0 END
-              ), 0) AS signed_cash
+              ), 0) AS signed_cash,
+              -- Realized PnL building blocks (flat-aware decision below). The
+              -- venue per-match realized_pnl_x18 is authoritative; the recorder
+              -- buy/sell cash-flow is ONLY equal to realized PnL when the run is
+              -- flat — for an OPEN position it is just net cash spent and must
+              -- NEVER be shown as "realized" (that produced the bogus -$506).
+              COALESCE(SUM(realized_pnl_x18) FILTER (WHERE realized_pnl_x18 IS NOT NULL), 0) / 1e18
+                AS venue_pnl,
+              COUNT(*) FILTER (WHERE realized_pnl_x18 IS NOT NULL) AS venue_rows,
+              COUNT(*) FILTER (
+                WHERE source = 'strategy' AND fill_price IS NOT NULL AND submission_idx IS NULL
+              ) AS pending_sync,
+              COALESCE(SUM(
+                CASE WHEN side = 'short'
+                       THEN  ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+                     WHEN side = 'long'
+                       THEN -ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+                     ELSE 0 END
+              ) FILTER (WHERE fill_price IS NOT NULL), 0) AS recorder_gross
             FROM {table}
             WHERE {where}
             """,
@@ -1055,14 +1083,150 @@ def get_session_live_metrics(
         return {}
     if not row:
         return {}
+    net_base = float(row.get("net_base") or 0)
+    is_flat = abs(net_base) <= 1e-9
+    # Realized PnL is DERIVED from session fills, NOT read from a venue field.
+    # Replay fills position-aware so partial closes count even while the run has
+    # residual inventory; open-only buys/sells still realize 0. If the replay read
+    # fails, keep the previous safe flat-only fallback rather than surfacing raw
+    # cash spent as realized PnL.
+    try:
+        replayed = _derive_session_realized_pnl(table, where, params, int(session_id))
+        realized = float(replayed or 0)
+    except Exception:
+        realized = float(row.get("signed_cash") or 0) if is_flat else 0.0
     return {
         "fills": int(row.get("fills") or 0),
         "volume": float(row.get("volume") or 0),
         "fees": float(row.get("fees") or 0),
-        "net_base": float(row.get("net_base") or 0),
+        "net_base": net_base,
         "signed_cash": float(row.get("signed_cash") or 0),
-        "realized_pnl": _session_realized_pnl(int(session_id), table, user_id),
+        "realized_pnl": realized,
     }
+
+
+def get_session_turnover(
+    user_id: int, network: str, product_id: int, started_at, stopped_at=None
+) -> dict:
+    """Real traded turnover for THIS user on THIS product since the run started —
+    the "accumulated position value" the user expects as Session Volume. Unlike
+    the strict session-tagged volume (which undercounts because position closes
+    flow through a separate archive path and not every fill is tagged), this
+    reflects what Nado shows: every fill on the product in the run's window.
+
+    Scoped to user_id + product_id + the session time window, so it never mixes
+    in another user or another product. Returns {volume, fills}."""
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    if product_id is None or started_at is None:
+        return {"volume": 0.0, "fills": 0}
+    try:
+        row = query_one(
+            f"""
+            SELECT
+              COUNT(*) FILTER (WHERE status IN ('filled', 'closed', 'partially_filled')) AS fills,
+              COALESCE(SUM(COALESCE(
+                NULLIF(quote_filled_x18, 0) / 1e18,
+                ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+              )), 0) AS volume
+            FROM {table}
+            WHERE user_id = %s AND product_id = %s
+              AND COALESCE(filled_at, created_at) >= %s
+              AND (%s IS NULL OR COALESCE(filled_at, created_at) <= %s)
+            """,
+            (int(user_id), int(product_id), started_at, stopped_at, stopped_at),
+        )
+    except Exception:
+        return {"volume": 0.0, "fills": 0}
+    if not row:
+        return {"volume": 0.0, "fills": 0}
+    return {"volume": float(row.get("volume") or 0), "fills": int(row.get("fills") or 0)}
+
+
+def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> dict:
+    """Account-level realized PnL (24h/7d/30d/all), DERIVED position-aware from the
+    user's COMPLETE venue-confirmed fill history in ``trades_<network>``.
+
+    This venue reports no per-fill realized PnL, so the per-fill sum that powered
+    the portfolio deck was always 0. Here we replay every real fill (excluding the
+    synthetic ``source='manual'`` flatten rows) per product in time order and
+    realize PnL on position reductions (see
+    ``portfolio_calculator.realized_pnl_windows_from_rows``). Returns an empty dict
+    on any error so the read-only display path never raises."""
+    from src.nadobro.services.portfolio_calculator import realized_pnl_windows_from_rows
+
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    try:
+        rows = query_all(
+            f"""
+            SELECT DISTINCT ON (submission_idx)
+                   product_id, side, fill_size, size, fill_price, price,
+                   base_filled_x18, quote_filled_x18,
+                   COALESCE(filled_at, created_at) AS filled_at
+            FROM {table}
+            WHERE user_id = %s
+              AND submission_idx IS NOT NULL
+              AND COALESCE(product_id, 0) <> 0
+              AND COALESCE(source, '') <> 'manual'
+              AND status IN ('filled', 'closed', 'partially_filled')
+            ORDER BY submission_idx, COALESCE(filled_at, created_at), id
+            """,
+            (int(user_id),),
+        )
+    except Exception:
+        return {}
+    return realized_pnl_windows_from_rows(rows, now=now)
+
+
+def get_paired_trades(
+    user_id: int,
+    network: str,
+    *,
+    product_id: int | None = None,
+    closed_only: bool = False,
+    limit: int | None = None,
+) -> list[dict]:
+    """Per-position round-trips for a user's NORMAL + engine trades, paired from
+    the authoritative venue fill ledger so each open is matched to its close and a
+    per-trade PnL card (entry/exit/PnL/fees) can be built.
+
+    Source = venue-confirmed fills only (``submission_idx IS NOT NULL``), deduped
+    per ``submission_idx`` so the bot's synthetic ``MARKET_CLOSE`` rows and any
+    duplicate recorder/match pair can never double-count. Pairing is position-
+    aware (see ``portfolio_calculator.pair_fills_into_trades``). Returns newest
+    closed trades first, with any still-open position last. ``[]`` on any error."""
+    from src.nadobro.services.portfolio_calculator import pair_fills_into_trades
+
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    # product_id 0 = product-less venue fills (this indexer's match feed carries no
+    # product_id); excluded so per-product pairing never mixes BTC with ETH.
+    where = ["user_id = %s", "submission_idx IS NOT NULL", "COALESCE(product_id, 0) <> 0"]
+    params: list = [int(user_id)]
+    if product_id is not None:
+        where.append("product_id = %s")
+        params.append(int(product_id))
+    try:
+        rows = query_all(
+            f"""
+            SELECT DISTINCT ON (submission_idx)
+                   product_id, side, fill_size, size, fill_price, price,
+                   base_filled_x18, quote_filled_x18, fee_x18, fill_fee, fees, builder_fee,
+                   submission_idx, COALESCE(filled_at, created_at) AS filled_at
+            FROM {table}
+            WHERE {" AND ".join(where)}
+            ORDER BY submission_idx, COALESCE(filled_at, created_at)
+            """,
+            tuple(params),
+        )
+    except Exception:
+        return []
+    trades = [t.to_dict() for t in pair_fills_into_trades(rows)]
+    if closed_only:
+        trades = [t for t in trades if t.get("closed")]
+    # Newest first (open trade, with no closed_at, sorts to the top).
+    trades.sort(key=lambda t: (t.get("closed_at") is not None, t.get("closed_at") or ""), reverse=True)
+    if limit is not None and int(limit) > 0:
+        trades = trades[: int(limit)]
+    return trades
 
 
 def get_session_recent_fills(
@@ -1588,11 +1752,20 @@ def insert_vault_lp_event(
     network: str = "mainnet",
 ) -> None:
     table = _vault_lp_events_table(network)
+    # Archive rows (submission_idx NOT NULL) UPSERT so a corrected re-sync can
+    # self-heal a previously mis-sized nlp_amount (e.g. rows written while the NLP
+    # product id resolved to the wrong spot). Bot-audit rows (submission_idx NULL)
+    # never match the partial unique index, so they always insert as before.
     execute(
         f"""INSERT INTO {table}
             (user_id, event_type, quote_usdt0, nlp_amount, submission_idx, tx_digest, event_ts)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING""",
+            ON CONFLICT (user_id, event_type, submission_idx) WHERE submission_idx IS NOT NULL
+            DO UPDATE SET
+                quote_usdt0 = COALESCE(EXCLUDED.quote_usdt0, {table}.quote_usdt0),
+                nlp_amount  = COALESCE(EXCLUDED.nlp_amount, {table}.nlp_amount),
+                tx_digest   = COALESCE(EXCLUDED.tx_digest, {table}.tx_digest),
+                event_ts    = COALESCE(EXCLUDED.event_ts, {table}.event_ts)""",
         (
             telegram_id,
             event_type,

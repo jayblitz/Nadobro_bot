@@ -1,46 +1,47 @@
 """Authoritative live snapshot of a strategy session, sourced from Nado.
 
 This is the single place that defines "what Nado shows for this session". It is
-consumed by three surfaces that previously disagreed (or read zero):
+consumed by:
 
 * the safety rails in ``bot_runtime._run_cycle`` — which fire SL/TP off the real
   session PnL (realized + **unrealized**), as a percentage of the configured
   margin;
-* the ``/mm_status`` and ``/mm_fills`` dashboards;
-* (indirectly) the finalize rollup, which now uses the same product+window
-  attribution.
+* the ``/mm_status`` and ``/mm_fills`` dashboards.
 
 PnL convention
 --------------
 ``session_pnl = realized_pnl + unrealized_pnl - funding_paid``
 
-Everything is sourced from the session's OWN tagged fills (``strategy_session_id``)
-in ``trades_<network>``, marked to the live mid — never the account-aggregate
-position on the product. This is the fix for the false-SL bug (session #40): a
-pre-existing / overlapping / untagged position on the same product can no longer
-contaminate a run's PnL.
+**Unrealized PnL is the LIVE VENUE POSITION uPnL** for the product (the exact
+number Nado/Portfolio shows), **baseline-adjusted**: we subtract the uPnL of any
+position that already existed when the run started, so the figure reflects only
+what THIS run did. This is the fix for the SL that failed to fire — reconstructing
+the position from recorded fills undercounted it badly (0.008 vs 0.08 on Nado), so
+the session PnL read ~0 while the real position was past the stop. Sourcing uPnL
+from the venue position makes the strategy SL agree with Portfolio.
 
-* ``session_pnl_gross = signed_cash + net_base * mark`` — exactly the session's
-  realized + open-leg unrealized, with no VWAP matching needed. ``net_base`` is
-  the session's signed open base (long +, short −) and ``signed_cash`` its signed
-  cash flow (short +quote, long −quote), both from the session's tagged fills.
-* ``realized_pnl`` — venue-authoritative per-match PnL when synced, else the
-  recorder rows' buy/sell cash-flow (see ``_session_realized_pnl``). **GROSS of
-  fees** — PnL is PnL. Fees are a standalone metric (``fees``), tracked per run
-  and surfaced separately, NOT folded into PnL.
-* ``unrealized_pnl = session_pnl_gross - realized_pnl`` — the open leg marked to
-  the live mid. uPnL is the dominant term in-flight (the $32-loss bug was an open
-  position), so a realized-only basis would never have tripped the stop.
-* ``funding_paid`` — paid-positive; reduces PnL. Best-effort from the session
-  row during a live run (funding is rolled up authoritatively at finalize).
+* ``unrealized_pnl`` — ``venue_position_uPnL - baseline_uPnL`` (run-only). When no
+  position pre-existed (the common case), this is exactly the venue uPnL.
+* ``realized_pnl`` — venue-authoritative per-match realized (gross of fees); the
+  recorder cash-flow fallback is used ONLY when the run is flat (see
+  ``get_session_live_metrics``). Fees are a standalone metric, never in PnL.
+* ``volume`` — real traded turnover on the product since the run started
+  (``get_session_turnover``), to match Nado.
+* ``funding_paid`` — paid-positive; reduces PnL.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# A positions row older than this (vs its ``synced_at``) is treated as stale and
+# the snapshot prefers a direct venue read instead. ~2 portfolio-sync ticks.
+_POSITION_STALE_SECONDS = 90.0
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -68,6 +69,119 @@ def _resolve_margin(state: Optional[dict], session: Optional[dict]) -> float:
     return 0.0
 
 
+def _session_baseline(session: Optional[dict]) -> tuple[float, float]:
+    """Signed position size + avg entry that existed when the run started, so the
+    run's PnL excludes a pre-existing/manual position on the same product. Stored
+    in ``config_snapshot`` at session creation. (0, 0) when the run began flat."""
+    if not session:
+        return 0.0, 0.0
+    snap = session.get("config_snapshot")
+    if isinstance(snap, str):
+        try:
+            snap = json.loads(snap)
+        except Exception:  # noqa: BLE001
+            snap = None
+    if not isinstance(snap, dict):
+        return 0.0, 0.0
+    return _f(snap.get("baseline_size")), _f(snap.get("baseline_entry"))
+
+
+def _aggregate_position_rows(rows: list) -> dict:
+    """Net an open product's cross + isolated ``positions`` rows into a single
+    venue view (signed size, blended entry from the dominant lot, summed uPnL)."""
+    net_signed = 0.0
+    upnl = 0.0
+    margin_used = 0.0
+    dominant = None
+    dominant_abs = -1.0
+    newest_sync = 0.0
+    for r in rows:
+        size = abs(_f(r.get("size")))
+        side = str(r.get("side") or "").lower()
+        signed = size if side == "long" else -size
+        net_signed += signed
+        upnl += _f(r.get("est_pnl"))
+        margin_used += _f(r.get("margin_used"))
+        newest_sync = max(newest_sync, _f(r.get("synced_ts")))
+        if size > dominant_abs:
+            dominant_abs = size
+            dominant = r
+    return {
+        "size_signed": net_signed,
+        "entry": _f(dominant.get("avg_entry_price")) if dominant else 0.0,
+        "liq": _f(dominant.get("est_liq_price")) if dominant else 0.0,
+        "leverage": _f(dominant.get("leverage")) if dominant else 0.0,
+        "margin_used": margin_used,
+        "upnl": upnl,
+        "synced_ts": newest_sync,
+    }
+
+
+def _live_position_from_client(client, product_id: int) -> Optional[dict]:
+    """Fresh venue position read straight from Nado for one product (best-effort)."""
+    if client is None:
+        return None
+    try:
+        positions = client.get_all_positions() or []
+    except Exception:  # noqa: BLE001 - display/guard path must never raise
+        logger.debug("live position read failed pid=%s", product_id, exc_info=True)
+        return None
+    net_signed = 0.0
+    upnl = 0.0
+    dominant = None
+    dominant_abs = -1.0
+    matched = False
+    for p in positions:
+        if int(p.get("product_id") or 0) != int(product_id):
+            continue
+        matched = True
+        size = abs(_f(p.get("amount")))
+        signed = _f(p.get("signed_amount"), size if str(p.get("side")).upper() == "LONG" else -size)
+        net_signed += signed
+        upnl += _f(p.get("unrealized_pnl"))
+        if size > dominant_abs:
+            dominant_abs = size
+            dominant = p
+    if not matched:
+        # Nado authoritatively reports no position on this product → flat.
+        return {"size_signed": 0.0, "entry": 0.0, "liq": 0.0, "leverage": 0.0,
+                "margin_used": 0.0, "upnl": 0.0, "synced_ts": time.time()}
+    return {
+        "size_signed": net_signed,
+        "entry": _f(dominant.get("price")) if dominant else 0.0,
+        "liq": _f(dominant.get("liquidation_price")) if dominant else 0.0,
+        "leverage": 0.0,
+        "margin_used": 0.0,
+        "upnl": upnl,
+        "synced_ts": time.time(),
+    }
+
+
+def _venue_position(telegram_id: int, network: str, product_id, client) -> dict:
+    """The live venue position for ``product_id`` — the SAME source Portfolio
+    uses (the nado_sync-maintained ``positions`` table), with a direct client
+    read when the DB row is stale or missing. Best-effort; flat on failure."""
+    flat = {"size_signed": 0.0, "entry": 0.0, "liq": 0.0, "leverage": 0.0,
+            "margin_used": 0.0, "upnl": 0.0, "synced_ts": 0.0}
+    if product_id is None:
+        return flat
+    from src.nadobro.models.database import get_open_position_rows_for_product
+
+    db_view = None
+    try:
+        rows = get_open_position_rows_for_product(int(telegram_id), network, int(product_id))
+        if rows:
+            db_view = _aggregate_position_rows(rows)
+    except Exception:  # noqa: BLE001
+        logger.debug("db position read failed pid=%s", product_id, exc_info=True)
+    stale = (db_view is None) or ((time.time() - _f(db_view.get("synced_ts"))) > _POSITION_STALE_SECONDS)
+    if stale and client is not None:
+        live = _live_position_from_client(client, int(product_id))
+        if live is not None:
+            return live
+    return db_view or flat
+
+
 def get_live_session_snapshot(
     telegram_id: int,
     network: str,
@@ -77,36 +191,42 @@ def get_live_session_snapshot(
     client=None,
     mark: Optional[float] = None,
 ) -> dict:
-    """Live figures for ``session`` (a ``strategy_sessions`` row), scoped to
-    THIS run only. Read-only, best-effort, never raises. Blocking — call via
+    """Live figures for ``session`` (a ``strategy_sessions`` row), scoped to THIS
+    run only. Read-only, best-effort, never raises. Blocking — call via
     ``run_blocking``.
 
-    PnL integrity: realized/volume/fees AND the open position come exclusively
-    from this session's tagged fills in ``trades_<network>`` (NOT the account's
-    aggregate position on the product). The session's net base is marked to the
-    live ``mark`` so ``session_pnl`` reflects only what this run did — a
-    pre-existing or other-source position on the same product can never
-    contaminate it (the false-SL bug). The account/portfolio view shows the
-    Nado aggregate separately.
+    Unrealized PnL + the open position come from the live VENUE position for the
+    product (baseline-adjusted to exclude any pre-existing position), so the
+    strategy SL/PnL agrees with Portfolio. Realized/fees come from this run's
+    own tagged fills (per user + per session); volume is the real turnover on
+    the product since the run started.
     """
     from src.nadobro.models.database import (
         count_open_orders_for_product,
         get_session_live_metrics,
+        get_session_turnover,
     )
 
     session = session or {}
     product_id = session.get("product_id")
     session_id = int(session.get("id") or 0)
-    # Scope to BOTH this session AND this user — stats are unique per user, per
-    # run. A session id is globally unique, but pinning user_id too means a
-    # mis-tagged/venue-synced row can never leak another user's PnL here.
+
+    # Per-user + per-session realized/fees (never another user's/run's fills).
     metrics = (
         get_session_live_metrics(session_id, network, user_id=int(telegram_id))
         if session_id else {}
     )
+    realized = _f(metrics.get("realized_pnl"))
+    fees = _f(metrics.get("fees"))
+    funding_paid = _f(session.get("total_funding_paid"))
 
-    # Live mark for valuing the session's open base. Prefer the caller-supplied
-    # mark (the rail already has the cycle mid); else read it once.
+    # Live venue position (authoritative uPnL) + the run's starting baseline.
+    pos = _venue_position(telegram_id, network, product_id, client)
+    total_size = _f(pos.get("size_signed"))
+    total_upnl = _f(pos.get("upnl"))
+    baseline_size, baseline_entry = _session_baseline(session)
+
+    # Live mark for valuing the position / deriving entry.
     mark_f = _f(mark, 0.0)
     if mark_f <= 0 and client is not None and product_id is not None:
         try:
@@ -114,37 +234,42 @@ def get_live_session_snapshot(
             mark_f = _f(mp.get("mid"), 0.0)
         except Exception:  # noqa: BLE001 - display/guard path must never raise
             logger.debug("live mark read failed pid=%s", product_id, exc_info=True)
+    if mark_f <= 0 and abs(total_size) > 1e-12 and _f(pos.get("entry")) > 0:
+        # Derive mark from the venue position: uPnL = size*(mark - entry).
+        mark_f = _f(pos.get("entry")) + total_upnl / total_size
 
-    realized = _f(metrics.get("realized_pnl"))
-    fees = _f(metrics.get("fees"))
-    volume = _f(metrics.get("volume"))
-    fills = int(metrics.get("fills") or 0)
-    net_base = _f(metrics.get("net_base"))
-    signed_cash = _f(metrics.get("signed_cash"))
-    funding_paid = _f((session or {}).get("total_funding_paid"))
+    # Baseline-adjusted, run-only position + unrealized. uPnL is additive across
+    # lots: run_uPnL = total_uPnL - baseline_uPnL (signed: size*(mark-entry)).
+    run_size = total_size - baseline_size
+    baseline_upnl = baseline_size * (mark_f - baseline_entry) if (baseline_size and mark_f > 0) else 0.0
+    unrealized = total_upnl - baseline_upnl
 
-    # Safety: if we hold open base but couldn't read a live mark (client down /
-    # market read failed), DO NOT value the open leg as ``signed_cash`` alone —
-    # that is the raw cash spent and reads as a huge phantom loss, which would
-    # trip a FALSE SL (the exact bug class we're fixing). Fall back to the mark
-    # that zeroes the open-leg uPnL (== realized-only basis): we simply don't
-    # know the unrealized yet, so report 0 rather than fabricate a loss.
-    if mark_f <= 0 and abs(net_base) > 1e-12:
-        mark_f = (realized - signed_cash) / net_base
-
-    # session realized + unrealized (gross), marked to the live mark, from this
-    # run's own fills. signed_cash + net_base*mark == realized + open-leg uPnL.
-    session_pnl_gross = signed_cash + net_base * mark_f
-    unrealized = session_pnl_gross - realized
-    session_pnl = session_pnl_gross - funding_paid
+    session_pnl = realized + unrealized - funding_paid
     margin = _resolve_margin(state, session)
     session_pnl_pct = (session_pnl / margin * 100.0) if margin > 0 else 0.0
+    # SLTP-GROSS fix: ``session_pnl`` is intentionally GROSS of fees (it is the
+    # number rendered on the status / share cards). The SL/TP rail, however, must
+    # judge the user's stop on the *net* economics — otherwise a -1% stop only
+    # trips at -1% gross, i.e. the true loss is -1% minus accumulated fees, so the
+    # stop fires late by the fee drag (worst on high-turnover grid/vol/DN). Expose
+    # a net basis for the rail without changing the displayed gross PnL.
+    session_pnl_net = session_pnl - fees
+    session_pnl_pct_net = (session_pnl_net / margin * 100.0) if margin > 0 else 0.0
 
-    # Position view = the SESSION's own net base (not the account aggregate).
-    has_position = abs(net_base) > 1e-12
-    position_side = "long" if net_base > 0 else "short" if net_base < 0 else ""
-    # Effective breakeven from the marked uPnL: uPnL = net_base*(mark - entry).
-    entry_price = (mark_f - unrealized / net_base) if net_base else 0.0
+    # Volume = real turnover on the product for THIS run (matches Nado), not the
+    # under-counted session-tagged sum.
+    turnover = get_session_turnover(
+        int(telegram_id), network, int(product_id) if product_id is not None else None,
+        session.get("started_at"), session.get("stopped_at"),
+    ) if product_id is not None else {}
+    volume = max(_f(metrics.get("volume")), _f(turnover.get("volume")))
+    fills = max(int(metrics.get("fills") or 0), int(turnover.get("fills") or 0))
+
+    # Position view = the run's own net position (baseline-excluded).
+    has_position = abs(run_size) > 1e-12
+    position_side = "long" if run_size > 0 else "short" if run_size < 0 else ""
+    entry_price = (mark_f - unrealized / run_size) if (run_size and mark_f > 0) else _f(pos.get("entry"))
+    position_value = abs(run_size) * mark_f
 
     # --- open orders for the product (session owns the product during a run) ---
     open_orders = 0
@@ -166,15 +291,18 @@ def get_live_session_snapshot(
         "funding_paid": funding_paid,
         "open_orders": open_orders,
         "session_pnl": session_pnl,
+        "session_pnl_net": session_pnl_net,
         "margin": margin,
         "session_pnl_pct": session_pnl_pct,
+        "session_pnl_pct_net": session_pnl_pct_net,
         "mark": mark_f,
         "has_position": has_position,
-        "position_size": abs(net_base),
+        "position_size": abs(run_size),
         "position_side": position_side,
+        "position_value": position_value,
         "entry_price": entry_price,
-        "liq_price": 0.0,
-        "leverage": _f((state or {}).get("leverage"), 0.0),
-        "margin_used": 0.0,
-        "net_base": net_base,
+        "liq_price": _f(pos.get("liq")),
+        "leverage": _f(pos.get("leverage")) or _f((state or {}).get("leverage"), 0.0),
+        "margin_used": _f(pos.get("margin_used")),
+        "net_base": run_size,
     }

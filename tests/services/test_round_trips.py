@@ -54,27 +54,48 @@ def _row(
     }
 
 
-def test_compute_round_trips_pairs_one_open_with_one_close():
+def test_compute_round_trips_derives_pnl_from_prices_not_void_field():
+    # Regression: this venue reports no per-fill realized PnL, so the close row's
+    # realized_pnl is 0. PnL must be DERIVED from prices (gross of fees) = +10,
+    # NOT read as 0 from the void field (the "manual trade PnL shown as 0" bug).
     open_ts = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
     close_ts = datetime(2026, 5, 1, 14, 0, tzinfo=timezone.utc)
     rows = [
         _row(1, "long", 1.0, 100.0, fee=0.10, ts=open_ts),
-        _row(2, "short", 1.0, 110.0, fee=0.20, realized_pnl=9.7, order_type="CLOSE_MARKET", ts=close_ts),
+        _row(2, "short", 1.0, 110.0, fee=0.20, realized_pnl=0.0, order_type="CLOSE_MARKET", ts=close_ts),
     ]
-    with patch.object(trade_service, "_query_all" if False else "query_all", create=True):
-        with patch("src.nadobro.db.query_all", return_value=rows):
-            trips = trade_service.compute_round_trips(42, "mainnet")
+    with patch("src.nadobro.db.query_all", return_value=rows):
+        trips = trade_service.compute_round_trips(42, "mainnet")
 
     assert len(trips) == 1
     trip = trips[0]
     assert trip["trip_key"] == "2"  # close trade id
     assert trip["side"] == "long"
-    assert trip["realized_pnl"] == pytest.approx(9.7)
+    assert trip["realized_pnl"] == pytest.approx(10.0)   # (110-100)*1, gross
     assert trip["fees"] == pytest.approx(0.30)
     assert trip["avg_open_price"] == pytest.approx(100.0)
     assert trip["avg_close_price"] == pytest.approx(110.0)
     assert trip["open_ts"] == open_ts
     assert trip["close_ts"] == close_ts
+
+
+def test_compute_round_trips_pairs_venue_fill_close_opposite_side():
+    # A close that arrives as a venue 'match' fill (order_type not CLOSE) must
+    # still pair against the open via opposite-side detection and derive PnL.
+    open_ts = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
+    close_ts = datetime(2026, 5, 1, 14, 0, tzinfo=timezone.utc)
+    rows = [
+        _row(1, "short", 2.0, 200.0, fee=0.10, order_type="match", ts=open_ts),
+        _row(2, "long", 2.0, 180.0, fee=0.10, realized_pnl=0.0, order_type="match", ts=close_ts),
+    ]
+    with patch("src.nadobro.db.query_all", return_value=rows):
+        trips = trade_service.compute_round_trips(42, "mainnet")
+
+    assert len(trips) == 1
+    trip = trips[0]
+    assert trip["side"] == "short"
+    assert trip["realized_pnl"] == pytest.approx(40.0)   # (200-180)*2 short profit
+    assert trip["size"] == pytest.approx(2.0)
 
 
 def test_compute_round_trips_consumes_fifo_lots_on_partial_close():

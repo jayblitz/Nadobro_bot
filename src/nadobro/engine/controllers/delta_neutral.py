@@ -10,9 +10,13 @@ Lifecycle (driven by on_start + on_tick):
            long's filled base × hedge_ratio so the legs match in BASE terms
            regardless of the spot/perp mid gap). If the short fails to spawn the
            long is rolled back — never carry an unhedged leg.
-  HOLDING  hold for ``hold_seconds`` (default 1h, up to 24h). Each tick a drift
+  HOLDING  hold for AT LEAST ``hold_seconds`` (default 1h). Each tick a drift
            gate flattens both legs early if the hedge breaks beyond
-           ``max_drift_pct`` (safety). At hold expiry both legs are closed.
+           ``max_drift_pct`` (safety). Once the minimum hold elapses the exit is
+           funding-driven: keep the hedge open while the short still earns
+           funding and close BOTH legs as soon as funding flips unfavorable
+           (debounced), or at ``max_hold_seconds`` as a safety cap. Set
+           ``funding_exit_enabled=False`` to restore a fixed hold at the minimum.
   CLOSING  reduce-only MARKET closes fired on BOTH legs concurrently (same tick
            ⇒ same minute). Wait until both terminate.
   WAITING  pause ``cycle_gap_seconds`` between cycles.
@@ -96,7 +100,15 @@ class DeltaNeutralController(Controller):
         self.hedge_broken = False
 
         self.phase = DNPhase.OPENING
-        self.cycles_completed = 0
+        # DN-CYCLES fix: the controller is rebuilt from scratch on a process
+        # restart / worker handoff / FAILED-recovery, and its phase/cycle counter
+        # live only in memory — so each rebuild reset cycles_completed to 0 and
+        # ran the whole cycle count again, never honoring the configured number
+        # of cycles. The engine persists progress to engine_controller_state;
+        # run_engine_cycle injects it as ``restore_cycles_completed`` /
+        # ``restore_funding_usd`` so a rebuilt controller resumes the count
+        # instead of restarting it. Defaults to a clean start (0) for a fresh run.
+        self.cycles_completed = max(0, _int_cfg(self.cfg("restore_cycles_completed"), 0))
         self.opened_at: Optional[float] = None      # hold-clock start (both legs open)
         self.wait_until: Optional[float] = None      # WAITING → OPENING gate
         self._abort_cycles = False                   # set on a drift break
@@ -106,8 +118,31 @@ class DeltaNeutralController(Controller):
         # short collects funding while the hedge is open; we poll the indexer
         # funding feed via the adapter and accumulate it for the PnL card.
         self.first_cycle_open_ts: Optional[float] = None
-        self.cumulative_funding: Decimal = Decimal(0)
-        self._funding_reported: Decimal = Decimal(0)
+        self.cumulative_funding: Decimal = _dec(self.cfg("restore_funding_usd", "0") or "0")
+        self._funding_reported: Decimal = self.cumulative_funding
+
+        # Funding-flip exit (engine-v2): ``hold_seconds`` is now a MINIMUM hold,
+        # not a fixed timer. After it elapses we keep the hedge open while the
+        # short still earns funding and close BOTH legs as soon as funding flips
+        # unfavorable (debounced), or at ``max_hold_seconds`` as a safety cap.
+        # The user can still close manually any time (the normal stop path), and
+        # the drift / dead-leg gates above still fire earlier than the minimum.
+        #   - funding_exit_enabled=False restores the legacy fixed-hold behavior
+        #     (close exactly at the minimum), used by cycle-mechanics tests.
+        #   - the short earns funding while rate > flip_threshold; "flip" =
+        #     rate <= flip_threshold for funding_flip_confirmations polls in a row.
+        self.min_hold_seconds = self.hold_seconds
+        _max_hold = max(0, _int_cfg(self.cfg("max_hold_seconds"), 86400))
+        self.max_hold_seconds = max(_max_hold, self.min_hold_seconds) if _max_hold > 0 else 0
+        self.funding_exit_enabled = bool(self.cfg("funding_exit_enabled", True))
+        self.funding_flip_threshold = _dec(self.cfg("funding_flip_threshold", "0"))
+        self.funding_flip_confirmations = max(1, _int_cfg(self.cfg("funding_flip_confirmations"), 2))
+        self.funding_poll_seconds = max(0, _int_cfg(self.cfg("funding_poll_seconds"), 60))
+        # Last observed perp funding rate + consecutive-unfavorable debounce,
+        # surfaced for status/telemetry (dn_last_funding_rate / dn_unfavorable_count).
+        self.last_funding_rate: Optional[Decimal] = None
+        self.funding_unfavorable_count = 0
+        self._last_funding_poll_ts: Optional[float] = None
 
         # Execution hardening (2026-06): one leg live while the other hangs is
         # the worst failure a "neutral" strategy can have. CLOSING re-issues
@@ -264,6 +299,11 @@ class DeltaNeutralController(Controller):
         if self.first_cycle_open_ts is None:
             self.first_cycle_open_ts = now
         self.entry_funding_rate = await self._read_funding_rate()
+        # Reset the funding-flip debounce per cycle; seed last_funding_rate with
+        # the entry reading so status shows it immediately.
+        self.last_funding_rate = self.entry_funding_rate
+        self.funding_unfavorable_count = 0
+        self._last_funding_poll_ts = None
         self.phase = DNPhase.HOLDING
 
     async def _rebalance_after_open(self) -> None:
@@ -318,6 +358,23 @@ class DeltaNeutralController(Controller):
         """Net funding received so far this run (positive = earned)."""
         return self.cumulative_funding
 
+    @property
+    def completed(self) -> bool:
+        """True once the run is finished — all configured cycles closed, or an
+        early abort (drift break / dead leg / funding flip). The runtime reads
+        this (``result["done"]``) to finalize the session and tear the engine
+        down; without it a finished DN run idled 'running' forever in DONE."""
+        return self.phase is DNPhase.DONE
+
+    @property
+    def stop_reason(self) -> str:
+        """Why the run ended, for the completion notification."""
+        if self.hedge_broken:
+            return "hedge_broken"
+        if self._abort_cycles:
+            return "stopped_early"
+        return "cycles_complete"
+
     async def _read_funding_rate(self) -> Optional[Decimal]:
         """Best-effort funding-rate snapshot for the perp leg (informational —
         the short earns funding when this is positive). Never breaks a cycle."""
@@ -325,6 +382,41 @@ class DeltaNeutralController(Controller):
             return await self.adapter.funding_rate(self.short_pair)
         except Exception:  # noqa: BLE001 - funding read is non-critical
             return None
+
+    async def _maybe_exit_on_funding_flip(self) -> None:
+        """After the minimum hold, poll the perp funding rate (throttled) and
+        close BOTH legs once it has flipped unfavorable for the short for
+        ``funding_flip_confirmations`` consecutive polls.
+
+        Best-effort and conservative: a failed or lagged read (None) is treated
+        as 'no signal' and never forces a close, so a venue hiccup can't unwind a
+        still-favorable hedge. A confirmed flip aborts further cycles — once the
+        edge is gone we don't churn back into unfavorable funding; the user can
+        restart (or pick a better pair from the Funding Rates screen)."""
+        now = time.time()
+        if (
+            self.funding_poll_seconds > 0
+            and self._last_funding_poll_ts is not None
+            and (now - self._last_funding_poll_ts) < self.funding_poll_seconds
+        ):
+            return
+        self._last_funding_poll_ts = now
+        rate = await self._read_funding_rate()
+        if rate is None:
+            return  # no signal — leave the debounce counter untouched
+        self.last_funding_rate = rate
+        if rate > self.funding_flip_threshold:
+            # Still favorable for the short — reset the debounce.
+            self.funding_unfavorable_count = 0
+            return
+        self.funding_unfavorable_count += 1
+        if self.funding_unfavorable_count >= self.funding_flip_confirmations:
+            self._emit_dn(
+                "funding_flip",
+                f"funding flipped unfavorable ({rate}/day) — closing the hedge",
+            )
+            self._abort_cycles = True
+            await self._close_both_now(CloseType.TIME_LIMIT)
 
     async def _leg_value(self, pair: str) -> Decimal:
         if self.inventory is None:
@@ -429,6 +521,18 @@ class DeltaNeutralController(Controller):
 
     # -- lifecycle --------------------------------------------------------
     async def on_start(self) -> None:
+        # DN-CYCLES fix: a rebuilt controller restores cycles_completed from
+        # persisted progress. If the configured cycle count is already met, do
+        # NOT open another cycle (that was the "ignores the cycle count" bug on
+        # restart) — go straight to DONE so the run finalizes cleanly.
+        if self.cycles_completed >= self.total_cycles:
+            logger.info(
+                "delta_neutral: restored cycles_completed=%s >= total_cycles=%s — "
+                "no new cycle opened",
+                self.cycles_completed, self.total_cycles,
+            )
+            self.phase = DNPhase.DONE
+            return
         await self._open_cycle()
         if self.phase is DNPhase.CLOSING:
             # First-cycle rollback in flight: surface it loudly. The
@@ -489,9 +593,32 @@ class DeltaNeutralController(Controller):
                     await self._close_both_now(CloseType.EARLY_STOP)
                     return
 
-        # Hold expiry → planned synchronized exit.
-        if self.opened_at is not None and (time.time() - self.opened_at) >= self.hold_seconds:
+        # Hold management. ``hold_seconds`` is the MINIMUM hold; the exit is
+        # funding-driven after it (or capped by max_hold_seconds).
+        if self.opened_at is None:
+            return
+        elapsed = time.time() - self.opened_at
+
+        # Safety cap: never hold past max_hold_seconds (0 = no cap; hold while
+        # funding stays favorable).
+        if self.max_hold_seconds and elapsed >= self.max_hold_seconds:
             await self._close_both_now(CloseType.TIME_LIMIT)
+            return
+
+        # Minimum hold guarantees at least one funding settlement window before
+        # any funding-driven exit. Drift / dead-leg gates above still fire earlier.
+        if elapsed < self.min_hold_seconds:
+            return
+
+        # Legacy fixed-hold semantics when funding-exit is disabled: close as
+        # soon as the minimum hold elapses.
+        if not self.funding_exit_enabled:
+            await self._close_both_now(CloseType.TIME_LIMIT)
+            return
+
+        # Past the minimum hold: keep the hedge open while the short still earns
+        # funding; close BOTH legs once funding flips unfavorable (debounced).
+        await self._maybe_exit_on_funding_flip()
 
     async def _tick_closing(self) -> None:
         # 1) Re-issue stops for any leg still alive — the first attempt may

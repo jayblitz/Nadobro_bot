@@ -175,7 +175,7 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
     snapshot["last_mint_ts_ms"] = pos.get("last_mint_ts_ms")
     snapshot["lockup_seconds_remaining"] = lockup_remaining_seconds(snapshot["last_mint_ts_ms"])
 
-    mintable = client.get_max_nlp_mintable(spot_leverage=False) or {}
+    mintable = client.get_max_nlp_mintable(spot_leverage=False, product_id=nlp_product_id) or {}
     max_mintable = float(mintable.get("max_mintable_usdt0") or 0.0)
     snapshot["max_mintable_usdt0"] = max_mintable
     snapshot["deposit_room_usdt0"] = deposit_room_usdt0(

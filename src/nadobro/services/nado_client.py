@@ -3181,30 +3181,85 @@ class NadoClient:
             results.append(r)
         return {"success": True, "cancelled": len([r for r in results if r["success"]])}
 
+    def get_perp_funding_rates(self, product_ids: list[int]) -> dict:
+        """Latest funding rates for the given perp products, read from the
+        indexer funding endpoint (SDK ``get_perp_funding_rates``).
+
+        Returns ``{product_id(int): {"product_id", "funding_rate", "update_time"}}``
+        where ``funding_rate`` is the **signed 24h (daily) rate**: positive means
+        longs pay shorts (favorable for a Delta-Neutral short leg), negative means
+        shorts pay longs. The indexer reports ``funding_rate_x18`` (the daily rate
+        × 1e18), so we divide by 1e18.
+
+        This is the *funding rate* — NOT the cumulative funding accumulator
+        (``cum_funding_x18``) the old ``all_products`` read mistook for a rate
+        (that field is a monotonic settlement index, not a rate). Sign is
+        preserved so callers can tell favorable from unfavorable funding.
+        """
+        from src.nadobro.services.nado_weights import query_weight
+
+        ids = [int(p) for p in (product_ids or []) if p is not None]
+        if not ids:
+            return {}
+        if not self._ensure_sdk_client():
+            return {}
+        # Indexer reads charge the archive host's per-IP token bucket
+        # (user_scoped=False ⇒ no in-flight slot to release). One batched request
+        # covers every perp regardless of list length.
+        if not self._gateway_allowed(
+            weight=query_weight("funding_rate"), url=self._archive_url(), user_scoped=False
+        ):
+            return {}
+        try:
+            raw = self.client.context.indexer_client.get_perp_funding_rates(ids)
+        except Exception as e:  # noqa: BLE001 - normalize venue errors
+            logger.error("SDK get_perp_funding_rates failed: %s", _format_sdk_error(e))
+            return {}
+        plain = self._to_plain(raw)
+        rows = plain.values() if isinstance(plain, dict) else (plain or [])
+        rates: dict = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pid = row.get("product_id")
+            raw_rate = row.get("funding_rate_x18")
+            if pid is None or raw_rate is None:
+                continue
+            try:
+                pid_int = int(pid)
+                rate = int(str(raw_rate)) / 1e18
+            except (TypeError, ValueError):
+                continue
+            rates[pid_int] = {
+                "product_id": pid_int,
+                "funding_rate": rate,
+                "update_time": row.get("update_time"),
+            }
+        return rates
+
     def get_all_funding_rates(self) -> dict:
         cache_key = f"{self.network}:funding"
         with _caches_lock:
             cached = _FUNDING_CACHE.get(cache_key)
         if cached and (time.time() - cached["ts"] < _FUNDING_TTL):
             return cached["data"]
-        try:
-            data = self._query_rest("all_products") or {}
-            if data.get("status") == "success":
-                rates = {}
-                for prod in data["data"].get("perp_products", []):
-                    pid = prod.get("product_id")
-                    funding = int(prod.get("cum_funding_x18", 0)) / 1e18
-                    rates[pid] = {"product_id": pid, "funding_rate": funding}
-                with _caches_lock:
-                    _FUNDING_CACHE[cache_key] = {"data": rates, "ts": time.time()}
-                return rates
-        except Exception as e:
-            logger.error(f"get_all_funding_rates failed: {e}")
-        return {}
+        product_ids = [
+            int(pid)
+            for name in get_perp_products(network=self.network, client=self)
+            if (pid := get_product_id(name, network=self.network, client=self)) is not None
+        ]
+        rates = self.get_perp_funding_rates(product_ids)
+        if rates:
+            with _caches_lock:
+                _FUNDING_CACHE[cache_key] = {"data": rates, "ts": time.time()}
+        return rates
 
     def get_funding_rate(self, product_id: int) -> Optional[dict]:
         rates = self.get_all_funding_rates()
-        return rates.get(product_id)
+        try:
+            return rates.get(int(product_id))
+        except (TypeError, ValueError):
+            return rates.get(product_id)
 
     def get_product_market_stats(self, product_id: int) -> dict:
         """
@@ -3443,7 +3498,21 @@ class NadoClient:
                 return 0.0
 
     def resolve_nlp_product_id(self) -> int | None:
-        """Discover the NLP spot product id from all_products (cached per client)."""
+        """Discover the NLP spot product id from all_products (cached per client).
+
+        NLP is the only spot product configured as a zero-interest, zero-spot-
+        withdraw-fee vault token: its 4-day lock and bps fee live in the vault,
+        not the spot interest model, so ``interest_*_x18`` and ``withdraw_fee_x18``
+        are all 0 (every other spot — kBTC, wETH, RWAs — carries non-zero borrow
+        interest). We anchor to the known per-network id and validate it against
+        that config.
+
+        Bug history: the previous heuristic matched ``book_info.min_size`` starting
+        with ``100000000000000000``, but EVERY Nado spot shares
+        ``min_size=100000000000000000000`` — so the scan returned the FIRST match
+        (kBTC, pid 1, ~$64k) and the vault reported the user's kBTC dust as a
+        phantom NLP position (~$3.20 for 0.00005 kBTC) instead of $0.
+        """
         cached = getattr(self, "_nlp_product_id", None)
         if cached is not None:
             return cached
@@ -3455,19 +3524,44 @@ class NadoClient:
             except ValueError:
                 pass
         default = 11 if self.network == "mainnet" else 1
+
+        def _is_zero(cfg: dict, key: str) -> bool:
+            try:
+                return int(cfg.get(key) or 0) == 0
+            except (TypeError, ValueError):
+                return False
+
+        def _is_nlp_like(sp: dict) -> bool:
+            cfg = sp.get("config") or {}
+            # The vault token has no spot borrow interest and no spot withdraw fee.
+            return (
+                _is_zero(cfg, "interest_floor_x18")
+                and _is_zero(cfg, "interest_small_cap_x18")
+                and _is_zero(cfg, "interest_large_cap_x18")
+                and _is_zero(cfg, "withdraw_fee_x18")
+            )
+
         try:
             payload = self._query_rest("all_products") or {}
             data = payload.get("data") or payload
+            candidates: list[int] = []
             for sp in data.get("spot_products") or []:
                 if not isinstance(sp, dict):
                     continue
                 pid = sp.get("product_id")
-                book = sp.get("book_info") or {}
-                min_size = str(book.get("min_size") or "")
-                # NLP spot uses large min_size increments on mainnet.
-                if pid is not None and min_size.startswith("100000000000000000"):
-                    self._nlp_product_id = int(pid)
-                    return self._nlp_product_id
+                if pid is None or int(pid) == 0:  # 0 = USDT0 quote, never NLP
+                    continue
+                if _is_nlp_like(sp):
+                    candidates.append(int(pid))
+            # Prefer the known per-network id when the venue confirms it; else, if
+            # the config uniquely identifies one product, trust that; otherwise
+            # fall back to the per-network default.
+            if default in candidates:
+                self._nlp_product_id = default
+                return default
+            if len(candidates) == 1:
+                self._nlp_product_id = candidates[0]
+                return candidates[0]
         except Exception as e:
             logger.debug("resolve_nlp_product_id failed network=%s err=%s", self.network, e)
         self._nlp_product_id = default
@@ -3540,13 +3634,23 @@ class NadoClient:
             logger.debug("nlp_locked_balances failed user=%s err=%s", _mask_address(self.address or ""), e)
             return empty
 
-    def get_max_nlp_mintable(self, *, spot_leverage: bool = False) -> dict:
-        """Maximum USDT0 the user can mint into NLP right now."""
+    def get_max_nlp_mintable(self, *, spot_leverage: bool = False, product_id: int | None = None) -> dict:
+        """Maximum USDT0 the user can mint into NLP right now.
+
+        ``product_id`` is REQUIRED by the gateway (QueryMaxLpMintableParams =
+        sender + product_id). Omitting it returned 0 for everyone, which the UI
+        surfaced as "deposits closed" even while the vault was open. Resolve the
+        NLP product id when the caller doesn't supply it.
+        """
         try:
+            pid = int(product_id) if product_id is not None else self.resolve_nlp_product_id()
+            if pid is None:
+                return {"max_mintable_usdt0": 0.0, "raw": {}}
             payload = self._query_rest(
                 "max_nlp_mintable",
                 {
                     "sender": self.subaccount_hex,
+                    "product_id": int(pid),
                     "spot_leverage": "true" if spot_leverage else "false",
                 },
             ) or {}

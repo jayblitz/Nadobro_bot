@@ -138,6 +138,41 @@ def _dn_underlying_key(symbol: str) -> str:
     return compact or text
 
 
+def _dn_pair_candidates(symbol: str) -> list[str]:
+    """All plausible underlying keys a spot/perp symbol could pair on.
+
+    DN-CUSTOM-ASSETS fix: ``_dn_underlying_key`` assumes a wrapped spot ticker
+    is ``w<TICKER>x`` where BOTH the leading ``W`` and trailing ``X`` are wrapper
+    markers (testnet xStocks: ``wQQQx`` -> ``QQQ``). On mainnet the RWA tickers
+    are ``QQQX`` / ``SPYX`` where the ``X`` is part of the *name*, so the spot
+    ``wQQQX`` reduces to ``QQQ`` while the perp ``QQQX-PERP`` reduces to ``QQQX``
+    — the two never match and the pair is silently dropped, leaving DN stuck on
+    BTC/ETH. Returning multiple candidate forms (full underlying key, and the
+    "strip only the leading wrapper" form that keeps the trailing X) lets the
+    pairing succeed for BOTH conventions without breaking the existing one.
+    Order = most-specific first; callers should prefer the existing
+    ``underlying_key`` match and only fall back to the broader candidates.
+    """
+    text = str(symbol or "").strip().upper()
+    if text.endswith("-PERP"):
+        text = text[:-5]
+    compact = text.replace("_", "-").replace("/", "-").strip("-").replace("-", "")
+    out: list[str] = []
+
+    def _add(value: str) -> None:
+        v = (value or "").strip().upper()
+        if v and v not in out:
+            out.append(v)
+
+    _add(_dn_underlying_key(symbol))           # e.g. wQQQX -> QQQ  (testnet form)
+    if compact.startswith("WB") and len(compact) > 2:
+        _add(compact[2:])                       # Backed wrapper: wbNVDA -> NVDA
+    if compact.startswith("W") and len(compact) > 1:
+        _add(compact[1:])                       # strip leading wrapper only: wQQQX -> QQQX
+    _add(compact)                               # bare: QQQX -> QQQX
+    return out
+
+
 def _derive_max_leverage_from_weight_x18(weight_x18) -> Optional[int]:
     """Derive max leverage from initial asset weight: lev = 1 / (1 - w).
 
@@ -590,6 +625,10 @@ def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
         return None
 
     spot_by_underlying: dict[str, list[dict]] = {}
+    # DN-CUSTOM-ASSETS fix: also index every spot under its broader candidate
+    # keys (see _dn_pair_candidates) so a perp can pair with a wrapped spot whose
+    # underlying_key was over-reduced (mainnet wQQQX/QQQX, wSPYX/SPYX).
+    spot_by_candidate: dict[str, list[dict]] = {}
     for key, row in (spot_catalog.get("spots") or {}).items():
         spot_row = dict(row or {})
         spot_row["key"] = key
@@ -597,6 +636,8 @@ def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
         if not underlying_key:
             continue
         spot_by_underlying.setdefault(underlying_key, []).append(spot_row)
+        for cand in _dn_pair_candidates(str(spot_row.get("symbol") or key)):
+            spot_by_candidate.setdefault(cand, []).append(spot_row)
 
     v2_perp_rows_by_symbol = {
         str(k).upper().strip(): v for k, v in v2_symbols.items() if str((v or {}).get("type") or "").lower() == "perp"
@@ -606,28 +647,20 @@ def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
     by_perp_id: dict[int, str] = {}
     by_spot_id: dict[int, str] = {}
 
-    entries = list((perp_catalog.get("perps") or {}).items())
-    entries.sort(key=lambda kv: int((kv[1] or {}).get("id", 0)))
-    for product_key, row in entries:
-        perp_row = dict(row or {})
-        perp_symbol = str(perp_row.get("symbol") or f"{product_key}-PERP").upper().strip()
-        v2_perp_row = v2_perp_rows_by_symbol.get(perp_symbol, {})
-        underlying_key = _dn_underlying_key(product_key) or _dn_underlying_key(perp_symbol)
-        if not underlying_key:
-            continue
-        spot_candidates = list(spot_by_underlying.get(underlying_key) or [])
-        if not spot_candidates:
-            continue
-        spot_candidates.sort(key=lambda item: int(item.get("id", 0)))
-        spot_row = spot_candidates[0]
+    def _register_pair(
+        product_key: str, underlying_key: str, perp_pid: int, perp_symbol: str,
+        perp_status: str, perp_open: bool, perp_market_hours, spot_row: dict,
+    ) -> None:
+        """Build + index one DN pair from a resolved perp + spot leg. ``entry_allowed``
+        is computed from BOTH legs' trading status and market hours, so a closed /
+        reduce-only equity market lists with a clear block reason and only becomes
+        tradable when both legs are live and open."""
         spot_status = str(spot_row.get("trading_status") or "")
-        perp_status = str(v2_perp_row.get("trading_status") or perp_row.get("trading_status") or "")
         spot_open = _market_is_open(spot_row)
-        perp_open = _market_is_open(v2_perp_row) if v2_perp_row else _market_is_open(perp_row)
         pair = {
             "product": str(product_key).upper().strip(),
             "underlying_key": underlying_key,
-            "perp_product_id": int(perp_row.get("id")),
+            "perp_product_id": int(perp_pid),
             "perp_symbol": perp_symbol,
             "spot_product_id": int(spot_row.get("id")),
             "spot_symbol": str(spot_row.get("symbol") or spot_row.get("key") or "").upper(),
@@ -635,7 +668,7 @@ def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
             "spot_trading_status": spot_status,
             "perp_trading_status": perp_status,
             "spot_market_hours": spot_row.get("market_hours"),
-            "perp_market_hours": v2_perp_row.get("market_hours") if v2_perp_row else None,
+            "perp_market_hours": perp_market_hours,
             "entry_allowed": (
                 _is_entry_trading_status(spot_status)
                 and _is_entry_trading_status(perp_status)
@@ -662,6 +695,70 @@ def _build_dn_pair_catalog(network: str, client=None) -> Optional[dict]:
         aliases[str(pair["spot_symbol"]).lower()] = pair_key
         if underlying_key:
             aliases[underlying_key.lower()] = pair_key
+
+    def _resolve_spot(underlying_key: str, *cand_symbols: str) -> Optional[dict]:
+        """Find the single spot leg for a perp: exact underlying-key match first,
+        then the broader wrapped-stock candidates (wQQQX/SPYX) — taking a
+        candidate only when it resolves to exactly one spot so we never mis-pair."""
+        spot_candidates = list(spot_by_underlying.get(underlying_key) or [])
+        if not spot_candidates:
+            cands: list[str] = []
+            for sym in cand_symbols:
+                cands.extend(_dn_pair_candidates(sym))
+            for cand in cands:
+                hits = spot_by_candidate.get(cand) or []
+                uniq_ids = {int(h.get("id", 0)) for h in hits}
+                if len(uniq_ids) == 1:
+                    spot_candidates = list(hits)
+                    break
+        if not spot_candidates:
+            return None
+        spot_candidates.sort(key=lambda item: int(item.get("id", 0)))
+        return spot_candidates[0]
+
+    entries = list((perp_catalog.get("perps") or {}).items())
+    entries.sort(key=lambda kv: int((kv[1] or {}).get("id", 0)))
+    for product_key, row in entries:
+        perp_row = dict(row or {})
+        perp_symbol = str(perp_row.get("symbol") or f"{product_key}-PERP").upper().strip()
+        v2_perp_row = v2_perp_rows_by_symbol.get(perp_symbol, {})
+        underlying_key = _dn_underlying_key(product_key) or _dn_underlying_key(perp_symbol)
+        if not underlying_key:
+            continue
+        spot_row = _resolve_spot(underlying_key, product_key, perp_symbol)
+        if spot_row is None:
+            continue
+        perp_status = str(v2_perp_row.get("trading_status") or perp_row.get("trading_status") or "")
+        perp_open = _market_is_open(v2_perp_row) if v2_perp_row else _market_is_open(perp_row)
+        perp_mh = v2_perp_row.get("market_hours") if v2_perp_row else None
+        _register_pair(product_key, underlying_key, int(perp_row.get("id")), perp_symbol,
+                       perp_status, perp_open, perp_mh, spot_row)
+
+    # DN-EQUITY-MARKETS fix (2026-06-21): equity perps (QQQ/SPY/NVDA/...) flip to
+    # ``soft_reduce_only`` when the underlying market is closed (nights/weekends),
+    # so the live-filtered perp catalog drops them and DN was stuck on BTC/ETH.
+    # Second pass: pair ANY v2 perp not already matched (incl. reduce-only/closed)
+    # that resolves to a spot leg. ``entry_allowed`` stays False with a clear
+    # reason while the market is closed/reduce-only — so the pair LISTS and becomes
+    # tradable the moment both legs are live, without ever entering a closed book.
+    for perp_symbol, v2_perp_row in v2_perp_rows_by_symbol.items():
+        try:
+            perp_pid = int(v2_perp_row.get("product_id"))
+        except (TypeError, ValueError):
+            continue
+        if perp_pid in by_perp_id:
+            continue  # already paired in the live pass
+        underlying_key = _dn_underlying_key(perp_symbol)
+        if not underlying_key:
+            continue
+        spot_row = _resolve_spot(underlying_key, perp_symbol)
+        if spot_row is None:
+            continue
+        _register_pair(
+            underlying_key, underlying_key, perp_pid, perp_symbol,
+            str(v2_perp_row.get("trading_status") or ""),
+            _market_is_open(v2_perp_row), v2_perp_row.get("market_hours"), spot_row,
+        )
     if not pairs:
         return None
     return {"pairs": pairs, "aliases": aliases, "by_perp_id": by_perp_id, "by_spot_id": by_spot_id}

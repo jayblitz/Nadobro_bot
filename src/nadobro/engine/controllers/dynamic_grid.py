@@ -26,16 +26,18 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+from src.nadobro.engine.adapter.base import Fill
 from src.nadobro.engine.controllers.controller_base import Controller
 from src.nadobro.engine.controllers.grid_trading import build_grid_config
 from src.nadobro.engine.executors.grid_executor import GridExecutor
 from src.nadobro.engine.executors.reverse_grid_executor import ReverseGridExecutor
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.routines import variance_regime
-from src.nadobro.engine.types import TradeType, _dec
+from src.nadobro.engine.types import OrderType, TradeType, _dec
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,26 @@ logger = logging.getLogger(__name__)
 # 50bp and at this multiple of the band width, whichever is larger.
 _DGRID_RESET_FLOOR_BP = 50.0
 _DGRID_RESET_BAND_MULT = 3.0
+
+
+def _parse_tp_tiers(raw: object) -> List[float]:
+    """Profit-booking tiers (% of margin), ascending. Accepts a list or a
+    comma string; defaults to 2/4/6%. 0/empty disables booking."""
+    if raw is None:
+        return [2.0, 4.0, 6.0]
+    if isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        items = [p for p in str(raw).replace(" ", "").split(",") if p]
+    out: List[float] = []
+    for it in items:
+        try:
+            v = float(it)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            out.append(v)
+    return sorted(set(out))
 
 
 class DynamicGridController(Controller):
@@ -55,7 +77,29 @@ class DynamicGridController(Controller):
         self.long_window = int(self.cfg("dgrid_long_window", 12) or 12)
         self.trend_on_vr = float(self.cfg("dgrid_trend_on_vr", 1.25) or 1.25)
         self.range_on_vr = float(self.cfg("dgrid_range_on_vr", 1.15) or 1.15)
+        # Sustained-drift trend filter (percent over the long window). Flips the
+        # grid direction on a slow one-way grind the variance ratio misses (a
+        # steady decline keeps VR<1 yet bleeds a long grid). 0 disables it.
+        self.trend_drift_pct = float(self.cfg("dgrid_trend_drift_pct", 0.30) or 0.30)
         self.flip_confirm_ticks = int(self.cfg("dgrid_flip_confirm_ticks", 2) or 2)
+        # Trend-capture (2026-06-21): once a run has gone in profit by
+        # ``trail_arm_pct`` (favorable move from the spawn anchor), a reversal of
+        # ``reversal_flip_pct`` from the run's price extreme FLIPS the side — the
+        # winner is flattened (reduce-only, in profit) and the opposite grid arms.
+        # This is the user-requested "close in profit on reversal and switch
+        # long<->short" that the slow variance classifier alone misses.
+        self.trail_arm_pct = float(self.cfg("dgrid_trail_arm_pct", 1.0) or 0.0)
+        self.trail_giveback_pct = float(self.cfg("dgrid_trail_giveback_pct", 0.5) or 0.0)
+        self.reversal_flip_pct = float(self.cfg("dgrid_reversal_flip_pct", 0.4) or 0.0)
+        self._run_extreme: Optional[Decimal] = None  # favorable price extreme since spawn
+        self._run_armed: bool = False                # peak favorable move cleared arm_pct
+        self._reversal_streak: int = 0
+        # Tiered profit-booking: as the run's unrealized PnL climbs past rising
+        # tiers (% of margin), close a fraction of the live position reduce-only
+        # to lock in gains and keep PnL near-positive when the move reverses.
+        self.tp_tiers_pct = _parse_tp_tiers(self.cfg("dgrid_tp_tiers_pct"))
+        self.tp_fraction = min(1.0, max(0.0, float(self.cfg("dgrid_tp_fraction", 0.33) or 0.33)))
+        self._booked_tiers: set[int] = set()
         # Reset re-center is OPT-IN (0 = OFF). When enabled it does a reduce-only
         # close + full ladder rebuild, so it must never fire inside the grid's
         # own band: floor it well above the band width (and a hard 50bp minimum)
@@ -113,18 +157,26 @@ class DynamicGridController(Controller):
         if step <= 0 or levels < 1:
             return {}
         span = step * Decimal(max(levels - 1, 1))
-        sl = _dec(self.cfg("sl_pct", 0) or 0)
+        # POST-ONLY-CROSS fix: offset the near-mid boundary onto the maker side
+        # by max(step/2, 1.5bp) so a post-only LIMIT_MAKER never sits AT mid and
+        # crosses the book (venue error_code 2008 — the exact failure that made
+        # every dgrid SELL flip refuse to arm).
+        maker_offset = max(step / Decimal(2), Decimal("0.00015"))
+        # GRID-DUAL-UNIT fix: don't rebuild a fill-blind, mid-referenced hard
+        # stop from sl_pct (premature wick stop-outs on top of the margin-%
+        # rail). SL is the avg-entry barrier + the fee-aware session rail; the
+        # rebuild only adjusts the band bounds.
         if side is TradeType.SELL:
             return {
-                "start_price": mid,
-                "end_price": mid * (Decimal(1) + span),
-                "limit_price": (mid * (Decimal(1) + sl)) if sl > 0 else Decimal(0),
+                "start_price": mid * (Decimal(1) + maker_offset),
+                "end_price": mid * (Decimal(1) + maker_offset + span),
+                "limit_price": Decimal(0),
             }
         # BUY (long grid)
         return {
-            "start_price": mid * (Decimal(1) - span),
-            "end_price": mid,
-            "limit_price": (mid * (Decimal(1) - sl)) if sl > 0 else Decimal(0),
+            "start_price": mid * (Decimal(1) - maker_offset - span),
+            "end_price": mid * (Decimal(1) - maker_offset),
+            "limit_price": Decimal(0),
         }
 
     # -- regime classification -------------------------------------------
@@ -146,17 +198,18 @@ class DynamicGridController(Controller):
             self.trading_pair, candles,
             short_window=self.short_window, long_window=self.long_window,
             trend_on=self.trend_on_vr, range_on=self.range_on_vr,
+            trend_drift_pct=self.trend_drift_pct,
             current_phase=self.current_phase,
         )
         self.variance_ratio = float(str(info.get("variance_ratio") or 0.0))
         self.last_direction = str(info.get("direction") or variance_regime.FLAT)
-        # Back-compat telemetry string for older /status readers — reflect the
-        # ACTUAL variance-ratio regime, not just drift sign. Only a VR at/above
-        # the trend threshold is a trend; otherwise it is ranging (even if price
-        # is drifting).
-        if self.variance_ratio >= self.trend_on_vr and self.last_direction == variance_regime.DOWN:
+        # Back-compat telemetry string for /status — a trend is EITHER a VR at/
+        # above the threshold OR a sustained directional drift (the slow-grind
+        # case the VR misses), matching the phase decision below.
+        is_trend = (self.variance_ratio >= self.trend_on_vr) or bool(info.get("trend_by_drift"))
+        if is_trend and self.last_direction == variance_regime.DOWN:
             self.last_regime = "TRENDING_DOWN"
-        elif self.variance_ratio >= self.trend_on_vr and self.last_direction == variance_regime.UP:
+        elif is_trend and self.last_direction == variance_regime.UP:
             self.last_regime = "TRENDING_UP"
         else:
             self.last_regime = "RANGING"
@@ -170,11 +223,77 @@ class DynamicGridController(Controller):
                 abs((mid - self._grid_anchor_mid) / self._grid_anchor_mid) * Decimal(10000)
             )
 
+    def _inventory_net_base(self) -> Decimal:
+        if self.inventory is None:
+            return Decimal(0)
+        try:
+            return _dec(self.inventory.get(self.user_id, self.trading_pair, self.id).net_amount_base)
+        except Exception:  # noqa: BLE001 - inventory read failures must not crash ticks
+            logger.warning("dgrid inventory read failed pair=%s (controller=%s)",
+                           self.trading_pair, self.id, exc_info=True)
+            return Decimal(0)
+
     async def _mid(self) -> Optional[Decimal]:
         try:
             return _dec(await self.adapter.mid_price(self.trading_pair))
         except Exception:  # noqa: BLE001
             return None
+
+    # -- trend capture (trailing reversal flip) --------------------------
+    def _reset_run_tracking(self, mid: Optional[Decimal]) -> None:
+        """Re-seed the favorable-extreme / arm state for a fresh run (called on
+        every spawn and flip so each leg trails from its own anchor)."""
+        self._run_extreme = _dec(mid) if (mid and mid > 0) else None
+        self._run_armed = False
+        self._reversal_streak = 0
+
+    def _is_long_phase(self) -> bool:
+        return self.current_phase != variance_regime.RGRID
+
+    def _update_run_extremes(self, mid: Optional[Decimal]) -> None:
+        """Track the most-favorable price reached this run and arm the trailing
+        reversal once the favorable move from the spawn anchor clears
+        ``trail_arm_pct`` (so we only ever 'lock & flip' a run that went green)."""
+        if mid is None or mid <= 0 or not self._grid_anchor_mid or self._grid_anchor_mid <= 0:
+            return
+        long = self._is_long_phase()
+        if self._run_extreme is None:
+            self._run_extreme = mid
+        elif long:
+            self._run_extreme = max(self._run_extreme, mid)
+        else:
+            self._run_extreme = min(self._run_extreme, mid)
+        anchor = self._grid_anchor_mid
+        fav = ((self._run_extreme - anchor) / anchor) if long else ((anchor - self._run_extreme) / anchor)
+        if self.trail_arm_pct > 0 and float(fav) * 100.0 >= self.trail_arm_pct:
+            self._run_armed = True
+
+    async def _maybe_reversal_flip(self, mid: Optional[Decimal]) -> bool:
+        """Once armed (run went in profit), a reversal of ``reversal_flip_pct``
+        from the favorable extreme flips the side — debounced by
+        ``flip_confirm_ticks``. ``_flip_to`` flattens the held position
+        reduce-only (in profit, since price only retraced the trail) and arms the
+        opposite grid. Returns True when a flip fired."""
+        if (self.reversal_flip_pct <= 0 or not self._run_armed or mid is None or mid <= 0
+                or not self._run_extreme or self._run_extreme <= 0):
+            return False
+        long = self._is_long_phase()
+        ext = self._run_extreme
+        retrace = ((ext - mid) / ext) if long else ((mid - ext) / ext)
+        if float(retrace) * 100.0 < self.reversal_flip_pct:
+            self._reversal_streak = 0
+            return False
+        self._reversal_streak += 1
+        if self._reversal_streak < max(1, self.flip_confirm_ticks):
+            return False
+        target = variance_regime.GRID if self.current_phase == variance_regime.RGRID else variance_regime.RGRID
+        logger.info(
+            "dgrid reversal flip armed pair=%s phase=%s extreme=%s mid=%s retrace=%.2f%% "
+            "(controller=%s)",
+            self.trading_pair, self.current_phase, ext, mid, float(retrace) * 100.0, self.id,
+        )
+        await self._flip_to(target, mid, reason="reversal")
+        return True
 
     async def on_tick(self) -> None:
         pair = self.trading_pair
@@ -191,6 +310,13 @@ class DynamicGridController(Controller):
 
         active = self.my_executors(active_only=True)
         if active:
+            # Trend-capture: track the run's favorable price extreme, then flip on
+            # a confirmed reversal once the run is in profit (closes the winner in
+            # profit and arms the opposite side). Runs BEFORE the slow variance
+            # flip so a sharp turn is caught immediately.
+            self._update_run_extremes(mid)
+            if await self._maybe_reversal_flip(mid):
+                return
             flip_needed = desired != self.current_phase
             if flip_needed:
                 self._phase_confirm_streak += 1
@@ -216,6 +342,8 @@ class DynamicGridController(Controller):
                 )
                 ex.suppress_new_entries = self.gate_paused or not worsening_allowed
                 await self.orchestrator.tick(ex.id)
+            # Book partial profit as the run's uPnL climbs past rising tiers.
+            await self._maybe_book_profit(mid)
             return
 
         # No live executor.
@@ -256,13 +384,15 @@ class DynamicGridController(Controller):
             mid, spawned, self.id,
         )
         # Surfaced once per flip so the runtime can notify the user — only when a
-        # new side actually armed (a refused spawn must not claim a switch).
-        if reason == "flip" and old_phase != new_phase and spawned:
+        # new side actually armed (a refused spawn must not claim a switch). Both
+        # the variance flip and the trailing reversal flip notify.
+        if reason in ("flip", "reversal") and old_phase != new_phase and spawned:
             self._dgrid_event = {
                 "from": old_phase,
                 "to": new_phase,
                 "variance_ratio": f"{self.variance_ratio:.2f}",
                 "direction": self.last_direction,
+                "reason": reason,
             }
 
     async def _recenter(self, mid: Decimal) -> None:
@@ -292,7 +422,100 @@ class DynamicGridController(Controller):
                 self.current_phase, mid, start, end, self.reset_threshold_bp, self.id,
             )
 
+    async def _maybe_book_profit(self, mid: Optional[Decimal]) -> None:
+        """Scale out reduce-only as the run's unrealized PnL crosses rising tiers
+        (% of margin), locking in gains so PnL stays near-positive on a reversal.
+        Each tier books once per run; the ladder resets on a fresh spawn/flip."""
+        if (not self.tp_tiers_pct or self.tp_fraction <= 0 or self.inventory is None
+                or mid is None or mid <= 0):
+            return
+        margin = _dec(self.cfg("margin_quote") or 0)
+        if margin <= 0:
+            return
+        hold = self.inventory.get(self.user_id, self.trading_pair, self.id)
+        net = hold.net_amount_base
+        if abs(net) <= 0:
+            return
+        upnl_pct = float(hold.unrealized_pnl(mid) / margin * Decimal(100))
+        # Newly crossed, not-yet-booked tiers.
+        to_book = [
+            i for i, t in enumerate(self.tp_tiers_pct)
+            if upnl_pct >= t and i not in self._booked_tiers
+        ]
+        if not to_book:
+            return
+        frac = min(1.0, self.tp_fraction * len(to_book))
+        close_base = abs(net) * _dec(frac)
+        try:
+            lot = self.adapter.lot_size(self.trading_pair)
+            if lot and lot > 0:
+                close_base = (close_base // lot) * lot
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(unquantized close is bumped by the venue min-notional guard)
+            pass
+        if close_base <= 0:
+            return  # below one lot — wait for a bigger position / higher tier
+        close_side = TradeType.SELL if net > 0 else TradeType.BUY
+        # DGRID-BOOK-RACE fix: route the reduction THROUGH the live grid
+        # executor (reduce_position) instead of firing a naked reduce-only
+        # MARKET at the adapter. The executor places the order, records the fill
+        # in the shared inventory, and advances its own per-level close
+        # accounting — so its resting close legs and the controller's net view
+        # can't drift apart. Falls back to nothing if no live executor.
+        booked = Decimal(0)
+        try:
+            active_executors = list(self.my_executors(active_only=True))
+            for ex in active_executors:
+                rp = getattr(ex, "reduce_position", None)
+                if callable(rp):
+                    booked += await rp(close_base - booked)
+                if booked >= close_base:
+                    break
+            if booked <= 0 and not active_executors:
+                # Fallback: no live executor exposed a reduce path, but inventory
+                # is held — book directly with a reduce-only MARKET so the
+                # position can still scale out (preserves prior behavior).
+                lev = int(self.cfg("leverage", 1) or 1)
+                order = await self.adapter.place_order(
+                    self.trading_pair, close_side, OrderType.MARKET, close_base, None, lev, True,
+                )
+                # DGRID-BOOK-RECORD fix: only the amount that actually FILLED
+                # reduces the position. A naked reduce-only MARKET can come back
+                # unfilled (no liquidity / venue reject); booking close_base
+                # regardless would desync inventory from the venue and mark the
+                # tier booked when nothing closed. Record the real fill so the
+                # controller's net view stays true and the next tier sizes off
+                # the remaining position.
+                filled = _dec(getattr(order, "filled_base", 0) or 0)
+                if filled > 0:
+                    self.inventory.apply_fill(
+                        self.user_id, self.trading_pair, self.id, close_side,
+                        filled, _dec(getattr(order, "filled_quote", 0) or 0),
+                        _dec(getattr(order, "fee_quote", 0) or 0),
+                    )
+                booked = filled
+        except Exception:  # noqa: BLE001 - booking is best-effort; retry next tick
+            logger.warning("dgrid book_profit failed pair=%s (controller=%s)",
+                           self.trading_pair, self.id, exc_info=True)
+            return
+        if booked <= 0:
+            return  # nothing reduced
+        for i in to_book:
+            self._booked_tiers.add(i)
+        logger.info(
+            "dgrid book_profit pair=%s side=%s base=%s uPnL=%.2f%% tiers=%s (controller=%s)",
+            self.trading_pair, close_side.name, booked, upnl_pct,
+            [self.tp_tiers_pct[i] for i in to_book], self.id,
+        )
+
     async def _spawn_phase(self, phase: str, mid: Optional[Decimal]) -> bool:
+        net = self._inventory_net_base()
+        if abs(net) > Decimal("1e-12"):
+            logger.warning(
+                "dgrid spawn deferred phase=%s pair=%s: controller inventory still non-flat "
+                "net_base=%s (controller=%s)",
+                phase, self.trading_pair, net, self.id,
+            )
+            return False
         side, cls = (
             (TradeType.SELL, ReverseGridExecutor) if phase == variance_regime.RGRID
             else (TradeType.BUY, GridExecutor)
@@ -320,6 +543,11 @@ class DynamicGridController(Controller):
             self.current_phase = phase
             self._grid_anchor_mid = _dec(mid)
             self.realized_move_bp = 0.0
+            # Fresh position -> reset the profit-booking ladder so the new run
+            # can book from its first tier again.
+            self._booked_tiers = set()
+            # Fresh run -> re-seed the trailing-reversal extreme/arm from here.
+            self._reset_run_tracking(mid)
         else:
             reason = self.orchestrator.last_spawn_reason(self.id) or "unknown"
             logger.warning(

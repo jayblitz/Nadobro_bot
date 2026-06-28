@@ -125,7 +125,16 @@ async def tick_vault_deposit_watch(network: str = "mainnet") -> None:
             set_vault_deposit_watch(telegram_id, enabled=False, network=network)
             continue
 
-        mintable = float((client.get_max_nlp_mintable(spot_leverage=False) or {}).get("max_mintable_usdt0") or 0.0)
+        # product_id is REQUIRED by the gateway — without it the query returns 0
+        # and the watch would never fire (the same bug that showed "deposits
+        # closed" in the UI).
+        nlp_pid = pos.get("nlp_product_id") or client.resolve_nlp_product_id()
+        mintable = float(
+            (client.get_max_nlp_mintable(spot_leverage=False, product_id=nlp_pid) or {}).get(
+                "max_mintable_usdt0"
+            )
+            or 0.0
+        )
         if should_notify_deposit_opening(last_seen, mintable):
             msg = (
                 "🔔 *Nado Vault deposit capacity opened*\n\n"

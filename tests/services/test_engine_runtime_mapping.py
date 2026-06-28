@@ -18,18 +18,26 @@ def test_map_grid_config_centers_band_and_sets_barriers():
     assert cfg["trading_pair"] == "BTC-USDC"
     assert cfg["min_spread_between_orders"] == Decimal("0.0004")
     assert cfg["max_open_orders"] == 2
-    assert cfg["total_amount_quote"] == Decimal("75")
+    # SIZING (2026-06-21): deployed notional = margin x effective leverage, so a
+    # $75 margin at 3x quotes $225 across the ladder (was margin-only $75).
+    assert cfg["total_amount_quote"] == Decimal("225")
     assert cfg["leverage"] == 3
-    # NO_ORDERS_AUDIT-FIX-R4: spread_bp is the per-level STEP; a BUY grid's
-    # band steps DOWN from mid so post-only buys never cross the book.
-    # span = (levels - 1) * step = 1 * 0.0004 -> start = 100 * (1 - 0.0004).
-    assert cfg["start_price"] == Decimal("99.96")
-    assert cfg["end_price"] == Decimal("100")
+    # POST-ONLY-CROSS fix: the near-mid boundary is offset onto the maker side by
+    # max(step/2, 1.5bp). step=0.0004 -> maker_offset=0.0002; span=1*0.0004.
+    # BUY band steps DOWN from (mid - maker_offset): start=100*(1-0.0002-0.0004),
+    # end=100*(1-0.0002).
+    assert cfg["start_price"] == Decimal("99.94")
+    assert cfg["end_price"] == Decimal("99.98")
     # Knobs for DynamicGridController side-correct band rebuilds.
     assert cfg["step_pct"] == Decimal("0.0004")
     assert cfg["levels_count"] == 2
-    # long grid hard stop below: 100 * (1 - 0.005)
-    assert cfg["limit_price"] == Decimal("99.5")
+    # GRID-DUAL-UNIT fix (f391f3c): limit_price is NO LONGER auto-derived from
+    # sl_pct. A mid-anchored hard stop fired on a brief wick to mid*(1-sl) even
+    # when little had filled — a premature stop-out. SL now lives in the
+    # fill-aware avg-entry barrier (triple_barrier_config.stop_loss) + the
+    # fee-aware session rail. limit_price stays available as an explicit
+    # catastrophic stop but defaults to 0 (disabled).
+    assert cfg["limit_price"] == Decimal("0")
     tb = cfg["triple_barrier_config"]
     assert isinstance(tb, TripleBarrierConfig)
     assert tb.take_profit == Decimal("0.006") and tb.stop_loss == Decimal("0.005")
@@ -66,12 +74,22 @@ def test_map_dn_clamps_hold_and_sets_cycles():
     assert cfg["cycle_gap_seconds"] == 45
 
 
-def test_map_rgrid_hard_stop_is_above_mid():
+def test_map_rgrid_band_is_above_mid_and_stop_in_barrier():
     cfg = er.map_strategy_config(
         "rgrid", {"notional_usd": 100.0, "spread_bp": 10.0, "levels": 4, "sl_pct": 0.8},
         Decimal(100), product="BTC-USDC",
     )
-    assert cfg["limit_price"] == Decimal("100.8")  # above for a short grid
+    # A short grid's sell band steps UP from mid. POST-ONLY-CROSS fix: the nearest
+    # sell is offset STRICTLY above mid (was == mid, which crossed the book and
+    # the venue rejected with error_code 2008).
+    assert cfg["start_price"] > Decimal("100")
+    assert cfg["end_price"] > cfg["start_price"]
+    # GRID-DUAL-UNIT fix (f391f3c): no mid-anchored hard limit_price stop; the
+    # short's SL lives in the fill-aware barrier (avg-entry + sl_pct).
+    assert cfg["limit_price"] == Decimal("0")
+    tb = cfg["triple_barrier_config"]
+    assert isinstance(tb, TripleBarrierConfig)
+    assert tb.stop_loss == Decimal("0.008")  # 0.8% from avg entry, above for a short
 
 
 def test_map_mid_config():
@@ -124,6 +142,38 @@ def test_map_risk_limits():
     assert lim.max_open_executors == 5            # levels + 2
     assert lim.max_single_order_quote == Decimal("100")
     assert lim.max_position_size_quote == Decimal("300")  # notional * levels fallback
+
+
+def test_deployed_notional_is_margin_times_leverage():
+    """SIZING (2026-06-21): grid/MM deploy margin x effective leverage. With no
+    leverage it stays margin-sized (back-compat); with leverage it scales."""
+    base = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product="BTC-PERP",
+    )
+    assert base["total_amount_quote"] == Decimal("100")   # eff_lev defaults to 1
+    lev5 = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product="BTC-PERP", leverage=5,
+    )
+    assert lev5["total_amount_quote"] == Decimal("500")   # 100 x 5
+    assert lev5["leverage"] == 5
+    # An explicit mm_leverage_override (Tiny preset / Lev button) wins over the
+    # session leverage.
+    over = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "mm_leverage_override": 3, "levels": 2},
+        Decimal(100), product="BTC-PERP", leverage=10,
+    )
+    assert over["total_amount_quote"] == Decimal("300")   # override 3x beats 10x
+
+
+def test_map_risk_limits_scale_with_leverage():
+    """The per-order and position caps must follow the DEPLOYED notional or the
+    Risk Engine rejects every leveraged order (the documented 'LIVE but 0 orders'
+    failure)."""
+    lim = er.map_risk_limits(
+        {"notional_usd": 100.0, "levels": 3, "session_notional_cap_usd": 0.0}, "grid", leverage=5,
+    )
+    assert lim.max_single_order_quote == Decimal("500")          # deployed = 100 x 5
+    assert lim.max_position_size_quote == Decimal("1500")        # deployed * levels
 
 
 def test_map_risk_limits_dn_follows_leg_size_not_notional():
@@ -329,3 +379,215 @@ def test_should_build_controller_truth_table():
     assert B(needs_recovery=False, has_local_active=False, worker_mode=False, is_running=True) is False
     # Non-worker, no local, nobody running -> build (single-process happy path).
     assert B(needs_recovery=False, has_local_active=False, worker_mode=False, is_running=False) is True
+
+
+def test_live_config_signature_ignores_mid_anchor_but_detects_leverage():
+    """A price-only remap must not churn the live controller, but a leverage /
+    deployed-notional edit must be visible before the next tick."""
+    cfg_100 = er.map_strategy_config(
+        "grid",
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5},
+        Decimal("100"),
+        product="BTC-PERP",
+        leverage=5,
+    )
+    cfg_110 = er.map_strategy_config(
+        "grid",
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5},
+        Decimal("110"),
+        product="BTC-PERP",
+        leverage=5,
+    )
+    limits_5x = er.map_risk_limits(
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5},
+        "grid",
+        leverage=5,
+    )
+    assert er._live_config_signature(cfg_100, limits_5x) == er._live_config_signature(cfg_110, limits_5x)
+
+    cfg_1x = er.map_strategy_config(
+        "grid",
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1},
+        Decimal("110"),
+        product="BTC-PERP",
+        leverage=1,
+    )
+    limits_1x = er.map_risk_limits(
+        {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1},
+        "grid",
+        leverage=1,
+    )
+    assert er._live_config_signature(cfg_100, limits_5x) != er._live_config_signature(cfg_1x, limits_1x)
+
+
+def test_apply_live_mid_config_updates_order_size_and_risk_limits():
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.nadobro.engine.controllers.market_making import MarketMakingController
+
+    old_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5}
+    new_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1}
+    old_cfg = er.map_strategy_config("mid", old_settings, Decimal("100"), product="BTC-PERP", leverage=5)
+    new_cfg = er.map_strategy_config("mid", new_settings, Decimal("100"), product="BTC-PERP", leverage=1)
+    old_limits = er.map_risk_limits(old_settings, "mid", leverage=5)
+    new_limits = er.map_risk_limits(new_settings, "mid", leverage=1)
+
+    class _Orch:
+        def __init__(self):
+            # Production ExecutorOrchestrator exposes RiskEngine as ``risk``.
+            self.risk = SimpleNamespace(limits=old_limits)
+            self.stopped = []
+
+        async def stop(self, ex_id):
+            self.stopped.append(ex_id)
+
+    orch = _Orch()
+    controller = MarketMakingController(
+        user_id=7,
+        configs=old_cfg,
+        orchestrator=orch,
+        adapter=object(),
+        inventory=None,
+        limits=old_limits,
+        controller_id="mid:7:mainnet",
+    )
+    controller._bid_id = "bid-order"
+    controller._ask_id = "ask-order"
+    controller._bid_price = Decimal("99")
+    controller._ask_price = Decimal("101")
+
+    asyncio.run(
+        er._apply_live_controller_update(
+            "mid", controller, orch, new_cfg, new_limits, Decimal("100")
+        )
+    )
+
+    assert controller.order_amount_quote == Decimal("50")
+    assert controller.configs["leverage"] == 1
+    assert controller.limits.max_single_order_quote == Decimal("100.0")
+    assert orch.risk.limits.max_single_order_quote == Decimal("100.0")
+    assert orch.stopped == ["bid-order", "ask-order"]
+    assert controller._bid_id is None and controller._ask_id is None
+
+
+def test_apply_live_fill_anchored_grid_refreshes_mm_quotes_and_risk_limits():
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.nadobro.engine.controllers.fill_anchored import FillAnchoredQuotingController
+
+    old_settings = {
+        "notional_usd": 100.0,
+        "levels": 2,
+        "fill_anchored": 1,
+        "spread_bp": 5.0,
+        "mm_leverage_override": 5,
+    }
+    new_settings = {
+        "notional_usd": 100.0,
+        "levels": 2,
+        "fill_anchored": 1,
+        "spread_bp": 20.0,
+        "mm_leverage_override": 1,
+        "reset_threshold_pct": 0.5,
+    }
+    old_cfg = er.map_strategy_config("grid", old_settings, Decimal("100"), product="BTC-PERP", leverage=5)
+    new_cfg = er.map_strategy_config("grid", new_settings, Decimal("100"), product="BTC-PERP", leverage=1)
+    old_limits = er.map_risk_limits(old_settings, "grid", leverage=5)
+    new_limits = er.map_risk_limits(new_settings, "grid", leverage=1)
+
+    class _Orch:
+        def __init__(self):
+            self.risk = SimpleNamespace(limits=old_limits)
+            self.stopped = []
+
+        async def stop(self, ex_id):
+            self.stopped.append(ex_id)
+
+    orch = _Orch()
+    controller = FillAnchoredQuotingController(
+        user_id=7,
+        configs=old_cfg,
+        orchestrator=orch,
+        adapter=object(),
+        inventory=None,
+        limits=old_limits,
+        controller_id="grid:7:mainnet",
+    )
+    controller._bid_id = "bid-order"
+    controller._ask_id = "ask-order"
+    controller._bid_price = Decimal("99")
+    controller._ask_price = Decimal("101")
+
+    asyncio.run(
+        er._apply_live_controller_update(
+            "grid", controller, orch, new_cfg, new_limits, Decimal("100")
+        )
+    )
+
+    assert controller.order_amount_quote == Decimal("50")
+    assert controller.spread_bid_pct == Decimal("0.002")
+    assert controller.reset_threshold_pct == Decimal("0.005")
+    assert orch.risk.limits.max_single_order_quote == Decimal("100.0")
+    assert orch.stopped == ["bid-order", "ask-order"]
+    assert controller._bid_id is None and controller._ask_id is None
+
+
+def test_apply_live_grid_config_requotes_without_controller_stop():
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.nadobro.engine.controllers.grid_trading import build_grid_config
+    from src.nadobro.engine.types import TradeType
+
+    old_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5}
+    new_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1}
+    old_cfg = er.map_strategy_config("grid", old_settings, Decimal("100"), product="BTC-PERP", leverage=5)
+    new_cfg = er.map_strategy_config("grid", new_settings, Decimal("100"), product="BTC-PERP", leverage=1)
+    old_limits = er.map_risk_limits(old_settings, "grid", leverage=5)
+    new_limits = er.map_risk_limits(new_settings, "grid", leverage=1)
+
+    class _Executor:
+        id = "grid-ex"
+        open_side = TradeType.BUY
+
+        def __init__(self):
+            self.config = build_grid_config(old_cfg, TradeType.BUY)
+            self.recentered = []
+
+        async def recenter(self, start_price, end_price):
+            self.recentered.append((start_price, end_price))
+
+    class _Orch:
+        def __init__(self, executor):
+            self.risk = SimpleNamespace(limits=old_limits)
+            self.executor = executor
+            self.stopped = []
+
+        def list(self, controller_id, active_only=True):
+            return [self.executor]
+
+        async def stop(self, ex_id):
+            self.stopped.append(ex_id)
+
+    executor = _Executor()
+    orch = _Orch(executor)
+    controller = SimpleNamespace(
+        id="grid:7:mainnet",
+        configs=old_cfg,
+        limits=old_limits,
+        trading_pair="BTC-PERP",
+    )
+
+    asyncio.run(
+        er._apply_live_controller_update(
+            "grid", controller, orch, new_cfg, new_limits, Decimal("100")
+        )
+    )
+
+    assert executor.config.total_amount_quote == Decimal("100")
+    assert executor.config.leverage == 1
+    assert executor.recentered
+    assert orch.stopped == []
+    assert orch.risk.limits.max_single_order_quote == Decimal("100.0")

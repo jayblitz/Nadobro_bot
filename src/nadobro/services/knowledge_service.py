@@ -1788,7 +1788,11 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
 
     lang = get_active_language()
     lang_name = LANGUAGE_LABELS.get(lang, "English")
-    lang_instruction = f"IMPORTANT: The user's preferred language is {lang} ({lang_name}). Always respond in {lang_name}." if lang != "en" else ""
+    lang_instruction = (
+        f"IMPORTANT: The user's preferred language is {lang} ({lang_name}). "
+        f"Always respond entirely in {lang_name}, including headings and the actionable insight line. "
+        f"Keep ticker symbols, numbers, prices, code, and wallet addresses unchanged."
+    ) if lang != "en" else ""
 
     if _is_casual_message(question):
         system = CASUAL_SYSTEM_PROMPT.format(
@@ -2055,7 +2059,11 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
 
     lang = get_active_language()
     lang_name = LANGUAGE_LABELS.get(lang, "English")
-    lang_instruction = f"IMPORTANT: The user's preferred language is {lang} ({lang_name}). Always respond in {lang_name}." if lang != "en" else ""
+    lang_instruction = (
+        f"IMPORTANT: The user's preferred language is {lang} ({lang_name}). "
+        f"Always respond entirely in {lang_name}, including headings and the actionable insight line. "
+        f"Keep ticker symbols, numbers, prices, code, and wallet addresses unchanged."
+    ) if lang != "en" else ""
 
     if _is_casual_message(question):
         system = CASUAL_SYSTEM_PROMPT.format(current_date=current_date, user_name=display_name, language_instruction=lang_instruction)

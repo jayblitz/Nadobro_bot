@@ -324,6 +324,71 @@ async def tick_howl():
         logger.error("HOWL ticker failed: %s", e)
 
 
+async def tick_night_howl():
+    """Hourly sweep that delivers each active user's Night HOWL report at THEIR
+    local 8am (per-user UTC offset; falls back to UTC). Builds a backtest-backed
+    trade-pattern report, sends it, and saves it for later (/howl). De-duped per
+    local day; users with no 24h activity are marked sent without a noisy ping."""
+    global _bot_app
+    if not _bot_app:
+        return
+    try:
+        from src.nadobro.services.night_howl_service import (
+            build_report, last_sent_date, mark_sent, night_howl_due,
+            night_howl_enabled, _user_tz_offset,
+        )
+        from src.nadobro.db import query_all
+        from src.nadobro.i18n import (
+            language_context, get_user_language, localize_text, get_active_language,
+        )
+
+        now_utc = datetime.now(timezone.utc)
+        rows = await run_blocking(
+            query_all, "SELECT key FROM bot_state WHERE key LIKE %s", ("strategy_bot:%",),
+        )
+        seen = set()
+        for row in rows:
+            try:
+                user_network = str(row.get("key", "")).replace("strategy_bot:", "")
+                user_id_str, network = user_network.split(":", 1)
+                telegram_id = int(user_id_str)
+                if (telegram_id, network) in seen:
+                    continue
+                seen.add((telegram_id, network))
+
+                if not await run_blocking(night_howl_enabled, telegram_id):
+                    continue
+                offset = await run_blocking(_user_tz_offset, telegram_id)
+                last = await run_blocking(last_sent_date, telegram_id, network)
+                if not night_howl_due(now_utc, offset, last):
+                    continue
+
+                report = await run_blocking(build_report, telegram_id, network, now_utc=now_utc)
+                if not report:
+                    continue
+                # Mark sent regardless so we don't rebuild every hour today.
+                await run_blocking(mark_sent, telegram_id, network, report.get("date"))
+                # Skip the ping for a no-activity day (report is still saved).
+                if int((report.get("pattern") or {}).get("trades") or 0) <= 0:
+                    continue
+                md = report.get("markdown")
+                if not md:
+                    continue
+                try:
+                    with language_context(get_user_language(telegram_id)):
+                        lang = get_active_language()
+                        await _bot_app.bot.send_message(
+                            chat_id=telegram_id, text=localize_text(md, lang),
+                            parse_mode="Markdown",
+                        )
+                except Exception as e:
+                    logger.error("Failed to send Night HOWL to user %s: %s", telegram_id, e)
+            except Exception as e:
+                logger.debug("Night HOWL skip for row: %s", e)
+    except Exception as e:
+        logger.error("Night HOWL ticker failed: %s", e)
+
+
 async def poll_lowiqpts_relay():
     global _bot_app
     if not _bot_app:
@@ -841,6 +906,12 @@ def start_scheduler():
             **_LONG_TICK,
         )
     scheduler.add_job(tick_howl, "cron", hour=2, minute=0, id="howl_nightly", replace_existing=True, **_LONG_TICK)
+    # Night HOWL: runs every hour on the hour and delivers to users for whom it's
+    # now their local 8am (per-user UTC offset), de-duped per local day.
+    scheduler.add_job(
+        tick_night_howl, "cron", minute=0, id="night_howl_hourly",
+        replace_existing=True, **_LONG_TICK,
+    )
     scheduler.add_job(
         poll_lowiqpts_relay, "interval", seconds=relay_poll_seconds,
         id="lowiqpts_relay_poll", replace_existing=True, **_SHORT_TICK,

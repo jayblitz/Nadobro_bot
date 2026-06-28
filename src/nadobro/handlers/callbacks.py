@@ -14,7 +14,7 @@ from src.nadobro.handlers.formatters import (
     fmt_wallet_info, fmt_alerts, fmt_portfolio, fmt_wallet_revoke_steps_card,
     fmt_settings, fmt_help, fmt_price, fmt_points_dashboard,
     fmt_trade_history, fmt_analytics, fmt_strategy_hub_intro,
-    fmt_referral_dashboard,
+    fmt_referral_dashboard, fmt_getting_started,
 )
 from src.nadobro.handlers.keyboards import (
     persistent_menu_kb, trade_product_kb, trade_size_kb, trade_leverage_kb,
@@ -26,7 +26,7 @@ from src.nadobro.handlers.keyboards import (
     points_scope_kb,
     referral_kb,
     mode_kb,     home_card_kb, status_kb, portfolio_kb, portfolio_history_kb, portfolio_analytics_kb,
-    onboarding_accept_tos_kb,
+    onboarding_accept_tos_kb, getting_started_kb,
     copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
 )
@@ -314,16 +314,16 @@ async def _handle_callback_inner(update, context, query, data, telegram_id, star
 # New onboarding (language → ToS) message text
 _ONB_WELCOME_LANG_MSG = """Welcome to Nadobro 👋
 
-Trade perps on Nado DEX from Telegram with guided execution, portfolio tools, automation, and AI support.
+Trade perps on Nado straight from Telegram. Type the trade, tap to confirm, done. Automation, portfolio, and AI are all here too.
 
 Pick your language:"""
 
-_ONB_WELCOME_CARD = """🔥 You're in!
+_ONB_WELCOME_CARD = """🔥 You're in.
 
-By tapping *"Let's Get It"* you accept the Terms of Use & Privacy Policy.
+Tapping *"Let's Get It"* means you're good with the Terms of Use & Privacy Policy.
 
 🔐 How it works:
-We generate a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke anytime.
+We spin up a secure 1CT signing key for your account. Your main wallet keys are never touched. Revoke whenever you want.
 
 Ready?"""
 
@@ -332,9 +332,9 @@ async def _handle_onb_new(query, data, telegram_id, context):
         set_new_onboarding_tos_accepted(telegram_id)
         await _edit_loc(
             query,
-            fmt_dashboard_home(),
+            fmt_getting_started(),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=home_card_kb(),
+            reply_markup=getting_started_kb(),
         )
         return
     if data.startswith("onb:lang:"):
@@ -343,7 +343,7 @@ async def _handle_onb_new(query, data, telegram_id, context):
             return
         lang = parts[2]
         set_new_onboarding_language(telegram_id, lang)
-        update_user_language(telegram_id, lang)
+        update_user_language(telegram_id, lang, source="onboarding")
         _ACTIVE_LANG.set(lang)
         await _edit_loc(query, _ONB_WELCOME_CARD,
             parse_mode=ParseMode.MARKDOWN,

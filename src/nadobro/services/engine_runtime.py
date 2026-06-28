@@ -12,6 +12,8 @@ all the real wiring lives here.
 """
 from __future__ import annotations
 
+from dataclasses import fields, is_dataclass
+from enum import Enum
 import logging
 import os
 import time
@@ -31,7 +33,7 @@ from src.nadobro.engine.controllers.reverse_grid import ReverseGridController
 from src.nadobro.engine.controllers.volume_bot import VolumeBotController
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
 from src.nadobro.engine.risk import RiskEngine
-from src.nadobro.engine.types import RiskLimits, RiskState, TripleBarrierConfig, _dec
+from src.nadobro.engine.types import RiskLimits, RiskState, TradeType, TripleBarrierConfig, _dec
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +305,226 @@ def _should_build_controller(
     return worker_mode or not is_running
 
 
+def _fingerprint_value(value: object) -> object:
+    """Comparable representation for config/risk objects.
+
+    Decimal/dataclass/Enum instances do not always compare predictably once
+    nested inside generic dicts, and callables such as candle providers must not
+    participate in live-config equality.
+    """
+    if callable(value):
+        return "<callable>"
+    if isinstance(value, Decimal):
+        return ("Decimal", str(value))
+    if isinstance(value, Enum):
+        return ("Enum", value.value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return (
+            type(value).__name__,
+            tuple(
+                (field.name, _fingerprint_value(getattr(value, field.name)))
+                for field in fields(value)
+            ),
+        )
+    if isinstance(value, dict):
+        return tuple(
+            (str(k), _fingerprint_value(v))
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            if not callable(v)
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_fingerprint_value(v) for v in value)
+    return value
+
+
+def _live_config_signature(
+    configs: Dict[str, object], limits: Optional[RiskLimits] = None
+) -> tuple:
+    """Stable signature for parameters that should change a live controller.
+
+    Excludes mid-derived price anchors so ordinary market movement does not
+    churn a controller. Includes risk limits because leverage/notional changes
+    must also update the runtime risk engine before the next order is spawned.
+    """
+    cfg_sig = tuple(
+        (str(k), _fingerprint_value(v))
+        for k, v in sorted(configs.items(), key=lambda item: str(item[0]))
+        if k not in _LIVE_CONFIG_SIGNATURE_EXCLUDE and not callable(v)
+    )
+    return (cfg_sig, _fingerprint_value(limits) if limits is not None else None)
+
+
+def _grid_bounds_for_side(configs: Dict[str, object], side: TradeType, mid: object) -> Dict[str, object]:
+    """Rebuild side-correct grid bounds from stable step/level knobs.
+
+    This mirrors the mapping/recenter math while keeping the helper local to the
+    runtime reconfig path, where the live executor side is known.
+    """
+    mid_dec = _dec(mid)
+    if mid_dec <= 0:
+        return {}
+    step = _dec(configs.get("step_pct") or configs.get("min_spread_between_orders") or 0)
+    levels = int(configs.get("levels_count") or configs.get("max_open_orders") or 0)
+    if step <= 0 or levels < 1:
+        return {}
+    span = step * Decimal(max(levels - 1, 1))
+    maker_offset = max(step / Decimal(2), Decimal("0.00015"))
+    if side is TradeType.SELL:
+        return {
+            "start_price": mid_dec * (Decimal(1) + maker_offset),
+            "end_price": mid_dec * (Decimal(1) + maker_offset + span),
+            "limit_price": Decimal(0),
+        }
+    return {
+        "start_price": mid_dec * (Decimal(1) - maker_offset - span),
+        "end_price": mid_dec * (Decimal(1) - maker_offset),
+        "limit_price": Decimal(0),
+    }
+
+
+def _apply_mid_controller_config(controller: Controller, configs: Dict[str, object]) -> None:
+    """Refresh MarketMakingController attrs read only at __init__."""
+    controller.trading_pair = str(configs["trading_pair"])  # type: ignore[attr-defined]
+    controller.spread_bid_pct = max(  # type: ignore[attr-defined]
+        _dec(configs.get("spread_bid_pct", "0.001")),
+        _dec(configs.get("spread_floor_half_pct", "0.00015")),
+    )
+    controller.spread_ask_pct = max(  # type: ignore[attr-defined]
+        _dec(configs.get("spread_ask_pct", "0.001")),
+        _dec(configs.get("spread_floor_half_pct", "0.00015")),
+    )
+    controller.order_amount_quote = _dec(configs.get("order_amount_quote", "10"))  # type: ignore[attr-defined]
+    controller.price_distance_tolerance = _dec(  # type: ignore[attr-defined]
+        configs.get("price_distance_tolerance", "0.0005")
+    )
+    max_base = configs.get("max_base_quote")
+    min_base = configs.get("min_base_quote")
+    controller.max_base_quote = _dec(max_base) if max_base is not None else None  # type: ignore[attr-defined]
+    controller.min_base_quote = _dec(min_base) if min_base is not None else None  # type: ignore[attr-defined]
+    controller.profit_protection = bool(configs.get("profit_protection", False))  # type: ignore[attr-defined]
+    controller.auto_spread = bool(configs.get("auto_spread", False))  # type: ignore[attr-defined]
+    controller.auto_spread_k = _dec(configs.get("auto_spread_k", "1.5"))  # type: ignore[attr-defined]
+    controller.spread_floor_half_pct = _dec(configs.get("spread_floor_half_pct", "0.00015"))  # type: ignore[attr-defined]
+    controller.spread_cap_half_pct = _dec(configs.get("spread_cap_half_pct", "0.005"))  # type: ignore[attr-defined]
+
+
+def _apply_orchestrator_risk_limits(orch: ExecutorOrchestrator, limits: RiskLimits) -> None:
+    """Refresh the live RiskEngine limits on the orchestrator.
+
+    ExecutorOrchestrator exposes the engine as ``risk`` in production. Keep the
+    legacy/test ``risk_engine`` spelling as a fallback so lightweight fakes still
+    exercise the same path.
+    """
+    for attr in ("risk", "risk_engine"):
+        risk_engine = getattr(orch, attr, None)
+        if risk_engine is not None:
+            try:
+                risk_engine.limits = limits
+            except Exception:  # noqa: BLE001 - bad fakes must not break a tick
+                logger.debug("risk limit refresh failed via orchestrator.%s", attr, exc_info=True)
+
+
+async def _reset_mm_quotes(controller: Controller, orch: ExecutorOrchestrator) -> None:
+    """Forget/stop current MM-style quotes so the next tick uses new sizing."""
+    for attr_id, attr_price in (("_bid_id", "_bid_price"), ("_ask_id", "_ask_price")):
+        ex_id = getattr(controller, attr_id, None)
+        if ex_id is not None:
+            await orch.stop(ex_id)
+            setattr(controller, attr_id, None)
+            setattr(controller, attr_price, None)
+
+
+def _apply_fill_anchored_controller_config(controller: Controller, configs: Dict[str, object]) -> None:
+    """Refresh FillAnchoredQuotingController attrs read only at __init__."""
+    _apply_mid_controller_config(controller, configs)
+    controller.mode = str(configs.get("anchor_mode", getattr(controller, "mode", "grid"))).lower()  # type: ignore[attr-defined]
+    controller.reset_threshold_pct = _dec(  # type: ignore[attr-defined]
+        configs.get(
+            "reset_threshold_pct",
+            "0.0025" if getattr(controller, "mode", "grid") == "grid" else "0.00125",
+        )
+    )
+
+
+async def _apply_grid_live_config(
+    strategy: str,
+    controller: Controller,
+    orch: ExecutorOrchestrator,
+    configs: Dict[str, object],
+    mid: object,
+) -> None:
+    """Apply sizing/spread/risk edits to active grid executors in place.
+
+    Recenter cancels only free/open entry orders and preserves held inventory +
+    reduce-only close legs, avoiding the flattening side effect of a full
+    controller stop.
+    """
+    from src.nadobro.engine.controllers.grid_trading import build_grid_config
+
+    controller.trading_pair = str(configs.get("trading_pair") or getattr(controller, "trading_pair", ""))  # type: ignore[attr-defined]
+    for ex in orch.list(controller.id, active_only=True):
+        recenter = getattr(ex, "recenter", None)
+        ex_config = getattr(ex, "config", None)
+        side = getattr(ex, "open_side", None)
+        if not callable(recenter) or ex_config is None or not isinstance(side, TradeType):
+            continue
+        if str(getattr(ex_config, "trading_pair", "")) != str(configs.get("trading_pair")):
+            logger.warning(
+                "live %s reconfig skipped executor %s: trading_pair changed %s -> %s",
+                strategy, getattr(ex, "id", "<unknown>"),
+                getattr(ex_config, "trading_pair", None), configs.get("trading_pair"),
+            )
+            continue
+        overlay = _grid_bounds_for_side(configs, side, mid)
+        next_cfg = build_grid_config({**configs, **overlay}, side)
+        for attr in (
+            "start_price",
+            "end_price",
+            "limit_price",
+            "total_amount_quote",
+            "min_spread_between_orders",
+            "max_open_orders",
+            "max_orders_per_batch",
+            "activation_bounds",
+            "triple_barrier_config",
+            "leverage",
+            "keep_position",
+        ):
+            setattr(ex_config, attr, getattr(next_cfg, attr))
+        await recenter(next_cfg.start_price, next_cfg.end_price)
+
+
+async def _apply_live_controller_update(
+    strategy: str,
+    controller: Controller,
+    orch: ExecutorOrchestrator,
+    configs: Dict[str, object],
+    limits: RiskLimits,
+    mid: object,
+) -> None:
+    """Apply live UI settings to a locally owned controller before ticking."""
+    controller.configs = dict(configs)
+    controller.limits = limits
+    _apply_orchestrator_risk_limits(orch, limits)
+
+    is_fill_anchored = (
+        configs.get("controller_override") == "fill_anchored"
+        or isinstance(controller, FillAnchoredQuotingController)
+    )
+    if is_fill_anchored:
+        _apply_fill_anchored_controller_config(controller, configs)
+        await _reset_mm_quotes(controller, orch)
+        return
+
+    if strategy == "mid":
+        _apply_mid_controller_config(controller, configs)
+        await _reset_mm_quotes(controller, orch)
+        return
+
+    if strategy in ("grid", "rgrid", "dgrid"):
+        await _apply_grid_live_config(strategy, controller, orch, configs, mid)
+
+
 def _remote_active(
     strategy: str, user_id: int, network: str, session_id: Optional[int] = None
 ) -> bool:
@@ -375,6 +597,22 @@ RUNTIME = _default_runtime()
 # it up here and emit its config keys in ``map_strategy_config``.
 ENGINE_MAPPED_STRATEGIES = ("grid", "rgrid", "dgrid", "mid", "vol", "dn")
 
+# These controllers derive live order sizing from config values that can be
+# edited from the UI while the bot remains LIVE. A price move alone changes
+# start/end anchors every cycle, so those mid-derived keys are deliberately
+# excluded from the signature below.
+_LIVE_RECONFIGURABLE_STRATEGIES = ("grid", "rgrid", "dgrid", "mid")
+_LIVE_CONFIG_SIGNATURE_EXCLUDE = frozenset({
+    "start_price",
+    "end_price",
+    "limit_price",
+    "candle_provider",
+    # DN-only restore fields; excluded defensively if a future strategy shares
+    # this helper.
+    "restore_cycles_completed",
+    "restore_funding_usd",
+})
+
 
 def engine_v2_enabled() -> bool:
     """Master switch for routing live strategy execution through the engine.
@@ -428,14 +666,40 @@ def _quote_defense_defaults(settings, notional, *, auto_spread: bool) -> dict:
     }
 
 
+def _effective_leverage(settings: Dict[str, Any], fallback: float = 1.0) -> float:
+    """Resolve the effective leverage that turns the user's *margin* (collateral)
+    into deployed position notional for the grid/MM family.
+
+    Precedence: an explicit ``mm_leverage_override`` (set by the Tiny Budget
+    preset / leverage selector) wins; otherwise the session ``leverage``; else
+    ``fallback``. Floored at 1x. The venue cap is NOT applied here — the start
+    guard (``_run_mm_start_guard``) already rejects leverage above the pair max
+    and the adapter re-validates at placement, so this stays a pure function of
+    settings (no catalog/network dependency in the hot mapping path).
+    """
+    raw = _f(settings, "mm_leverage_override", 0.0)
+    if raw <= 0:
+        raw = _f(settings, "leverage", 0.0)
+    if raw <= 0:
+        raw = float(fallback or 1.0)
+    return max(1.0, raw)
+
+
 def map_strategy_config(
-    strategy: str, settings: Dict[str, Any], mid: Decimal, *, product: str, leverage: int = 1
+    strategy: str, settings: Dict[str, Any], mid: Decimal, *, product: str,
+    leverage: int = 1, network: str = "mainnet",
 ) -> Dict[str, object]:
     """Derive an engine controller config from a user's saved strategy settings
     + current mid. Documented, testnet-tunable mappings (not 1:1 with legacy).
     """
     mid = _dec(mid)
+    # ``notional`` here is the user's allocated MARGIN (collateral). The grid/MM
+    # family deploys ``margin x effective_leverage`` of position notional, so a
+    # $100 margin at 5x quotes ~$500 across the ladder (and unlocks more levels).
+    # DN/Volume size their own legs and do not use ``deployed`` below.
     notional = _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0))
+    eff_lev = _effective_leverage(settings, float(leverage or 1.0))
+    deployed = notional * eff_lev
     # The quoting spread is USER-SET, not one hardcoded value for everyone. Read
     # the strategy's own spread field (the frontend writes rgrid_spread_bp /
     # dgrid_spread_bp), falling back to the generic spread_bp. Previously this
@@ -466,13 +730,14 @@ def map_strategy_config(
             "trading_pair": product,
             "spread_bid_pct": spread_frac,
             "spread_ask_pct": spread_frac,
-            "order_amount_quote": Decimal(str(notional)) / Decimal(levels),
-            "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", notional))),
+            "order_amount_quote": Decimal(str(deployed)) / Decimal(levels),
+            "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", deployed))),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
-            "leverage": leverage,
+            "leverage": int(eff_lev),
             # Regime gate + inventory cap + ATR auto-spread (2026-06 upgrade).
-            # auto_spread engages when the user left spread unset/zero.
-            **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
+            # auto_spread engages when the user left spread unset/zero. margin_quote
+            # tracks the DEPLOYED size so the net-exposure cap scales with leverage.
+            **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
         }
     if strategy == "dn":
         # NO_ORDERS_AUDIT-FIX-R1: DN config keys for DeltaNeutralController.
@@ -492,9 +757,17 @@ def map_strategy_config(
         hedge_ratio = Decimal(str(_f(settings, "dn_hedge_ratio", 1.0)))
         leg_quote = Decimal(str(_f(settings, "fixed_margin_usd", notional)))
         max_drift = Decimal(str(_f(settings, "dn_max_drift_pct", 5.0))) / Decimal(100)
-        # Hold duration: default 1h, clamp [60s, 24h]. The controller owns this
-        # timer and closes BOTH legs together at expiry.
+        # Hold duration is now the MINIMUM hold: default 1h, clamp [60s, 24h].
+        # After it elapses the controller keeps the hedge open while funding
+        # stays favorable and closes BOTH legs on a funding flip (or at the
+        # max-hold safety cap). funding_exit_enabled=False restores a fixed hold.
         hold_seconds = int(max(60.0, min(_f(settings, "dn_hold_seconds", 3600.0), 86400.0)))
+        # Safety cap on the total hold; 0 disables it (hold while favorable).
+        # Clamp to <= 7d so a stray setting can't strand a hedge indefinitely.
+        max_hold_seconds = int(max(0.0, min(_f(settings, "dn_max_hold_seconds", 86400.0), 604800.0)))
+        funding_exit_enabled = _f(settings, "dn_funding_exit", 1.0) >= 0.5
+        funding_flip_confirmations = int(max(1.0, _f(settings, "dn_funding_flip_confirmations", 2.0)))
+        funding_poll_seconds = int(max(0.0, _f(settings, "dn_funding_poll_seconds", 60.0)))
         # Volume-farming: repeat open->hold->close N times with a gap between.
         cycles = int(max(1.0, _f(settings, "dn_cycles", 1.0)))
         cycle_gap_seconds = int(max(0.0, _f(settings, "dn_cycle_gap_seconds", 30.0)))
@@ -510,7 +783,11 @@ def map_strategy_config(
             "hedge_ratio": hedge_ratio,
             "leg_amount_quote": leg_quote,
             "max_drift_pct": max_drift,
-            "hold_seconds": hold_seconds,
+            "hold_seconds": hold_seconds,            # minimum hold
+            "max_hold_seconds": max_hold_seconds,
+            "funding_exit_enabled": funding_exit_enabled,
+            "funding_flip_confirmations": funding_flip_confirmations,
+            "funding_poll_seconds": funding_poll_seconds,
             "cycles": cycles,
             "cycle_gap_seconds": cycle_gap_seconds,
             "barriers": _TBC(take_profit=leg_tp or None, stop_loss=leg_sl or None),
@@ -520,6 +797,15 @@ def map_strategy_config(
         }
     if strategy == "vol":
         interval = max(1.0, _f(settings, "interval_seconds", 60))
+        # VOL-MARGIN fix: the vol card collects the run size under
+        # ``session_margin_usd`` (strategy_handler), but the generic ``notional``
+        # above only reads cycle_notional_usd/notional_usd — so a user who set
+        # "$500" still traded the $100 default. Prefer the user's session margin,
+        # then fall back to the legacy keys.
+        vol_notional = _f(
+            settings, "session_margin_usd",
+            _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0)),
+        )
         # Normalize the trading pair so the VolumeBotController validation
         # sees a canonical base (e.g. ``KBTC``) regardless of whether
         # ``state.product`` was stored as ``KBTC`` (current UI) or as a
@@ -532,11 +818,15 @@ def map_strategy_config(
             vol_pair = str(product or "")
         return {
             "trading_pair": vol_pair,
-            "total_amount_quote": Decimal(str(notional)),
+            "total_amount_quote": Decimal(str(vol_notional)),
             "total_duration": interval * 4,
             "order_interval": interval,
             "market": "spot",
             "leverage": 1,
+            # VOL-LOOP / VOL-NO-CAP: cumulative volume target (0 = single
+            # round-trip) and a hard cycle ceiling so the loop can't run away.
+            "target_volume_usd": Decimal(str(_f(settings, "target_volume_usd", 0.0))),
+            "max_cycles": int(max(1, _f(settings, "vol_max_cycles", 100))),
         }
     # grid / rgrid / dgrid family.
     #
@@ -553,10 +843,10 @@ def map_strategy_config(
             "reset_threshold_pct": Decimal(str(_f(settings, "reset_threshold_pct", default_reset))) / Decimal(100),
             "spread_bid_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
             "spread_ask_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
-            "order_amount_quote": Decimal(str(notional)) / Decimal(levels),
+            "order_amount_quote": Decimal(str(deployed)) / Decimal(levels),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
-            "leverage": leverage,
-            **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
+            "leverage": int(eff_lev),
+            **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
         }
     #
     # NO_ORDERS_AUDIT-FIX-R4: spread_bp is now interpreted as the per-level
@@ -589,24 +879,40 @@ def map_strategy_config(
         spread_frac = Decimal("0.0005")  # 5 bp fallback
     span = spread_frac * Decimal(max(levels - 1, 1))
 
+    # GRID-DUAL-UNIT fix: do NOT derive a hard ``limit_price`` stop from the
+    # user's sl_pct. That stop is referenced to the run/rebuild mid and ignores
+    # how much of the grid has actually filled, so it fires on a brief wick to
+    # mid*(1-sl) even when little is at risk — a premature stop-out on top of the
+    # session margin-% rail. SL is now governed consistently by (a) the executor
+    # avg-entry barrier (triple_barrier_config.stop_loss, fill-aware) and (b) the
+    # fee-aware session rail. limit_price stays available as an explicit
+    # catastrophic stop but is no longer auto-set from sl.
+    # POST-ONLY-CROSS fix: the boundary level nearest mid must be a strict maker,
+    # or a post-only LIMIT_MAKER placed AT mid crosses the book and the venue
+    # rejects it (error_code 2008 — seen on every rgrid SELL and, once grids
+    # ladder past one level, on the top BUY too). Offset the near boundary by at
+    # least half a grid step (floored at 1.5 bp) onto the maker side: buys
+    # strictly below mid, sells strictly above.
+    maker_offset = max(spread_frac / Decimal(2), Decimal("0.00015"))
     if strategy == "rgrid":
-        start_price = mid
-        end_price = mid * (Decimal(1) + span)
-        limit_price = mid * (Decimal(1) + sl) if sl > 0 else Decimal(0)
+        start_price = mid * (Decimal(1) + maker_offset)
+        end_price = mid * (Decimal(1) + maker_offset + span)
+        limit_price = Decimal(0)
     else:  # grid OR dgrid-as-long-default; dgrid recomputes at on_tick
-        start_price = mid * (Decimal(1) - span)
-        end_price = mid
-        limit_price = mid * (Decimal(1) - sl) if sl > 0 else Decimal(0)
+        start_price = mid * (Decimal(1) - maker_offset - span)
+        end_price = mid * (Decimal(1) - maker_offset)
+        limit_price = Decimal(0)
 
     cfg: Dict[str, object] = {
         "trading_pair": product,
         "start_price": start_price,
         "end_price": end_price,
         "limit_price": limit_price,
-        "total_amount_quote": Decimal(str(notional)),
+        # Deployed position notional = margin x effective leverage (see top).
+        "total_amount_quote": Decimal(str(deployed)),
         "min_spread_between_orders": spread_frac,
         "max_open_orders": levels,
-        "leverage": leverage,
+        "leverage": int(eff_lev),
         "triple_barrier_config": TripleBarrierConfig(
             take_profit=tp or None, stop_loss=sl or None
         ),
@@ -618,7 +924,9 @@ def map_strategy_config(
         "tp_pct": tp,
         "sl_pct": sl,
         # Regime gate + inventory cap + ATR auto-step (2026-06 upgrade).
-        **_quote_defense_defaults(settings, notional, auto_spread=spread_frac <= 0),
+        # margin_quote = DEPLOYED notional so the net-exposure cap scales with
+        # leverage instead of choking a leveraged ladder at 30% of collateral.
+        **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
     }
     # NO_ORDERS_AUDIT-FIX-R2: DynamicGridController requires a candle_provider
     # callable to classify the volatility regime. Without one, _candles()
@@ -638,23 +946,52 @@ def map_strategy_config(
         cfg["dgrid_long_window"] = int(max(4, _f(settings, "dgrid_long_window_points", 12)))
         cfg["dgrid_trend_on_vr"] = _f(settings, "dgrid_trend_on_variance_ratio", 1.25)
         cfg["dgrid_range_on_vr"] = _f(settings, "dgrid_range_on_variance_ratio", 1.15)
+        # Sustained-drift trend filter: flip the grid direction on a slow one-way
+        # grind the variance ratio misses (a steady decline keeps VR<1 yet bleeds
+        # a long grid). Percent over the long window; 0 disables.
+        cfg["dgrid_trend_drift_pct"] = _f(settings, "dgrid_trend_drift_pct", 0.30)
+        # Tiered profit-booking: scale out reduce-only as the run's uPnL climbs
+        # past these tiers (% of margin), closing dgrid_tp_fraction each time.
+        cfg["dgrid_tp_tiers_pct"] = settings.get("dgrid_tp_tiers_pct") or [2.0, 4.0, 6.0]
+        cfg["dgrid_tp_fraction"] = _f(settings, "dgrid_tp_fraction", 0.33)
         # Confirm-ticks debounce a flip.
         cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 2)))
+        # Trend-capture redesign (2026-06): as a run goes in profit, ratchet a
+        # trailing take-profit so a reversal still closes green, and flip
+        # long<->short on a confirmed price reversal from the run's extreme
+        # (faster than waiting for the variance classifier to cross). Percents.
+        cfg["dgrid_trail_arm_pct"] = _f(settings, "dgrid_trail_arm_pct", 1.0)
+        cfg["dgrid_trail_giveback_pct"] = _f(settings, "dgrid_trail_giveback_pct", 0.5)
+        cfg["dgrid_reversal_flip_pct"] = _f(settings, "dgrid_reversal_flip_pct", 0.4)
         # Reset re-center honors the user's reset setting (grid_reset_threshold_pct,
         # default 0.2% -> 20bp). This now drives an IN-PLACE re-quote of the
         # resting ladder (GridExecutor.recenter), not a flatten — so it cannot
         # bleed fees. The controller still FLOORS the threshold above the grid
         # band (see __init__) so it never fires on normal in-band oscillation.
+        # TREND-CAPTURE (2026-06-21): default the re-center ON (0.5% -> floored to
+        # 50bp in the controller) so the ladder FOLLOWS price as it trends instead
+        # of going stale and never filling — the "placed 2 orders and stopped"
+        # report. Explicit 0 still disables it.
         cfg["dgrid_reset_threshold_bp"] = _f(
             settings, "dgrid_reset_threshold_bp",
-            _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0,
+            _f(settings, "grid_reset_threshold_pct", 0.5) * 100.0,
         )
 
     # GRID / RGRID in-place re-center: honor the user's reset threshold so the
     # ladder follows price ("reset and continue") instead of going stale. Drives
     # GridExecutor.recenter (no flatten); the controller floors it above the band.
     if strategy == "grid":
-        cfg["reset_threshold_bp"] = _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0
+        # Default ON (0.5% -> 50bp floor) so a Grid now allowed to run in trends
+        # follows price instead of resting a never-filling ladder below mid.
+        cfg["reset_threshold_bp"] = _f(settings, "grid_reset_threshold_pct", 0.5) * 100.0
+        # GRID-IN-TRENDS (user directive 2026-06-21): plain Grid was gated OUT of
+        # trends/expansions by default and silently never quoted (the "always
+        # market paused" report). Default the regime gate OFF for grid so it
+        # quotes in every regime; the inventory net-exposure cap, the in-place
+        # recenter, and the live-session SL/TP rails remain the backstops. Still
+        # user-overridable: an explicit regime_gate_enabled=1 re-arms the gate.
+        if "regime_gate_enabled" not in settings:
+            cfg["regime_gate_enabled"] = 0.0
     elif strategy == "rgrid":
         cfg["reset_threshold_bp"] = _f(settings, "rgrid_reset_threshold_pct", 0.0) * 100.0
         # A Reverse Grid is a TREND strategy (it wins in trends, resets and
@@ -665,7 +1002,9 @@ def map_strategy_config(
     return cfg
 
 
-def map_risk_limits(settings: Dict[str, Any], strategy: Optional[str] = None) -> RiskLimits:
+def map_risk_limits(
+    settings: Dict[str, Any], strategy: Optional[str] = None, *, leverage: float = 1.0,
+) -> RiskLimits:
     # Delta Neutral sizes each leg from ``fixed_margin_usd`` (NOT ``notional_usd``),
     # so its risk caps must follow the leg size or the Risk Engine rejects every
     # leg with ``max_single_order_quote`` and the controller never places an order
@@ -682,13 +1021,21 @@ def map_risk_limits(settings: Dict[str, Any], strategy: Optional[str] = None) ->
             max_single_order_quote=Decimal(str(per_order_cap)),
             max_position_size_quote=Decimal(str(per_order_cap)),
         )
-    notional = _f(settings, "notional_usd", 100.0)
+    # Grid/MM family: caps must follow the DEPLOYED notional (margin x leverage),
+    # or the Risk Engine rejects every leveraged order — the same "LIVE but 0
+    # orders" failure the DN branch above guards against. With leverage=1 this is
+    # identical to the legacy margin-sized behavior (tests rely on that).
+    margin = _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0))
+    eff_lev = _effective_leverage(settings, float(leverage or 1.0))
+    deployed = margin * eff_lev
     levels = max(1, int(_f(settings, "levels", 2)))
-    cap = _f(settings, "session_notional_cap_usd", 0.0) or (notional * levels)
+    cap = _f(settings, "session_notional_cap_usd", 0.0) or (deployed * levels)
     return RiskLimits(
         max_open_executors=levels + 2,
-        max_single_order_quote=Decimal(str(notional)),
-        max_position_size_quote=Decimal(str(cap)),
+        # A single bumped level can be up to the whole deployed size (when the
+        # min-notional cap collapses the ladder to one level).
+        max_single_order_quote=Decimal(str(deployed)),
+        max_position_size_quote=Decimal(str(max(cap, deployed * 1.2))),
     )
 
 
@@ -931,9 +1278,10 @@ async def run_engine_cycle(
         return {"success": False, "error": f"strategy '{strategy}' not engine-mapped"}
 
     settings = {k: v for k, v in state.items() if not isinstance(v, (dict, list))}
+    _start_lev = _f(settings, "leverage", 1)
     configs = map_strategy_config(strategy, settings, _dec(mid), product=product,
-                                  leverage=int(_f(settings, "leverage", 1)))
-    limits = map_risk_limits(settings, strategy)
+                                  leverage=int(_start_lev), network=network)
+    limits = map_risk_limits(settings, strategy, leverage=_start_lev)
 
     # NO_ORDERS_AUDIT-FIX-R2: inject the dgrid candle_provider HERE, because
     # this is where ``client`` and ``product_id`` are available. The provider
@@ -1002,6 +1350,29 @@ async def run_engine_cycle(
             from src.nadobro.engine.adapter.nado import ProductMeta
 
             meta[product] = ProductMeta(int(product_id), _dec("0.01"), _dec("0.001"), _dec("1"))
+        # GRID-MIN-NOTIONAL-INFLATE fix: each grid level is sized
+        # total_amount_quote / levels, but the venue bumps any sub-min-notional
+        # order UP to its minimum — so a small/many-level grid silently deploys
+        # MORE than the configured (and risk-approved) size. Cap the level count
+        # so each level is at least the venue minimum. Conservative: only ever
+        # REDUCES the level count, never raises it.
+        if strategy in ("grid", "rgrid", "dgrid"):
+            try:
+                _mn = float(getattr(meta.get(product), "min_notional", 0) or 0)
+                _tot = float(configs.get("total_amount_quote") or 0)
+                if _mn > 0 and _tot > 0:
+                    _max_levels = max(1, int(_tot // _mn))
+                    _cur = int(configs.get("max_open_orders") or 1)
+                    if _cur > _max_levels:
+                        configs["max_open_orders"] = _max_levels
+                        configs["levels_count"] = _max_levels
+                        logger.info(
+                            "grid level cap (min-notional): %s -> %s levels "
+                            "(total=%.2f min_notional=%.2f) user=%s strategy=%s",
+                            _cur, _max_levels, _tot, _mn, telegram_id, strategy,
+                        )
+            except Exception:  # noqa: BLE001 - cap is best-effort, never block start
+                logger.debug("grid min-notional level cap skipped", exc_info=True)
         # NO_ORDERS_AUDIT-FIX-R1: DN needs metadata for BOTH legs (spot long +
         # perp short), each with its OWN product_id. The old fallback keyed both
         # legs to the SAME ``product_id`` — which would have traded the perp
@@ -1009,6 +1380,63 @@ async def run_engine_cycle(
         # isolated-only flag) from the DN pair catalog.
         if strategy == "dn":
             _materialize_dn_leg_meta(meta, configs, client, network, product)
+            # DN-CYCLES fix: a rebuild (restart / worker handoff / recovery) used
+            # to reset the controller's cycle counter to 0 and re-run the whole
+            # configured cycle count. Restore the persisted progress so the
+            # rebuilt controller resumes the count instead of restarting it.
+            # GUARD: only restore for a run that has already ticked at least once
+            # (state["runs"] > 0). A fresh user start has runs == 0, so a stale
+            # progress row left by a prior crashed run (the controller_id is
+            # stable across runs) can never bleed into a new run.
+            if int(_f(state, "runs", 0)) > 0:
+                try:
+                    from src.nadobro.services.engine_persistence import (
+                        get_controller_progress,
+                    )
+
+                    _cid = deterministic_controller_id(strategy, telegram_id, network)
+                    _prog = get_controller_progress(_cid) or {}
+                    if _prog:
+                        configs["restore_cycles_completed"] = int(
+                            _prog.get("cycles_completed") or 0
+                        )
+                        configs["restore_funding_usd"] = _prog.get("funding_earned_usd") or 0
+                        # OPTION-1 anti-doubling reconcile: a rebuild (worker
+                        # handoff / process restart) loses the in-memory
+                        # controller, and RUNTIME.start clears the engine's
+                        # inventory view — so on_start would open a SECOND hedge
+                        # on top of the prior instance's still-open venue legs,
+                        # orphaning the originals (no executor handle manages
+                        # them). True "resume" needs executor rehydration; until
+                        # then, if the persisted phase shows a cycle was in
+                        # progress, FLATTEN any existing DN legs on the venue
+                        # before re-opening so the new cycle starts from flat —
+                        # never 2x exposure, never an unmanaged orphan. Closing
+                        # nothing (already flat) is a safe no-op.
+                        _phase = str(_prog.get("phase") or "").upper()
+                        if _phase in {"OPENING", "HOLDING", "CLOSING"}:
+                            try:
+                                from src.nadobro.services.async_utils import run_blocking_sdk
+                                from src.nadobro.services.trade_service import (
+                                    close_delta_neutral_legs,
+                                )
+                                logger.warning(
+                                    "dn rebuild mid-cycle (phase=%s) — flattening any "
+                                    "existing legs before re-open user=%s product=%s",
+                                    _phase, telegram_id, product,
+                                )
+                                await run_blocking_sdk(
+                                    close_delta_neutral_legs,
+                                    telegram_id, product, network,
+                                    source="dn_rebuild_reconcile",
+                                )
+                            except Exception:  # noqa: BLE001 - best-effort safety net
+                                logger.warning(
+                                    "dn rebuild reconcile flatten failed user=%s product=%s",
+                                    telegram_id, product, exc_info=True,
+                                )
+                except Exception:  # noqa: BLE001 - restore is best-effort, never block start
+                    logger.debug("dn progress restore skipped", exc_info=True)
         adapter = build_adapter(client, meta)
         started_controller = await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),
@@ -1056,6 +1484,19 @@ async def run_engine_cycle(
         if needs_recovery:
             state["last_recovery_ts"] = time.time()
         return {"success": True, "action": action, "strategy": strategy}
+
+    if strategy in _LIVE_RECONFIGURABLE_STRATEGIES and _has_local:
+        controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        orch = RUNTIME._orchestrators.get((telegram_id, network, strategy))      # noqa: SLF001
+        if controller is not None and orch is not None:
+            old_sig = _live_config_signature(controller.configs, controller.limits)
+            new_sig = _live_config_signature(configs, limits)
+            if old_sig != new_sig:
+                await _apply_live_controller_update(strategy, controller, orch, configs, limits, mid)
+                logger.info(
+                    "engine live config updated user=%s network=%s strategy=%s",
+                    telegram_id, network, strategy,
+                )
 
     await RUNTIME.tick(telegram_id, network, strategy)
     # Regime-gate transition: surfaced exactly once per QUOTE<->PAUSE flip so
@@ -1127,6 +1568,20 @@ async def run_engine_cycle(
     except Exception:  # noqa: BLE001  # policy: degrade-ok(diagnostics-only block)
         engine_diag = {}
     result: Dict[str, Any] = {"success": True, "action": "engine_ticked", "strategy": strategy}
+    # VOL-LOOP completion: a controller that has finished its work (e.g. Volume
+    # reached its target volume / cap) signals it via ``completed`` so bot_runtime
+    # can finalize the session instead of leaving the strategy idling "running".
+    try:
+        _ctrl_done = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+        if _ctrl_done is not None and getattr(_ctrl_done, "completed", False):
+            result["done"] = True
+            result["action"] = "engine_completed"
+            result["stop_reason"] = str(getattr(_ctrl_done, "stop_reason", "") or "completed")
+            _vol_done = getattr(_ctrl_done, "session_volume_usd", None)
+            if _vol_done is not None:
+                result["session_volume_usd"] = float(_vol_done)
+    except Exception:  # noqa: BLE001 - completion surfacing is best-effort
+        logger.debug("completion surface failed", exc_info=True)
     if engine_diag:
         result["engine_diag"] = engine_diag
     if gate_event:

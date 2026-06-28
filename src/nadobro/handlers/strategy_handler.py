@@ -14,7 +14,7 @@ import logging
 from src.nadobro.config import get_dn_pair, get_dn_products, get_perp_products, get_product_id, get_product_max_leverage, get_spot_product_id, list_volume_spot_product_names, normalize_volume_spot_symbol
 from src.nadobro.handlers.commands import build_status_dashboard_parts
 from src.nadobro.handlers.formatters import escape_md, fmt_price
-from src.nadobro.handlers.keyboards import back_kb, strategy_action_kb, strategy_product_picker_kb
+from src.nadobro.handlers.keyboards import back_kb, dn_funding_rates_kb, strategy_action_kb, strategy_product_picker_kb
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.services.onboarding_service import is_new_onboarding_complete
@@ -96,6 +96,80 @@ def _vol_market_pref(context) -> str:
     # ``strategy:volmarket`` callback are retained as no-ops only so cached
     # menus / deep links don't crash; we always return "spot".
     return "spot"
+
+
+def _build_dn_funding_ranking(telegram_id: int) -> tuple[str, list[tuple[str, float | None, bool]]]:
+    """Rank DN underlyings by their perp's current funding rate.
+
+    Funding is a signed daily rate (positive ⇒ longs pay shorts ⇒ favorable for
+    the DN short leg), settled hourly. Most-positive first = best short carry.
+    Pulls every DN perp's rate in one batched indexer call
+    (``client.get_perp_funding_rates``). Returns ``(markdown_text, rows)`` where
+    each row is ``(product, daily_rate_or_None, entry_allowed)`` in display order.
+    """
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    client = get_user_readonly_client(telegram_id)
+
+    products = list(_strategy_available_products("dn", network))
+    pid_by_product: dict[str, int] = {}
+    entry_allowed_by_product: dict[str, bool] = {}
+    for product in products:
+        pair = get_dn_pair(product, network=network, client=client) or {}
+        entry_allowed_by_product[product] = bool(pair.get("entry_allowed", True))
+        pid = pair.get("perp_product_id")
+        if pid is not None:
+            try:
+                pid_by_product[product] = int(pid)
+            except (TypeError, ValueError):
+                pass
+
+    rates_by_pid: dict = {}
+    if client and pid_by_product:
+        try:
+            rates_by_pid = client.get_perp_funding_rates(list(pid_by_product.values())) or {}
+        except Exception:  # degrade-ok: funding screen still renders without rates
+            rates_by_pid = {}
+
+    rows: list[tuple[str, float | None, bool]] = []
+    for product in products:
+        rate: float | None = None
+        pid = pid_by_product.get(product)
+        if pid is not None:
+            entry = rates_by_pid.get(pid) or {}
+            raw = entry.get("funding_rate")
+            if raw is not None:
+                try:
+                    rate = float(raw)
+                except (TypeError, ValueError):
+                    rate = None
+        rows.append((product, rate, entry_allowed_by_product.get(product, True)))
+
+    # Most-positive funding first; unknown rates sink to the bottom.
+    rows.sort(key=lambda t: (t[1] is None, -(t[1] if t[1] is not None else 0.0)))
+
+    lines = [
+        "💹 *Delta Neutral — Funding Rates*",
+        "Highest funding first \\(best carry for the DN *short* leg\\)\\.",
+        "",
+    ]
+    have_rates = any(r is not None for _p, r, _e in rows)
+    if not have_rates:
+        lines.append("_Funding rates are unavailable right now — try Refresh in a moment\\._")
+    else:
+        for idx, (product, rate, entry_allowed) in enumerate(rows[:8], start=1):
+            prod = escape_md(str(product).upper())
+            if rate is None:
+                detail = "n/a"
+            else:
+                bias = "short earns" if rate > 0 else ("short pays" if rate < 0 else "flat")
+                detail = escape_md(f"{rate * 100:+.4f}%/day ({bias})")
+            lock = "" if entry_allowed else "🔒 "
+            lines.append(f"{idx}\\. {lock}*{prod}* — {detail}")
+    lines.append("")
+    lines.append("_Daily rate, settled hourly \\(about rate/24 per hour\\)\\. Tap a market to select it,_")
+    lines.append("_then set your margin and start\\. Short hold/size can be fee\\-dominated\\._")
+    return "\n".join(lines), rows
 
 
 async def _handle_strategy(query, data, context, telegram_id):
@@ -288,6 +362,20 @@ async def _handle_strategy(query, data, context, telegram_id):
                 vol_market=vkb,
             ),
         )
+    elif action == "funding":
+        # DN-only: rank the corresponding-spot perps by funding so the user picks
+        # the best short carry before sizing margin. Tapping a row routes through
+        # the normal pair selection and lands back on the DN dashboard.
+        if strategy_id != "dn":
+            return
+        with timed_metric("cb.strategy.funding.dn"):
+            text, ranked = await run_blocking(_build_dn_funding_ranking, telegram_id)
+        await _edit_loc(
+            query,
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=dn_funding_rates_kb(ranked),
+        )
     elif action == "config":
         if strategy_id not in supported:
             return
@@ -345,9 +433,21 @@ async def _handle_strategy(query, data, context, telegram_id):
             conf = settings.get("strategies", {}).get(strategy_id, {})
             section = "setup"
             context.user_data[f"strategy_config_section:{strategy_id}"] = section
+            # Confirmation note so Standard is no longer a silent no-op: it clears
+            # the Tiny override and returns to the default leverage (margin × 3x).
+            margin_std = float(conf.get("notional_usd", 100.0) or 0.0)
+            deployed_std = margin_std * _mm_effective_leverage(conf)
+            std_note = (
+                "*Standard preset applied*\n"
+                f"✅ Cleared the Tiny override — back to default leverage "
+                f"\\({escape_md(f'{_mm_effective_leverage(conf):.0f}x')}\\)\\. "
+                f"Position \\= *{escape_md(f'${deployed_std:,.0f}')}* "
+                f"\\(margin × leverage\\)\\. Pick a Lev button to override\\."
+            )
+            body_std = _strategy_config_section_text(strategy_id, conf, network, section)
             await _edit_loc(
                 query,
-                _strategy_config_section_text(strategy_id, conf, network, section),
+                f"{body_std}\n\n{std_note}",
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=_strategy_config_section_kb(strategy_id, section),
             )
@@ -451,6 +551,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             # per-leg size, hold duration, cycle count + gap, hedge drift gate.
             "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
             "dn_cycle_gap_seconds", "dn_max_drift_pct", "dn_hedge_ratio",
+            # MM/grid leverage: turns margin into deployed notional (margin x lev).
+            "mm_leverage_override",
         }
         if field not in allowed_numeric_fields:
             return
@@ -513,6 +615,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dn_cycle_gap_seconds": (0, 86400),
             "dn_max_drift_pct": (0.5, 50),
             "dn_hedge_ratio": (0.1, 5.0),
+            "mm_leverage_override": (1, 50),
         }
         lo, hi = limits[field]
         if value < lo or value > hi:
@@ -520,7 +623,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         int_fields = {
             "interval_seconds", "levels", "max_open_orders",
             "auto_close_on_maintenance", "is_long_bias", "rgrid_reset_timeout_seconds",
-            "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds",
+            "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds", "mm_leverage_override",
         }
 
         def _mutate(s):
@@ -597,7 +700,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
             "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
-            "directional_bias",
+            "directional_bias", "mm_leverage_override",
             # Delta Neutral (engine v2) custom inputs.
             "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
         )
@@ -652,8 +755,9 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_long_window_points": "Enter DGRID long volatility window points \\(example: `12`\\)",
             "session_margin_usd": "Enter session margin in USD \\(per\\-cycle notional, example: `500`\\)",
             "target_volume_usd": "Enter target cumulative volume in USD \\(example: `25000`\\)",
+            "mm_leverage_override": "Enter leverage \\(1 – 50; position size \\= margin × leverage, example: `5`\\)",
             "fixed_margin_usd": "Enter per\\-leg size in USD \\(example: `100`\\)",
-            "dn_hold_seconds": "Enter hold duration in seconds \\(60 – 86400; example: `3600` for 1h\\)",
+            "dn_hold_seconds": "Enter *minimum* hold in seconds \\(60 – 86400; example: `3600` for 1h\\)\\. After this, the hedge stays open while funding is favorable and closes on a funding flip\\.",
             "dn_cycles": "Enter how many open→hold→close cycles to run \\(example: `3`\\)",
         }
         await _edit_loc(query, 
@@ -1032,6 +1136,32 @@ def _strategy_config_menu_kb(strategy: str):
     return InlineKeyboardMarkup(rows)
 
 
+def _mm_effective_leverage(conf: dict) -> float:
+    """Display-side mirror of engine_runtime._effective_leverage: an explicit
+    mm_leverage_override wins, else the MM default (3x). Used so the card shows
+    the SAME leverage the engine will deploy."""
+    override = float(conf.get("mm_leverage_override", 0) or 0)
+    return override if override >= 1 else 3.0
+
+
+def _mm_sizing_line(conf: dict) -> str:
+    """'Leverage Nx -> Position $X (margin x lev)' + preset label for the Core
+    card, so picking Tiny/Standard or a leverage button VISIBLY changes the card
+    and the resulting position size (the #4 'nothing changes' fix)."""
+    margin = float(conf.get("notional_usd", 100.0) or 0.0)
+    override = float(conf.get("mm_leverage_override", 0) or 0)
+    eff_lev = _mm_effective_leverage(conf)
+    deployed = margin * eff_lev
+    preset = str(conf.get("mm_preset") or "").lower()
+    preset_label = {"tiny": "Tiny Budget", "standard": "Standard"}.get(preset, "—")
+    src = "preset/custom" if override >= 1 else "default"
+    return (
+        f"Leverage: *{escape_md(f'{eff_lev:.0f}x')}* \\({escape_md(src)}\\) \\| "
+        f"Position: *{escape_md(f'${deployed:,.0f}')}* \\(margin×lev\\)\n"
+        f"Preset: *{escape_md(preset_label)}*"
+    )
+
+
 def _strategy_config_section_text(strategy: str, conf: dict, network: str, section: str) -> str:
     if strategy == "vol":
         direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
@@ -1089,8 +1219,9 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             )
         return (
             "⚙️ *GRID · Core*\n\n"
-            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n\n"
-            "Set the main loop size and cadence\\."
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"{_mm_sizing_line(conf)}\n\n"
+            "Set the main loop size and cadence\\. *Position size \\= margin × leverage*\\."
         )
 
     if strategy == "rgrid":
@@ -1121,8 +1252,9 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "⚙️ *Reverse GRID · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Levels: *{escape_md(levels)}* \\| Spread: *{escape_md(rgrid_spread)}*\n"
-            f"POV: *{escape_md(pov_label)}*\n\n"
-            "Set the basic breakout loop here\\."
+            f"POV: *{escape_md(pov_label)}*\n"
+            f"{_mm_sizing_line(conf)}\n\n"
+            "Set the basic breakout loop here\\. *Position size \\= margin × leverage*\\."
         )
 
     if strategy == "dgrid":
@@ -1152,8 +1284,10 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "⚡ *Dynamic GRID · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Levels: *{escape_md(levels)}* \\| Starting spread: *{escape_md(f'{spread_bp:.1f} bp')}*\n"
-            f"POV: *{escape_md(pov_label)}*\n\n"
-            "DGRID automatically switches between GRID and RGRID while resizing spread from realized movement\\."
+            f"POV: *{escape_md(pov_label)}*\n"
+            f"{_mm_sizing_line(conf)}\n\n"
+            "DGRID auto\\-switches GRID↔RGRID, ladders into the move, trails take\\-profit, "
+            "and flips long↔short on a confirmed reversal\\. *Position size \\= margin × leverage*\\."
         )
 
     if strategy == "mid":
@@ -1178,7 +1312,8 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Spread: *{escape_md(f'{spread_bp:+.1f} bp')}* \\| Levels: *{escape_md(levels)}*\n"
             f"Reference: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias_str)}*\n"
-            f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n\n"
+            f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n"
+            f"{_mm_sizing_line(conf)}\n\n"
             "Pure mid ± spread×level\\. No anchor, no soft\\-reset\\. "
             "Bias range −1\\.0 → \\+1\\.0; \\|1\\.0\\| adds 20% margin\\."
         )
@@ -1200,7 +1335,7 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "⚙️ *Delta Neutral · Core*\n\n"
             f"Size \\(per leg\\): *{escape_md(f'${leg_size:,.0f}')}* \\| Short: *1x*\n"
             f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* \\| Cycles: *{escape_md(str(cycles))}*\n\n"
-            "Buys spot \\+ 1x\\-shorts the perp, holds, then exits both legs together — repeated per cycle\\."
+            "Buys spot \\+ 1x\\-shorts the perp, holds, then exits both legs together, repeated per cycle\\."
         )
 
     return _fmt_strategy_config_text(strategy, conf, network)
@@ -1253,6 +1388,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:grid:notional_usd:250"),
                 ],
                 [
+                    InlineKeyboardButton("Lev 1x", callback_data="strategy:set:grid:mm_leverage_override:1"),
+                    InlineKeyboardButton("3x", callback_data="strategy:set:grid:mm_leverage_override:3"),
+                    InlineKeyboardButton("5x", callback_data="strategy:set:grid:mm_leverage_override:5"),
+                    InlineKeyboardButton("10x", callback_data="strategy:set:grid:mm_leverage_override:10"),
+                ],
+                [
                     InlineKeyboardButton("Spread 2bp", callback_data="strategy:set:grid:spread_bp:2"),
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:grid:spread_bp:5"),
                     InlineKeyboardButton("Spread 10bp", callback_data="strategy:set:grid:spread_bp:10"),
@@ -1264,6 +1405,7 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 ],
                 [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:grid:notional_usd"),
+                    InlineKeyboardButton("Custom Lev", callback_data="strategy:input:grid:mm_leverage_override"),
                     InlineKeyboardButton("Custom Interval", callback_data="strategy:input:grid:interval_seconds"),
                 ],
             ]
@@ -1353,6 +1495,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:dgrid:notional_usd:250"),
                 ],
                 [
+                    InlineKeyboardButton("Lev 1x", callback_data="strategy:set:dgrid:mm_leverage_override:1"),
+                    InlineKeyboardButton("3x", callback_data="strategy:set:dgrid:mm_leverage_override:3"),
+                    InlineKeyboardButton("5x", callback_data="strategy:set:dgrid:mm_leverage_override:5"),
+                    InlineKeyboardButton("10x", callback_data="strategy:set:dgrid:mm_leverage_override:10"),
+                ],
+                [
                     InlineKeyboardButton("Levels 3", callback_data="strategy:set:dgrid:levels:3"),
                     InlineKeyboardButton("Levels 4", callback_data="strategy:set:dgrid:levels:4"),
                     InlineKeyboardButton("Levels 6", callback_data="strategy:set:dgrid:levels:6"),
@@ -1420,6 +1568,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:rgrid:notional_usd:50"),
                     InlineKeyboardButton("Margin $100", callback_data="strategy:set:rgrid:notional_usd:100"),
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:rgrid:notional_usd:250"),
+                ],
+                [
+                    InlineKeyboardButton("Lev 1x", callback_data="strategy:set:rgrid:mm_leverage_override:1"),
+                    InlineKeyboardButton("3x", callback_data="strategy:set:rgrid:mm_leverage_override:3"),
+                    InlineKeyboardButton("5x", callback_data="strategy:set:rgrid:mm_leverage_override:5"),
+                    InlineKeyboardButton("10x", callback_data="strategy:set:rgrid:mm_leverage_override:10"),
                 ],
                 [
                     InlineKeyboardButton("Levels 3", callback_data="strategy:set:rgrid:levels:3"),
@@ -1517,6 +1671,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:mid:notional_usd:250"),
                 ],
                 [
+                    InlineKeyboardButton("Lev 1x", callback_data="strategy:set:mid:mm_leverage_override:1"),
+                    InlineKeyboardButton("3x", callback_data="strategy:set:mid:mm_leverage_override:3"),
+                    InlineKeyboardButton("5x", callback_data="strategy:set:mid:mm_leverage_override:5"),
+                    InlineKeyboardButton("10x", callback_data="strategy:set:mid:mm_leverage_override:10"),
+                ],
+                [
                     InlineKeyboardButton("Spread −5bp", callback_data="strategy:set:mid:spread_bp:-5"),
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:mid:spread_bp:5"),
                     InlineKeyboardButton("Spread 25bp", callback_data="strategy:set:mid:spread_bp:25"),
@@ -1569,9 +1729,9 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Size $250", callback_data="strategy:set:dn:fixed_margin_usd:250"),
                 ],
                 [
-                    InlineKeyboardButton("Hold 1h", callback_data="strategy:set:dn:dn_hold_seconds:3600"),
-                    InlineKeyboardButton("Hold 6h", callback_data="strategy:set:dn:dn_hold_seconds:21600"),
-                    InlineKeyboardButton("Hold 24h", callback_data="strategy:set:dn:dn_hold_seconds:86400"),
+                    InlineKeyboardButton("Min hold 1h", callback_data="strategy:set:dn:dn_hold_seconds:3600"),
+                    InlineKeyboardButton("Min hold 6h", callback_data="strategy:set:dn:dn_hold_seconds:21600"),
+                    InlineKeyboardButton("Min hold 24h", callback_data="strategy:set:dn:dn_hold_seconds:86400"),
                 ],
                 [
                     InlineKeyboardButton("1 Cycle", callback_data="strategy:set:dn:dn_cycles:1"),
@@ -2164,16 +2324,6 @@ def _build_strategy_preview_text(
             + (f"\n\n{warning}" if warning else "")
         )
 
-    cycles_per_day = 86400 / max(interval_seconds, 10)
-    est_daily_volume = cycle_notional * 2.0 * cycles_per_day
-
-    # Conservative fee estimate using builder fee (2 bps) + maker fee proxy (1 bp).
-    from src.nadobro.config import EST_FEE_RATE, EST_FILL_EFFICIENCY
-    est_fees = est_daily_volume * EST_FEE_RATE
-    est_spread_pnl = est_daily_volume * (spread_bp / 10000.0) * EST_FILL_EFFICIENCY
-    est_funding = abs(funding_rate) * margin_usd * 3 if strategy_id == "dn" else 0.0
-    est_net = est_spread_pnl + est_funding - est_fees
-    status_dot = "🟢" if est_net >= 0 else "🟠"
     funding_bias = "FAVORABLE" if funding_rate > 0.000001 else "UNFAVORABLE"
     auto_close = "ON" if float(conf.get("auto_close_on_maintenance", 1) or 0) >= 0.5 else "OFF"
     # Engine-v2 DN settings (what the controller actually runs).
@@ -2186,6 +2336,19 @@ def _build_strategy_preview_text(
     dn_spot_symbol = str(dn_pair.get("spot_symbol") or product).upper()
     dn_perp_symbol = str(dn_pair.get("perp_symbol") or f"{product}-PERP").upper()
     dn_market_label = f"{dn_spot_symbol} spot / {dn_perp_symbol}"
+    # Economics over the configured hold × cycles. The short earns funding when
+    # the daily rate is positive; it accrues on the perp notional (≈ per-leg size
+    # at 1x) pro-rated over the hold, summed across cycles. Sign is preserved, so
+    # an unfavorable rate shows as a negative contribution, not a phantom gain.
+    # (The old preview multiplied |rate| × margin × 3 — wrong magnitude AND it
+    # hid the sign; funding is a daily rate, not a 3-interval one.)
+    from src.nadobro.config import EST_FEE_RATE
+    dn_hold_seconds = int(conf.get("dn_hold_seconds", 3600) or 3600)
+    dn_est_funding = funding_rate * (dn_hold_seconds / 86400.0) * dn_leg_size * dn_cycles
+    # Round-trip taker fees: open + close on BOTH legs each cycle (4 fills × per-leg notional).
+    dn_est_fees = 4.0 * dn_leg_size * EST_FEE_RATE * dn_cycles
+    dn_est_net = dn_est_funding - dn_est_fees
+    dn_net_dot = "🟢" if dn_est_net >= 0 else "🟠"
     warning = ""
     if not wallet_ready:
         warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
@@ -2211,13 +2374,17 @@ def _build_strategy_preview_text(
         f"• Market: *{escape_md(dn_market_label)}*\n"
         f"• Size \\(per leg\\): *{escape_md(_fmt_usd(dn_leg_size))}*\n"
         f"• Short Leverage: *1x* \\(fixed\\)\n"
-        f"• Hold: *{escape_md(dn_hold_label)}*\n"
+        f"• Min hold: *{escape_md(dn_hold_label)}*\n"
         f"• Cycles: *{escape_md(dn_cycles_label)}*\n"
         f"• Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
         "ℹ️ *How it works*\n"
-        "Buys spot \\+ 1x\\-shorts the same perp, holds for the set duration, then exits both legs "
-        "together — farming spot \\+ perp volume and funding while staying delta neutral\\. Repeats per cycle\\.\n"
-        f"Funding now: *{escape_md(funding_bias)}* \\| Est\\. Daily Fees: *{escape_md(_fmt_usd(est_fees))}*"
+        "Buys spot \\+ 1x\\-shorts the same perp, holds for *at least* the min hold, then keeps the "
+        "hedge open while funding stays favorable and closes BOTH legs the moment funding flips "
+        "\\(or you close it\\)\\. Farms spot \\+ perp volume and funding while staying delta neutral\\.\n"
+        f"Funding now: *{escape_md(funding_bias)}* \\({escape_md(f'{funding_rate * 100:+.4f}')}%/day\\)\n"
+        f"Est\\. over {escape_md(dn_hold_label)} × {escape_md(str(dn_cycles))}: "
+        f"funding *{escape_md(_fmt_usd(dn_est_funding))}* · fees *{escape_md(_fmt_usd(dn_est_fees))}* · "
+        f"net {dn_net_dot} *{escape_md(_fmt_usd(dn_est_net))}*"
         + (f"\n\n{warning}" if warning else "")
     )
 

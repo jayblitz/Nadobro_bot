@@ -1386,7 +1386,7 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
     if flow == "awaiting_main_address":
         if not _is_valid_main_address(text):
             await _reply_loc(update.message, 
-                "❌ That doesn't look right. Send your main wallet address — starts with 0x followed by 40 hex characters.",
+                "❌ That doesn't look right. Send your main wallet address. It starts with 0x followed by 40 hex characters.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return True
@@ -1576,6 +1576,8 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "rgrid_reset_threshold_pct", "rgrid_reset_timeout_seconds", "rgrid_discretion",
         # Mid Mode accepts directional_bias as a continuous float in [-1, +1].
         "directional_bias",
+        # MM/grid leverage (position size = margin × leverage).
+        "mm_leverage_override",
         # Delta Neutral (engine v2) custom inputs. Without these here, the DN
         # custom-size/hold/cycles reply was rejected, the pending state cleared,
         # and the typed number fell through to the LOWIQPTS points relay.
@@ -1643,6 +1645,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "fixed_margin_usd": (1, 1000000),
         "dn_hold_seconds": (60, 86400),
         "dn_cycles": (1, 100),
+        "mm_leverage_override": (1, 50),
     }
     if field not in limits:
         logger.error("Missing strategy limit for field=%s (strategy=%s)", field, strategy)
@@ -1667,7 +1670,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         int_fields = {
             "interval_seconds", "levels", "quote_ttl_seconds", "rgrid_reset_timeout_seconds",
             "grid_reset_timeout_seconds", "dgrid_short_window_points", "dgrid_long_window_points",
-            "dn_hold_seconds", "dn_cycles",
+            "dn_hold_seconds", "dn_cycles", "mm_leverage_override",
         }
         if field in int_fields:
             cfg[field] = int(value)
