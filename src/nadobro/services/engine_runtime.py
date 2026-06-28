@@ -492,9 +492,17 @@ def map_strategy_config(
         hedge_ratio = Decimal(str(_f(settings, "dn_hedge_ratio", 1.0)))
         leg_quote = Decimal(str(_f(settings, "fixed_margin_usd", notional)))
         max_drift = Decimal(str(_f(settings, "dn_max_drift_pct", 5.0))) / Decimal(100)
-        # Hold duration: default 1h, clamp [60s, 24h]. The controller owns this
-        # timer and closes BOTH legs together at expiry.
+        # Hold duration is now the MINIMUM hold: default 1h, clamp [60s, 24h].
+        # After it elapses the controller keeps the hedge open while funding
+        # stays favorable and closes BOTH legs on a funding flip (or at the
+        # max-hold safety cap). funding_exit_enabled=False restores a fixed hold.
         hold_seconds = int(max(60.0, min(_f(settings, "dn_hold_seconds", 3600.0), 86400.0)))
+        # Safety cap on the total hold; 0 disables it (hold while favorable).
+        # Clamp to <= 7d so a stray setting can't strand a hedge indefinitely.
+        max_hold_seconds = int(max(0.0, min(_f(settings, "dn_max_hold_seconds", 86400.0), 604800.0)))
+        funding_exit_enabled = _f(settings, "dn_funding_exit", 1.0) >= 0.5
+        funding_flip_confirmations = int(max(1.0, _f(settings, "dn_funding_flip_confirmations", 2.0)))
+        funding_poll_seconds = int(max(0.0, _f(settings, "dn_funding_poll_seconds", 60.0)))
         # Volume-farming: repeat open->hold->close N times with a gap between.
         cycles = int(max(1.0, _f(settings, "dn_cycles", 1.0)))
         cycle_gap_seconds = int(max(0.0, _f(settings, "dn_cycle_gap_seconds", 30.0)))
@@ -510,7 +518,11 @@ def map_strategy_config(
             "hedge_ratio": hedge_ratio,
             "leg_amount_quote": leg_quote,
             "max_drift_pct": max_drift,
-            "hold_seconds": hold_seconds,
+            "hold_seconds": hold_seconds,            # minimum hold
+            "max_hold_seconds": max_hold_seconds,
+            "funding_exit_enabled": funding_exit_enabled,
+            "funding_flip_confirmations": funding_flip_confirmations,
+            "funding_poll_seconds": funding_poll_seconds,
             "cycles": cycles,
             "cycle_gap_seconds": cycle_gap_seconds,
             "barriers": _TBC(take_profit=leg_tp or None, stop_loss=leg_sl or None),
@@ -1082,6 +1094,40 @@ async def run_engine_cycle(
                             _prog.get("cycles_completed") or 0
                         )
                         configs["restore_funding_usd"] = _prog.get("funding_earned_usd") or 0
+                        # OPTION-1 anti-doubling reconcile: a rebuild (worker
+                        # handoff / process restart) loses the in-memory
+                        # controller, and RUNTIME.start clears the engine's
+                        # inventory view — so on_start would open a SECOND hedge
+                        # on top of the prior instance's still-open venue legs,
+                        # orphaning the originals (no executor handle manages
+                        # them). True "resume" needs executor rehydration; until
+                        # then, if the persisted phase shows a cycle was in
+                        # progress, FLATTEN any existing DN legs on the venue
+                        # before re-opening so the new cycle starts from flat —
+                        # never 2x exposure, never an unmanaged orphan. Closing
+                        # nothing (already flat) is a safe no-op.
+                        _phase = str(_prog.get("phase") or "").upper()
+                        if _phase in {"OPENING", "HOLDING", "CLOSING"}:
+                            try:
+                                from src.nadobro.services.async_utils import run_blocking_sdk
+                                from src.nadobro.services.trade_service import (
+                                    close_delta_neutral_legs,
+                                )
+                                logger.warning(
+                                    "dn rebuild mid-cycle (phase=%s) — flattening any "
+                                    "existing legs before re-open user=%s product=%s",
+                                    _phase, telegram_id, product,
+                                )
+                                await run_blocking_sdk(
+                                    close_delta_neutral_legs,
+                                    telegram_id, product, network,
+                                    source="dn_rebuild_reconcile",
+                                )
+                            except Exception:  # noqa: BLE001 - best-effort safety net
+                                logger.warning(
+                                    "dn rebuild reconcile flatten failed user=%s product=%s",
+                                    telegram_id, product, exc_info=True,
+                                )
                 except Exception:  # noqa: BLE001 - restore is best-effort, never block start
                     logger.debug("dn progress restore skipped", exc_info=True)
         adapter = build_adapter(client, meta)

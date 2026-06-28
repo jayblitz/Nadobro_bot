@@ -32,6 +32,9 @@ CFG = {
     "trading_pair_long": "L", "trading_pair_short": "S",
     "hedge_ratio": "1", "leg_amount_quote": "50",
     "max_drift_pct": "0.05", "hold_seconds": 3600, "cycles": 1,
+    # These tests exercise close/residual mechanics via fixed-hold timing, not
+    # the funding-flip exit — keep the legacy fixed-hold behavior.
+    "funding_exit_enabled": False,
 }
 
 
