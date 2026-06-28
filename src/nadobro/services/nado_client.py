@@ -3181,30 +3181,85 @@ class NadoClient:
             results.append(r)
         return {"success": True, "cancelled": len([r for r in results if r["success"]])}
 
+    def get_perp_funding_rates(self, product_ids: list[int]) -> dict:
+        """Latest funding rates for the given perp products, read from the
+        indexer funding endpoint (SDK ``get_perp_funding_rates``).
+
+        Returns ``{product_id(int): {"product_id", "funding_rate", "update_time"}}``
+        where ``funding_rate`` is the **signed 24h (daily) rate**: positive means
+        longs pay shorts (favorable for a Delta-Neutral short leg), negative means
+        shorts pay longs. The indexer reports ``funding_rate_x18`` (the daily rate
+        × 1e18), so we divide by 1e18.
+
+        This is the *funding rate* — NOT the cumulative funding accumulator
+        (``cum_funding_x18``) the old ``all_products`` read mistook for a rate
+        (that field is a monotonic settlement index, not a rate). Sign is
+        preserved so callers can tell favorable from unfavorable funding.
+        """
+        from src.nadobro.services.nado_weights import query_weight
+
+        ids = [int(p) for p in (product_ids or []) if p is not None]
+        if not ids:
+            return {}
+        if not self._ensure_sdk_client():
+            return {}
+        # Indexer reads charge the archive host's per-IP token bucket
+        # (user_scoped=False ⇒ no in-flight slot to release). One batched request
+        # covers every perp regardless of list length.
+        if not self._gateway_allowed(
+            weight=query_weight("funding_rate"), url=self._archive_url(), user_scoped=False
+        ):
+            return {}
+        try:
+            raw = self.client.context.indexer_client.get_perp_funding_rates(ids)
+        except Exception as e:  # noqa: BLE001 - normalize venue errors
+            logger.error("SDK get_perp_funding_rates failed: %s", _format_sdk_error(e))
+            return {}
+        plain = self._to_plain(raw)
+        rows = plain.values() if isinstance(plain, dict) else (plain or [])
+        rates: dict = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pid = row.get("product_id")
+            raw_rate = row.get("funding_rate_x18")
+            if pid is None or raw_rate is None:
+                continue
+            try:
+                pid_int = int(pid)
+                rate = int(str(raw_rate)) / 1e18
+            except (TypeError, ValueError):
+                continue
+            rates[pid_int] = {
+                "product_id": pid_int,
+                "funding_rate": rate,
+                "update_time": row.get("update_time"),
+            }
+        return rates
+
     def get_all_funding_rates(self) -> dict:
         cache_key = f"{self.network}:funding"
         with _caches_lock:
             cached = _FUNDING_CACHE.get(cache_key)
         if cached and (time.time() - cached["ts"] < _FUNDING_TTL):
             return cached["data"]
-        try:
-            data = self._query_rest("all_products") or {}
-            if data.get("status") == "success":
-                rates = {}
-                for prod in data["data"].get("perp_products", []):
-                    pid = prod.get("product_id")
-                    funding = int(prod.get("cum_funding_x18", 0)) / 1e18
-                    rates[pid] = {"product_id": pid, "funding_rate": funding}
-                with _caches_lock:
-                    _FUNDING_CACHE[cache_key] = {"data": rates, "ts": time.time()}
-                return rates
-        except Exception as e:
-            logger.error(f"get_all_funding_rates failed: {e}")
-        return {}
+        product_ids = [
+            int(pid)
+            for name in get_perp_products(network=self.network, client=self)
+            if (pid := get_product_id(name, network=self.network, client=self)) is not None
+        ]
+        rates = self.get_perp_funding_rates(product_ids)
+        if rates:
+            with _caches_lock:
+                _FUNDING_CACHE[cache_key] = {"data": rates, "ts": time.time()}
+        return rates
 
     def get_funding_rate(self, product_id: int) -> Optional[dict]:
         rates = self.get_all_funding_rates()
-        return rates.get(product_id)
+        try:
+            return rates.get(int(product_id))
+        except (TypeError, ValueError):
+            return rates.get(product_id)
 
     def get_product_market_stats(self, product_id: int) -> dict:
         """

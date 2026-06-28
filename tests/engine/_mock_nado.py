@@ -56,6 +56,9 @@ class MockNadoAdapter(NadoAdapterBase):
         # Funding the short leg "earns" per call to funding_since (received-
         # positive). Tests can set this to simulate accrued funding.
         self.funding_quote: Decimal = Decimal(0)
+        # Current signed daily funding rate returned by funding_rate(); None =
+        # "no signal" (the default — mimics a venue that isn't reporting yet).
+        self.funding_rate_value: object = None
 
     # -- test controls ----------------------------------------------------
     def set_mid(self, value: object) -> None:
@@ -171,6 +174,11 @@ class MockNadoAdapter(NadoAdapterBase):
     async def funding_since(self, trading_pair: str, since_ts: float) -> Decimal:
         self._maybe_fail("funding_since")
         return _dec(self.funding_quote)
+
+    async def funding_rate(self, trading_pair: str):
+        self._maybe_fail("funding_rate")
+        v = self.funding_rate_value
+        return _dec(v) if v is not None else None
 
     def tick_size(self, trading_pair: str) -> Decimal:
         return self._tick

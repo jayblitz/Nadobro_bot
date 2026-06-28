@@ -2613,6 +2613,10 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                     "🚨 Delta Neutral on {product} ({network}): a position remainder could not be "
                     "flattened after 3 attempts — check your positions.\n{detail}"
                 ),
+                "funding_flip": (
+                    "💹 Delta Neutral on {product} ({network}): funding flipped unfavorable after the "
+                    "minimum hold — closing both legs to stop paying funding.\n{detail}"
+                ),
             }
             template = dn_messages.get(kind)
             if template:
@@ -2682,23 +2686,19 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         )
         if rail is not None:
             return rail
-    if strategy == "dn":
-        # DN-RAIL fix: Delta Neutral had NO session SL/TP enforcement at all —
-        # it was in the engine skip-list but never got a post-dispatch rail, so a
-        # user's DN sl_pct/tp_pct was silently ignored. Wire the same margin-%
-        # rail used by the other engine strategies, measured on net (both-leg)
-        # session PnL, and flatten BOTH legs together on a hit so the hedge is
-        # never left half-open.
-        rail = await _evaluate_session_pnl_rail(
-            telegram_id, network, state, strategy, product,
-            client=client,
-            close_coro=lambda: run_blocking(
-                close_delta_neutral_legs, telegram_id, product, network, source="dn_session_rail"
-            ),
-            market_label=_market_label_for_strategy(strategy, product, state),
-        )
-        if rail is not None:
-            return rail
+    # DN deliberately has NO price-move session SL/TP rail. The shared
+    # _evaluate_session_pnl_rail reads get_live_session_snapshot, which measures a
+    # SINGLE product_id — but a Delta-Neutral run is a TWO-leg hedge (spot long +
+    # perp short) on two products. Measuring one leg makes a normal ~sl_pct price
+    # move look like a full session loss, so the rail fired within minutes of
+    # opening, flattened the hedge, and finalized the run — which is exactly the
+    # "doesn't hold for the configured time / cycles don't auto-restart" bug.
+    # A delta-neutral position has no directional price risk to stop out of; its
+    # real risks are covered by the controller itself: the drift gate (hedge
+    # breakage), the dead-leg gate (one leg dies), the funding-flip exit, the
+    # min/max hold, and manual close. So DN is intentionally excluded here.
+    # (A correctly NET-of-both-legs session rail could be reinstated later, but it
+    # needs a two-product snapshot — see get_live_session_snapshot.)
 
     # VOL-LOOP completion: the engine controller finished its work (e.g. Volume
     # reached its target volume / cycle cap) and signalled result["done"].

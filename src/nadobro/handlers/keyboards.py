@@ -959,6 +959,12 @@ def strategy_action_kb(
             ],
             [*pair_buttons],
         ]
+        if strategy_id == "dn":
+            # Rank DN pairs by perp funding so users can pick the best short carry
+            # before sizing margin (callback handled in strategy_handler).
+            rows.insert(2, [
+                InlineKeyboardButton("💹 Funding Rates", callback_data="strategy:funding:dn"),
+            ])
     if is_running:
         rows.insert(0, [
             InlineKeyboardButton("📊 Strategy snapshot", callback_data="strategy:status"),
@@ -966,6 +972,36 @@ def strategy_action_kb(
         ])
     rows.append([
         InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub"),
+        InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def dn_funding_rates_kb(ranked: list | None = None):
+    """Funding-rates ranking screen for Delta Neutral. ``ranked`` is an ordered
+    list of ``(product, daily_rate_or_None, entry_allowed)`` (most positive
+    funding first). Each row taps through to the normal pair selection
+    (``strategy:pair:dn:{PRODUCT}``), which lands back on the DN dashboard with
+    that asset pre-selected so the user can size margin and start."""
+    rows = []
+    for product, rate, entry_allowed in (ranked or [])[:8]:
+        prod = str(product).upper()
+        if rate is None:
+            rate_label = "n/a"
+        else:
+            rate_label = f"{rate * 100:+.3f}%/d"
+        lock = "" if entry_allowed else "🔒 "
+        rows.append([
+            InlineKeyboardButton(
+                f"{lock}{prod}  {rate_label}",
+                callback_data=f"strategy:pair:dn:{prod}",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="strategy:funding:dn"),
+    ])
+    rows.append([
+        InlineKeyboardButton("◀ Back", callback_data="strategy:preview:dn"),
         InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
     ])
     return InlineKeyboardMarkup(rows)
