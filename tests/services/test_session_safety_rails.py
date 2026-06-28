@@ -7,6 +7,7 @@ fired. The rail now reads live Nado session PnL (realized + unrealized) measured
 as a percentage of the configured margin.
 """
 
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -23,17 +24,24 @@ async def _fake_run_blocking(fn, *args, **kwargs):
 
 class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
     async def _run_rail(self, snap, *, sl=1.0, tp=2.0):
-        state = {"sl_pct": sl, "tp_pct": tp, "strategy": "dgrid"}
+        state = {
+            "sl_pct": sl,
+            "tp_pct": tp,
+            "strategy": "dgrid",
+            "strategy_session_id": 11,
+            "running": True,
+        }
         closed = {}
 
         async def close_coro():
             closed["called"] = True
             return {"success": True}
 
-        sess = {"id": 1, "product_id": 2, "started_at": None, "stopped_at": None}
+        sess = {"id": 11, "product_id": 2, "status": "running", "started_at": None, "stopped_at": None}
         self._engine_stop = AsyncMock()
         with patch.object(bot_runtime, "run_blocking", _fake_run_blocking), \
-             patch("src.nadobro.models.database.get_active_strategy_session", return_value=sess), \
+             patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=sess), \
+             patch("src.nadobro.models.database.get_active_strategy_session_for_strategy") as active_sess, \
              patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=snap), \
              patch.object(engine_runtime.RUNTIME, "stop", new=self._engine_stop), \
              patch.object(bot_runtime, "_finalize_session") as fin, \
@@ -44,6 +52,7 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
                 42, "mainnet", state, "dgrid", "BTC",
                 client=None, close_coro=close_coro,
             )
+        active_sess.assert_not_called()
         return res, closed, state, fin
 
     async def test_sl_fires_on_unrealized_drawdown(self):
@@ -220,6 +229,98 @@ class StatusRenderTests(unittest.TestCase):
         self.assertIn("-32.00%", text)
         self.assertIn("realized $-2.00 | unrealized $-30.00", text)
         self.assertIn("Position: LONG", text)
+
+
+class DashboardSessionResolverTests(unittest.TestCase):
+    def test_mm_status_uses_state_session_id(self):
+        from src.nadobro.handlers import commands
+
+        state = {
+            "running": True,
+            "strategy": "dgrid",
+            "strategy_session_id": 22,
+            "notional_usd": 100.0,
+        }
+        status = {
+            "running": True,
+            "strategy": "dgrid",
+            "network": "mainnet",
+            "product": "BTC",
+            "open_orders_count": 0,
+            "strategy_session_id": 22,
+        }
+        state_sess = {"id": 22, "product_id": 2, "status": "running"}
+        wrong_newest = {"id": 99, "product_id": 3, "status": "running"}
+        chosen = {}
+
+        def fake_snapshot(_user, _network, sess, **_kwargs):
+            chosen["id"] = sess["id"]
+            return {
+                "unrealized_pnl": -3.0,
+                "session_pnl": -5.0,
+                "session_pnl_pct": -5.0,
+                "margin": 100.0,
+                "realized_pnl": -2.0,
+                "volume": 1000.0,
+                "fees": 0.5,
+                "fills": 4,
+                "open_orders": 1,
+                "has_position": True,
+                "position_size": 0.01,
+                "position_side": "long",
+                "entry_price": 65000.0,
+                "liq_price": 0.0,
+            }
+
+        with patch("src.nadobro.services.bot_runtime.get_user_bot_status", return_value=status), \
+             patch("src.nadobro.services.bot_runtime.get_user_bot_state", return_value=state), \
+             patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=state_sess), \
+             patch("src.nadobro.models.database.get_active_strategy_session_for_strategy", return_value=wrong_newest), \
+             patch("src.nadobro.services.user_service.get_user_readonly_client", return_value=None), \
+             patch("src.nadobro.services.live_session.get_live_session_snapshot", side_effect=fake_snapshot):
+            text, is_active = commands.build_mm_status_text(42)
+
+        self.assertTrue(is_active)
+        self.assertEqual(chosen["id"], 22)
+        self.assertIn("PnL (realized+unrealized): $-5.00", text)
+
+
+class MultiprocessTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delegated_timeout_does_not_run_local_fallback(self):
+        state = {
+            "running": True,
+            "strategy": "dgrid",
+            "product": "BTC",
+            "interval_seconds": 60,
+        }
+        saved = []
+        local_run = AsyncMock(return_value=(True, None))
+        mark_error = AsyncMock()
+
+        def load_state(_user, _network):
+            return dict(state)
+
+        def save_state(_user, _network, updated):
+            saved.append(dict(updated))
+
+        async def timed_out_submit(_payload):
+            raise asyncio.TimeoutError()
+
+        with patch.object(bot_runtime, "_load_state", side_effect=load_state), \
+             patch.object(bot_runtime, "_save_state", side_effect=save_state), \
+             patch.object(bot_runtime, "_run_cycle", new=local_run), \
+             patch.object(bot_runtime, "_mark_cycle_error", new=mark_error), \
+             patch.object(bot_runtime, "_strategy_use_multiprocess", return_value=True), \
+             patch.object(bot_runtime, "_strategy_cycle_timeout_seconds", return_value=0.01), \
+             patch("src.nadobro.services.runtime_supervisor.is_multiprocess_enabled", return_value=True), \
+             patch("src.nadobro.services.runtime_supervisor.strategy_worker_group", return_value="mm_grid"), \
+             patch("src.nadobro.services.runtime_supervisor.submit_cycle_job", side_effect=timed_out_submit), \
+             patch("src.nadobro.services.execution_queue.get_queue_diagnostics", return_value={}):
+            await bot_runtime.handle_strategy_job({"telegram_id": 42, "network": "mainnet"})
+
+        local_run.assert_not_called()
+        mark_error.assert_awaited_once()
+        self.assertTrue(any(s.get("last_cycle_result") == "error" for s in saved))
 
 
 if __name__ == "__main__":

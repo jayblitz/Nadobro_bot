@@ -326,11 +326,13 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
     # the Nado UI instead of the engine-empty in-memory ``state``.
     live_snapshot = None
     try:
-        from src.nadobro.models.database import get_active_strategy_session
         from src.nadobro.services.live_session import get_live_session_snapshot
+        from src.nadobro.services.session_resolver import resolve_current_strategy_session
         from src.nadobro.services.user_service import get_user_readonly_client
 
-        sess = get_active_strategy_session(telegram_id, network)
+        sess = resolve_current_strategy_session(
+            telegram_id, network, strategy_id, state=state, status=status
+        )
         if sess and sess.get("id") is not None:
             client = get_user_readonly_client(telegram_id, network=network)
             live_snapshot = get_live_session_snapshot(
@@ -361,13 +363,16 @@ def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:
     db_fills = None
     try:
         from src.nadobro.models.database import (
-            get_active_strategy_session,
             get_session_recent_fills,
         )
+        from src.nadobro.services.session_resolver import resolve_current_strategy_session
 
         status = get_user_bot_status(telegram_id) or {}
         network = str(status.get("network") or state.get("network") or "mainnet")
-        sess = get_active_strategy_session(telegram_id, network)
+        strategy_id = str(status.get("strategy") or state.get("strategy") or "").lower()
+        sess = resolve_current_strategy_session(
+            telegram_id, network, strategy_id, state=state, status=status
+        )
         if sess and sess.get("id") is not None:
             # Scoped per user + per session so /mm_fills only ever shows THIS
             # user's fills for THIS run (not the whole product, not other users).

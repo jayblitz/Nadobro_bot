@@ -824,6 +824,44 @@ def increment_session_metrics(
     )
 
 
+def get_strategy_session_by_id(
+    session_id: int,
+    *,
+    user_id: int | None = None,
+    network: str | None = None,
+    strategy: str | None = None,
+) -> Optional[dict]:
+    """Load one strategy session, optionally pinned to its owner/network/strategy."""
+    conditions = ["id = %s"]
+    params: list = [int(session_id)]
+    if user_id is not None:
+        conditions.append("user_id = %s")
+        params.append(int(user_id))
+    if network:
+        conditions.append("network = %s")
+        params.append(str(network))
+    if strategy:
+        conditions.append("strategy = %s")
+        params.append(str(strategy))
+    return query_one(
+        f"SELECT * FROM strategy_sessions WHERE {' AND '.join(conditions)} LIMIT 1",
+        tuple(params),
+    )
+
+
+def get_active_strategy_session_for_strategy(
+    user_id: int,
+    network: str,
+    strategy: str,
+) -> Optional[dict]:
+    return query_one(
+        "SELECT * FROM strategy_sessions "
+        "WHERE user_id = %s AND network = %s AND strategy = %s AND status = 'running' "
+        "ORDER BY started_at DESC LIMIT 1",
+        (int(user_id), str(network), str(strategy)),
+    )
+
+
 def rollup_session_from_trades(session_id: int, network: str) -> dict:
     """Recompute session totals from ``trades_<network>``.
 
