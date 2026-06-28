@@ -620,7 +620,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
                 return []
 
         fake_user = SimpleNamespace(network_mode=SimpleNamespace(value=network))
-        sess = {"id": 1, "product_id": 1, "started_at": None, "stopped_at": None}
+        sess = {"id": 1, "product_id": 1, "status": "running", "started_at": None, "stopped_at": None}
 
         async def _run_blocking_stub(func, *args, **kwargs):
             return func(*args, **kwargs)
@@ -646,7 +646,12 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             "src.nadobro.services.settings_service.get_strategy_settings",
             return_value=("mainnet", {}),
         ), patch(
-            "src.nadobro.models.database.get_active_strategy_session", return_value=sess
+            # The session rail now resolves the run via session_resolver
+            # (binds to THIS run's session id), not the bare
+            # get_active_strategy_session. Mock what the rail actually calls so
+            # the snapshot SL/TP path is exercised.
+            "src.nadobro.services.session_resolver.resolve_current_strategy_session",
+            return_value=sess,
         ), patch(
             "src.nadobro.services.live_session.get_live_session_snapshot", return_value=snapshot
         ), patch.object(
