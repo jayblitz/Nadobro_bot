@@ -749,15 +749,25 @@ def map_strategy_config(
     sl = Decimal(str(_sl_pct)) / Decimal(100)
 
     if strategy == "mid":
+        _mid_bias = max(-1.0, min(_f(settings, "directional_bias", 0.0), 1.0))
+        # Directional bias intentionally builds one-sided inventory, which would
+        # otherwise be choked by the symmetric net-exposure cap. Per the docs,
+        # extreme bias (±1) is allowed up to 20% more directional exposure (and
+        # therefore needs ~20% more margin headroom); scale the cap linearly with
+        # |bias| so the lean is effective but still bounded.
+        _bias_exposure_mult = 1.0 + 0.20 * abs(_mid_bias)
         return {
             "trading_pair": product,
             "spread_bid_pct": spread_frac,
             "spread_ask_pct": spread_frac,
             # Mid Mode directional bias in [-1, +1]: the controller skews the
-            # per-side spreads to lean the book long/short. _f coerces the legacy
-            # text default ("neutral") to 0.0 (symmetric).
-            "directional_bias": _f(settings, "directional_bias", 0.0),
-            "order_amount_quote": Decimal(str(deployed)) / Decimal(levels),
+            # per-side spreads (documented ±0.2 alpha-tilt) to lean the book
+            # long/short. _f coerces the legacy text default ("neutral") to 0.0.
+            "directional_bias": _mid_bias,
+            # Mid is a single bid + single ask (NOT a ladder), so the full
+            # deployed notional goes into each side — ``levels`` does not subdivide
+            # the quote here (it would just silently shrink the size).
+            "order_amount_quote": Decimal(str(deployed)),
             "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", deployed))),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": int(eff_lev),
@@ -765,6 +775,9 @@ def map_strategy_config(
             # auto_spread engages when the user left spread unset/zero. margin_quote
             # tracks the DEPLOYED size so the net-exposure cap scales with leverage.
             **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
+            # Bias-scaled net-exposure cap (overrides the _quote_defense_defaults
+            # value): +20% at |bias|=1 so a directional lean isn't suppressed.
+            "max_net_exposure_pct": _f(settings, "max_net_exposure_pct", 30.0) * _bias_exposure_mult,
         }
     if strategy == "dn":
         # NO_ORDERS_AUDIT-FIX-R1: DN config keys for DeltaNeutralController.

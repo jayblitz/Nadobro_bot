@@ -567,10 +567,12 @@ async def _handle_strategy(query, data, context, telegram_id):
             value = float(raw_value)
         except (TypeError, ValueError):
             return
-        # Mid Mode allows negative spread (concede pricing) per Tread docs.
-        # Other strategies stay on the legacy positive-only range.
+        # Mid Mode spread is capped at 0: a post-only LIMIT_MAKER can't cross the
+        # book, so a negative spread is impossible to honor (it was previously
+        # accepted but silently floored). 0 = quote as tight as the fee floor
+        # allows (the speed end). Other strategies stay positive-only.
         if field == "spread_bp" and strategy_id == "mid":
-            spread_lo, spread_hi = -10.0, 100.0
+            spread_lo, spread_hi = 0.0, 100.0
         else:
             spread_lo, spread_hi = 0.1, 200.0
         limits = {
@@ -1657,14 +1659,9 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("10x", callback_data="strategy:set:mid:mm_leverage_override:10"),
                 ],
                 [
-                    InlineKeyboardButton("Spread −5bp", callback_data="strategy:set:mid:spread_bp:-5"),
+                    InlineKeyboardButton("Tight 2bp", callback_data="strategy:set:mid:spread_bp:2"),
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:mid:spread_bp:5"),
                     InlineKeyboardButton("Spread 25bp", callback_data="strategy:set:mid:spread_bp:25"),
-                ],
-                [
-                    InlineKeyboardButton("Levels 1", callback_data="strategy:set:mid:levels:1"),
-                    InlineKeyboardButton("Levels 2", callback_data="strategy:set:mid:levels:2"),
-                    InlineKeyboardButton("Levels 3", callback_data="strategy:set:mid:levels:3"),
                 ],
                 [
                     InlineKeyboardButton("30s", callback_data="strategy:set:mid:interval_seconds:30"),
