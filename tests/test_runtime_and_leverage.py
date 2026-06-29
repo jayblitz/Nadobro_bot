@@ -997,5 +997,85 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIn("Last order error", text)
 
 
+class MMDurationTests(unittest.TestCase):
+    def test_hard_cap_modes(self):
+        from src.nadobro.services.bot_runtime import _mm_duration_is_hard_cap
+        # Mid / D-Grid: duration is a HARD cap. Grid / R-Grid: soft target.
+        self.assertTrue(_mm_duration_is_hard_cap("mid"))
+        self.assertTrue(_mm_duration_is_hard_cap("dgrid"))
+        self.assertFalse(_mm_duration_is_hard_cap("grid"))
+        self.assertFalse(_mm_duration_is_hard_cap("rgrid"))
+
+    def test_resolve_run_duration(self):
+        from src.nadobro.services.bot_runtime import _resolve_mm_run_duration_minutes
+        # Opt-out: no preset, no custom → 0 (no cap, unchanged behavior).
+        self.assertEqual(_resolve_mm_run_duration_minutes({}, 100.0, 1_000_000.0), 0.0)
+        # Custom duration with no volume → returned as typed.
+        self.assertEqual(
+            _resolve_mm_run_duration_minutes({"mm_duration_minutes": 45}, 100.0, 0.0), 45.0
+        )
+        # Preset-derived: $1000 deployed, normal (0.05), $1.44M/24h vol → 20 min.
+        d = _resolve_mm_run_duration_minutes({"participation_preset": "normal"}, 1000.0, 1_440_000.0)
+        self.assertAlmostEqual(d, 20.0, places=6)
+        # Custom over the bound is clamped to [Aggressive … 10×Passive] = [10, 1000].
+        c = _resolve_mm_run_duration_minutes({"mm_duration_minutes": 999999}, 1000.0, 1_440_000.0)
+        self.assertAlmostEqual(c, 1000.0, places=6)
+
+    def test_resolve_cycle_notional(self):
+        from src.nadobro.services.bot_runtime import _resolve_mm_cycle_notional_usd
+        base = {"interval_seconds": 60}  # 1-minute cycle; vol 14.4M → vpm 10000
+        # Participation scales the chunk: aggressive 0.10 > normal 0.05 > passive 0.01.
+        agg = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "aggressive"}, 100000, 14_400_000, 100)
+        nrm = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "normal"}, 100000, 14_400_000, 100)
+        pas = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "passive"}, 100000, 14_400_000, 100)
+        self.assertAlmostEqual(agg, 1000.0, places=6)
+        self.assertAlmostEqual(nrm, 500.0, places=6)
+        self.assertAlmostEqual(pas, 100.0, places=6)
+        self.assertTrue(agg > nrm > pas)
+        # Opt-out: no preset → 0 (keep deployed-based sizing).
+        self.assertEqual(_resolve_mm_cycle_notional_usd(base, 100000, 14_400_000, 100), 0.0)
+        # No volume → 0 (can't size a chunk).
+        self.assertEqual(
+            _resolve_mm_cycle_notional_usd({**base, "participation_preset": "normal"}, 100000, 0, 100), 0.0
+        )
+        # Capped at the deployed budget; floored at the venue min notional.
+        self.assertAlmostEqual(
+            _resolve_mm_cycle_notional_usd({**base, "participation_preset": "aggressive"}, 50, 14_400_000, 100),
+            50.0, places=6,
+        )
+        self.assertAlmostEqual(
+            _resolve_mm_cycle_notional_usd({**base, "participation_preset": "passive"}, 100000, 14400, 100),
+            100.0, places=6,
+        )
+
+
+class TwapPauseTests(unittest.TestCase):
+    def test_disabled_by_default(self):
+        from src.nadobro.services.bot_runtime import _twap_should_pause
+        st = {}  # no twap_pause_move_bp → off
+        self.assertFalse(_twap_should_pause(st, "mid", 100.0))
+        self.assertFalse(st.get("twap_paused"))
+
+    def test_rgrid_never_pauses(self):
+        from src.nadobro.services.bot_runtime import _twap_should_pause
+        # Even with a tight threshold and a huge move, R-Grid is excluded
+        # (its momentum entry must fire on fast moves).
+        st = {"twap_pause_move_bp": 50, "twap_last_mid": 100.0}
+        self.assertFalse(_twap_should_pause(st, "rgrid", 130.0))
+
+    def test_pauses_on_fast_move_resumes_when_settled(self):
+        from src.nadobro.services.bot_runtime import _twap_should_pause
+        st = {"twap_pause_move_bp": 200}  # 2% per-cycle threshold
+        # First cycle establishes the baseline — no prior mid, no pause.
+        self.assertFalse(_twap_should_pause(st, "mid", 100.0))
+        self.assertEqual(st["twap_last_mid"], 100.0)
+        # +3% jump → pause.
+        self.assertTrue(_twap_should_pause(st, "mid", 103.0))
+        self.assertTrue(st["twap_paused"])
+        # Next cycle moves only +0.5% off the new baseline → resume.
+        self.assertFalse(_twap_should_pause(st, "mid", 103.5))
+        self.assertFalse(st["twap_paused"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,15 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     # fill-anchored grid soft-reset telemetry (green/red trigger levels).
     "grid_reset_up_price", "grid_reset_down_price", "grid_soft_reset_engaged",
     "grid_net_base", "grid_reset_threshold_bp", "grid_mode",
+    # MM participation/duration (TWAP): preset + user duration are start-snapshot
+    # (they freeze the chunk/run-duration computed at start, like vol_direction);
+    # the computed run duration, chunk + one-shot notify flag are runtime-owned.
+    # NOTE: twap_pause_move_bp is intentionally NOT here — it is read every cycle
+    # so live UI edits to the fast-move pause threshold take effect mid-run.
+    "participation_preset", "mm_duration_minutes", "mm_run_duration_minutes",
+    "mm_duration_target_notified", "mm_cycle_notional_usd",
+    # TWAP fast-move pause runtime telemetry (last mid baseline, paused flag).
+    "twap_last_mid", "twap_paused",
     "dn_last_funding_rate", "dn_unfavorable_count",
     "dn_mode", "order_observability",
     "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
@@ -1020,6 +1029,33 @@ def start_user_bot(
         mm_ok, mm_msg = _run_mm_start_guard(telegram_id, network, product.upper(), float(state.get("leverage") or leverage or 1.0), state)
         if not mm_ok:
             return False, mm_msg
+        # Participation/Duration (TWAP): resolve the enforced run duration AND
+        # the per-cycle order chunk once at start from the participation preset
+        # (or a custom mm_duration_minutes) against the pair's 24h volume.
+        # Both are opt-in — absent a preset/duration they stay 0 (unchanged).
+        try:
+            # Match map_strategy_config's deployed basis exactly: cycle_notional
+            # fallback notional, × the EFFECTIVE leverage (mm_leverage_override,
+            # venue-capped) — otherwise the duration + chunk cap would be skewed.
+            from src.nadobro.services.engine_runtime import _effective_leverage
+            _notional = float(state.get("cycle_notional_usd") or state.get("notional_usd") or 0.0)
+            _deployed = _notional * _effective_leverage(state, float(state.get("leverage") or 1.0))
+            _vol = _best_effort_pair_24h_volume_usd(telegram_id, network, product.upper())
+            _dur = _resolve_mm_run_duration_minutes(state, _deployed, _vol)
+            if _dur > 0:
+                state["mm_run_duration_minutes"] = _dur
+                state["mm_duration_target_notified"] = False
+            from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
+            from src.nadobro.services.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD
+            _min_notional = (
+                get_product_min_quote_notional_usd(product.upper(), network=network)
+                or DEFAULT_MIN_ORDER_NOTIONAL_USD
+            )
+            _chunk = _resolve_mm_cycle_notional_usd(state, _deployed, _vol, _min_notional)
+            if _chunk > 0:
+                state["mm_cycle_notional_usd"] = _chunk
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(participation is opt-in; never block start)
+            logger.debug("mm participation wiring skipped user=%s", telegram_id, exc_info=True)
     if strategy == "vol":
         state["vol_market"] = vol_market_kw
         if vol_market_kw == "spot":
@@ -2156,6 +2192,198 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
     )
 
 
+# MM run-duration (TWAP/participation): Mid + Dynamic Grid treat the duration as
+# a HARD cap (flatten at expiry); Grid + Reverse Grid treat it as a SOFT target
+# (keep running past it to let grid/profit conditions complete — per the docs).
+_MM_DURATION_HARD_CAP_STRATEGIES = ("mid", "dgrid")
+
+
+def _mm_duration_is_hard_cap(strategy: str) -> bool:
+    return str(strategy or "").lower() in _MM_DURATION_HARD_CAP_STRATEGIES
+
+
+# TWAP fast-move pause: when the reference price moves more than the configured
+# per-cycle threshold, the passive quoting modes pause re-quoting for that cycle
+# to avoid chasing a fast market (documented TWAP behavior). Opt-in — 0/unset =
+# off (the right threshold is pair-dependent, so we never force a default).
+# R-Grid is EXCLUDED: its taker-momentum entry is meant to fire on fast moves,
+# so pausing it would suppress the strategy's whole point.
+DEFAULT_TWAP_PAUSE_MOVE_BP = 0.0
+_TWAP_PAUSE_STRATEGIES = ("mid", "grid", "dgrid")
+
+
+def _twap_should_pause(state: dict, strategy: str, mid: float) -> bool:
+    """True when the per-cycle price move exceeds ``twap_pause_move_bp`` (so the
+    bot should skip re-quoting this cycle). Tracks ``twap_last_mid`` /
+    ``twap_paused`` for the next cycle + /status. Returns False (and disables)
+    for R-Grid, for a 0/unset threshold, or for a bad mid."""
+    if str(strategy or "").lower() not in _TWAP_PAUSE_STRATEGIES:
+        return False
+    try:
+        thr_bp = float(state.get("twap_pause_move_bp", DEFAULT_TWAP_PAUSE_MOVE_BP) or 0.0)
+        mid_f = float(mid)
+    except (TypeError, ValueError):
+        return False
+    if thr_bp <= 0 or mid_f <= 0:
+        state["twap_paused"] = False
+        return False
+    last = state.get("twap_last_mid")
+    state["twap_last_mid"] = mid_f
+    paused = False
+    try:
+        last_f = float(last) if last is not None else 0.0
+        if last_f > 0:
+            paused = (abs(mid_f - last_f) / last_f) > (thr_bp / 10000.0)
+    except (TypeError, ValueError, ZeroDivisionError):
+        paused = False
+    state["twap_paused"] = paused
+    return paused
+
+
+def _resolve_mm_run_duration_minutes(state: dict, deployed_usd: float, vol_24h_usd: float) -> float:
+    """Enforced MM run length in minutes (0 = no cap → unchanged behavior).
+
+    A user-set ``mm_duration_minutes`` wins, clamped to the participation bounds
+    ([Aggressive … 10×Passive]) when 24h volume is known; otherwise the
+    participation preset implies the duration (compute_pov_duration). Opt-in:
+    with neither a custom duration nor a preset (or no volume), returns 0."""
+    from src.nadobro.services import pov_engine
+
+    try:
+        custom = float(state.get("mm_duration_minutes") or 0.0)
+    except (TypeError, ValueError):
+        custom = 0.0
+    deployed = max(0.0, float(deployed_usd or 0.0))
+    vol = max(0.0, float(vol_24h_usd or 0.0))
+    preset = state.get("participation_preset")
+    if custom > 0:
+        if vol > 0 and deployed > 0:
+            clamped, _lo, _hi = pov_engine.bound_user_duration_minutes(custom, deployed, vol)
+            return float(clamped)
+        return custom
+    if preset and vol > 0 and deployed > 0:
+        return float(pov_engine.compute_pov_duration(deployed, str(preset), vol)["duration_minutes"])
+    return 0.0
+
+
+def _resolve_mm_cycle_notional_usd(
+    state: dict, deployed_usd: float, vol_24h_usd: float, min_notional_usd: float
+) -> float:
+    """Participation-derived per-cycle order chunk in USD (0 = no override →
+    keep the deployed-based order sizing). Only when a participation preset is
+    set AND 24h volume is known.
+
+    chunk = participation_rate × vol_per_minute × bot_cycle_minutes. This sizes
+    each order to the participation rate against the pair's per-minute volume,
+    scaled to the bot's ACTUAL cycle (interval_seconds) — so Aggressive places
+    bigger bites than Passive, and over the run's duration the chunks total the
+    deployed notional (consistent with the duration math). NOTE: this is the
+    cadence-correct chunk, not pov_engine.cycle_notional (which assumes a
+    1/multiplier-minute cycle the bot does not run). Floored at the venue min
+    notional, capped at the deployed budget (one order can't exceed margin)."""
+    from src.nadobro.services import pov_engine
+
+    preset = state.get("participation_preset")
+    deployed = max(0.0, float(deployed_usd or 0.0))
+    vol = max(0.0, float(vol_24h_usd or 0.0))
+    if not preset or vol <= 0 or deployed <= 0:
+        return 0.0
+    rate = pov_engine.participation_rate(str(preset))          # 0.10 / 0.05 / 0.01
+    vol_per_minute = vol / 1440.0
+    try:
+        cycle_minutes = max(1.0, float(state.get("interval_seconds") or 60.0)) / 60.0
+    except (TypeError, ValueError):
+        cycle_minutes = 1.0
+    chunk = rate * vol_per_minute * cycle_minutes
+    chunk = max(chunk, max(0.0, float(min_notional_usd or 0.0)))
+    return min(chunk, deployed)
+
+
+def _best_effort_pair_24h_volume_usd(telegram_id: int, network: str, product: str) -> float:
+    """Pair 24h USD volume for POV sizing; 0 on any failure (so duration stays
+    opt-out rather than crashing the start)."""
+    try:
+        from src.nadobro.services.user_service import get_user_readonly_client
+        client = get_user_readonly_client(telegram_id, network=network)
+        if client is None:
+            return 0.0
+        pid = get_product_id(str(product).upper(), network=network)
+        if pid is None:
+            return 0.0
+        stats = client.get_product_market_stats(int(pid)) or {}
+        return float(stats.get("volume_24h_usd") or 0.0)
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(volume is best-effort; duration just stays uncapped)
+        return 0.0
+
+
+async def _evaluate_mm_duration_rail(
+    telegram_id: int, network: str, state: dict, strategy: str, product: str, *, client,
+) -> tuple[bool, str | None] | None:
+    """Enforce the MM run duration. Hard-cap modes (Mid/D-Grid) finalize +
+    flatten at expiry; soft-target modes (Grid/R-Grid) notify once and keep
+    running. ``None`` when no duration is set or it hasn't elapsed yet."""
+    try:
+        dur = float(state.get("mm_run_duration_minutes") or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur <= 0:
+        return None
+    started_raw = state.get("started_at")
+    if not started_raw:
+        return None
+    try:
+        started = datetime.fromisoformat(str(started_raw))
+        elapsed_min = (datetime.now(timezone.utc) - started).total_seconds() / 60.0
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(bad timestamp → skip the cap this cycle)
+        return None
+    if elapsed_min < dur:
+        return None
+    if not _mm_duration_is_hard_cap(strategy):
+        # Grid / R-Grid: target only — keep running for profit conditions; tell
+        # the user once that the planned duration elapsed.
+        if not state.get("mm_duration_target_notified"):
+            state["mm_duration_target_notified"] = True
+            _save_state(telegram_id, network, state)
+            await _notify(
+                telegram_id,
+                "⏱️ {strategy} on {market} ({network}): planned duration "
+                "({mins:.0f}m) reached — still running to let grid/profit conditions complete.",
+                strategy=_strategy_display_name(strategy),
+                market=_market_label_for_strategy(strategy, product, state),
+                network=network, mins=dur,
+            )
+        return None
+    # Mid / D-Grid: hard cap — finalize, then stop + flatten.
+    _finalize_session(state, stop_reason="duration_reached")
+    state["running"] = False
+    state["last_action"] = "mm_duration_reached"
+    _save_state(telegram_id, network, state)
+    # Stop the engine controller FIRST so its resting maker orders are cancelled
+    # before we flatten — otherwise close_all_positions races the still-live
+    # controller and leaves "1 open orders remain" (mirrors the SL/TP rail).
+    try:
+        from src.nadobro.services import engine_runtime as _er_dur
+        if strategy in _er_dur.ENGINE_MAPPED_STRATEGIES:
+            await _er_dur.RUNTIME.stop(telegram_id, network, strategy)
+    except Exception:  # noqa: BLE001 - close_all_positions is the backstop
+        logger.warning("engine stop before duration cap close failed user=%s", telegram_id, exc_info=True)
+    close_res = await run_blocking(close_all_positions, telegram_id, network)
+    if isinstance(close_res, dict) and not close_res.get("success"):
+        logger.warning(
+            "mm duration close failed user=%s network=%s strategy=%s: %s",
+            telegram_id, network, strategy, close_res.get("error", "unknown"),
+        )
+    await _notify(
+        telegram_id,
+        "⏱️ {strategy} on {market} ({network}): run duration ({mins:.0f}m) reached — "
+        "orders cancelled and positions flattened.",
+        strategy=_strategy_display_name(strategy),
+        market=_market_label_for_strategy(strategy, product, state),
+        network=network, mins=dur,
+    )
+    return True, None
+
+
 async def _evaluate_session_pnl_rail(
     telegram_id: int,
     network: str,
@@ -2525,6 +2753,27 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
+    # TWAP fast-move pause (Phase 3): for the passive quoting modes, skip this
+    # cycle's re-quote when the price moved too fast (opt-in via twap_pause_move_bp).
+    mm_twap_paused = False
+    if strategy in _TWAP_PAUSE_STRATEGIES:
+        _prev_twap_paused = bool(state.get("twap_paused"))
+        mm_twap_paused = _twap_should_pause(state, strategy, mid)
+        _save_state(telegram_id, network, state)
+        if mm_twap_paused and not _prev_twap_paused:
+            await _notify(
+                telegram_id,
+                "⏸ {strategy} paused new quotes on {product} ({network}) — price moved "
+                "too fast this cycle. Resting orders stay; quoting resumes when it settles.",
+                strategy=strategy.upper(), product=product, network=network,
+            )
+        elif _prev_twap_paused and not mm_twap_paused:
+            await _notify(
+                telegram_id,
+                "▶️ {strategy} resumed quoting on {product} ({network}) — price settled.",
+                strategy=strategy.upper(), product=product, network=network,
+            )
+
     if strategy not in ("grid", "rgrid", "dgrid", "mid", "dn", "vol"):
         # Legacy/directional strategies: same margin-based session-PnL rail as
         # the engine strategies (was a leverage-blind, direction-blind % price
@@ -2557,9 +2806,18 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     if engine_v2_enabled() and strategy in ENGINE_MAPPED_STRATEGIES:
         # Engine v2 owns execution for this strategy (feature-gated).
         with timed_metric(f"runtime.strategy.engine.{strategy}"):
-            result = await run_engine_cycle(
-                telegram_id, network, state, client, mid, product, product_id
-            )
+            if mm_twap_paused:
+                # Skip the controller tick (no re-quote/re-anchor) this cycle;
+                # resting orders stay put. The SL + duration rails below still
+                # run, so safety is never paused — only quoting.
+                result = {
+                    "success": True, "action": "twap_paused",
+                    "strategy": strategy, "paused_reason": "fast_move",
+                }
+            else:
+                result = await run_engine_cycle(
+                    telegram_id, network, state, client, mid, product, product_id
+                )
         # Real per-cycle order counts. run_engine_cycle returns the controller's
         # CUMULATIVE placed/filled/cancelled; convert to this-cycle deltas so the
         # log / "orders placed" notify / session metrics report actual activity
@@ -2712,6 +2970,14 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 )
 
     if strategy in ("grid", "rgrid", "dgrid", "mid"):
+        # MM run-duration (participation/TWAP): hard cap for Mid/D-Grid, soft
+        # target for Grid/R-Grid. Checked before the SL rail so an expired run
+        # finalizes cleanly.
+        dur_rail = await _evaluate_mm_duration_rail(
+            telegram_id, network, state, strategy, product, client=client,
+        )
+        if dur_rail is not None:
+            return dur_rail
         # Session SL/TP on live Nado PnL (% of margin). Replaces the dead
         # ``result["action"] == grid_stop_loss_hit | grid_take_profit_hit |
         # circuit_breaker`` / "session notional cap reached" branches: the engine

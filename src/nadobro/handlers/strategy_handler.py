@@ -556,6 +556,11 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dn_cycle_gap_seconds", "dn_max_drift_pct", "dn_hedge_ratio",
             # MM/grid leverage: turns margin into deployed notional (margin x lev).
             "mm_leverage_override",
+            # MM run duration in minutes (participation/TWAP). Hard cap for
+            # Mid/D-Grid; soft target for Grid/R-Grid.
+            "mm_duration_minutes",
+            # TWAP fast-move pause threshold (bp/cycle); 0 = off.
+            "twap_pause_move_bp",
         }
         if field not in allowed_numeric_fields:
             return
@@ -622,6 +627,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dn_max_drift_pct": (0.5, 50),
             "dn_hedge_ratio": (0.1, 5.0),
             "mm_leverage_override": (1, 50),
+            "mm_duration_minutes": (1, 14400),   # 1 min .. 240h (POV upper bound)
+            "twap_pause_move_bp": (0, 5000),     # 0 = off .. 50% per-cycle move
         }
         lo, hi = limits[field]
         if value < lo or value > hi:
@@ -630,7 +637,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "interval_seconds", "levels", "max_open_orders",
             "auto_close_on_maintenance", "is_long_bias", "rgrid_reset_timeout_seconds",
             "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds", "mm_leverage_override",
-            "fill_anchored",
+            "fill_anchored", "mm_duration_minutes", "twap_pause_move_bp",
         }
 
         def _mutate(s):
@@ -707,7 +714,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
             "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
-            "directional_bias", "mm_leverage_override",
+            "directional_bias", "mm_leverage_override", "mm_duration_minutes",
+            "twap_pause_move_bp",
             # Delta Neutral (engine v2) custom inputs.
             "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
         )
@@ -763,6 +771,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "session_margin_usd": "Enter session margin in USD \\(per\\-cycle notional, example: `500`\\)",
             "target_volume_usd": "Enter target cumulative volume in USD \\(example: `25000`\\)",
             "mm_leverage_override": "Enter leverage \\(1 – 50; position size \\= margin × leverage, example: `5`\\)",
+            "mm_duration_minutes": "Enter run duration in minutes \\(hard cap for Mid/D\\-Grid; a target for Grid/R\\-Grid, example: `60`\\)",
+            "twap_pause_move_bp": "Enter fast\\-move pause threshold in bp per cycle \\(0 \\= off; pauses re\\-quoting when price jumps more, example: `200` \\= 2%\\)",
             "fixed_margin_usd": "Enter per\\-leg size in USD \\(example: `100`\\)",
             "dn_hold_seconds": "Enter *minimum* hold in seconds \\(60 – 86400; example: `3600` for 1h\\)\\. After this, the hedge stays open while funding is favorable and closes on a funding flip\\.",
             "dn_cycles": "Enter how many open→hold→close cycles to run \\(example: `3`\\)",
@@ -1411,6 +1421,22 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("120s", callback_data="strategy:set:grid:interval_seconds:120"),
                 ],
                 [
+                    InlineKeyboardButton("⚡ Aggressive", callback_data="strategy:set_text:grid:participation_preset:aggressive"),
+                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:grid:participation_preset:normal"),
+                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:grid:participation_preset:passive"),
+                ],
+                [
+                    InlineKeyboardButton("Duration 30m", callback_data="strategy:set:grid:mm_duration_minutes:30"),
+                    InlineKeyboardButton("2h", callback_data="strategy:set:grid:mm_duration_minutes:120"),
+                    InlineKeyboardButton("✍️ Custom Duration", callback_data="strategy:input:grid:mm_duration_minutes"),
+                ],
+                [
+                    InlineKeyboardButton("Pause: Off", callback_data="strategy:set:grid:twap_pause_move_bp:0"),
+                    InlineKeyboardButton("1%", callback_data="strategy:set:grid:twap_pause_move_bp:100"),
+                    InlineKeyboardButton("2%", callback_data="strategy:set:grid:twap_pause_move_bp:200"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:grid:twap_pause_move_bp"),
+                ],
+                [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:grid:notional_usd"),
                     InlineKeyboardButton("Custom Lev", callback_data="strategy:input:grid:mm_leverage_override"),
                     InlineKeyboardButton("Custom Interval", callback_data="strategy:input:grid:interval_seconds"),
@@ -1496,6 +1522,22 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("30s", callback_data="strategy:set:dgrid:interval_seconds:30"),
                     InlineKeyboardButton("60s", callback_data="strategy:set:dgrid:interval_seconds:60"),
+                ],
+                [
+                    InlineKeyboardButton("⚡ Aggressive", callback_data="strategy:set_text:dgrid:participation_preset:aggressive"),
+                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:dgrid:participation_preset:normal"),
+                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:dgrid:participation_preset:passive"),
+                ],
+                [
+                    InlineKeyboardButton("Duration 30m", callback_data="strategy:set:dgrid:mm_duration_minutes:30"),
+                    InlineKeyboardButton("2h", callback_data="strategy:set:dgrid:mm_duration_minutes:120"),
+                    InlineKeyboardButton("✍️ Custom Duration", callback_data="strategy:input:dgrid:mm_duration_minutes"),
+                ],
+                [
+                    InlineKeyboardButton("Pause: Off", callback_data="strategy:set:dgrid:twap_pause_move_bp:0"),
+                    InlineKeyboardButton("1%", callback_data="strategy:set:dgrid:twap_pause_move_bp:100"),
+                    InlineKeyboardButton("2%", callback_data="strategy:set:dgrid:twap_pause_move_bp:200"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:dgrid:twap_pause_move_bp"),
                 ],
                 [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:dgrid:notional_usd"),
@@ -1588,6 +1630,15 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Custom Spread", callback_data="strategy:input:rgrid:rgrid_spread_bp"),
                 ],
                 [
+                    InlineKeyboardButton("⚡ Aggressive", callback_data="strategy:set_text:rgrid:participation_preset:aggressive"),
+                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:rgrid:participation_preset:normal"),
+                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:rgrid:participation_preset:passive"),
+                ],
+                [
+                    InlineKeyboardButton("Duration 30m (target)", callback_data="strategy:set:rgrid:mm_duration_minutes:30"),
+                    InlineKeyboardButton("✍️ Custom Duration", callback_data="strategy:input:rgrid:mm_duration_minutes"),
+                ],
+                [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:rgrid:notional_usd"),
                     InlineKeyboardButton("Custom Interval", callback_data="strategy:input:rgrid:interval_seconds"),
                 ],
@@ -1677,6 +1728,22 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Min Spread 2bp", callback_data="strategy:set:mid:min_spread_bp:2"),
                     InlineKeyboardButton("Max 30bp", callback_data="strategy:set:mid:max_spread_bp:30"),
                     InlineKeyboardButton("Max 50bp", callback_data="strategy:set:mid:max_spread_bp:50"),
+                ],
+                [
+                    InlineKeyboardButton("⚡ Aggressive", callback_data="strategy:set_text:mid:participation_preset:aggressive"),
+                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:mid:participation_preset:normal"),
+                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:mid:participation_preset:passive"),
+                ],
+                [
+                    InlineKeyboardButton("Duration 30m", callback_data="strategy:set:mid:mm_duration_minutes:30"),
+                    InlineKeyboardButton("2h", callback_data="strategy:set:mid:mm_duration_minutes:120"),
+                    InlineKeyboardButton("✍️ Custom Duration", callback_data="strategy:input:mid:mm_duration_minutes"),
+                ],
+                [
+                    InlineKeyboardButton("Pause: Off", callback_data="strategy:set:mid:twap_pause_move_bp:0"),
+                    InlineKeyboardButton("1%", callback_data="strategy:set:mid:twap_pause_move_bp:100"),
+                    InlineKeyboardButton("2%", callback_data="strategy:set:mid:twap_pause_move_bp:200"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:mid:twap_pause_move_bp"),
                 ],
                 [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:mid:notional_usd"),
