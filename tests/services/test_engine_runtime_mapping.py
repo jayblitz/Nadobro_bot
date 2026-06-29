@@ -105,7 +105,9 @@ def test_map_mid_config():
     )
     assert cfg["spread_bid_pct"] == Decimal("0.0005")
     assert cfg["spread_ask_pct"] == Decimal("0.0005")
-    assert cfg["order_amount_quote"] == Decimal("50")  # 100 / 2 levels
+    # Mid is one bid + one ask: full deployed notional per side (levels do NOT
+    # subdivide the quote). $100 margin × 1x = $100.
+    assert cfg["order_amount_quote"] == Decimal("100")
     assert cfg["max_base_quote"] == Decimal("60")
 
 
@@ -392,6 +394,37 @@ def test_min_max_spread_bp_drive_auto_spread_bounds():
     assert inv["spread_cap_half_pct"] == inv["spread_floor_half_pct"] == Decimal("30.0") / Decimal(10000)
 
 
+def test_mid_directional_bias_scales_net_exposure_cap_and_clamps():
+    """Mid directional bias is allowed up to +20% net-exposure headroom at |bias|=1
+    (the documented '20% additional margin'), scaling linearly, and bias is
+    clamped to [-1, 1]."""
+    from decimal import Decimal
+    from src.nadobro.services.engine_runtime import map_strategy_config
+
+    mid = Decimal("100")
+    neutral = map_strategy_config("mid", {"notional_usd": 100.0, "levels": 1}, mid, product="BTC-PERP")
+    assert neutral["max_net_exposure_pct"] == 30.0          # default, no bias
+    assert neutral["directional_bias"] == 0.0
+
+    long_full = map_strategy_config(
+        "mid", {"notional_usd": 100.0, "levels": 1, "directional_bias": 1.0}, mid, product="BTC-PERP",
+    )
+    assert abs(long_full["max_net_exposure_pct"] - 36.0) < 1e-9   # +20%
+    assert long_full["directional_bias"] == 1.0
+
+    half = map_strategy_config(
+        "mid", {"notional_usd": 100.0, "levels": 1, "directional_bias": -0.5}, mid, product="BTC-PERP",
+    )
+    assert abs(half["max_net_exposure_pct"] - 33.0) < 1e-9        # +10% at |0.5|
+    assert half["directional_bias"] == -0.5
+
+    clamped = map_strategy_config(
+        "mid", {"notional_usd": 100.0, "levels": 1, "directional_bias": 5.0}, mid, product="BTC-PERP",
+    )
+    assert clamped["directional_bias"] == 1.0
+    assert abs(clamped["max_net_exposure_pct"] - 36.0) < 1e-9
+
+
 def test_sl_tp_is_per_strategy_user_set():
     """rgrid/dgrid SL/TP come from rgrid_stop_loss_pct / rgrid_take_profit_pct
     (the fields the UI writes), not the generic sl_pct/tp_pct default."""
@@ -520,7 +553,7 @@ def test_apply_live_mid_config_updates_order_size_and_risk_limits():
         )
     )
 
-    assert controller.order_amount_quote == Decimal("50")
+    assert controller.order_amount_quote == Decimal("100")   # full deployed (one bid+ask)
     assert controller.configs["leverage"] == 1
     assert controller.limits.max_single_order_quote == Decimal("100.0")
     assert orch.risk.limits.max_single_order_quote == Decimal("100.0")

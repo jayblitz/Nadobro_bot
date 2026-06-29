@@ -1602,9 +1602,10 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         )
         return True
 
-    # Mid Mode allows negative spread (concede pricing) per Tread docs.
+    # Mid Mode spread is capped at 0 (a post-only LIMIT_MAKER can't cross the
+    # book, so a negative spread can't be honored). 0 = tightest fee-floored quote.
     if field == "spread_bp" and strategy == "mid":
-        spread_lo, spread_hi = -10.0, 100.0
+        spread_lo, spread_hi = 0.0, 100.0
     else:
         spread_lo, spread_hi = 0.1, 200.0
     limits = {

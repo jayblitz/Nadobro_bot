@@ -57,9 +57,9 @@ def test_quotes_around_mid():
 
 
 def test_directional_bias_long_skews_quotes_toward_buying():
-    """A full long bias (+1) tightens the bid (closer to mid → fills more) and
-    widens the ask, so the book leans into accumulating longs. With spread 1%
-    and skew strength 0.5: bid 99.5 (was 99), ask 101.5 (was 101)."""
+    """A full long bias (+1) tightens the bid (closer to mid → front-loads buys)
+    and widens the ask, leaning into longs. With spread 1% and the documented
+    ±0.2 alpha-tilt: bid 99.2 (0.8× spread), ask 101.2 (1.2× spread)."""
     async def body():
         cfg = dict(BASE)
         cfg["directional_bias"] = 1.0
@@ -68,14 +68,14 @@ def test_directional_bias_long_skews_quotes_toward_buying():
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)
         prices = sorted(o.price for o in adapter.placed)
-        assert prices == [Decimal("99.5"), Decimal("101.5")]
+        assert prices == [Decimal("99.2"), Decimal("101.2")]
 
     asyncio.run(body())
 
 
 def test_directional_bias_short_skews_quotes_toward_selling():
-    """A full short bias (-1) tightens the ask and widens the bid: bid 98.5,
-    ask 100.5."""
+    """A full short bias (-1) tightens the ask and widens the bid (±0.2 tilt):
+    bid 98.8, ask 100.8."""
     async def body():
         cfg = dict(BASE)
         cfg["directional_bias"] = -1.0
@@ -84,7 +84,7 @@ def test_directional_bias_short_skews_quotes_toward_selling():
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)
         prices = sorted(o.price for o in adapter.placed)
-        assert prices == [Decimal("98.5"), Decimal("100.5")]
+        assert prices == [Decimal("98.8"), Decimal("100.8")]
 
     asyncio.run(body())
 

@@ -22,11 +22,12 @@ from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExec
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import ExecutionStrategy, TradeType, _dec
 
-# How hard a full directional_bias (±1) skews the per-side spread. 0.5 means a
-# full long bias quotes the bid at half the spread (closer to mid → fills more)
-# and the ask at 1.5× (further → fills less). Bounded so neither factor goes
+# Directional bias maps linearly to the documented alpha-tilt: ±1 bias → ±0.2.
+# As a per-side spread skew this means a full long bias quotes the bid at 0.8×
+# the spread (closer to mid → front-loads buys) and the ask at 1.2× (further →
+# back-loads sells); short bias is the mirror. Bounded so neither factor goes
 # non-positive for bias in [-1, 1].
-_BIAS_SKEW_STRENGTH = Decimal("0.5")
+_BIAS_SKEW_STRENGTH = Decimal("0.2")
 
 
 def _safe_bias(value: object) -> Decimal:

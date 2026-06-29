@@ -657,6 +657,8 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
                     # current per-user settings (which can change between runs).
                     "fill_anchored", "mm_leverage_override",
                     "min_spread_bp", "max_spread_bp", "grid_reset_threshold_pct",
+                    # Mid Mode directional bias (its key per-session knob).
+                    "directional_bias",
                     "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
                     "rgrid_discretion", "rgrid_reset_threshold_pct",
                     "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
