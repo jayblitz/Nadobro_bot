@@ -1059,7 +1059,7 @@ def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
     if strategy == "vol":
         return [("direction", "🎯 Direction"), ("risk", "🛡 TP / SL")]
     if strategy == "grid":
-        return [("setup", "⚙️ Core"), ("execution", "🧠 Execution"), ("risk", "🛡 Risk")]
+        return [("setup", "⚙️ Core"), ("execution", "📐 Spread"), ("risk", "🛡 Risk")]
     if strategy == "rgrid":
         return [("setup", "⚙️ Core"), ("risk", "🛡 Risk"), ("reset", "🔄 Reset")]
     if strategy == "dgrid":
@@ -1077,9 +1077,9 @@ def _strategy_section_for_field(strategy: str, field: str) -> str:
     if strategy == "vol":
         return "direction" if field == "vol_direction" else "risk"
     if strategy == "grid":
-        if field in {"threshold_bp", "close_offset_bp", "reference_mode", "directional_bias", "participation_preset"}:
+        if field in {"min_spread_bp", "max_spread_bp"}:
             return "execution"
-        if field in {"cycle_notional_usd", "inventory_soft_limit_usd", "quote_ttl_seconds", "session_notional_cap_usd", "min_spread_bp", "max_spread_bp", "vol_sensitivity"}:
+        if field in {"cycle_notional_usd", "inventory_soft_limit_usd", "session_notional_cap_usd"}:
             return "risk"
         return "setup"
     if strategy == "rgrid":
@@ -1415,37 +1415,23 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 ],
             ]
         elif section == "execution":
+            # Spread bounds: the floor/cap the ATR auto-spread clamps to (and the
+            # manual-spread floor). Replaces the previous dead controls
+            # (threshold/close-offset/reference-mode/bias/POV — none were wired).
             rows = [
                 [
-                    InlineKeyboardButton("Threshold 8bp", callback_data="strategy:set:grid:threshold_bp:8"),
-                    InlineKeyboardButton("12bp", callback_data="strategy:set:grid:threshold_bp:12"),
-                    InlineKeyboardButton("20bp", callback_data="strategy:set:grid:threshold_bp:20"),
+                    InlineKeyboardButton("Min Spread 2bp", callback_data="strategy:set:grid:min_spread_bp:2"),
+                    InlineKeyboardButton("5bp", callback_data="strategy:set:grid:min_spread_bp:5"),
+                    InlineKeyboardButton("10bp", callback_data="strategy:set:grid:min_spread_bp:10"),
                 ],
                 [
-                    InlineKeyboardButton("Close 20bp", callback_data="strategy:set:grid:close_offset_bp:20"),
-                    InlineKeyboardButton("30bp", callback_data="strategy:set:grid:close_offset_bp:30"),
+                    InlineKeyboardButton("Max Spread 30bp", callback_data="strategy:set:grid:max_spread_bp:30"),
+                    InlineKeyboardButton("50bp", callback_data="strategy:set:grid:max_spread_bp:50"),
+                    InlineKeyboardButton("100bp", callback_data="strategy:set:grid:max_spread_bp:100"),
                 ],
                 [
-                    InlineKeyboardButton("Ref MID", callback_data="strategy:set_text:grid:reference_mode:mid"),
-                    InlineKeyboardButton("EMA Fast", callback_data="strategy:set_text:grid:reference_mode:ema_fast"),
-                    InlineKeyboardButton("EMA Slow", callback_data="strategy:set_text:grid:reference_mode:ema_slow"),
-                ],
-                [
-                    InlineKeyboardButton("Bias Neutral", callback_data="strategy:set_text:grid:directional_bias:neutral"),
-                    InlineKeyboardButton("Bias Long", callback_data="strategy:set_text:grid:directional_bias:long_bias"),
-                    InlineKeyboardButton("Bias Short", callback_data="strategy:set_text:grid:directional_bias:short_bias"),
-                ],
-                [
-                    InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:grid:participation_preset:aggressive"),
-                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:grid:participation_preset:normal"),
-                ],
-                [
-                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:grid:participation_preset:passive"),
-                    InlineKeyboardButton("POV Off", callback_data="strategy:set_text:grid:participation_preset:off"),
-                ],
-                [
-                    InlineKeyboardButton("Custom Threshold", callback_data="strategy:input:grid:threshold_bp"),
-                    InlineKeyboardButton("Custom Close", callback_data="strategy:input:grid:close_offset_bp"),
+                    InlineKeyboardButton("Custom Min Spread", callback_data="strategy:input:grid:min_spread_bp"),
+                    InlineKeyboardButton("Custom Max Spread", callback_data="strategy:input:grid:max_spread_bp"),
                 ],
             ]
         else:
@@ -1468,15 +1454,10 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("Inv $30", callback_data="strategy:set:grid:inventory_soft_limit_usd:30"),
                     InlineKeyboardButton("Inv $60", callback_data="strategy:set:grid:inventory_soft_limit_usd:60"),
-                    InlineKeyboardButton("TTL 90s", callback_data="strategy:set:grid:quote_ttl_seconds:90"),
                 ],
                 [
                     InlineKeyboardButton("Reset 0.8%", callback_data="strategy:set:grid:grid_reset_threshold_pct:0.8"),
                     InlineKeyboardButton("1.5%", callback_data="strategy:set:grid:grid_reset_threshold_pct:1.5"),
-                ],
-                [
-                    InlineKeyboardButton("Reset 120s", callback_data="strategy:set:grid:grid_reset_timeout_seconds:120"),
-                    InlineKeyboardButton("300s", callback_data="strategy:set:grid:grid_reset_timeout_seconds:300"),
                 ],
                 [
                     InlineKeyboardButton("Custom TP", callback_data="strategy:input:grid:tp_pct"),
@@ -1515,14 +1496,6 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("60s", callback_data="strategy:set:dgrid:interval_seconds:60"),
                 ],
                 [
-                    InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:dgrid:participation_preset:aggressive"),
-                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:dgrid:participation_preset:normal"),
-                ],
-                [
-                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:dgrid:participation_preset:passive"),
-                    InlineKeyboardButton("POV Off", callback_data="strategy:set_text:dgrid:participation_preset:off"),
-                ],
-                [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:dgrid:notional_usd"),
                     InlineKeyboardButton("Custom Interval", callback_data="strategy:input:dgrid:interval_seconds"),
                 ],
@@ -1541,6 +1514,11 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Spread 2bp", callback_data="strategy:set:dgrid:dgrid_spread_bp:2"),
                     InlineKeyboardButton("Spread 8bp", callback_data="strategy:set:dgrid:dgrid_spread_bp:8"),
                     InlineKeyboardButton("Spread 15bp", callback_data="strategy:set:dgrid:dgrid_spread_bp:15"),
+                ],
+                [
+                    InlineKeyboardButton("Min Spread 2bp", callback_data="strategy:set:dgrid:dgrid_min_spread_bp:2"),
+                    InlineKeyboardButton("Max 30bp", callback_data="strategy:set:dgrid:dgrid_max_spread_bp:30"),
+                    InlineKeyboardButton("Max 50bp", callback_data="strategy:set:dgrid:dgrid_max_spread_bp:50"),
                 ],
                 [
                     InlineKeyboardButton("Custom Trend", callback_data="strategy:input:dgrid:dgrid_trend_on_variance_ratio"),
@@ -1604,14 +1582,6 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("0.25", callback_data="strategy:set:rgrid:rgrid_discretion:0.25"),
                 ],
                 [
-                    InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:rgrid:participation_preset:aggressive"),
-                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:rgrid:participation_preset:normal"),
-                ],
-                [
-                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:rgrid:participation_preset:passive"),
-                    InlineKeyboardButton("POV Off", callback_data="strategy:set_text:rgrid:participation_preset:off"),
-                ],
-                [
                     InlineKeyboardButton("Custom Levels", callback_data="strategy:input:rgrid:levels"),
                     InlineKeyboardButton("Custom Spread", callback_data="strategy:input:rgrid:rgrid_spread_bp"),
                 ],
@@ -1640,10 +1610,6 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("Reset 0.8%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:0.8"),
                     InlineKeyboardButton("1.5%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:1.5"),
-                ],
-                [
-                    InlineKeyboardButton("Timeout 120s", callback_data="strategy:set:rgrid:rgrid_reset_timeout_seconds:120"),
-                    InlineKeyboardButton("300s", callback_data="strategy:set:rgrid:rgrid_reset_timeout_seconds:300"),
                 ],
                 [
                     InlineKeyboardButton("Disc 0.06", callback_data="strategy:set:rgrid:rgrid_discretion:0.06"),
@@ -1706,22 +1672,14 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("120s", callback_data="strategy:set:mid:interval_seconds:120"),
                 ],
                 [
-                    InlineKeyboardButton("Ref MID", callback_data="strategy:set_text:mid:reference_mode:mid"),
-                    InlineKeyboardButton("EMA Fast", callback_data="strategy:set_text:mid:reference_mode:ema_fast"),
-                    InlineKeyboardButton("EMA Slow", callback_data="strategy:set_text:mid:reference_mode:ema_slow"),
-                ],
-                [
                     InlineKeyboardButton("Bias −0.5", callback_data="strategy:set:mid:directional_bias:-0.5"),
                     InlineKeyboardButton("Bias 0", callback_data="strategy:set:mid:directional_bias:0"),
                     InlineKeyboardButton("Bias +0.5", callback_data="strategy:set:mid:directional_bias:0.5"),
                 ],
                 [
-                    InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:mid:participation_preset:aggressive"),
-                    InlineKeyboardButton("Normal", callback_data="strategy:set_text:mid:participation_preset:normal"),
-                ],
-                [
-                    InlineKeyboardButton("Passive", callback_data="strategy:set_text:mid:participation_preset:passive"),
-                    InlineKeyboardButton("POV Off", callback_data="strategy:set_text:mid:participation_preset:off"),
+                    InlineKeyboardButton("Min Spread 2bp", callback_data="strategy:set:mid:min_spread_bp:2"),
+                    InlineKeyboardButton("Max 30bp", callback_data="strategy:set:mid:max_spread_bp:30"),
+                    InlineKeyboardButton("Max 50bp", callback_data="strategy:set:mid:max_spread_bp:50"),
                 ],
                 [
                     InlineKeyboardButton("Custom Margin", callback_data="strategy:input:mid:notional_usd"),
