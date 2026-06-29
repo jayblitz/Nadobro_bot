@@ -723,6 +723,13 @@ def map_strategy_config(
     notional = _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0))
     eff_lev = _effective_leverage(settings, float(leverage or 1.0))
     deployed = notional * eff_lev
+    # Participation chunk (Phase 1b): when a participation preset is active,
+    # bot_runtime resolves the per-cycle order notional once at start (chunk =
+    # preset multiplier × 24h volume, floored at min-notional, capped at
+    # deployed). Use it as the per-order size in place of the deployed-budget
+    # sizing. 0/unset → keep the deployed-based size (opt-out, unchanged).
+    _mm_chunk = _f(settings, "mm_cycle_notional_usd", 0.0)
+    _chunk_dec = Decimal(str(_mm_chunk)) if _mm_chunk > 0 else None
     # The quoting spread is USER-SET, not one hardcoded value for everyone. Read
     # the strategy's own spread field (the frontend writes rgrid_spread_bp /
     # dgrid_spread_bp), falling back to the generic spread_bp. Previously this
@@ -766,8 +773,9 @@ def map_strategy_config(
             "directional_bias": _mid_bias,
             # Mid is a single bid + single ask (NOT a ladder), so the full
             # deployed notional goes into each side — ``levels`` does not subdivide
-            # the quote here (it would just silently shrink the size).
-            "order_amount_quote": Decimal(str(deployed)),
+            # the quote here (it would just silently shrink the size). With a
+            # participation preset, the per-cycle chunk replaces the full size.
+            "order_amount_quote": _chunk_dec or Decimal(str(deployed)),
             "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", deployed))),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": int(eff_lev),
@@ -888,7 +896,9 @@ def map_strategy_config(
             "reset_threshold_pct": Decimal(str(_f(settings, "reset_threshold_pct", default_reset))) / Decimal(100),
             "spread_bid_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
             "spread_ask_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
-            "order_amount_quote": Decimal(str(deployed)) / Decimal(levels),
+            # Fill-anchored places ONE bid + ONE ask per cycle; a participation
+            # chunk sizes that order directly, else the deployed budget / levels.
+            "order_amount_quote": _chunk_dec or (Decimal(str(deployed)) / Decimal(levels)),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": int(eff_lev),
             # rgrid → taker-momentum (buy the break up / sell the break down).
@@ -979,7 +989,8 @@ def map_strategy_config(
         "end_price": end_price,
         "limit_price": limit_price,
         # Deployed position notional = margin x effective leverage (see top).
-        "total_amount_quote": Decimal(str(deployed)),
+        # A participation chunk caps the per-cycle ladder notional when active.
+        "total_amount_quote": _chunk_dec or Decimal(str(deployed)),
         "min_spread_between_orders": spread_frac,
         "max_open_orders": levels,
         "leverage": int(eff_lev),

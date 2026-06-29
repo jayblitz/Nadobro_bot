@@ -1021,6 +1021,33 @@ class MMDurationTests(unittest.TestCase):
         c = _resolve_mm_run_duration_minutes({"mm_duration_minutes": 999999}, 1000.0, 1_440_000.0)
         self.assertAlmostEqual(c, 1000.0, places=6)
 
+    def test_resolve_cycle_notional(self):
+        from src.nadobro.services.bot_runtime import _resolve_mm_cycle_notional_usd
+        base = {"interval_seconds": 60}  # 1-minute cycle; vol 14.4M → vpm 10000
+        # Participation scales the chunk: aggressive 0.10 > normal 0.05 > passive 0.01.
+        agg = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "aggressive"}, 100000, 14_400_000, 100)
+        nrm = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "normal"}, 100000, 14_400_000, 100)
+        pas = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "passive"}, 100000, 14_400_000, 100)
+        self.assertAlmostEqual(agg, 1000.0, places=6)
+        self.assertAlmostEqual(nrm, 500.0, places=6)
+        self.assertAlmostEqual(pas, 100.0, places=6)
+        self.assertTrue(agg > nrm > pas)
+        # Opt-out: no preset → 0 (keep deployed-based sizing).
+        self.assertEqual(_resolve_mm_cycle_notional_usd(base, 100000, 14_400_000, 100), 0.0)
+        # No volume → 0 (can't size a chunk).
+        self.assertEqual(
+            _resolve_mm_cycle_notional_usd({**base, "participation_preset": "normal"}, 100000, 0, 100), 0.0
+        )
+        # Capped at the deployed budget; floored at the venue min notional.
+        self.assertAlmostEqual(
+            _resolve_mm_cycle_notional_usd({**base, "participation_preset": "aggressive"}, 50, 14_400_000, 100),
+            50.0, places=6,
+        )
+        self.assertAlmostEqual(
+            _resolve_mm_cycle_notional_usd({**base, "participation_preset": "passive"}, 100000, 14400, 100),
+            100.0, places=6,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

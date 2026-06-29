@@ -111,6 +111,34 @@ def test_map_mid_config():
     assert cfg["max_base_quote"] == Decimal("60")
 
 
+def test_participation_chunk_overrides_per_order_size():
+    """mm_cycle_notional_usd (set by bot_runtime at start when a participation
+    preset is active) replaces the deployed-based per-order size across the MM
+    family; 0/unset keeps the deployed sizing."""
+    # chunk 30 is distinct from every default (mid 100, grid/rgrid 100/4=25, dgrid 100).
+    mid = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "spread_bp": 5.0, "mm_cycle_notional_usd": 30.0},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert mid["order_amount_quote"] == Decimal("30")
+    for strat in ("grid", "rgrid"):
+        cfg = er.map_strategy_config(
+            strat, {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1, "mm_cycle_notional_usd": 30.0},
+            Decimal(100), product="BTC-USDC",
+        )
+        assert cfg["order_amount_quote"] == Decimal("30"), strat
+    dg = er.map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "mm_cycle_notional_usd": 30.0},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert dg["total_amount_quote"] == Decimal("30")
+    # Opt-out: no chunk → deployed-based sizing unchanged.
+    mid0 = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "spread_bp": 5.0}, Decimal(100), product="BTC-USDC",
+    )
+    assert mid0["order_amount_quote"] == Decimal("100")
+
+
 def test_map_vol_config_is_spot():
     cfg = er.map_strategy_config(
         "vol", {"notional_usd": 40.0, "interval_seconds": 60}, Decimal(100), product="KBTC-USDC",

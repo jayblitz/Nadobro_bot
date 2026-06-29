@@ -20,7 +20,7 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     # MM participation/duration (TWAP): preset, user duration, enforced run
     # duration, and the soft-target one-shot notify flag.
     "participation_preset", "mm_duration_minutes", "mm_run_duration_minutes",
-    "mm_duration_target_notified",
+    "mm_duration_target_notified", "mm_cycle_notional_usd",
     "dn_last_funding_rate", "dn_unfavorable_count",
     "dn_mode", "order_observability",
     "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
@@ -1024,9 +1024,10 @@ def start_user_bot(
         mm_ok, mm_msg = _run_mm_start_guard(telegram_id, network, product.upper(), float(state.get("leverage") or leverage or 1.0), state)
         if not mm_ok:
             return False, mm_msg
-        # Participation/Duration (TWAP): resolve the enforced run duration once at
-        # start from the participation preset (or a custom mm_duration_minutes)
-        # against the pair's 24h volume. 0 = no cap (opt-out, unchanged behavior).
+        # Participation/Duration (TWAP): resolve the enforced run duration AND
+        # the per-cycle order chunk once at start from the participation preset
+        # (or a custom mm_duration_minutes) against the pair's 24h volume.
+        # Both are opt-in — absent a preset/duration they stay 0 (unchanged).
         try:
             _deployed = float(state.get("notional_usd") or 0.0) * float(state.get("leverage") or 1.0)
             _vol = _best_effort_pair_24h_volume_usd(telegram_id, network, product.upper())
@@ -1034,8 +1035,17 @@ def start_user_bot(
             if _dur > 0:
                 state["mm_run_duration_minutes"] = _dur
                 state["mm_duration_target_notified"] = False
-        except Exception:  # noqa: BLE001  # policy: degrade-ok(duration is opt-in; never block start)
-            logger.debug("mm duration wiring skipped user=%s", telegram_id, exc_info=True)
+            from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
+            from src.nadobro.services.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD
+            _min_notional = (
+                get_product_min_quote_notional_usd(product.upper(), network=network)
+                or DEFAULT_MIN_ORDER_NOTIONAL_USD
+            )
+            _chunk = _resolve_mm_cycle_notional_usd(state, _deployed, _vol, _min_notional)
+            if _chunk > 0:
+                state["mm_cycle_notional_usd"] = _chunk
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(participation is opt-in; never block start)
+            logger.debug("mm participation wiring skipped user=%s", telegram_id, exc_info=True)
     if strategy == "vol":
         state["vol_market"] = vol_market_kw
         if vol_market_kw == "spot":
@@ -2206,6 +2216,39 @@ def _resolve_mm_run_duration_minutes(state: dict, deployed_usd: float, vol_24h_u
     if preset and vol > 0 and deployed > 0:
         return float(pov_engine.compute_pov_duration(deployed, str(preset), vol)["duration_minutes"])
     return 0.0
+
+
+def _resolve_mm_cycle_notional_usd(
+    state: dict, deployed_usd: float, vol_24h_usd: float, min_notional_usd: float
+) -> float:
+    """Participation-derived per-cycle order chunk in USD (0 = no override →
+    keep the deployed-based order sizing). Only when a participation preset is
+    set AND 24h volume is known.
+
+    chunk = participation_rate × vol_per_minute × bot_cycle_minutes. This sizes
+    each order to the participation rate against the pair's per-minute volume,
+    scaled to the bot's ACTUAL cycle (interval_seconds) — so Aggressive places
+    bigger bites than Passive, and over the run's duration the chunks total the
+    deployed notional (consistent with the duration math). NOTE: this is the
+    cadence-correct chunk, not pov_engine.cycle_notional (which assumes a
+    1/multiplier-minute cycle the bot does not run). Floored at the venue min
+    notional, capped at the deployed budget (one order can't exceed margin)."""
+    from src.nadobro.services import pov_engine
+
+    preset = state.get("participation_preset")
+    deployed = max(0.0, float(deployed_usd or 0.0))
+    vol = max(0.0, float(vol_24h_usd or 0.0))
+    if not preset or vol <= 0 or deployed <= 0:
+        return 0.0
+    rate = pov_engine.participation_rate(str(preset))          # 0.10 / 0.05 / 0.01
+    vol_per_minute = vol / 1440.0
+    try:
+        cycle_minutes = max(1.0, float(state.get("interval_seconds") or 60.0)) / 60.0
+    except (TypeError, ValueError):
+        cycle_minutes = 1.0
+    chunk = rate * vol_per_minute * cycle_minutes
+    chunk = max(chunk, max(0.0, float(min_notional_usd or 0.0)))
+    return min(chunk, deployed)
 
 
 def _best_effort_pair_24h_volume_usd(telegram_id: int, network: str, product: str) -> float:
