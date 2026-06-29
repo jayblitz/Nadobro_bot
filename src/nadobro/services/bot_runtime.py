@@ -17,12 +17,15 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     # fill-anchored grid soft-reset telemetry (green/red trigger levels).
     "grid_reset_up_price", "grid_reset_down_price", "grid_soft_reset_engaged",
     "grid_net_base", "grid_reset_threshold_bp", "grid_mode",
-    # MM participation/duration (TWAP): preset, user duration, enforced run
-    # duration, and the soft-target one-shot notify flag.
+    # MM participation/duration (TWAP): preset + user duration are start-snapshot
+    # (they freeze the chunk/run-duration computed at start, like vol_direction);
+    # the computed run duration, chunk + one-shot notify flag are runtime-owned.
+    # NOTE: twap_pause_move_bp is intentionally NOT here — it is read every cycle
+    # so live UI edits to the fast-move pause threshold take effect mid-run.
     "participation_preset", "mm_duration_minutes", "mm_run_duration_minutes",
     "mm_duration_target_notified", "mm_cycle_notional_usd",
-    # TWAP fast-move pause: threshold, last mid baseline, paused flag.
-    "twap_pause_move_bp", "twap_last_mid", "twap_paused",
+    # TWAP fast-move pause runtime telemetry (last mid baseline, paused flag).
+    "twap_last_mid", "twap_paused",
     "dn_last_funding_rate", "dn_unfavorable_count",
     "dn_mode", "order_observability",
     "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
@@ -1031,7 +1034,12 @@ def start_user_bot(
         # (or a custom mm_duration_minutes) against the pair's 24h volume.
         # Both are opt-in — absent a preset/duration they stay 0 (unchanged).
         try:
-            _deployed = float(state.get("notional_usd") or 0.0) * float(state.get("leverage") or 1.0)
+            # Match map_strategy_config's deployed basis exactly: cycle_notional
+            # fallback notional, × the EFFECTIVE leverage (mm_leverage_override,
+            # venue-capped) — otherwise the duration + chunk cap would be skewed.
+            from src.nadobro.services.engine_runtime import _effective_leverage
+            _notional = float(state.get("cycle_notional_usd") or state.get("notional_usd") or 0.0)
+            _deployed = _notional * _effective_leverage(state, float(state.get("leverage") or 1.0))
             _vol = _best_effort_pair_24h_volume_usd(telegram_id, network, product.upper())
             _dur = _resolve_mm_run_duration_minutes(state, _deployed, _vol)
             if _dur > 0:
@@ -2345,23 +2353,26 @@ async def _evaluate_mm_duration_rail(
                 network=network, mins=dur,
             )
         return None
-    # Mid / D-Grid: hard cap — finalize, flatten, stop.
+    # Mid / D-Grid: hard cap — finalize, then stop + flatten.
     _finalize_session(state, stop_reason="duration_reached")
     state["running"] = False
     state["last_action"] = "mm_duration_reached"
     _save_state(telegram_id, network, state)
+    # Stop the engine controller FIRST so its resting maker orders are cancelled
+    # before we flatten — otherwise close_all_positions races the still-live
+    # controller and leaves "1 open orders remain" (mirrors the SL/TP rail).
+    try:
+        from src.nadobro.services import engine_runtime as _er_dur
+        if strategy in _er_dur.ENGINE_MAPPED_STRATEGIES:
+            await _er_dur.RUNTIME.stop(telegram_id, network, strategy)
+    except Exception:  # noqa: BLE001 - close_all_positions is the backstop
+        logger.warning("engine stop before duration cap close failed user=%s", telegram_id, exc_info=True)
     close_res = await run_blocking(close_all_positions, telegram_id, network)
     if isinstance(close_res, dict) and not close_res.get("success"):
         logger.warning(
             "mm duration close failed user=%s network=%s strategy=%s: %s",
             telegram_id, network, strategy, close_res.get("error", "unknown"),
         )
-    try:
-        from src.nadobro.services import engine_runtime as _er_dur
-        if strategy in _er_dur.ENGINE_MAPPED_STRATEGIES:
-            await _er_dur.RUNTIME.stop(telegram_id, network, strategy)
-    except Exception:  # noqa: BLE001 - close_all_positions is the backstop
-        logger.warning("engine stop after duration cap failed user=%s", telegram_id, exc_info=True)
     await _notify(
         telegram_id,
         "⏱️ {strategy} on {market} ({network}): run duration ({mins:.0f}m) reached — "
