@@ -1580,6 +1580,8 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "mm_leverage_override",
         # MM run duration in minutes (participation/TWAP).
         "mm_duration_minutes",
+        # TWAP fast-move pause threshold (bp/cycle; 0 = off).
+        "twap_pause_move_bp",
         # Delta Neutral (engine v2) custom inputs. Without these here, the DN
         # custom-size/hold/cycles reply was rejected, the pending state cleared,
         # and the typed number fell through to the LOWIQPTS points relay.
@@ -1650,6 +1652,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "dn_cycles": (1, 100),
         "mm_leverage_override": (1, 50),
         "mm_duration_minutes": (1, 14400),
+        "twap_pause_move_bp": (0, 5000),
     }
     if field not in limits:
         logger.error("Missing strategy limit for field=%s (strategy=%s)", field, strategy)

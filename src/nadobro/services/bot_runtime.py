@@ -21,6 +21,8 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     # duration, and the soft-target one-shot notify flag.
     "participation_preset", "mm_duration_minutes", "mm_run_duration_minutes",
     "mm_duration_target_notified", "mm_cycle_notional_usd",
+    # TWAP fast-move pause: threshold, last mid baseline, paused flag.
+    "twap_pause_move_bp", "twap_last_mid", "twap_paused",
     "dn_last_funding_rate", "dn_unfavorable_count",
     "dn_mode", "order_observability",
     "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
@@ -2192,6 +2194,44 @@ def _mm_duration_is_hard_cap(strategy: str) -> bool:
     return str(strategy or "").lower() in _MM_DURATION_HARD_CAP_STRATEGIES
 
 
+# TWAP fast-move pause: when the reference price moves more than the configured
+# per-cycle threshold, the passive quoting modes pause re-quoting for that cycle
+# to avoid chasing a fast market (documented TWAP behavior). Opt-in — 0/unset =
+# off (the right threshold is pair-dependent, so we never force a default).
+# R-Grid is EXCLUDED: its taker-momentum entry is meant to fire on fast moves,
+# so pausing it would suppress the strategy's whole point.
+DEFAULT_TWAP_PAUSE_MOVE_BP = 0.0
+_TWAP_PAUSE_STRATEGIES = ("mid", "grid", "dgrid")
+
+
+def _twap_should_pause(state: dict, strategy: str, mid: float) -> bool:
+    """True when the per-cycle price move exceeds ``twap_pause_move_bp`` (so the
+    bot should skip re-quoting this cycle). Tracks ``twap_last_mid`` /
+    ``twap_paused`` for the next cycle + /status. Returns False (and disables)
+    for R-Grid, for a 0/unset threshold, or for a bad mid."""
+    if str(strategy or "").lower() not in _TWAP_PAUSE_STRATEGIES:
+        return False
+    try:
+        thr_bp = float(state.get("twap_pause_move_bp", DEFAULT_TWAP_PAUSE_MOVE_BP) or 0.0)
+        mid_f = float(mid)
+    except (TypeError, ValueError):
+        return False
+    if thr_bp <= 0 or mid_f <= 0:
+        state["twap_paused"] = False
+        return False
+    last = state.get("twap_last_mid")
+    state["twap_last_mid"] = mid_f
+    paused = False
+    try:
+        last_f = float(last) if last is not None else 0.0
+        if last_f > 0:
+            paused = (abs(mid_f - last_f) / last_f) > (thr_bp / 10000.0)
+    except (TypeError, ValueError, ZeroDivisionError):
+        paused = False
+    state["twap_paused"] = paused
+    return paused
+
+
 def _resolve_mm_run_duration_minutes(state: dict, deployed_usd: float, vol_24h_usd: float) -> float:
     """Enforced MM run length in minutes (0 = no cap → unchanged behavior).
 
@@ -2702,6 +2742,27 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         _save_state(telegram_id, network, state)
         reference_price = mid
 
+    # TWAP fast-move pause (Phase 3): for the passive quoting modes, skip this
+    # cycle's re-quote when the price moved too fast (opt-in via twap_pause_move_bp).
+    mm_twap_paused = False
+    if strategy in _TWAP_PAUSE_STRATEGIES:
+        _prev_twap_paused = bool(state.get("twap_paused"))
+        mm_twap_paused = _twap_should_pause(state, strategy, mid)
+        _save_state(telegram_id, network, state)
+        if mm_twap_paused and not _prev_twap_paused:
+            await _notify(
+                telegram_id,
+                "⏸ {strategy} paused new quotes on {product} ({network}) — price moved "
+                "too fast this cycle. Resting orders stay; quoting resumes when it settles.",
+                strategy=strategy.upper(), product=product, network=network,
+            )
+        elif _prev_twap_paused and not mm_twap_paused:
+            await _notify(
+                telegram_id,
+                "▶️ {strategy} resumed quoting on {product} ({network}) — price settled.",
+                strategy=strategy.upper(), product=product, network=network,
+            )
+
     if strategy not in ("grid", "rgrid", "dgrid", "mid", "dn", "vol"):
         # Legacy/directional strategies: same margin-based session-PnL rail as
         # the engine strategies (was a leverage-blind, direction-blind % price
@@ -2734,9 +2795,18 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     if engine_v2_enabled() and strategy in ENGINE_MAPPED_STRATEGIES:
         # Engine v2 owns execution for this strategy (feature-gated).
         with timed_metric(f"runtime.strategy.engine.{strategy}"):
-            result = await run_engine_cycle(
-                telegram_id, network, state, client, mid, product, product_id
-            )
+            if mm_twap_paused:
+                # Skip the controller tick (no re-quote/re-anchor) this cycle;
+                # resting orders stay put. The SL + duration rails below still
+                # run, so safety is never paused — only quoting.
+                result = {
+                    "success": True, "action": "twap_paused",
+                    "strategy": strategy, "paused_reason": "fast_move",
+                }
+            else:
+                result = await run_engine_cycle(
+                    telegram_id, network, state, client, mid, product, product_id
+                )
         # Real per-cycle order counts. run_engine_cycle returns the controller's
         # CUMULATIVE placed/filled/cancelled; convert to this-cycle deltas so the
         # log / "orders placed" notify / session metrics report actual activity

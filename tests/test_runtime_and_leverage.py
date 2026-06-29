@@ -1049,5 +1049,33 @@ class MMDurationTests(unittest.TestCase):
         )
 
 
+class TwapPauseTests(unittest.TestCase):
+    def test_disabled_by_default(self):
+        from src.nadobro.services.bot_runtime import _twap_should_pause
+        st = {}  # no twap_pause_move_bp → off
+        self.assertFalse(_twap_should_pause(st, "mid", 100.0))
+        self.assertFalse(st.get("twap_paused"))
+
+    def test_rgrid_never_pauses(self):
+        from src.nadobro.services.bot_runtime import _twap_should_pause
+        # Even with a tight threshold and a huge move, R-Grid is excluded
+        # (its momentum entry must fire on fast moves).
+        st = {"twap_pause_move_bp": 50, "twap_last_mid": 100.0}
+        self.assertFalse(_twap_should_pause(st, "rgrid", 130.0))
+
+    def test_pauses_on_fast_move_resumes_when_settled(self):
+        from src.nadobro.services.bot_runtime import _twap_should_pause
+        st = {"twap_pause_move_bp": 200}  # 2% per-cycle threshold
+        # First cycle establishes the baseline — no prior mid, no pause.
+        self.assertFalse(_twap_should_pause(st, "mid", 100.0))
+        self.assertEqual(st["twap_last_mid"], 100.0)
+        # +3% jump → pause.
+        self.assertTrue(_twap_should_pause(st, "mid", 103.0))
+        self.assertTrue(st["twap_paused"])
+        # Next cycle moves only +0.5% off the new baseline → resume.
+        self.assertFalse(_twap_should_pause(st, "mid", 103.5))
+        self.assertFalse(st["twap_paused"])
+
+
 if __name__ == "__main__":
     unittest.main()
