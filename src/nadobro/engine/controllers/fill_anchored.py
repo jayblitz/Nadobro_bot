@@ -87,7 +87,7 @@ class FillAnchoredQuotingController(MarketMakingController):
             try:
                 px = _dec(px_raw)
                 base = abs(_dec(base_raw))
-            except Exception:  # noqa: BLE001 - skip malformed rows
+            except Exception:  # policy: degrade-ok(skip a malformed seeded fill; live fills re-anchor)
                 continue
             if px <= 0 or base <= 0:
                 continue
