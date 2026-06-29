@@ -9,10 +9,12 @@ from src.nadobro.services import engine_runtime as er
 
 
 def test_map_grid_config_centers_band_and_sets_barriers():
+    # Classic static-ladder mapping (grid now defaults to fill-anchored; the
+    # ladder is the opt-out escape via fill_anchored=0).
     cfg = er.map_strategy_config(
         "grid",
         {"notional_usd": 75.0, "cycle_notional_usd": 75.0, "spread_bp": 4.0,
-         "levels": 2, "tp_pct": 0.6, "sl_pct": 0.5},
+         "levels": 2, "tp_pct": 0.6, "sl_pct": 0.5, "fill_anchored": 0},
         Decimal(100), product="BTC-USDC", leverage=3,
     )
     assert cfg["trading_pair"] == "BTC-USDC"
@@ -150,19 +152,20 @@ def test_map_risk_limits():
 def test_deployed_notional_is_margin_times_leverage():
     """SIZING (2026-06-21): grid/MM deploy margin x effective leverage. With no
     leverage it stays margin-sized (back-compat); with leverage it scales."""
+    # Classic ladder (fill_anchored=0) exposes deployed as total_amount_quote.
     base = er.map_strategy_config(
-        "grid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product="BTC-PERP",
+        "grid", {"notional_usd": 100.0, "levels": 2, "fill_anchored": 0}, Decimal(100), product="BTC-PERP",
     )
     assert base["total_amount_quote"] == Decimal("100")   # eff_lev defaults to 1
     lev5 = er.map_strategy_config(
-        "grid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product="BTC-PERP", leverage=5,
+        "grid", {"notional_usd": 100.0, "levels": 2, "fill_anchored": 0}, Decimal(100), product="BTC-PERP", leverage=5,
     )
     assert lev5["total_amount_quote"] == Decimal("500")   # 100 x 5
     assert lev5["leverage"] == 5
     # An explicit mm_leverage_override (Tiny preset / Lev button) wins over the
     # session leverage.
     over = er.map_strategy_config(
-        "grid", {"notional_usd": 100.0, "mm_leverage_override": 3, "levels": 2},
+        "grid", {"notional_usd": 100.0, "mm_leverage_override": 3, "levels": 2, "fill_anchored": 0},
         Decimal(100), product="BTC-PERP", leverage=10,
     )
     assert over["total_amount_quote"] == Decimal("300")   # override 3x beats 10x
@@ -340,9 +343,9 @@ def test_spread_is_per_strategy_user_set():
     )
     assert dg["step_pct"] == Decimal("15.0") / Decimal(10000)
 
-    # grid still uses spread_bp.
+    # grid (classic ladder, fill_anchored=0) still uses spread_bp as the step.
     g = map_strategy_config(
-        "grid", {"notional_usd": 100.0, "spread_bp": 3.0, "levels": 2},
+        "grid", {"notional_usd": 100.0, "spread_bp": 3.0, "levels": 2, "fill_anchored": 0},
         mid, product="BTC-PERP",
     )
     assert g["min_spread_between_orders"] == Decimal("3.0") / Decimal(10000)
@@ -595,8 +598,8 @@ def test_apply_live_grid_config_requotes_without_controller_stop():
     from src.nadobro.engine.controllers.grid_trading import build_grid_config
     from src.nadobro.engine.types import TradeType
 
-    old_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5}
-    new_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1}
+    old_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 5, "fill_anchored": 0}
+    new_settings = {"notional_usd": 100.0, "levels": 2, "mm_leverage_override": 1, "fill_anchored": 0}
     old_cfg = er.map_strategy_config("grid", old_settings, Decimal("100"), product="BTC-PERP", leverage=5)
     new_cfg = er.map_strategy_config("grid", new_settings, Decimal("100"), product="BTC-PERP", leverage=1)
     old_limits = er.map_risk_limits(old_settings, "grid", leverage=5)

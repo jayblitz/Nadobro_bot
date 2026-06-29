@@ -449,6 +449,10 @@ def _apply_fill_anchored_controller_config(controller: Controller, configs: Dict
     )
     controller.momentum = bool(configs.get("momentum", False))  # type: ignore[attr-defined]
     controller.vwap_volume_fraction = _dec(configs.get("vwap_volume_fraction", "0") or "0")  # type: ignore[attr-defined]
+    controller.concession_enabled = bool(configs.get("concession_enabled", False))  # type: ignore[attr-defined]
+    controller.concession_escalation_ticks = max(1, int(configs.get("concession_escalation_ticks", 5) or 5))  # type: ignore[attr-defined]
+    _cfrac = _dec(configs.get("concession_fraction", "0.5") or "0.5")  # type: ignore[attr-defined]
+    controller.concession_fraction = max(Decimal("0.05"), min(_cfrac, Decimal(1)))  # type: ignore[attr-defined]
 
 
 async def _apply_grid_live_config(
@@ -857,11 +861,11 @@ def map_strategy_config(
     # One bid + one ask around a fill-anchored reference instead of a static
     # ladder; reset_threshold_pct uses TreadFi's defaults (0.25% grid /
     # 0.125% rgrid) unless overridden.
-    # fill-anchored is the DEFAULT for rgrid now (the trend-following Reverse
-    # Grid users expect: it waits for a directional break, then steps WITH the
-    # trend via taker-momentum). Classic one-sided ladder is opt-out via
-    # ``fill_anchored=0``. Grid stays classic-by-default (opt-in fill_anchored=1).
-    _fa_default = 1.0 if strategy == "rgrid" else 0.0
+    # fill-anchored is the DEFAULT for BOTH grid and rgrid now — it's the behavior
+    # the docs describe: grid = last-fill anchor + no-cross + soft-reset-to-mid;
+    # rgrid = trend-following taker-momentum. The classic static ladder remains a
+    # safety escape via ``fill_anchored=0`` (not surfaced in the UI).
+    _fa_default = 1.0 if strategy in ("grid", "rgrid") else 0.0
     if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", _fa_default)):
         default_reset = 0.25 if strategy == "grid" else 0.125
         return {
@@ -882,13 +886,24 @@ def map_strategy_config(
             "vwap_volume_fraction": (
                 _f(settings, "rgrid_discretion", 0.0) if strategy == "rgrid" else 0.0
             ),
+            # Grid two-step stall escalation: after the soft-reset maker leg
+            # stalls for N ticks, a bounded reduce-only taker concession flattens
+            # part of the one-sided exposure before the SL rail. Grid only
+            # (rgrid is momentum-driven, no soft reset).
+            "concession_enabled": strategy == "grid",
+            "concession_escalation_ticks": int(max(1.0, _f(settings, "grid_concession_ticks", 5.0))),
+            "concession_fraction": _f(settings, "grid_concession_fraction", 0.5),
             **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
-            # rgrid is a TREND strategy: keep the regime gate OFF (matching the
-            # classic rgrid) so momentum can quote/enter in trends — the gate
-            # would otherwise pause exactly when momentum needs to act. The
-            # inventory cap + session SL/TP rail remain the backstops. (Grid
-            # fill-anchored keeps whatever _quote_defense_defaults resolved.)
-            **({"regime_gate_enabled": 0.0} if strategy == "rgrid" else {}),
+            # Keep the regime gate OFF: rgrid is a trend strategy (the gate would
+            # pause momentum exactly when it must act), and grid is the
+            # GRID-IN-TRENDS default (quote in every regime; inventory cap +
+            # soft-reset + session SL/TP rail are the backstops). Both honor an
+            # explicit user override (regime_gate_enabled=1 re-arms it).
+            **(
+                {"regime_gate_enabled": 0.0}
+                if (strategy == "rgrid" or (strategy == "grid" and "regime_gate_enabled" not in settings))
+                else {}
+            ),
         }
     #
     # NO_ORDERS_AUDIT-FIX-R4: spread_bp is now interpreted as the per-level

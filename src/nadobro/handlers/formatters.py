@@ -1824,6 +1824,19 @@ def fmt_status_overview(status: dict, onboarding: dict):
             f"{_loc('Side')}: *{escape_md(reset_side)}* \\| "
             f"SL/TP: *{escape_md(f'{sl_pct:.2f}%/{tp_pct:.2f}%')}*"
         )
+        # Green/red soft-reset trigger levels: 🟢 = over-short, price must RISE to
+        # this to rebalance; 🔴 = over-long, price must FALL to this. The arrow
+        # marks the side currently in play based on net exposure.
+        up_price = float(status.get("grid_reset_up_price") or 0.0)
+        down_price = float(status.get("grid_reset_down_price") or 0.0)
+        if up_price > 0 or down_price > 0:
+            net_base = float(status.get("grid_net_base") or 0.0)
+            watch = " ◀ short" if net_base < 0 else (" ◀ long" if net_base > 0 else "")
+            engaged = " \\(engaged\\)" if status.get("grid_soft_reset_engaged") else ""
+            lines.append(
+                f"{_loc('Reset levels')}: 🟢 *{escape_md(f'{up_price:,.2f}')}* / "
+                f"🔴 *{escape_md(f'{down_price:,.2f}')}*{escape_md(watch)}{engaged}"
+            )
         maker_fill_ratio = status.get("maker_fill_ratio")
         cancellation_ratio = status.get("cancellation_ratio")
         avg_quote_distance_bp = status.get("avg_quote_distance_bp")
