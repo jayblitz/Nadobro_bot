@@ -348,6 +348,47 @@ def test_spread_is_per_strategy_user_set():
     assert g["min_spread_between_orders"] == Decimal("3.0") / Decimal(10000)
 
 
+def test_min_max_spread_bp_drive_auto_spread_bounds():
+    """min_spread_bp / max_spread_bp (and dgrid_*) now set the per-side spread
+    floor/cap (bps → fraction). Unset preserves the legacy 1.5bp / 50bp band."""
+    from decimal import Decimal
+    from src.nadobro.services.engine_runtime import map_strategy_config
+
+    mid = Decimal("100")
+    g = map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 2, "min_spread_bp": 3.0, "max_spread_bp": 40.0},
+        mid, product="BTC-PERP",
+    )
+    assert g["spread_floor_half_pct"] == Decimal("3.0") / Decimal(10000)
+    assert g["spread_cap_half_pct"] == Decimal("40.0") / Decimal(10000)
+
+    g0 = map_strategy_config("grid", {"notional_usd": 100.0, "levels": 2}, mid, product="BTC-PERP")
+    assert g0["spread_floor_half_pct"] == Decimal("1.5") / Decimal(10000)
+    assert g0["spread_cap_half_pct"] == Decimal("50.0") / Decimal(10000)
+
+    m = map_strategy_config(
+        "mid", {"notional_usd": 100.0, "levels": 2, "min_spread_bp": 4.0, "max_spread_bp": 20.0},
+        mid, product="BTC-PERP",
+    )
+    assert m["spread_floor_half_pct"] == Decimal("4.0") / Decimal(10000)
+    assert m["spread_cap_half_pct"] == Decimal("20.0") / Decimal(10000)
+
+    dg = map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "levels": 4, "dgrid_min_spread_bp": 5.0,
+                  "dgrid_max_spread_bp": 30.0},
+        mid, product="BTC-PERP",
+    )
+    assert dg["spread_floor_half_pct"] == Decimal("5.0") / Decimal(10000)
+    assert dg["spread_cap_half_pct"] == Decimal("30.0") / Decimal(10000)
+
+    # min > max can't invert the band — cap is held at the floor.
+    inv = map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 2, "min_spread_bp": 30.0, "max_spread_bp": 10.0},
+        mid, product="BTC-PERP",
+    )
+    assert inv["spread_cap_half_pct"] == inv["spread_floor_half_pct"] == Decimal("30.0") / Decimal(10000)
+
+
 def test_sl_tp_is_per_strategy_user_set():
     """rgrid/dgrid SL/TP come from rgrid_stop_loss_pct / rgrid_take_profit_pct
     (the fields the UI writes), not the generic sl_pct/tp_pct default."""

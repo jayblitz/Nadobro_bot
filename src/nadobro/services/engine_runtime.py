@@ -662,6 +662,16 @@ def _quote_defense_defaults(settings, notional, *, auto_spread: bool) -> dict:
     allocated margin with resume at 70% of the cap, ATR(14, 1m) x 1.5 spread
     with a fee floor (1.5 bp/side) when the user didn't pin a spread.
     """
+    # Per-side spread bounds from the user's min/max spread (bps → fraction).
+    # Previously hardcoded (1.5 bp floor / 50 bp cap) so min_spread_bp /
+    # max_spread_bp were dead inputs; now they drive the manual floor AND the
+    # ATR auto-spread clamp. Defaults match the old constants, so an unset config
+    # behaves exactly as before. floor clamped ≥0 (mid may concede to 0) and the
+    # cap is held ≥ floor so a stray min>max can't invert the band.
+    floor_half = Decimal(str(max(0.0, _f(settings, "min_spread_bp", 1.5)))) / Decimal(10000)
+    cap_half = Decimal(str(_f(settings, "max_spread_bp", 50.0))) / Decimal(10000)
+    if cap_half < floor_half:
+        cap_half = floor_half
     return {
         "regime_gate_enabled": bool(_f(settings, "regime_gate_enabled", 1.0)),
         "max_net_exposure_pct": _f(settings, "max_net_exposure_pct", 30.0),
@@ -669,8 +679,8 @@ def _quote_defense_defaults(settings, notional, *, auto_spread: bool) -> dict:
         "margin_quote": Decimal(str(notional)),
         "auto_spread": auto_spread,
         "auto_spread_k": Decimal(str(_f(settings, "auto_spread_k", 1.5))),
-        "spread_floor_half_pct": Decimal("0.00015"),
-        "spread_cap_half_pct": Decimal("0.005"),
+        "spread_floor_half_pct": floor_half,
+        "spread_cap_half_pct": cap_half,
         "candle_provider": None,  # injected in run_engine_cycle (client there)
     }
 
@@ -1008,6 +1018,12 @@ def map_strategy_config(
             settings, "dgrid_reset_threshold_bp",
             _f(settings, "grid_reset_threshold_pct", 0.5) * 100.0,
         )
+        # Dynamic Grid's own min/max per-side spread bounds drive the auto-spread
+        # clamp (previously dead — _quote_defense_defaults hardcoded the band).
+        _dg_floor = Decimal(str(max(0.0, _f(settings, "dgrid_min_spread_bp", 2.0)))) / Decimal(10000)
+        _dg_cap = Decimal(str(_f(settings, "dgrid_max_spread_bp", 50.0))) / Decimal(10000)
+        cfg["spread_floor_half_pct"] = _dg_floor
+        cfg["spread_cap_half_pct"] = max(_dg_cap, _dg_floor)
 
     # GRID / RGRID in-place re-center: honor the user's reset threshold so the
     # ladder follows price ("reset and continue") instead of going stale. Drives
