@@ -20,7 +20,7 @@ from tests.engine._mock_nado import MockNadoAdapter
 from src.nadobro.engine.controllers.fill_anchored import FillAnchoredQuotingController
 from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
-from src.nadobro.engine.types import TradeType
+from src.nadobro.engine.types import OrderType, TradeType
 
 PAIR = "BTC-PERP"
 SPREAD = Decimal("0.001")
@@ -141,6 +141,105 @@ def test_rgrid_mode_uses_exposure_vwap():
         ), "no clamped requote may appear in rgrid mode"
 
     asyncio.run(body())
+
+
+def _takers(adapter, side=None):
+    out = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+    return [o for o in out if side is None or o.side is side]
+
+
+def test_momentum_waits_for_directional_break():
+    """rgrid taker-momentum does NOT enter on start — it waits for price to break
+    the exposure band from the anchor (fixes the 'immediately enters short')."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _controller(adapter, mode="rgrid", extra={"momentum": True})
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)   # mid == anchor → no break
+        assert adapter.placed == []
+
+    asyncio.run(body())
+
+
+def test_momentum_buys_the_break_up():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _controller(adapter, mode="rgrid", extra={"momentum": True})
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)           # anchor = 100
+        adapter.set_mid(Decimal("101"))             # > 100*(1+0.001) = 100.1
+        await orch.tick_controller(c.id)
+        assert len(_takers(adapter, TradeType.BUY)) == 1
+        assert _takers(adapter, TradeType.SELL) == []
+
+    asyncio.run(body())
+
+
+def test_momentum_sells_the_break_down():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _controller(adapter, mode="rgrid", extra={"momentum": True})
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        adapter.set_mid(Decimal("99"))              # < 100*(1-0.001) = 99.9
+        await orch.tick_controller(c.id)
+        assert len(_takers(adapter, TradeType.SELL)) == 1
+        assert _takers(adapter, TradeType.BUY) == []
+
+    asyncio.run(body())
+
+
+def test_momentum_adds_into_an_uptrend():
+    """As price keeps pumping past the re-anchored exposure band, momentum adds
+    MORE longs — and never shorts into the pump."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _controller(adapter, mode="rgrid", extra={"momentum": True})
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)               # anchor 100
+        for px in ("101", "104", "108", "113"):
+            adapter.set_mid(Decimal(px))
+            await orch.tick_controller(c.id)           # may fire a taker
+            await orch.tick_controller(c.id)           # absorb the fill into the VWAP
+        assert len(_takers(adapter, TradeType.BUY)) >= 2, "adds longs as price pumps"
+        assert _takers(adapter, TradeType.SELL) == [], "never shorts into a pump"
+
+    asyncio.run(body())
+
+
+def test_discretion_windows_exposure_vwap():
+    """vwap_volume_fraction (rgrid_discretion) VWAPs only the most-recent fraction
+    of fill volume — a tighter, more reactive exposure price."""
+    adapter = MockNadoAdapter(mid=Decimal(100))
+    _, c = _controller(adapter, mode="rgrid",
+                       extra={"momentum": True, "vwap_volume_fraction": Decimal("0.5")})
+    for px in (100, 100, 110, 120):
+        c._fills.append((Decimal(px), Decimal(1)))
+    # Last 50% of volume (2 of 4 units): (120 + 110) / 2 = 115.
+    assert c._exposure_vwap() == Decimal("115")
+    # Whole window: (100 + 100 + 110 + 120) / 4 = 107.5.
+    c.vwap_volume_fraction = Decimal(0)
+    assert c._exposure_vwap() == Decimal("107.5")
+
+
+def test_rgrid_defaults_to_momentum_fill_anchored():
+    from src.nadobro.services.engine_runtime import map_strategy_config
+    cfg = map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 2, "rgrid_discretion": 0.1},
+        Decimal(100), product=PAIR,
+    )
+    assert cfg["controller_override"] == "fill_anchored"
+    assert cfg["momentum"] is True
+    assert cfg["vwap_volume_fraction"] == 0.1
+    # grid is still classic-by-default (fill_anchored opt-in).
+    g = map_strategy_config("grid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product=PAIR)
+    assert "controller_override" not in g
+    # rgrid can opt OUT to the classic short ladder.
+    classic = map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 2, "fill_anchored": 0},
+        Decimal(100), product=PAIR,
+    )
+    assert "controller_override" not in classic
 
 
 def test_runtime_opt_in_maps_override_and_treadfi_defaults():

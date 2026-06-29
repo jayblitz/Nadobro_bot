@@ -75,8 +75,11 @@ def test_map_dn_clamps_hold_and_sets_cycles():
 
 
 def test_map_rgrid_band_is_above_mid_and_stop_in_barrier():
+    # rgrid now defaults to fill-anchored trend-follow; this pins the CLASSIC
+    # one-sided ladder, which is opt-out via fill_anchored=0.
     cfg = er.map_strategy_config(
-        "rgrid", {"notional_usd": 100.0, "spread_bp": 10.0, "levels": 4, "sl_pct": 0.8},
+        "rgrid", {"notional_usd": 100.0, "spread_bp": 10.0, "levels": 4, "sl_pct": 0.8,
+                  "fill_anchored": 0},
         Decimal(100), product="BTC-USDC",
     )
     # A short grid's sell band steps UP from mid. POST-ONLY-CROSS fix: the nearest
@@ -313,12 +316,22 @@ def test_spread_is_per_strategy_user_set():
 
     mid = Decimal("100")
 
-    # rgrid honors rgrid_spread_bp (20bp step), not the generic spread_bp (5).
+    # rgrid honors rgrid_spread_bp (20bp), not the generic spread_bp (5). It now
+    # defaults to fill-anchored, so the spread flows to the per-side quote band.
     rg = map_strategy_config(
         "rgrid", {"notional_usd": 100.0, "spread_bp": 5.0, "rgrid_spread_bp": 20.0, "levels": 2},
         mid, product="BTC-PERP",
     )
-    assert rg["min_spread_between_orders"] == Decimal("20.0") / Decimal(10000)
+    assert rg["controller_override"] == "fill_anchored"
+    assert rg["spread_ask_pct"] == Decimal("20.0") / Decimal(10000)
+    # Classic ladder (opt-out) still honors rgrid_spread_bp as the ladder step.
+    rg_classic = map_strategy_config(
+        "rgrid",
+        {"notional_usd": 100.0, "spread_bp": 5.0, "rgrid_spread_bp": 20.0, "levels": 2,
+         "fill_anchored": 0},
+        mid, product="BTC-PERP",
+    )
+    assert rg_classic["min_spread_between_orders"] == Decimal("20.0") / Decimal(10000)
 
     # dgrid honors dgrid_spread_bp (15bp), not the default 8.
     dg = map_strategy_config(

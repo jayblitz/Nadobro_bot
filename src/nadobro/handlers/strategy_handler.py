@@ -543,6 +543,9 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
             "auto_close_on_maintenance", "is_long_bias",
+            # R-Grid trend-follow toggle (1 = fill-anchored taker-momentum, the
+            # default for rgrid; 0 = classic one-sided ladder).
+            "fill_anchored",
             # Mid Mode accepts directional_bias as a continuous float in [-1, +1].
             "directional_bias",
             # Volume Bot (spot, 2026-05) accepts session margin + target volume.
@@ -608,6 +611,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_long_window_points": (4, 200),
             "auto_close_on_maintenance": (0, 1),
             "is_long_bias": (0, 1),
+            "fill_anchored": (0, 1),
             # Delta Neutral (engine v2).
             "fixed_margin_usd": (1, 1000000),
             "dn_hold_seconds": (60, 86400),        # 1 minute .. 24 hours
@@ -624,6 +628,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "interval_seconds", "levels", "max_open_orders",
             "auto_close_on_maintenance", "is_long_bias", "rgrid_reset_timeout_seconds",
             "dn_hold_seconds", "dn_cycles", "dn_cycle_gap_seconds", "mm_leverage_override",
+            "fill_anchored",
         }
 
         def _mutate(s):
@@ -1588,6 +1593,15 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("60s", callback_data="strategy:set:rgrid:interval_seconds:60"),
                     InlineKeyboardButton("120s", callback_data="strategy:set:rgrid:interval_seconds:120"),
+                ],
+                [
+                    InlineKeyboardButton("🌊 Trend-follow (default)", callback_data="strategy:set:rgrid:fill_anchored:1"),
+                    InlineKeyboardButton("📊 Classic ladder", callback_data="strategy:set:rgrid:fill_anchored:0"),
+                ],
+                [
+                    InlineKeyboardButton("Discretion 0.06", callback_data="strategy:set:rgrid:rgrid_discretion:0.06"),
+                    InlineKeyboardButton("0.12", callback_data="strategy:set:rgrid:rgrid_discretion:0.12"),
+                    InlineKeyboardButton("0.25", callback_data="strategy:set:rgrid:rgrid_discretion:0.25"),
                 ],
                 [
                     InlineKeyboardButton("📈 POV Aggressive", callback_data="strategy:set_text:rgrid:participation_preset:aggressive"),

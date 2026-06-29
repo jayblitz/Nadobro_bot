@@ -56,6 +56,68 @@ def test_quotes_around_mid():
     asyncio.run(body())
 
 
+def test_directional_bias_long_skews_quotes_toward_buying():
+    """A full long bias (+1) tightens the bid (closer to mid → fills more) and
+    widens the ask, so the book leans into accumulating longs. With spread 1%
+    and skew strength 0.5: bid 99.5 (was 99), ask 101.5 (was 101)."""
+    async def body():
+        cfg = dict(BASE)
+        cfg["directional_bias"] = 1.0
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _mm(adapter, InventoryRepository(), cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        prices = sorted(o.price for o in adapter.placed)
+        assert prices == [Decimal("99.5"), Decimal("101.5")]
+
+    asyncio.run(body())
+
+
+def test_directional_bias_short_skews_quotes_toward_selling():
+    """A full short bias (-1) tightens the ask and widens the bid: bid 98.5,
+    ask 100.5."""
+    async def body():
+        cfg = dict(BASE)
+        cfg["directional_bias"] = -1.0
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _mm(adapter, InventoryRepository(), cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        prices = sorted(o.price for o in adapter.placed)
+        assert prices == [Decimal("98.5"), Decimal("100.5")]
+
+    asyncio.run(body())
+
+
+def test_directional_bias_neutral_keeps_symmetric_quotes():
+    async def body():
+        cfg = dict(BASE)
+        cfg["directional_bias"] = 0.0
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _mm(adapter, InventoryRepository(), cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        prices = sorted(o.price for o in adapter.placed)
+        assert prices == [Decimal(99), Decimal(101)]
+
+    asyncio.run(body())
+
+
+def test_directional_bias_parsing_clamps_and_tolerates_text_default():
+    from src.nadobro.engine.controllers.market_making import _safe_bias
+    # Legacy text default and garbage → neutral (0); out-of-range → clamped.
+    assert _safe_bias("neutral") == Decimal(0)
+    assert _safe_bias(None) == Decimal(0)
+    assert _safe_bias(2.5) == Decimal(1)
+    assert _safe_bias(-9) == Decimal(-1)
+    assert _safe_bias("0.4") == Decimal("0.4")
+    # Constructed with the text default, the controller is symmetric (bias 0).
+    cfg = dict(BASE)
+    cfg["directional_bias"] = "neutral"
+    _, c = _mm(MockNadoAdapter(mid=Decimal(100)), InventoryRepository(), cfg)
+    assert c.directional_bias == Decimal(0)
+
+
 def test_refresh_on_drift():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
