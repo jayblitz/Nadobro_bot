@@ -997,5 +997,30 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIn("Last order error", text)
 
 
+class MMDurationTests(unittest.TestCase):
+    def test_hard_cap_modes(self):
+        from src.nadobro.services.bot_runtime import _mm_duration_is_hard_cap
+        # Mid / D-Grid: duration is a HARD cap. Grid / R-Grid: soft target.
+        self.assertTrue(_mm_duration_is_hard_cap("mid"))
+        self.assertTrue(_mm_duration_is_hard_cap("dgrid"))
+        self.assertFalse(_mm_duration_is_hard_cap("grid"))
+        self.assertFalse(_mm_duration_is_hard_cap("rgrid"))
+
+    def test_resolve_run_duration(self):
+        from src.nadobro.services.bot_runtime import _resolve_mm_run_duration_minutes
+        # Opt-out: no preset, no custom → 0 (no cap, unchanged behavior).
+        self.assertEqual(_resolve_mm_run_duration_minutes({}, 100.0, 1_000_000.0), 0.0)
+        # Custom duration with no volume → returned as typed.
+        self.assertEqual(
+            _resolve_mm_run_duration_minutes({"mm_duration_minutes": 45}, 100.0, 0.0), 45.0
+        )
+        # Preset-derived: $1000 deployed, normal (0.05), $1.44M/24h vol → 20 min.
+        d = _resolve_mm_run_duration_minutes({"participation_preset": "normal"}, 1000.0, 1_440_000.0)
+        self.assertAlmostEqual(d, 20.0, places=6)
+        # Custom over the bound is clamped to [Aggressive … 10×Passive] = [10, 1000].
+        c = _resolve_mm_run_duration_minutes({"mm_duration_minutes": 999999}, 1000.0, 1_440_000.0)
+        self.assertAlmostEqual(c, 1000.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

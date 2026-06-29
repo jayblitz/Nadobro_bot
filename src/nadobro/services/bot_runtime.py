@@ -17,6 +17,10 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     # fill-anchored grid soft-reset telemetry (green/red trigger levels).
     "grid_reset_up_price", "grid_reset_down_price", "grid_soft_reset_engaged",
     "grid_net_base", "grid_reset_threshold_bp", "grid_mode",
+    # MM participation/duration (TWAP): preset, user duration, enforced run
+    # duration, and the soft-target one-shot notify flag.
+    "participation_preset", "mm_duration_minutes", "mm_run_duration_minutes",
+    "mm_duration_target_notified",
     "dn_last_funding_rate", "dn_unfavorable_count",
     "dn_mode", "order_observability",
     "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
@@ -1020,6 +1024,18 @@ def start_user_bot(
         mm_ok, mm_msg = _run_mm_start_guard(telegram_id, network, product.upper(), float(state.get("leverage") or leverage or 1.0), state)
         if not mm_ok:
             return False, mm_msg
+        # Participation/Duration (TWAP): resolve the enforced run duration once at
+        # start from the participation preset (or a custom mm_duration_minutes)
+        # against the pair's 24h volume. 0 = no cap (opt-out, unchanged behavior).
+        try:
+            _deployed = float(state.get("notional_usd") or 0.0) * float(state.get("leverage") or 1.0)
+            _vol = _best_effort_pair_24h_volume_usd(telegram_id, network, product.upper())
+            _dur = _resolve_mm_run_duration_minutes(state, _deployed, _vol)
+            if _dur > 0:
+                state["mm_run_duration_minutes"] = _dur
+                state["mm_duration_target_notified"] = False
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(duration is opt-in; never block start)
+            logger.debug("mm duration wiring skipped user=%s", telegram_id, exc_info=True)
     if strategy == "vol":
         state["vol_market"] = vol_market_kw
         if vol_market_kw == "spot":
@@ -2156,6 +2172,124 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
     )
 
 
+# MM run-duration (TWAP/participation): Mid + Dynamic Grid treat the duration as
+# a HARD cap (flatten at expiry); Grid + Reverse Grid treat it as a SOFT target
+# (keep running past it to let grid/profit conditions complete — per the docs).
+_MM_DURATION_HARD_CAP_STRATEGIES = ("mid", "dgrid")
+
+
+def _mm_duration_is_hard_cap(strategy: str) -> bool:
+    return str(strategy or "").lower() in _MM_DURATION_HARD_CAP_STRATEGIES
+
+
+def _resolve_mm_run_duration_minutes(state: dict, deployed_usd: float, vol_24h_usd: float) -> float:
+    """Enforced MM run length in minutes (0 = no cap → unchanged behavior).
+
+    A user-set ``mm_duration_minutes`` wins, clamped to the participation bounds
+    ([Aggressive … 10×Passive]) when 24h volume is known; otherwise the
+    participation preset implies the duration (compute_pov_duration). Opt-in:
+    with neither a custom duration nor a preset (or no volume), returns 0."""
+    from src.nadobro.services import pov_engine
+
+    try:
+        custom = float(state.get("mm_duration_minutes") or 0.0)
+    except (TypeError, ValueError):
+        custom = 0.0
+    deployed = max(0.0, float(deployed_usd or 0.0))
+    vol = max(0.0, float(vol_24h_usd or 0.0))
+    preset = state.get("participation_preset")
+    if custom > 0:
+        if vol > 0 and deployed > 0:
+            clamped, _lo, _hi = pov_engine.bound_user_duration_minutes(custom, deployed, vol)
+            return float(clamped)
+        return custom
+    if preset and vol > 0 and deployed > 0:
+        return float(pov_engine.compute_pov_duration(deployed, str(preset), vol)["duration_minutes"])
+    return 0.0
+
+
+def _best_effort_pair_24h_volume_usd(telegram_id: int, network: str, product: str) -> float:
+    """Pair 24h USD volume for POV sizing; 0 on any failure (so duration stays
+    opt-out rather than crashing the start)."""
+    try:
+        from src.nadobro.services.user_service import get_user_readonly_client
+        client = get_user_readonly_client(telegram_id, network=network)
+        if client is None:
+            return 0.0
+        pid = get_product_id(str(product).upper(), network=network)
+        if pid is None:
+            return 0.0
+        stats = client.get_product_market_stats(int(pid)) or {}
+        return float(stats.get("volume_24h_usd") or 0.0)
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(volume is best-effort; duration just stays uncapped)
+        return 0.0
+
+
+async def _evaluate_mm_duration_rail(
+    telegram_id: int, network: str, state: dict, strategy: str, product: str, *, client,
+) -> tuple[bool, str | None] | None:
+    """Enforce the MM run duration. Hard-cap modes (Mid/D-Grid) finalize +
+    flatten at expiry; soft-target modes (Grid/R-Grid) notify once and keep
+    running. ``None`` when no duration is set or it hasn't elapsed yet."""
+    try:
+        dur = float(state.get("mm_run_duration_minutes") or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur <= 0:
+        return None
+    started_raw = state.get("started_at")
+    if not started_raw:
+        return None
+    try:
+        started = datetime.fromisoformat(str(started_raw))
+        elapsed_min = (datetime.now(timezone.utc) - started).total_seconds() / 60.0
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(bad timestamp → skip the cap this cycle)
+        return None
+    if elapsed_min < dur:
+        return None
+    if not _mm_duration_is_hard_cap(strategy):
+        # Grid / R-Grid: target only — keep running for profit conditions; tell
+        # the user once that the planned duration elapsed.
+        if not state.get("mm_duration_target_notified"):
+            state["mm_duration_target_notified"] = True
+            _save_state(telegram_id, network, state)
+            await _notify(
+                telegram_id,
+                "⏱️ {strategy} on {market} ({network}): planned duration "
+                "({mins:.0f}m) reached — still running to let grid/profit conditions complete.",
+                strategy=_strategy_display_name(strategy),
+                market=_market_label_for_strategy(strategy, product, state),
+                network=network, mins=dur,
+            )
+        return None
+    # Mid / D-Grid: hard cap — finalize, flatten, stop.
+    _finalize_session(state, stop_reason="duration_reached")
+    state["running"] = False
+    state["last_action"] = "mm_duration_reached"
+    _save_state(telegram_id, network, state)
+    close_res = await run_blocking(close_all_positions, telegram_id, network)
+    if isinstance(close_res, dict) and not close_res.get("success"):
+        logger.warning(
+            "mm duration close failed user=%s network=%s strategy=%s: %s",
+            telegram_id, network, strategy, close_res.get("error", "unknown"),
+        )
+    try:
+        from src.nadobro.services import engine_runtime as _er_dur
+        if strategy in _er_dur.ENGINE_MAPPED_STRATEGIES:
+            await _er_dur.RUNTIME.stop(telegram_id, network, strategy)
+    except Exception:  # noqa: BLE001 - close_all_positions is the backstop
+        logger.warning("engine stop after duration cap failed user=%s", telegram_id, exc_info=True)
+    await _notify(
+        telegram_id,
+        "⏱️ {strategy} on {market} ({network}): run duration ({mins:.0f}m) reached — "
+        "orders cancelled and positions flattened.",
+        strategy=_strategy_display_name(strategy),
+        market=_market_label_for_strategy(strategy, product, state),
+        network=network, mins=dur,
+    )
+    return True, None
+
+
 async def _evaluate_session_pnl_rail(
     telegram_id: int,
     network: str,
@@ -2712,6 +2846,14 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
                 )
 
     if strategy in ("grid", "rgrid", "dgrid", "mid"):
+        # MM run-duration (participation/TWAP): hard cap for Mid/D-Grid, soft
+        # target for Grid/R-Grid. Checked before the SL rail so an expired run
+        # finalizes cleanly.
+        dur_rail = await _evaluate_mm_duration_rail(
+            telegram_id, network, state, strategy, product, client=client,
+        )
+        if dur_rail is not None:
+            return dur_rail
         # Session SL/TP on live Nado PnL (% of margin). Replaces the dead
         # ``result["action"] == grid_stop_loss_hit | grid_take_profit_hit |
         # circuit_breaker`` / "session notional cap reached" branches: the engine

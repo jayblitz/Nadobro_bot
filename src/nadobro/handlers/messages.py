@@ -1578,6 +1578,8 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "directional_bias",
         # MM/grid leverage (position size = margin × leverage).
         "mm_leverage_override",
+        # MM run duration in minutes (participation/TWAP).
+        "mm_duration_minutes",
         # Delta Neutral (engine v2) custom inputs. Without these here, the DN
         # custom-size/hold/cycles reply was rejected, the pending state cleared,
         # and the typed number fell through to the LOWIQPTS points relay.
@@ -1647,6 +1649,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "dn_hold_seconds": (60, 86400),
         "dn_cycles": (1, 100),
         "mm_leverage_override": (1, 50),
+        "mm_duration_minutes": (1, 14400),
     }
     if field not in limits:
         logger.error("Missing strategy limit for field=%s (strategy=%s)", field, strategy)
