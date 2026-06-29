@@ -602,6 +602,10 @@ RUNTIME = _default_runtime()
 # it up here and emit its config keys in ``map_strategy_config``.
 ENGINE_MAPPED_STRATEGIES = ("grid", "rgrid", "dgrid", "mid", "vol", "dn")
 
+# How many of THIS session's most-recent recorded fills to seed the fill-anchored
+# exposure VWAP from on (re)build (matches FillAnchoredQuotingController history).
+_FILL_HISTORY_SEED = 200
+
 # These controllers derive live order sizing from config values that can be
 # edited from the UI while the bot remains LIVE. A price move alone changes
 # start/end anchors every cycle, so those mid-derived keys are deliberately
@@ -1465,6 +1469,23 @@ async def run_engine_cycle(
                                 )
                 except Exception:  # noqa: BLE001 - restore is best-effort, never block start
                     logger.debug("dn progress restore skipped", exc_info=True)
+        # Fill-anchored (grid/rgrid) exposure VWAP must be peculiar to THIS
+        # session + user. Seed it from the run's OWN recorded fills
+        # (get_session_recent_fills is scoped by strategy_session_id + user_id) so
+        # the anchor is provably session-scoped and survives a rebuild — never the
+        # whole platform or another run/strategy. Empty for a fresh session.
+        if configs.get("controller_override") == "fill_anchored":
+            try:
+                from src.nadobro.services.engine_persistence import resolve_running_session_id
+                from src.nadobro.models.database import get_session_recent_fills
+
+                _sid = resolve_running_session_id(strategy, telegram_id, network)
+                if _sid:
+                    configs["seed_fills"] = get_session_recent_fills(
+                        int(_sid), network, limit=_FILL_HISTORY_SEED, user_id=telegram_id
+                    )
+            except Exception:  # noqa: BLE001 - seeding is best-effort, never block start
+                logger.debug("fill-anchored seed_fills skipped", exc_info=True)
         adapter = build_adapter(client, meta)
         started_controller = await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),

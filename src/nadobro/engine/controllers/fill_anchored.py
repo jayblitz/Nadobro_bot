@@ -60,6 +60,47 @@ class FillAnchoredQuotingController(MarketMakingController):
         # (rgrid_discretion). 0 ⇒ VWAP over the whole retained window.
         self.vwap_volume_fraction = _dec(self.cfg("vwap_volume_fraction", "0") or "0")
         self._pending_taker_id: Optional[str] = None
+        # SESSION ISOLATION: the exposure VWAP must reflect THIS run's fills only.
+        # In-memory absorption already guarantees that (my_executors is scoped to
+        # this controller_id = strategy:user:network and a per-run orchestrator),
+        # but a rebuild (worker handoff / restart) would otherwise start blank and
+        # lose the session's prior fills. The runtime injects ``seed_fills`` —
+        # this session's OWN recorded trades (get_session_recent_fills, scoped by
+        # strategy_session_id + user_id) — so the anchor is provably per-session
+        # and survives rebuilds. Never seeded from other users/sessions/products.
+        self._seed_from_history(self.cfg("seed_fills", None))
+
+    def _seed_from_history(self, rows: object) -> None:
+        """Seed the exposure window from this session's recorded fills (newest
+        first), so the VWAP/anchor reflect the run's real history on (re)build."""
+        if not rows or not isinstance(rows, (list, tuple)):
+            return
+        parsed: list[Tuple[Decimal, Decimal, str]] = []
+        for r in rows:
+            if isinstance(r, dict):
+                px_raw, base_raw, side = r.get("price"), r.get("size"), r.get("side")
+            elif isinstance(r, (list, tuple)) and len(r) >= 2:
+                px_raw, base_raw = r[0], r[1]
+                side = r[2] if len(r) >= 3 else None
+            else:
+                continue
+            try:
+                px = _dec(px_raw)
+                base = abs(_dec(base_raw))
+            except Exception:  # noqa: BLE001 - skip malformed rows
+                continue
+            if px <= 0 or base <= 0:
+                continue
+            parsed.append((px, base, str(side or "").lower()))
+        # rows arrive newest-first; append oldest-first so the deque order and the
+        # final _reference (newest fill) match live absorption.
+        for px, base, side in reversed(parsed):
+            self._fills.append((px, base))
+            self._reference = px
+            if side in ("long", "buy"):
+                self._last_buy_px = px
+            elif side in ("short", "sell"):
+                self._last_sell_px = px
 
     # -- fill anchoring -----------------------------------------------------
     def _absorb_fills(self) -> None:

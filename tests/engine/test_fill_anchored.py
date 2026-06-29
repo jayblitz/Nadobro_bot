@@ -242,6 +242,63 @@ def test_rgrid_defaults_to_momentum_fill_anchored():
     assert "controller_override" not in classic
 
 
+def test_exposure_vwap_is_isolated_per_controller_and_user():
+    """A different user's/run's controller never bleeds into this run's exposure
+    VWAP — fills are sourced only from my_executors (scoped to this
+    controller_id), so two controllers in the same process stay separate."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        base = {
+            "trading_pair": PAIR, "anchor_mode": "rgrid",
+            "spread_bid_pct": SPREAD, "spread_ask_pct": SPREAD,
+            "order_amount_quote": Decimal(10), "price_distance_tolerance": Decimal("0.0001"),
+        }
+        a = FillAnchoredQuotingController(
+            user_id=1, orchestrator=orch, adapter=adapter,
+            inventory=InventoryRepository(), configs=dict(base), controller_id="rgrid:1:mainnet",
+        )
+        b = FillAnchoredQuotingController(
+            user_id=2, orchestrator=orch, adapter=adapter,
+            inventory=InventoryRepository(), configs=dict(base), controller_id="rgrid:2:mainnet",
+        )
+        await orch.spawn_controller(a)
+        await orch.spawn_controller(b)
+        await orch.tick_controller(a.id)   # A rests its maker quotes
+        # Fill ALL of A's resting orders.
+        for ex in orch.list(a.id, active_only=False):
+            order = getattr(ex, "order", None)
+            if order is not None:
+                adapter.fill_order(order.id)
+        await orch.tick_controller(a.id)   # A absorbs its own fills
+        await orch.tick_controller(b.id)   # B must NOT see A's fills
+        assert len(a._fills) >= 1
+        assert len(b._fills) == 0
+        assert b._exposure_vwap() is None
+
+    asyncio.run(body())
+
+
+def test_seed_from_session_history_scopes_vwap_to_the_run():
+    """The runtime seeds the exposure VWAP from THIS session's own recorded fills
+    (get_session_recent_fills, scoped by strategy_session_id + user_id), so the
+    anchor is per-session and survives a rebuild. No seed → empty (fresh run)."""
+    adapter = MockNadoAdapter(mid=Decimal(100))
+    seed = [  # newest-first, exactly as get_session_recent_fills returns
+        {"price": 120, "size": 1, "side": "long"},
+        {"price": 110, "size": 1, "side": "short"},
+        {"price": 100, "size": 1, "side": "long"},
+    ]
+    _, c = _controller(adapter, mode="rgrid", extra={"momentum": True, "seed_fills": seed})
+    assert c._exposure_vwap() == Decimal(110)          # (100+110+120)/3
+    assert c._reference == Decimal(120)                # newest fill = anchor
+    assert c._last_buy_px == Decimal(120)              # most recent long
+    assert c._last_sell_px == Decimal(110)             # the short
+    # A fresh session (no seed) starts blank → waits for a directional break.
+    _, c2 = _controller(adapter, mode="rgrid", extra={"momentum": True})
+    assert c2._exposure_vwap() is None
+
+
 def test_runtime_opt_in_maps_override_and_treadfi_defaults():
     from src.nadobro.services.engine_runtime import map_strategy_config
 
