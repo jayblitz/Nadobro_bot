@@ -406,6 +406,9 @@ def _apply_mid_controller_config(controller: Controller, configs: Dict[str, obje
     controller.auto_spread_k = _dec(configs.get("auto_spread_k", "1.5"))  # type: ignore[attr-defined]
     controller.spread_floor_half_pct = _dec(configs.get("spread_floor_half_pct", "0.00015"))  # type: ignore[attr-defined]
     controller.spread_cap_half_pct = _dec(configs.get("spread_cap_half_pct", "0.005"))  # type: ignore[attr-defined]
+    # Live edits to Mid Mode directional bias take effect on the next tick.
+    from src.nadobro.engine.controllers.market_making import _safe_bias
+    controller.directional_bias = _safe_bias(configs.get("directional_bias", "0"))  # type: ignore[attr-defined]
 
 
 def _apply_orchestrator_risk_limits(orch: ExecutorOrchestrator, limits: RiskLimits) -> None:
@@ -444,6 +447,8 @@ def _apply_fill_anchored_controller_config(controller: Controller, configs: Dict
             "0.0025" if getattr(controller, "mode", "grid") == "grid" else "0.00125",
         )
     )
+    controller.momentum = bool(configs.get("momentum", False))  # type: ignore[attr-defined]
+    controller.vwap_volume_fraction = _dec(configs.get("vwap_volume_fraction", "0") or "0")  # type: ignore[attr-defined]
 
 
 async def _apply_grid_live_config(
@@ -597,6 +602,10 @@ RUNTIME = _default_runtime()
 # it up here and emit its config keys in ``map_strategy_config``.
 ENGINE_MAPPED_STRATEGIES = ("grid", "rgrid", "dgrid", "mid", "vol", "dn")
 
+# How many of THIS session's most-recent recorded fills to seed the fill-anchored
+# exposure VWAP from on (re)build (matches FillAnchoredQuotingController history).
+_FILL_HISTORY_SEED = 200
+
 # These controllers derive live order sizing from config values that can be
 # edited from the UI while the bot remains LIVE. A price move alone changes
 # start/end anchors every cycle, so those mid-derived keys are deliberately
@@ -730,6 +739,10 @@ def map_strategy_config(
             "trading_pair": product,
             "spread_bid_pct": spread_frac,
             "spread_ask_pct": spread_frac,
+            # Mid Mode directional bias in [-1, +1]: the controller skews the
+            # per-side spreads to lean the book long/short. _f coerces the legacy
+            # text default ("neutral") to 0.0 (symmetric).
+            "directional_bias": _f(settings, "directional_bias", 0.0),
             "order_amount_quote": Decimal(str(deployed)) / Decimal(levels),
             "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", deployed))),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
@@ -834,7 +847,12 @@ def map_strategy_config(
     # One bid + one ask around a fill-anchored reference instead of a static
     # ladder; reset_threshold_pct uses TreadFi's defaults (0.25% grid /
     # 0.125% rgrid) unless overridden.
-    if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", 0.0)):
+    # fill-anchored is the DEFAULT for rgrid now (the trend-following Reverse
+    # Grid users expect: it waits for a directional break, then steps WITH the
+    # trend via taker-momentum). Classic one-sided ladder is opt-out via
+    # ``fill_anchored=0``. Grid stays classic-by-default (opt-in fill_anchored=1).
+    _fa_default = 1.0 if strategy == "rgrid" else 0.0
+    if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", _fa_default)):
         default_reset = 0.25 if strategy == "grid" else 0.125
         return {
             "trading_pair": product,
@@ -846,7 +864,21 @@ def map_strategy_config(
             "order_amount_quote": Decimal(str(deployed)) / Decimal(levels),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": int(eff_lev),
+            # rgrid → taker-momentum (buy the break up / sell the break down).
+            # grid stays maker (no-cross spread capture).
+            "momentum": strategy == "rgrid",
+            # Exposure-price VWAP window from the user's discretion knob (now
+            # live; previously a dead input). Only meaningful for rgrid.
+            "vwap_volume_fraction": (
+                _f(settings, "rgrid_discretion", 0.0) if strategy == "rgrid" else 0.0
+            ),
             **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
+            # rgrid is a TREND strategy: keep the regime gate OFF (matching the
+            # classic rgrid) so momentum can quote/enter in trends — the gate
+            # would otherwise pause exactly when momentum needs to act. The
+            # inventory cap + session SL/TP rail remain the backstops. (Grid
+            # fill-anchored keeps whatever _quote_defense_defaults resolved.)
+            **({"regime_gate_enabled": 0.0} if strategy == "rgrid" else {}),
         }
     #
     # NO_ORDERS_AUDIT-FIX-R4: spread_bp is now interpreted as the per-level
@@ -1437,6 +1469,23 @@ async def run_engine_cycle(
                                 )
                 except Exception:  # noqa: BLE001 - restore is best-effort, never block start
                     logger.debug("dn progress restore skipped", exc_info=True)
+        # Fill-anchored (grid/rgrid) exposure VWAP must be peculiar to THIS
+        # session + user. Seed it from the run's OWN recorded fills
+        # (get_session_recent_fills is scoped by strategy_session_id + user_id) so
+        # the anchor is provably session-scoped and survives a rebuild — never the
+        # whole platform or another run/strategy. Empty for a fresh session.
+        if configs.get("controller_override") == "fill_anchored":
+            try:
+                from src.nadobro.services.engine_persistence import resolve_running_session_id
+                from src.nadobro.models.database import get_session_recent_fills
+
+                _sid = resolve_running_session_id(strategy, telegram_id, network)
+                if _sid:
+                    configs["seed_fills"] = get_session_recent_fills(
+                        int(_sid), network, limit=_FILL_HISTORY_SEED, user_id=telegram_id
+                    )
+            except Exception:  # noqa: BLE001 - seeding is best-effort, never block start
+                logger.debug("fill-anchored seed_fills skipped", exc_info=True)
         adapter = build_adapter(client, meta)
         started_controller = await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),

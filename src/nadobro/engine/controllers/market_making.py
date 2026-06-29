@@ -22,6 +22,22 @@ from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExec
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import ExecutionStrategy, TradeType, _dec
 
+# How hard a full directional_bias (±1) skews the per-side spread. 0.5 means a
+# full long bias quotes the bid at half the spread (closer to mid → fills more)
+# and the ask at 1.5× (further → fills less). Bounded so neither factor goes
+# non-positive for bias in [-1, 1].
+_BIAS_SKEW_STRENGTH = Decimal("0.5")
+
+
+def _safe_bias(value: object) -> Decimal:
+    """Parse directional_bias, clamped to [-1, 1]. Tolerates the legacy text
+    default ("neutral") and any unparseable value by treating it as 0 (neutral)."""
+    try:
+        b = _dec(value)
+    except Exception:  # noqa: BLE001 - "neutral"/None/garbage → neutral
+        return Decimal(0)
+    return max(Decimal(-1), min(Decimal(1), b))
+
 
 class MarketMakingController(Controller):
     def __init__(self, **kwargs: object) -> None:
@@ -49,6 +65,11 @@ class MarketMakingController(Controller):
         # every fill. Floor the manual per-side spread at the same minimum.
         self.spread_bid_pct = max(self.spread_bid_pct, self.spread_floor_half_pct)
         self.spread_ask_pct = max(self.spread_ask_pct, self.spread_floor_half_pct)
+        # Directional bias (Mid Mode): lean the book long (>0) / short (<0) by
+        # skewing the per-side spreads. 0 = symmetric (default). Previously the
+        # user's directional_bias setting only changed the preview math and was
+        # never applied to live quoting — this wires it into the controller.
+        self.directional_bias = _safe_bias(self.cfg("directional_bias", "0"))
         self._bid_id: Optional[str] = None
         self._bid_price: Optional[Decimal] = None
         self._ask_id: Optional[str] = None
@@ -109,8 +130,19 @@ class MarketMakingController(Controller):
             self.spread_bid_pct = half
             self.spread_ask_pct = half
 
-        target_bid = mid * (Decimal(1) - self.spread_bid_pct)
-        target_ask = mid * (Decimal(1) + self.spread_ask_pct)
+        # Directional bias: skew the per-side spreads so the favored side quotes
+        # closer to mid (fills more) and the other side further (fills less),
+        # accumulating the desired inventory lean. Floored so neither side quotes
+        # through the fee-clearing minimum; bias=0 leaves the quotes symmetric.
+        eff_bid_pct = self.spread_bid_pct
+        eff_ask_pct = self.spread_ask_pct
+        if self.directional_bias != 0:
+            skew = self.directional_bias * _BIAS_SKEW_STRENGTH
+            eff_bid_pct = max(self.spread_floor_half_pct, self.spread_bid_pct * (Decimal(1) - skew))
+            eff_ask_pct = max(self.spread_floor_half_pct, self.spread_ask_pct * (Decimal(1) + skew))
+
+        target_bid = mid * (Decimal(1) - eff_bid_pct)
+        target_ask = mid * (Decimal(1) + eff_ask_pct)
         await self._reconcile(TradeType.BUY, target_bid, allow_buy)
         await self._reconcile(TradeType.SELL, target_ask, allow_sell)
 

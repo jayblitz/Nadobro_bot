@@ -27,9 +27,13 @@ from decimal import Decimal
 from typing import Deque, Optional, Tuple
 
 from src.nadobro.engine.controllers.market_making import MarketMakingController
-from src.nadobro.engine.types import TradeType, _dec
+from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExecutorConfig
+from src.nadobro.engine.risk import ExecutorRequest
+from src.nadobro.engine.types import ExecutionStrategy, TradeType, _dec
 
-_VWAP_WINDOW = 20  # fills in the exposure-price window (rgrid)
+# How many recent fills to retain for the exposure-price VWAP. Large enough that
+# a volume-fraction window (rgrid_discretion) has history to work with.
+_FILL_HISTORY = 200
 
 
 class FillAnchoredQuotingController(MarketMakingController):
@@ -43,8 +47,60 @@ class FillAnchoredQuotingController(MarketMakingController):
         self._reference: Optional[Decimal] = None
         self._last_buy_px: Optional[Decimal] = None
         self._last_sell_px: Optional[Decimal] = None
-        self._fills: Deque[Tuple[Decimal, Decimal]] = deque(maxlen=_VWAP_WINDOW)
+        self._fills: Deque[Tuple[Decimal, Decimal]] = deque(maxlen=_FILL_HISTORY)
         self._seen_filled: set[str] = set()
+        # rgrid taker-momentum: instead of resting maker quotes, fire a TAKER
+        # market order when price breaks the exposure band — buy as price rises
+        # above ref·(1+spread), sell as it falls below ref·(1-spread). The
+        # exposure VWAP re-anchors after each fill, so it steps WITH the trend
+        # (adds longs into a pump / shorts into a dump) and self-throttles. Off
+        # ⇒ classic fill-anchored maker quoting (unchanged).
+        self.momentum = bool(self.cfg("momentum", False))
+        # Exposure-price VWAP window as a fraction of recent fill VOLUME
+        # (rgrid_discretion). 0 ⇒ VWAP over the whole retained window.
+        self.vwap_volume_fraction = _dec(self.cfg("vwap_volume_fraction", "0") or "0")
+        self._pending_taker_id: Optional[str] = None
+        # SESSION ISOLATION: the exposure VWAP must reflect THIS run's fills only.
+        # In-memory absorption already guarantees that (my_executors is scoped to
+        # this controller_id = strategy:user:network and a per-run orchestrator),
+        # but a rebuild (worker handoff / restart) would otherwise start blank and
+        # lose the session's prior fills. The runtime injects ``seed_fills`` —
+        # this session's OWN recorded trades (get_session_recent_fills, scoped by
+        # strategy_session_id + user_id) — so the anchor is provably per-session
+        # and survives rebuilds. Never seeded from other users/sessions/products.
+        self._seed_from_history(self.cfg("seed_fills", None))
+
+    def _seed_from_history(self, rows: object) -> None:
+        """Seed the exposure window from this session's recorded fills (newest
+        first), so the VWAP/anchor reflect the run's real history on (re)build."""
+        if not rows or not isinstance(rows, (list, tuple)):
+            return
+        parsed: list[Tuple[Decimal, Decimal, str]] = []
+        for r in rows:
+            if isinstance(r, dict):
+                px_raw, base_raw, side = r.get("price"), r.get("size"), r.get("side")
+            elif isinstance(r, (list, tuple)) and len(r) >= 2:
+                px_raw, base_raw = r[0], r[1]
+                side = r[2] if len(r) >= 3 else None
+            else:
+                continue
+            try:
+                px = _dec(px_raw)
+                base = abs(_dec(base_raw))
+            except Exception:  # policy: degrade-ok(skip a malformed seeded fill; live fills re-anchor)
+                continue
+            if px <= 0 or base <= 0:
+                continue
+            parsed.append((px, base, str(side or "").lower()))
+        # rows arrive newest-first; append oldest-first so the deque order and the
+        # final _reference (newest fill) match live absorption.
+        for px, base, side in reversed(parsed):
+            self._fills.append((px, base))
+            self._reference = px
+            if side in ("long", "buy"):
+                self._last_buy_px = px
+            elif side in ("short", "sell"):
+                self._last_sell_px = px
 
     # -- fill anchoring -----------------------------------------------------
     def _absorb_fills(self) -> None:
@@ -76,10 +132,82 @@ class FillAnchoredQuotingController(MarketMakingController):
             self._seen_filled &= live
 
     def _exposure_vwap(self) -> Optional[Decimal]:
+        if not self._fills:
+            return None
+        # Windowed by the most-recent fraction of fill volume when discretion is
+        # set (a tighter, more reactive exposure price); else VWAP over all
+        # retained fills.
+        if self.vwap_volume_fraction > 0:
+            total_base = sum((b for _, b in self._fills), Decimal(0))
+            if total_base <= 0:
+                return None
+            want = total_base * self.vwap_volume_fraction
+            num = Decimal(0)
+            den = Decimal(0)
+            for p, b in reversed(self._fills):  # most recent first
+                num += p * b
+                den += b
+                if den >= want:
+                    break
+            return num / den if den > 0 else None
         total_base = sum((b for _, b in self._fills), Decimal(0))
         if total_base <= 0:
             return None
         return sum((p * b for p, b in self._fills), Decimal(0)) / total_base
+
+    # -- taker momentum (rgrid) ---------------------------------------------
+    def _taker_in_flight(self) -> bool:
+        if self._pending_taker_id is None:
+            return False
+        ex = self.orchestrator.get(self._pending_taker_id)
+        if ex is None or ex.is_terminated:
+            self._pending_taker_id = None
+            return False
+        return True
+
+    async def _fire_taker(self, side: TradeType, mid: Decimal) -> None:
+        """Fire ONE reduce-or-add TAKER market order in ``side`` for the per-step
+        size. The fill re-anchors the exposure VWAP, moving the next trigger with
+        the trend."""
+        if mid <= 0 or self.order_amount_quote <= 0:
+            return
+        amount_base = self.order_amount_quote / mid
+        cfg = OrderExecutorConfig(
+            self.trading_pair, side, amount_base, ExecutionStrategy.MARKET
+        )
+        ex = OrderExecutor(
+            cfg, user_id=self.user_id, controller_id=self.id,
+            adapter=self.adapter, inventory=self.inventory,
+        )
+        ok = await self.spawn_executor(
+            ex, ExecutorRequest(order_amount_quote=self.order_amount_quote)
+        )
+        if ok:
+            self._pending_taker_id = ex.id
+
+    async def _tick_momentum(self, mid: Decimal) -> None:
+        base_value = self._base_value(mid)
+        exposure = self.exposure_allowed_sides(self.trading_pair, mid)
+        allow_buy = exposure["buy"]
+        allow_sell = exposure["sell"]
+        await self.evaluate_quote_gate(self.trading_pair)
+        if self.gate_paused:
+            allow_buy = allow_buy and base_value < 0    # only reduce a short
+            allow_sell = allow_sell and base_value > 0  # only reduce a long
+        # One taker at a time: wait for the prior market order to settle (and be
+        # absorbed into the exposure VWAP) before considering the next step.
+        if self._taker_in_flight():
+            return
+        band = max(self.spread_ask_pct, self.spread_floor_half_pct)
+        ref = self._exposure_vwap() or self._reference or mid
+        if ref <= 0:
+            return
+        buy_trigger = ref * (Decimal(1) + band)
+        sell_trigger = ref * (Decimal(1) - band)
+        if mid >= buy_trigger and allow_buy:
+            await self._fire_taker(TradeType.BUY, mid)
+        elif mid <= sell_trigger and allow_sell:
+            await self._fire_taker(TradeType.SELL, mid)
 
     def _current_reference(self, mid: Decimal) -> Decimal:
         if self.mode == "rgrid":
@@ -96,6 +224,16 @@ class FillAnchoredQuotingController(MarketMakingController):
         mid = await self.adapter.mid_price(self.trading_pair)
         if mid <= 0:
             return
+
+        # rgrid taker-momentum: wait for a directional break from the anchor, then
+        # follow it. Seed the anchor to the start mid so the FIRST trigger is a
+        # real ±band move (no immediate one-sided short like the classic ladder).
+        if self.mode == "rgrid" and self.momentum:
+            if self._reference is None:
+                self._reference = mid
+            await self._tick_momentum(mid)
+            return
+
         base_value = self._base_value(mid)
 
         exposure = self.exposure_allowed_sides(self.trading_pair, mid)
