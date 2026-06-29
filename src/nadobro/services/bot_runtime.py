@@ -13,7 +13,11 @@ _STRATEGY_SETTINGS_RUNTIME_BLOCKLIST = frozenset({
     "worker_group", "worker_last_heartbeat", "last_dispatch_ts", "last_cycle_ms",
     "last_cycle_result", "worker_pid", "grid_anchor_price", "grid_buy_exposure_price",
     "grid_sell_exposure_price", "grid_drift_from_anchor_pct", "grid_reset_active",
-    "grid_reset_side", "grid_last_cycle_pnl_usd", "dn_last_funding_rate", "dn_unfavorable_count",
+    "grid_reset_side", "grid_last_cycle_pnl_usd",
+    # fill-anchored grid soft-reset telemetry (green/red trigger levels).
+    "grid_reset_up_price", "grid_reset_down_price", "grid_soft_reset_engaged",
+    "grid_net_base", "grid_reset_threshold_bp", "grid_mode",
+    "dn_last_funding_rate", "dn_unfavorable_count",
     "dn_mode", "order_observability",
     "last_error_category", "vol_order_attempts", "vol_order_failures", "last_order_error", "last_order_ts",
     "vol_market",
@@ -647,6 +651,12 @@ def _create_session(telegram_id: int, strategy: str, product: str, network: str,
                     "notional_usd", "cycle_notional_usd", "spread_bp", "leverage",
                     "slippage_pct", "interval_seconds", "tp_pct", "sl_pct", "levels",
                     "budget_usd", "risk_level", "max_positions", "products",
+                    # Grid / MM EXECUTION MODE + live knobs, so each session
+                    # records the mode (anchored grid vs classic ladder) and the
+                    # spread/leverage/reset it actually ran with — not just the
+                    # current per-user settings (which can change between runs).
+                    "fill_anchored", "mm_leverage_override",
+                    "min_spread_bp", "max_spread_bp", "grid_reset_threshold_pct",
                     "rgrid_spread_bp", "rgrid_stop_loss_pct", "rgrid_take_profit_pct",
                     "rgrid_discretion", "rgrid_reset_threshold_pct",
                     "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
@@ -1594,6 +1604,12 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "rgrid_reset_active": bool(state.get("grid_reset_active")),
         "rgrid_reset_side": state.get("grid_reset_side"),
         "rgrid_last_cycle_pnl_usd": state.get("grid_last_cycle_pnl_usd"),
+        # fill-anchored grid soft-reset levels (green = over-short rise trigger,
+        # red = over-long fall trigger) for the order-monitor card.
+        "grid_reset_up_price": float(state.get("grid_reset_up_price") or 0.0),
+        "grid_reset_down_price": float(state.get("grid_reset_down_price") or 0.0),
+        "grid_soft_reset_engaged": bool(state.get("grid_soft_reset_engaged")),
+        "grid_net_base": float(state.get("grid_net_base") or 0.0),
         "rgrid_stop_loss_pct": state.get("rgrid_stop_loss_pct") or state.get("grid_stop_loss_pct") or state.get("sl_pct"),
         "rgrid_take_profit_pct": state.get("rgrid_take_profit_pct") or state.get("grid_take_profit_pct") or state.get("tp_pct"),
         "rgrid_reset_threshold_pct": state.get("rgrid_reset_threshold_pct") or state.get("grid_reset_threshold_pct"),

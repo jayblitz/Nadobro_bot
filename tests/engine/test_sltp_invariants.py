@@ -121,10 +121,14 @@ def test_grid_does_not_set_fill_blind_limit_price_stop():
 
 
 def test_grid_barrier_carries_user_sl_and_tp_for_executor_enforcement():
-    """The executor barrier still carries the user's sl/tp (avg-entry based,
-    consistent with the margin rail) so the executor enforces both — including
-    take-profit, which GRID-TP-DEAD left dead."""
-    cfg = map_strategy_config("grid", {"sl_pct": 0.5, "tp_pct": 1.0}, MID, product=PRODUCT)
+    """The classic-ladder executor barrier still carries the user's sl/tp
+    (avg-entry based, consistent with the margin rail) so the executor enforces
+    both — including take-profit, which GRID-TP-DEAD left dead. (Grid now defaults
+    to fill-anchored, which enforces SL/TP via the session margin-% rail, not a
+    per-level barrier; the classic ladder is the fill_anchored=0 escape.)"""
+    cfg = map_strategy_config(
+        "grid", {"sl_pct": 0.5, "tp_pct": 1.0, "fill_anchored": 0}, MID, product=PRODUCT
+    )
     tbc = cfg.get("triple_barrier_config")
     assert tbc is not None
     assert float(getattr(tbc, "stop_loss", 0) or 0) > 0
