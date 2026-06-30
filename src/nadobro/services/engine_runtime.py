@@ -1009,6 +1009,14 @@ def map_strategy_config(
         "min_spread_between_orders": spread_frac,
         "max_open_orders": levels,
         "leverage": int(eff_lev),
+        # Continuous laddering for the whole GridExecutor family (classic grid &
+        # rgrid when fill_anchored=0, and D-Grid): re-arm round-tripped levels so
+        # the ladder keeps working its band instead of draining to COMPLETE and
+        # terminating. Bounded by the net-exposure cap + session rails. (Default
+        # grid/rgrid run the fill-anchored controller, which already re-quotes
+        # every tick; Mid is the market-making controller, likewise continuous —
+        # this flag only affects the multi-level ladder executor.)
+        "recycle_levels": True,
         "triple_barrier_config": TripleBarrierConfig(
             take_profit=tp or None, stop_loss=sl or None
         ),
@@ -1034,6 +1042,7 @@ def map_strategy_config(
     # real provider on first start.
     if strategy == "dgrid":
         cfg["candle_provider"] = None
+        # (recycle_levels is set for the whole GridExecutor family above.)
         # Thread the user's Dynamic-Grid regime knobs through to the controller
         # so the GRID<->RGRID switch actually honors them (previously dgrid ran
         # a hardcoded EMA classifier and ignored these entirely). Defaults match
@@ -1059,11 +1068,6 @@ def map_strategy_config(
         cfg["dgrid_trail_arm_pct"] = _f(settings, "dgrid_trail_arm_pct", 1.0)
         cfg["dgrid_trail_giveback_pct"] = _f(settings, "dgrid_trail_giveback_pct", 0.5)
         cfg["dgrid_reversal_flip_pct"] = _f(settings, "dgrid_reversal_flip_pct", 0.4)
-        # Continuous market-making grid: re-arm completed levels so the band keeps
-        # working (buy dip / sell pop / re-arm) instead of draining to COMPLETE
-        # and terminating — the other half of the "placed a few orders and
-        # stopped" report. Bounded by the net-exposure cap + session rails.
-        cfg["recycle_levels"] = True
         # Reset re-center drives an IN-PLACE re-quote of the resting ladder
         # (GridExecutor.recenter) — no flatten, no realized loss — so it can
         # follow price closely without bleeding fees. Pass the user's explicit

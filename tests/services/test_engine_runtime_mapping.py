@@ -192,6 +192,25 @@ def test_dgrid_continuous_quoting_wiring():
     assert dg2["dgrid_reset_threshold_bp"] == 80.0
 
 
+def test_classic_grid_rgrid_ladder_recycles():
+    """The classic multi-level ladder (fill_anchored=0) for grid & rgrid recycles
+    completed levels so it keeps working continuously, like D-Grid. The default
+    grid/rgrid run the fill-anchored controller (continuous by design) and never
+    see this flag — it only affects the GridExecutor ladder."""
+    for strat in ("grid", "rgrid"):
+        classic = er.map_strategy_config(
+            strat, {"notional_usd": 100.0, "levels": 3, "fill_anchored": 0},
+            Decimal(58000), product="BTC-USDC",
+        )
+        assert classic["recycle_levels"] is True, strat
+        # Default (fill-anchored) path returns before the ladder cfg -> no flag.
+        default = er.map_strategy_config(
+            strat, {"notional_usd": 100.0, "levels": 3},
+            Decimal(58000), product="BTC-USDC",
+        )
+        assert "recycle_levels" not in default, strat
+
+
 def test_map_vol_config_is_spot():
     cfg = er.map_strategy_config(
         "vol", {"notional_usd": 40.0, "interval_seconds": 60}, Decimal(100), product="KBTC-USDC",
