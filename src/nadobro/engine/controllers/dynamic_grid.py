@@ -348,11 +348,14 @@ class DynamicGridController(Controller):
                     # re-center the resting ladder IN PLACE (re-quote unfilled
                     # opens around the new mid) WITHOUT closing the held
                     # position — no flatten, no realized loss, no fee churn.
-                    # Rate-limited so a fast move can't churn cancels every tick
-                    # (and so fill processing isn't starved by the early return).
+                    # Rate-limited so a fast move can't churn cancels every tick.
+                    # Do NOT return here: now that re-center fires often (default
+                    # ~one band width), the executor must still be ticked this
+                    # cycle so close-leg fills, the SL/TP barriers, and profit
+                    # booking keep running. A slow same-regime grind would
+                    # otherwise re-center every tick and never process fills.
                     self._last_recenter_ts = now
                     await self._recenter(mid)
-                    return
             # Manage the live grid: gate / inventory cap suppress NEW entries
             # only; fills, close legs and stops keep running.
             exposure = self.exposure_allowed_sides(pair, mid) if mid else {"buy": True, "sell": True}
