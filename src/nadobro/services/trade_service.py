@@ -996,15 +996,32 @@ def execute_spot_market_order(
                 f"Available: ${usdt_balance:,.2f}"
             ),
         }
-    if (not is_buy) and size > spot_balance * 0.999:
-        return {
-            "success": False,
-            "error": (
-                f"Insufficient {display_asset} spot balance to sell.\n"
-                f"Required: {size:,.6f}\n"
-                f"Available: {spot_balance:,.6f}"
-            ),
-        }
+    if not is_buy:
+        if spot_balance <= 0:
+            return {
+                "success": False,
+                "error": f"No {display_asset} spot balance to sell.",
+            }
+        # SELL-FULL-BALANCE fix (DN exposure bug): closing a position sells the
+        # FULL held balance, so size == spot_balance. The old guard
+        # `size > spot_balance * 0.999` then rejected the order (balance is
+        # always > 0.999×balance), stranding the DN spot leg on close and
+        # leaving the user directional. Clamp the sell to what's actually held
+        # (a hair of headroom absorbs venue rounding) instead of rejecting a
+        # legitimate full-balance close.
+        if size > spot_balance:
+            size = spot_balance
+            notional = size * mid
+        if notional < MIN_TRADE_SIZE_USD:
+            # The remaining balance is below the venue minimum — it cannot be
+            # sold as its own order. Surface it instead of silently failing.
+            return {
+                "success": False,
+                "error": (
+                    f"{display_asset} spot remainder ({size:,.6f} ≈ ${notional:,.2f}) "
+                    f"is below the ${MIN_TRADE_SIZE_USD} minimum trade size."
+                ),
+            }
 
     if enforce_rate_limit:
         allowed, msg = check_rate_limit(telegram_id, network=selected_network)
@@ -2474,6 +2491,83 @@ def close_position(
     return payload
 
 
+def _read_spot_balance(readonly, spot_product_id: int) -> float:
+    balances = (readonly.get_balance() or {}).get("balances", {}) or {}
+    return float(balances.get(spot_product_id, balances.get(str(spot_product_id), 0)) or 0.0)
+
+
+def _spot_mid(readonly, spot_product_id: int) -> float:
+    try:
+        return float((readonly.get_market_price(spot_product_id) or {}).get("mid") or 0.0)
+    except Exception:  # noqa: BLE001 - valuation is best-effort
+        return 0.0
+
+
+def _close_spot_leg_with_sweep(
+    telegram_id: int,
+    asset: str,
+    spot_product_id: int,
+    spot_symbol: str,
+    *,
+    network: str,
+    slippage_pct: float,
+    source: str,
+    strategy_session_id: int | None,
+    max_rounds: int = 3,
+) -> dict:
+    """Flatten the spot leg and VERIFY it, retrying up to ``max_rounds``.
+
+    A single market sell can partial-fill on a thin book or be rejected, which
+    is how the DN spot leg got stranded after a stop. Each round re-reads the
+    balance and sells what remains; a remainder below the venue minimum can't be
+    sold as its own order, so it's treated as flat (dust). If a real position is
+    still held after all rounds, returns success=False with the exact residual
+    so the stop path surfaces the exposure instead of hiding it."""
+    readonly = get_user_readonly_client(telegram_id, network=network)
+    if not readonly:
+        return {"success": False, "error": "Readonly client unavailable for spot close."}
+
+    last_sell: dict = {"success": True, "skipped": True, "spot_size": 0.0}
+    rounds = 0
+    for _ in range(max_rounds):
+        size = _read_spot_balance(readonly, spot_product_id)
+        if size <= 0:
+            return {"success": True, "spot_size": 0.0, "rounds": rounds, "skipped": rounds == 0}
+        mid = _spot_mid(readonly, spot_product_id)
+        if mid > 0 and size * mid < MIN_TRADE_SIZE_USD:
+            # Sub-minimum remainder — un-sellable as its own order; treat as flat.
+            return {"success": True, "spot_size": size, "residual_value_usd": size * mid,
+                    "rounds": rounds, "dust": True}
+        rounds += 1
+        last_sell = execute_spot_market_order(
+            telegram_id, asset, size, is_buy=False, enforce_rate_limit=False,
+            slippage_pct=slippage_pct, source=source, strategy_session_id=strategy_session_id,
+            network=network, spot_product_id=int(spot_product_id), spot_symbol=spot_symbol,
+            asset_label=spot_symbol,
+        )
+        if not last_sell.get("success"):
+            break  # rejection (e.g. sub-min) — verify below, don't spin
+
+    # Final verification — flat, dust-only, or genuinely still exposed.
+    final_size = _read_spot_balance(readonly, spot_product_id)
+    mid = _spot_mid(readonly, spot_product_id)
+    final_value = final_size * mid if mid > 0 else 0.0
+    if final_size <= 0 or (mid > 0 and final_value < MIN_TRADE_SIZE_USD):
+        return {"success": True, "spot_size": final_size, "residual_value_usd": final_value,
+                "rounds": rounds}
+    return {
+        "success": False,
+        "error": (
+            f"{spot_symbol} spot leg NOT fully closed after {rounds} attempt(s): "
+            f"{final_size:,.6f} (~${final_value:,.2f}) still held — "
+            f"{last_sell.get('error') or 'close it manually from Portfolio.'}"
+        ),
+        "spot_size": final_size,
+        "residual_value_usd": final_value,
+        "rounds": rounds,
+    }
+
+
 def close_delta_neutral_legs(
     telegram_id: int,
     asset: str,
@@ -2514,25 +2608,19 @@ def close_delta_neutral_legs(
         if spot_product_id is None:
             spot_product_id = get_spot_product_id(asset, network=selected_network)
         if spot_product_id is not None:
-            balance = readonly.get_balance() or {}
-            balances = balance.get("balances", {}) or {}
-            spot_size = float(balances.get(spot_product_id, balances.get(str(spot_product_id), 0)) or 0.0)
-            spot_result["spot_size"] = spot_size
-            if spot_size > 0:
-                spot_result = execute_spot_market_order(
-                    telegram_id,
-                    asset,
-                    spot_size,
-                    is_buy=False,
-                    enforce_rate_limit=False,
-                    slippage_pct=slippage_pct,
-                    source=source,
-                    strategy_session_id=strategy_session_id,
-                    network=selected_network,
-                    spot_product_id=int(spot_product_id),
-                    spot_symbol=spot_symbol,
-                    asset_label=spot_symbol,
-                )
+            # Verify-and-sweep: retry until the spot leg is provably flat (or
+            # only dust remains). A single sell could partial-fill or be rejected
+            # and silently leave the user exposed after a stop.
+            spot_result = _close_spot_leg_with_sweep(
+                telegram_id,
+                asset,
+                int(spot_product_id),
+                spot_symbol,
+                network=selected_network,
+                slippage_pct=slippage_pct,
+                source=source,
+                strategy_session_id=strategy_session_id,
+            )
     except Exception as e:
         spot_result = {"success": False, "error": str(e)}
 

@@ -1637,6 +1637,21 @@ async def run_engine_cycle(
             counts_fn = getattr(controller, "order_counts", None)
             if callable(counts_fn):
                 order_counts = counts_fn() or {}
+            # DN: surface the live funding rate + unfavorable-debounce to
+            # /status. These were referenced by the status card but NEVER
+            # written anywhere, so the dashboard showed "Rate 0.000000"
+            # permanently. The controller refreshes last_funding_rate each
+            # (throttled) HOLDING poll; persist it into runtime state here.
+            if strategy == "dn":
+                _fr = getattr(controller, "last_funding_rate", None)
+                if _fr is not None:
+                    try:
+                        state["dn_last_funding_rate"] = float(_fr)
+                    except (TypeError, ValueError):
+                        pass
+                state["dn_unfavorable_count"] = int(
+                    getattr(controller, "funding_unfavorable_count", 0) or 0
+                )
     except Exception:  # policy: degrade-ok(gate notify is best-effort)
         gate_event = None
     # Persist DN live progress so /status (main process) can read it from the
