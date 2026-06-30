@@ -108,7 +108,7 @@ from src.nadobro.handlers.intent_handlers import (
     handle_trade_intent_message,
 )
 from src.nadobro.handlers.intent_parser import parse_interaction_intent
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk
 from src.nadobro.services.perf import timed_metric, log_slow, increment_counter
 
 logger = logging.getLogger(__name__)
@@ -235,7 +235,9 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
 
     if action_type == "close_position":
         product = action_data.get("product")
-        result = await run_blocking(close_position, telegram_id, product)
+        # Off the 8-thread misc pool (which the click/card-render path shares) so
+        # a throttled venue close can't starve unrelated taps. SDK pool = 24.
+        result = await run_blocking_sdk(close_position, telegram_id, product)
         if result.get("success"):
             msg = f"✅ Closed {escape_md(str(result.get('cancelled', 0)))} {escape_md(result.get('product', product))} position size\\."
         else:
@@ -244,7 +246,8 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         return bool(result.get("success")), str(result.get("error", ""))
 
     if action_type == "close_all":
-        result = await run_blocking(close_all_positions, telegram_id)
+        # SDK pool, not the misc pool the click path renders cards on.
+        result = await run_blocking_sdk(close_all_positions, telegram_id)
         if result.get("success"):
             products = ", ".join(result.get("products", []))
             msg = f"✅ Closed total size {escape_md(str(result.get('cancelled', 0)))} across {escape_md(products)}\\."

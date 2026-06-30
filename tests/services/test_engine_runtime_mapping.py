@@ -139,6 +139,39 @@ def test_participation_chunk_overrides_per_order_size():
     assert mid0["order_amount_quote"] == Decimal("100")
 
 
+def test_fill_anchored_reset_threshold_reads_ui_keys():
+    """The UI writes the reset threshold under grid_reset_threshold_pct /
+    rgrid_reset_threshold_pct, but the default (fill-anchored) grid/rgrid
+    controller reads reset_threshold_pct. The mapping must translate the UI keys
+    or the "Reset Threshold" button is a silent no-op (the controller would
+    always use its 0.25% / 0.125% default). Regression guard for that bug."""
+    # Grid: button writes grid_reset_threshold_pct=0.8 (%). Expect 0.8/100.
+    grid = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1,
+                 "grid_reset_threshold_pct": 0.8},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert grid["reset_threshold_pct"] == Decimal("0.8") / Decimal(100)
+    # R-Grid: button writes rgrid_reset_threshold_pct=1.5 (%). Expect 1.5/100.
+    rgrid = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1,
+                  "rgrid_reset_threshold_pct": 1.5},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert rgrid["reset_threshold_pct"] == Decimal("1.5") / Decimal(100)
+    # Unset → per-mode default preserved (grid 0.25% / rgrid 0.125%).
+    grid_def = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert grid_def["reset_threshold_pct"] == Decimal("0.25") / Decimal(100)
+    rgrid_def = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert rgrid_def["reset_threshold_pct"] == Decimal("0.125") / Decimal(100)
+
+
 def test_map_vol_config_is_spot():
     cfg = er.map_strategy_config(
         "vol", {"notional_usd": 40.0, "interval_seconds": 60}, Decimal(100), product="KBTC-USDC",

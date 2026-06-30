@@ -889,11 +889,26 @@ def map_strategy_config(
     _fa_default = 1.0 if strategy in ("grid", "rgrid") else 0.0
     if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", _fa_default)):
         default_reset = 0.25 if strategy == "grid" else 0.125
+        # The UI writes the reset threshold under per-strategy keys
+        # (grid_reset_threshold_pct / rgrid_reset_threshold_pct), but the
+        # fill-anchored controller reads ``reset_threshold_pct``. Read the UI
+        # keys here so the "Reset Threshold" button actually drives the soft
+        # reset — previously a silent no-op: the controller always fell back to
+        # the hardcoded default because nothing translated the key. Percent →
+        # fraction. (Also fixes live edits: _apply_fill_anchored_controller_config
+        # refreshes from this same mapped value each cycle.)
+        if strategy == "rgrid":
+            _reset_pct = _f(settings, "rgrid_reset_threshold_pct",
+                            _f(settings, "grid_reset_threshold_pct",
+                               _f(settings, "reset_threshold_pct", default_reset)))
+        else:
+            _reset_pct = _f(settings, "grid_reset_threshold_pct",
+                            _f(settings, "reset_threshold_pct", default_reset))
         return {
             "trading_pair": product,
             "controller_override": "fill_anchored",
             "anchor_mode": strategy,
-            "reset_threshold_pct": Decimal(str(_f(settings, "reset_threshold_pct", default_reset))) / Decimal(100),
+            "reset_threshold_pct": Decimal(str(_reset_pct)) / Decimal(100),
             "spread_bid_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
             "spread_ask_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
             # Fill-anchored places ONE bid + ONE ask per cycle; a participation
