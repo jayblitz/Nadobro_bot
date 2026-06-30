@@ -280,10 +280,11 @@ def test_drift_break_reports_hedge_broken_stop_reason():
     asyncio.run(body())
 
 
-def test_funding_flip_closes_after_min_hold_and_aborts_cycles():
-    """Past the minimum hold, a confirmed funding flip closes BOTH legs (planned
-    TIME_LIMIT exit) and aborts further cycles so we don't churn back into
-    unfavorable funding — cycles=2 stops at 1."""
+def test_funding_flip_closes_early_and_aborts_cycles():
+    """A confirmed funding flip closes BOTH legs EARLY — before the planned hold
+    (TIME_LIMIT exit) — and aborts further cycles so we don't churn back into
+    unfavorable funding (cycles=2 stops at 1). hold_seconds is large so the
+    PLANNED close can't fire; only the funding flip can."""
     from src.nadobro.engine.types import CloseType
     from src.nadobro.engine.controllers.delta_neutral import DNPhase
 
@@ -293,7 +294,7 @@ def test_funding_flip_closes_after_min_hold_and_aborts_cycles():
         orch, c = _dn(adapter, InventoryRepository(),
                       {"trading_pair_long": "L", "trading_pair_short": "S",
                        "hedge_ratio": "1", "leg_amount_quote": "50", "max_drift_pct": "0.05",
-                       "hold_seconds": 0, "funding_exit_enabled": True,
+                       "hold_seconds": 100000, "funding_exit_enabled": True,
                        "funding_poll_seconds": 0, "funding_flip_confirmations": 2,
                        "cycles": 2, "cycle_gap_seconds": 0})
         await orch.spawn_controller(c)
@@ -315,9 +316,10 @@ def test_funding_flip_closes_after_min_hold_and_aborts_cycles():
     asyncio.run(body())
 
 
-def test_favorable_funding_holds_past_min_hold():
-    """With funding still favorable (short earns) and no max-hold cap, the hedge
-    stays open past the minimum hold instead of closing on a timer."""
+def test_favorable_funding_does_not_exit_early():
+    """While funding stays favorable (short earns), the funding-flip early exit
+    does NOT fire — the hedge keeps holding until its PLANNED close. (hold is
+    large here so we observe holding before the planned close.)"""
     from src.nadobro.engine.controllers.delta_neutral import DNPhase
 
     async def body():
@@ -326,9 +328,9 @@ def test_favorable_funding_holds_past_min_hold():
         orch, c = _dn(adapter, InventoryRepository(),
                       {"trading_pair_long": "L", "trading_pair_short": "S",
                        "hedge_ratio": "1", "leg_amount_quote": "50", "max_drift_pct": "0.05",
-                       "hold_seconds": 0, "funding_exit_enabled": True,
+                       "hold_seconds": 100000, "funding_exit_enabled": True,
                        "funding_poll_seconds": 0, "funding_flip_confirmations": 2,
-                       "max_hold_seconds": 0})              # 0 = no cap, hold while favorable
+                       "max_hold_seconds": 0})
         await orch.spawn_controller(c)
         for _ in range(5):
             await orch.tick_controller(c.id)
@@ -349,7 +351,7 @@ def test_funding_flip_debounce_resets_on_favorable():
         orch, c = _dn(adapter, InventoryRepository(),
                       {"trading_pair_long": "L", "trading_pair_short": "S",
                        "hedge_ratio": "1", "leg_amount_quote": "50", "max_drift_pct": "0.05",
-                       "hold_seconds": 0, "funding_exit_enabled": True,
+                       "hold_seconds": 100000, "funding_exit_enabled": True,
                        "funding_poll_seconds": 0, "funding_flip_confirmations": 2,
                        "max_hold_seconds": 0})
         await orch.spawn_controller(c)
@@ -367,10 +369,11 @@ def test_funding_flip_debounce_resets_on_favorable():
     asyncio.run(body())
 
 
-def test_min_hold_blocks_funding_exit():
-    """Before the minimum hold elapses, even strongly unfavorable funding must
-    NOT close the hedge (funding isn't even polled yet)."""
-    from src.nadobro.engine.controllers.delta_neutral import DNPhase
+def test_funding_flip_exits_early_before_hold():
+    """A confirmed unfavorable flip closes the hedge EARLY, before the planned
+    hold elapses (the safety early-exit). With confirmations=1 a single
+    unfavorable poll triggers it."""
+    from src.nadobro.engine.types import CloseType
 
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
@@ -381,10 +384,42 @@ def test_min_hold_blocks_funding_exit():
                        "hold_seconds": 3600, "funding_exit_enabled": True,
                        "funding_poll_seconds": 0, "funding_flip_confirmations": 1})
         await orch.spawn_controller(c)
-        await orch.tick_controller(c.id)                  # elapsed < min hold → no funding check
-        assert len(orch.list(c.id, active_only=True)) == 2
-        assert c.phase is DNPhase.HOLDING
-        assert c.funding_unfavorable_count == 0
+        await orch.tick_controller(c.id)                  # elapsed << hold, but flip confirmed → close early
+        assert orch.list(c.id, active_only=True) == []
+        assert c.last_close_type is CloseType.TIME_LIMIT
+        assert c._abort_cycles is True
+        assert "funding_flip" in [e["kind"] for e in c.consume_dn_events()]
+
+    asyncio.run(body())
+
+
+def test_hold_is_hard_close_even_when_funding_favorable():
+    """The user's hold is the PLANNED close time: once it elapses the hedge
+    closes even with favorable funding. (Regression for the reported bug where a
+    6h hold ran on toward the hidden 24h cap because favorable funding extended
+    it.)"""
+    import time as _time
+    from src.nadobro.engine.types import CloseType
+    from src.nadobro.engine.controllers.delta_neutral import DNPhase
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter.funding_rate_value = Decimal("0.0009")    # favorable — would have held under the old logic
+        orch, c = _dn(adapter, InventoryRepository(),
+                      {"trading_pair_long": "L", "trading_pair_short": "S",
+                       "hedge_ratio": "1", "leg_amount_quote": "50", "max_drift_pct": "0.05",
+                       "hold_seconds": 3600, "funding_exit_enabled": True,
+                       "funding_poll_seconds": 0, "funding_flip_confirmations": 2,
+                       "max_hold_seconds": 0, "cycles": 1})
+        await orch.spawn_controller(c)
+        c.opened_at = _time.time() - 3601                 # the 3600s hold just elapsed
+        await orch.tick_controller(c.id)                  # planned close fires despite favorable funding
+        assert orch.list(c.id, active_only=True) == []
+        assert c.last_close_type is CloseType.TIME_LIMIT
+        assert c._abort_cycles is False                   # planned close, not an abort
+        await orch.tick_controller(c.id)
+        assert c.cycles_completed == 1
+        assert c.phase is DNPhase.DONE
 
     asyncio.run(body())
 

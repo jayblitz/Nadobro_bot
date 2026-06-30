@@ -10,13 +10,13 @@ Lifecycle (driven by on_start + on_tick):
            long's filled base × hedge_ratio so the legs match in BASE terms
            regardless of the spot/perp mid gap). If the short fails to spawn the
            long is rolled back — never carry an unhedged leg.
-  HOLDING  hold for AT LEAST ``hold_seconds`` (default 1h). Each tick a drift
-           gate flattens both legs early if the hedge breaks beyond
-           ``max_drift_pct`` (safety). Once the minimum hold elapses the exit is
-           funding-driven: keep the hedge open while the short still earns
-           funding and close BOTH legs as soon as funding flips unfavorable
-           (debounced), or at ``max_hold_seconds`` as a safety cap. Set
-           ``funding_exit_enabled=False`` to restore a fixed hold at the minimum.
+  HOLDING  hold until ``hold_seconds`` (the user's "Hold") elapses, then close
+           BOTH legs — the hold is the PLANNED close time and is never exceeded.
+           Each tick a drift gate flattens both legs early if the hedge breaks
+           beyond ``max_drift_pct`` (safety), and — when ``funding_exit_enabled``
+           — a confirmed funding flip closes BOTH legs EARLY (debounced) so the
+           short stops paying funding. Funding rate + accrued earned are polled
+           here (throttled) so the dashboard reflects them in real time.
   CLOSING  reduce-only MARKET closes fired on BOTH legs concurrently (same tick
            ⇒ same minute). Wait until both terminate.
   WAITING  pause ``cycle_gap_seconds`` between cycles.
@@ -121,16 +121,17 @@ class DeltaNeutralController(Controller):
         self.cumulative_funding: Decimal = _dec(self.cfg("restore_funding_usd", "0") or "0")
         self._funding_reported: Decimal = self.cumulative_funding
 
-        # Funding-flip exit (engine-v2): ``hold_seconds`` is now a MINIMUM hold,
-        # not a fixed timer. After it elapses we keep the hedge open while the
-        # short still earns funding and close BOTH legs as soon as funding flips
-        # unfavorable (debounced), or at ``max_hold_seconds`` as a safety cap.
-        # The user can still close manually any time (the normal stop path), and
-        # the drift / dead-leg gates above still fire earlier than the minimum.
-        #   - funding_exit_enabled=False restores the legacy fixed-hold behavior
-        #     (close exactly at the minimum), used by cycle-mechanics tests.
+        # Hold + funding-flip exit (engine-v2): ``hold_seconds`` is the PLANNED
+        # CLOSE time (the user's "Hold"). The hedge closes when it elapses and is
+        # NEVER held past it. A confirmed funding flip closes BOTH legs EARLY
+        # (debounced) so the short stops paying funding; the user can also close
+        # manually any time, and the drift / dead-leg gates fire earlier still.
+        #   - funding_exit_enabled=False simply disables the early funding exit;
+        #     the hedge still closes at hold_seconds.
         #   - the short earns funding while rate > flip_threshold; "flip" =
         #     rate <= flip_threshold for funding_flip_confirmations polls in a row.
+        # ``min_hold_seconds`` is retained only as the max_hold floor (so a
+        # configured max cap can never be shorter than the hold itself).
         self.min_hold_seconds = self.hold_seconds
         _max_hold = max(0, _int_cfg(self.cfg("max_hold_seconds"), 86400))
         self.max_hold_seconds = max(_max_hold, self.min_hold_seconds) if _max_hold > 0 else 0
@@ -383,40 +384,42 @@ class DeltaNeutralController(Controller):
         except Exception:  # noqa: BLE001 - funding read is non-critical
             return None
 
-    async def _maybe_exit_on_funding_flip(self) -> None:
-        """After the minimum hold, poll the perp funding rate (throttled) and
-        close BOTH legs once it has flipped unfavorable for the short for
-        ``funding_flip_confirmations`` consecutive polls.
+    async def _poll_funding_and_check_flip(self) -> bool:
+        """Throttled indexer funding poll during HOLDING.
 
-        Best-effort and conservative: a failed or lagged read (None) is treated
-        as 'no signal' and never forces a close, so a venue hiccup can't unwind a
-        still-favorable hedge. A confirmed flip aborts further cycles — once the
-        edge is gone we don't churn back into unfavorable funding; the user can
-        restart (or pick a better pair from the Funding Rates screen)."""
+        Refreshes the accrued funding EARNED (cumulative_funding) and the live
+        RATE (last_funding_rate) so the dashboard updates in real time instead
+        of staying at $0 / 0.0 until the hedge closes. Returns True iff
+        funding-exit is enabled AND the rate has been unfavorable for the short
+        for ``funding_flip_confirmations`` consecutive polls (the early-exit
+        signal — the caller closes both legs).
+
+        Conservative: a failed or lagged rate read (None) is treated as 'no
+        signal' and never forces a close, so a venue hiccup can't unwind a
+        still-favorable hedge."""
         now = time.time()
         if (
             self.funding_poll_seconds > 0
             and self._last_funding_poll_ts is not None
             and (now - self._last_funding_poll_ts) < self.funding_poll_seconds
         ):
-            return
+            return False
         self._last_funding_poll_ts = now
+        # Accrued funding earned → dashboard (refreshed regardless of the flip
+        # exit so /status is live even when funding-exit is disabled).
+        await self.refresh_funding()
         rate = await self._read_funding_rate()
         if rate is None:
-            return  # no signal — leave the debounce counter untouched
+            return False  # no signal — leave the debounce counter untouched
         self.last_funding_rate = rate
+        if not self.funding_exit_enabled:
+            return False
         if rate > self.funding_flip_threshold:
             # Still favorable for the short — reset the debounce.
             self.funding_unfavorable_count = 0
-            return
+            return False
         self.funding_unfavorable_count += 1
-        if self.funding_unfavorable_count >= self.funding_flip_confirmations:
-            self._emit_dn(
-                "funding_flip",
-                f"funding flipped unfavorable ({rate}/day) — closing the hedge",
-            )
-            self._abort_cycles = True
-            await self._close_both_now(CloseType.TIME_LIMIT)
+        return self.funding_unfavorable_count >= self.funding_flip_confirmations
 
     async def _leg_value(self, pair: str) -> Decimal:
         if self.inventory is None:
@@ -593,32 +596,41 @@ class DeltaNeutralController(Controller):
                     await self._close_both_now(CloseType.EARLY_STOP)
                     return
 
-        # Hold management. ``hold_seconds`` is the MINIMUM hold; the exit is
-        # funding-driven after it (or capped by max_hold_seconds).
+        # Hold management. ``hold_seconds`` (the user's "Hold") is the PLANNED
+        # CLOSE time: the hedge closes when it elapses and is NEVER held past it.
+        # A confirmed funding flip can close BOTH legs EARLIER (a safety exit
+        # that can only make us close SOONER, never later).
         if self.opened_at is None:
             return
         elapsed = time.time() - self.opened_at
 
-        # Safety cap: never hold past max_hold_seconds (0 = no cap; hold while
-        # funding stays favorable).
+        # Absolute backstop: never hold past max_hold_seconds (>= hold_seconds;
+        # 0 = no extra cap). Redundant with the planned close below for a finite
+        # hold — kept as a safety net for a degenerate config.
         if self.max_hold_seconds and elapsed >= self.max_hold_seconds:
             await self._close_both_now(CloseType.TIME_LIMIT)
             return
 
-        # Minimum hold guarantees at least one funding settlement window before
-        # any funding-driven exit. Drift / dead-leg gates above still fire earlier.
-        if elapsed < self.min_hold_seconds:
-            return
-
-        # Legacy fixed-hold semantics when funding-exit is disabled: close as
-        # soon as the minimum hold elapses.
-        if not self.funding_exit_enabled:
+        # Throttled funding poll: refresh the live RATE + accrued EARNED for the
+        # dashboard AND evaluate the funding-flip early exit. A confirmed flip
+        # aborts further cycles — once the edge is gone we don't churn back into
+        # unfavorable funding.
+        if await self._poll_funding_and_check_flip():
+            self._emit_dn(
+                "funding_flip",
+                f"funding flipped unfavorable ({self.last_funding_rate}/day) — closing the hedge",
+            )
+            self._abort_cycles = True
             await self._close_both_now(CloseType.TIME_LIMIT)
             return
 
-        # Past the minimum hold: keep the hedge open while the short still earns
-        # funding; close BOTH legs once funding flips unfavorable (debounced).
-        await self._maybe_exit_on_funding_flip()
+        # Planned close: the user's hold elapsed — close both legs now. This is
+        # the guaranteed exit (the old behavior treated hold_seconds as a MINIMUM
+        # and held on while funding stayed favorable, up to a hidden 24h cap —
+        # which surprised users who set a finite hold and expected it to close).
+        if elapsed >= self.hold_seconds:
+            await self._close_both_now(CloseType.TIME_LIMIT)
+            return
 
     async def _tick_closing(self) -> None:
         # 1) Re-issue stops for any leg still alive — the first attempt may
