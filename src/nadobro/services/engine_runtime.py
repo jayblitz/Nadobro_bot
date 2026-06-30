@@ -886,7 +886,12 @@ def map_strategy_config(
     # the docs describe: grid = last-fill anchor + no-cross + soft-reset-to-mid;
     # rgrid = trend-following taker-momentum. The classic static ladder remains a
     # safety escape via ``fill_anchored=0`` (not surfaced in the UI).
-    _fa_default = 1.0 if strategy in ("grid", "rgrid") else 0.0
+    # grid now defaults to the classic MULTI-LEVEL recycling ladder (user choice:
+    # a real ladder, many resting orders, follows price via the controller
+    # re-center). fill_anchored=1 is the opt-in for the single-pair fill-anchored
+    # maker. rgrid stays fill-anchored momentum by default (trend-following taker)
+    # — its multi-level-ladder switch is pending an explicit decision.
+    _fa_default = 1.0 if strategy == "rgrid" else 0.0
     if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", _fa_default)):
         default_reset = 0.25 if strategy == "grid" else 0.125
         # The UI writes the reset threshold under per-strategy keys
@@ -1091,9 +1096,10 @@ def map_strategy_config(
     # ladder follows price ("reset and continue") instead of going stale. Drives
     # GridExecutor.recenter (no flatten); the controller floors it above the band.
     if strategy == "grid":
-        # Default ON (0.5% -> 50bp floor) so a Grid now allowed to run in trends
-        # follows price instead of resting a never-filling ladder below mid.
-        cfg["reset_threshold_bp"] = _f(settings, "grid_reset_threshold_pct", 0.5) * 100.0
+        # Re-center ON by default: pass the user's explicit reset through, else 0
+        # so the controller uses its band-width auto-follow (50bp was too coarse —
+        # the ladder rarely re-centered and went stale below mid).
+        cfg["reset_threshold_bp"] = _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0
         # GRID-IN-TRENDS (user directive 2026-06-21): plain Grid was gated OUT of
         # trends/expansions by default and silently never quoted (the "always
         # market paused" report). Default the regime gate OFF for grid so it

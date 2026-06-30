@@ -193,22 +193,26 @@ def test_dgrid_continuous_quoting_wiring():
 
 
 def test_classic_grid_rgrid_ladder_recycles():
-    """The classic multi-level ladder (fill_anchored=0) for grid & rgrid recycles
-    completed levels so it keeps working continuously, like D-Grid. The default
-    grid/rgrid run the fill-anchored controller (continuous by design) and never
-    see this flag — it only affects the GridExecutor ladder."""
+    """The multi-level GridExecutor ladder recycles completed levels so it keeps
+    working continuously, like D-Grid. grid now DEFAULTS to this ladder; rgrid
+    defaults to fill-anchored momentum (no GridExecutor) but can opt in."""
+    # Explicit classic ladder (fill_anchored=0) recycles for both.
     for strat in ("grid", "rgrid"):
         classic = er.map_strategy_config(
             strat, {"notional_usd": 100.0, "levels": 3, "fill_anchored": 0},
             Decimal(58000), product="BTC-USDC",
         )
         assert classic["recycle_levels"] is True, strat
-        # Default (fill-anchored) path returns before the ladder cfg -> no flag.
-        default = er.map_strategy_config(
-            strat, {"notional_usd": 100.0, "levels": 3},
-            Decimal(58000), product="BTC-USDC",
-        )
-        assert "recycle_levels" not in default, strat
+    # grid DEFAULTS to the recycling ladder now.
+    g_def = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 3}, Decimal(58000), product="BTC-USDC",
+    )
+    assert g_def.get("recycle_levels") is True and "controller_override" not in g_def
+    # rgrid still defaults to fill-anchored momentum: different controller, no flag.
+    r_def = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 3}, Decimal(58000), product="BTC-USDC",
+    )
+    assert "recycle_levels" not in r_def and r_def["controller_override"] == "fill_anchored"
 
 
 def test_map_vol_config_is_spot():
