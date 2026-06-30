@@ -1059,18 +1059,22 @@ def map_strategy_config(
         cfg["dgrid_trail_arm_pct"] = _f(settings, "dgrid_trail_arm_pct", 1.0)
         cfg["dgrid_trail_giveback_pct"] = _f(settings, "dgrid_trail_giveback_pct", 0.5)
         cfg["dgrid_reversal_flip_pct"] = _f(settings, "dgrid_reversal_flip_pct", 0.4)
-        # Reset re-center honors the user's reset setting (grid_reset_threshold_pct,
-        # default 0.2% -> 20bp). This now drives an IN-PLACE re-quote of the
-        # resting ladder (GridExecutor.recenter), not a flatten — so it cannot
-        # bleed fees. The controller still FLOORS the threshold above the grid
-        # band (see __init__) so it never fires on normal in-band oscillation.
-        # TREND-CAPTURE (2026-06-21): default the re-center ON (0.5% -> floored to
-        # 50bp in the controller) so the ladder FOLLOWS price as it trends instead
-        # of going stale and never filling — the "placed 2 orders and stopped"
-        # report. Explicit 0 still disables it.
+        # Continuous market-making grid: re-arm completed levels so the band keeps
+        # working (buy dip / sell pop / re-arm) instead of draining to COMPLETE
+        # and terminating — the other half of the "placed a few orders and
+        # stopped" report. Bounded by the net-exposure cap + session rails.
+        cfg["recycle_levels"] = True
+        # Reset re-center drives an IN-PLACE re-quote of the resting ladder
+        # (GridExecutor.recenter) — no flatten, no realized loss — so it can
+        # follow price closely without bleeding fees. Pass the user's explicit
+        # threshold through when set; otherwise pass 0 so the controller picks
+        # its geometry default (~one band width of drift) and the ladder FOLLOWS
+        # price as it trends instead of going stale ("placed a few orders and
+        # stopped"). 50bp was too coarse — BTC rarely drifts that far inside one
+        # 30-60s tick, so it almost never re-centered.
         cfg["dgrid_reset_threshold_bp"] = _f(
             settings, "dgrid_reset_threshold_bp",
-            _f(settings, "grid_reset_threshold_pct", 0.5) * 100.0,
+            _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0,
         )
         # Dynamic Grid's own min/max per-side spread bounds drive the auto-spread
         # clamp (previously dead — _quote_defense_defaults hardcoded the band).

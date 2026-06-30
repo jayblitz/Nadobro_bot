@@ -84,6 +84,12 @@ class GridExecutorConfig:
     triple_barrier_config: Optional[TripleBarrierConfig] = None
     leverage: int = 1
     keep_position: bool = False
+    # Continuous market-making grid: when True, a fully round-tripped level
+    # (COMPLETE) is re-armed to a fresh NOT_ACTIVE slot each tick so the grid
+    # keeps working its band (buy the dip, sell the pop, re-arm, repeat) instead
+    # of draining to all-COMPLETE and terminating. Default False preserves the
+    # classic one-shot ladder (grid/rgrid fill_anchored=0). D-Grid sets it True.
+    recycle_levels: bool = False
     connector_name: str = "nado"
 
     def __post_init__(self) -> None:
@@ -430,9 +436,32 @@ class GridExecutor(Executor):
             return
         for level in self.levels:
             await self._process_level(level, mid)
+        if self.config.recycle_levels:
+            # Continuous grid: re-arm round-tripped levels so the band keeps
+            # working. New entries still pass through _maybe_place_opens, which
+            # honors suppress_new_entries (the controller's net-exposure cap),
+            # so this can't accumulate past the inventory limit.
+            self._recycle_completed_levels()
         await self._maybe_place_opens()
-        if all(lv.state is GridLevelState.COMPLETE for lv in self.levels):
+        if not self.config.recycle_levels and all(
+            lv.state is GridLevelState.COMPLETE for lv in self.levels
+        ):
             self._terminate(CloseType.COMPLETED)
+
+    def _recycle_completed_levels(self) -> None:
+        """Reset fully round-tripped levels (open filled + close filled) back to
+        a fresh NOT_ACTIVE slot at the same band price so ``_maybe_place_opens``
+        re-issues the entry. The completed round trip is already booked into the
+        shared inventory, so zeroing the level's local accounting is safe — the
+        new open is a new position with its own close leg. Price-following is
+        handled separately by the controller's re-center (which re-prices free
+        slots toward the current mid)."""
+        for i, lv in enumerate(self.levels):
+            if lv.state is GridLevelState.COMPLETE:
+                self.levels[i] = GridLevel(
+                    index=lv.index, open_price=lv.open_price,
+                    close_price=lv.close_price, amount_base=lv.amount_base,
+                )
 
     def _take_profit_breached(self, mid: Decimal) -> bool:
         """True when price has moved FAVORABLY by ``take_profit`` from the

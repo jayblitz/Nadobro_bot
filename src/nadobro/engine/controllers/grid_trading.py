@@ -37,6 +37,7 @@ def build_grid_config(configs: dict, side: TradeType) -> GridExecutorConfig:
         triple_barrier_config=configs.get("triple_barrier_config"),
         leverage=int(configs.get("leverage", 1)),
         keep_position=bool(configs.get("keep_position", False)),
+        recycle_levels=bool(configs.get("recycle_levels", False)),
     )
 
 

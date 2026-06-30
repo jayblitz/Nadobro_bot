@@ -172,6 +172,26 @@ def test_fill_anchored_reset_threshold_reads_ui_keys():
     assert rgrid_def["reset_threshold_pct"] == Decimal("0.125") / Decimal(100)
 
 
+def test_dgrid_continuous_quoting_wiring():
+    """D-Grid must (a) recycle completed levels so it keeps working the band and
+    (b) leave the re-center threshold at 0 when the user hasn't pinned one, so
+    the controller picks its band-width auto-follow default (50bp was too coarse
+    and the grid 'placed a few orders and stopped'). An explicit value passes
+    through."""
+    dg = er.map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "levels": 3, "dgrid_spread_bp": 8.0},
+        Decimal(58000), product="BTC-USDC",
+    )
+    assert dg["recycle_levels"] is True
+    assert dg["dgrid_reset_threshold_bp"] == 0.0  # -> controller auto-follow default
+    # Explicit user reset (grid_reset_threshold_pct=0.8% -> 80bp) is honored.
+    dg2 = er.map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "levels": 3, "grid_reset_threshold_pct": 0.8},
+        Decimal(58000), product="BTC-USDC",
+    )
+    assert dg2["dgrid_reset_threshold_bp"] == 80.0
+
+
 def test_map_vol_config_is_spot():
     cfg = er.map_strategy_config(
         "vol", {"notional_usd": 40.0, "interval_seconds": 60}, Decimal(100), product="KBTC-USDC",
