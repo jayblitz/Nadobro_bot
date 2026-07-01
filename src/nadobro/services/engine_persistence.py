@@ -316,6 +316,25 @@ class DbTradeRecorder:
         }
         if order_id:
             data["order_digest"] = str(order_id)
+            # Idempotency: if venue-sync already recorded this fill authoritatively
+            # (it carries a submission_idx), do NOT insert a duplicate strategy row.
+            # The executor recorder and nado_sync._write_matches are two writers for
+            # the same fill; whichever runs SECOND must defer. When the recorder
+            # runs first its submission_idx-less row is ENRICHED by _write_matches
+            # (not duplicated); when venue-sync runs first (it can beat the
+            # executor's fill detection by tens of seconds), this guard stops the
+            # recorder from double-counting the fill.
+            from src.nadobro.db import query_one as _qone
+            _tbl = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+            try:
+                if _qone(
+                    f"SELECT 1 FROM {_tbl} WHERE order_digest = %s "
+                    f"AND submission_idx IS NOT NULL LIMIT 1",
+                    (str(order_id),),
+                ):
+                    return
+            except Exception:  # noqa: BLE001 - dedupe probe is best-effort
+                pass
         if realized_pnl is not None:
             data["realized_pnl"] = str(_dec(realized_pnl))
         insert_trade(data, network=network)
@@ -326,6 +345,34 @@ class DbTradeRecorder:
         # enriches this row instead of writing an untagged duplicate.
         if order_id:
             self._link_intent(str(order_id), int(session_id), network)
+
+    def link_placement(self, controller_id: str, order_id: Optional[str]) -> None:
+        """Link a freshly-PLACED order digest to its live session BEFORE any fill.
+
+        This is the deterministic fix for session-volume undercount. Engine fill
+        detection (order_status polling) is unreliable, but nado_sync reliably
+        syncs every venue fill. Writing the digest→session intent at placement
+        (``source='strategy'``) means ``_write_matches._back_link_intent`` then
+        attributes EVERY venue fill for this order to the session as
+        ``source='strategy'`` — and the session rollup counts only
+        ``source='strategy'`` — so volume no longer depends on the executor
+        catching the fill. Best-effort; never raises (a fill is never lost to it).
+        """
+        try:
+            if not order_id:
+                return
+            parsed = _parse_controller_id(controller_id)
+            if parsed is None:
+                return
+            strategy, user_id, network = parsed
+            session_id = self._resolve_session_id(strategy, user_id, network)
+            if session_id is None:
+                return
+            self._link_intent(str(order_id), int(session_id), network)
+        except Exception:  # noqa: BLE001 - placement linking is best-effort
+            _recorder_logger.debug(
+                "placement intent link failed controller=%s", controller_id, exc_info=True
+            )
 
     @staticmethod
     def _link_intent(digest: str, session_id: int, network: str) -> None:

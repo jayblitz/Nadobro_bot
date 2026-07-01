@@ -27,7 +27,7 @@ import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, AsyncIterator, Dict, Iterable, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, Optional, Sequence
 
 from src.nadobro.engine.adapter.base import (
     AdapterError,
@@ -232,9 +232,15 @@ class NadoAdapter(NadoAdapterBase):
         client: NadoClient,
         products: Dict[str, ProductMeta],
         registry: Optional[OrderRegistry] = None,
+        on_place: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._client = client
         self._products = products
+        # Optional placement hook: called with the venue digest right after a
+        # successful placement (single choke point for all engine orders). The
+        # runtime wires this to link digest→session at placement so fill volume
+        # is attributed from the venue sync regardless of executor fill detection.
+        self._on_place = on_place
         self._orders: Dict[str, _OrderRef] = {}
         self._registry: OrderRegistry = registry or OrderRegistry()
         # Phase C: last authoritative status snapshot per digest +
@@ -376,6 +382,16 @@ class NadoAdapter(NadoAdapterBase):
         # client id (tag) OR the digest resolve back to this order's metadata.
         order_tags.bind_digest(tag, order.id)
         order_lifecycle.seed(order.id, state=order.state, tag=tag)
+        # Placement hook: link this digest to the live session NOW (before any
+        # fill/venue-sync) so volume attribution doesn't depend on the executor
+        # detecting the fill. The hook does synchronous DB writes, so run it OFF
+        # the event loop (a grid places many orders per tick — never block the
+        # loop). Best-effort: a link failure must never fail a placed order.
+        if self._on_place is not None:
+            try:
+                await asyncio.to_thread(self._on_place, order.id)
+            except Exception:  # noqa: BLE001 - placement link is best-effort
+                logger.debug("on_place link failed for %s", order.id, exc_info=True)
         ref = _OrderRef(
             trading_pair, meta.product_id, side, order_type, amount_base, price
         )

@@ -662,6 +662,15 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         # never treat ``realized_pnl_x18`` as authoritative PnL.
         pnl_x18 = _x18_field(match, "realized_pnl", "realized_pnl_x18")
         base_amount = from_x18(base_x18)
+        # HUMAN columns. Rollups + PnL/History cards read fill_size * fill_price
+        # (human), NOT the *_x18 columns. A venue-only fill (no recorder row) was
+        # inserted with x18 amounts but NULL price, so it counted as $0 volume even
+        # once attributed. Derive human size/price/fee from the authoritative venue
+        # quote (the notional) so every synced fill contributes real volume.
+        base_h = abs(base_amount)
+        quote_h = abs(from_x18(quote_x18))
+        fee_h = abs(from_x18(fee_x18))
+        price_h = (quote_h / base_h) if base_h > 0 else Decimal(0)
         digest = str(
             match.get("digest")
             or match.get("order_digest")
@@ -669,6 +678,25 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             or order.get("order_digest")
             or ""
         ).strip()
+        # IndexerMatch carries no product_id/name; recover BOTH from open_orders by
+        # digest BEFORE the window fallback so (a) the product-scoped window resolve
+        # can match the session's product (product_id=0 never matched → orphaned),
+        # and (b) the inserted fill keeps a real product_id + name (not product_id=0,
+        # which the per-trade card can't pair).
+        recovered_pname = str(match.get("product_name") or "").strip()
+        if int(product_id or 0) == 0 and digest:
+            try:
+                _oo = query_one(
+                    "SELECT product_id, pair FROM open_orders "
+                    "WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 LIMIT 1",
+                    (digest,),
+                )
+                if _oo and _oo.get("product_id"):
+                    product_id = int(_oo["product_id"])
+                    if not recovered_pname and _oo.get("pair"):
+                        recovered_pname = str(_oo["pair"])
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                pass
         session_id, source = _back_link_intent(digest, network)
         if session_id is None:
             # Digest back-link missed (no order_intents row for this fill).
@@ -717,35 +745,22 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 _maybe_increment_session_win_loss(session_id, pnl_x18)
                 continue
 
-        # IndexerMatch carries no product_id. For a freshly-inserted fill with no
-        # recorder row to inherit from (e.g. desk — DbTradeRecorder skips when
-        # there's no session), recover product_id + name from the live open_orders
-        # row for this digest, so the fill is attributable to a product instead of
-        # collapsing into the product_id=0 bucket the per-trade card can't pair.
+        # product_id + name were already recovered from open_orders above (used for
+        # the window fallback too); reuse them here so the inserted fill is
+        # attributable to a product instead of the product_id=0 bucket.
         insert_pid = int(product_id or 0)
-        insert_pname = str(match.get("product_name") or "").strip()
-        if insert_pid == 0 and digest:
-            oo = query_one(
-                "SELECT product_id, pair FROM open_orders "
-                "WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 LIMIT 1",
-                (digest,),
-            )
-            if oo and oo.get("product_id"):
-                insert_pid = int(oo["product_id"])
-                if not insert_pname and oo.get("pair"):
-                    insert_pname = str(oo["pair"])
-        if not insert_pname:
-            insert_pname = f"ID:{insert_pid}"
+        insert_pname = recovered_pname or f"ID:{insert_pid}"
 
         execute(
             f"""
             INSERT INTO {table} (
-              user_id, product_id, product_name, order_type, side, size, status,
+              user_id, product_id, product_name, order_type, side, size,
+              fill_size, price, fill_price, fill_fee, status,
               submission_idx, isolated, realized_pnl_x18, fee_x18, base_filled_x18, quote_filled_x18,
               order_digest, strategy_session_id, source,
               filled_at, created_at
             )
-            VALUES (%s, %s, %s, 'match', %s, %s, 'filled', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (%s, %s, %s, 'match', %s, %s, %s, %s, %s, %s, 'filled', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             """,
             (
                 user_id,
@@ -753,6 +768,13 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 insert_pname,
                 "long" if base_amount >= 0 else "short",
                 str(abs(base_amount)),
+                # Human columns so this venue-only fill contributes real volume/fees
+                # (rollups read fill_size * fill_price, not the x18 columns). Use
+                # fixed-point (:f) so a value like 100/1.25 is stored "80", not "8E+1".
+                f"{base_h:f}",
+                f"{price_h:f}",
+                f"{price_h:f}",
+                f"{fee_h:f}",
                 submission_idx,
                 bool(match.get("isolated")),
                 pnl_x18,

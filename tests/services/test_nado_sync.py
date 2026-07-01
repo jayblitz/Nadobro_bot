@@ -163,9 +163,14 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
 
         assert inserted == 1
         params = execute_calls[0][1]
-        assert params[4] == "1.25"
-        assert params[8] == str(to_x18("0.5"))
-        assert params[9] == str(to_x18("1.25"))
+        # size + human columns (rollups read fill_size * fill_price, not x18):
+        assert params[4] == "1.25"                  # size
+        assert params[5] == "1.25"                  # fill_size (human)
+        assert params[7] == "80"                    # fill_price = |quote|/|base| = 100/1.25
+        assert params[8] == "0.5"                   # fill_fee (human)
+        # x18 fields still persisted (authoritative venue values):
+        assert params[12] == str(to_x18("0.5"))     # fee_x18
+        assert params[13] == str(to_x18("1.25"))    # base_filled_x18
 
     def test_write_matches_enriches_manual_recorder_row_no_dupe(self):
         # A manual OPEN recorder row (which carries product_id) must be ENRICHED,

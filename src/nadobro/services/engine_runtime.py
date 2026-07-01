@@ -60,12 +60,15 @@ CONTROLLER_REGISTRY: Dict[str, type] = {
 # --------------------------------------------------------------------------
 # construction
 # --------------------------------------------------------------------------
-def build_adapter(client: object, products: Dict[str, object]) -> NadoAdapterBase:
+def build_adapter(
+    client: object, products: Dict[str, object], on_place: Optional[Any] = None
+) -> NadoAdapterBase:
     """Construct the live Nado adapter from a NadoClient + product-metadata map.
-    ``products`` maps trading_pair -> ProductMeta (see adapter/nado.py)."""
+    ``products`` maps trading_pair -> ProductMeta (see adapter/nado.py).
+    ``on_place`` (optional) is called with each placed digest for session linking."""
     from src.nadobro.engine.adapter.nado import NadoAdapter
 
-    return NadoAdapter(client, products)  # type: ignore[arg-type]
+    return NadoAdapter(client, products, on_place=on_place)  # type: ignore[arg-type]
 
 
 def build_risk_engine(limits: Optional[RiskLimits] = None) -> RiskEngine:
@@ -1581,7 +1584,17 @@ async def run_engine_cycle(
                     )
             except Exception:  # noqa: BLE001 - seeding is best-effort, never block start
                 logger.debug("fill-anchored seed_fills skipped", exc_info=True)
-        adapter = build_adapter(client, meta)
+        # Wire placement-time digest→session linking so every venue fill is
+        # attributed to this run (source='strategy') even when the executor's own
+        # fill detection misses it — the root fix for session-volume undercount.
+        _placement_recorder = getattr(RUNTIME, "_trade_recorder", None)
+        _placement_cid = deterministic_controller_id(strategy, telegram_id, network)
+
+        def _link_placed_digest(digest: str) -> None:
+            if _placement_recorder is not None and hasattr(_placement_recorder, "link_placement"):
+                _placement_recorder.link_placement(_placement_cid, digest)
+
+        adapter = build_adapter(client, meta, on_place=_link_placed_digest)
         started_controller = await RUNTIME.start(
             telegram_id, network, strategy, configs, adapter, DbInventoryRepository(),
             limits=limits,
