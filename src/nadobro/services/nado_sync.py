@@ -643,6 +643,11 @@ def _write_open_orders(user_id: int, network: str, orders: list[dict[str, Any]])
 def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) -> int:
     inserted = 0
     table = f"trades_{_network_table_suffix(network)}"
+    # Sessions that received a (late-syncing) fill this pass. The stored session
+    # totals (Volume/Fees/PnL on the Performance + Share-PnL cards) are written by
+    # the finalize rollup at STOP — but a session's CLOSE fills sync AFTER stop, so
+    # without re-rolling up here the shareable card would miss the close turnover.
+    touched_sessions: set[int] = set()
     for match in matches:
         submission_idx = match.get("submission_idx")
         if submission_idx is None:
@@ -744,6 +749,9 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             except Exception:  # noqa: BLE001 - recovery is best-effort
                 pass
 
+        if session_id is not None:
+            touched_sessions.add(int(session_id))
+
         # Engine (``source='strategy'``) AND manual open (``source='manual'``)
         # fills are written at fill time by a recorder row carrying human columns
         # and — crucially — a real ``product_id`` (IndexerMatch has none). Enrich
@@ -827,6 +835,30 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         )
         inserted += 1
         _maybe_increment_session_win_loss(session_id, pnl_x18)
+
+    # Re-roll up any session that got a fill this pass so its STORED totals
+    # (Volume/Fees/PnL/counts) reflect late-syncing fills — crucially the close
+    # turnover, which lands after the finalize rollup ran at stop. Off the event
+    # loop (this runs in a worker thread) and idempotent (recomputed from trades).
+    for _sid in touched_sessions:
+        try:
+            from src.nadobro.models.database import (
+                rollup_engine_session_pnl_funding,
+                rollup_session_from_trades,
+            )
+
+            rollup_session_from_trades(_sid, network)
+            # Realized PnL / funding are derived (venue reports no per-fill PnL);
+            # must run AFTER rollup_session_from_trades. GATE to engine strategies
+            # (this fn is not self-gating — the caller must, or a legacy session's
+            # PnL gets overwritten).
+            _srow = query_one("SELECT strategy FROM strategy_sessions WHERE id = %s", (_sid,))
+            _strat = str((_srow or {}).get("strategy") or "").lower()
+            from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+            if _strat in ENGINE_MAPPED_STRATEGIES:
+                rollup_engine_session_pnl_funding(_sid, network)
+        except Exception:  # noqa: BLE001 - re-rollup is best-effort, never break sync
+            logger.debug("post-sync session re-rollup failed sid=%s", _sid, exc_info=True)
     return inserted
 
 
