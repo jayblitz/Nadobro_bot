@@ -85,7 +85,7 @@ from src.nadobro.config import (
     list_volume_spot_product_names,
     normalize_volume_spot_symbol,
 )
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk
 from src.nadobro.services.perf import timed_metric, log_slow
 from src.nadobro.services.trading_readiness import check_trading_readiness
 
@@ -799,7 +799,22 @@ async def _handle_status_callback(query, data: str, telegram_id: int):
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else "refresh"
     if action == "stop":
-        ok, msg = await run_blocking(stop_user_bot, telegram_id, True)
+        # Instant ack so the card doesn't sit frozen while cleanup runs — the
+        # stop path cancels resting orders + flattens on the venue, which can
+        # take seconds even after scoping (and minutes under venue throttling).
+        # Run it on the SDK pool (not the small misc pool the click path uses to
+        # render cards) so other taps stay responsive while this works.
+        try:
+            with language_context(get_user_language(telegram_id)):
+                await _edit_loc(
+                    query,
+                    "🛑 Stopping the strategy and closing open positions…",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise
+        ok, msg = await run_blocking_sdk(stop_user_bot, telegram_id, True)
         body, merged_kb = await build_status_dashboard_parts(telegram_id)
         prefix = "🛑" if ok else "⚠️"
         with language_context(get_user_language(telegram_id)):

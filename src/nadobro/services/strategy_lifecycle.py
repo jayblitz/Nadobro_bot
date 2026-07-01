@@ -57,4 +57,10 @@ def cleanup_strategy_positions(telegram_id: int, network: str, state: dict[str, 
             max_base_size=_volume_spot_managed_size(state),
         )
 
-    return close_all_positions(telegram_id, network=network)
+    # Grid / D-Grid / R-Grid / Mid are single-product strategies — scope the
+    # flatten to the product they traded instead of sweeping every perp market
+    # (the sweep is what made a stop take minutes under venue rate-limiting).
+    # Falls back to a full close inside close_all_positions if the product can't
+    # be resolved.
+    only_product = str(state.get("product") or "").strip() or None
+    return close_all_positions(telegram_id, network=network, only_product=only_product)

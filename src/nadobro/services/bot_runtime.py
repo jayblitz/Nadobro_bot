@@ -129,8 +129,9 @@ STRATEGY_ERROR_ALERT_STREAK = 3
 
 # Engine strategies that spawn their executors on the first *tick* (not in
 # on_start). For these the eager kickoff must fire an immediate follow-up tick
-# or the strategy posts nothing until the scheduler's next interval.
-_SPAWN_ON_TICK_STRATEGIES = {"dgrid", "mid"}
+# or the strategy posts nothing until the scheduler's next interval. rgrid now
+# runs DynamicGridController (spawns in on_tick), so it joins this set.
+_SPAWN_ON_TICK_STRATEGIES = {"dgrid", "rgrid", "mid"}
 
 _bot_app = None
 _runtime_loop: asyncio.AbstractEventLoop | None = None

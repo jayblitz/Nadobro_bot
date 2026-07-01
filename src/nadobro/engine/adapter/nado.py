@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -62,6 +63,16 @@ _OPEN_LIST_KEYS = ("orders", "open_orders", "data", "result")
 _REJECTED_STATES = ("rejected", "expired", "failed", "error")
 _CANCELLED_STATES = ("cancelled", "canceled", "voided")
 _FILLED_STATES = ("filled", "matched", "complete", "completed")
+
+# order_status polls fetch the WHOLE product open-orders list, and a grid ticks
+# order_status once PER LEVEL — so an N-level ladder made N identical
+# get_open_orders (query_orders) gateway calls every tick, a top cause of the
+# venue 429 storms (and worse now that grid/rgrid/dgrid are multi-level). Coalesce
+# them: the first status poll for a product fetches the snapshot, the rest of that
+# tick's polls reuse it. TTL is far below the strategy tick interval (30-60s) so a
+# fill is at most this stale before the next tick's fresh fetch. Poll-only path
+# (verify-after-cancel / reconcile stay uncached — they need post-mutation truth).
+_OPEN_ORDERS_SNAP_TTL_S = float(os.environ.get("NADO_OPEN_ORDERS_SNAP_TTL_SECONDS", "2.0"))
 
 # AUDIT-FIX-3: warn once per process per non-unit leverage so we don't spam logs.
 _warned_leverage_set: set[int] = set()
@@ -230,6 +241,9 @@ class NadoAdapter(NadoAdapterBase):
         # (lifecycle change-seq seen when it was taken). Lets order_status skip
         # a gateway poll while the WS lifecycle says nothing changed.
         self._status_cache: Dict[str, tuple[NadoOrder, int]] = {}
+        # Per-product open-orders snapshot for intra-tick coalescing (see
+        # _OPEN_ORDERS_SNAP_TTL_S): product_id -> (monotonic_ts, orders).
+        self._open_orders_snap: Dict[int, tuple[float, list]] = {}
 
     # -- product metadata -------------------------------------------------
     def _meta(self, trading_pair: str) -> ProductMeta:
@@ -366,6 +380,9 @@ class NadoAdapter(NadoAdapterBase):
             trading_pair, meta.product_id, side, order_type, amount_base, price
         )
         self._orders[order.id] = ref
+        # Mutation: a new resting order changes the product's open-orders list,
+        # so drop the coalesced snapshot.
+        self._open_orders_snap.pop(int(meta.product_id), None)
         try:
             self._registry.record(order.id, ref)
         except Exception:  # noqa: BLE001 - persistence must not break placement
@@ -436,6 +453,9 @@ class NadoAdapter(NadoAdapterBase):
         if ref is None:
             return False
         self._orders[order_id] = ref
+        # Mutation: drop the coalesced snapshot so any post-cancel re-poll (the
+        # BUG-GR-1 capture-partial-fill probe) reads fresh, not a pre-cancel state.
+        self._open_orders_snap.pop(int(ref.product_id), None)
 
         # AUDIT-FIX-1: NadoClient.cancel_orders catches internal SDK exceptions
         # and returns {"success": False, "error": "..."} instead of raising.
@@ -502,14 +522,35 @@ class NadoAdapter(NadoAdapterBase):
                 return snap
             if lc is not None and lc.fresh and lc.seq == seen_seq:
                 return snap
+            # A fresh WS event bumped the seq since our last snapshot (e.g. a
+            # fill): capture the new amounts NOW — bypass the intra-tick
+            # open-orders coalescing so we don't serve a pre-event snapshot shared
+            # with sibling levels on this product.
+            if lc is not None and lc.fresh and lc.seq != seen_seq:
+                self._open_orders_snap.pop(int(ref.product_id), None)
 
         order = await self._order_status_rest(order_id, ref)
         self._status_cache[order_id] = (order, lc.seq if lc is not None else -1)
         return order
 
+    async def _open_orders_coalesced(self, product_id: int) -> list:
+        """get_open_orders(product_id) with a short intra-tick TTL so N per-level
+        order_status polls in one tick share ONE gateway (query_orders) call.
+        Only the read-only status-poll path uses this; mutation-verification
+        paths call get_open_orders directly for post-cancel/place truth."""
+        pid = int(product_id)
+        now = time.monotonic()
+        hit = self._open_orders_snap.get(pid)
+        if hit is not None and (now - hit[0]) < _OPEN_ORDERS_SNAP_TTL_S:
+            return hit[1]
+        orders = await asyncio.to_thread(self._client.get_open_orders, pid, True)
+        orders = list(orders or [])
+        self._open_orders_snap[pid] = (now, orders)
+        return orders
+
     async def _order_status_rest(self, order_id: str, ref: _OrderRef) -> NadoOrder:
         try:
-            open_orders = await asyncio.to_thread(self._client.get_open_orders, ref.product_id, True)
+            open_orders = await self._open_orders_coalesced(ref.product_id)
         except Exception as exc:  # noqa: BLE001
             raise AdapterError(f"order_status failed: {exc}") from exc
 

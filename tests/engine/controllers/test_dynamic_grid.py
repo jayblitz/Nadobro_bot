@@ -114,8 +114,10 @@ def test_metrics_exposed_for_dashboard():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
         orch = ExecutorOrchestrator()
-        # 25bp requested, but it must be floored above the grid band (step 20bp
-        # x (3-1) = 40bp band -> 120bp floor) so reset can't fire inside the band.
+        # 25bp requested. The re-center only re-quotes unfilled maker opens (no
+        # flatten), so we follow price closely: an explicit value is honored with
+        # only a small half-band floor (step 20bp x (3-1) = 40bp band -> 20bp
+        # half-band, < 25), so 25bp passes through unchanged.
         cfg = dict(CFG, candle_provider=lambda p: _down(), dgrid_reset_threshold_bp=25.0)
         c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
                                   inventory=InventoryRepository(), configs=cfg)
@@ -124,29 +126,34 @@ def test_metrics_exposed_for_dashboard():
         m = c.dgrid_metrics()
         assert m["dgrid_phase"] == "rgrid"
         assert m["dgrid_variance_ratio"] >= 1.25
-        assert m["dgrid_reset_threshold_bp"] >= 50.0  # floored, not the raw 25
+        assert m["dgrid_reset_threshold_bp"] == 25.0  # honored, not inflated to 50
 
 
-def test_reset_off_by_default_no_churn_on_moving_mid():
-    # Finding 1 regression: with reset OFF (default), a moving mid must NOT
-    # flatten + respawn the grid every tick. The same executor must persist.
+def test_recenter_on_by_default_reuses_executor_no_respawn():
+    # A *dynamic* grid must FOLLOW price by default — the "placed a few orders
+    # and stopped, never recalibrated" report. Re-center is ON by default
+    # (auto = ~one band width), and crucially it re-quotes the SAME executor's
+    # ladder in place (GridExecutor.recenter) — never a flatten + respawn, so a
+    # moving mid does not churn the position.
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
         orch = ExecutorOrchestrator()
         cfg = dict(CFG, candle_provider=lambda p: _range())  # ranging -> grid, no flip
-        assert "dgrid_reset_threshold_bp" not in cfg  # default OFF
+        assert "dgrid_reset_threshold_bp" not in cfg  # user did not pin a value
         c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
                                   inventory=InventoryRepository(), configs=cfg)
         await orch.spawn_controller(c)
+        # Auto-default = one band width (step 20bp x (3-1) = 40bp), not OFF.
+        assert c.reset_threshold_bp == 40.0
         await orch.tick_controller(c.id)
         first = orch.list(c.id, active_only=True)[0]
-        # Walk the mid well beyond any 0.2% band, several ticks.
+        # Walk the mid well beyond the band, several ticks.
         for px in (101, 99, 103, 97, 104):
             adapter.set_mid(Decimal(px))
             await orch.tick_controller(c.id)
         active = orch.list(c.id, active_only=True)
-        assert len(active) == 1 and active[0] is first, "reset must be OFF by default (no churn)"
-        assert c.reset_threshold_bp == 0.0
+        assert len(active) == 1 and active[0] is first, \
+            "re-center must reuse the same executor (no flatten/respawn churn)"
 
     asyncio.run(body())
 

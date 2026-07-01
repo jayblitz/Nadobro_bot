@@ -442,8 +442,12 @@ def test_map_strategy_config_disables_gate_for_rgrid():
 
     from src.nadobro.services.engine_runtime import map_strategy_config
 
+    # rgrid now runs the dynamic directional-ladder engine (DynamicGridController),
+    # which never pauses on trend/breakout (on_tick calls evaluate_quote_gate with
+    # pause_on_trend=False, pause_on_breakout=False) — so it is inherently not gated
+    # out of trends. Assert it routed to that engine, not the old short-ladder flag.
     rg = map_strategy_config("rgrid", {"notional_usd": 100.0}, _D("100"), product="BTC-PERP")
-    assert float(rg.get("regime_gate_enabled", 1.0)) == 0.0
+    assert rg.get("candle_provider", "MISSING") is None and rg.get("recycle_levels") is True
     # GRID-IN-TRENDS (user directive 2026-06-21): plain grid now defaults the gate
     # OFF too (it was silently never quoting in trends/expansions). The inventory
     # cap + recenter + session SL/TP rails are the backstops.

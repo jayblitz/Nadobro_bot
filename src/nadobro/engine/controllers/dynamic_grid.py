@@ -41,11 +41,19 @@ from src.nadobro.engine.types import OrderType, TradeType, _dec
 
 logger = logging.getLogger(__name__)
 
-# Reset re-center guards: when opt-in reset is enabled, never let it fire inside
-# the grid's own band (would flatten + rebuild on normal oscillation). Floor at
-# 50bp and at this multiple of the band width, whichever is larger.
-_DGRID_RESET_FLOOR_BP = 50.0
-_DGRID_RESET_BAND_MULT = 3.0
+# Re-center geometry. A dynamic grid is supposed to FOLLOW price — re-quoting
+# its free/completed slots around a fresh mid as price drifts — so that the
+# ladder keeps working in range instead of resting stale once price walks away.
+# The executor re-center only re-prices UNFILLED maker opens (it never flattens
+# or pays taker fees — held inventory keeps its close legs), so following price
+# closely is cheap; the real cost is venue request load, which the per-tick
+# min-interval below bounds. Default re-center trigger = ~one band width of
+# drift, floored so a tiny step can't churn every tick.
+_DGRID_AUTO_RESET_FLOOR_BP = 12.0
+# Don't re-center more than once per this many seconds, so a fast move can
+# neither hammer the venue with cancel/replace bursts nor starve fill
+# processing (the re-center path returns before ticking the executor).
+_DGRID_RECENTER_MIN_INTERVAL_S = 5.0
 
 
 def _parse_tp_tiers(raw: object) -> List[float]:
@@ -100,16 +108,23 @@ class DynamicGridController(Controller):
         self.tp_tiers_pct = _parse_tp_tiers(self.cfg("dgrid_tp_tiers_pct"))
         self.tp_fraction = min(1.0, max(0.0, float(self.cfg("dgrid_tp_fraction", 0.33) or 0.33)))
         self._booked_tiers: set[int] = set()
-        # Reset re-center is OPT-IN (0 = OFF). When enabled it does a reduce-only
-        # close + full ladder rebuild, so it must never fire inside the grid's
-        # own band: floor it well above the band width (and a hard 50bp minimum)
-        # so a tiny value can't churn fees every tick.
+        # Re-center is ON by default so the grid tracks price (the whole point of
+        # a *dynamic* grid). The executor re-center only re-quotes unfilled maker
+        # opens — no flatten, no realized loss — so it is safe to follow closely.
+        # Threshold precedence: an explicit user value wins (with a small
+        # geometry floor); otherwise auto = ~one band width of drift.
+        step_bp = float(_dec(self.cfg("step_pct", 0) or 0) * Decimal(10000))
+        band_bp = step_bp * float(max(int(self.cfg("levels_count", 0) or 0) - 1, 1))
         _reset = float(self.cfg("dgrid_reset_threshold_bp", 0.0) or 0.0)
         if _reset > 0:
-            step_bp = float(_dec(self.cfg("step_pct", 0) or 0) * Decimal(10000))
-            band_bp = step_bp * float(max(int(self.cfg("levels_count", 0) or 0) - 1, 1))
-            _reset = max(_reset, _DGRID_RESET_FLOOR_BP, band_bp * _DGRID_RESET_BAND_MULT)
+            # Honor the user's threshold but keep a small floor so it can't churn
+            # inside a single step (half a band is still well within the grid).
+            _reset = max(_reset, _DGRID_AUTO_RESET_FLOOR_BP, band_bp * 0.5)
+        else:
+            # Auto-follow default: re-center once price has drifted ~one band.
+            _reset = max(_DGRID_AUTO_RESET_FLOOR_BP, band_bp)
         self.reset_threshold_bp = _reset
+        self._last_recenter_ts = 0.0
         # Live phase + telemetry (surfaced to /status via run_engine_cycle).
         self.current_phase: str = variance_regime.GRID
         self.last_regime: Optional[str] = None  # back-compat: "TRENDING_*"/"RANGING"
@@ -325,14 +340,22 @@ class DynamicGridController(Controller):
                     return
             else:
                 self._phase_confirm_streak = 0
+                now = time.time()
                 if (self.reset_threshold_bp > 0 and mid is not None
-                        and self.realized_move_bp >= self.reset_threshold_bp):
+                        and self.realized_move_bp >= self.reset_threshold_bp
+                        and (now - self._last_recenter_ts) >= _DGRID_RECENTER_MIN_INTERVAL_S):
                     # Same regime, but price has run away from the grid anchor:
                     # re-center the resting ladder IN PLACE (re-quote unfilled
                     # opens around the new mid) WITHOUT closing the held
                     # position — no flatten, no realized loss, no fee churn.
+                    # Rate-limited so a fast move can't churn cancels every tick.
+                    # Do NOT return here: now that re-center fires often (default
+                    # ~one band width), the executor must still be ticked this
+                    # cycle so close-leg fills, the SL/TP barriers, and profit
+                    # booking keep running. A slow same-regime grind would
+                    # otherwise re-center every tick and never process fills.
+                    self._last_recenter_ts = now
                     await self._recenter(mid)
-                    return
             # Manage the live grid: gate / inventory cap suppress NEW entries
             # only; fills, close legs and stops keep running.
             exposure = self.exposure_allowed_sides(pair, mid) if mid else {"buy": True, "sell": True}

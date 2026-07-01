@@ -139,6 +139,108 @@ def test_participation_chunk_overrides_per_order_size():
     assert mid0["order_amount_quote"] == Decimal("100")
 
 
+def test_fill_anchored_reset_threshold_reads_ui_keys():
+    """The UI writes the reset threshold under grid_reset_threshold_pct /
+    rgrid_reset_threshold_pct, but the default (fill-anchored) grid/rgrid
+    controller reads reset_threshold_pct. The mapping must translate the UI keys
+    or the "Reset Threshold" button is a silent no-op (the controller would
+    always use its 0.25% / 0.125% default). Regression guard for that bug."""
+    # Grid: button writes grid_reset_threshold_pct=0.8 (%). Expect 0.8/100.
+    grid = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1,
+                 "grid_reset_threshold_pct": 0.8},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert grid["reset_threshold_pct"] == Decimal("0.8") / Decimal(100)
+    # R-Grid: button writes rgrid_reset_threshold_pct=1.5 (%). Expect 1.5/100.
+    rgrid = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1,
+                  "rgrid_reset_threshold_pct": 1.5},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert rgrid["reset_threshold_pct"] == Decimal("1.5") / Decimal(100)
+    # Unset → per-mode default preserved (grid 0.25% / rgrid 0.125%).
+    grid_def = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert grid_def["reset_threshold_pct"] == Decimal("0.25") / Decimal(100)
+    rgrid_def = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert rgrid_def["reset_threshold_pct"] == Decimal("0.125") / Decimal(100)
+
+
+def test_dgrid_continuous_quoting_wiring():
+    """D-Grid must (a) recycle completed levels so it keeps working the band and
+    (b) leave the re-center threshold at 0 when the user hasn't pinned one, so
+    the controller picks its band-width auto-follow default (50bp was too coarse
+    and the grid 'placed a few orders and stopped'). An explicit value passes
+    through."""
+    dg = er.map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "levels": 3, "dgrid_spread_bp": 8.0},
+        Decimal(58000), product="BTC-USDC",
+    )
+    assert dg["recycle_levels"] is True
+    assert dg["dgrid_reset_threshold_bp"] == 0.0  # -> controller auto-follow default
+    # Explicit user reset (grid_reset_threshold_pct=0.8% -> 80bp) is honored.
+    dg2 = er.map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "levels": 3, "grid_reset_threshold_pct": 0.8},
+        Decimal(58000), product="BTC-USDC",
+    )
+    assert dg2["dgrid_reset_threshold_bp"] == 80.0
+
+
+def test_grid_rgrid_default_to_recycling_ladders():
+    """grid & rgrid both DEFAULT to multi-level recycling ladders now (user
+    choice). grid -> classic long ladder; rgrid -> dynamic directional ladder
+    (DynamicGridController: long in uptrends, short in downtrends), so its cfg
+    carries the dgrid candle_provider + regime knobs. The fill-anchored quoting
+    (grid maker / rgrid momentum taker) is the fill_anchored=1 opt-in."""
+    g_def = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 3}, Decimal(58000), product="BTC-USDC",
+    )
+    assert g_def.get("recycle_levels") is True and "controller_override" not in g_def
+    # Classic long ladder, NOT the dynamic engine: no dgrid regime knobs.
+    assert "dgrid_trend_on_vr" not in g_def
+
+    r_def = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 3}, Decimal(58000), product="BTC-USDC",
+    )
+    assert r_def.get("recycle_levels") is True and "controller_override" not in r_def
+    # Routed to the dynamic directional-ladder engine (same as dgrid): carries the
+    # regime classifier knobs that the classic grid ladder does not.
+    assert "dgrid_trend_on_vr" in r_def
+
+    # fill_anchored=1 opts rgrid into trend-following taker momentum.
+    r_mom = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 3, "fill_anchored": 1},
+        Decimal(58000), product="BTC-USDC",
+    )
+    assert r_mom["controller_override"] == "fill_anchored" and r_mom["momentum"] is True
+
+
+def test_rgrid_is_trend_aggressive_dgrid_is_balanced():
+    """rgrid and dgrid share DynamicGridController but get DIFFERENT default
+    tuning: rgrid reacts/flips faster (pure trend-direction ladder), dgrid is the
+    steadier volatility-balanced switcher. Explicit user settings still override."""
+    rg = er.map_strategy_config("rgrid", {"notional_usd": 100.0}, Decimal(58000), product="BTC-USDC")
+    dg = er.map_strategy_config("dgrid", {"notional_usd": 100.0}, Decimal(58000), product="BTC-USDC")
+    # rgrid detects trend sooner and flips faster than dgrid.
+    assert rg["dgrid_trend_on_vr"] < dg["dgrid_trend_on_vr"]
+    assert rg["dgrid_trend_drift_pct"] < dg["dgrid_trend_drift_pct"]
+    assert rg["dgrid_flip_confirm_ticks"] < dg["dgrid_flip_confirm_ticks"]
+    assert rg["dgrid_short_window"] < dg["dgrid_short_window"]
+    assert rg["dgrid_reversal_flip_pct"] < dg["dgrid_reversal_flip_pct"]
+    # An explicit user value overrides the per-strategy default.
+    rg_ov = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "dgrid_trend_on_variance_ratio": 1.40},
+        Decimal(58000), product="BTC-USDC",
+    )
+    assert rg_ov["dgrid_trend_on_vr"] == 1.40
+
+
 def test_map_vol_config_is_spot():
     cfg = er.map_strategy_config(
         "vol", {"notional_usd": 40.0, "interval_seconds": 60}, Decimal(100), product="KBTC-USDC",
@@ -350,21 +452,21 @@ def test_spread_is_per_strategy_user_set():
     mid = Decimal("100")
 
     # rgrid honors rgrid_spread_bp (20bp), not the generic spread_bp (5). It now
-    # defaults to fill-anchored, so the spread flows to the per-side quote band.
+    # defaults to the dynamic directional ladder, where the spread is the ladder
+    # STEP (min_spread_between_orders).
     rg = map_strategy_config(
         "rgrid", {"notional_usd": 100.0, "spread_bp": 5.0, "rgrid_spread_bp": 20.0, "levels": 2},
         mid, product="BTC-PERP",
     )
-    assert rg["controller_override"] == "fill_anchored"
-    assert rg["spread_ask_pct"] == Decimal("20.0") / Decimal(10000)
-    # Classic ladder (opt-out) still honors rgrid_spread_bp as the ladder step.
-    rg_classic = map_strategy_config(
+    assert rg["min_spread_between_orders"] == Decimal("20.0") / Decimal(10000)
+    # Opting into momentum (fill_anchored=1) flows the spread to the per-side band.
+    rg_mom = map_strategy_config(
         "rgrid",
         {"notional_usd": 100.0, "spread_bp": 5.0, "rgrid_spread_bp": 20.0, "levels": 2,
-         "fill_anchored": 0},
+         "fill_anchored": 1},
         mid, product="BTC-PERP",
     )
-    assert rg_classic["min_spread_between_orders"] == Decimal("20.0") / Decimal(10000)
+    assert rg_mom["spread_ask_pct"] == Decimal("20.0") / Decimal(10000)
 
     # dgrid honors dgrid_spread_bp (15bp), not the default 8.
     dg = map_strategy_config(

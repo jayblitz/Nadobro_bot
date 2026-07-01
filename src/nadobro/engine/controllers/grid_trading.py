@@ -6,6 +6,7 @@ Implemented in Phase 4.
 from __future__ import annotations
 
 import logging
+import time
 from decimal import Decimal
 from typing import Dict, Optional
 
@@ -16,10 +17,13 @@ from src.nadobro.engine.types import TradeType, TripleBarrierConfig, _dec
 
 logger = logging.getLogger(__name__)
 
-# Re-center guards (shared semantics with dgrid): an enabled reset must never
-# fire inside the grid's own band — floor it at 50bp and at 3x the band width.
-_GRID_RESET_FLOOR_BP = 50.0
-_GRID_RESET_BAND_MULT = 3.0
+# Re-center geometry (shared semantics with dgrid). The executor re-center only
+# re-quotes UNFILLED maker opens — no flatten, no realized loss — so following
+# price closely is cheap; the real cost is venue request load, bounded by the
+# per-tick min-interval. Default trigger = ~one band width of drift, floored so a
+# tiny step can't churn every tick.
+_GRID_AUTO_RESET_FLOOR_BP = 12.0
+_GRID_RECENTER_MIN_INTERVAL_S = 5.0
 
 
 def build_grid_config(configs: dict, side: TradeType) -> GridExecutorConfig:
@@ -37,6 +41,7 @@ def build_grid_config(configs: dict, side: TradeType) -> GridExecutorConfig:
         triple_barrier_config=configs.get("triple_barrier_config"),
         leverage=int(configs.get("leverage", 1)),
         keep_position=bool(configs.get("keep_position", False)),
+        recycle_levels=bool(configs.get("recycle_levels", False)),
     )
 
 
@@ -56,15 +61,21 @@ class GridController(Controller):
         # around a fresh mid as price drifts, WITHOUT closing the position
         # (GridExecutor.recenter). Opt-in via reset_threshold_bp; floored so it
         # never fires on normal in-band oscillation.
+        # Re-center ON by default so the ladder FOLLOWS price (re-quoting free /
+        # recycled slots around a fresh mid) instead of resting a stale band.
+        # Explicit user value wins (small half-band floor); else auto = one band.
+        step_bp = float(_dec(self.cfg("step_pct", 0) or 0) * Decimal(10000))
+        band_bp = step_bp * float(max(int(self.cfg("levels_count", 0) or 0) - 1, 1))
         _reset = float(self.cfg("reset_threshold_bp", 0.0) or 0.0)
         if _reset > 0:
-            step_bp = float(_dec(self.cfg("step_pct", 0) or 0) * Decimal(10000))
-            band_bp = step_bp * float(max(int(self.cfg("levels_count", 0) or 0) - 1, 1))
-            _reset = max(_reset, _GRID_RESET_FLOOR_BP, band_bp * _GRID_RESET_BAND_MULT)
+            _reset = max(_reset, _GRID_AUTO_RESET_FLOOR_BP, band_bp * 0.5)
+        else:
+            _reset = max(_GRID_AUTO_RESET_FLOOR_BP, band_bp)
         self.reset_threshold_bp = _reset
         self._anchor_mid: Optional[Decimal] = None
         self.realized_move_bp: float = 0.0
         self._reset_active: bool = False
+        self._last_recenter_ts = 0.0
 
     async def on_start(self) -> None:
         # Regime gate: never ARM a grid into a trending/breakout market —
@@ -134,6 +145,12 @@ class GridController(Controller):
             )
         if self.realized_move_bp < self.reset_threshold_bp:
             return
+        # Rate-limit re-centers so a fast move can't churn cancel/replace bursts
+        # at the venue (on_tick still ticks the executor every cycle, so fills /
+        # SL-TP processing is never skipped — only the re-quote is throttled).
+        now = time.time()
+        if now - self._last_recenter_ts < _GRID_RECENTER_MIN_INTERVAL_S:
+            return
         overlay = self._rebuild_bounds_for_side(_dec(mid))
         if not overlay:
             return
@@ -149,6 +166,7 @@ class GridController(Controller):
             self._anchor_mid = _dec(mid)
             self.realized_move_bp = 0.0
             self._reset_active = True
+            self._last_recenter_ts = now
             logger.info("grid %s recenter side=%s mid=%s band=[%s, %s]",
                         self.id, self.SIDE.name, mid, start, end)
 

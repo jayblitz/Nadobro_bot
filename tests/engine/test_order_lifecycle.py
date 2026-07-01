@@ -84,13 +84,19 @@ class _CountingClient:
         return []
 
 
-def test_no_ws_event_polls_rest_every_call():
+def test_no_ws_event_coalesces_within_tick_then_repolls():
     async def body():
         client = _CountingClient()
         a = NadoAdapter(client, META)
         order = await a.place_order(PAIR, TradeType.BUY, OrderType.LIMIT_MAKER, Decimal(1), Decimal(100))
-        # No WS events ⇒ seeded entry isn't fresh ⇒ every status hits the gateway.
+        # No WS events. Back-to-back status polls within the coalescing TTL now
+        # share ONE get_open_orders fetch (the 429 fix: an N-level ladder made N
+        # identical query_orders calls per tick; now it makes one per product).
         await a.order_status(order.id)
+        await a.order_status(order.id)
+        assert client.open_orders_calls == 1
+        # Next tick (snapshot expired) re-polls fresh.
+        a._open_orders_snap.clear()
         await a.order_status(order.id)
         assert client.open_orders_calls == 2
     asyncio.run(body())
@@ -108,6 +114,24 @@ def test_fresh_unchanged_lifecycle_skips_gateway():
         # No further WS events; entry still fresh and seq unchanged → no gateway.
         await a.order_status(order.id)
         await a.order_status(order.id)
+        assert client.open_orders_calls == 1
+    asyncio.run(body())
+
+
+def test_multi_level_ladder_coalesces_open_orders_poll():
+    """The 429 fix: a multi-level ladder polls order_status once per level per
+    tick, each fetching the WHOLE product open-orders list. Those must coalesce to
+    ONE get_open_orders call per product per tick (not N)."""
+    async def body():
+        client = _CountingClient()
+        a = NadoAdapter(client, META)
+        o1 = await a.place_order(PAIR, TradeType.BUY, OrderType.LIMIT_MAKER, Decimal(1), Decimal(99))
+        o2 = await a.place_order(PAIR, TradeType.BUY, OrderType.LIMIT_MAKER, Decimal(1), Decimal(98))
+        o3 = await a.place_order(PAIR, TradeType.BUY, OrderType.LIMIT_MAKER, Decimal(1), Decimal(97))
+        client.open_orders_calls = 0  # count only the status-poll phase
+        # One tick's worth of per-level status polls (same product) -> 1 fetch.
+        for oid in (o1.id, o2.id, o3.id):
+            await a.order_status(oid)
         assert client.open_orders_calls == 1
     asyncio.run(body())
 

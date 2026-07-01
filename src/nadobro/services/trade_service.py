@@ -2642,7 +2642,9 @@ def close_delta_neutral_legs(
     }
 
 
-def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) -> dict:
+def close_all_positions(
+    telegram_id: int, network: str | None = None, only_product: str | None = None, **kwargs
+) -> dict:
     user = get_user(telegram_id)
     active_network = user.network_mode.value if user else "mainnet"
     selected_network = str(network or active_network)
@@ -2650,11 +2652,26 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
 
+    # Scope: a strategy stop only needs to flatten the one product it traded.
+    # When ``only_product`` resolves to a pid, cancel/close JUST that market
+    # instead of sweeping every perp on the venue (the old behavior — two full
+    # all-products sweeps of serial gateway round-trips that made a stop take
+    # minutes under rate-limiting). Unresolvable/None falls back to the full
+    # sweep, so manual "close all" and safety flattens are unchanged.
+    only_pid = (
+        get_product_id(only_product, network=selected_network, client=client)
+        if only_product else None
+    )
+    scoped_products = (
+        [only_product] if (only_product and only_pid is not None)
+        else get_perp_products(network=selected_network, client=client)
+    )
+
     cancelled_orders = 0
     order_errors = []
     # Cancel on default + isolated margin subaccounts (orders rest on the same sender as quotes).
     for snd in _order_sender_params(client, selected_network):
-        for product_name in get_perp_products(network=selected_network, client=client):
+        for product_name in scoped_products:
             pid = get_product_id(product_name, network=selected_network, client=client)
             if pid is None:
                 continue
@@ -2695,6 +2712,8 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
     errors = []
     products_closed = set()
     for pid, p in net_positions.items():
+        if only_pid is not None and int(pid) != int(only_pid):
+            continue
         for leg in _iter_position_legs(p):
             try:
                 signed_amount = float(leg.get("signed_amount", 0) or 0)
@@ -2764,6 +2783,10 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
         result["order_errors"] = order_errors
     # Verify flatten succeeded before reporting success to callers that notify users.
     post_positions = _normalize_net_positions(client.get_all_positions() or [])
+    if only_pid is not None:
+        # Scoped close: only verify the product we actually flattened, so an
+        # unrelated position on another market can't false-fail a strategy stop.
+        post_positions = {pid: p for pid, p in post_positions.items() if int(pid) == int(only_pid)}
     if post_positions:
         result["success"] = False
         result["error"] = (
@@ -2772,7 +2795,7 @@ def close_all_positions(telegram_id: int, network: str | None = None, **kwargs) 
         )
     remaining_orders = 0
     for snd in _order_sender_params(client, selected_network):
-        for product_name in get_perp_products(network=selected_network, client=client):
+        for product_name in scoped_products:
             pid = get_product_id(product_name, network=selected_network, client=client)
             if pid is None:
                 continue

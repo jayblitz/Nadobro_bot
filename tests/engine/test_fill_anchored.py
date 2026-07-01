@@ -222,29 +222,34 @@ def test_discretion_windows_exposure_vwap():
     assert c._exposure_vwap() == Decimal("107.5")
 
 
-def test_rgrid_defaults_to_momentum_fill_anchored():
+def test_rgrid_defaults_to_directional_ladder_momentum_is_optin():
     from src.nadobro.services.engine_runtime import map_strategy_config
+    # rgrid now DEFAULTS to the dynamic directional recycling ladder
+    # (DynamicGridController: long ladder in uptrends, short ladder in downtrends,
+    # booking profit per level) — user choice. It is NOT the fill-anchored maker.
     cfg = map_strategy_config(
-        "rgrid", {"notional_usd": 100.0, "levels": 2, "rgrid_discretion": 0.1},
+        "rgrid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product=PAIR,
+    )
+    assert "controller_override" not in cfg
+    assert cfg.get("candle_provider", "MISSING") is None  # routed to the dynamic engine
+    assert cfg["recycle_levels"] is True
+    # Trend-following taker MOMENTUM is now the fill_anchored=1 opt-in.
+    mom = map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 2, "rgrid_discretion": 0.1, "fill_anchored": 1},
         Decimal(100), product=PAIR,
     )
-    assert cfg["controller_override"] == "fill_anchored"
-    assert cfg["momentum"] is True
-    assert cfg["vwap_volume_fraction"] == 0.1
-    # grid now ALSO defaults to fill-anchored (last-fill anchor + no-cross +
-    # soft-reset), maker (not momentum).
+    assert mom["controller_override"] == "fill_anchored"
+    assert mom["momentum"] is True
+    assert mom["vwap_volume_fraction"] == 0.1
+    # grid DEFAULTS to the classic MULTI-LEVEL recycling ladder (not fill-anchored).
     g = map_strategy_config("grid", {"notional_usd": 100.0, "levels": 2}, Decimal(100), product=PAIR)
-    assert g["controller_override"] == "fill_anchored"
-    assert g["anchor_mode"] == "grid"
-    assert g["momentum"] is False
-    # Both can opt OUT to the classic ladder via fill_anchored=0.
-    for s in ("grid", "rgrid"):
-        classic = map_strategy_config(
-            s, {"notional_usd": 100.0, "levels": 2, "fill_anchored": 0},
-            Decimal(100), product=PAIR,
-        )
-        assert "controller_override" not in classic
-        assert "start_price" in classic
+    assert "controller_override" not in g
+    assert "start_price" in g and g["recycle_levels"] is True
+    # grid can opt INTO the fill-anchored maker via fill_anchored=1.
+    g_fa = map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 2, "fill_anchored": 1}, Decimal(100), product=PAIR
+    )
+    assert g_fa["controller_override"] == "fill_anchored" and g_fa["momentum"] is False
 
 
 def test_exposure_vwap_is_isolated_per_controller_and_user():

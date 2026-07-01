@@ -77,6 +77,60 @@ def test_recenter_requotes_free_opens_keeps_inventory_and_does_not_flatten():
     asyncio.run(body())
 
 
+def _recycle_cfg(recycle: bool) -> GridExecutorConfig:
+    return GridExecutorConfig(
+        trading_pair="BTC-PERP", side=TradeType.BUY,
+        start_price=Decimal("99"), end_price=Decimal("100"), limit_price=Decimal(0),
+        total_amount_quote=Decimal(100), min_spread_between_orders=Decimal("0.002"),
+        max_open_orders=1, recycle_levels=recycle,
+    )
+
+
+def test_recycle_rearms_completed_level_and_keeps_quoting():
+    """recycle_levels=True (D-Grid): a fully round-tripped level re-arms and
+    re-quotes a fresh open instead of completing-and-terminating, so the grid
+    keeps working its band — the fix for 'placed a few orders and stopped'."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recycle_cfg(True), user_id=1, controller_id="G", adapter=adapter,
+                          inventory=InventoryRepository())
+        await orch.spawn(ex)  # on_create places the open
+        lv = ex.levels[0]
+        assert lv.state is GridLevelState.OPEN_ORDER_PLACED
+        # Round-trip to COMPLETE: fill open -> close placed -> fill close.
+        adapter.fill_order(lv.open_order_id)
+        await orch.tick(ex.id)
+        assert ex.levels[0].state is GridLevelState.CLOSE_ORDER_PLACED
+        adapter.fill_order(ex.levels[0].close_order_id)
+        placed_before = len(adapter.placed)
+        await orch.tick(ex.id)  # close filled -> COMPLETE -> recycle -> re-quote
+        assert not ex.is_terminated, "recycling grid must not terminate on complete"
+        assert len(adapter.placed) > placed_before, "recycled level must re-quote a new open"
+        assert ex.levels[0].state is GridLevelState.OPEN_ORDER_PLACED
+
+    asyncio.run(body())
+
+
+def test_classic_grid_terminates_on_all_complete():
+    """recycle_levels=False (classic one-shot ladder): unchanged — once every
+    level round-trips, the executor terminates COMPLETED."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recycle_cfg(False), user_id=1, controller_id="G", adapter=adapter,
+                          inventory=InventoryRepository())
+        await orch.spawn(ex)
+        lv = ex.levels[0]
+        adapter.fill_order(lv.open_order_id)
+        await orch.tick(ex.id)
+        adapter.fill_order(ex.levels[0].close_order_id)
+        await orch.tick(ex.id)
+        assert ex.is_terminated, "classic one-shot grid must terminate when all levels complete"
+
+    asyncio.run(body())
+
+
 def _ctrl_cfg(**over):
     cfg = {
         "trading_pair": "BTC-PERP", "start_price": Decimal("99"), "end_price": Decimal("100"),
