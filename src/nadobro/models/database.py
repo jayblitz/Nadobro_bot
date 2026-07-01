@@ -891,7 +891,10 @@ def rollup_session_from_trades(session_id: int, network: str) -> dict:
                 COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0)
               )), 0) AS fees,
               COALESCE(SUM(COALESCE(
-                NULLIF(quote_filled_x18, 0) / 1e18,
+                -- quote_filled_x18 is SIGNED (negative for buys); ABS it so the
+                -- volume is gross turnover (opens + closes), not net cash flow —
+                -- summing the signed value made a flattened run collapse to ~$0.
+                ABS(NULLIF(quote_filled_x18, 0)) / 1e18,
                 ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
               )), 0) AS volume,
               COALESCE(SUM(COALESCE(funding_paid, 0)), 0) AS funding,
@@ -1041,7 +1044,10 @@ def get_session_live_metrics(
               -- (set by nado_sync on each match) so the run's totals grow as
               -- orders fill/close, even before the recorder columns are present.
               COALESCE(SUM(COALESCE(
-                NULLIF(quote_filled_x18, 0) / 1e18,
+                -- quote_filled_x18 is SIGNED (negative for buys); ABS it so the
+                -- volume is gross turnover (opens + closes), not net cash flow —
+                -- summing the signed value made a flattened run collapse to ~$0.
+                ABS(NULLIF(quote_filled_x18, 0)) / 1e18,
                 ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
               )), 0) AS volume,
               COALESCE(SUM(COALESCE(
@@ -1136,7 +1142,8 @@ def get_session_turnover(
             SELECT
               COUNT(*) FILTER (WHERE status IN ('filled', 'closed', 'partially_filled')) AS fills,
               COALESCE(SUM(COALESCE(
-                NULLIF(quote_filled_x18, 0) / 1e18,
+                -- signed x18 → ABS for gross turnover (see rollup note above).
+                ABS(NULLIF(quote_filled_x18, 0)) / 1e18,
                 ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
               )), 0) AS volume
             FROM {table}
