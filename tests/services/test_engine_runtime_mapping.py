@@ -192,27 +192,33 @@ def test_dgrid_continuous_quoting_wiring():
     assert dg2["dgrid_reset_threshold_bp"] == 80.0
 
 
-def test_classic_grid_rgrid_ladder_recycles():
-    """The multi-level GridExecutor ladder recycles completed levels so it keeps
-    working continuously, like D-Grid. grid now DEFAULTS to this ladder; rgrid
-    defaults to fill-anchored momentum (no GridExecutor) but can opt in."""
-    # Explicit classic ladder (fill_anchored=0) recycles for both.
-    for strat in ("grid", "rgrid"):
-        classic = er.map_strategy_config(
-            strat, {"notional_usd": 100.0, "levels": 3, "fill_anchored": 0},
-            Decimal(58000), product="BTC-USDC",
-        )
-        assert classic["recycle_levels"] is True, strat
-    # grid DEFAULTS to the recycling ladder now.
+def test_grid_rgrid_default_to_recycling_ladders():
+    """grid & rgrid both DEFAULT to multi-level recycling ladders now (user
+    choice). grid -> classic long ladder; rgrid -> dynamic directional ladder
+    (DynamicGridController: long in uptrends, short in downtrends), so its cfg
+    carries the dgrid candle_provider + regime knobs. The fill-anchored quoting
+    (grid maker / rgrid momentum taker) is the fill_anchored=1 opt-in."""
     g_def = er.map_strategy_config(
         "grid", {"notional_usd": 100.0, "levels": 3}, Decimal(58000), product="BTC-USDC",
     )
     assert g_def.get("recycle_levels") is True and "controller_override" not in g_def
-    # rgrid still defaults to fill-anchored momentum: different controller, no flag.
+    # Classic long ladder, NOT the dynamic engine: no dgrid regime knobs.
+    assert "dgrid_trend_on_vr" not in g_def
+
     r_def = er.map_strategy_config(
         "rgrid", {"notional_usd": 100.0, "levels": 3}, Decimal(58000), product="BTC-USDC",
     )
-    assert "recycle_levels" not in r_def and r_def["controller_override"] == "fill_anchored"
+    assert r_def.get("recycle_levels") is True and "controller_override" not in r_def
+    # Routed to the dynamic directional-ladder engine (same as dgrid): carries the
+    # regime classifier knobs that the classic grid ladder does not.
+    assert "dgrid_trend_on_vr" in r_def
+
+    # fill_anchored=1 opts rgrid into trend-following taker momentum.
+    r_mom = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 3, "fill_anchored": 1},
+        Decimal(58000), product="BTC-USDC",
+    )
+    assert r_mom["controller_override"] == "fill_anchored" and r_mom["momentum"] is True
 
 
 def test_map_vol_config_is_spot():
@@ -426,21 +432,21 @@ def test_spread_is_per_strategy_user_set():
     mid = Decimal("100")
 
     # rgrid honors rgrid_spread_bp (20bp), not the generic spread_bp (5). It now
-    # defaults to fill-anchored, so the spread flows to the per-side quote band.
+    # defaults to the dynamic directional ladder, where the spread is the ladder
+    # STEP (min_spread_between_orders).
     rg = map_strategy_config(
         "rgrid", {"notional_usd": 100.0, "spread_bp": 5.0, "rgrid_spread_bp": 20.0, "levels": 2},
         mid, product="BTC-PERP",
     )
-    assert rg["controller_override"] == "fill_anchored"
-    assert rg["spread_ask_pct"] == Decimal("20.0") / Decimal(10000)
-    # Classic ladder (opt-out) still honors rgrid_spread_bp as the ladder step.
-    rg_classic = map_strategy_config(
+    assert rg["min_spread_between_orders"] == Decimal("20.0") / Decimal(10000)
+    # Opting into momentum (fill_anchored=1) flows the spread to the per-side band.
+    rg_mom = map_strategy_config(
         "rgrid",
         {"notional_usd": 100.0, "spread_bp": 5.0, "rgrid_spread_bp": 20.0, "levels": 2,
-         "fill_anchored": 0},
+         "fill_anchored": 1},
         mid, product="BTC-PERP",
     )
-    assert rg_classic["min_spread_between_orders"] == Decimal("20.0") / Decimal(10000)
+    assert rg_mom["spread_ask_pct"] == Decimal("20.0") / Decimal(10000)
 
     # dgrid honors dgrid_spread_bp (15bp), not the default 8.
     dg = map_strategy_config(

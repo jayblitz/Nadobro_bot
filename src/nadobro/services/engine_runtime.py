@@ -29,7 +29,6 @@ from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
 from src.nadobro.engine.controllers.grid_trading import GridController
 from src.nadobro.engine.controllers.fill_anchored import FillAnchoredQuotingController
 from src.nadobro.engine.controllers.market_making import MarketMakingController
-from src.nadobro.engine.controllers.reverse_grid import ReverseGridController
 from src.nadobro.engine.controllers.volume_bot import VolumeBotController
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
 from src.nadobro.engine.risk import RiskEngine
@@ -40,7 +39,12 @@ logger = logging.getLogger(__name__)
 # Strategy id (bot_runtime's keys) -> engine controller class.
 CONTROLLER_REGISTRY: Dict[str, type] = {
     "grid": GridController,
-    "rgrid": ReverseGridController,
+    # rgrid = directional recycling ladder: long ladder in uptrends, short ladder
+    # in downtrends, multi-level, booking profit per level (user spec). That IS
+    # the DynamicGridController (same engine as D-Grid). The classic one-sided
+    # ReverseGridController is no longer the default; fill_anchored=1 opts into
+    # the trend-following taker momentum instead.
+    "rgrid": DynamicGridController,
     "dgrid": DynamicGridController,
     "mid": MarketMakingController,
     "dn": DeltaNeutralController,
@@ -886,12 +890,12 @@ def map_strategy_config(
     # the docs describe: grid = last-fill anchor + no-cross + soft-reset-to-mid;
     # rgrid = trend-following taker-momentum. The classic static ladder remains a
     # safety escape via ``fill_anchored=0`` (not surfaced in the UI).
-    # grid now defaults to the classic MULTI-LEVEL recycling ladder (user choice:
-    # a real ladder, many resting orders, follows price via the controller
-    # re-center). fill_anchored=1 is the opt-in for the single-pair fill-anchored
-    # maker. rgrid stays fill-anchored momentum by default (trend-following taker)
-    # — its multi-level-ladder switch is pending an explicit decision.
-    _fa_default = 1.0 if strategy == "rgrid" else 0.0
+    # grid and rgrid both default to the MULTI-LEVEL recycling ladder now (user
+    # choice). grid -> classic long ladder (GridController); rgrid -> dynamic
+    # directional ladder (DynamicGridController, via CONTROLLER_REGISTRY). The
+    # fill-anchored quoting (grid: single-pair maker / rgrid: trend-following
+    # taker momentum) is the opt-in via fill_anchored=1.
+    _fa_default = 0.0
     if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", _fa_default)):
         default_reset = 0.25 if strategy == "grid" else 0.125
         # The UI writes the reset threshold under per-strategy keys
@@ -1045,7 +1049,9 @@ def map_strategy_config(
     # ``client.get_candlesticks(...)``; setting ``"candle_provider": None``
     # here makes the contract explicit and lets the cycle driver inject the
     # real provider on first start.
-    if strategy == "dgrid":
+    if strategy in ("dgrid", "rgrid"):
+        # rgrid runs the SAME dynamic directional-ladder engine as dgrid
+        # (DynamicGridController): long ladder in uptrends, short in downtrends.
         cfg["candle_provider"] = None
         # (recycle_levels is set for the whole GridExecutor family above.)
         # Thread the user's Dynamic-Grid regime knobs through to the controller
@@ -1081,9 +1087,10 @@ def map_strategy_config(
         # price as it trends instead of going stale ("placed a few orders and
         # stopped"). 50bp was too coarse — BTC rarely drifts that far inside one
         # 30-60s tick, so it almost never re-centered.
+        _reset_key = "rgrid_reset_threshold_pct" if strategy == "rgrid" else "grid_reset_threshold_pct"
         cfg["dgrid_reset_threshold_bp"] = _f(
             settings, "dgrid_reset_threshold_bp",
-            _f(settings, "grid_reset_threshold_pct", 0.0) * 100.0,
+            _f(settings, _reset_key, 0.0) * 100.0,
         )
         # Dynamic Grid's own min/max per-side spread bounds drive the auto-spread
         # clamp (previously dead — _quote_defense_defaults hardcoded the band).
@@ -1092,9 +1099,11 @@ def map_strategy_config(
         cfg["spread_floor_half_pct"] = _dg_floor
         cfg["spread_cap_half_pct"] = max(_dg_cap, _dg_floor)
 
-    # GRID / RGRID in-place re-center: honor the user's reset threshold so the
-    # ladder follows price ("reset and continue") instead of going stale. Drives
-    # GridExecutor.recenter (no flatten); the controller floors it above the band.
+    # GRID in-place re-center: honor the user's reset threshold so the classic
+    # long ladder follows price ("reset and continue") instead of going stale.
+    # Drives GridExecutor.recenter (no flatten); the controller floors it above
+    # the band. (rgrid now runs DynamicGridController — its re-center is wired
+    # via dgrid_reset_threshold_bp in the block above.)
     if strategy == "grid":
         # Re-center ON by default: pass the user's explicit reset through, else 0
         # so the controller uses its band-width auto-follow (50bp was too coarse —
@@ -1108,13 +1117,6 @@ def map_strategy_config(
         # user-overridable: an explicit regime_gate_enabled=1 re-arms the gate.
         if "regime_gate_enabled" not in settings:
             cfg["regime_gate_enabled"] = 0.0
-    elif strategy == "rgrid":
-        cfg["reset_threshold_bp"] = _f(settings, "rgrid_reset_threshold_pct", 0.0) * 100.0
-        # A Reverse Grid is a TREND strategy (it wins in trends, resets and
-        # keeps quoting). The regime gate exists to keep a *ranging* grid out of
-        # trends, so it must NOT gate rgrid: turn it off so rgrid quotes in every
-        # regime. (User directive 2026-06-17.)
-        cfg["regime_gate_enabled"] = 0.0
     return cfg
 
 
