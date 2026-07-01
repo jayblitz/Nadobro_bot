@@ -697,6 +697,25 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                         recovered_pname = str(_oo["pair"])
             except Exception:  # noqa: BLE001 - recovery is best-effort
                 pass
+        # A market/text-to-trade order fills instantly and leaves open_orders, so
+        # its digest is often gone by sync time. Fall back to any prior trades row
+        # for the same digest — execute_market_order and the engine recorder both
+        # wrote one carrying the real product_id. This keeps text-to-trade fills OUT
+        # of the product_id=0 bucket that History (get_paired_trades) excludes.
+        if int(product_id or 0) == 0 and digest:
+            try:
+                _tr = query_one(
+                    f"SELECT product_id, product_name FROM {table} "
+                    f"WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 "
+                    f"ORDER BY id ASC LIMIT 1",
+                    (digest,),
+                )
+                if _tr and _tr.get("product_id"):
+                    product_id = int(_tr["product_id"])
+                    if not recovered_pname and _tr.get("product_name"):
+                        recovered_pname = str(_tr["product_name"])
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                pass
         session_id, source = _back_link_intent(digest, network)
         if session_id is None:
             # Digest back-link missed (no order_intents row for this fill).

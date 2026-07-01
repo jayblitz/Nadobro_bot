@@ -220,6 +220,34 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         assert params[1] == 4            # product_id resolved from open_orders
         assert params[2] == "ETH-PERP"   # product_name from open_orders.pair
 
+    def test_write_matches_recovers_productid_from_prior_trade_when_open_orders_gone(self):
+        # A market/text-to-trade order fills instantly and leaves open_orders, so
+        # its digest is gone by sync time. Recover product_id from a prior trades
+        # row for the same digest — keeps text-to-trade fills OUT of the
+        # product_id=0 bucket that History (get_paired_trades) excludes.
+        execute_calls = []
+
+        def _q(sql, *params):
+            if "FROM open_orders" in sql:
+                return None                                   # digest gone
+            if "source IN ('strategy', 'manual')" in sql:
+                return None                                   # no recorder row to enrich
+            if "SELECT product_id, product_name FROM trades_" in sql:
+                return {"product_id": 9, "product_name": "SOL-PERP"}  # prior OWN row
+            return None                                       # dedup / back-link / window
+
+        with patch.object(nado_sync, "query_one", side_effect=_q), patch.object(
+            nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)
+        ):
+            nado_sync._write_matches(42, "testnet", [{
+                "submission_idx": "9", "digest": "0xmkt",
+                "base_filled": str(to_x18("1")), "quote_filled": str(to_x18("-100")),
+                "fee": str(to_x18("0.1")),
+            }])
+
+        ins = next(c for c in execute_calls if "INSERT INTO" in c[0])
+        assert ins[1][1] == 9 and ins[1][2] == "SOL-PERP"
+
     def test_write_open_orders_does_not_sweep_when_live_rows_have_no_digests(self):
         execute_calls = []
         with patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
