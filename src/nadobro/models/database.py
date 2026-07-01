@@ -881,8 +881,22 @@ def rollup_session_from_trades(session_id: int, network: str) -> dict:
               COUNT(*) FILTER (WHERE status IN ('filled', 'closed', 'partially_filled')) AS filled,
               COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled,
               COALESCE(SUM(COALESCE(realized_pnl, pnl, 0)), 0) AS realized_pnl,
-              COALESCE(SUM(COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0)), 0) AS fees,
-              COALESCE(SUM(ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)), 0) AS volume,
+              -- Volume/fees prefer the venue-authoritative x18 columns (set by
+              -- nado_sync per match), falling back to human columns — IDENTICAL to
+              -- get_session_live_metrics so the finalize card and the live /mm_status
+              -- can never disagree, and a fill counts even if one column set is
+              -- missing (the human/x18 split was a source of $0-volume undercounts).
+              COALESCE(SUM(COALESCE(
+                NULLIF(fee_x18, 0) / 1e18,
+                COALESCE(fill_fee, fees, 0) + COALESCE(builder_fee, 0)
+              )), 0) AS fees,
+              COALESCE(SUM(COALESCE(
+                -- quote_filled_x18 is SIGNED (negative for buys); ABS it so the
+                -- volume is gross turnover (opens + closes), not net cash flow —
+                -- summing the signed value made a flattened run collapse to ~$0.
+                ABS(NULLIF(quote_filled_x18, 0)) / 1e18,
+                ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
+              )), 0) AS volume,
               COALESCE(SUM(COALESCE(funding_paid, 0)), 0) AS funding,
               COUNT(*) FILTER (
                 WHERE status IN ('filled', 'closed') AND COALESCE(realized_pnl, pnl, 0) > 1e-9
@@ -1030,7 +1044,10 @@ def get_session_live_metrics(
               -- (set by nado_sync on each match) so the run's totals grow as
               -- orders fill/close, even before the recorder columns are present.
               COALESCE(SUM(COALESCE(
-                NULLIF(quote_filled_x18, 0) / 1e18,
+                -- quote_filled_x18 is SIGNED (negative for buys); ABS it so the
+                -- volume is gross turnover (opens + closes), not net cash flow —
+                -- summing the signed value made a flattened run collapse to ~$0.
+                ABS(NULLIF(quote_filled_x18, 0)) / 1e18,
                 ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
               )), 0) AS volume,
               COALESCE(SUM(COALESCE(
@@ -1125,7 +1142,8 @@ def get_session_turnover(
             SELECT
               COUNT(*) FILTER (WHERE status IN ('filled', 'closed', 'partially_filled')) AS fills,
               COALESCE(SUM(COALESCE(
-                NULLIF(quote_filled_x18, 0) / 1e18,
+                -- signed x18 → ABS for gross turnover (see rollup note above).
+                ABS(NULLIF(quote_filled_x18, 0)) / 1e18,
                 ABS(COALESCE(fill_size, size, 0)) * COALESCE(NULLIF(fill_price, 0), price, 0)
               )), 0) AS volume
             FROM {table}

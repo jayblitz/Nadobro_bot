@@ -63,4 +63,9 @@ def cleanup_strategy_positions(telegram_id: int, network: str, state: dict[str, 
     # Falls back to a full close inside close_all_positions if the product can't
     # be resolved.
     only_product = str(state.get("product") or "").strip() or None
-    return close_all_positions(telegram_id, network=network, only_product=only_product)
+    return close_all_positions(
+        telegram_id, network=network, only_product=only_product,
+        # Attribute the flatten's close fills to THIS session so its volume counts
+        # the close turnover (opens + closes), not just the opens.
+        strategy_session_id=session_id,
+    )

@@ -643,6 +643,11 @@ def _write_open_orders(user_id: int, network: str, orders: list[dict[str, Any]])
 def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) -> int:
     inserted = 0
     table = f"trades_{_network_table_suffix(network)}"
+    # Sessions that received a (late-syncing) fill this pass. The stored session
+    # totals (Volume/Fees/PnL on the Performance + Share-PnL cards) are written by
+    # the finalize rollup at STOP — but a session's CLOSE fills sync AFTER stop, so
+    # without re-rolling up here the shareable card would miss the close turnover.
+    touched_sessions: set[int] = set()
     for match in matches:
         submission_idx = match.get("submission_idx")
         if submission_idx is None:
@@ -662,6 +667,15 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         # never treat ``realized_pnl_x18`` as authoritative PnL.
         pnl_x18 = _x18_field(match, "realized_pnl", "realized_pnl_x18")
         base_amount = from_x18(base_x18)
+        # HUMAN columns. Rollups + PnL/History cards read fill_size * fill_price
+        # (human), NOT the *_x18 columns. A venue-only fill (no recorder row) was
+        # inserted with x18 amounts but NULL price, so it counted as $0 volume even
+        # once attributed. Derive human size/price/fee from the authoritative venue
+        # quote (the notional) so every synced fill contributes real volume.
+        base_h = abs(base_amount)
+        quote_h = abs(from_x18(quote_x18))
+        fee_h = abs(from_x18(fee_x18))
+        price_h = (quote_h / base_h) if base_h > 0 else Decimal(0)
         digest = str(
             match.get("digest")
             or match.get("order_digest")
@@ -669,6 +683,46 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             or order.get("order_digest")
             or ""
         ).strip()
+        # IndexerMatch carries no product_id/name; recover BOTH from open_orders by
+        # digest BEFORE the window fallback so (a) the product-scoped window resolve
+        # can match the session's product (product_id=0 never matched → orphaned),
+        # and (b) the inserted fill keeps a real product_id + name (not product_id=0,
+        # which the per-trade card can't pair).
+        recovered_pname = str(match.get("product_name") or "").strip()
+        if int(product_id or 0) == 0 and digest:
+            try:
+                _oo = query_one(
+                    "SELECT product_id, pair FROM open_orders "
+                    "WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 LIMIT 1",
+                    (digest,),
+                )
+                if _oo and _oo.get("product_id"):
+                    product_id = int(_oo["product_id"])
+                    if not recovered_pname and _oo.get("pair"):
+                        recovered_pname = str(_oo["pair"])
+            # policy: degrade-ok(open_orders product lookup best-effort; later trades/session fallbacks still run)
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                pass
+        # A market/text-to-trade order fills instantly and leaves open_orders, so
+        # its digest is often gone by sync time. Fall back to any prior trades row
+        # for the same digest — execute_market_order and the engine recorder both
+        # wrote one carrying the real product_id. This keeps text-to-trade fills OUT
+        # of the product_id=0 bucket that History (get_paired_trades) excludes.
+        if int(product_id or 0) == 0 and digest:
+            try:
+                _tr = query_one(
+                    f"SELECT product_id, product_name FROM {table} "
+                    f"WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 "
+                    f"ORDER BY id ASC LIMIT 1",
+                    (digest,),
+                )
+                if _tr and _tr.get("product_id"):
+                    product_id = int(_tr["product_id"])
+                    if not recovered_pname and _tr.get("product_name"):
+                        recovered_pname = str(_tr["product_name"])
+            # policy: degrade-ok(prior-trades product lookup best-effort; session-product fallback still runs)
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                pass
         session_id, source = _back_link_intent(digest, network)
         if session_id is None:
             # Digest back-link missed (no order_intents row for this fill).
@@ -677,6 +731,29 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             session_id = _resolve_session_by_window(
                 user_id, network, product_id, _timestamp_or_now(match.get("timestamp"))
             )
+
+        # Last-resort product_id: a session-attributed fill whose id is still 0
+        # inherits its SESSION's product. This is the stop-close case — the flatten
+        # market order fills instantly (digest gone from open_orders) with no prior
+        # recorder row, so neither recovery above resolves it — yet it IS the
+        # session's own close and must carry the session's product to count.
+        if int(product_id or 0) == 0 and session_id:
+            try:
+                _sp = query_one(
+                    "SELECT product_id, product_name FROM strategy_sessions "
+                    "WHERE id = %s AND COALESCE(product_id, 0) <> 0 LIMIT 1",
+                    (int(session_id),),
+                )
+                if _sp and _sp.get("product_id"):
+                    product_id = int(_sp["product_id"])
+                    if not recovered_pname and _sp.get("product_name"):
+                        recovered_pname = str(_sp["product_name"])
+            # policy: degrade-ok(session-product fallback best-effort; fill may stay product_id=0, excluded from per-trade card)
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                pass
+
+        if session_id is not None:
+            touched_sessions.add(int(session_id))
 
         # Engine (``source='strategy'``) AND manual open (``source='manual'``)
         # fills are written at fill time by a recorder row carrying human columns
@@ -717,35 +794,22 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 _maybe_increment_session_win_loss(session_id, pnl_x18)
                 continue
 
-        # IndexerMatch carries no product_id. For a freshly-inserted fill with no
-        # recorder row to inherit from (e.g. desk — DbTradeRecorder skips when
-        # there's no session), recover product_id + name from the live open_orders
-        # row for this digest, so the fill is attributable to a product instead of
-        # collapsing into the product_id=0 bucket the per-trade card can't pair.
+        # product_id + name were already recovered from open_orders above (used for
+        # the window fallback too); reuse them here so the inserted fill is
+        # attributable to a product instead of the product_id=0 bucket.
         insert_pid = int(product_id or 0)
-        insert_pname = str(match.get("product_name") or "").strip()
-        if insert_pid == 0 and digest:
-            oo = query_one(
-                "SELECT product_id, pair FROM open_orders "
-                "WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 LIMIT 1",
-                (digest,),
-            )
-            if oo and oo.get("product_id"):
-                insert_pid = int(oo["product_id"])
-                if not insert_pname and oo.get("pair"):
-                    insert_pname = str(oo["pair"])
-        if not insert_pname:
-            insert_pname = f"ID:{insert_pid}"
+        insert_pname = recovered_pname or f"ID:{insert_pid}"
 
         execute(
             f"""
             INSERT INTO {table} (
-              user_id, product_id, product_name, order_type, side, size, status,
+              user_id, product_id, product_name, order_type, side, size,
+              fill_size, price, fill_price, fill_fee, status,
               submission_idx, isolated, realized_pnl_x18, fee_x18, base_filled_x18, quote_filled_x18,
               order_digest, strategy_session_id, source,
               filled_at, created_at
             )
-            VALUES (%s, %s, %s, 'match', %s, %s, 'filled', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (%s, %s, %s, 'match', %s, %s, %s, %s, %s, %s, 'filled', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             """,
             (
                 user_id,
@@ -753,6 +817,13 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 insert_pname,
                 "long" if base_amount >= 0 else "short",
                 str(abs(base_amount)),
+                # Human columns so this venue-only fill contributes real volume/fees
+                # (rollups read fill_size * fill_price, not the x18 columns). Use
+                # fixed-point (:f) so a value like 100/1.25 is stored "80", not "8E+1".
+                f"{base_h:f}",
+                f"{price_h:f}",
+                f"{price_h:f}",
+                f"{fee_h:f}",
                 submission_idx,
                 bool(match.get("isolated")),
                 pnl_x18,
@@ -767,6 +838,30 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         )
         inserted += 1
         _maybe_increment_session_win_loss(session_id, pnl_x18)
+
+    # Re-roll up any session that got a fill this pass so its STORED totals
+    # (Volume/Fees/PnL/counts) reflect late-syncing fills — crucially the close
+    # turnover, which lands after the finalize rollup ran at stop. Off the event
+    # loop (this runs in a worker thread) and idempotent (recomputed from trades).
+    for _sid in touched_sessions:
+        try:
+            from src.nadobro.models.database import (
+                rollup_engine_session_pnl_funding,
+                rollup_session_from_trades,
+            )
+
+            rollup_session_from_trades(_sid, network)
+            # Realized PnL / funding are derived (venue reports no per-fill PnL);
+            # must run AFTER rollup_session_from_trades. GATE to engine strategies
+            # (this fn is not self-gating — the caller must, or a legacy session's
+            # PnL gets overwritten).
+            _srow = query_one("SELECT strategy FROM strategy_sessions WHERE id = %s", (_sid,))
+            _strat = str((_srow or {}).get("strategy") or "").lower()
+            from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+            if _strat in ENGINE_MAPPED_STRATEGIES:
+                rollup_engine_session_pnl_funding(_sid, network)
+        except Exception:  # noqa: BLE001 - re-rollup is best-effort, never break sync
+            logger.debug("post-sync session re-rollup failed sid=%s", _sid, exc_info=True)
     return inserted
 
 

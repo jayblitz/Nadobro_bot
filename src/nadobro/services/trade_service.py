@@ -2643,7 +2643,8 @@ def close_delta_neutral_legs(
 
 
 def close_all_positions(
-    telegram_id: int, network: str | None = None, only_product: str | None = None, **kwargs
+    telegram_id: int, network: str | None = None, only_product: str | None = None,
+    strategy_session_id: int | None = None, **kwargs
 ) -> dict:
     user = get_user(telegram_id)
     active_network = user.network_mode.value if user else "mainnet"
@@ -2745,6 +2746,21 @@ def close_all_positions(
                     products_closed.add(product_name)
                     close_side = "short" if signed_amount > 0 else "long"
                     close_digest = r.get("digest", "")
+                    # Link the close digest → session (source='strategy') at
+                    # placement so the venue-synced close fill is attributed to the
+                    # session and COUNTS toward its volume. A session's volume is
+                    # turnover (opens + closes); without this the flatten's ~equal
+                    # close volume orphaned as source='manual', session=null (it
+                    # fills after stopped_at, so the window fallback can't reach it).
+                    if strategy_session_id and close_digest:
+                        try:
+                            from src.nadobro.services.engine_persistence import DbTradeRecorder
+                            DbTradeRecorder._link_intent(
+                                str(close_digest), int(strategy_session_id), selected_network
+                            )
+                        # policy: degrade-ok(close link best-effort; close fill still records, attribution falls back to window)
+                        except Exception:  # noqa: BLE001 - link is best-effort
+                            pass
                     close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
                     fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, pid)
                     _record_close_in_db(
