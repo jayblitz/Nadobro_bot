@@ -1050,35 +1050,44 @@ def map_strategy_config(
     # here makes the contract explicit and lets the cycle driver inject the
     # real provider on first start.
     if strategy in ("dgrid", "rgrid"):
-        # rgrid runs the SAME dynamic directional-ladder engine as dgrid
-        # (DynamicGridController): long ladder in uptrends, short in downtrends.
+        # Both run the SAME dynamic directional-ladder engine (DynamicGridController:
+        # long ladder in uptrends, short in downtrends), but with DIFFERENT default
+        # tuning so the two products stay distinct:
+        #   * rgrid = PURE trend-direction ladder — reacts sooner and flips faster
+        #     (lower VR/drift thresholds, shorter windows, 1-tick flip confirm,
+        #     earlier trailing-reversal), so it spends less time in the neutral
+        #     mean-reversion grid and tracks the trend direction aggressively.
+        #   * dgrid = VOLATILITY-BALANCED switcher — steadier thresholds and slower
+        #     flips, so it mean-reverts (long grid) in ranges and only goes
+        #     directional on a clearer volatility-regime signal.
+        # Any explicit user setting still overrides these per-strategy defaults.
+        _rg = strategy == "rgrid"
         cfg["candle_provider"] = None
         # (recycle_levels is set for the whole GridExecutor family above.)
-        # Thread the user's Dynamic-Grid regime knobs through to the controller
-        # so the GRID<->RGRID switch actually honors them (previously dgrid ran
-        # a hardcoded EMA classifier and ignored these entirely). Defaults match
-        # the strategy hub (trend 1.25 / range 1.15, windows 4 / 12).
-        cfg["dgrid_short_window"] = int(max(2, _f(settings, "dgrid_short_window_points", 4)))
-        cfg["dgrid_long_window"] = int(max(4, _f(settings, "dgrid_long_window_points", 12)))
-        cfg["dgrid_trend_on_vr"] = _f(settings, "dgrid_trend_on_variance_ratio", 1.25)
-        cfg["dgrid_range_on_vr"] = _f(settings, "dgrid_range_on_variance_ratio", 1.15)
+        cfg["dgrid_short_window"] = int(max(2, _f(settings, "dgrid_short_window_points", 3 if _rg else 4)))
+        cfg["dgrid_long_window"] = int(max(4, _f(settings, "dgrid_long_window_points", 8 if _rg else 12)))
+        cfg["dgrid_trend_on_vr"] = _f(settings, "dgrid_trend_on_variance_ratio", 1.10 if _rg else 1.25)
+        cfg["dgrid_range_on_vr"] = _f(settings, "dgrid_range_on_variance_ratio", 1.05 if _rg else 1.15)
         # Sustained-drift trend filter: flip the grid direction on a slow one-way
         # grind the variance ratio misses (a steady decline keeps VR<1 yet bleeds
-        # a long grid). Percent over the long window; 0 disables.
-        cfg["dgrid_trend_drift_pct"] = _f(settings, "dgrid_trend_drift_pct", 0.30)
+        # a long grid). Percent over the long window; 0 disables. rgrid catches it
+        # earlier (0.15%) so it turns with the trend sooner.
+        cfg["dgrid_trend_drift_pct"] = _f(settings, "dgrid_trend_drift_pct", 0.15 if _rg else 0.30)
         # Tiered profit-booking: scale out reduce-only as the run's uPnL climbs
         # past these tiers (% of margin), closing dgrid_tp_fraction each time.
         cfg["dgrid_tp_tiers_pct"] = settings.get("dgrid_tp_tiers_pct") or [2.0, 4.0, 6.0]
         cfg["dgrid_tp_fraction"] = _f(settings, "dgrid_tp_fraction", 0.33)
-        # Confirm-ticks debounce a flip.
-        cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 2)))
+        # Confirm-ticks debounce a flip. rgrid flips on the first confirmed change
+        # (trend follower); dgrid waits an extra tick to avoid whipsaw.
+        cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 1 if _rg else 2)))
         # Trend-capture redesign (2026-06): as a run goes in profit, ratchet a
         # trailing take-profit so a reversal still closes green, and flip
         # long<->short on a confirmed price reversal from the run's extreme
         # (faster than waiting for the variance classifier to cross). Percents.
-        cfg["dgrid_trail_arm_pct"] = _f(settings, "dgrid_trail_arm_pct", 1.0)
+        # rgrid arms sooner and flips on a smaller reversal (it chases the trend).
+        cfg["dgrid_trail_arm_pct"] = _f(settings, "dgrid_trail_arm_pct", 0.5 if _rg else 1.0)
         cfg["dgrid_trail_giveback_pct"] = _f(settings, "dgrid_trail_giveback_pct", 0.5)
-        cfg["dgrid_reversal_flip_pct"] = _f(settings, "dgrid_reversal_flip_pct", 0.4)
+        cfg["dgrid_reversal_flip_pct"] = _f(settings, "dgrid_reversal_flip_pct", 0.3 if _rg else 0.4)
         # Reset re-center drives an IN-PLACE re-quote of the resting ladder
         # (GridExecutor.recenter) — no flatten, no realized loss — so it can
         # follow price closely without bleeding fees. Pass the user's explicit

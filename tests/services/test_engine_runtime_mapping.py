@@ -221,6 +221,26 @@ def test_grid_rgrid_default_to_recycling_ladders():
     assert r_mom["controller_override"] == "fill_anchored" and r_mom["momentum"] is True
 
 
+def test_rgrid_is_trend_aggressive_dgrid_is_balanced():
+    """rgrid and dgrid share DynamicGridController but get DIFFERENT default
+    tuning: rgrid reacts/flips faster (pure trend-direction ladder), dgrid is the
+    steadier volatility-balanced switcher. Explicit user settings still override."""
+    rg = er.map_strategy_config("rgrid", {"notional_usd": 100.0}, Decimal(58000), product="BTC-USDC")
+    dg = er.map_strategy_config("dgrid", {"notional_usd": 100.0}, Decimal(58000), product="BTC-USDC")
+    # rgrid detects trend sooner and flips faster than dgrid.
+    assert rg["dgrid_trend_on_vr"] < dg["dgrid_trend_on_vr"]
+    assert rg["dgrid_trend_drift_pct"] < dg["dgrid_trend_drift_pct"]
+    assert rg["dgrid_flip_confirm_ticks"] < dg["dgrid_flip_confirm_ticks"]
+    assert rg["dgrid_short_window"] < dg["dgrid_short_window"]
+    assert rg["dgrid_reversal_flip_pct"] < dg["dgrid_reversal_flip_pct"]
+    # An explicit user value overrides the per-strategy default.
+    rg_ov = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "dgrid_trend_on_variance_ratio": 1.40},
+        Decimal(58000), product="BTC-USDC",
+    )
+    assert rg_ov["dgrid_trend_on_vr"] == 1.40
+
+
 def test_map_vol_config_is_spot():
     cfg = er.map_strategy_config(
         "vol", {"notional_usd": 40.0, "interval_seconds": 60}, Decimal(100), product="KBTC-USDC",
