@@ -248,6 +248,33 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         ins = next(c for c in execute_calls if "INSERT INTO" in c[0])
         assert ins[1][1] == 9 and ins[1][2] == "SOL-PERP"
 
+    def test_write_matches_inherits_productid_from_session_for_stop_close(self):
+        # A stop-close fills after stopped_at with product_id=0, its digest gone
+        # from open_orders and no prior recorder row — but it IS session-attributed
+        # (the flatten was linked at placement). It must inherit the SESSION's
+        # product_id so it counts toward the session's CLOSE volume (turnover =
+        # opens + closes).
+        def _q(sql, *params):
+            if "FROM strategy_sessions" in sql:
+                return {"product_id": 2, "product_name": "BTC"}
+            return None  # open_orders / prior-trade / recorder-row / dedup all miss
+
+        execute_calls = []
+        with patch.object(nado_sync, "_back_link_intent", return_value=(90, "strategy")), \
+             patch.object(nado_sync, "query_one", side_effect=_q), \
+             patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
+            nado_sync._write_matches(42, "mainnet", [{
+                "submission_idx": "9", "digest": "0xclose",
+                "base_filled": str(to_x18("0.0336")), "quote_filled": str(to_x18("-1997")),
+                "fee": str(to_x18("0.3")),
+            }])
+
+        ins = next(c for c in execute_calls if "INSERT INTO" in c[0])
+        params = ins[1]
+        assert params[1] == 2 and params[2] == "BTC"   # product_id/name from session
+        assert params[16] == 90                        # attributed to the session
+        assert params[17] == "strategy"                # counts in the rollup
+
     def test_write_open_orders_does_not_sweep_when_live_rows_have_no_digests(self):
         execute_calls = []
         with patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):

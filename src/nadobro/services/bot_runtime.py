@@ -594,7 +594,7 @@ async def _retire_legacy_vol_perp_state(telegram_id: int, network: str, state: d
     state["last_error"] = "Volume Perp was retired; legacy session stopped and perp cleanup requested."
     _save_state(telegram_id, network, state)
 
-    close_res = await run_blocking(close_all_positions, telegram_id, network)
+    close_res = await run_blocking(close_all_positions, telegram_id, network, strategy_session_id=int(state.get("strategy_session_id") or 0) or None)
     if close_res.get("success"):
         await _notify(
             telegram_id,
@@ -2368,7 +2368,7 @@ async def _evaluate_mm_duration_rail(
             await _er_dur.RUNTIME.stop(telegram_id, network, strategy)
     except Exception:  # noqa: BLE001 - close_all_positions is the backstop
         logger.warning("engine stop before duration cap close failed user=%s", telegram_id, exc_info=True)
-    close_res = await run_blocking(close_all_positions, telegram_id, network)
+    close_res = await run_blocking(close_all_positions, telegram_id, network, strategy_session_id=int(state.get("strategy_session_id") or 0) or None)
     if isinstance(close_res, dict) and not close_res.get("success"):
         logger.warning(
             "mm duration close failed user=%s network=%s strategy=%s: %s",
@@ -2783,7 +2783,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         rail = await _evaluate_session_pnl_rail(
             telegram_id, network, state, strategy, product,
             client=client,
-            close_coro=lambda: run_blocking(close_all_positions, telegram_id, network),
+            close_coro=lambda: run_blocking(close_all_positions, telegram_id, network, strategy_session_id=int(state.get("strategy_session_id") or 0) or None),
         )
         if rail is not None:
             return rail
@@ -2987,7 +2987,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         rail = await _evaluate_session_pnl_rail(
             telegram_id, network, state, strategy, product,
             client=client,
-            close_coro=lambda: run_blocking(close_all_positions, telegram_id, network),
+            close_coro=lambda: run_blocking(close_all_positions, telegram_id, network, strategy_session_id=int(state.get("strategy_session_id") or 0) or None),
         )
         if rail is not None:
             return rail

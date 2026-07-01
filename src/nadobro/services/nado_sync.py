@@ -725,6 +725,25 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 user_id, network, product_id, _timestamp_or_now(match.get("timestamp"))
             )
 
+        # Last-resort product_id: a session-attributed fill whose id is still 0
+        # inherits its SESSION's product. This is the stop-close case — the flatten
+        # market order fills instantly (digest gone from open_orders) with no prior
+        # recorder row, so neither recovery above resolves it — yet it IS the
+        # session's own close and must carry the session's product to count.
+        if int(product_id or 0) == 0 and session_id:
+            try:
+                _sp = query_one(
+                    "SELECT product_id, product_name FROM strategy_sessions "
+                    "WHERE id = %s AND COALESCE(product_id, 0) <> 0 LIMIT 1",
+                    (int(session_id),),
+                )
+                if _sp and _sp.get("product_id"):
+                    product_id = int(_sp["product_id"])
+                    if not recovered_pname and _sp.get("product_name"):
+                        recovered_pname = str(_sp["product_name"])
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                pass
+
         # Engine (``source='strategy'``) AND manual open (``source='manual'``)
         # fills are written at fill time by a recorder row carrying human columns
         # and — crucially — a real ``product_id`` (IndexerMatch has none). Enrich

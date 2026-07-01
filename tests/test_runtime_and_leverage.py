@@ -313,7 +313,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertFalse(state.get("running"))
         self.assertTrue(any(s.get("running") is False for s in saved_states))
         finalize_mock.assert_called_once()
-        close_mock.assert_called_once_with(telegram_id, network)
+        # The retirement close is attributed to the session so its close volume counts.
+        close_mock.assert_called_once_with(telegram_id, network, strategy_session_id=5)
         dispatch_mock.assert_not_called()
 
     def test_run_cycle_retires_legacy_bro_and_cleans_exchange_state(self):
