@@ -700,6 +700,7 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                     product_id = int(_oo["product_id"])
                     if not recovered_pname and _oo.get("pair"):
                         recovered_pname = str(_oo["pair"])
+            # policy: degrade-ok(open_orders product lookup best-effort; later trades/session fallbacks still run)
             except Exception:  # noqa: BLE001 - recovery is best-effort
                 pass
         # A market/text-to-trade order fills instantly and leaves open_orders, so
@@ -719,6 +720,7 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                     product_id = int(_tr["product_id"])
                     if not recovered_pname and _tr.get("product_name"):
                         recovered_pname = str(_tr["product_name"])
+            # policy: degrade-ok(prior-trades product lookup best-effort; session-product fallback still runs)
             except Exception:  # noqa: BLE001 - recovery is best-effort
                 pass
         session_id, source = _back_link_intent(digest, network)
@@ -746,6 +748,7 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                     product_id = int(_sp["product_id"])
                     if not recovered_pname and _sp.get("product_name"):
                         recovered_pname = str(_sp["product_name"])
+            # policy: degrade-ok(session-product fallback best-effort; fill may stay product_id=0, excluded from per-trade card)
             except Exception:  # noqa: BLE001 - recovery is best-effort
                 pass
 

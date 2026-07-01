@@ -2758,6 +2758,7 @@ def close_all_positions(
                             DbTradeRecorder._link_intent(
                                 str(close_digest), int(strategy_session_id), selected_network
                             )
+                        # policy: degrade-ok(close link best-effort; close fill still records, attribution falls back to window)
                         except Exception:  # noqa: BLE001 - link is best-effort
                             pass
                     close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
