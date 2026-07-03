@@ -333,6 +333,11 @@ def realized_pnl_windows_from_rows(
     pnl_windows = {k: ZERO for k in keys}
     wins = 0
     losses = 0
+    # Per-window win/loss counters so window-scoped surfaces (Night HOWL's
+    # "your last 24h") can report a win rate over the SAME closes as the
+    # window's PnL, not the account's whole history.
+    wins_windows = {k: 0 for k in keys}
+    losses_windows = {k: 0 for k in keys}
 
     norm = [c for c in (_fill_signed_base_price_ts(r) for r in (rows or [])) if c is not None]
     # Chronological replay; ts-less rows (shouldn't happen for DB rows) sort oldest.
@@ -365,13 +370,19 @@ def realized_pnl_windows_from_rows(
             pnl_windows["all"] += realized
             if realized > ZERO:
                 wins += 1
+                wins_windows["all"] += 1
             elif realized < ZERO:
                 losses += 1
+                losses_windows["all"] += 1
             if ts is not None:
                 age = Decimal(max(0, int((now - ts.astimezone(timezone.utc)).total_seconds())))
                 for wk, thr in thresholds.items():
                     if age <= thr:
                         pnl_windows[wk] += realized
+                        if realized > ZERO:
+                            wins_windows[wk] += 1
+                        else:
+                            losses_windows[wk] += 1
 
     decisive = wins + losses
     return {
@@ -380,6 +391,8 @@ def realized_pnl_windows_from_rows(
         "wins": wins,
         "losses": losses,
         "win_rate": (Decimal(wins) / Decimal(decisive) * Decimal(100)) if decisive else ZERO,
+        "wins_windows": wins_windows,
+        "losses_windows": losses_windows,
     }
 
 

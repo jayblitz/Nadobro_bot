@@ -42,7 +42,7 @@ from src.nadobro.services.user_service import (
     get_user,
     get_user_readonly_client,
 )
-from src.nadobro.utils.visual import b, divider, esc
+from src.nadobro.utils.visual import b, divider, esc, price as _px, qty as _qty
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +116,11 @@ def _exits_line(plan: ExecutionPlan) -> str:
     if ex.tp_pct is not None:
         bits.append(f"TP +{ex.tp_pct:g}%")
     if ex.tp_price is not None:
-        bits.append(f"TP ${ex.tp_price:,.4g}")
+        bits.append(f"TP {_px(ex.tp_price)}")
     if ex.sl_pct is not None:
         bits.append(f"SL -{ex.sl_pct:g}%")
     if ex.sl_price is not None:
-        bits.append(f"SL ${ex.sl_price:,.4g}")
+        bits.append(f"SL {_px(ex.sl_price)}")
     if ex.trailing_pct is not None:
         bits.append(f"trail {ex.trailing_pct:g}%")
     return " / ".join(bits)
@@ -133,7 +133,7 @@ def render_preview_card(plan: ExecutionPlan, mid: float, balance_note: str) -> s
         side_txt = "LONG" if plan.side == "buy" else "SHORT"
     size_txt = (
         f"${plan.size_quote:,.2f}" if plan.size_quote
-        else f"{plan.size_base:g} {plan.product}"
+        else f"{_qty(plan.size_base)} {plan.product}"
     )
     notional = float(plan.size_quote or (plan.size_base or 0) * mid)
     lines = [
@@ -149,7 +149,7 @@ def render_preview_card(plan: ExecutionPlan, mid: float, balance_note: str) -> s
             f"every {plan.interval_seconds:g}s · {mode}"
         ))
     elif plan.algo == "limit":
-        lines.append(esc(f"Limit order at ${plan.limit_price:,.4g}"))
+        lines.append(esc(f"Limit order at {_px(plan.limit_price)}"))
     else:
         lines.append(esc("Market order"))
     if plan.market == "perp" and plan.leverage:
@@ -159,7 +159,7 @@ def render_preview_card(plan: ExecutionPlan, mid: float, balance_note: str) -> s
     if exits:
         lines.append(esc(f"Exits: {exits} (vs actual avg entry)"))
     lines.append(divider())
-    lines.append(esc(f"Mid now ${mid:,.4g} · est. notional ~${notional:,.2f}"))
+    lines.append(esc(f"Mid now {_px(mid)} · est. notional ~${notional:,.2f}"))
     if balance_note:
         lines.append(esc(balance_note))
     lines.append("")

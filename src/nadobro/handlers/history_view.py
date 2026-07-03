@@ -46,7 +46,11 @@ def render_history_view(
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for idx, trip in enumerate(visible, start=page * page_size + 1):
-        pair = str(trip.get("pair") or trip.get("product_name") or f"ID:{trip.get('product_id')}")
+        pair = _resolve_pair_name(
+            trip.get("product_id"),
+            str(trip.get("pair") or trip.get("product_name") or ""),
+            network,
+        )
         side = "📈 long" if str(trip.get("side") or "").lower() == "long" else "📉 short"
         size = _dec(trip.get("size"))
         open_px = _dec(trip.get("avg_open_price"))
@@ -83,6 +87,28 @@ def render_history_view(
     rows.append([InlineKeyboardButton("📈 Performance", callback_data="portfolio:performance")])
     rows.append([InlineKeyboardButton("⬅ Portfolio", callback_data="portfolio:view")])
     return "\n".join(lines)[:3500], InlineKeyboardMarkup(rows)
+
+
+def _resolve_pair_name(product_id: Any, stored: str, network: str) -> str:
+    """Resolve a display pair name from the product id, falling back to the
+    stored name — never surface a raw ``ID:0`` / ``ID:5`` to the user."""
+    stored = (stored or "").strip()
+    if stored and not stored.startswith("ID:"):
+        return stored
+    try:
+        pid = int(product_id) if product_id is not None else 0
+    except (TypeError, ValueError):
+        pid = 0
+    if pid > 0:
+        try:
+            from src.nadobro.config import get_product_name
+
+            name = get_product_name(pid, network=network)
+            if name and not str(name).startswith("ID:"):
+                return name
+        except Exception:
+            pass
+    return stored or (f"ID:{pid}" if pid else "?")
 
 
 def _fmt_size(size: Decimal) -> str:

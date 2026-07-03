@@ -846,6 +846,32 @@ def init_db():
                 except Exception:  # noqa: BLE001 - repair rollup is best-effort
                     logger.warning("post-backfill session re-rollup failed sid=%s", _sid, exc_info=True)
 
+        # migrations/0016_retag_leaked_copy_fills.sql: re-tag copy fills that
+        # leaked into History as source='manual' (the old venue-match enrich
+        # gate skipped source='copy' rows and inserted a manual dup). Match by
+        # order_digest shared with a source='copy' row for the same user — a
+        # legit manual trade shares its digest with nothing. Idempotent.
+        with conn.cursor() as cur:
+            try:
+                for net in ("testnet", "mainnet"):
+                    cur.execute(f"""
+                        UPDATE trades_{net} m SET source = 'copy'
+                        WHERE m.source = 'manual'
+                          AND m.order_digest IS NOT NULL
+                          AND EXISTS (
+                            SELECT 1 FROM trades_{net} c
+                            WHERE c.source = 'copy'
+                              AND c.order_digest = m.order_digest
+                              AND c.user_id = m.user_id
+                              AND c.id <> m.id
+                          )
+                    """)
+                conn.commit()
+                logger.info("leaked copy-fill retag verified")
+            except Exception:
+                conn.rollback()
+                logger.warning("leaked copy-fill retag failed", exc_info=True)
+
         # --- strategy_sessions table ---
         with conn.cursor() as cur:
             cur.execute("""

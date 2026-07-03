@@ -755,19 +755,27 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         if session_id is not None:
             touched_sessions.add(int(session_id))
 
-        # Engine (``source='strategy'``) AND manual open (``source='manual'``)
-        # fills are written at fill time by a recorder row carrying human columns
-        # and — crucially — a real ``product_id`` (IndexerMatch has none). Enrich
-        # the earliest such row for this digest with the authoritative venue x18
-        # PnL/fee instead of inserting a duplicate, so the row stays canonical, the
-        # match is counted once, AND the manual fill keeps its product_id (else a
-        # product_id=0 dupe is inserted and the per-trade card can't pair it).
-        # The bot's synthetic account-wide ``MARKET_CLOSE`` rows are EXCLUDED so an
-        # oversized close never acquires a submission_idx and pollutes the ledger.
+        # Every recorder row (``source`` = strategy / manual / copy / vol_stop)
+        # is written at fill time carrying human columns and — crucially — a real
+        # ``product_id`` (IndexerMatch has none). Enrich the earliest such row for
+        # this digest with the authoritative venue x18 PnL/fee instead of inserting
+        # a duplicate, so the row stays canonical, the match is counted once, and
+        # it KEEPS ITS SOURCE (the UPDATE never rewrites ``source``).
+        #
+        # The source restriction is deliberately absent: it used to be
+        # ``source IN ('strategy','manual')``, which skipped ``copy`` (and
+        # ``vol_stop``) recorder rows — so a copied fill's venue match inserted a
+        # NEW ``source='manual'`` duplicate that then LEAKED into the History tab
+        # (which is manual-only) and double-counted. Matching any prior recorder
+        # row by digest fixes the leak AND the duplicate.
+        #
+        # The bot's synthetic account-wide ``MARKET_CLOSE`` rows are still EXCLUDED
+        # (``NOT ILIKE '%close%'``) so an oversized close never acquires a
+        # submission_idx and pollutes the ledger.
         if digest:
             recorder_row = query_one(
                 f"SELECT id FROM {table} "
-                f"WHERE order_digest = %s AND source IN ('strategy', 'manual') "
+                f"WHERE order_digest = %s "
                 f"AND submission_idx IS NULL AND COALESCE(order_type, '') NOT ILIKE '%%close%%' "
                 f"ORDER BY id ASC LIMIT 1",
                 (digest,),
@@ -818,7 +826,20 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         # the window fallback too); reuse them here so the inserted fill is
         # attributable to a product instead of the product_id=0 bucket.
         insert_pid = int(product_id or 0)
-        insert_pname = recovered_pname or f"ID:{insert_pid}"
+        insert_pname = recovered_pname
+        # Resolve the real catalog name when we have a product id but no name —
+        # otherwise the row stores "ID:5" and every downstream surface (History,
+        # HOWL top pairs, the Share PnL card) shows the raw id instead of the pair.
+        if (not insert_pname) and insert_pid > 0:
+            try:
+                from src.nadobro.config import get_product_name as _gpn
+
+                resolved = _gpn(insert_pid, network=network)
+                if resolved and not str(resolved).startswith("ID:"):
+                    insert_pname = resolved
+            except Exception:  # policy: degrade-ok(name resolution best-effort)
+                pass
+        insert_pname = insert_pname or f"ID:{insert_pid}"
 
         execute(
             f"""

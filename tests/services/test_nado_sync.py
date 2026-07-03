@@ -178,8 +178,10 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         execute_calls = []
 
         def _q(sql, *params):
-            if "source IN ('strategy', 'manual')" in sql:
-                return {"id": 99}        # manual recorder row exists for this digest
+            # The enrich gate is now source-agnostic (matches any recorder row
+            # for the digest); identify it by its NOT ILIKE '%close%' guard.
+            if "NOT ILIKE" in sql:
+                return {"id": 99}        # a recorder row exists for this digest
             return None                  # dedup / back-link / window: miss
 
         with patch.object(nado_sync, "query_one", side_effect=_q), patch.object(
@@ -230,7 +232,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         def _q(sql, *params):
             if "FROM open_orders" in sql:
                 return None                                   # digest gone
-            if "source IN ('strategy', 'manual')" in sql:
+            if "NOT ILIKE" in sql:
                 return None                                   # no recorder row to enrich
             if "SELECT product_id, product_name FROM trades_" in sql:
                 return {"product_id": 9, "product_name": "SOL-PERP"}  # prior OWN row

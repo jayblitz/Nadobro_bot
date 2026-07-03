@@ -18,17 +18,32 @@ NOW = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc).timestamp()
 
 
 def _trades():
+    # Venue-confirmed fills (submission_idx + product_id) — the ONLY rows that
+    # count now. Realized PnL is derived position-aware from open/close legs,
+    # NOT read from the void per-fill ``realized_pnl`` column.
     return [
-        {"created_at": NOW - 3600, "product_name": "BTC", "side": "long", "size": 0.1,
-         "price": 60000, "fees": 2.0, "realized_pnl": 15.0, "source": "grid", "status": "filled"},
-        {"created_at": NOW - 7200, "product_name": "BTC", "side": "short", "size": 0.1,
-         "price": 60000, "fees": 2.0, "realized_pnl": -8.0, "source": "grid", "status": "filled"},
-        {"created_at": NOW - 1800, "product_name": "ETH", "side": "long", "size": 1.0,
-         "price": 3000, "fees": 1.0, "realized_pnl": 3.0, "source": "manual", "status": "filled"},
-        {"created_at": NOW - 99999, "product_name": "OLD", "side": "long", "size": 1,
-         "price": 1, "status": "filled"},                        # outside 24h window
-        {"created_at": NOW - 100, "product_name": "SOL", "side": "long", "size": 1,
-         "price": 150, "status": "failed"},                       # excluded (failed)
+        # BTC (pid 2): open long then close +$15 -> 1 win.
+        {"created_at": NOW - 7200, "product_id": 2, "product_name": "BTC-PERP", "side": "long",
+         "fill_size": 0.1, "fill_price": 60000, "fill_fee": 2.0, "submission_idx": 1,
+         "source": "grid", "status": "filled"},
+        {"created_at": NOW - 3600, "product_id": 2, "product_name": "BTC-PERP", "side": "short",
+         "fill_size": 0.1, "fill_price": 60150, "fill_fee": 2.0, "submission_idx": 2,
+         "source": "grid", "status": "filled"},
+        # ETH (pid 4): open long then close -$10 -> 1 loss.
+        {"created_at": NOW - 1800, "product_id": 4, "product_name": "ETH-PERP", "side": "long",
+         "fill_size": 1.0, "fill_price": 3000, "fill_fee": 0.5, "submission_idx": 3,
+         "source": "manual", "status": "filled"},
+        {"created_at": NOW - 900, "product_id": 4, "product_name": "ETH-PERP", "side": "short",
+         "fill_size": 1.0, "fill_price": 2990, "fill_fee": 0.5, "submission_idx": 4,
+         "source": "manual", "status": "filled"},
+        # Outside 24h window (still counts toward entry basis, not the window).
+        {"created_at": NOW - 99999, "product_id": 9, "product_name": "OLD-PERP", "side": "long",
+         "fill_size": 1, "fill_price": 1, "submission_idx": 5, "status": "filled"},
+        # Excluded: failed, and a pending (no submission_idx) row.
+        {"created_at": NOW - 100, "product_id": 3, "product_name": "SOL-PERP", "side": "long",
+         "fill_size": 1, "fill_price": 150, "submission_idx": 6, "status": "failed"},
+        {"created_at": NOW - 50, "product_id": 2, "product_name": "BTC-PERP", "side": "long",
+         "fill_size": 0.5, "fill_price": 61000, "status": "filled"},   # no submission_idx
     ]
 
 
@@ -37,15 +52,47 @@ def _trades():
 # --------------------------------------------------------------------------- #
 
 def test_pattern_windows_and_aggregates():
+    # Degraded mode (no account_pnl) replays the given rows position-aware.
     p = nh.compute_user_pattern(_trades(), now_ts=NOW)
-    assert p["trades"] == 3                       # old + failed excluded
-    assert p["volume_usd"] == 15000.0
+    assert p["trades"] == 4                       # 4 venue-confirmed in-window; old/failed/pending excluded
+    assert p["volume_usd"] == 0.1 * 60000 + 0.1 * 60150 + 1 * 3000 + 1 * 2990
     assert p["fees_usd"] == 5.0
-    assert p["realized_pnl_usd"] == 10.0
-    assert p["net_pnl_usd"] == 5.0                # 10 realized - 5 fees
-    assert p["wins"] == 2 and p["losses"] == 1
-    assert abs(p["win_rate"] - 2 / 3) < 1e-3
-    assert p["top_pairs"][0]["pair"] == "BTC"
+    # Realized: BTC +15, ETH -10 = +5 (derived, not the per-fill column).
+    assert abs(p["realized_pnl_usd"] - 5.0) < 1e-6
+    assert abs(p["net_pnl_usd"] - 0.0) < 1e-6     # 5 realized - 5 fees
+    assert p["wins"] == 1 and p["losses"] == 1
+    assert abs(p["win_rate"] - 0.5) < 1e-3
+    assert p["top_pairs"][0]["pair"] == "BTC-PERP"
+
+
+def test_pattern_win_loss_from_account_pnl_window():
+    # When account_pnl is supplied (production path), wins/losses/realized come
+    # from ITS 24h window, never re-derived from the rows.
+    account_pnl = {
+        "pnl_windows": {"24h": 42.0, "7d": 100.0, "30d": 100.0, "all": 100.0},
+        "wins_windows": {"24h": 3, "7d": 5, "30d": 5, "all": 5},
+        "losses_windows": {"24h": 1, "7d": 2, "30d": 2, "all": 2},
+    }
+    p = nh.compute_user_pattern(_trades(), now_ts=NOW, account_pnl=account_pnl)
+    assert p["realized_pnl_usd"] == 42.0
+    assert p["wins"] == 3 and p["losses"] == 1
+    assert abs(p["win_rate"] - 0.75) < 1e-6
+
+
+def test_pattern_resolves_pair_names_no_id_zero():
+    # A product-less fill (pid 0) never reaches the leaderboard; a stale stored
+    # name is superseded by the resolver.
+    trades = [
+        {"created_at": NOW - 100, "product_id": 2, "product_name": "BTC", "side": "long",
+         "fill_size": 0.1, "fill_price": 60000, "submission_idx": 1, "status": "filled"},
+        {"created_at": NOW - 90, "product_id": 0, "product_name": "ID:0", "side": "long",
+         "fill_size": 0.1, "fill_price": 60000, "submission_idx": 2, "status": "filled"},
+    ]
+    p = nh.compute_user_pattern(
+        trades, now_ts=NOW, resolve_pair=lambda pid, stored: "BTC-PERP" if pid == 2 else f"ID:{pid}"
+    )
+    pairs = {tp["pair"] for tp in p["top_pairs"]}
+    assert pairs == {"BTC-PERP"}                  # ID:0 dropped, BTC canonicalized
 
 
 def test_pattern_empty_is_safe():
@@ -56,8 +103,10 @@ def test_pattern_empty_is_safe():
 def test_pattern_accepts_iso_and_epoch_timestamps():
     iso = datetime.fromtimestamp(NOW - 600, timezone.utc).isoformat()
     trades = [
-        {"created_at": iso, "product_name": "BTC", "size": 1, "price": 100, "status": "filled"},
-        {"created_at": int((NOW - 600) * 1000), "product_name": "ETH", "size": 1, "price": 50, "status": "filled"},
+        {"created_at": iso, "product_id": 2, "product_name": "BTC", "side": "long",
+         "fill_size": 1, "fill_price": 100, "submission_idx": 1, "status": "filled"},
+        {"created_at": int((NOW - 600) * 1000), "product_id": 4, "product_name": "ETH", "side": "long",
+         "fill_size": 1, "fill_price": 50, "submission_idx": 2, "status": "filled"},
     ]
     assert nh.compute_user_pattern(trades, now_ts=NOW)["trades"] == 2
 
@@ -182,6 +231,10 @@ def test_build_report_bounds_trade_query_to_last_24h(monkeypatch, memstore):
 
     now = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(db, "get_trades_by_user", _trades)
+    monkeypatch.setattr(db, "get_account_realized_pnl_windows", lambda *a, **k: {})
+    # DB-independent: stub the live-state read the backtest branch would make.
+    import src.nadobro.services.bot_runtime as br
+    monkeypatch.setattr(br, "_load_state", lambda *a, **k: {})
 
     report = nh.build_report(7, "mainnet", now_utc=now)
 
