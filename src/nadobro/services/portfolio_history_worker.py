@@ -121,20 +121,27 @@ class DbPortfolioHistoryRepository(PortfolioHistoryRepository):
         execute(
             """
             INSERT INTO engine_portfolio_history
-                (user_id, ts, total_value_quote, by_account_json, by_asset_json)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (user_id, ts) DO NOTHING
+                (user_id, network, ts, total_value_quote, by_account_json, by_asset_json)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, network, ts) DO NOTHING
             """,
-            (row.user_id, row.ts, str(row.total_value_quote), _json(row.by_account), _json(row.by_asset)),
+            (
+                row.user_id, row.network, row.ts, str(row.total_value_quote),
+                _json(row.by_account), _json(row.by_asset),
+            ),
         )
 
     def fetch(
-        self, user_id: int, since: Optional[datetime] = None, until: Optional[datetime] = None
+        self, user_id: int, since: Optional[datetime] = None, until: Optional[datetime] = None,
+        network: Optional[str] = None,
     ) -> List[PortfolioHistoryRow]:
         from src.nadobro.db import query_all
 
         clauses = ["user_id = %s"]
         params: List[object] = [user_id]
+        if network is not None:
+            clauses.append("network = %s")
+            params.append(network)
         if since is not None:
             clauses.append("ts >= %s")
             params.append(since)
@@ -142,7 +149,7 @@ class DbPortfolioHistoryRepository(PortfolioHistoryRepository):
             clauses.append("ts <= %s")
             params.append(until)
         rows = query_all(
-            f"SELECT user_id, ts, total_value_quote, by_account_json, by_asset_json "
+            f"SELECT user_id, network, ts, total_value_quote, by_account_json, by_asset_json "
             f"FROM engine_portfolio_history WHERE {' AND '.join(clauses)} ORDER BY ts",
             tuple(params),
         )
@@ -155,6 +162,7 @@ class DbPortfolioHistoryRepository(PortfolioHistoryRepository):
                     total_value_quote=_dec(r["total_value_quote"]),
                     by_account={k: _dec(v) for k, v in _loads(r["by_account_json"]).items()},
                     by_asset={k: _dec(v) for k, v in _loads(r["by_asset_json"]).items()},
+                    network=str(r.get("network") or "mainnet"),
                 )
             )
         return out
@@ -182,42 +190,44 @@ class DbPortfolioHistoryRepository(PortfolioHistoryRepository):
                     (d365,),
                 )
                 removed += cur.rowcount or 0
-                # 30d..1y: keep one per (user, day). Pick the row with
-                # max(ts) per bucket via DISTINCT ON (CTE pattern, O(N)).
+                # 30d..1y: keep one per (user, network, day). Pick the row
+                # with max(ts) per bucket via DISTINCT ON (CTE pattern, O(N)).
+                # Bucketing by network keeps each mode's series intact — one
+                # survivor per network per day, never one across both.
                 cur.execute(
                     """
                     WITH keep AS (
-                        SELECT DISTINCT ON (user_id, date_trunc('day', ts))
-                               user_id, ts
+                        SELECT DISTINCT ON (user_id, network, date_trunc('day', ts))
+                               user_id, network, ts
                         FROM engine_portfolio_history
                         WHERE ts >= %s AND ts < %s
-                        ORDER BY user_id, date_trunc('day', ts), ts DESC
+                        ORDER BY user_id, network, date_trunc('day', ts), ts DESC
                     )
                     DELETE FROM engine_portfolio_history h
                     WHERE h.ts >= %s AND h.ts < %s
                       AND NOT EXISTS (
                         SELECT 1 FROM keep k
-                        WHERE k.user_id = h.user_id AND k.ts = h.ts
+                        WHERE k.user_id = h.user_id AND k.network = h.network AND k.ts = h.ts
                       )
                     """,
                     (d365, d30, d365, d30),
                 )
                 removed += cur.rowcount or 0
-                # 7d..30d: keep one per (user, hour).
+                # 7d..30d: keep one per (user, network, hour).
                 cur.execute(
                     """
                     WITH keep AS (
-                        SELECT DISTINCT ON (user_id, date_trunc('hour', ts))
-                               user_id, ts
+                        SELECT DISTINCT ON (user_id, network, date_trunc('hour', ts))
+                               user_id, network, ts
                         FROM engine_portfolio_history
                         WHERE ts >= %s AND ts < %s
-                        ORDER BY user_id, date_trunc('hour', ts), ts DESC
+                        ORDER BY user_id, network, date_trunc('hour', ts), ts DESC
                     )
                     DELETE FROM engine_portfolio_history h
                     WHERE h.ts >= %s AND h.ts < %s
                       AND NOT EXISTS (
                         SELECT 1 FROM keep k
-                        WHERE k.user_id = h.user_id AND k.ts = h.ts
+                        WHERE k.user_id = h.user_id AND k.network = h.network AND k.ts = h.ts
                       )
                     """,
                     (d30, d7, d30, d7),
@@ -247,8 +257,14 @@ class SnapshotAccountProvider(AccountProvider):
     """Sources normalized accounts + marks from the existing portfolio
     snapshot, so portfolio v2 reuses the live Nado data path."""
 
-    def __init__(self, network: str = "mainnet") -> None:
-        self.network = network
+    def __init__(self, network: str | None = None) -> None:
+        # None = follow each user's ACTIVE network (matches the perp snapshot
+        # path, which samples via get_portfolio_snapshot on the user's current
+        # mode). Pinning "mainnet" here while the perp leg followed the user's
+        # mode summed testnet perps + mainnet spot into one equity number.
+        # Stored under ``_network``: a plain ``self.network`` attribute would
+        # shadow the ``network()`` accessor inherited from AccountProvider.
+        self._network = network
 
     async def accounts(self, user_id: int) -> Accounts:
         from src.nadobro.services.async_utils import run_blocking
@@ -309,6 +325,18 @@ class SnapshotAccountProvider(AccountProvider):
                 marks[pair] = _dec(pos.get("mark_price", pos.get("price", 0)))
         return marks
 
+    async def network(self, user_id: int) -> str:
+        """Network the sample is taken on: an explicitly pinned constructor
+        network wins; otherwise the user's ACTIVE network as resolved by the
+        portfolio snapshot (the same snapshot ``accounts()`` just read — the
+        2s snapshot cache keeps the two calls coherent)."""
+        if self._network is not None:
+            return str(self._network)
+        from src.nadobro.services.async_utils import run_blocking
+
+        snapshot = await run_blocking(self._snapshot, user_id)
+        return str(getattr(snapshot, "network", None) or "mainnet")
+
     def _snapshot(self, user_id: int) -> object:
         from src.nadobro.services.portfolio_service import get_portfolio_snapshot
 
@@ -317,7 +345,9 @@ class SnapshotAccountProvider(AccountProvider):
     def _spot_balances(self, user_id: int) -> Dict[object, Decimal]:
         from src.nadobro.services.user_service import get_user_readonly_client
 
-        client = get_user_readonly_client(user_id, network=self.network)
+        # network=None resolves the user's active network — same network the
+        # perp snapshot above was taken on, so one sample never mixes modes.
+        client = get_user_readonly_client(user_id, network=self._network)
         if client is None:
             return {}
         try:

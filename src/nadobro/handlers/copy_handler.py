@@ -292,11 +292,15 @@ async def _handle_copy(query, data, context, telegram_id):
             for m in mirrors:
                 status_label = localize_text("PAUSED", lang) if m.get("paused") else localize_text("ACTIVE", lang)
                 status_icon = f"⏸ {status_label}" if m.get("paused") else f"🟢 {status_label}"
+                # Mirrors keep running on their own network across a mode
+                # switch — tag each row so testnet and mainnet mirrors are
+                # never mistaken for one another on this shared dashboard.
+                net_tag = "🧪 TESTNET" if str(m.get("network", "mainnet")).lower() == "testnet" else "🌐 MAINNET"
                 pnl = float(m.get("cumulative_pnl", 0) or 0)
                 pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 pnl_str = escape_md(pnl_str)
                 lines.append(
-                    f"• *{escape_md(m['trader_label'])}* · {status_icon}\n"
+                    f"• *{escape_md(m['trader_label'])}* · {status_icon} · {escape_md(net_tag)}\n"
                     f"  {l_alloc}: ${float(m.get('total_allocated_usd', 0) or 0):.0f} \\| "
                     f"{l_margin}: ${float(m.get('margin_per_trade', 0) or 0):.0f} \\| {l_lev}: {float(m.get('max_leverage', 0) or 0):.0f}x\n"
                     f"  {l_positions}: {int(m.get('open_positions', 0) or 0)}\n"

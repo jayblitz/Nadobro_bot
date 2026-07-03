@@ -59,7 +59,7 @@ def render_history_view(
         margin = "iso" if bool(trip.get("isolated")) else "cross"
         lines.extend([
             f"{idx}. {b(pair)}  {side} · {margin}",
-            f"    {abs(size)} @ {money(open_px)} → {money(close_px)} · held {hold}",
+            f"    {_fmt_size(abs(size))} @ {money(open_px)} → {money(close_px)} · held {hold}",
             f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Fees -{money(abs(fees))} · "
             f"Funding {signed_money(-funding)} · Vol {money(volume)}",  # funding_paid > 0 is a cost
             "",
@@ -83,6 +83,18 @@ def render_history_view(
     rows.append([InlineKeyboardButton("📈 Performance", callback_data="portfolio:performance")])
     rows.append([InlineKeyboardButton("⬅ Portfolio", callback_data="portfolio:view")])
     return "\n".join(lines)[:3500], InlineKeyboardMarkup(rows)
+
+
+def _fmt_size(size: Decimal) -> str:
+    """Trim float→Decimal noise (0.01535000000000003 → 0.01535): sizes come
+    from float DB columns, so digits past 8 decimals are representation
+    artifacts, not venue precision."""
+    try:
+        q = size.quantize(Decimal("0.00000001"))
+        text = f"{q.normalize():f}"
+        return text if text not in ("-0", "") else "0"
+    except Exception:
+        return str(size)
 
 
 def _dec(value: Any) -> Decimal:

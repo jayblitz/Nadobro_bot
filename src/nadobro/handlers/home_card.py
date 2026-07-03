@@ -14,7 +14,6 @@ from src.nadobro.handlers.formatters import (
     fmt_positions,
     fmt_settings,
     fmt_wallet_info,
-    fmt_help,
     fmt_points_dashboard,
     fmt_referral_dashboard,
 )
@@ -387,13 +386,5 @@ async def open_home_card_view_from_message(update, context: CallbackContext, tel
 
 async def open_home_card_from_command(update, context: CallbackContext, telegram_id: int):
     text = await build_home_card_text_async(telegram_id)
-    await _edit_or_send_card(update, context, text, home_card_kb())
-
-
-async def open_help_card_from_command(update, context: CallbackContext):
-    await _edit_or_send_card(update, context, fmt_help(), home_card_kb())
-
-
-async def open_status_card_from_command(update, context: CallbackContext, text: str):
     await _edit_or_send_card(update, context, text, home_card_kb())
 

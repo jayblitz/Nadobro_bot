@@ -41,6 +41,10 @@ class TWAPExecutorConfig:
     activation_bounds: Optional[Decimal] = None
     leverage: int = 1
     connector_name: str = "nado"
+    # MAKER slice offset from mid in bps: a BUY rests BELOW mid and a SELL
+    # ABOVE it (buy low / sell high), re-anchored to the live mid every slice
+    # so the quotes follow price. 0 = legacy at-mid pricing.
+    maker_offset_bp: float = 0.0
 
     def __post_init__(self) -> None:
         self.total_amount_quote = _dec(self.total_amount_quote)
@@ -113,12 +117,22 @@ class TWAPExecutor(Executor):
         self._current_recorded_fee = Decimal(0)
 
     async def _place_slice(self, index: int, mid: Decimal) -> None:
-        amount_base = self.config.amount_per_order_quote / mid
         if self.is_maker:
+            # Rest INSIDE the book: buy below mid, sell above it (offset in
+            # bps), re-anchored to the live mid each slice so the ladder
+            # follows price. At-mid post-only orders crossed on tight books.
+            px = mid
+            offset = _dec(self.config.maker_offset_bp or 0) / Decimal(10000)
+            if offset > 0:
+                if self.config.side is TradeType.BUY:
+                    px = mid * (Decimal(1) - offset)
+                else:
+                    px = mid * (Decimal(1) + offset)
+            amount_base = self.config.amount_per_order_quote / px
             order = await self._guard(
                 lambda: self.adapter.place_order(
                     self.trading_pair, self.config.side, OrderType.LIMIT_MAKER,
-                    amount_base, mid, self.config.leverage, False,
+                    amount_base, px, self.config.leverage, False,
                 ),
                 label="twap_maker",
             )
@@ -126,6 +140,7 @@ class TWAPExecutor(Executor):
             self._reset_current_counters()
             self._ingest_current(order)
         else:
+            amount_base = self.config.amount_per_order_quote / mid
             order = await self._guard(
                 lambda: self.adapter.place_order(
                     self.trading_pair, self.config.side, OrderType.MARKET,

@@ -2335,6 +2335,11 @@ class NadoClient:
         ratio = d_price / d_inc
         if order_type == "ioc":
             rounding = ROUND_CEILING if is_buy else ROUND_FLOOR
+        elif order_type == "post_only":
+            # Never round INTO the book: a post-only buy rounds DOWN and a
+            # post-only sell rounds UP, so tick alignment can't turn a valid
+            # maker price into a crossing one the venue rejects.
+            rounding = ROUND_FLOOR if is_buy else ROUND_CEILING
         else:
             rounding = ROUND_HALF_UP
         ticks = ratio.to_integral_value(rounding=rounding)
@@ -2506,9 +2511,16 @@ class NadoClient:
             data = self._query_rest("all_products") or {}
             if data.get("status") != "success":
                 return
-            perp_products = (data.get("data", {}) or {}).get("perp_products", []) or []
+            payload = data.get("data", {}) or {}
+            # BOTH markets: spot orders (Volume bot) previously had NO cached
+            # increments because only perp_products was parsed — their price/size
+            # went to the venue unaligned and every spot order was rejected
+            # ("volume bot places no orders"), while perp strategies worked.
+            all_rows = list(payload.get("perp_products", []) or []) + list(
+                payload.get("spot_products", []) or []
+            )
             fresh_blob: dict = {}
-            for p in perp_products:
+            for p in all_rows:
                 pid = p.get("product_id")
                 try:
                     pid = int(pid)

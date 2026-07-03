@@ -24,6 +24,7 @@ from src.nadobro.handlers.keyboards import (
     home_card_kb,
     status_kb,
     compose_status_overview_kb,
+    back_kb,
 )
 from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_automation_for_user
 from src.nadobro.services.nado_tooling_service import get_ops_diagnostics
@@ -35,7 +36,6 @@ from src.nadobro.services.onboarding_service import (
 from src.nadobro.config import DUAL_MODE_CARD_FLOW
 from src.nadobro.handlers.home_card import (
     open_home_card_from_command,
-    open_help_card_from_command,
 )
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.referral_service import (
@@ -90,6 +90,14 @@ async def cmd_start(update: Update, context: CallbackContext):
     language_code = getattr(update.effective_user, "language_code", None)
 
     user, is_new, _ = get_or_create_user(telegram_id, username, language_code=language_code)
+
+    # /start is the universal escape hatch: commands never reach the text
+    # pipeline (the MessageHandler filters out bot commands), so any stuck
+    # multi-step flow (referral claim, custom inputs, wallet flow) must be
+    # cleared HERE or the user stays trapped in it.
+    from src.nadobro.handlers.state_reset import clear_pending_user_state
+
+    clear_pending_user_state(context, telegram_id)
 
     start_arg = context.args[0] if getattr(context, "args", None) else None
     if start_arg:
@@ -184,15 +192,22 @@ async def _send_dashboard_card(update: Update, context: CallbackContext, telegra
 async def cmd_help(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
     with language_context(get_user_language(telegram_id)):
-        if DUAL_MODE_CARD_FLOW:
-            await open_help_card_from_command(update, context)
-            return
+        # Always send a visible reply — same fix as /status. The card-edit
+        # path applied the guide to the remembered home-card bubble, which may
+        # have scrolled far off-screen, so /help looked like a silent no-op.
         lang = get_active_language()
-        await update.message.reply_text(
-            localize_text(fmt_help(), lang),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=localize_markup(persistent_menu_kb(), lang),
-        )
+        localized = localize_text(fmt_help(), lang)
+        try:
+            await update.message.reply_text(
+                localized,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=localize_markup(back_kb(), lang),
+            )
+        except Exception:
+            await update.message.reply_text(
+                plain_text_fallback(localized),
+                reply_markup=localize_markup(back_kb(), lang),
+            )
 
 
 async def cmd_status(update: Update, context: CallbackContext):

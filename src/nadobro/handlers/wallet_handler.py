@@ -100,6 +100,12 @@ async def _handle_wallet(query, data, telegram_id, context):
         success, result_msg = await run_blocking(switch_network, telegram_id, net)
 
         if success:
+            # Mode switch invalidates in-flight confirmation flows (pending
+            # text trade / close-all) so a later "confirm" can't execute a
+            # preview built against the other network.
+            from src.nadobro.handlers.state_reset import clear_pending_user_state
+
+            clear_pending_user_state(context, telegram_id)
             info = get_user_wallet_info(telegram_id)
             msg = fmt_wallet_info(info)
             await _edit_loc(query, 

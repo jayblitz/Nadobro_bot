@@ -758,3 +758,20 @@ class NadoNlpVaultClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_align_price_post_only_never_rounds_into_the_book():
+    """Post-only alignment must round AWAY from crossing: buys floor, sells
+    ceil. HALF_UP could push a buy up onto the ask and the venue rejects the
+    crossing post-only order (the volume bot's maker slices)."""
+    from src.nadobro.services.nado_client import NadoClient
+
+    # increment 0.5: 100.3 would HALF_UP to 100.5 for a buy — must floor to 100.0
+    assert NadoClient._align_price_to_increment(100.3, 0.5, True, "post_only") == 100.0
+    # sell at 100.3 must ceil to 100.5 (away from the bids), not floor
+    assert NadoClient._align_price_to_increment(100.3, 0.5, False, "post_only") == 100.5
+    # ioc semantics unchanged: buy rounds up (aggressive), sell rounds down
+    assert NadoClient._align_price_to_increment(100.3, 0.5, True, "ioc") == 100.5
+    assert NadoClient._align_price_to_increment(100.3, 0.5, False, "ioc") == 100.0
+    # default orders keep HALF_UP
+    assert NadoClient._align_price_to_increment(100.3, 0.5, True, "default") == 100.5

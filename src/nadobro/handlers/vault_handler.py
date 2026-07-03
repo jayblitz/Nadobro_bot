@@ -100,14 +100,26 @@ def _vault_home_card(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
         f"Max mintable now: `{_fmt_usd(max_mintable)}`",
         f"Lockup: `{_fmt_lockup(lockup)}`",
     ]
+    margin_locked = snapshot.get("deposit_blocked_reason") == "margin_locked"
     if max_mintable <= 1.0:
         lines.append("")
-        lines.append("Vault capacity is currently *closed* for new deposits.")
+        if margin_locked:
+            lines.append(
+                "Deposits are *open*, but your USDT0 is currently backing open "
+                "positions (a vault mint never borrows against your trading "
+                "account). Close/reduce positions or deposit more USDT0 to mint."
+            )
+        else:
+            lines.append("Vault capacity is currently *closed* for new deposits.")
     text = "\n".join(lines)
 
     deposit_btn = InlineKeyboardButton("⬇️ Deposit", callback_data="vault:deposit")
     if max_mintable <= 1.0:
-        deposit_btn = InlineKeyboardButton("⛔ Deposits closed", callback_data="vault:home")
+        deposit_btn = (
+            InlineKeyboardButton("🔒 Margin in use", callback_data="vault:home")
+            if margin_locked
+            else InlineKeyboardButton("⛔ Deposits closed", callback_data="vault:home")
+        )
 
     watch_label = "🔕 Stop deposit alerts" if watch_enabled else "🔔 Notify when deposits open"
     watch_cb = "vault:watch:off" if watch_enabled else "vault:watch:on"
@@ -255,7 +267,15 @@ async def handle_vault_callback(query, context: CallbackContext) -> bool:
         sub = parts[2] if len(parts) > 2 else ""
         if sub == "":
             if float(snapshot.get("max_mintable_usdt0") or 0.0) <= 1.0:
-                await _show_home(query, telegram_id, flash="⚠️ Vault deposit capacity is closed right now.")
+                if snapshot.get("deposit_blocked_reason") == "margin_locked":
+                    flash = (
+                        "🔒 Your USDT0 is backing open positions — a vault mint never "
+                        "borrows against your trading account. Close/reduce positions "
+                        "or deposit more USDT0, then try again."
+                    )
+                else:
+                    flash = "⚠️ Vault deposit capacity is closed right now."
+                await _show_home(query, telegram_id, flash=flash)
                 return True
             text, kb = _deposit_picker(snapshot)
             await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)

@@ -714,8 +714,11 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_trend_on_variance_ratio", "dgrid_range_on_variance_ratio",
             "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
+            "grid_reset_threshold_pct", "grid_reset_timeout_seconds",
             "directional_bias", "mm_leverage_override", "mm_duration_minutes",
             "twap_pause_move_bp",
+            # Volume Bot (spot) custom inputs.
+            "session_margin_usd", "target_volume_usd",
             # Delta Neutral (engine v2) custom inputs.
             "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
         )
@@ -1617,8 +1620,8 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("120s", callback_data="strategy:set:rgrid:interval_seconds:120"),
                 ],
                 [
-                    InlineKeyboardButton("🌊 Trend-follow (default)", callback_data="strategy:set:rgrid:fill_anchored:1"),
-                    InlineKeyboardButton("📊 Classic ladder", callback_data="strategy:set:rgrid:fill_anchored:0"),
+                    InlineKeyboardButton("🌊 Momentum (taker)", callback_data="strategy:set:rgrid:fill_anchored:1"),
+                    InlineKeyboardButton("📊 Directional ladder (default)", callback_data="strategy:set:rgrid:fill_anchored:0"),
                 ],
                 [
                     InlineKeyboardButton("Discretion 0.06", callback_data="strategy:set:rgrid:rgrid_discretion:0.06"),

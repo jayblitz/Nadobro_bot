@@ -73,6 +73,11 @@ class VolumeBotController(Controller):
         cfg = TWAPExecutorConfig(
             self.trading_pair, side, amount_quote, self.total_duration,
             self.order_interval, mode="MAKER", leverage=1,
+            # Buy low / sell high: rest each maker slice a few bps inside the
+            # book (re-anchored to mid every slice, so the quotes follow the
+            # price) instead of AT mid, where post-only orders cross and get
+            # rejected on tight books.
+            maker_offset_bp=float(self.cfg("vol_maker_offset_bp", 5.0) or 0.0),
         )
         return TWAPExecutor(cfg, user_id=self.user_id, controller_id=self.id,
                             adapter=self.adapter, inventory=self.inventory)

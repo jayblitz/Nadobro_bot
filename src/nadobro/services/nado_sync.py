@@ -782,12 +782,32 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                       base_filled_x18 = %s,
                       quote_filled_x18 = %s,
                       isolated = %s,
-                      strategy_session_id = COALESCE(strategy_session_id, %s)
+                      strategy_session_id = COALESCE(strategy_session_id, %s),
+                      -- Backfill the HUMAN columns from the authoritative venue
+                      -- quote when the submit-time fill resolve missed (indexer
+                      -- lag) and the retry queue expired. Rollups + History read
+                      -- fill_size * fill_price, so a row stamped with a
+                      -- submission_idx but price 0 counted as $0 volume and
+                      -- rendered as an "entry @ $0.00" round trip whose PnL was
+                      -- the full exit notional.
+                      fill_size = CASE WHEN COALESCE(fill_size, 0) = 0 AND %s > 0
+                                       THEN %s ELSE fill_size END,
+                      fill_price = CASE WHEN COALESCE(fill_price, 0) = 0 AND %s > 0
+                                        THEN %s ELSE fill_price END,
+                      price = CASE WHEN COALESCE(price, 0) = 0 AND %s > 0
+                                   THEN %s ELSE price END,
+                      fill_fee = CASE WHEN COALESCE(fill_fee, 0) = 0 AND %s > 0
+                                      THEN %s ELSE fill_fee END
                     WHERE id = %s
                     """,
                     (
                         submission_idx, pnl_x18, fee_x18, base_x18, quote_x18,
-                        bool(match.get("isolated")), session_id, recorder_row["id"],
+                        bool(match.get("isolated")), session_id,
+                        float(base_h), float(base_h),
+                        float(price_h), float(price_h),
+                        float(price_h), float(price_h),
+                        float(fee_h), float(fee_h),
+                        recorder_row["id"],
                     ),
                 )
                 inserted += 1

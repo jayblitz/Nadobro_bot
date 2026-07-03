@@ -59,15 +59,22 @@ async def cmd_night_howl(update: Update, context: CallbackContext) -> None:
     date = arg or None
     report = await _run_blocking_safe(get_report, telegram_id, network, date)
     if not report or not report.get("markdown"):
+        # Plain text on purpose: ``date`` is the raw user argument — sending
+        # it inside Markdown lets a stray backtick unbalance the entities,
+        # Telegram rejects the message, and the user gets total silence.
         await chat.send_message(
             "🌙 No Night HOWL report found"
-            + (f" for `{date}`." if date else " yet.")
+            + (f" for {date}." if date else " yet.")
             + " Reports are generated each morning at your local 8am after you've "
-            "traded. See dates with `/howl list`.",
-            parse_mode=ParseMode.MARKDOWN,
+            "traded. See dates with /howl list."
         )
         return
-    await chat.send_message(report["markdown"], parse_mode=ParseMode.MARKDOWN)
+    try:
+        await chat.send_message(report["markdown"], parse_mode=ParseMode.MARKDOWN)
+    except Exception:  # policy: degrade-ok(saved report may carry unbalanced markdown)
+        from src.nadobro.handlers.render_utils import plain_text_fallback
+
+        await chat.send_message(plain_text_fallback(report["markdown"]))
 
 _BRIEF_RATE_LIMIT_SECONDS = 300
 _LAST_BRIEF_KEY = "last_brief_ts"
@@ -125,36 +132,60 @@ async def _send_brief(
         pass
 
     network = _network_for(telegram_id)
-
-    try:
-        body, sources = await render_morning_brief(
-            telegram_id=telegram_id,
-            user_name=update.effective_user.first_name,
-            network=network,
-            categories=categories,
-        )
-    except Exception as exc:
-        logger.exception("morning brief render failed: %s", exc)
-        message = update.effective_message
-        if message is not None:
-            await message.reply_text(
-                escape_md("⚠️ Couldn't compose the brief right now. Try again in a moment."),
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("🏠 Home", callback_data="nav:main")]]
-                ),
-            )
-        return
-
-    card = fmt_bro_answer_card(body, mode="morning_brief", sources=sources)
     message = update.effective_message
-    if message is not None:
-        await message.reply_text(
-            card,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=bro_answer_kb("morning_brief"),
-        )
+    first_name = update.effective_user.first_name
+
+    # Mark BEFORE launching so a second /brief inside the window is throttled
+    # even while the first is still rendering; cleared again on failure so a
+    # failed brief doesn't lock the user out for 5 minutes.
     _mark_used(context)
+
+    async def _render_and_send() -> None:
+        try:
+            body, sources = await render_morning_brief(
+                telegram_id=telegram_id,
+                user_name=first_name,
+                network=network,
+                categories=categories,
+            )
+        except Exception as exc:
+            logger.exception("morning brief render failed: %s", exc)
+            if context.user_data is not None:
+                context.user_data.pop(_LAST_BRIEF_KEY, None)
+            if message is not None:
+                try:
+                    await message.reply_text(
+                        escape_md("⚠️ Couldn't compose the brief right now. Try again in a moment."),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("🏠 Home", callback_data="nav:main")]]
+                        ),
+                    )
+                except Exception:  # policy: degrade-ok(error notice is best-effort)
+                    logger.warning("brief failure notice send failed", exc_info=True)
+            return
+
+        card = fmt_bro_answer_card(body, mode="morning_brief", sources=sources)
+        if message is not None:
+            try:
+                await message.reply_text(
+                    card,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=bro_answer_kb("morning_brief"),
+                )
+            except Exception:  # policy: degrade-ok(fall back to plain text)
+                from src.nadobro.handlers.render_utils import plain_text_fallback
+
+                await message.reply_text(
+                    plain_text_fallback(card),
+                    reply_markup=bro_answer_kb("morning_brief"),
+                )
+
+    # Render OUTSIDE the per-user serialization lock: a cold brief fans out
+    # ~13 news connectors plus an LLM call (up to ~45-60s). Holding the lock
+    # for that long queued /stop_all and Stop-button taps behind it — an
+    # emergency flatten must never wait on a news round trip.
+    context.application.create_task(_render_and_send(), update=update)
 
 
 async def cmd_morning_brief(update: Update, context: CallbackContext) -> None:

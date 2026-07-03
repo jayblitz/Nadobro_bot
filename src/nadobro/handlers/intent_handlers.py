@@ -94,6 +94,11 @@ def _enrich_trade_payload(telegram_id: int, payload: dict, settings: dict) -> di
     est_margin = (size * price) / leverage if leverage > 0 and price else None
     result["price"] = price
     result["est_margin"] = est_margin
+    # Stamp the network the preview was built against so a "confirm" typed
+    # after a testnet<->mainnet switch is rejected instead of executing the
+    # trade on the other network (the payload may hydrate from bot_state in a
+    # different process, where the handler-level state reset can't reach).
+    result["network"] = network
     return result
 
 
@@ -180,6 +185,26 @@ async def handle_pending_text_trade_confirmation(update, context: CallbackContex
     if not wallet_ready:
         await _reply_md_safe(update.message, f"⚠️ {escape_md(wallet_msg)}")
         return True
+
+    # Network guard: the preview was priced/validated against the network it
+    # was built on. If the user switched testnet<->mainnet since, discard it —
+    # never execute a testnet preview as a real mainnet order (or vice versa).
+    pending_network = str(pending.get("network") or "").strip().lower()
+    if pending_network:
+        user = get_user(telegram_id)
+        current_network = user.network_mode.value if user else "mainnet"
+        if pending_network != str(current_network).lower():
+            context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
+            await run_blocking(clear_text_trade_pending, int(telegram_id))
+            await _reply_md_safe(
+                update.message,
+                localize_text(
+                    "⚠️ This trade was previewed on *{prev}* but you are now on *{cur}*\\. "
+                    "Discarded — please request the trade again\\.",
+                    lang,
+                ).format(prev=escape_md(pending_network.upper()), cur=escape_md(str(current_network).upper())),
+            )
+            return True
 
     context.user_data.pop(PENDING_TEXT_TRADE_KEY, None)
     await run_blocking(clear_text_trade_pending, int(telegram_id))

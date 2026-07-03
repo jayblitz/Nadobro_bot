@@ -39,3 +39,14 @@ def test_engine_v2_migration_covers_new_tables():
     assert "CREATE TABLE IF NOT EXISTS engine_portfolio_history" in sql
     assert "CREATE TABLE IF NOT EXISTS engine_strategy_sessions" in sql
     assert "ix_engine_executors_user_ctrl" in sql
+
+
+def test_portfolio_history_network_migration_covers_startup_ddl():
+    sql = Path("src/nadobro/migrations/0014_portfolio_history_network.sql").read_text()
+    assert "ALTER TABLE engine_portfolio_history" in sql
+    assert "ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT 'mainnet'" in sql
+    assert "PRIMARY KEY (user_id, network, ts)" in sql
+    # The startup DDL in db.py must mirror the migration.
+    ddl = Path("src/nadobro/db.py").read_text()
+    assert "ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT 'mainnet'" in ddl
+    assert "PRIMARY KEY (user_id, network, ts)" in ddl
