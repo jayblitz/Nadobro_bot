@@ -46,6 +46,38 @@ def _quantize(value: Decimal, decimals: int) -> Decimal:
     return value.quantize(quantum, rounding=ROUND_HALF_UP)
 
 
+def qty(value, max_decimals: int = 8) -> str:
+    """Format a base/token quantity as a plain, complete decimal — never
+    exponent notation, never a 28-digit division tail.
+
+    A size derived from ``quote / price`` is a Decimal with full context
+    precision (e.g. ``0.0006024096385542168674698795181``); ``:g`` on it prints
+    every digit (the "6^4 blaa blaa" the user saw on the Desk card). Round to
+    ``max_decimals`` and strip trailing zeros so ``0.01535000000000003`` → ``0.01535``
+    and ``0.7`` stays ``0.7``."""
+    d = _d(value)
+    try:
+        q = d.quantize(Decimal(1).scaleb(-max(0, int(max_decimals))), rounding=ROUND_HALF_UP)
+        # normalize() can yield exponent form for integers (7 -> 7E+0); format
+        # with :f to force plain notation, then trim the fractional zeros.
+        text = f"{q:f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+    except Exception:
+        return str(d)
+
+
+def price(value, ccy: str = "USD") -> str:
+    """Format a price with thousands separators and NO exponent — showing the
+    complete figure (``$61,988.84``), not ``.4g``'s ``6.199e+04`` which both
+    goes exponential AND drops the cents. Sub-dollar prices keep more decimals."""
+    d = _d(value)
+    a = abs(d)
+    decimals = 2 if a >= 1 else (6 if a > 0 else 2)
+    return money(d, ccy, decimals=decimals)
+
+
 def signed(amount: Decimal, decimals: int = 2) -> str:
     value = _quantize(_d(amount), decimals)
     sign = "+" if value >= 0 else "-"

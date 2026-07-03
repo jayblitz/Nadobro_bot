@@ -170,13 +170,16 @@ class ExecutionPlan:
         return max(1, int((self.duration_minutes * 60) // self.interval_seconds))
 
     def describe(self) -> str:
-        """One-line summary for logs/alerts (not UI — the card formats its own)."""
+        """One-line summary for logs, alerts, AND the 'My Desk' plan list."""
+        from src.nadobro.utils.visual import qty as _qty
+
         bits = [self.algo.upper(), (self.side or "?").upper(), self.product or "?",
                 self.market.upper()]
         if self.size_base:
-            bits.append(f"{self.size_base:g} base")
+            # Plain decimal, never the 28-digit division tail or exponent form.
+            bits.append(f"{_qty(self.size_base)} base")
         elif self.size_quote:
-            bits.append(f"${self.size_quote:g}")
+            bits.append(f"${self.size_quote:,.2f}")
         if self.duration_minutes:
             bits.append(f"over {self.duration_minutes:g}m")
         if self.entry_trigger:

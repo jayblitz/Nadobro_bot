@@ -1165,11 +1165,15 @@ def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> di
     user's COMPLETE venue-confirmed fill history in ``trades_<network>``.
 
     This venue reports no per-fill realized PnL, so the per-fill sum that powered
-    the portfolio deck was always 0. Here we replay every real fill (excluding the
-    synthetic ``source='manual'`` flatten rows) per product in time order and
-    realize PnL on position reductions (see
-    ``portfolio_calculator.realized_pnl_windows_from_rows``). Returns an empty dict
-    on any error so the read-only display path never raises."""
+    the portfolio deck was always 0. Here we replay every real fill per product in
+    time order and realize PnL on position reductions (see
+    ``portfolio_calculator.realized_pnl_windows_from_rows``). Synthetic flatten
+    rows are excluded by ``submission_idx IS NOT NULL`` — they can never acquire
+    one (nado_sync's enrich skips ``order_type ILIKE '%close%'`` recorder rows).
+    The old ``source <> 'manual'`` filter targeted those same synthetic rows but
+    ALSO dropped every REAL manual fill (unlinked venue fills default to
+    source='manual'), so a manual trader's account PnL read ~0 — removed.
+    Returns an empty dict on any error so the display path never raises."""
     from src.nadobro.services.portfolio_calculator import realized_pnl_windows_from_rows
 
     table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
@@ -1184,7 +1188,6 @@ def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> di
             WHERE user_id = %s
               AND submission_idx IS NOT NULL
               AND COALESCE(product_id, 0) <> 0
-              AND COALESCE(source, '') <> 'manual'
               AND status IN ('filled', 'closed', 'partially_filled')
             ORDER BY submission_idx, COALESCE(filled_at, created_at), id
             """,

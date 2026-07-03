@@ -82,18 +82,46 @@ def _trade_realized(trade: Dict[str, Any]) -> Optional[float]:
 # PURE: pattern metrics                                                        #
 # --------------------------------------------------------------------------- #
 
+def _window_key(window_hours: float) -> str:
+    if window_hours <= 24.0:
+        return "24h"
+    if window_hours <= 7 * 24.0:
+        return "7d"
+    return "30d"
+
+
 def compute_user_pattern(
     trades: List[Dict[str, Any]],
     *,
     now_ts: Optional[float] = None,
     window_hours: float = 24.0,
+    account_pnl: Optional[Dict[str, Any]] = None,
+    resolve_pair: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Summarize a user's last-``window_hours`` trading behaviour from raw trade
-    rows. Pure — pass a list of trade dicts, get a metrics dict back."""
+    rows. Pure — pass a list of trade dicts, get a metrics dict back.
+
+    Correctness rules (the ``$42.99 gross / ID:0 / 8W-0L`` report bug):
+    - Only VENUE-CONFIRMED fills count (``submission_idx`` present), deduped per
+      submission_idx — recorder rows that were later enriched, pending-sync
+      rows, and the bot's synthetic account-wide closes never double-count.
+    - Volume reads the fill columns (``fill_size``/``fill_price``) like every
+      other surface, not the order's requested ``size * price``.
+    - Realized PnL / wins / losses come from the position-aware replay
+      (``account_pnl`` = ``get_account_realized_pnl_windows`` result, which
+      needs FULL history for entry basis), never from the per-fill
+      ``realized_pnl`` column — this venue reports none, so those values are
+      recorder estimates at best. Without ``account_pnl`` we replay the rows
+      we were given (tests / degraded mode; entry basis limited to the input).
+    - Pair names resolve through ``resolve_pair(product_id, stored_name)`` so
+      one product can't appear as BTC-PERP, BTC, and ID:0 at once; product-less
+      fills (pid 0) never make the leaderboard.
+    """
     now_ts = now_ts if now_ts is not None else datetime.now(timezone.utc).timestamp()
     cutoff = now_ts - window_hours * 3600.0
 
-    recent = []
+    recent: List[tuple] = []
+    seen_idx: set = set()
     for t in trades:
         ts = _trade_ts(t)
         if ts is None or ts < cutoff:
@@ -101,10 +129,48 @@ def compute_user_pattern(
         status = str(t.get("status") or "").lower()
         if status in ("failed", "cancelled", "rejected"):
             continue
+        sub_idx = t.get("submission_idx")
+        if sub_idx is None:
+            continue  # pending-sync or synthetic — not a venue-confirmed fill
+        key = str(sub_idx)
+        if key in seen_idx:
+            continue
+        seen_idx.add(key)
         recent.append((ts, t))
 
+    wkey = _window_key(window_hours)
+    if account_pnl is None:
+        # Degraded/pure mode: replay whatever rows we were handed (dedup by
+        # submission_idx across the WHOLE input so older entry basis counts).
+        # The input is already window-scoped by the caller (HOWL queries
+        # since_created_at=cutoff) and these rows carry created_at, which the
+        # replay's window bucketer doesn't read — so we read its ``all`` bucket,
+        # which over the pre-scoped input IS the window's realized PnL.
+        from src.nadobro.services.portfolio_calculator import (
+            realized_pnl_windows_from_rows,
+        )
+
+        replay_rows: List[Dict[str, Any]] = []
+        replay_seen: set = set()
+        for t in trades:
+            sub_idx = t.get("submission_idx")
+            if sub_idx is None or str(sub_idx) in replay_seen:
+                continue
+            replay_seen.add(str(sub_idx))
+            replay_rows.append(t)
+        account_pnl = realized_pnl_windows_from_rows(
+            replay_rows, now=datetime.fromtimestamp(now_ts, tz=timezone.utc)
+        )
+        wkey = "all"
+
+    realized = _f((account_pnl.get("pnl_windows") or {}).get(wkey))
+    wins = int((account_pnl.get("wins_windows") or {}).get(wkey) or 0)
+    losses = int((account_pnl.get("losses_windows") or {}).get(wkey) or 0)
+    decisive = wins + losses
+    win_rate = (wins / decisive) if decisive else None
+
     n = len(recent)
-    if n == 0:
+    if n == 0 and realized == 0.0:
         return {
             "trades": 0, "volume_usd": 0.0, "fees_usd": 0.0, "funding_usd": 0.0,
             "realized_pnl_usd": 0.0, "net_pnl_usd": 0.0, "win_rate": None,
@@ -112,33 +178,29 @@ def compute_user_pattern(
             "busiest_hour_utc": None, "avg_trade_usd": 0.0,
         }
 
-    volume = fees = funding = realized = 0.0
-    wins = losses = realized_count = 0
+    volume = fees = funding = 0.0
     pair_counter: Counter = Counter()
     pair_volume: Counter = Counter()
     source_counter: Counter = Counter()
     hour_counter: Counter = Counter()
 
     for ts, t in recent:
-        notional = abs(_f(t.get("size")) * _f(t.get("price")))
+        size = _f(t.get("fill_size")) or _f(t.get("size"))
+        px = _f(t.get("fill_price")) or _f(t.get("price"))
+        notional = abs(size * px)
         volume += notional
         fees += _trade_fees(t)
         funding += _f(t.get("funding_paid"))
-        pair = str(t.get("product_name") or "?").upper()
-        pair_counter[pair] += 1
-        pair_volume[pair] += notional
+        pid = int(_f(t.get("product_id")))
+        stored = str(t.get("product_name") or "").upper()
+        if pid > 0:
+            pair = str(resolve_pair(pid, stored)).upper() if resolve_pair else stored
+            if pair and not pair.startswith("ID:"):
+                pair_counter[pair] += 1
+                pair_volume[pair] += notional
         source_counter[str(t.get("source") or "manual").lower()] += 1
         hour_counter[datetime.fromtimestamp(ts, timezone.utc).hour] += 1
-        r = _trade_realized(t)
-        if r is not None and r != 0.0:
-            realized += r
-            realized_count += 1
-            if r > 0:
-                wins += 1
-            else:
-                losses += 1
 
-    win_rate = (wins / realized_count) if realized_count else None
     busiest_hour = hour_counter.most_common(1)[0][0] if hour_counter else None
     top_pairs = [
         {"pair": p, "trades": c, "volume_usd": round(pair_volume[p], 2)}
@@ -439,7 +501,10 @@ def build_report(
     """Assemble (but do not send) one user's Night HOWL report. Returns the
     report dict (also persisted) or None if there's nothing to report. Best
     effort: never raises — a per-user failure must not break the nightly sweep."""
-    from src.nadobro.models.database import get_trades_by_user
+    from src.nadobro.models.database import (
+        get_account_realized_pnl_windows,
+        get_trades_by_user,
+    )
     from src.nadobro.services.bot_runtime import _load_state
     from src.nadobro.services.user_service import get_user_readonly_client
 
@@ -455,7 +520,37 @@ def build_report(
             network=network,
             since_created_at=cutoff,
         ) or []
-        pattern = compute_user_pattern(trades, now_ts=now_utc.timestamp())
+        # Realized PnL / win-rate must be DERIVED from the COMPLETE fill history
+        # (position-aware, needs entry basis older than the 24h window), not the
+        # void per-fill column that made the report read "+$42.99 gross, 8W/0L".
+        account_pnl = get_account_realized_pnl_windows(
+            telegram_id, network, now=now_utc
+        ) or {}
+        # Pair-name resolver: one product → one canonical name, never ID:0.
+        try:
+            pair_client = client or get_user_readonly_client(telegram_id, network=network)
+        except Exception:  # policy: degrade-ok(name resolution falls back to stored)
+            pair_client = None
+
+        def _resolve_pair(pid: int, stored: str) -> str:
+            from src.nadobro.config import get_product_name as _gpn
+
+            try:
+                name = _gpn(int(pid), network=network, client=pair_client)
+            except Exception:  # policy: degrade-ok(fall back to stored name)
+                name = ""
+            if name and not str(name).startswith("ID:"):
+                return name
+            if stored and not stored.startswith("ID:"):
+                return stored
+            return name or stored or f"ID:{pid}"
+
+        pattern = compute_user_pattern(
+            trades,
+            now_ts=now_utc.timestamp(),
+            account_pnl=account_pnl,
+            resolve_pair=_resolve_pair,
+        )
 
         # Backtest the user's live strategy (if any) over its last-24h candles.
         backtests: List[Dict[str, Any]] = []

@@ -546,3 +546,66 @@ def test_history_fill_price_repair_and_round_trip_pairing():
     assert abs(btc["realized_pnl"] - (61988.84 - 60000.0) * 0.00895) < 1e-6
     assert abs(btc["volume_usd"] - 0.00895 * (60000.0 + 61988.84)) < 1e-6
     assert 5 not in trips, "price-less fill without x18 must not render a $0 trip"
+
+
+def test_history_excludes_copy_and_strategy_includes_tp_close():
+    """History = normal trades only. A copy fill (source='copy') and a strategy
+    fill (source='strategy' + session) never appear; a manual open + a TP-style
+    close (source='manual', order_type='match', no session) DO pair into a
+    round-trip. Also verifies the 0016 retag repair re-tags a leaked copy dup."""
+    from datetime import datetime, timedelta, timezone
+
+    from src.nadobro.db import execute, init_db, query_one
+    from src.nadobro.services.trade_service import compute_round_trips
+
+    uid = 880200
+    t0 = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    init_db()
+    execute("DELETE FROM trades_mainnet WHERE user_id = %s", (uid,))
+
+    def ins(**kw):
+        cols = ", ".join(kw)
+        ph = ", ".join(["%s"] * len(kw))
+        execute(f"INSERT INTO trades_mainnet ({cols}) VALUES ({ph})", tuple(kw.values()))
+
+    # Copy round-trip: canonical source='copy' rows + a leaked source='manual'
+    # dup sharing each digest (what the old enrich gate produced).
+    ins(user_id=uid, product_id=2, product_name="BTC-PERP", order_type="market", side="long",
+        status="filled", size=0.01, fill_size=0.01, fill_price=60000, order_digest="0xCA",
+        source="copy", filled_at=t0)
+    ins(user_id=uid, product_id=2, product_name="BTC-PERP", order_type="match", side="long",
+        status="filled", size=0.01, fill_size=0.01, fill_price=60000, order_digest="0xCA",
+        source="manual", submission_idx=8801, filled_at=t0)
+    ins(user_id=uid, product_id=2, product_name="BTC-PERP", order_type="market", side="short",
+        status="filled", size=0.01, fill_size=0.01, fill_price=60500, order_digest="0xCB",
+        source="copy", filled_at=t0 + timedelta(hours=1))
+    ins(user_id=uid, product_id=2, product_name="BTC-PERP", order_type="match", side="short",
+        status="filled", size=0.01, fill_size=0.01, fill_price=60500, order_digest="0xCB",
+        source="manual", submission_idx=8802, filled_at=t0 + timedelta(hours=1))
+    # Genuine manual open + TP-style close (unique digests).
+    ins(user_id=uid, product_id=4, product_name="ETH-PERP", order_type="market", side="long",
+        status="filled", size=1.0, fill_size=1.0, fill_price=3000, order_digest="0xM1",
+        source="manual", submission_idx=8803, filled_at=t0 + timedelta(hours=2))
+    ins(user_id=uid, product_id=4, product_name="ETH-PERP", order_type="match", side="short",
+        status="filled", size=1.0, fill_size=1.0, fill_price=3090, order_digest="0xTP",
+        source="manual", submission_idx=8804, filled_at=t0 + timedelta(hours=3))
+    # Strategy round-trip (source='strategy' + session) — Performance, not History.
+    ins(user_id=uid, product_id=2, product_name="BTC-PERP", order_type="match", side="long",
+        status="filled", size=0.02, fill_size=0.02, fill_price=59000, order_digest="0xS1",
+        source="strategy", submission_idx=8805, strategy_session_id=42424, filled_at=t0 + timedelta(hours=4))
+    ins(user_id=uid, product_id=2, product_name="BTC-PERP", order_type="match", side="short",
+        status="filled", size=0.02, fill_size=0.02, fill_price=59500, order_digest="0xS2",
+        source="strategy", submission_idx=8806, strategy_session_id=42424, filled_at=t0 + timedelta(hours=5))
+
+    init_db()  # runs the 0016 retag repair
+
+    assert query_one("SELECT source FROM trades_mainnet WHERE submission_idx = 8801")["source"] == "copy"
+    assert query_one("SELECT source FROM trades_mainnet WHERE submission_idx = 8803")["source"] == "manual"
+
+    trips = compute_round_trips(uid, "mainnet", limit=50)
+    keys = {(t["product_id"], round(float(t["avg_open_price"]), 2), round(float(t["avg_close_price"]), 2))
+            for t in trips}
+    assert (4, 3000.0, 3090.0) in keys           # manual + TP close pairs in
+    assert (2, 60000.0, 60500.0) not in keys     # copy excluded
+    assert (2, 59000.0, 59500.0) not in keys     # strategy excluded
+    assert len(trips) == 1
