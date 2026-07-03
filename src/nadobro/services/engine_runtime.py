@@ -882,6 +882,9 @@ def map_strategy_config(
             # round-trip) and a hard cycle ceiling so the loop can't run away.
             "target_volume_usd": Decimal(str(_f(settings, "target_volume_usd", 0.0))),
             "max_cycles": int(max(1, _f(settings, "vol_max_cycles", 100))),
+            # Maker slices rest this many bps inside the book (buy below mid /
+            # sell above), re-anchored to mid every slice.
+            "vol_maker_offset_bp": _f(settings, "vol_maker_offset_bp", 5.0),
         }
     # grid / rgrid / dgrid family.
     #
@@ -889,15 +892,12 @@ def map_strategy_config(
     # One bid + one ask around a fill-anchored reference instead of a static
     # ladder; reset_threshold_pct uses TreadFi's defaults (0.25% grid /
     # 0.125% rgrid) unless overridden.
-    # fill-anchored is the DEFAULT for BOTH grid and rgrid now — it's the behavior
-    # the docs describe: grid = last-fill anchor + no-cross + soft-reset-to-mid;
-    # rgrid = trend-following taker-momentum. The classic static ladder remains a
-    # safety escape via ``fill_anchored=0`` (not surfaced in the UI).
-    # grid and rgrid both default to the MULTI-LEVEL recycling ladder now (user
-    # choice). grid -> classic long ladder (GridController); rgrid -> dynamic
-    # directional ladder (DynamicGridController, via CONTROLLER_REGISTRY). The
-    # fill-anchored quoting (grid: single-pair maker / rgrid: trend-following
-    # taker momentum) is the opt-in via fill_anchored=1.
+    # grid and rgrid both default to the MULTI-LEVEL recycling ladder (user
+    # choice, 2026-06). grid -> classic long ladder (GridController); rgrid ->
+    # dynamic directional ladder (DynamicGridController, via CONTROLLER_REGISTRY).
+    # The fill-anchored quoting (grid: single-pair maker with no-cross +
+    # soft-reset-to-mid / rgrid: trend-following taker momentum) is the opt-in
+    # via fill_anchored=1.
     _fa_default = 0.0
     if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", _fa_default)):
         default_reset = 0.25 if strategy == "grid" else 0.125

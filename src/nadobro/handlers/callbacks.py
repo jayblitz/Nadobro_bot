@@ -383,6 +383,10 @@ async def _handle_mode(query, data, telegram_id, context=None):
 
     success, result_msg = await run_blocking(switch_network, telegram_id, target_network)
     if success:
+        # A mode switch invalidates any in-flight confirmation flow (pending
+        # text trade / close-all / trade card) — a "confirm" typed after the
+        # switch must never execute a preview built against the other network.
+        clear_pending_user_state(context, telegram_id)
         network_label = "🧪 TESTNET" if target_network == "testnet" else "🌐 MAINNET"
         await _edit_loc(query,
             "✅ *Switched to {label}*\n\n{msg}",

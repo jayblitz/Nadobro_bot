@@ -146,3 +146,40 @@ def test_on_stop_cancels_outstanding_maker_order():
         assert oid in adapter.cancelled
 
     asyncio.run(body())
+
+
+def test_maker_offset_rests_buy_below_and_sell_above_mid():
+    """Volume-bot pricing: with maker_offset_bp set, a BUY slice rests BELOW
+    mid and a SELL slice ABOVE it (buy low / sell high, post-only can't cross);
+    the slice size is derived from the offset price, not raw mid."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        cfg = TWAPExecutorConfig(
+            PAIR, TradeType.BUY, Decimal(200), 40, 20, mode="MAKER", maker_offset_bp=10.0
+        )
+        ex = _ex(cfg, adapter)
+        await ex.on_create()
+        buy_px = ex.current_order.price
+        assert buy_px == Decimal("100") * Decimal("0.999")  # 10 bp below mid
+        assert ex.current_order.amount_base == Decimal(100) / buy_px
+
+        adapter2 = MockNadoAdapter(mid=Decimal(100))
+        cfg2 = TWAPExecutorConfig(
+            PAIR, TradeType.SELL, Decimal(200), 40, 20, mode="MAKER", maker_offset_bp=10.0
+        )
+        ex2 = _ex(cfg2, adapter2)
+        await ex2.on_create()
+        assert ex2.current_order.price == Decimal("100") * Decimal("1.001")  # 10 bp above
+
+    asyncio.run(body())
+
+
+def test_maker_offset_zero_keeps_legacy_at_mid_pricing():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        cfg = TWAPExecutorConfig(PAIR, TradeType.BUY, Decimal(200), 40, 20, mode="MAKER")
+        ex = _ex(cfg, adapter)
+        await ex.on_create()
+        assert ex.current_order.price == Decimal(100)
+
+    asyncio.run(body())

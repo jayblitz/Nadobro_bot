@@ -1585,6 +1585,8 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "mm_duration_minutes",
         # TWAP fast-move pause threshold (bp/cycle; 0 = off).
         "twap_pause_move_bp",
+        # Volume Bot (spot) custom inputs.
+        "session_margin_usd", "target_volume_usd",
         # Delta Neutral (engine v2) custom inputs. Without these here, the DN
         # custom-size/hold/cycles reply was rejected, the pending state cleared,
         # and the typed number fell through to the LOWIQPTS points relay.
@@ -1649,6 +1651,9 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "dgrid_max_spread_bp": (1.0, 200.0),
         "dgrid_short_window_points": (2, 50),
         "dgrid_long_window_points": (4, 200),
+        # Volume Bot (spot) custom inputs — mirror strategy_handler set limits.
+        "session_margin_usd": (10, 1000000),
+        "target_volume_usd": (100, 100000000),
         # Delta Neutral (engine v2) custom inputs.
         "fixed_margin_usd": (1, 1000000),
         "dn_hold_seconds": (60, 86400),
@@ -1806,7 +1811,7 @@ async def _handle_pending_bro_input(update, context, telegram_id, text):
 async def _handle_pending_referral_claim(update, context, telegram_id, text):
     """User tapped 'Claim Custom Code' and is now typing their desired code."""
     raw = (text or "").strip()
-    if raw.lower() in ("cancel", "/cancel", "❌ cancel", "/start"):
+    if raw.lower() in ("cancel", "❌ cancel"):
         context.user_data.pop("pending_referral_claim", None)
         await _reply_loc(
             update.message,
@@ -1814,6 +1819,16 @@ async def _handle_pending_referral_claim(update, context, telegram_id, text):
             reply_markup=localize_markup(persistent_menu_kb(), get_active_language()),
         )
         return True
+
+    # Codes are permanent once claimed, so only treat the message as a claim
+    # attempt when it PLAUSIBLY is one: a single bare alphanumeric token. Any
+    # other text (a trade like "long btc 0.01", a menu button, a question)
+    # exits the claim flow and falls through to normal handling — previously
+    # the flow hijacked every message, and normalize_code stripping
+    # punctuation meant "long btc 0.01" was silently claimed as "LONGBTC001".
+    if not raw.isalnum():
+        context.user_data.pop("pending_referral_claim", None)
+        return False
 
     normalized, error = validate_custom_code(raw)
     if error:

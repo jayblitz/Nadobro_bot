@@ -76,6 +76,10 @@ class PortfolioHistoryRow:
     total_value_quote: Decimal
     by_account: Dict[str, Decimal]
     by_asset: Dict[str, Decimal]
+    # Network the sample was taken on (the sampler follows the user's ACTIVE
+    # network, so testnet and mainnet rows form separate series). Trailing
+    # default keeps existing positional constructions valid.
+    network: str = "mainnet"
 
 
 # --------------------------------------------------------------------------
@@ -91,6 +95,12 @@ class AccountProvider(abc.ABC):
     async def mark_prices(self, user_id: int) -> Dict[str, Decimal]:
         ...
 
+    async def network(self, user_id: int) -> str:
+        """Network the account data is sourced from. Non-abstract with a
+        mainnet default so existing providers keep working; the DB-backed
+        provider overrides this with the user's active network."""
+        return "mainnet"
+
 
 class ExecutorsRepository(abc.ABC):
     @abc.abstractmethod
@@ -105,8 +115,11 @@ class PortfolioHistoryRepository(abc.ABC):
 
     @abc.abstractmethod
     def fetch(
-        self, user_id: int, since: Optional[datetime] = None, until: Optional[datetime] = None
+        self, user_id: int, since: Optional[datetime] = None, until: Optional[datetime] = None,
+        network: Optional[str] = None,
     ) -> List[PortfolioHistoryRow]:
+        """``network=None`` returns all rows (back-compat); pass a network to
+        read one mode's series without the other interleaved."""
         ...
 
     @abc.abstractmethod
@@ -118,16 +131,25 @@ class InMemoryAccountProvider(AccountProvider):
     def __init__(self) -> None:
         self._accounts: Dict[int, Accounts] = {}
         self._marks: Dict[int, Dict[str, Decimal]] = {}
+        self._networks: Dict[int, str] = {}
 
-    def set(self, user_id: int, accounts: Accounts, marks: Optional[Dict[str, Decimal]] = None) -> None:
+    def set(
+        self, user_id: int, accounts: Accounts, marks: Optional[Dict[str, Decimal]] = None,
+        network: Optional[str] = None,
+    ) -> None:
         self._accounts[user_id] = accounts
         self._marks[user_id] = marks or {}
+        if network is not None:
+            self._networks[user_id] = network
 
     async def accounts(self, user_id: int) -> Accounts:
         return self._accounts.get(user_id, {})
 
     async def mark_prices(self, user_id: int) -> Dict[str, Decimal]:
         return self._marks.get(user_id, {})
+
+    async def network(self, user_id: int) -> str:
+        return self._networks.get(user_id, "mainnet")
 
 
 class InMemoryExecutorsRepository(ExecutorsRepository):
@@ -155,9 +177,12 @@ class InMemoryPortfolioHistoryRepository(PortfolioHistoryRepository):
         self._rows.append(row)
 
     def fetch(
-        self, user_id: int, since: Optional[datetime] = None, until: Optional[datetime] = None
+        self, user_id: int, since: Optional[datetime] = None, until: Optional[datetime] = None,
+        network: Optional[str] = None,
     ) -> List[PortfolioHistoryRow]:
         out = [r for r in self._rows if r.user_id == user_id]
+        if network is not None:
+            out = [r for r in out if r.network == network]
         if since is not None:
             out = [r for r in out if r.ts >= since]
         if until is not None:
@@ -171,7 +196,9 @@ class InMemoryPortfolioHistoryRepository(PortfolioHistoryRepository):
             bucket = _retention_bucket(row.ts, now)
             if bucket is None:
                 continue  # older than 1y -> drop
-            key = (row.user_id, bucket)
+            # Bucket per network so downsampling never collapses a testnet and
+            # a mainnet sample into one surviving row.
+            key = (row.user_id, row.network, bucket)
             current = kept.get(key)
             if current is None or row.ts > current.ts:
                 kept[key] = row
@@ -248,7 +275,7 @@ class Portfolio:
 
     async def history(
         self, user_id: int, interval: str = "24h", start: Optional[datetime] = None,
-        end: Optional[datetime] = None,
+        end: Optional[datetime] = None, network: Optional[str] = None,
     ) -> List[PortfolioHistoryRow]:
         now = end or datetime.now(timezone.utc)
         if interval == "custom":
@@ -256,7 +283,7 @@ class Portfolio:
         else:
             span = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
             since = now - span.get(interval, timedelta(hours=24))
-        return self.history_repo.fetch(user_id, since=since, until=now)
+        return self.history_repo.fetch(user_id, since=since, until=now, network=network)
 
     async def sample(self, user_id: int, now: Optional[datetime] = None) -> PortfolioHistoryRow:
         """Capture one history row from the current state (used by the sampler)."""
@@ -272,6 +299,7 @@ class Portfolio:
             total_value_quote=_total_value(accounts),
             by_account=by_account,
             by_asset=by_asset,
+            network=await self.accounts_provider.network(user_id),
         )
         self.history_repo.record(row)
         return row

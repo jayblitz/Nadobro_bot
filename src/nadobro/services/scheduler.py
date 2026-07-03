@@ -84,8 +84,14 @@ def _alert_condition_label(condition: str) -> str:
     return labels.get(str(condition or ""), str(condition or ""))
 
 
-async def _build_alert_context() -> tuple[dict, dict]:
-    """Build optional context maps used by funding/pnl alerts."""
+async def _build_alert_context(network: str | None = None) -> tuple[dict, dict]:
+    """Build optional context maps used by funding/pnl alerts.
+
+    ``network`` scopes the scan to the evaluation network (the alert worker's
+    network in handle_alert_job). Without it, PnL positions were fetched from
+    each user's CURRENT active network — a user browsing testnet had their
+    mainnet PnL alert evaluated against testnet positions (wrong-fire or
+    never-fire)."""
     from src.nadobro.models.database import get_all_active_alerts, AlertCondition
     from src.nadobro.config import get_product_id
     from src.nadobro.services.user_service import get_user_readonly_client
@@ -93,7 +99,7 @@ async def _build_alert_context() -> tuple[dict, dict]:
     funding_rates: dict = {}
     positions_by_user: dict = {}
 
-    active_alerts = await run_blocking(get_all_active_alerts)
+    active_alerts = await run_blocking(get_all_active_alerts, network)
     if not active_alerts:
         return funding_rates, positions_by_user
 
@@ -137,7 +143,10 @@ async def _build_alert_context() -> tuple[dict, dict]:
     if needs_pnl:
         for user_id in pnl_user_ids:
             try:
-                client = await run_blocking(get_user_readonly_client, user_id)
+                # Pin the client to the evaluation network — the alert lives in
+                # that network's table, so its PnL must be read there regardless
+                # of which mode the user is currently browsing.
+                client = await run_blocking(get_user_readonly_client, user_id, network)
                 if not client:
                     continue
                 positions = await run_blocking(client.get_all_positions)
@@ -190,12 +199,12 @@ async def handle_alert_job(payload: dict):
             prices = await _get_market_snapshot()
         if not prices:
             return
-        funding_rates, positions_by_user = await _build_alert_context()
         # Scope evaluation to the alert worker's configured network so we
         # don't fire mainnet alerts against testnet prices (or vice versa).
         # Alerts in the OTHER network are paused until a second worker
         # covers it. (Audit 2026-05.)
         alert_network = getattr(_check_client, "network", "mainnet")
+        funding_rates, positions_by_user = await _build_alert_context(alert_network)
         triggered = await run_blocking(
             get_triggered_alerts,
             prices,

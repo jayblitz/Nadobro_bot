@@ -151,7 +151,7 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
     network = _user_network(user)
     client = get_user_nado_client(telegram_id)
     if not client:
-        snapshot["error"] = "Wallet not linked. Use /wallet to link a signer."
+        snapshot["error"] = "Wallet not linked. Open 💼 Wallet Vault from the home menu to link a signer."
         return snapshot
     if not client._initialized:
         client.initialize()
@@ -182,6 +182,24 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
         snapshot["lp_value_usdt0"], max_mintable, PRIVATE_ALPHA_CAP_USDT0,
     )
     snapshot["deposit_capacity_open"] = max_mintable >= 100.0
+    # The bot mints with spot_leverage=false (a vault deposit must never
+    # borrow against the trading account), so its gate is STRICTER than the
+    # Nado UI default (spot_leverage=true). A trader whose USDT0 is backing
+    # open positions gets no-borrow max ≈ 0 and used to see a blanket
+    # "Deposits closed" even while the vault itself was open. Distinguish
+    # the two so the card tells the truth.
+    snapshot["deposit_blocked_reason"] = None
+    if max_mintable <= 1.0:
+        try:
+            lev = client.get_max_nlp_mintable(
+                spot_leverage=True, product_id=nlp_product_id
+            ) or {}
+            lev_mintable = float(lev.get("max_mintable_usdt0") or 0.0)
+        except Exception:  # policy: degrade-ok(diagnostic only; gate stays strict)
+            lev_mintable = 0.0
+        snapshot["deposit_blocked_reason"] = (
+            "margin_locked" if lev_mintable > 1.0 else "vault_full"
+        )
 
     pool = get_pool_metrics(network, client=client)
     snapshot["pool"] = pool
@@ -240,7 +258,7 @@ def deposit_to_vault(telegram_id: int, usdt0_amount: float) -> dict:
     network = _user_network(user) if user else "mainnet"
     client = get_user_nado_client(telegram_id)
     if not client:
-        return {"success": False, "error": "Wallet not linked. Use /wallet first."}
+        return {"success": False, "error": "Wallet not linked. Open 💼 Wallet Vault from the home menu first."}
     if not client._initialized:
         client.initialize()
     if not client._initialized:
@@ -298,7 +316,7 @@ def withdraw_from_vault(telegram_id: int, nlp_amount: float) -> dict:
     network = _user_network(user) if user else "mainnet"
     client = get_user_nado_client(telegram_id)
     if not client:
-        return {"success": False, "error": "Wallet not linked. Use /wallet first."}
+        return {"success": False, "error": "Wallet not linked. Open 💼 Wallet Vault from the home menu first."}
     if not client._initialized:
         client.initialize()
     if not client._initialized:

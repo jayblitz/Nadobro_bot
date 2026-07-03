@@ -17,6 +17,7 @@ _TRANSIENT_USER_DATA_KEYS = (
     "pending_bro_input",
     "pending_copy_wallet",
     "pending_admin_copy_wallet",
+    "pending_referral_claim",
     "wallet_flow",
     "wallet_linked_signer_pk",
     "wallet_main_address",

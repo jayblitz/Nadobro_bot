@@ -787,6 +787,65 @@ def init_db():
                 conn.rollback()
                 logger.warning("Failed to backfill per-network user volume counters", exc_info=True)
 
+        # migrations/0015_backfill_fill_price_from_x18.sql: repair fills whose
+        # human columns were never backfilled (submit-time resolve missed, retry
+        # queue expired, match sync stamped x18 only). Derive fill_size /
+        # fill_price / fill_fee from the stored venue quote. Idempotent — the
+        # CASE guards only fill missing values.
+        _repaired_sessions: dict[str, set] = {"testnet": set(), "mainnet": set()}
+        with conn.cursor() as cur:
+            try:
+                for net in ("testnet", "mainnet"):
+                    cur.execute(f"""
+                        UPDATE trades_{net} SET
+                          fill_size = CASE WHEN COALESCE(fill_size, 0) = 0
+                              THEN ABS(base_filled_x18::numeric) / 1e18 ELSE fill_size END,
+                          fill_price = CASE WHEN COALESCE(fill_price, 0) = 0
+                              THEN ABS(quote_filled_x18::numeric / NULLIF(base_filled_x18, 0)::numeric) ELSE fill_price END,
+                          price = CASE WHEN COALESCE(price, 0) = 0
+                              THEN ABS(quote_filled_x18::numeric / NULLIF(base_filled_x18, 0)::numeric) ELSE price END,
+                          fill_fee = CASE WHEN COALESCE(fill_fee, 0) = 0
+                              THEN COALESCE(ABS(fee_x18::numeric), 0) / 1e18 ELSE fill_fee END
+                        WHERE submission_idx IS NOT NULL
+                          AND COALESCE(base_filled_x18, 0) <> 0
+                          AND COALESCE(quote_filled_x18, 0) <> 0
+                          AND (COALESCE(fill_price, 0) = 0 OR COALESCE(fill_size, 0) = 0 OR COALESCE(price, 0) = 0)
+                        RETURNING strategy_session_id
+                    """)
+                    _repaired_sessions[net] = {
+                        int(r[0]) for r in (cur.fetchall() or []) if r and r[0]
+                    }
+                conn.commit()
+                logger.info(
+                    "fill price x18 backfill verified (sessions touched: testnet=%d mainnet=%d)",
+                    len(_repaired_sessions["testnet"]), len(_repaired_sessions["mainnet"]),
+                )
+            except Exception:
+                conn.rollback()
+                _repaired_sessions = {"testnet": set(), "mainnet": set()}
+                logger.warning("fill price x18 backfill failed", exc_info=True)
+
+        # Re-roll the stored session totals for any session whose fills were
+        # just repaired — Performance reads strategy_sessions.total_volume_usd
+        # etc., which were computed while the fills still read $0.
+        for _net, _sids in _repaired_sessions.items():
+            for _sid in _sids:
+                try:
+                    from src.nadobro.models.database import (
+                        rollup_engine_session_pnl_funding,
+                        rollup_session_from_trades,
+                    )
+                    from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+
+                    rollup_session_from_trades(_sid, _net)
+                    _srow = query_one(
+                        "SELECT strategy FROM strategy_sessions WHERE id = %s", (_sid,)
+                    )
+                    if str((_srow or {}).get("strategy") or "").lower() in ENGINE_MAPPED_STRATEGIES:
+                        rollup_engine_session_pnl_funding(_sid, _net)
+                except Exception:  # noqa: BLE001 - repair rollup is best-effort
+                    logger.warning("post-backfill session re-rollup failed sid=%s", _sid, exc_info=True)
+
         # --- strategy_sessions table ---
         with conn.cursor() as cur:
             cur.execute("""
@@ -871,12 +930,34 @@ def init_db():
 
                 CREATE TABLE IF NOT EXISTS engine_portfolio_history (
                     user_id           BIGINT NOT NULL,
+                    network           TEXT NOT NULL DEFAULT 'mainnet',
                     ts                TIMESTAMPTZ NOT NULL,
                     total_value_quote NUMERIC(38,18) NOT NULL,
                     by_account_json   JSONB NOT NULL,
                     by_asset_json     JSONB NOT NULL,
-                    PRIMARY KEY (user_id, ts)
+                    PRIMARY KEY (user_id, network, ts)
                 );
+                -- migrations/0014_portfolio_history_network.sql: samples are
+                -- taken on the user's ACTIVE network — tag each row so a
+                -- testnet<->mainnet switch never interleaves one series.
+                ALTER TABLE engine_portfolio_history
+                    ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT 'mainnet';
+                DO $$
+                DECLARE
+                    pk_cols text;
+                BEGIN
+                    SELECT string_agg(a.attname, ',' ORDER BY k.ord) INTO pk_cols
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+                    WHERE t.relname = 'engine_portfolio_history' AND c.contype = 'p';
+
+                    IF pk_cols IS DISTINCT FROM 'user_id,network,ts' THEN
+                        EXECUTE 'ALTER TABLE engine_portfolio_history DROP CONSTRAINT IF EXISTS engine_portfolio_history_pkey';
+                        EXECUTE 'ALTER TABLE engine_portfolio_history ADD PRIMARY KEY (user_id, network, ts)';
+                    END IF;
+                END $$;
 
                 CREATE TABLE IF NOT EXISTS engine_strategy_sessions (
                     id            UUID PRIMARY KEY,

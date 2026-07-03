@@ -2437,12 +2437,12 @@ _TEXTS = {
         "ru": "НЕ УСТАНОВЛЕН",
         "ko": "미설정",
     },
-    "use /onboard to continue": {
-        "zh": "使用 /onboard 继续",
-        "fr": "utilisez /onboard pour continuer",
-        "ar": "استخدم /onboard للمتابعة",
-        "ru": "используйте /onboard для продолжения",
-        "ko": "/onboard를 사용하여 계속",
+    "link via Wallet Vault to continue": {
+        "zh": "通过钱包保险库链接以继续",
+        "fr": "liez via Wallet Vault pour continuer",
+        "ar": "اربط عبر خزنة المحفظة للمتابعة",
+        "ru": "привяжите через Wallet Vault для продолжения",
+        "ko": "지갑 볼트를 통해 연결하여 계속",
     },
     "Funding:": {
         "zh": "资金:",

@@ -39,12 +39,16 @@ pytestmark = pytest.mark.skipif(not _db_reachable(), reason="no reachable Postgr
 def _schema():
     from src.nadobro.db import execute
 
+    # 0007 creates the old-shape engine_portfolio_history; 0014 upgrades it in
+    # place (network column + PK swap) — applying both exercises the real
+    # upgrade path every run.
     for mig in ("0007_engine_v2_tables.sql", "0009_engine_kill_switch.sql",
-                "0013_engine_controller_state.sql"):
+                "0013_engine_controller_state.sql",
+                "0014_portfolio_history_network.sql"):
         execute((MIGRATIONS / mig).read_text())
     # clean slate for deterministic assertions
     execute("TRUNCATE engine_position_hold, engine_executors, engine_kill_switch, "
-            "engine_controller_state")
+            "engine_controller_state, engine_portfolio_history")
     yield
 
 
@@ -436,3 +440,109 @@ def test_snapshot_uses_venue_upnl_and_real_turnover():
     # Turnover spans all three fills on the product: 0.03*65000 + 0.03*64000 + 0.02*63000
     expected_turnover = 0.03 * 65000.0 + 0.03 * 64000.0 + 0.02 * 63000.0
     assert abs(snap["volume"] - expected_turnover) < 1e-3
+
+
+def test_portfolio_history_network_separation_roundtrip():
+    """0014 upgrade path + per-network record/fetch/prune against real Postgres.
+
+    Same (user, ts) must coexist on both networks under the new PK; exact
+    duplicates dedupe via ON CONFLICT; fetch filters one mode's series; the
+    retention prune keeps one survivor PER NETWORK per hourly bucket.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from src.nadobro.db import query_one
+    from src.nadobro.engine.portfolio import PortfolioHistoryRow
+    from src.nadobro.services.portfolio_history_worker import DbPortfolioHistoryRepository
+
+    # The 0014 PK swap actually happened (fixture applied 0007 then 0014).
+    pk = query_one(
+        """
+        SELECT string_agg(a.attname, ',' ORDER BY k.ord) AS cols
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+        WHERE t.relname = 'engine_portfolio_history' AND c.contype = 'p'
+        """
+    )
+    assert pk["cols"] == "user_id,network,ts"
+
+    repo = DbPortfolioHistoryRepository()
+    uid = 9500
+    now = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+    # Same (user, ts) on BOTH networks coexists; a duplicate is a no-op.
+    repo.record(PortfolioHistoryRow(uid, now, Decimal(100), {}, {}, network="mainnet"))
+    repo.record(PortfolioHistoryRow(uid, now, Decimal(9), {}, {}, network="testnet"))
+    repo.record(PortfolioHistoryRow(uid, now, Decimal(100), {}, {}, network="mainnet"))
+    assert len(repo.fetch(uid)) == 2
+    assert [r.total_value_quote for r in repo.fetch(uid, network="testnet")] == [Decimal(9)]
+    assert {r.network for r in repo.fetch(uid)} == {"mainnet", "testnet"}
+
+    # Prune: two same-hour samples per network ~10d old -> one survivor each.
+    prune_uid = 9501
+    base10 = now - timedelta(days=10)
+    for net in ("mainnet", "testnet"):
+        repo.record(PortfolioHistoryRow(prune_uid, base10, Decimal(1), {}, {}, network=net))
+        repo.record(PortfolioHistoryRow(prune_uid, base10 + timedelta(minutes=10), Decimal(2), {}, {}, network=net))
+    removed = repo.prune(now)
+    survivors = repo.fetch(prune_uid)
+    assert removed >= 2  # at least our two older-per-network rows went
+    assert sorted((r.network, r.total_value_quote) for r in survivors) == [
+        ("mainnet", Decimal(2)), ("testnet", Decimal(2)),
+    ]
+
+
+def test_history_fill_price_repair_and_round_trip_pairing():
+    """0015 repair + compute_round_trips regression (the '$0.00 entry' bug).
+
+    A fill stamped with submission_idx + x18 amounts but human price 0 must be
+    repaired from the venue quote at startup; price-less fills WITHOUT x18 are
+    skipped by the round-trip pairer (never rendered as $0-entry trips whose
+    PnL equals the exit notional); a partial close counts matched volume once.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from src.nadobro.db import execute, init_db, query_one
+    from src.nadobro.services.trade_service import compute_round_trips
+
+    uid = 777002
+    x18 = 10 ** 18
+    t0 = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    init_db()  # canonical schema (idempotent)
+    execute("DELETE FROM trades_mainnet WHERE user_id = %s", (uid,))
+
+    def ins(**kw):
+        cols = ", ".join(kw)
+        ph = ", ".join(["%s"] * len(kw))
+        execute(f"INSERT INTO trades_mainnet ({cols}) VALUES ({ph})", tuple(kw.values()))
+
+    # Corrupt open: x18 present, human price 0 (the screenshot rows 1-2).
+    ins(user_id=uid, product_id=2, product_name="BTC-PERP", order_type="match", side="long",
+        status="filled", size=0.00895, price=0, fill_price=0, fill_size=0, fill_fee=0,
+        submission_idx=2001, isolated=False,
+        base_filled_x18=int(0.00895 * x18), quote_filled_x18=int(0.00895 * 60000 * x18),
+        fee_x18=int(0.10 * x18), filled_at=t0, source="manual")
+    ins(user_id=uid, product_id=2, product_name="BTC-PERP", order_type="match", side="short",
+        status="filled", size=0.00895, price=61988.84, fill_price=61988.84, fill_size=0.00895,
+        fill_fee=0.10, submission_idx=2002, isolated=False,
+        filled_at=t0 + timedelta(days=1), source="manual")
+    # Garbage: price-less close with NO x18 — must be skipped, not shown as $0.
+    ins(user_id=uid, product_id=5, product_name="SPCX-PERP", order_type="match", side="short",
+        status="filled", size=0.7, price=0, fill_price=0, fill_size=0.7,
+        submission_idx=2003, isolated=False, filled_at=t0 + timedelta(days=2), source="manual")
+
+    init_db()  # second run performs the 0015 repair on the corrupt row
+
+    row = query_one("SELECT fill_price, fill_size FROM trades_mainnet WHERE submission_idx = 2001")
+    assert abs(float(row["fill_price"]) - 60000.0) < 1e-6
+    assert abs(float(row["fill_size"]) - 0.00895) < 1e-9
+
+    trips = {t["product_id"]: t for t in compute_round_trips(uid, "mainnet", limit=50)}
+    assert 2 in trips, "repaired BTC round trip must appear"
+    btc = trips[2]
+    assert abs(btc["avg_open_price"] - 60000.0) < 1e-6
+    assert abs(btc["realized_pnl"] - (61988.84 - 60000.0) * 0.00895) < 1e-6
+    assert abs(btc["volume_usd"] - 0.00895 * (60000.0 + 61988.84)) < 1e-6
+    assert 5 not in trips, "price-less fill without x18 must not render a $0 trip"

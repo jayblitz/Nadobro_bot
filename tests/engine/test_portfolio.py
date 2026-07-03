@@ -203,6 +203,83 @@ def test_history_window_by_interval():
     asyncio.run(body())
 
 
+def test_sample_stamps_provider_network():
+    async def body():
+        acct = InMemoryAccountProvider()
+        acct.set(1, {"nado_spot": {"USDC": {"value": Decimal(100)}}}, network="testnet")
+        acct.set(2, {"nado_spot": {"USDC": {"value": Decimal(200)}}})  # no network -> mainnet
+        hist = InMemoryPortfolioHistoryRepository()
+        p = _portfolio(acct=acct, hist=hist)
+        row1 = await p.sample(1)
+        row2 = await p.sample(2)
+        assert row1.network == "testnet"
+        assert row2.network == "mainnet"
+
+    asyncio.run(body())
+
+
+def test_fetch_and_history_filter_by_network():
+    async def body():
+        hist = InMemoryPortfolioHistoryRepository()
+        now = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+        hist.record(PortfolioHistoryRow(1, now - timedelta(hours=1), Decimal(10), {}, {}, network="testnet"))
+        hist.record(PortfolioHistoryRow(1, now - timedelta(hours=2), Decimal(20), {}, {}, network="mainnet"))
+        # No filter -> both series (back-compat).
+        assert len(hist.fetch(1)) == 2
+        # Filtered -> one mode's series only.
+        t_rows = hist.fetch(1, network="testnet")
+        assert [r.total_value_quote for r in t_rows] == [Decimal(10)]
+        m_rows = hist.fetch(1, network="mainnet")
+        assert [r.total_value_quote for r in m_rows] == [Decimal(20)]
+        p = _portfolio(hist=hist)
+        assert len(await p.history(1, "24h", end=now, network="testnet")) == 1
+        assert len(await p.history(1, "24h", end=now)) == 2
+
+    asyncio.run(body())
+
+
+def test_retention_buckets_per_network():
+    async def body():
+        hist = InMemoryPortfolioHistoryRepository()
+        now = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+        # Two samples in the SAME hourly bucket (~10d ago) on DIFFERENT
+        # networks: downsampling must keep one per network, not one total.
+        base10 = now - timedelta(days=10)
+        hist.record(PortfolioHistoryRow(1, base10, Decimal(1), {}, {}, network="testnet"))
+        hist.record(PortfolioHistoryRow(1, base10 + timedelta(minutes=5), Decimal(2), {}, {}, network="mainnet"))
+        removed = await run_retention_once(hist, now)
+        assert removed == 0
+        kept = hist.fetch(1)
+        assert {r.network for r in kept} == {"testnet", "mainnet"}
+
+    asyncio.run(body())
+
+
+def test_snapshot_provider_network_resolution():
+    class TestnetSnapshotProvider(SnapshotAccountProvider):
+        def _snapshot(self, user_id: int) -> object:
+            return SimpleNamespace(positions=[], network="testnet")
+
+    class NetworklessSnapshotProvider(SnapshotAccountProvider):
+        def _snapshot(self, user_id: int) -> object:
+            return SimpleNamespace(positions=[])
+
+    async def body():
+        # Follows the snapshot's (i.e. the user's active) network.
+        assert await TestnetSnapshotProvider().network(1) == "testnet"
+        # A pinned constructor network wins over the snapshot.
+        assert await TestnetSnapshotProvider(network="mainnet").network(1) == "mainnet"
+        # Snapshot without a network attribute degrades to mainnet.
+        assert await NetworklessSnapshotProvider().network(1) == "mainnet"
+        # End-to-end: the sampled row carries the resolved network.
+        hist = InMemoryPortfolioHistoryRepository()
+        row = await _portfolio(acct=TestnetSnapshotProvider(), hist=hist).sample(1)
+        assert row.network == "testnet"
+        assert hist.fetch(1, network="testnet")[0].ts == row.ts
+
+    asyncio.run(body())
+
+
 def test_state_and_controller_as_dict():
     async def body():
         inv = InventoryRepository()

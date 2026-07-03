@@ -1441,6 +1441,7 @@ def fmt_help():
         "/desk \\- Talk a trade out loud, preview it, then confirm\n"
         "/brief \\- Your full morning market brief\n"
         "/news \\- Latest market news \\(add a category to filter\\)\n"
+        "/howl \\- Your saved Night HOWL reports \\(`list` or a date to browse\\)\n"
         "/mm\\_status \\- Live market\\-making dashboard \\(GRID / RGRID / DGRID / Mid\\)\n"
         "/mm\\_fills \\- Recent fills on your active MM strategy\n"
         "/stop\\_all \\- Stop every running strategy and flatten bot exposure\n"
@@ -1586,7 +1587,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
         lines.extend(["", f"*{_loc('Setup')}*"])
         lines.append(f"{_loc('Setup:')} *{_loc('IN PROGRESS')}* · {escape_md(step.replace('_', ' ').title())}")
         if not key_ready:
-            lines.append(f"{_loc('Key:')} *{_loc('NOT SET')}* · {_loc('use /onboard to continue')}")
+            lines.append(f"{_loc('Key:')} *{_loc('NOT SET')}* · {_loc('link via Wallet Vault to continue')}")
         elif not funded:
             lines.append(f"{_loc('Funding:')} *{_loc('NEEDED')}* · {_loc('deposit to your wallet')}")
         return "\n".join(lines)

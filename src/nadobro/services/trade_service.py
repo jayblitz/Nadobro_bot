@@ -3079,6 +3079,14 @@ def compute_round_trips(
         if size <= 0:
             continue
         price = float(row.get("px") or 0)
+        # A fill without a resolvable price carries NO price information: queued
+        # as an open lot at $0 it turns every later close into "entry @ $0.00,
+        # PnL = full exit notional"; as a close it emits an all-zero trip. Same
+        # philosophy as the product_id=0 exclusion above — skip rather than show
+        # WRONG. (Migration 0015 + the match-sync human-column backfill repair
+        # the rows that have the venue x18 quote; the rest have no price data.)
+        if price <= 0:
+            continue
         fee = float(row.get("fee") or 0)
         funding = float(row.get("funding_paid") or 0)
         ts = row.get("ts")
@@ -3117,7 +3125,10 @@ def compute_round_trips(
                 avg_open = sum(l["price"] * l["size"] for l in open_lots) / total_open_qty
                 open_fees = sum(l["fees"] for l in open_lots)
                 open_funding = sum(l["funding"] for l in open_lots)
-                volume_usd = (total_open_qty * avg_open) + (size * price)
+                # Both legs use the MATCHED quantity. Using the close row's full
+                # size overstated a partially-matched close (its leftover opens a
+                # new lot whose notional is counted again when THAT trip closes).
+                volume_usd = total_open_qty * (avg_open + price)
                 # Realized PnL is DERIVED from open/close prices, NOT read from the
                 # per-fill ``realized_pnl`` column — this venue reports none, so that
                 # column is always 0 and every venue-closed manual trade showed PnL 0.
