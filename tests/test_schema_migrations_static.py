@@ -47,6 +47,14 @@ def test_backfill_fill_price_migration_present():
     assert "base_filled_x18" in sql and "quote_filled_x18" in sql
 
 
+def test_overlay_signals_migration_and_startup_ddl():
+    sql = Path("src/nadobro/migrations/0017_overlay_signals.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS overlay_signals" in sql
+    assert "idx_overlay_signals_user" in sql
+    ddl = Path("src/nadobro/db.py").read_text()
+    assert "CREATE TABLE IF NOT EXISTS overlay_signals" in ddl
+
+
 def test_retag_leaked_copy_fills_migration_and_startup_ddl():
     sql = Path("src/nadobro/migrations/0016_retag_leaked_copy_fills.sql").read_text()
     for net in ("testnet", "mainnet"):

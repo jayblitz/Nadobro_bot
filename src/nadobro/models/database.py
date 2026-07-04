@@ -1537,6 +1537,32 @@ def fetch_due_time_limits(now_utc, network: str, limit: int = 50) -> dict:
 # Fill Sync Queue ORM
 # ---------------------------------------------------------------------------
 
+def insert_overlay_signal(data: dict) -> Optional[int]:
+    """Persist one financial-overlay signal + the bounded action it applied.
+    Best-effort — the caller wraps this so a log failure never breaks a tick."""
+    cols = [
+        "user_id", "network", "strategy", "product_id", "product_name",
+        "strategy_session_id", "bias", "regime", "confidence", "entry_ok",
+        "scale", "spread_mult", "sl_pct", "tp_pct",
+    ]
+    json_cols = {"action_json", "reasons_json", "risks_json"}
+    filtered = {k: v for k, v in data.items() if k in cols and v is not None}
+    payload = dict(filtered)
+    for jc in json_cols:
+        if data.get(jc) is not None:
+            payload[jc] = json.dumps(data[jc])
+    col_names = list(payload.keys())
+    if not col_names:
+        return None
+    vals = [payload[c] for c in col_names]
+    query = pgsql.SQL("INSERT INTO overlay_signals ({}) VALUES ({}) RETURNING id").format(
+        pgsql.SQL(", ").join(pgsql.Identifier(c) for c in col_names),
+        pgsql.SQL(", ").join(pgsql.Placeholder() * len(col_names)),
+    )
+    row = execute_returning(query, vals)
+    return row["id"] if row else None
+
+
 def insert_fill_sync(data: dict) -> Optional[int]:
     cols = ["trade_id", "network", "user_id", "subaccount_hex", "order_digest", "product_id", "placed_at_ts"]
     filtered = {k: v for k, v in data.items() if k in cols and v is not None}

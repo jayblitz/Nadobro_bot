@@ -83,6 +83,26 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(closed.get("called"))
         fin.assert_not_called()
 
+    async def test_overlay_drawdown_kill_switch_fires_when_user_sl_loose(self):
+        # User SL is loose (20%) so it does NOT fire at -12%, but the overlay's
+        # separate 10% drawdown cap trips flatten + stand-down.
+        snap = {"session_pnl": -12.0, "session_pnl_pct": -12.0, "margin": 100.0}
+        res, closed, state, fin = await self._run_rail(snap, sl=20.0, tp=50.0)
+        self.assertEqual(res, (True, None))
+        self.assertTrue(closed.get("called"))
+        self.assertFalse(state["running"])
+        self.assertEqual(fin.call_args.kwargs.get("stop_reason"), "overlay_drawdown")
+        self.assertIn("overlay drawdown", (state["last_error"] or "").lower())
+        self._engine_stop.assert_awaited_once_with(42, "mainnet", "dgrid")
+
+    async def test_overlay_drawdown_not_fired_within_cap(self):
+        # -8% is inside both the loose user SL (20%) and the 10% overlay cap.
+        snap = {"session_pnl": -8.0, "session_pnl_pct": -8.0, "margin": 100.0}
+        res, closed, _state, fin = await self._run_rail(snap, sl=20.0, tp=50.0)
+        self.assertIsNone(res)
+        self.assertFalse(closed.get("called"))
+        fin.assert_not_called()
+
     async def test_no_basis_when_margin_zero(self):
         snap = {"session_pnl": -50.0, "session_pnl_pct": 0.0, "margin": 0.0}
         res, closed, _state, fin = await self._run_rail(snap, sl=1.0)

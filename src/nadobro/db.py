@@ -911,6 +911,39 @@ def init_db():
             conn.commit()
             logger.info("strategy_sessions table verified/created")
 
+        # --- overlay_signals (migrations/0017_overlay_signals.sql) ---
+        # Financial-overlay signal + action log; powers Night HOWL analysis.
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS overlay_signals (
+                    id                 BIGSERIAL PRIMARY KEY,
+                    user_id            BIGINT NOT NULL,
+                    network            TEXT NOT NULL,
+                    strategy           TEXT NOT NULL,
+                    product_id         INTEGER,
+                    product_name       TEXT,
+                    strategy_session_id INTEGER,
+                    ts                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    bias               DOUBLE PRECISION,
+                    regime             TEXT,
+                    confidence         DOUBLE PRECISION,
+                    entry_ok           BOOLEAN,
+                    scale              DOUBLE PRECISION,
+                    spread_mult        DOUBLE PRECISION,
+                    sl_pct             DOUBLE PRECISION,
+                    tp_pct             DOUBLE PRECISION,
+                    action_json        JSONB,
+                    reasons_json       JSONB,
+                    risks_json         JSONB
+                );
+                CREATE INDEX IF NOT EXISTS idx_overlay_signals_user
+                    ON overlay_signals (user_id, network, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_overlay_signals_session
+                    ON overlay_signals (strategy_session_id) WHERE strategy_session_id IS NOT NULL;
+            """)
+            conn.commit()
+            logger.info("overlay_signals table verified/created")
+
         # --- Engine v2 tables (migrations/0007_engine_v2_tables.sql) ---
         with conn.cursor() as cur:
             cur.execute("""
