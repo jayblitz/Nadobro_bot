@@ -84,6 +84,83 @@ def atr(candles: Sequence[Candle], period: int = 14) -> Optional[float]:
     return atr_val
 
 
+def _ema_series(values: Sequence[float], period: int) -> List[Optional[float]]:
+    """Full-length EMA series aligned to ``values`` (SMA-seeded like ``ema``).
+    The first ``period - 1`` entries are ``None`` (not enough history yet)."""
+    n = len(values)
+    if period <= 0 or n < period:
+        return []
+    out: List[Optional[float]] = [None] * (period - 1)
+    k = 2.0 / (period + 1)
+    e = sum(float(v) for v in values[:period]) / period
+    out.append(e)
+    for v in values[period:]:
+        e = float(v) * k + e * (1 - k)
+        out.append(e)
+    return out
+
+
+def macd(
+    closes: Sequence[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> Optional[Dict[str, float]]:
+    """MACD line (EMA_fast − EMA_slow), its signal line (EMA of the MACD line),
+    and the histogram. ``None`` until there is enough history for the signal
+    line. The histogram sign is the momentum read; ``macd`` vs ``signal`` is the
+    crossover."""
+    if fast <= 0 or slow <= fast or signal <= 0:
+        return None
+    if len(closes) < slow + signal:
+        return None
+    fast_s = _ema_series(closes, fast)
+    slow_s = _ema_series(closes, slow)
+    if not fast_s or not slow_s:
+        return None
+    macd_line = [
+        (f - s) if (f is not None and s is not None) else None
+        for f, s in zip(fast_s, slow_s)
+    ]
+    valid = [m for m in macd_line if m is not None]
+    if len(valid) < signal:
+        return None
+    sig = ema(valid, signal)
+    if sig is None:
+        return None
+    macd_val = float(valid[-1])
+    return {"macd": macd_val, "signal": float(sig), "histogram": macd_val - float(sig)}
+
+
+def bollinger(
+    closes: Sequence[float],
+    period: int = 20,
+    num_std: float = 2.0,
+) -> Optional[Dict[str, float]]:
+    """Bollinger Bands over the last ``period`` closes (population std, the
+    standard convention). ``pct_b`` locates price in the band (0 = lower band,
+    1 = upper); ``bandwidth`` = band width / middle (a squeeze/expansion read)."""
+    if period <= 1 or len(closes) < period:
+        return None
+    window = [float(c) for c in closes[-period:]]
+    mid = sum(window) / period
+    var = sum((x - mid) ** 2 for x in window) / period
+    sd = var ** 0.5
+    upper = mid + num_std * sd
+    lower = mid - num_std * sd
+    price = float(closes[-1])
+    width = upper - lower
+    pct_b = ((price - lower) / width) if width > 0 else 0.5
+    bandwidth = (width / mid) if mid else 0.0
+    return {
+        "upper": upper,
+        "middle": mid,
+        "lower": lower,
+        "pct_b": pct_b,
+        "bandwidth": bandwidth,
+    }
+
+
 async def run(
     trading_pair: str,
     candles: Sequence[Candle],
@@ -115,4 +192,6 @@ async def run(
         "atr": a,
         "rsi": rsi(closes, rsi_period),
         "volatility": volatility,
+        "macd": macd(closes),
+        "bollinger": bollinger(closes),
     }
