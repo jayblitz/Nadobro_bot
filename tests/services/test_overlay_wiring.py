@@ -88,3 +88,71 @@ def test_overlay_writes_barrier_state_for_rail():
     # Regime-adjusted barriers surfaced to state for the session rail.
     assert "overlay_sl_pct" in state and state["overlay_sl_pct"] > 0
     assert "overlay_tp_pct" in state and state["overlay_tp_pct"] > 0
+
+
+def test_overlay_fetches_funding_without_breaking():
+    calls = {"funding": 0}
+
+    class _ClientWithFunding(_FakeClient):
+        def get_perp_funding_rates(self, product_ids):
+            calls["funding"] += 1
+            return {int(product_ids[0]): {"funding_rate": 0.0012}}
+
+    cfg = {"order_amount_quote": Decimal("500"), "directional_bias": 0.0,
+           "spread_bid_pct": Decimal("0.0005"), "spread_ask_pct": Decimal("0.0005")}
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5, "tp_pct": 1.0}
+    asyncio.run(er._maybe_apply_overlay(
+        7, "mainnet", "mid", "BTC", 2, cfg, state, client=_ClientWithFunding(), mid=131.6,
+    ))
+    # Funding was fetched and the overlay still applied (bias set).
+    assert calls["funding"] == 1
+    assert cfg["directional_bias"] != 0.0
+
+
+def test_overlay_survives_funding_fetch_failure():
+    class _ClientFundingBoom(_FakeClient):
+        def get_perp_funding_rates(self, product_ids):
+            raise RuntimeError("indexer down")
+
+    cfg = {"order_amount_quote": Decimal("500"), "directional_bias": 0.0}
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5, "tp_pct": 1.0}
+    # Must not raise; overlay still applies from candle features.
+    asyncio.run(er._maybe_apply_overlay(
+        7, "mainnet", "mid", "BTC", 2, cfg, state, client=_ClientFundingBoom(), mid=131.6,
+    ))
+    assert cfg["directional_bias"] != 0.0
+
+
+def test_funding_flag_fires_with_held_long_position(monkeypatch):
+    """End-to-end: a held long + positive funding -> the persisted signal
+    carries a funding carry-cost risk (position side read from inventory)."""
+    class _Hold:
+        net_amount_base = 0.05          # long
+    class _Inv:
+        def get(self, *a, **k):
+            return _Hold()
+    class _Ctrl:
+        inventory = _Inv()
+        trading_pair = "BTC-PERP"
+        id = "mid:7:mainnet"
+
+    class _ClientFunding(_FakeClient):
+        def get_perp_funding_rates(self, product_ids):
+            return {int(product_ids[0]): {"funding_rate": 0.0015}}   # longs pay
+
+    monkeypatch.setitem(er.RUNTIME._controllers, (7, "mainnet", "mid"), _Ctrl())
+    captured = {}
+    import src.nadobro.models.database as db
+    monkeypatch.setattr(db, "insert_overlay_signal", lambda row: captured.update(row) or 1, raising=False)
+
+    cfg = {"order_amount_quote": Decimal("500"), "directional_bias": 0.0}
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5, "tp_pct": 1.0}
+    try:
+        asyncio.run(er._maybe_apply_overlay(
+            7, "mainnet", "mid", "BTC", 2, cfg, state, client=_ClientFunding(), mid=131.6,
+        ))
+    finally:
+        er.RUNTIME._controllers.pop((7, "mainnet", "mid"), None)
+
+    risks = captured.get("risks_json") or []
+    assert any("Funding" in r and "paying" in r for r in risks)
