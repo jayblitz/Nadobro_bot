@@ -32,6 +32,16 @@ def _llm_timeout_seconds() -> float:
 
 
 def _get_client() -> Optional[OpenAI]:
+    # Prefer the NanoGPT gateway (one key: Claude / GPT / DMind) when configured;
+    # fall back to native Grok only when NanoGPT is absent.
+    try:
+        from src.nadobro.services.llm_gateway import chat_client
+
+        gw = chat_client()
+        if gw is not None:
+            return gw
+    except Exception:  # policy: degrade-ok(fall back to native xai)
+        pass
     global _xai_client
     if _xai_client:
         return _xai_client
@@ -58,16 +68,24 @@ def _get_openai_client() -> Optional[OpenAI]:
 
 
 def chat_json(messages: list[dict], schema: dict | None = None, model: str | None = None) -> tuple[dict, str]:
-    """Provider-selected JSON chat used by features that need structured LLM output."""
-    providers = [
-        ("grok", _get_client(), model or os.environ.get("NADO_LLM_XAI_MODEL", "grok-3-mini-fast")),
-        ("openai", _get_openai_client(), os.environ.get("NADO_LLM_OPENAI_MODEL", "gpt-4o")),
-    ]
+    """Provider-selected JSON chat used by features that need structured LLM output.
+
+    NanoGPT gateway is primary (one key, per-task model); native Grok / OpenAI
+    remain fallbacks for when NanoGPT is not configured or is down.
+    """
+    from src.nadobro.services.llm_gateway import gateway_configured, model_for
+
+    providers: list[tuple[str, Optional[OpenAI], str]] = []
+    if gateway_configured():
+        providers.append(("nanogpt", _get_client(), model or model_for("json")))
+    else:
+        providers.append(("grok", _get_client(), model or os.environ.get("NADO_LLM_XAI_MODEL", "grok-3-mini-fast")))
+    providers.append(("openai", _get_openai_client(), os.environ.get("NADO_LLM_OPENAI_MODEL", "gpt-4o")))
     last_error: Exception | None = None
     for provider, client, selected_model in providers:
         if client is None:
             continue
-        for attempt in range(2 if provider == "grok" else 1):
+        for attempt in range(2 if provider in ("grok", "nanogpt") else 1):
             try:
                 kwargs = {
                     "model": selected_model,

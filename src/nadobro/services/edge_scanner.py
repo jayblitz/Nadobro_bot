@@ -137,7 +137,16 @@ def _get_openai_client():
 
 
 def _get_analysis_client():
-    """Pick the best available LLM client for edge analysis."""
+    """Pick the best available LLM client for edge analysis. NanoGPT gateway
+    (one key: Claude / GPT / DMind) is primary; native Grok/OpenAI fall back."""
+    try:
+        from src.nadobro.services.llm_gateway import chat_client, model_for
+
+        gw = chat_client()
+        if gw is not None:
+            return gw, model_for("scan")
+    except Exception:  # policy: degrade-ok(fall back to native providers)
+        pass
     xai = _get_xai_client()
     if xai:
         return xai, os.environ.get("BRO_SCAN_MODEL", "grok-3-mini-fast")
