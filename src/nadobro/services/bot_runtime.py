@@ -2416,6 +2416,22 @@ async def _evaluate_session_pnl_rail(
     # ignored and the rail used the 0.8 default.
     from src.nadobro.services.strategy_registry import effective_sl_tp_pct
     sl_pct, tp_pct = effective_sl_tp_pct(strategy, state)
+    # Overlay-adaptive barriers: when the financial overlay steers this strategy
+    # and has written regime-adjusted SL/TP (widen in a trend, tighten in chop),
+    # the rail uses them instead of the user's static config. Bounded upstream
+    # (the engine caps the widening at ~1.3x the user's base) and backstopped by
+    # the 10% overlay drawdown cap below.
+    try:
+        from src.nadobro.services.overlay_actuator import overlay_applies
+        if overlay_applies(strategy):
+            ov_sl = state.get("overlay_sl_pct")
+            ov_tp = state.get("overlay_tp_pct")
+            if ov_sl is not None:
+                sl_pct = float(ov_sl)
+            if ov_tp is not None:
+                tp_pct = float(ov_tp)
+    except Exception:  # noqa: BLE001 - fall back to the user's config barriers
+        logger.debug("overlay barrier read failed", exc_info=True)
     if sl_pct <= 0 and tp_pct <= 0:
         return None
 

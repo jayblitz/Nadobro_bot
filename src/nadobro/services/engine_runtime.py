@@ -1440,6 +1440,19 @@ async def _maybe_apply_overlay(
         overrides = compute_overrides(strategy, signal)
         changed = apply_overrides_to_configs(strategy, configs, overrides)
 
+        # Surface the regime-adjusted barriers to the session SL/TP rail (which
+        # reads state, not configs). Persisted with state at end of cycle, so
+        # the rail uses them from the next cycle. Cleared to fall back to the
+        # user's config when the signal produced no barrier.
+        if signal.sl_pct is not None:
+            state["overlay_sl_pct"] = float(signal.sl_pct)
+        else:
+            state.pop("overlay_sl_pct", None)
+        if signal.tp_pct is not None:
+            state["overlay_tp_pct"] = float(signal.tp_pct)
+        else:
+            state.pop("overlay_tp_pct", None)
+
         # Persist the signal + applied action for Night HOWL / audit (off loop).
         try:
             from src.nadobro.models.database import insert_overlay_signal

@@ -85,3 +85,33 @@ def test_grid_gets_no_directional_bias_key():
     # directional_bias is a Mid-only continuous knob.
     ov = oa.compute_overrides("grid", Signal(bias=0.5, regime="trend_up", entry_ok=True, scale=0.3))
     assert "directional_bias" not in ov
+
+
+def test_signal_barriers_flow_into_overrides_and_grid_barrier():
+    from src.nadobro.engine.types import TripleBarrierConfig
+    sig = Signal(bias=0.7, regime="trend_up", entry_ok=True, scale=0.5,
+                 spread_mult=1.2, confidence=0.8, sl_pct=0.65, tp_pct=1.6)
+    ov = oa.compute_overrides("grid", sig)
+    assert ov["sl_pct"] == 0.65 and ov["tp_pct"] == 1.6
+    cfg = {"total_amount_quote": Decimal("400"),
+           "triple_barrier_config": TripleBarrierConfig(take_profit=Decimal("0.01"), stop_loss=Decimal("0.005"))}
+    changed = oa.apply_overrides_to_configs("grid", cfg, ov)
+    tb = cfg["triple_barrier_config"]
+    assert tb.stop_loss == Decimal("0.0065")   # 0.65% -> fraction
+    assert tb.take_profit == Decimal("0.016")  # 1.6%  -> fraction
+    assert changed["barriers"] == {"sl_pct": 0.65, "tp_pct": 1.6}
+
+
+def test_mid_barrier_is_rail_only_no_triple_barrier():
+    sig = Signal(bias=0.3, regime="range", entry_ok=True, scale=0.0,
+                 spread_mult=1.0, confidence=0.5, sl_pct=0.5, tp_pct=1.0)
+    ov = oa.compute_overrides("mid", sig)
+    cfg = {"order_amount_quote": Decimal("500"), "directional_bias": 0.0}   # no triple_barrier
+    changed = oa.apply_overrides_to_configs("mid", cfg, ov)
+    assert "barriers" not in changed         # nothing to apply on the config
+    assert ov["sl_pct"] == 0.5               # still surfaced for the session rail
+
+
+def test_no_barriers_when_signal_has_none():
+    ov = oa.compute_overrides("grid", Signal(bias=0.5, regime="trend_up", entry_ok=True, scale=0.3))
+    assert "sl_pct" not in ov and "tp_pct" not in ov

@@ -77,3 +77,14 @@ def test_overlay_noop_without_client_candles():
         7, "mainnet", "grid", "BTC", 2, cfg, state, client=object(), mid=100.0,
     ))
     assert cfg == before
+
+
+def test_overlay_writes_barrier_state_for_rail():
+    cfg = {"order_amount_quote": Decimal("500"), "directional_bias": 0.0}
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5, "tp_pct": 1.0}
+    asyncio.run(er._maybe_apply_overlay(
+        7, "mainnet", "mid", "BTC", 2, cfg, state, client=_FakeClient(), mid=131.6,
+    ))
+    # Regime-adjusted barriers surfaced to state for the session rail.
+    assert "overlay_sl_pct" in state and state["overlay_sl_pct"] > 0
+    assert "overlay_tp_pct" in state and state["overlay_tp_pct"] > 0

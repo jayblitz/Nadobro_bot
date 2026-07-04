@@ -84,6 +84,14 @@ def compute_overrides(strategy: str, signal: Signal) -> Dict[str, object]:
         "bias": float(signal.bias),
         "confidence": float(signal.confidence),
     }
+    # Regime-adjusted barriers (% of margin), derived from the user's base SL/TP
+    # in the engine (trend widens, chop tightens). Applied to the controller's
+    # per-level barrier AND surfaced for the session rail; the 10% overlay
+    # drawdown cap is the hard backstop over both.
+    if signal.sl_pct is not None:
+        overrides["sl_pct"] = float(signal.sl_pct)
+    if signal.tp_pct is not None:
+        overrides["tp_pct"] = float(signal.tp_pct)
     if strat == "mid":
         overrides["directional_bias"] = _clamp(float(signal.bias), -1.0, 1.0)
     return overrides
@@ -132,6 +140,25 @@ def apply_overrides_to_configs(
     if "directional_bias" in overrides:
         configs["directional_bias"] = float(overrides["directional_bias"])
         changed["directional_bias"] = configs["directional_bias"]
+
+    # Regime-adjusted barriers → the controller's per-level triple barrier (grid
+    # ladder). Mid + fill-anchored are rail-only, so this key is simply absent
+    # there and the session rail carries the overlay sl/tp instead (via state).
+    sl_pct = overrides.get("sl_pct")
+    tp_pct = overrides.get("tp_pct")
+    if (sl_pct is not None or tp_pct is not None) and "triple_barrier_config" in configs:
+        try:
+            from src.nadobro.engine.types import TripleBarrierConfig
+
+            sl_frac = (Decimal(str(sl_pct)) / Decimal(100)) if sl_pct else None
+            tp_frac = (Decimal(str(tp_pct)) / Decimal(100)) if tp_pct else None
+            if sl_frac or tp_frac:
+                configs["triple_barrier_config"] = TripleBarrierConfig(
+                    take_profit=tp_frac or None, stop_loss=sl_frac or None
+                )
+                changed["barriers"] = {"sl_pct": sl_pct, "tp_pct": tp_pct}
+        except Exception:  # noqa: BLE001 - barrier override is best-effort
+            pass
 
     if overrides.get("suppress_new_entries"):
         # Choke NEW exposure via the existing net-exposure cap (the inventory
