@@ -356,12 +356,21 @@ def night_howl_due(
     return last_sent_date != local.strftime("%Y-%m-%d")
 
 
+def _fmt_regime(regime: str) -> str:
+    return {
+        "trend_up": "trending up", "trend_down": "trending down",
+        "range": "ranging", "chop": "choppy",
+    }.get(str(regime or ""), str(regime or "—").replace("_", " "))
+
+
 def render_report_markdown(
     pattern: Dict[str, Any],
     recommendations: List[str],
     *,
     local_date: str,
     backtests: Optional[List[Dict[str, Any]]] = None,
+    signal_summary: Optional[Dict[str, Any]] = None,
+    narrative: str = "",
 ) -> str:
     """Compose the per-user report as Telegram-friendly Markdown. Unique per user
     because every figure is theirs."""
@@ -391,6 +400,27 @@ def render_report_markdown(
         bh = pattern.get("busiest_hour_utc")
         if bh is not None:
             lines.append(f"• Busiest hour: {int(bh):02d}:00 UTC")
+        lines.append("")
+
+    # Financial-overlay read: what the indicator/regime overlay saw and did.
+    ss = signal_summary or {}
+    if int(ss.get("signals") or 0) > 0:
+        lines.append("*Overlay read*")
+        lines.append(
+            f"• Market was mostly *{_fmt_regime(ss.get('dominant_regime'))}* "
+            f"(avg confidence {_f(ss.get('avg_confidence')) * 100:.0f}%, "
+            f"bias {_f(ss.get('avg_bias')):+.2f})"
+        )
+        lines.append(
+            f"• Overlay actions: scaled up {int(ss.get('scaled_up') or 0)}× · "
+            f"scaled down {int(ss.get('scaled_down') or 0)}× · "
+            f"paused adds {int(ss.get('suppressed') or 0)}×"
+        )
+        lines.append("")
+
+    if narrative:
+        lines.append("*Analyst*")
+        lines.append(narrative)
         lines.append("")
 
     if backtests:
@@ -581,9 +611,32 @@ def build_report(
             except Exception as exc:  # noqa: BLE001 - backtest is enrichment, not required
                 logger.debug("night_howl backtest skipped user=%s: %s", telegram_id, exc)
 
-        recommendations = derive_recommendations(pattern, backtests)
+        # Financial-overlay read: summarize what the overlay signalled/did over
+        # the window, and let the slow DMind analyst ground its recommendations
+        # in it (falls back to the deterministic heuristics when the finance LLM
+        # is off). Never blocks the sweep.
+        signal_summary: Dict[str, Any] = {"signals": 0}
+        narrative = ""
+        analyst_provider = "none"
+        try:
+            from src.nadobro.models.database import get_overlay_signals
+            from src.nadobro.services.signal_analyst import (
+                analyze_activity, summarize_overlay_signals,
+            )
+
+            overlay_rows = get_overlay_signals(telegram_id, network, since=cutoff)
+            signal_summary = summarize_overlay_signals(overlay_rows)
+            analysis = analyze_activity(pattern, signal_summary, backtests=backtests)
+            recommendations = analysis.get("recommendations") or derive_recommendations(pattern, backtests)
+            narrative = str(analysis.get("narrative") or "")
+            analyst_provider = str(analysis.get("provider") or "none")
+        except Exception as exc:  # noqa: BLE001 - analyst is enrichment, not required
+            logger.debug("night_howl analyst skipped user=%s: %s", telegram_id, exc)
+            recommendations = derive_recommendations(pattern, backtests)
+
         markdown = render_report_markdown(
             pattern, recommendations, local_date=local_date, backtests=backtests,
+            signal_summary=signal_summary, narrative=narrative,
         )
         report = {
             "date": local_date,
@@ -592,6 +645,9 @@ def build_report(
             "pattern": pattern,
             "backtests": backtests,
             "recommendations": recommendations,
+            "signal_summary": signal_summary,
+            "narrative": narrative,
+            "analyst_provider": analyst_provider,
             "markdown": markdown,
         }
         save_report(telegram_id, network, report)

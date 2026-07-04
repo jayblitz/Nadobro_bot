@@ -1563,6 +1563,27 @@ def insert_overlay_signal(data: dict) -> Optional[int]:
     return row["id"] if row else None
 
 
+def get_overlay_signals(user_id: int, network: str, since=None, limit: int = 500) -> list:
+    """Recent financial-overlay signals for a user/network (newest first). Used
+    by Night HOWL to explain what the overlay did. ``[]`` on any error."""
+    try:
+        clauses = ["user_id = %s", "network = %s"]
+        params: list = [int(user_id), str(network)]
+        if since is not None:
+            clauses.append("ts >= %s")
+            params.append(since)
+        params.append(int(limit))
+        return query_all(
+            f"SELECT strategy, product_name, bias, regime, confidence, entry_ok, "
+            f"scale, spread_mult, action_json, reasons_json, risks_json, ts "
+            f"FROM overlay_signals WHERE {' AND '.join(clauses)} "
+            f"ORDER BY ts DESC LIMIT %s",
+            tuple(params),
+        ) or []
+    except Exception:
+        return []
+
+
 def insert_fill_sync(data: dict) -> Optional[int]:
     cols = ["trade_id", "network", "user_id", "subaccount_hex", "order_digest", "product_id", "placed_at_ts"]
     filtered = {k: v for k, v in data.items() if k in cols and v is not None}
