@@ -8,6 +8,7 @@ the target cumulative volume or max-cycle safety cap is reached.
 """
 from __future__ import annotations
 
+import logging
 import time
 from decimal import Decimal
 from typing import Optional
@@ -20,6 +21,8 @@ from src.nadobro.engine.types import ExecutionStrategy, PositionAction, TradeTyp
 # Quote-like symbols that must never be selected as a base for Volume.
 # Kept in sync with ``product_catalog._QUOTE_LIKE_SYMBOLS``.
 _QUOTE_LIKE_BASES = frozenset({"USDC", "USDC0", "USDT", "USDT0", "USD"})
+
+logger = logging.getLogger(__name__)
 
 
 def _non_negative_decimal(value: object, default: str = "0") -> Decimal:
@@ -138,7 +141,13 @@ class VolumeBotController(Controller):
             if bid is not None and bid > 0 and px <= bid:
                 px = bid * (Decimal(1) + Decimal("0.0001"))
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning(
+                "volume_bot: sell price using fee/entry floor without live book guard; "
+                "post-only sell may reject or rest away from book pair=%s controller=%s",
+                self.trading_pair,
+                self.id,
+                exc_info=True,
+            )
         return px
 
     async def _spawn_order(
