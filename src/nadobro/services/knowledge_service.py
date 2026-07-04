@@ -157,7 +157,20 @@ def _fetch_fear_greed_index() -> str:
         return "Fear & Greed Index: unavailable"
 
 
-def _get_xai_client():
+def _gateway_client():
+    """NanoGPT gateway client (one key: Claude / GPT / DMind) or None."""
+    try:
+        from src.nadobro.services.llm_gateway import chat_client
+
+        return chat_client()
+    except Exception:  # policy: degrade-ok(fall back to native providers)
+        return None
+
+
+def _get_native_xai_client():
+    """NATIVE Grok client. Required for the live-X search path (Grok's
+    ``extra_body.search_parameters`` extension is Grok-only), so it stays
+    separate from the gateway-preferred general client below."""
     global _xai_client
     if _xai_client is None:
         api_key = os.environ.get("XAI_API_KEY")
@@ -167,7 +180,15 @@ def _get_xai_client():
     return _xai_client
 
 
+def _get_xai_client():
+    # General reasoning: prefer the NanoGPT gateway; native Grok is the fallback.
+    return _gateway_client() or _get_native_xai_client()
+
+
 def _get_openai_client():
+    gw = _gateway_client()
+    if gw is not None:
+        return gw
     global _openai_client
     if _openai_client is None:
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -215,6 +236,15 @@ def _wants_detailed_answer(question: str) -> bool:
 
 
 def _model_for(provider: str) -> str:
+    # When the NanoGPT gateway is active, all general reasoning uses the
+    # gateway chat model regardless of the nominal provider label.
+    try:
+        from src.nadobro.services.llm_gateway import gateway_configured, model_for
+
+        if gateway_configured():
+            return model_for("chat")
+    except Exception:  # policy: degrade-ok(fall back to native provider model)
+        pass
     if provider == "openai":
         return os.environ.get("OPENAI_SUPPORT_MODEL", "gpt-4o")
     return os.environ.get("XAI_SUPPORT_MODEL", "grok-3-mini-fast")
@@ -1310,7 +1340,7 @@ def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, li
 def _execute_market_sentiment(query: str) -> tuple[str, list[str]]:
     fng = _fetch_fear_greed_index()
 
-    client = _get_xai_client()
+    client = _get_native_xai_client()  # Grok live-X sentiment needs native client
     if not client:
         return f"[MARKET SENTIMENT]\n{fng}\n\nxAI client not available for detailed sentiment.", []
 
@@ -1644,7 +1674,12 @@ def _append_x_links_if_needed(answer: str, context_text: str) -> str:
 
 
 def _stream_support_llm(provider: str, system: str, question: str, x_search: bool = False, history: list[dict] = None):
-    if provider == "openai":
+    # Grok live-X search only works on a NATIVE Grok client; everything else
+    # goes through the gateway-preferred general client.
+    native_x = x_search and provider == "xai" and _get_native_xai_client() is not None
+    if native_x:
+        client = _get_native_xai_client()
+    elif provider == "openai":
         client = _get_openai_client()
     else:
         client = _get_xai_client()
@@ -1660,13 +1695,13 @@ def _stream_support_llm(provider: str, system: str, question: str, x_search: boo
     messages.append({"role": "user", "content": question})
 
     kwargs = dict(
-        model=XAI_X_SEARCH_MODEL if (x_search and provider == "xai") else _model_for(provider),
+        model=XAI_X_SEARCH_MODEL if native_x else _model_for(provider),
         messages=messages,
         max_tokens=max_tokens,
         temperature=0.5,
         stream=True,
     )
-    if x_search and provider == "xai":
+    if native_x:
         kwargs["extra_body"] = {"search_parameters": _pick_x_search_params(question)}
 
     stream = client.chat.completions.create(**kwargs)
@@ -1874,10 +1909,11 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
     _load_knowledge_base()
 
     is_x_question = _is_x_twitter_question(question)
-    # Prefer the direct X tool path (X API first, then Grok fallback) for
-    # real X questions. This avoids generic OpenAI-only answers when xAI
-    # credentials exist but do not have permission for the selected model.
-    use_x_prompt = is_x_question and xai_client is not None and not _x_api_ready
+    # Prefer the direct X tool path (X API first, then Grok fallback) for real
+    # X questions. Grok's live-X search needs a NATIVE Grok client (the
+    # extra_body extension is Grok-only), so gate on that — never on the
+    # gateway client, or NanoGPT would receive a param it doesn't understand.
+    use_x_prompt = is_x_question and _get_native_xai_client() is not None and not _x_api_ready
 
     gathered_context = ""
     if is_x_question and _x_api_ready:
@@ -2218,7 +2254,12 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         for provider in providers:
             try:
                 def _call(p=provider):
-                    client = _get_xai_client() if p == "xai" else _get_openai_client()
+                    # X-search (extra_body below) needs the NATIVE Grok client;
+                    # all other reasoning uses the gateway-preferred client.
+                    if use_x_prompt and p == "xai":
+                        client = _get_native_xai_client()
+                    else:
+                        client = _get_xai_client() if p == "xai" else _get_openai_client()
                     max_tokens = 1400 if (_wants_detailed_answer(question) or use_x_prompt) else 650
                     messages = [{"role": "system", "content": system}]
                     if history_msgs:

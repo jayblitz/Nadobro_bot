@@ -15,7 +15,7 @@ from typing import Any
 
 from src.nadobro.services.nanogpt_client import nanogpt_chat_completion, nanogpt_is_configured
 from src.nadobro.services.provider_config import dmind_configured
-from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
+from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds
 from src.nadobro.services.source_registry import record_source
 
 logger = logging.getLogger(__name__)
@@ -71,9 +71,10 @@ def _analyze_via_nanogpt(
     task: str,
     schema_hint: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    from src.nadobro.services.nanogpt_client import nanogpt_default_model
-
-    model = (os.environ.get("NANOGPT_FINANCE_MODEL") or nanogpt_default_model()).strip()
+    # Finance/analyst reasoning defaults to the Web3-native DMind model on
+    # NanoGPT (one key). Override with NANOGPT_FINANCE_MODEL (e.g. dmind/dmind-1,
+    # or dmind/dmind-3 once it is hosted).
+    model = (os.environ.get("NANOGPT_FINANCE_MODEL") or "dmind/dmind-1").strip()
     user_payload = json.dumps(
         {
             "task": task,
@@ -197,13 +198,6 @@ def _analyze_via_dmind(
             detail=f"DMind {task}",
             allowed_use="finance_llm",
             metadata={"model": DMIND_MODEL},
-        )
-        record_provider_degraded(
-            "dmind",
-            f"DMind request failed: {exc}",
-            latency_ms=latency_ms,
-            source_url="https://dmind.ai/",
-            allowed_use="finance_llm",
         )
         return {
             "ok": True,
