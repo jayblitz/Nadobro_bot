@@ -422,7 +422,7 @@ def init_db():
         with conn.cursor() as cur:
             for col, col_type in [("close_price", "DOUBLE PRECISION"), ("closed_at", "TIMESTAMPTZ")]:
                 try:
-                    cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")  # Safe: col and col_type are hardcoded constants above
+                    cur.execute(f"ALTER TABLE trades ADD COLUMN IF NOT EXISTS {col} {col_type}")  # Safe: col and col_type are hardcoded constants above
                     conn.commit()
                     logger.info(f"Added column trades.{col}")
                 except Exception:
@@ -738,7 +738,7 @@ def init_db():
                 table = f"trades_{net}"
                 for col, col_type in _NEW_TRADE_COLS:
                     try:
-                        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
                         conn.commit()
                         logger.info("Added column %s.%s", table, col)
                     except Exception:
@@ -755,7 +755,7 @@ def init_db():
             # Also add to the legacy trades table for backwards compat
             for col, col_type in _NEW_TRADE_COLS:
                 try:
-                    cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+                    cur.execute(f"ALTER TABLE trades ADD COLUMN IF NOT EXISTS {col} {col_type}")
                     conn.commit()
                 except Exception:
                     conn.rollback()

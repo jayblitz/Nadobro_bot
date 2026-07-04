@@ -529,7 +529,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         raw_value = parts[4]
         if strategy_id not in supported:
             return
-        if strategy_id == "vol" and field not in {"sl_pct", "session_margin_usd", "target_volume_usd"}:
+        if strategy_id == "vol" and field not in {"tp_pct", "sl_pct", "session_margin_usd", "target_volume_usd"}:
             return
         allowed_numeric_fields = {
             "notional_usd", "spread_bp", "interval_seconds", "tp_pct", "sl_pct",
@@ -587,7 +587,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             "interval_seconds": (10, 3600),
             "tp_pct": (0.05, 100),
             "sl_pct": (0.05, 100),
-            "session_margin_usd": (10, 1000000),
+            "session_margin_usd": (100, 1000000),
             "target_volume_usd": (100, 100000000),
             "levels": (1, 20),
             "min_range_pct": (0.1, 20),
@@ -722,7 +722,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             # Delta Neutral (engine v2) custom inputs.
             "fixed_margin_usd", "dn_hold_seconds", "dn_cycles",
         )
-        if strategy_id == "vol" and field not in {"sl_pct", "session_margin_usd", "target_volume_usd"}:
+        if strategy_id == "vol" and field not in {"tp_pct", "sl_pct", "session_margin_usd", "target_volume_usd"}:
             return
         if field not in allowed_inputs:
             return
@@ -1373,6 +1373,14 @@ def _strategy_config_section_kb(strategy: str, section: str):
             ],
             [
                 InlineKeyboardButton("✍️ Custom Margin", callback_data="strategy:input:vol:session_margin_usd"),
+            ],
+            [
+                InlineKeyboardButton("TP 0.5%", callback_data="strategy:set:vol:tp_pct:0.5"),
+                InlineKeyboardButton("TP 1.0%", callback_data="strategy:set:vol:tp_pct:1.0"),
+                InlineKeyboardButton("TP 2.0%", callback_data="strategy:set:vol:tp_pct:2.0"),
+            ],
+            [
+                InlineKeyboardButton("✍️ Custom TP", callback_data="strategy:input:vol:tp_pct"),
             ],
             [
                 InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:vol:sl_pct:0.5"),
@@ -2105,9 +2113,22 @@ def _build_strategy_preview_text(
         # post-only buy → wait fill → post-only sell loop per cycle.
         session_margin = float(conf.get("session_margin_usd") or conf.get("fixed_margin_usd") or 100.0)
         target_volume = float(conf.get("target_volume_usd") or 10000.0)
+        tp_pct_vol = float(conf.get("tp_pct") or 1.0)
         sl_pct_vol = float(conf.get("sl_pct") or 0.5)
         from src.nadobro.config import EST_FEE_RATE as _SPOT_FEE_RATE_EST
-        maker_fee_bp = float(conf.get("vol_maker_fee_bp") or (_SPOT_FEE_RATE_EST * 10_000.0))
+        maker_fee_rate = conf.get("vol_maker_fee_rate")
+        if maker_fee_rate is None:
+            try:
+                from src.nadobro.services.product_catalog import get_spot_maker_fee_rate
+
+                maker_fee_rate = get_spot_maker_fee_rate(product, network=network)
+            except Exception:
+                maker_fee_rate = None
+        if maker_fee_rate is None and conf.get("vol_maker_fee_bp") is not None:
+            maker_fee_rate = float(conf.get("vol_maker_fee_bp") or 0.0) / 10_000.0
+        if maker_fee_rate is None:
+            maker_fee_rate = _SPOT_FEE_RATE_EST
+        maker_fee_bp = float(maker_fee_rate) * 10_000.0
         volume_done = float(bot_status.get("volume_done_usd") or 0.0)
         volume_remaining = float(
             bot_status.get("volume_remaining_usd") or max(0.0, target_volume - volume_done)
@@ -2117,7 +2138,7 @@ def _build_strategy_preview_text(
             session_pnl = float(bot_status.get("session_realized_pnl_usd") or session_pnl)
         # Each cycle pushes 2× session_margin of volume (buy leg + sell leg).
         est_cycles = max(1, int((target_volume + (2 * session_margin) - 1) // (2 * session_margin))) if session_margin > 0 else 0
-        est_fees_usd = target_volume * (maker_fee_bp / 10_000.0)
+        est_fees_usd = target_volume * float(maker_fee_rate)
         est_pnl_at_sl_usd = -session_margin * (sl_pct_vol / 100.0) if sl_pct_vol > 0 else 0.0
         market_label = f"{str(product).upper()} SPOT"
         phase = str(bot_status.get("vol_phase") or "idle").upper()
@@ -2139,6 +2160,7 @@ def _build_strategy_preview_text(
             "⚙️ *Configuration*\n"
             f"• Market: *{escape_md(market_label)}*\n"
             f"• Session margin: *{escape_md(_fmt_usd(session_margin))}*\n"
+            f"• Take profit: *{escape_md(f'{tp_pct_vol:.2f}%')}*\n"
             f"• Stop loss: *{escape_md(f'{sl_pct_vol:.2f}%')}*\n"
             f"• Target volume: *{escape_md(_fmt_usd(target_volume))}*\n\n"
             "🧮 *Pre\\-flight analytics*\n"
@@ -2154,8 +2176,8 @@ def _build_strategy_preview_text(
             f"• Phase: *{escape_md(phase)}*\n\n"
             "ℹ️ *How it works*\n"
             "Post\\-only spot buy at the bid → wait for fill → post\\-only sell at the ask\\. "
-            "Loop repeats until target volume is reached, or the session SL halts the bot at "
-            f"*{escape_md(f'{sl_pct_vol:.2f}%')}* of margin\\."
+            "Loop repeats until target volume is reached, or the session TP/SL halts the bot at "
+            f"*{escape_md(f'{tp_pct_vol:.2f}% / {sl_pct_vol:.2f}%')}* of margin\\."
             + (f"\n\n{warning}" if warning else "")
         )
 
@@ -2426,5 +2448,3 @@ def _build_strategy_preview_text(
         f"net {dn_net_dot} *{escape_md(_fmt_usd(dn_est_net))}*"
         + (f"\n\n{warning}" if warning else "")
     )
-
-

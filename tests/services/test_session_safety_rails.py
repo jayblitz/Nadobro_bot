@@ -83,6 +83,56 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(closed.get("called"))
         fin.assert_not_called()
 
+    async def _run_rail_with_state(self, snap, state):
+        closed = {}
+
+        async def close_coro():
+            closed["called"] = True
+            return {"success": True}
+
+        sess = {"id": 11, "product_id": 2, "status": "running", "started_at": None, "stopped_at": None}
+        self._engine_stop = AsyncMock()
+        with patch.object(bot_runtime, "run_blocking", _fake_run_blocking), \
+             patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=sess), \
+             patch("src.nadobro.models.database.get_active_strategy_session_for_strategy"), \
+             patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=snap), \
+             patch.object(engine_runtime.RUNTIME, "stop", new=self._engine_stop), \
+             patch.object(bot_runtime, "_finalize_session") as fin, \
+             patch.object(bot_runtime, "_save_state"), \
+             patch.object(bot_runtime, "_notify", new=AsyncMock()), \
+             patch.object(bot_runtime, "_strategy_display_name", return_value="DGRID"):
+            res = await bot_runtime._evaluate_session_pnl_rail(
+                42, "mainnet", state, "dgrid", "BTC", client=None, close_coro=close_coro,
+            )
+        return res, closed, fin
+
+    async def test_rail_prefers_overlay_sl_when_present(self):
+        # User SL loose (20%), but the overlay wrote a tight 1% SL for this
+        # regime -> the rail fires on the overlay SL at -1.5%.
+        state = {
+            "sl_pct": 20.0, "tp_pct": 50.0, "strategy": "dgrid",
+            "strategy_session_id": 11, "running": True,
+            "overlay_sl_pct": 1.0, "overlay_tp_pct": 2.0,
+        }
+        snap = {"session_pnl": -1.5, "session_pnl_pct": -1.5, "margin": 100.0}
+        res, closed, fin = await self._run_rail_with_state(snap, state)
+        self.assertEqual(res, (True, None))
+        self.assertTrue(closed.get("called"))
+        self.assertEqual(fin.call_args.kwargs.get("stop_reason"), "sl_hit")
+
+    async def test_rail_uses_overlay_tp_widened_in_trend(self):
+        # Overlay widened TP to 3% in a trend; +2.5% does NOT hit it even though
+        # the user's static TP was 2%.
+        state = {
+            "sl_pct": 1.0, "tp_pct": 2.0, "strategy": "dgrid",
+            "strategy_session_id": 11, "running": True,
+            "overlay_sl_pct": 1.3, "overlay_tp_pct": 3.0,
+        }
+        snap = {"session_pnl": 2.5, "session_pnl_pct": 2.5, "margin": 100.0}
+        res, closed, _fin = await self._run_rail_with_state(snap, state)
+        self.assertIsNone(res)               # 2.5% < overlay TP 3% -> no stop
+        self.assertFalse(closed.get("called"))
+
     async def test_overlay_drawdown_kill_switch_fires_when_user_sl_loose(self):
         # User SL is loose (20%) so it does NOT fire at -12%, but the overlay's
         # separate 10% drawdown cap trips flatten + stand-down.

@@ -98,3 +98,34 @@ def test_get_spot_catalog_falls_back_to_stale_cache_when_live_unavailable(monkey
     served = pc.get_spot_catalog("mainnet", refresh=True)
     # Should still get the previously-cached BTC, not the trimmed static fallback.
     assert "BTC" in served["spots"]
+
+
+def test_dynamic_spot_catalog_preserves_fee_and_increment_fields(monkeypatch):
+    monkeypatch.setattr(
+        pc,
+        "_fetch_v2_symbols_map",
+        lambda network, product_type=None: {
+            "WQQQX": {
+                "product_id": "77",
+                "symbol": "WQQQX",
+                "type": "spot",
+                "trading_status": "live",
+                "exchange_rate_x18": "1050000000000000000",
+                "min_size": "100000000000000000000",
+                "size_increment": "1000000000000000",
+                "price_increment_x18": "10000000000000000",
+                "maker_fee_rate_x18": "1000000000000000",
+                "taker_fee_rate_x18": "2000000000000000",
+            }
+        },
+    )
+
+    catalog = pc._build_dynamic_spot_catalog("testnet")
+    row = catalog["spots"]["WQQQX"]
+
+    assert row["exchange_rate_x18"] == "1050000000000000000"
+    assert row["min_size_x18"] == "100000000000000000000"
+    assert row["size_increment_x18"] == "1000000000000000"
+    assert row["price_increment_x18"] == "10000000000000000"
+    assert row["maker_fee_rate_x18"] == "1000000000000000"
+    assert row["taker_fee_rate_x18"] == "2000000000000000"
