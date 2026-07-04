@@ -1446,9 +1446,43 @@ async def _maybe_apply_overlay(
         features = await run_blocking_sdk(_gather)
         if not features:
             return
+
+        # Live funding + current position side so the signal can flag when the
+        # carry is hostile to what the strategy is actually holding. Funding is
+        # one batched indexer read (off-loop, best-effort); position side is read
+        # from the controller's in-memory inventory — no extra SDK call.
+        funding_rate: Optional[float] = None
+        if hasattr(client, "get_perp_funding_rates"):
+            try:
+                def _funding():
+                    return client.get_perp_funding_rates([int(pid)])  # type: ignore[attr-defined]
+
+                rates = await run_blocking_sdk(_funding) or {}
+                entry = rates.get(int(pid)) or rates.get(str(pid)) or {}
+                raw = entry.get("funding_rate") if isinstance(entry, dict) else None
+                funding_rate = float(raw) if raw is not None else None
+            except Exception:  # noqa: BLE001 - funding context is optional
+                funding_rate = None
+
+        position_side: Optional[str] = None
+        try:
+            controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
+            inv = getattr(controller, "inventory", None)
+            if controller is not None and inv is not None:
+                hold = inv.get(telegram_id, controller.trading_pair, controller.id)
+                net_base = float(getattr(hold, "net_amount_base", 0) or 0)
+                if net_base > 0:
+                    position_side = "long"
+                elif net_base < 0:
+                    position_side = "short"
+        except Exception:  # noqa: BLE001 - position side is an optional enrichment
+            position_side = None
+
         base_sl, base_tp = effective_sl_tp_pct(strategy, state)
         signal = build_signal(
             features,
+            funding_rate=funding_rate,
+            position_side=position_side,
             base_sl_pct=(base_sl if base_sl > 0 else 0.5),
             base_tp_pct=(base_tp if base_tp > 0 else 1.0),
         )
