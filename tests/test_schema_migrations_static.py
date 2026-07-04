@@ -74,3 +74,12 @@ def test_portfolio_history_network_migration_covers_startup_ddl():
     ddl = Path("src/nadobro/db.py").read_text()
     assert "ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT 'mainnet'" in ddl
     assert "PRIMARY KEY (user_id, network, ts)" in ddl
+
+
+def test_startup_trade_column_migrations_are_idempotent():
+    ddl = Path("src/nadobro/db.py").read_text()
+
+    assert "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}" in ddl
+    assert "ALTER TABLE trades ADD COLUMN IF NOT EXISTS {col} {col_type}" in ddl
+    assert "ALTER TABLE trades ADD COLUMN {col} {col_type}" not in ddl
+    assert "ALTER TABLE {table} ADD COLUMN {col} {col_type}" not in ddl
