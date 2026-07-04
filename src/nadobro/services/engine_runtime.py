@@ -1389,6 +1389,94 @@ def _materialize_dn_leg_meta(
             )
 
 
+async def _maybe_apply_overlay(
+    telegram_id: int,
+    network: str,
+    strategy: str,
+    product: str,
+    product_id: object,
+    configs: Dict[str, object],
+    state: Dict[str, Any],
+    *,
+    client: object,
+    mid: float,
+) -> None:
+    """Compute the multi-timeframe signal and apply BOUNDED overrides to the
+    mapped ``configs`` in place. Best-effort: any failure leaves the base config
+    untouched. Candle fetch + persistence run off the event loop."""
+    try:
+        from src.nadobro.services.overlay_actuator import (
+            apply_overrides_to_configs,
+            compute_overrides,
+            overlay_applies,
+        )
+
+        if not overlay_applies(strategy):
+            return
+        pid = _opt_int(product_id)
+        if pid is None or client is None or not hasattr(client, "get_candlesticks"):
+            return
+
+        from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk
+        from src.nadobro.services import market_features as _mf
+        from src.nadobro.services.signal_engine import build_signal
+        from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+
+        def _gather() -> Dict[str, Dict[str, object]]:
+            def _fetch(p, tf, lim):
+                return client.get_candlesticks(int(p), tf, int(lim))  # type: ignore[attr-defined]
+
+            return _mf.multi_tf_features(_fetch, network, int(pid))
+
+        features = await run_blocking_sdk(_gather)
+        if not features:
+            return
+        base_sl, base_tp = effective_sl_tp_pct(strategy, state)
+        signal = build_signal(
+            features,
+            base_sl_pct=(base_sl if base_sl > 0 else 0.5),
+            base_tp_pct=(base_tp if base_tp > 0 else 1.0),
+        )
+        overrides = compute_overrides(strategy, signal)
+        changed = apply_overrides_to_configs(strategy, configs, overrides)
+
+        # Persist the signal + applied action for Night HOWL / audit (off loop).
+        try:
+            from src.nadobro.models.database import insert_overlay_signal
+
+            row = {
+                "user_id": int(telegram_id),
+                "network": network,
+                "strategy": strategy,
+                "product_id": int(pid),
+                "product_name": str(product or ""),
+                "strategy_session_id": _opt_int(state.get("strategy_session_id")),
+                "bias": signal.bias,
+                "regime": signal.regime,
+                "confidence": signal.confidence,
+                "entry_ok": bool(signal.entry_ok),
+                "scale": signal.scale,
+                "spread_mult": signal.spread_mult,
+                "sl_pct": signal.sl_pct,
+                "tp_pct": signal.tp_pct,
+                "action_json": changed,
+                "reasons_json": list(signal.reasons),
+                "risks_json": list(signal.risks),
+            }
+            await run_blocking(insert_overlay_signal, row)
+        except Exception:  # noqa: BLE001 - persistence must never break a tick
+            logger.debug("overlay signal persist failed", exc_info=True)
+
+        if changed:
+            logger.info(
+                "overlay applied user=%s network=%s strategy=%s regime=%s bias=%.2f conf=%.2f changed=%s",
+                telegram_id, network, strategy, signal.regime, signal.bias,
+                signal.confidence, list(changed.keys()),
+            )
+    except Exception:  # noqa: BLE001 - overlay is advisory; never break the cycle
+        logger.warning("overlay apply failed user=%s strategy=%s", telegram_id, strategy, exc_info=True)
+
+
 async def run_engine_cycle(
     telegram_id: int,
     network: str,
@@ -1412,6 +1500,16 @@ async def run_engine_cycle(
     configs = map_strategy_config(strategy, settings, _dec(mid), product=product,
                                   leverage=int(_start_lev), network=network)
     limits = map_risk_limits(settings, strategy, leverage=_start_lev)
+
+    # Financial overlay (background, no user config): compute a multi-timeframe
+    # signal and apply BOUNDED overrides to the mapped configs before the
+    # live-reconfigure path pushes them to the controller. Best-effort — any
+    # failure leaves the base config untouched so a tick never breaks. The
+    # overlay's own drawdown kill-switch lives in bot_runtime's session rail.
+    await _maybe_apply_overlay(
+        telegram_id, network, strategy, product, product_id, configs, state,
+        client=client, mid=mid,
+    )
 
     # NO_ORDERS_AUDIT-FIX-R2: inject the dgrid candle_provider HERE, because
     # this is where ``client`` and ``product_id`` are available. The provider

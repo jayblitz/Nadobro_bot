@@ -2482,15 +2482,42 @@ async def _evaluate_session_pnl_rail(
         reason = "sl_hit"
     elif tp_pct > 0 and pct_net >= tp_pct:
         reason = "tp_hit"
+    # Overlay drawdown kill-switch: a SECOND, independent stop for the financial
+    # overlay (10% of margin by default), armed only when the overlay steers
+    # this strategy. Either the user's session SL OR this cap trips flatten +
+    # stand-down. It reuses THIS snapshot (no extra live-session read).
+    if not reason:
+        try:
+            from src.nadobro.services.overlay_actuator import (
+                OVERLAY_DRAWDOWN_CAP_PCT,
+                overlay_applies,
+                overlay_drawdown_breached,
+            )
+            if overlay_applies(strategy) and overlay_drawdown_breached(
+                pct_net, OVERLAY_DRAWDOWN_CAP_PCT
+            ):
+                reason = "overlay_drawdown"
+        except Exception:  # noqa: BLE001 - overlay cap is best-effort; user SL still governs
+            logger.debug("overlay drawdown check failed", exc_info=True)
     if not reason:
         return None
 
     _finalize_session(state, stop_reason=reason)
     state["running"] = False
-    state["last_error"] = None if reason == "tp_hit" else (
-        f"Stopped by session SL: PnL ${pnl:,.2f} ({pct:.2f}% of "
-        f"${float(snap.get('margin') or 0.0):,.2f} margin)."
-    )
+    if reason == "tp_hit":
+        state["last_error"] = None
+    elif reason == "overlay_drawdown":
+        from src.nadobro.services.overlay_actuator import OVERLAY_DRAWDOWN_CAP_PCT as _cap
+        state["last_error"] = (
+            f"Stopped by overlay drawdown kill-switch (≥{_cap:.0f}% of "
+            f"margin): PnL ${pnl:,.2f} ({pct:.2f}% of "
+            f"${float(snap.get('margin') or 0.0):,.2f} margin)."
+        )
+    else:
+        state["last_error"] = (
+            f"Stopped by session SL: PnL ${pnl:,.2f} ({pct:.2f}% of "
+            f"${float(snap.get('margin') or 0.0):,.2f} margin)."
+        )
     _save_state(telegram_id, network, state)
 
     label = market_label or f"{product}-PERP"
@@ -2508,15 +2535,18 @@ async def _evaluate_session_pnl_rail(
         logger.warning("engine stop before SL/TP close failed user=%s", telegram_id, exc_info=True)
     close_res = await close_coro()
     if close_res.get("success"):
+        if reason == "tp_hit":
+            _msg = ("✅ {strategy} target reached on {market} ({network}) — session TP hit "
+                    "(PnL ${pnl} / {pct}% of margin).")
+        elif reason == "overlay_drawdown":
+            _msg = ("🛑 {strategy} stopped on {market} ({network}) — overlay drawdown "
+                    "kill-switch (PnL ${pnl} / {pct}% of margin).")
+        else:
+            _msg = ("🛑 {strategy} stopped on {market} ({network}) — session SL hit "
+                    "(PnL ${pnl} / {pct}% of margin).")
         await _notify(
             telegram_id,
-            (
-                "✅ {strategy} target reached on {market} ({network}) — session TP hit "
-                "(PnL ${pnl} / {pct}% of margin)."
-                if reason == "tp_hit" else
-                "🛑 {strategy} stopped on {market} ({network}) — session SL hit "
-                "(PnL ${pnl} / {pct}% of margin)."
-            ),
+            _msg,
             strategy=strategy_label, market=label, network=network,
             pnl=f"{pnl:,.2f}", pct=f"{pct:.2f}",
         )

@@ -609,3 +609,27 @@ def test_history_excludes_copy_and_strategy_includes_tp_close():
     assert (2, 60000.0, 60500.0) not in keys     # copy excluded
     assert (2, 59000.0, 59500.0) not in keys     # strategy excluded
     assert len(trips) == 1
+
+
+def test_overlay_signals_insert_and_readback():
+    """overlay_signals table (0017) + insert_overlay_signal round-trip incl. JSONB."""
+    from src.nadobro.db import execute, init_db, query_one
+    from src.nadobro.models.database import insert_overlay_signal
+
+    init_db()
+    execute("DELETE FROM overlay_signals WHERE user_id = %s", (99123,))
+    rid = insert_overlay_signal({
+        "user_id": 99123, "network": "mainnet", "strategy": "mid", "product_id": 2,
+        "product_name": "BTC-PERP", "strategy_session_id": 555,
+        "bias": 0.7, "regime": "trend_up", "confidence": 0.85, "entry_ok": True,
+        "scale": 0.6, "spread_mult": 1.4, "sl_pct": 0.65, "tp_pct": 1.6,
+        "action_json": {"directional_bias": 0.7, "order_amount_quote": "563.75"},
+        "reasons_json": ["trend up 85%"], "risks_json": ["funding cost"],
+    })
+    assert rid is not None
+    row = query_one("SELECT * FROM overlay_signals WHERE id = %s", (rid,))
+    assert row["strategy"] == "mid" and row["regime"] == "trend_up"
+    assert abs(float(row["bias"]) - 0.7) < 1e-9 and row["entry_ok"] is True
+    assert row["action_json"]["directional_bias"] == 0.7
+    assert row["reasons_json"] == ["trend up 85%"]
+    assert row["strategy_session_id"] == 555
