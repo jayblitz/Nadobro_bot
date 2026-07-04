@@ -15,7 +15,7 @@ fetch, persistence) and the flatten.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional, Tuple
 
 from src.nadobro.services.feature_flags import env_flag
 from src.nadobro.services.signal_engine import Signal
@@ -95,6 +95,73 @@ def compute_overrides(strategy: str, signal: Signal) -> Dict[str, object]:
     if strat == "mid":
         overrides["directional_bias"] = _clamp(float(signal.bias), -1.0, 1.0)
     return overrides
+
+
+def rail_barriers(
+    base_sl_pct: float, base_tp_pct: float, signal: Signal
+) -> Tuple[Optional[float], Optional[float]]:
+    """Session-rail barriers derived from the signal, bounded by the user's own
+    config. The user's session SL is the kill-switch contract, so the overlay
+    may only TIGHTEN it (chop ×0.8), never widen it past the configured stop;
+    TP follows the regime scaling both ways (let winners run in a trend). A
+    barrier the user disarmed (``<= 0``) stays disarmed — the 10% overlay
+    drawdown cap is the backstop either way."""
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    if base_sl_pct > 0 and signal.sl_pct is not None:
+        sl = min(float(signal.sl_pct), float(base_sl_pct))
+    if base_tp_pct > 0 and signal.tp_pct is not None:
+        tp = float(signal.tp_pct)
+    return sl, tp
+
+
+def stabilize_overrides(
+    prev: Optional[Mapping[str, object]], overrides: Dict[str, object]
+) -> Dict[str, object]:
+    """Dead-band the continuous override factors against the previously APPLIED
+    values. Every applied change flips the live-config signature, and each flip
+    recenters the grid ladder / resets Mid quotes — so a 4th-decimal wobble in
+    bias/ATR must not churn live orders every candle refresh. Regime flips,
+    suppression flips and barrier changes always pass through (risk controls);
+    size/spread/bias move only in ≥ 0.05 / 0.10 / 0.10 steps."""
+    if not isinstance(prev, Mapping):
+        return overrides
+
+    def _n(value: object, default: float = 0.0) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    has_bias_prev = "directional_bias" in prev
+    has_bias_new = "directional_bias" in overrides
+    material = (
+        str(prev.get("regime")) != str(overrides.get("regime"))
+        or bool(prev.get("suppress_new_entries")) != bool(overrides.get("suppress_new_entries"))
+        or prev.get("sl_pct") != overrides.get("sl_pct")
+        or prev.get("tp_pct") != overrides.get("tp_pct")
+        or has_bias_prev != has_bias_new
+        or abs(_n(prev.get("size_factor"), 1.0) - _n(overrides.get("size_factor"), 1.0)) >= 0.05
+        or abs(_n(prev.get("spread_factor"), 1.0) - _n(overrides.get("spread_factor"), 1.0)) >= 0.10
+        or (has_bias_new
+            and abs(_n(prev.get("directional_bias")) - _n(overrides.get("directional_bias"))) >= 0.10)
+    )
+    if material:
+        return overrides
+    out = dict(overrides)
+    for key in ("size_factor", "spread_factor", "directional_bias"):
+        if key in prev and key in out:
+            out[key] = prev[key]
+    return out
+
+
+# The subset of override keys whose APPLIED values must stay sticky across
+# cycles (persisted in state as ``overlay_applied`` and compared by
+# ``stabilize_overrides``).
+APPLIED_OVERRIDE_KEYS = (
+    "size_factor", "spread_factor", "directional_bias",
+    "suppress_new_entries", "regime", "sl_pct", "tp_pct",
+)
 
 
 def _mul_dec(configs: Dict[str, object], key: str, factor: float) -> bool:

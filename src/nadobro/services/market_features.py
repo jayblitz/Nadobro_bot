@@ -114,7 +114,11 @@ def compute_tf_features(candles: Sequence[Candle]) -> Dict[str, object]:
         "candles": n,
         "trend": trend,
         "rsi": ta.rsi(closes, 14),
-        "macd_hist": (m["histogram"] if m else None),
+        # Histogram normalized by price: the raw MACD histogram is in PRICE
+        # units, so an unscaled read saturates the fusion vote on a $100k asset
+        # and contributes ~nothing on a sub-cent token. As a fraction of the
+        # last close it is comparable across products.
+        "macd_hist": ((m["histogram"] / last) if (m and last) else None),
         "macd_cross": (1.0 if (m and m["macd"] > m["signal"]) else (-1.0 if m else None)),
         "bb_pct_b": (bb["pct_b"] if bb else None),
         "bb_bandwidth": (bb["bandwidth"] if bb else None),

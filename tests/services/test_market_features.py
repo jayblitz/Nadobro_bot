@@ -67,3 +67,15 @@ def test_downtrend_features():
     assert feats["4h"]["trend"] == "down"
     assert feats["4h"]["rsi"] < 50
     assert feats["4h"]["macd_hist"] is not None
+
+
+def test_macd_hist_is_price_normalized():
+    """The histogram is emitted as a FRACTION of the last close so the fusion
+    vote is comparable across a $100k asset and a sub-cent token."""
+    cheap = mf.compute_tf_features(_series(0.0001, 0.0001 * 0.004))
+    pricey = mf.compute_tf_features(_series(100000.0, 100000.0 * 0.004))
+    assert cheap["macd_hist"] is not None and pricey["macd_hist"] is not None
+    # Identical relative moves -> (nearly) identical normalized histograms.
+    assert cheap["macd_hist"] == pytest.approx(pricey["macd_hist"], rel=1e-6)
+    # And the value is a small fraction, not a price-scale number.
+    assert abs(pricey["macd_hist"]) < 0.05
