@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from decimal import Decimal
 
 import pytest
@@ -104,6 +105,35 @@ def test_sell_price_covers_positive_maker_fee_and_edge():
         assert sell is not None
         assert sell.order.price > Decimal("100.19")
         assert sell.order.amount_base == buy.order.amount_base
+
+    asyncio.run(body())
+
+
+def test_sell_price_logs_when_order_book_guard_unavailable(caplog):
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        c = VolumeBotController(
+            user_id=1,
+            orchestrator=orch,
+            adapter=adapter,
+            inventory=InventoryRepository(),
+            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            controller_id="VB",
+        )
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=Decimal("100"))
+
+        adapter.fail_on.add("order_book")
+        adapter.fail_remaining = 1
+        caplog.set_level(logging.WARNING, logger="src.nadobro.engine.controllers.volume_bot")
+
+        await orch.tick_controller(c.id)
+
+        assert c.phase == "pending_close_fill"
+        assert "sell price using fee/entry floor without live book guard" in caplog.text
+        assert "post-only sell may reject or rest away from book" in caplog.text
 
     asyncio.run(body())
 
