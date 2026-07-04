@@ -275,6 +275,23 @@ def _categorize_runtime_error(error_msg: str) -> str:
 
 
 def _merge_vol_order_counters(state: dict, result: dict) -> None:
+    for key in (
+        "vol_phase",
+        "volume_done_usd",
+        "volume_remaining_usd",
+        "session_volume_usd",
+        "session_realized_pnl_usd",
+        "vol_cycles_completed",
+        "vol_entry_size",
+        "vol_entry_quote",
+        "vol_entry_price",
+        "vol_entry_fill_ts",
+        "vol_close_size",
+        "vol_last_order_digest",
+        "vol_last_order_kind",
+    ):
+        if key in result:
+            state[key] = result[key]
     attempts = int(result.get("vol_order_attempts") or 0)
     failures = int(result.get("vol_order_failures") or 0)
     if attempts > 0:
@@ -971,20 +988,20 @@ def start_user_bot(
     if not preflight_ok:
         return False, preflight_msg
 
-    # NO_ORDERS_AUDIT-FIX-R5: vol spot TWAP slices are sized from
-    # ``notional_usd / slices`` (slices ≈ total_duration / order_interval,
-    # default = 4). If the resulting per-slice quote is below the spot
-    # pair's min_notional, every TWAP slice silently rejects at the venue.
+    # Volume spot places one post-only buy for the user's session margin. If
+    # that one order is below the spot pair's min_notional, the venue rejects it.
     # Surface a precise actionable error instead.
     if strategy == "vol" and vol_market_kw == "spot":
         from src.nadobro.config import get_spot_metadata
         from src.nadobro.services.product_catalog import _x18_to_float
 
         _, _vol_cfg = get_strategy_settings(telegram_id, "vol")
-        _notional = float(_vol_cfg.get("notional_usd") or 100.0)
-        _interval = max(1.0, float(_vol_cfg.get("interval_seconds") or 60.0))
-        _slices = max(1, int((_interval * 4) / _interval))  # mirrors map_strategy_config
-        per_slice = _notional / _slices
+        _notional = float(
+            _vol_cfg.get("session_margin_usd")
+            or _vol_cfg.get("cycle_notional_usd")
+            or _vol_cfg.get("notional_usd")
+            or 100.0
+        )
         spot_meta = get_spot_metadata(product, network=network) or {}
         min_size_x18 = spot_meta.get("min_size_x18")
         min_notional_usd = _x18_to_float(min_size_x18) if min_size_x18 else None
@@ -996,12 +1013,11 @@ def start_user_bot(
                 "skipping pre-flight check (transient catalog miss)",
                 product, network,
             )
-        elif per_slice < float(min_notional_usd):
+        elif _notional < float(min_notional_usd):
             return False, (
-                f"Vol slice notional ${per_slice:,.2f} is below the spot pair's "
+                f"Vol margin ${_notional:,.2f} is below the spot pair's "
                 f"venue minimum ${float(min_notional_usd):,.2f}. "
-                f"Raise notional to at least ${float(min_notional_usd) * _slices:,.0f} "
-                f"or lower order_interval."
+                f"Raise margin to at least ${float(min_notional_usd):,.0f}."
             )
 
     _mark_previous_sessions_superseded(telegram_id, network)
@@ -1067,10 +1083,29 @@ def start_user_bot(
             direction = "short" if direction == "short" else "long"
             state["vol_direction"] = direction
             state["direction"] = direction
-        state["fixed_margin_usd"] = 100.0
-        state["notional_usd"] = 100.0
+        _vol_margin = float(
+            state.get("session_margin_usd")
+            or state.get("cycle_notional_usd")
+            or state.get("notional_usd")
+            or state.get("fixed_margin_usd")
+            or 100.0
+        )
+        state["session_margin_usd"] = _vol_margin
+        state["fixed_margin_usd"] = _vol_margin
+        state["notional_usd"] = _vol_margin
         state["vol_phase"] = "idle"
         state["session_realized_pnl_usd"] = 0.0
+        state["volume_done_usd"] = 0.0
+        state["volume_remaining_usd"] = float(state.get("target_volume_usd") or 0.0)
+        try:
+            from src.nadobro.services.product_catalog import get_spot_maker_fee_rate
+
+            _fee_rate = get_spot_maker_fee_rate(str(product), network=network)
+            if _fee_rate is not None:
+                state["vol_maker_fee_rate"] = float(_fee_rate)
+                state["vol_maker_fee_bp"] = float(_fee_rate) * 10000.0
+        except Exception:
+            logger.debug("vol maker fee resolution skipped user=%s product=%s", telegram_id, product, exc_info=True)
         # Keep saved VOL prefs aligned with this run so dashboards / Advanced match execution.
         if vol_market_kw == "perp":
             try:

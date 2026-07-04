@@ -303,6 +303,47 @@ def _build_dynamic_spot_catalog(network: str) -> Optional[dict]:
             continue
         key = symbol
         underlying_key = _dn_underlying_key(symbol)
+        book_info = row.get("book_info") or {}
+        product_row = row.get("product") or {}
+        product_book = product_row.get("book_info") or {}
+        min_size_x18_raw = _first_present(
+            row.get("min_size"),
+            row.get("min_size_x18"),
+            book_info.get("min_size"),
+            book_info.get("min_size_x18"),
+            product_row.get("min_size"),
+            product_row.get("min_size_x18"),
+            product_book.get("min_size"),
+            product_book.get("min_size_x18"),
+        )
+        size_increment_x18_raw = _first_present(
+            row.get("size_increment"),
+            row.get("size_increment_x18"),
+            book_info.get("size_increment"),
+            book_info.get("size_increment_x18"),
+            product_row.get("size_increment"),
+            product_row.get("size_increment_x18"),
+            product_book.get("size_increment"),
+            product_book.get("size_increment_x18"),
+        )
+        price_increment_x18_raw = _first_present(
+            row.get("price_increment_x18"),
+            book_info.get("price_increment_x18"),
+            product_row.get("price_increment_x18"),
+            product_book.get("price_increment_x18"),
+        )
+        maker_fee_rate_x18_raw = _first_present(
+            row.get("maker_fee_rate_x18"),
+            book_info.get("maker_fee_rate_x18"),
+            product_row.get("maker_fee_rate_x18"),
+            product_book.get("maker_fee_rate_x18"),
+        )
+        taker_fee_rate_x18_raw = _first_present(
+            row.get("taker_fee_rate_x18"),
+            book_info.get("taker_fee_rate_x18"),
+            product_row.get("taker_fee_rate_x18"),
+            product_book.get("taker_fee_rate_x18"),
+        )
         spots[key] = {
             "id": pid,
             "type": "spot",
@@ -313,6 +354,11 @@ def _build_dynamic_spot_catalog(network: str) -> Optional[dict]:
             "trading_status": str(row.get("trading_status") or ""),
             "market_hours": row.get("market_hours"),
             "exchange_rate_x18": row.get("exchange_rate_x18"),
+            "min_size_x18": str(min_size_x18_raw) if min_size_x18_raw is not None else None,
+            "size_increment_x18": str(size_increment_x18_raw) if size_increment_x18_raw is not None else None,
+            "price_increment_x18": str(price_increment_x18_raw) if price_increment_x18_raw is not None else None,
+            "maker_fee_rate_x18": str(maker_fee_rate_x18_raw) if maker_fee_rate_x18_raw is not None else None,
+            "taker_fee_rate_x18": str(taker_fee_rate_x18_raw) if taker_fee_rate_x18_raw is not None else None,
         }
         by_id[pid] = key
         aliases[key.lower()] = key
@@ -1013,6 +1059,29 @@ def get_product_taker_fee_rate(
     return _x18_to_float(row.get("taker_fee_rate_x18"))
 
 
+def get_spot_maker_fee_rate(
+    name: str,
+    network: str = "mainnet",
+    refresh: bool = False,
+) -> Optional[float]:
+    """Return a spot maker fee/rebate as a fraction for the named spot product."""
+    row = get_spot_metadata(name, network=network, refresh=refresh)
+    if not row:
+        return None
+    return _x18_to_float(row.get("maker_fee_rate_x18"))
+
+
+def get_spot_taker_fee_rate(
+    name: str,
+    network: str = "mainnet",
+    refresh: bool = False,
+) -> Optional[float]:
+    row = get_spot_metadata(name, network=network, refresh=refresh)
+    if not row:
+        return None
+    return _x18_to_float(row.get("taker_fee_rate_x18"))
+
+
 def get_product_metadata(product: str, network: str = "mainnet", client=None, refresh: bool = False) -> dict:
     key = (product or "").upper().strip()
     if not key:
@@ -1055,13 +1124,24 @@ def get_spot_metadata(name: str, network: str = "mainnet", refresh: bool = False
         return {}
     dn_pair = get_dn_pair(name, network=network, refresh=refresh)
     if dn_pair.get("spot_product_id") is not None:
-        return {
+        meta = {
             "id": int(dn_pair["spot_product_id"]),
             "symbol": str(dn_pair.get("spot_symbol") or ""),
             "trading_status": str(dn_pair.get("spot_trading_status") or ""),
             "market_hours": dn_pair.get("spot_market_hours"),
             "exchange_rate_x18": dn_pair.get("exchange_rate_x18"),
         }
+        try:
+            catalog = get_spot_catalog(network=network, refresh=refresh)
+            key = (catalog.get("by_id") or {}).get(int(dn_pair["spot_product_id"]))
+            row = (catalog.get("spots") or {}).get(key) if key else None
+            if isinstance(row, dict):
+                enriched = dict(row)
+                enriched.update({k: v for k, v in meta.items() if v not in (None, "")})
+                return enriched
+        except Exception:  # noqa: BLE001
+            pass
+        return meta
     catalog = get_spot_catalog(network=network, refresh=refresh)
     aliases = catalog.get("aliases") or {}
     key = aliases.get(str(name).lower().strip())
@@ -1083,4 +1163,3 @@ def is_product_id_isolated_only(
         return False
     row = (catalog.get("perps") or {}).get(key) or {}
     return _as_bool(row.get("isolated_only"))
-

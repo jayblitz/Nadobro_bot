@@ -871,20 +871,35 @@ def map_strategy_config(
             vol_pair = normalize_volume_spot_symbol(str(product or "")) or str(product or "")
         except Exception:
             vol_pair = str(product or "")
+        try:
+            from src.nadobro.services.product_catalog import get_spot_maker_fee_rate
+
+            spot_maker_fee_rate = get_spot_maker_fee_rate(vol_pair, network=network)
+        except Exception:
+            spot_maker_fee_rate = None
+        if spot_maker_fee_rate is None:
+            if settings.get("vol_maker_fee_rate") is not None:
+                spot_maker_fee_rate = _f(settings, "vol_maker_fee_rate", 0.0)
+            else:
+                spot_maker_fee_rate = _f(settings, "vol_maker_fee_bp", 0.0) / 10000.0
         return {
             "trading_pair": vol_pair,
             "total_amount_quote": Decimal(str(vol_notional)),
+            # Compatibility only; the Volume controller now places one order per
+            # leg and waits for full fill instead of TWAP slicing over time.
             "total_duration": interval * 4,
             "order_interval": interval,
             "market": "spot",
             "leverage": 1,
+            "spot_maker_fee_rate": Decimal(str(spot_maker_fee_rate or 0.0)),
             # VOL-LOOP / VOL-NO-CAP: cumulative volume target (0 = single
             # round-trip) and a hard cycle ceiling so the loop can't run away.
             "target_volume_usd": Decimal(str(_f(settings, "target_volume_usd", 0.0))),
             "max_cycles": int(max(1, _f(settings, "vol_max_cycles", 100))),
-            # Maker slices rest this many bps inside the book (buy below mid /
-            # sell above), re-anchored to mid every slice.
+            # Buy rests at/inside the book; sell uses this as the minimum edge
+            # above entry after positive maker-fee coverage.
             "vol_maker_offset_bp": _f(settings, "vol_maker_offset_bp", 5.0),
+            "vol_min_edge_bp": _f(settings, "vol_min_edge_bp", _f(settings, "vol_maker_offset_bp", 5.0)),
         }
     # grid / rgrid / dgrid family.
     #
@@ -1751,7 +1766,23 @@ async def run_engine_cycle(
         action = "engine_recovered" if needs_recovery else "engine_started"
         if needs_recovery:
             state["last_recovery_ts"] = time.time()
-        return {"success": True, "action": action, "strategy": strategy}
+        start_result: Dict[str, Any] = {"success": True, "action": action, "strategy": strategy}
+        try:
+            counts_fn = getattr(registered, "order_counts", None)
+            if callable(counts_fn):
+                _counts = counts_fn() or {}
+                if _counts:
+                    start_result["order_counts"] = _counts
+            if strategy == "vol":
+                vol_metrics_fn = getattr(registered, "volume_metrics", None)
+                if callable(vol_metrics_fn):
+                    _vol_metrics = vol_metrics_fn() or {}
+                    start_result.update(_vol_metrics)
+                    for key, value in _vol_metrics.items():
+                        state[key] = value
+        except Exception:  # noqa: BLE001 - start telemetry is best-effort
+            logger.debug("engine start telemetry skipped", exc_info=True)
+        return start_result
 
     if strategy in _LIVE_RECONFIGURABLE_STRATEGIES and _has_local:
         controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
@@ -1775,6 +1806,7 @@ async def run_engine_cycle(
     dgrid_metrics: Dict[str, Any] = {}
     grid_metrics: Dict[str, Any] = {}
     order_counts: Dict[str, Any] = {}
+    vol_metrics: Dict[str, Any] = {}
     try:
         controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
         if controller is not None:
@@ -1801,6 +1833,12 @@ async def run_engine_cycle(
             counts_fn = getattr(controller, "order_counts", None)
             if callable(counts_fn):
                 order_counts = counts_fn() or {}
+            if strategy == "vol":
+                vol_metrics_fn = getattr(controller, "volume_metrics", None)
+                if callable(vol_metrics_fn):
+                    vol_metrics = vol_metrics_fn() or {}
+                    for key, value in vol_metrics.items():
+                        state[key] = value
             # DN: surface the live funding rate + unfavorable-debounce to
             # /status. These were referenced by the status card but NEVER
             # written anywhere, so the dashboard showed "Rate 0.000000"
@@ -1818,6 +1856,7 @@ async def run_engine_cycle(
                 )
     except Exception:  # policy: degrade-ok(gate notify is best-effort)
         gate_event = None
+        vol_metrics = {}
     # Persist DN live progress so /status (main process) can read it from the
     # worker that runs the cycle.
     _persist_dn_progress(telegram_id, network, strategy)
@@ -1851,6 +1890,8 @@ async def run_engine_cycle(
     except Exception:  # noqa: BLE001  # policy: degrade-ok(diagnostics-only block)
         engine_diag = {}
     result: Dict[str, Any] = {"success": True, "action": "engine_ticked", "strategy": strategy}
+    if vol_metrics:
+        result.update(vol_metrics)
     # VOL-LOOP completion: a controller that has finished its work (e.g. Volume
     # reached its target volume / cap) signals it via ``completed`` so bot_runtime
     # can finalize the session instead of leaving the strategy idling "running".

@@ -17,6 +17,15 @@ def _volume_spot_managed_size(state: dict[str, Any]) -> float:
         entry_ts = 0.0
     if phase not in ("filled_wait_close", "pending_close_fill") and entry_ts <= 0:
         return 0.0
+    if phase == "pending_close_fill":
+        for key in ("vol_close_size", "vol_entry_size"):
+            try:
+                managed = float(state.get(key) or 0.0)
+            except (TypeError, ValueError):
+                managed = 0.0
+            if managed > 0:
+                return managed
+        return 0.0
     managed = 0.0
     for key in ("vol_close_size", "vol_entry_size"):
         try:
