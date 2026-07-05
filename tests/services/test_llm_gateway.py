@@ -52,6 +52,30 @@ def test_unknown_task_falls_back(monkeypatch):
     assert llm_gateway.model_for("does-not-exist") == "gpt-5.5"
 
 
+def test_model_env_inline_comment_is_stripped(monkeypatch):
+    # Regression: an operator pasted the model with the docs description attached
+    # ("NANOGPT_MODEL_SCAN=chatgpt-4o-latest         # edge/market scan"), which
+    # reached NanoGPT verbatim -> 400 model_not_supported. The gateway must
+    # sanitize the value back to the bare model id.
+    monkeypatch.setenv("NANOGPT_MODEL_SCAN", "chatgpt-4o-latest         # edge/market scan")
+    assert llm_gateway.model_for("scan") == "chatgpt-4o-latest"
+    monkeypatch.setenv("NANOGPT_MODEL", "gpt-5.5   # global default")
+    assert llm_gateway.model_for("does-not-exist") == "gpt-5.5"
+
+
+def test_base_url_and_key_inline_comment_is_stripped(monkeypatch):
+    from src.nadobro.services import provider_config as pc
+    # A base URL pasted with a trailing "# note" was the "no host specified"
+    # failure — the OpenAI client got an unparseable host.
+    monkeypatch.setenv("NANOGPT_BASE_URL", "https://nano-gpt.com/api/v1   # base url")
+    assert pc.nanogpt_base_url() == "https://nano-gpt.com/api/v1"
+    monkeypatch.setenv("NANOGPT_API_KEY", "sk-live-abc   # my key")
+    assert pc.nanogpt_api_key() == "sk-live-abc"
+    # A bare '#' with no leading space (e.g. inside a token) is preserved.
+    assert pc.clean_env_value("model#weird") == "model#weird"
+    assert pc.clean_env_value(None) == ""
+
+
 def test_bro_llm_prefers_gateway(monkeypatch):
     monkeypatch.setenv("NANOGPT_API_KEY", "sk-test")
     monkeypatch.setenv("XAI_API_KEY", "xai-should-not-win")

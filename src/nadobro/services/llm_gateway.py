@@ -81,13 +81,20 @@ def chat_client() -> Optional["OpenAI"]:
 
 def model_for(task: str, fallback: Optional[str] = None) -> str:
     """Resolve the NanoGPT model id for a task, honoring the per-task env var,
-    then the global ``NANOGPT_MODEL`` override, then the built-in default."""
+    then the global ``NANOGPT_MODEL`` override, then the built-in default.
+
+    Env values are sanitized (``clean_env_value``) so a model id pasted with a
+    trailing ``# note``/description — the exact failure that made the edge
+    scanner send ``"...  # edge/market scan"`` and get 400 model_not_supported —
+    is stripped back to the bare model id."""
+    from src.nadobro.services.provider_config import clean_env_value
+
     env, default = _TASK_MODEL_ENV.get(task, ("", ""))
     if env:
-        val = (os.environ.get(env) or "").strip()
+        val = clean_env_value(os.environ.get(env))
         if val:
             return val
-    global_default = (os.environ.get("NANOGPT_MODEL") or "").strip()
+    global_default = clean_env_value(os.environ.get("NANOGPT_MODEL"))
     return default or global_default or fallback or "chatgpt-4o-latest"
 
 

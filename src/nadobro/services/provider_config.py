@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import os
+import re
+
+# An inline comment in an env value: whitespace followed by ``#`` and the rest
+# of the line. Deployment dashboards / .env templates routinely carry a trailing
+# "# note" (or the docs description) that plain ``.strip()`` leaves attached —
+# which then becomes a bogus model id ("...  # edge/market scan" -> 400
+# model_not_supported) or an unparseable base URL ("... # base url" -> "no host
+# specified"). A single-token config value never contains " #", so cutting there
+# is safe.
+_INLINE_COMMENT_RE = re.compile(r"\s+#.*$", re.DOTALL)
+
+
+def clean_env_value(raw: object) -> str:
+    """Strip an inline ``# comment`` and surrounding whitespace from an env
+    value. Idempotent and safe for single-token values (keys, URLs, model ids),
+    which never legitimately contain a space-delimited ``#``."""
+    text = "" if raw is None else str(raw)
+    return _INLINE_COMMENT_RE.sub("", text).strip()
 
 
 def env_first(*names: str) -> str:
     for name in names:
-        value = (os.environ.get(name) or "").strip()
+        value = clean_env_value(os.environ.get(name))
         if value:
             return value
     return ""
@@ -18,7 +36,7 @@ def nanogpt_api_key() -> str:
 
 
 def nanogpt_base_url() -> str:
-    return (os.environ.get("NANOGPT_BASE_URL") or "https://nano-gpt.com/api/v1").strip().rstrip("/")
+    return clean_env_value(os.environ.get("NANOGPT_BASE_URL") or "https://nano-gpt.com/api/v1").rstrip("/")
 
 
 def nanogpt_configured() -> bool:
