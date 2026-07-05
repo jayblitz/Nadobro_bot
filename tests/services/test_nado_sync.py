@@ -315,6 +315,17 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         assert sid == 7
         assert src == "bro"
 
+    def test_window_session_resolver_matches_dn_spot_leg(self):
+        ts = datetime(2026, 7, 5, tzinfo=timezone.utc)
+
+        with patch.object(nado_sync, "query_one", return_value=None), \
+             patch.object(nado_sync, "query_all", return_value=[{"id": 90, "product_name": "WGOOGLX"}]), \
+             patch("src.nadobro.services.product_catalog.get_dn_pair",
+                   return_value={"perp_product_id": 117, "spot_product_id": 118}):
+            sid = nado_sync._resolve_session_by_window(42, "mainnet", 118, ts)
+
+        assert sid == 90
+
     def test_normalize_order_rows_treats_no_open_orders_message_as_empty(self):
         assert nado_sync._normalize_order_rows({"message": "No open orders"}) == []
 

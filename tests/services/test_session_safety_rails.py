@@ -279,6 +279,50 @@ class LiveSnapshotMathTests(unittest.TestCase):
         self.assertAlmostEqual(snap["volume"], 6100.0)
         self.assertEqual(snap["fills"], 40)
 
+    def test_dn_volume_uses_spot_and_perp_turnover(self):
+        venue = {"size_signed": -0.5, "entry": 100.0, "liq": 0.0, "leverage": 1.0,
+                 "margin_used": 100.0, "upnl": 0.0, "synced_ts": 9e18}
+        sess = {
+            "id": 10,
+            "strategy": "dn",
+            "product_id": 117,
+            "product_name": "WGOOGLX",
+            "started_at": None,
+            "stopped_at": None,
+        }
+        turnovers = {
+            117: {"volume": 200.0, "fills": 2},
+            118: {"volume": 300.0, "fills": 2},
+        }
+        open_orders = {117: 1, 118: 2}
+        seen_turnover_products = []
+        seen_open_products = []
+
+        def fake_turnover(_user, _network, product_id, *_args):
+            seen_turnover_products.append(int(product_id))
+            return turnovers[int(product_id)]
+
+        def fake_open_orders(_user, _network, product_id):
+            seen_open_products.append(int(product_id))
+            return open_orders[int(product_id)]
+
+        with patch.object(live_session, "_venue_position", return_value=venue), \
+             patch("src.nadobro.models.database.get_session_live_metrics",
+                   return_value={"fills": 0, "volume": 0.0, "fees": 0.0, "realized_pnl": 0.0}), \
+             patch("src.nadobro.models.database.get_session_turnover", side_effect=fake_turnover), \
+             patch("src.nadobro.models.database.count_open_orders_for_product", side_effect=fake_open_orders), \
+             patch("src.nadobro.services.product_catalog.get_dn_pair",
+                   return_value={"perp_product_id": 117, "spot_product_id": 118}):
+            snap = live_session.get_live_session_snapshot(
+                42, "mainnet", sess, state={"strategy": "dn", "notional_usd": 100.0}, client=None, mark=100.0,
+            )
+
+        self.assertEqual(sorted(seen_turnover_products), [117, 118])
+        self.assertEqual(sorted(seen_open_products), [117, 118])
+        self.assertAlmostEqual(snap["volume"], 500.0)
+        self.assertEqual(snap["fills"], 4)
+        self.assertEqual(snap["open_orders"], 3)
+
 
 class StatusRenderTests(unittest.TestCase):
     def test_status_lines_show_upnl_and_session_pnl(self):

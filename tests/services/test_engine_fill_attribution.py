@@ -83,3 +83,32 @@ def test_recorder_inserts_when_no_venue_row_yet():
     assert len(inserted) == 1
     assert inserted[0]["source"] == "strategy"
     assert inserted[0]["strategy_session_id"] == 90
+
+
+def test_recorder_resolves_dn_spot_leg_product_id():
+    rec = DbTradeRecorder()
+    inserted: list = []
+
+    with patch(
+        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        return_value=90,
+    ), patch(
+        "src.nadobro.services.product_catalog.get_spot_product_id", return_value=118
+    ), patch(
+        "src.nadobro.services.product_catalog.get_product_id",
+        side_effect=AssertionError("DN spot leg must not use perp resolver"),
+    ), patch(
+        "src.nadobro.config.get_product_name", return_value="WGOOGLX"
+    ), patch(
+        "src.nadobro.models.database.insert_trade",
+        side_effect=lambda data, network="mainnet": inserted.append(data),
+    ):
+        rec.record(
+            "dn:42:mainnet", "WGOOGLX-USDT0", TradeType.BUY,
+            Decimal("0.5"), Decimal("700"), Decimal("0.07"),
+        )
+
+    assert len(inserted) == 1
+    assert inserted[0]["product_id"] == 118
+    assert inserted[0]["product_name"] == "WGOOGLX"
+    assert inserted[0]["strategy_session_id"] == 90

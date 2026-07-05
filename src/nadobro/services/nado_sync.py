@@ -1026,7 +1026,47 @@ def _resolve_session_by_window(
     except Exception:
         logger.debug("window session resolve failed pid=%s", product_id, exc_info=True)
         return None
-    return int(row["id"]) if row and row.get("id") is not None else None
+    if row and row.get("id") is not None:
+        return int(row["id"])
+
+    # DN sessions store the perp product id on strategy_sessions, but a missed
+    # digest link can be a SPOT-leg fill. Recover those by matching the fill pid
+    # against the session's resolved spot/perp pair.
+    try:
+        sessions = query_all(
+            """
+            SELECT id, product_name FROM strategy_sessions
+            WHERE user_id = %s AND network = %s AND strategy = 'dn'
+              AND started_at <= %s
+              AND (stopped_at IS NULL OR stopped_at >= %s)
+            ORDER BY started_at DESC
+            LIMIT 20
+            """,
+            (int(user_id), _normalize_network(network), ts, ts),
+        )
+    except Exception:
+        logger.debug("dn window session resolve failed pid=%s", product_id, exc_info=True)
+        return None
+    if not sessions:
+        return None
+    try:
+        from src.nadobro.services.product_catalog import get_dn_pair
+
+        for sess in sessions:
+            product = str(sess.get("product_name") or "").strip()
+            candidates = [product]
+            if "-" in product:
+                candidates.append(product.split("-", 1)[0])
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                dn_pair = get_dn_pair(candidate, network=network) or {}
+                pair_ids = {dn_pair.get("spot_product_id"), dn_pair.get("perp_product_id")}
+                if pid in {int(v) for v in pair_ids if v is not None}:
+                    return int(sess["id"])
+    except Exception:
+        logger.debug("dn product-pair session resolve failed pid=%s", product_id, exc_info=True)
+    return None
 
 
 def _write_funding(user_id: int, network: str, payments: list[dict[str, Any]]) -> int:
