@@ -90,6 +90,7 @@ def test_tick_starts_active_and_tears_down_stale(monkeypatch):
     monkeypatch.setenv("NADO_DESK_ENABLE", "true")
     desk_runtime.set_bot_app(object())
     desk_runtime._RUNNING.clear()
+    desk_runtime._boot_standdown_done = True   # steady state (boot pass already ran)
     desk_runtime._RUNNING.add((999, "mainnet"))  # a stale session, no active plans
 
     scans = {"mainnet": [42], "testnet": []}
@@ -120,6 +121,142 @@ def test_tick_starts_active_and_tears_down_stale(monkeypatch):
     assert (42, "mainnet") in started      # user with active plans got a session
     assert (999, "mainnet") in stopped     # the stale session was torn down
     assert (42, "mainnet", "desk") in ticked
+
+
+def _mk_record(plan_id: str, status: str, summary: str = "buy 0.03 BTC"):
+    class _Plan:
+        def __init__(self, pid):
+            self.plan_id = pid
+
+        def describe(self):
+            return summary
+
+    return {"plan": _Plan(plan_id), "plan_id": plan_id, "status": status, "state": {}}
+
+
+def test_redeploy_stands_down_active_plans_and_notifies(monkeypatch):
+    """Redeploy contract: nothing trades unless the user starts it. The first
+    tick after boot parks every still-active plan (cancelled, fills kept),
+    notifies the owner what was NOT resumed, and starts no session."""
+    monkeypatch.setenv("NADO_DESK_ENABLE", "true")
+    monkeypatch.delenv("NADO_DESK_RESUME_ON_RESTART", raising=False)
+    desk_runtime.set_bot_app(object())
+    desk_runtime._RUNNING.clear()
+    desk_runtime._boot_standdown_done = False
+
+    scans = {"mainnet": [7], "testnet": []}
+    monkeypatch.setattr(desk_runtime.desk_store, "list_users_with_active_plans",
+                        lambda network: scans.get(network, []))
+    monkeypatch.setattr(desk_runtime.desk_store, "list_active_plans",
+                        lambda uid, network: [_mk_record("p-wait", "awaiting_trigger"),
+                                              _mk_record("p-run", "running")])
+    finished = []
+    monkeypatch.setattr(
+        desk_runtime.desk_store, "finish_plan",
+        lambda pid, network, status, error=None: finished.append(
+            (pid, network, status, error)) or True,
+    )
+    notified = []
+
+    async def fake_notify(uid, evt):
+        notified.append((uid, evt["type"]))
+
+    monkeypatch.setattr(desk_runtime, "_notify_event", fake_notify)
+
+    ensured = []
+
+    async def fake_ensure(uid, network):
+        ensured.append((uid, network))
+        return True
+
+    monkeypatch.setattr(desk_runtime, "_ensure_session", fake_ensure)
+
+    asyncio.run(desk_runtime.tick_desk_runner())
+
+    assert [(f[0], f[2]) for f in finished] == [
+        ("p-wait", "cancelled"), ("p-run", "cancelled")]
+    assert all("user-initiated" in (f[3] or "") for f in finished)
+    # Wording differs by prior status: a waiting trigger vs an open position.
+    assert (7, "plan_parked_waiting") in notified
+    assert (7, "plan_parked_running") in notified
+    assert ensured == []                       # no session before a clean slate
+    assert desk_runtime._boot_standdown_done is True
+
+    # Steady state: the parked plans are gone; nothing resumes on later ticks.
+    scans["mainnet"] = []
+    asyncio.run(desk_runtime.tick_desk_runner())
+    assert ensured == []
+
+
+def test_resume_env_flag_restores_legacy_resume(monkeypatch):
+    monkeypatch.setenv("NADO_DESK_ENABLE", "true")
+    monkeypatch.setenv("NADO_DESK_RESUME_ON_RESTART", "1")
+    desk_runtime.set_bot_app(object())
+    desk_runtime._RUNNING.clear()
+    desk_runtime._boot_standdown_done = False
+
+    scans = {"mainnet": [42], "testnet": []}
+    monkeypatch.setattr(desk_runtime.desk_store, "list_users_with_active_plans",
+                        lambda network: scans.get(network, []))
+    parked = []
+    monkeypatch.setattr(desk_runtime.desk_store, "finish_plan",
+                        lambda *a, **k: parked.append(a) or True)
+
+    started, ticked = [], []
+
+    async def fake_ensure(uid, network):
+        started.append((uid, network))
+        return True
+
+    class FakeRuntime:
+        _controllers = {}
+
+        async def tick(self, uid, network, strat):
+            ticked.append((uid, network, strat))
+
+    monkeypatch.setattr(desk_runtime, "_ensure_session", fake_ensure)
+    monkeypatch.setattr("src.nadobro.services.engine_runtime.RUNTIME", FakeRuntime())
+
+    asyncio.run(desk_runtime.tick_desk_runner())
+
+    assert parked == []                        # nothing stood down
+    assert (42, "mainnet") in started          # legacy resume behavior
+
+
+def test_standdown_db_failure_blocks_sessions_until_complete(monkeypatch):
+    """An incomplete stand-down must not let sessions start — an unparked plan
+    would auto-resume after all. Retry next tick."""
+    monkeypatch.setenv("NADO_DESK_ENABLE", "true")
+    monkeypatch.delenv("NADO_DESK_RESUME_ON_RESTART", raising=False)
+    desk_runtime.set_bot_app(object())
+    desk_runtime._RUNNING.clear()
+    desk_runtime._boot_standdown_done = False
+
+    calls = {"n": 0}
+
+    def flaky_scan(network):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("db down")
+        return []
+
+    monkeypatch.setattr(desk_runtime.desk_store, "list_users_with_active_plans", flaky_scan)
+
+    ensured = []
+
+    async def fake_ensure(uid, network):
+        ensured.append((uid, network))
+        return True
+
+    monkeypatch.setattr(desk_runtime, "_ensure_session", fake_ensure)
+
+    asyncio.run(desk_runtime.tick_desk_runner())
+    assert desk_runtime._boot_standdown_done is False   # retrying
+    assert ensured == []
+
+    asyncio.run(desk_runtime.tick_desk_runner())        # DB back: completes
+    assert desk_runtime._boot_standdown_done is True
+    assert ensured == []                                # nothing was active
 
 
 def test_failed_controller_is_rebuilt_not_ticked_dead(monkeypatch):

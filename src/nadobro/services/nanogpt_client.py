@@ -26,7 +26,9 @@ def nanogpt_base_url() -> str:
 
 
 def nanogpt_default_model() -> str:
-    return (os.environ.get("NANOGPT_MODEL") or "chatgpt-4o-latest").strip()
+    from src.nadobro.services.provider_config import clean_env_value
+
+    return clean_env_value(os.environ.get("NANOGPT_MODEL")) or "chatgpt-4o-latest"
 
 
 def openai_compatible_chat(

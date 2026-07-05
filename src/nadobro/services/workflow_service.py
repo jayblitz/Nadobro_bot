@@ -365,11 +365,13 @@ def _workflows_llm_enabled() -> bool:
 
 def _workflow_llm_complete(messages: list[dict[str, Any]]) -> tuple[bool, str]:
     if nanogpt_is_configured():
+        from src.nadobro.services.provider_config import clean_env_value
+
         model = (
-            os.environ.get("NANOGPT_WORKFLOW_MODEL")
-            or os.environ.get("NANOGPT_MODEL")
+            clean_env_value(os.environ.get("NANOGPT_WORKFLOW_MODEL"))
+            or clean_env_value(os.environ.get("NANOGPT_MODEL"))
             or "chatgpt-4o-latest"
-        ).strip()
+        )
         ok, text, _raw = nanogpt_chat_completion(
             messages,
             model=model,
