@@ -92,8 +92,9 @@ def _tf_directional_score(feat: Mapping[str, object]) -> Optional[float]:
 
     hist = _f(feat.get("macd_hist"))
     if hist is not None:
-        # Sign is the momentum direction; magnitude is scaled softly.
-        parts.append(_clamp(hist * 40.0, -1.0, 1.0) if hist != 0 else 0.0)
+        # ``macd_hist`` arrives price-normalized (histogram / close), so it is
+        # comparable across products. ~0.33% of price maps to a full vote.
+        parts.append(_clamp(hist * 300.0, -1.0, 1.0) if hist != 0 else 0.0)
 
     rsi = _f(feat.get("rsi"))
     if rsi is not None:
