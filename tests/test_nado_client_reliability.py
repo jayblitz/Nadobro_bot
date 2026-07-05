@@ -1,6 +1,6 @@
 import unittest
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from _stubs import install_test_stubs
@@ -281,6 +281,66 @@ class NadoClientReliabilityTests(unittest.TestCase):
                 nc._ALL_PRICES_CACHE.pop("testnet", None)
             empty = client.get_all_market_prices()
         self.assertEqual(empty, {})
+
+    def test_get_all_open_orders_sweeps_spot_products(self):
+        """Portfolio open orders must include Volume-bot spot orders, not only perps."""
+        from src.nadobro.services import product_catalog as pc
+
+        client = NadoClient.from_address("0x" + "1" * 40, network="mainnet")
+        client._initialized = True
+        captured = {}
+
+        class _Engine:
+            def get_subaccount_multi_products_open_orders(self, product_ids, sender):
+                captured["product_ids"] = list(product_ids)
+                captured["sender"] = sender
+                return SimpleNamespace(product_orders=[
+                    SimpleNamespace(product_id=2, orders=[]),
+                    SimpleNamespace(product_id=77, orders=[
+                        SimpleNamespace(
+                            digest="0xspotdigest",
+                            amount=str(1 * 10**18),
+                            price_x18=str(700 * 10**18),
+                        )
+                    ]),
+                ])
+
+        client.client = SimpleNamespace(context=SimpleNamespace(engine_client=_Engine()))
+        spot_catalog = {
+            "spots": {
+                "USDT0": {"id": 1, "symbol": "USDT0", "base": "USDT0"},
+                "WGOOGLX": {"id": 77, "symbol": "WGOOGLX", "base": "WGOOGLX"},
+            },
+            "by_id": {1: "USDT0", 77: "WGOOGLX"},
+            "aliases": {},
+        }
+        nado_mod = ModuleType("nado_protocol")
+        utils_mod = ModuleType("nado_protocol.utils")
+        math_mod = ModuleType("nado_protocol.utils.math")
+        math_mod.from_x18 = lambda value: value / 1e18
+        nado_mod.utils = utils_mod
+        utils_mod.math = math_mod
+
+        with patch("src.nadobro.services.nado_client.get_perp_products", return_value=["BTC"]), \
+             patch("src.nadobro.services.nado_client.get_product_id", return_value=2), \
+             patch.object(pc, "get_catalog", return_value={"perps": {}, "by_id": {}, "aliases": {}}), \
+             patch.object(pc, "get_spot_catalog", return_value=spot_catalog), \
+             patch.object(client, "_gateway_allowed", return_value=True), \
+             patch.object(client, "_gateway_release"), \
+             patch.dict(sys.modules, {
+                 "nado_protocol": nado_mod,
+                 "nado_protocol.utils": utils_mod,
+                 "nado_protocol.utils.math": math_mod,
+             }):
+            rows = client.get_all_open_orders()
+
+        self.assertEqual(captured["sender"], client.subaccount_hex)
+        self.assertIn(2, captured["product_ids"])
+        self.assertIn(77, captured["product_ids"])
+        self.assertNotIn(1, captured["product_ids"])
+        self.assertEqual(rows[0]["product_id"], 77)
+        self.assertEqual(rows[0]["product_name"], "WGOOGLX")
+        self.assertEqual(rows[0]["side"], "LONG")
 
     def test_extract_positions_from_rest_payload_supports_camel_case_fields(self):
         client = NadoClient(private_key="0xabc", network="mainnet")

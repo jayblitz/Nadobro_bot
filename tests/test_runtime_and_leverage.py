@@ -975,7 +975,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         status = {
             "running": True,
             "strategy": "vol",
-            "product": "BTC",
+            "product": "WGOOGLX",
+            "vol_market": "spot",
             "notional_usd": 100,
             "runs": 3,
             "interval_seconds": 10,
@@ -993,6 +994,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         }
         onboarding = {"onboarding_complete": True, "network": "mainnet", "has_key": True, "funded": True}
         text = formatters.fmt_status_overview(status, onboarding)
+        self.assertIn("WGOOGLX SPOT", text)
+        self.assertNotIn("WGOOGLX\\-PERP", text)
         self.assertIn("Last cycle", text)
         self.assertIn("Error class", text)
         self.assertIn("Last order error", text)
