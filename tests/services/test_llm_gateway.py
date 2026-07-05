@@ -36,15 +36,15 @@ def test_gateway_on_with_key(monkeypatch):
 
 
 def test_model_for_precedence(monkeypatch):
-    # built-in default
+    # built-in defaults (verified NanoGPT ids)
     assert llm_gateway.model_for("finance") == "dmind/dmind-1"
-    assert llm_gateway.model_for("chat") == "chatgpt-4o-latest"
-    # global override beats built-in only where no per-task default exists;
-    # a per-task env var beats everything.
+    assert llm_gateway.model_for("chat") == "anthropic/claude-sonnet-5"
+    assert llm_gateway.model_for("intent") == "openai/gpt-5-mini"
+    # a per-task env var beats the built-in default.
     monkeypatch.setenv("NANOGPT_MODEL_FINANCE", "dmind/dmind-3")
-    monkeypatch.setenv("NANOGPT_MODEL_CHAT", "claude-sonnet-4.5")
+    monkeypatch.setenv("NANOGPT_MODEL_CHAT", "openai/gpt-5.5")
     assert llm_gateway.model_for("finance") == "dmind/dmind-3"
-    assert llm_gateway.model_for("chat") == "claude-sonnet-4.5"
+    assert llm_gateway.model_for("chat") == "openai/gpt-5.5"
 
 
 def test_unknown_task_falls_back(monkeypatch):
