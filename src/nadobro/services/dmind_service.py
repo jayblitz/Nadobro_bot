@@ -73,8 +73,11 @@ def _analyze_via_nanogpt(
 ) -> dict[str, Any]:
     # Finance/analyst reasoning defaults to the Web3-native DMind model on
     # NanoGPT (one key). Override with NANOGPT_FINANCE_MODEL (e.g. dmind/dmind-1,
-    # or dmind/dmind-3 once it is hosted).
-    model = (os.environ.get("NANOGPT_FINANCE_MODEL") or "dmind/dmind-1").strip()
+    # or dmind/dmind-3 once it is hosted). Sanitized so a value pasted with a
+    # trailing "# note" is stripped to the bare model id.
+    from src.nadobro.services.provider_config import clean_env_value
+
+    model = clean_env_value(os.environ.get("NANOGPT_FINANCE_MODEL")) or "dmind/dmind-1"
     user_payload = json.dumps(
         {
             "task": task,
