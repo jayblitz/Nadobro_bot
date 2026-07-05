@@ -8,12 +8,16 @@ reactions. Each output background is derived only from its matching master:
 - bullish.png  <- PnL bullish master.png
 - bearish.png  <- PnL Bearish master.png
 
-Only dynamic UI/text zones are cleared. The reaction mascot, chart direction,
-stage, arrow, border, and cyber trading scene stay from the matching master.
+The left/user-data side is rebuilt as one continuous clean scene so dynamic
+stats are never drawn on top of baked stats. The reaction mascot, chart
+direction, stage, arrow, border, and cyber trading scene stay from the matching
+master on the right side.
 """
 from __future__ import annotations
 
 from pathlib import Path
+
+import random
 
 from PIL import Image, ImageDraw, ImageFilter, PngImagePlugin
 
@@ -29,49 +33,82 @@ SOURCE_MASTERS = {
     "bearish": CARDS_DIR / "PnL Bearish master.png",
 }
 
-# These regions contain user-specific data or selected controls in the master
-# references. They are cleared so the renderer can draw real user data.
-CLEAR_ZONES = (
-    ((36, 30, 395, 142), 18),     # header logo/wordmark
-    ((36, 150, 815, 322), 20),    # symbol + On Nado
-    ((36, 316, 1025, 405), 12),   # strategy tabs
-    ((36, 420, 1065, 692), 18),   # volume / fees / PnL
-    ((36, 670, 386, 866), 14),    # reaction badge / referral
-    ((970, 720, 1470, 872), 18),  # strategy callout
-)
-
-CLEAR_COLOR = (2, 5, 18)
+CLEAN_LEFT_X = 1015
+CLEAN_FEATHER = 140
 
 
-def _clear_dynamic_zones(master: Image.Image) -> Image.Image:
-    out = master.convert("RGBA")
+def _draw_clean_data_field(reaction: str) -> Image.Image:
+    """Create a continuous empty field for all dynamic user data."""
     width, height = CANVAS_SIZE
+    img = Image.new("RGBA", CANVAS_SIZE, (2, 5, 18, 255))
+    px = img.load()
 
-    for box, radius in CLEAR_ZONES:
-        mask = Image.new("L", CANVAS_SIZE, 0)
-        draw = ImageDraw.Draw(mask)
-        draw.rounded_rectangle(box, radius=radius, fill=255)
+    rng = random.Random(f"nadobro-pnl-v2-{reaction}")
+    accent = (56, 242, 160) if reaction in {"positive", "bullish"} else (255, 76, 91)
 
-        # Feather the outer edge so the clear area does not look like a hard
-        # pasted rectangle on top of the scene.
-        feather = mask.filter(ImageFilter.GaussianBlur(4))
-        layer = Image.new("RGBA", CANVAS_SIZE, CLEAR_COLOR + (0,))
-        layer.putalpha(feather)
-        out.alpha_composite(layer)
+    for y in range(height):
+        for x in range(width):
+            nx = x / width
+            ny = y / height
+            glow = max(0.0, 1.0 - (((nx - 0.46) / 0.42) ** 2 + ((ny - 0.70) / 0.50) ** 2))
+            top = max(0.0, 1.0 - ny)
+            noise = rng.randint(-3, 3)
+            r = int(3 + 4 * top + accent[0] * glow * 0.020 + noise)
+            g = int(8 + 9 * top + accent[1] * glow * 0.035 + noise)
+            b = int(24 + 18 * top + accent[2] * glow * 0.040 + noise)
+            px[x, y] = (max(0, r), max(0, g), max(0, b), 255)
 
-        x1, y1, x2, y2 = box
-        inner = (
-            max(0, x1 + 8),
-            max(0, y1 + 8),
-            min(width, x2 - 8),
-            min(height, y2 - 8),
-        )
-        ImageDraw.Draw(out, "RGBA").rounded_rectangle(
-            inner,
-            radius=max(2, radius - 6),
-            fill=CLEAR_COLOR + (252,),
-        )
+    return img.filter(ImageFilter.GaussianBlur(0.25))
 
+
+def _clear_dynamic_zones(master: Image.Image, reaction: str) -> Image.Image:
+    original = master.convert("RGBA")
+    out = original.copy()
+    field = _draw_clean_data_field(reaction)
+
+    mask = Image.new("L", CANVAS_SIZE, 0)
+    mask_px = mask.load()
+    width, height = CANVAS_SIZE
+    clean_x = 1085
+    feather = 100
+    for y in range(height):
+        for x in range(width):
+            if x <= clean_x:
+                alpha = 255
+            elif x >= clean_x + feather:
+                alpha = 0
+            else:
+                alpha = int(255 * (1 - (x - clean_x) / feather))
+            mask_px[x, y] = alpha
+
+    out.paste(field, (0, 0), mask)
+
+    # Paste the original reaction art back on top. The mask is broad on the
+    # mascot/chart/stage side, but intentionally avoids the old metric/PnL text
+    # lanes from the masters.
+    protect = Image.new("L", CANVAS_SIZE, 0)
+    protect_draw = ImageDraw.Draw(protect)
+    protect_draw.rectangle((1120, 0, width, height), fill=255)
+    protect_draw.ellipse((955, 80, 1515, 545), fill=255)
+    protect_draw.ellipse((1030, 390, 1515, 835), fill=255)
+    protect_draw.polygon([(950, 700), (1530, 635), (1560, 860), (870, 890)], fill=255)
+    out.paste(original, (0, 0), protect.filter(ImageFilter.GaussianBlur(10)))
+
+    # The mascot protection mask is feathered, which can otherwise pull tiny
+    # fragments of the master's old strategy row back into the dynamic tab lane.
+    tab_lane_clear = Image.new("L", CANVAS_SIZE, 0)
+    tab_lane_draw = ImageDraw.Draw(tab_lane_clear)
+    tab_lane_draw.rectangle((895, 305, 1005, 410), fill=255)
+    out.paste(field, (0, 0), tab_lane_clear.filter(ImageFilter.GaussianBlur(12)))
+
+    # Preserve the original border exactly.
+    border = Image.new("L", CANVAS_SIZE, 0)
+    border_draw = ImageDraw.Draw(border)
+    border_draw.rectangle((0, 0, width, 16), fill=255)
+    border_draw.rectangle((0, height - 16, width, height), fill=255)
+    border_draw.rectangle((0, 0, 16, height), fill=255)
+    border_draw.rectangle((width - 16, 0, width, height), fill=255)
+    out.paste(original, (0, 0), border)
     return out
 
 
@@ -84,14 +121,14 @@ def rebuild_backgrounds() -> dict[str, Path]:
             raise FileNotFoundError(f"Missing PnL v2 source master: {source}")
 
         master = Image.open(source).convert("RGB").resize(CANVAS_SIZE, Image.LANCZOS)
-        cleaned = _clear_dynamic_zones(master)
+        cleaned = _clear_dynamic_zones(master, reaction)
 
         metadata = PngImagePlugin.PngInfo()
         metadata.add_text("nadobro_reaction", reaction)
         metadata.add_text("nadobro_source_master", source.name)
         metadata.add_text(
             "nadobro_background_policy",
-            "matching-master-only; dynamic-ui-zones-cleared",
+            "matching-master-only; continuous-data-field",
         )
 
         output = PNL_V2_DIR / f"{reaction}.png"
