@@ -317,6 +317,7 @@ def build_status_snapshot(
     count — and overrides the state estimates so the dashboard matches Nado.
     No external calls here — the caller fetches the snapshot.
     """
+    is_volume = str(strategy_id or "").lower() == "vol"
     session_done = max(0.0, _safe_float(state.get("mm_session_notional_done_usd"), 0.0))
     session_target = max(0.0, _safe_float(state.get("session_notional_cap_usd"), 0.0))
     initial_equity = max(0.0, _safe_float(state.get("mm_initial_equity"), 0.0))
@@ -337,6 +338,21 @@ def build_status_snapshot(
     if live_snapshot:
         session_done = max(session_done, _safe_float(live_snapshot.get("volume"), 0.0))
         cumulative_pnl = _safe_float(live_snapshot.get("realized_pnl"), cumulative_pnl)
+
+    if is_volume:
+        state_volume = max(
+            _safe_float(state.get("volume_done_usd"), 0.0),
+            _safe_float(state.get("session_volume_usd"), 0.0),
+        )
+        session_done = max(session_done, state_volume)
+        volume_target = max(0.0, _safe_float(state.get("target_volume_usd"), 0.0))
+        if volume_target > 0:
+            session_target = volume_target
+        if not live_snapshot:
+            cumulative_pnl = _safe_float(
+                state.get("session_realized_pnl_usd"),
+                _safe_float(state.get("mm_cumulative_pnl"), cumulative_pnl),
+            )
 
     # Fill rate: ratio of executed quotes vs tracked quotes over the session.
     tracked = state.get("mm_tracked_quotes") or {}
@@ -372,6 +388,14 @@ def build_status_snapshot(
     resume_tracked_count = int(_safe_float(state.get("mm_resume_tracked_count"), 0))
     market_price_retries = list(state.get("mm_market_price_retries") or [])
     open_orders_retries = list(state.get("mm_open_orders_retries") or [])
+    order_observability = state.get("order_observability") or {}
+    volume_remaining = _safe_float(
+        state.get("volume_remaining_usd"),
+        max(session_target - session_done, 0.0) if session_target > 0 else 0.0,
+    )
+    session_fees = _safe_float(state.get("session_fees_usd"), 0.0)
+    if live_snapshot:
+        session_fees = _safe_float(live_snapshot.get("fees"), session_fees)
 
     return {
         "strategy_id": strategy_id,
@@ -394,6 +418,7 @@ def build_status_snapshot(
         "session_pnl_usd": session_pnl,
         "session_pnl_pct": session_pnl_pct,
         "session_margin_usd": session_margin,
+        "session_fees_usd": session_fees,
         "has_position": bool(live_snapshot.get("has_position")),
         "position_size": _safe_float(live_snapshot.get("position_size"), 0.0),
         "position_side": str(live_snapshot.get("position_side") or ""),
@@ -428,11 +453,81 @@ def build_status_snapshot(
         "resume_tracked_count": resume_tracked_count,
         "market_price_retries": market_price_retries,
         "open_orders_retries": open_orders_retries,
+        "orders_placed": int(_safe_float(order_observability.get("orders_placed"), 0)),
+        "orders_filled": int(_safe_float(order_observability.get("orders_filled"), 0)),
+        "orders_cancelled": int(_safe_float(order_observability.get("orders_cancelled"), 0)),
+        "vol_market": str(state.get("vol_market") or "").lower(),
+        "vol_phase": state.get("vol_phase"),
+        "vol_last_order_kind": state.get("vol_last_order_kind"),
+        "vol_last_order_digest": state.get("vol_last_order_digest"),
+        "vol_cycles_completed": int(_safe_float(state.get("vol_cycles_completed"), 0)),
+        "vol_closed_cycles": int(_safe_float(state.get("vol_closed_cycles"), 0)),
+        "volume_remaining_usd": max(volume_remaining, 0.0),
     }
+
+
+def _compact_digest(digest) -> str:
+    text = str(digest or "").strip()
+    if len(text) <= 14:
+        return text
+    return f"{text[:8]}…{text[-6:]}"
+
+
+def _volume_product_label(snapshot: dict) -> str:
+    product = str(snapshot.get("product") or "?").upper().replace("-PERP", "")
+    market = str(snapshot.get("vol_market") or "").lower()
+    if market == "spot":
+        return f"{product} SPOT"
+    return f"{product}-PERP" if product != "MULTI" else product
+
+
+def _render_volume_status_lines(snapshot: dict) -> list[str]:
+    state_label = "PAUSED" if snapshot.get("is_paused") else ("LIVE" if snapshot.get("running") else "STOPPED")
+    done = float(snapshot.get("session_done_usd") or 0.0)
+    target = float(snapshot.get("session_target_usd") or 0.0)
+    progress = (done / target * 100.0) if target > 0 else 0.0
+    remaining = float(snapshot.get("volume_remaining_usd") or 0.0)
+    phase = str(snapshot.get("vol_phase") or "idle")
+    cycles = int(snapshot.get("vol_cycles_completed") or snapshot.get("vol_closed_cycles") or 0)
+    placed = int(snapshot.get("orders_placed") or 0)
+    filled = max(int(snapshot.get("fill_count") or 0), int(snapshot.get("orders_filled") or 0))
+    cancelled = int(snapshot.get("orders_cancelled") or 0)
+
+    lines = [
+        f"VOL {_volume_product_label(snapshot)} ({snapshot.get('network')}) — {state_label}",
+        f"Phase: {phase} | Cycles: {cycles}",
+        (
+            f"Volume: ${done:,.2f}"
+            + (f" / ${target:,.2f} ({progress:.1f}%)" if target > 0 else "")
+        ),
+    ]
+    if target > 0:
+        lines.append(f"Remaining: ${remaining:,.2f}")
+    lines.append(
+        f"PnL: realized ${snapshot['cumulative_pnl_usd']:+,.2f}"
+        + (f" | fees ${snapshot['session_fees_usd']:,.2f}" if snapshot.get("session_fees_usd") else "")
+    )
+    lines.append(
+        f"Orders: {snapshot['open_orders_count']} open / "
+        f"{placed} placed / {filled} filled / {cancelled} cancelled"
+    )
+    last_kind = str(snapshot.get("vol_last_order_kind") or "").strip()
+    last_digest = _compact_digest(snapshot.get("vol_last_order_digest"))
+    if last_kind or last_digest:
+        bits = [last_kind.upper()] if last_kind else []
+        if last_digest:
+            bits.append(last_digest)
+        lines.append(f"Last order: {' '.join(bits)}")
+    if snapshot.get("last_error"):
+        lines.append(f"Last error: {str(snapshot['last_error'])[:160]}")
+    return lines
 
 
 def render_status_lines(snapshot: dict) -> list[str]:
     """Plain-text (non-MarkdownV2) lines for /mm_status output."""
+    if str(snapshot.get("strategy_id") or "").lower() == "vol":
+        return _render_volume_status_lines(snapshot)
+
     label = (snapshot.get("strategy_id") or "MM").upper()
     state_label = "PAUSED" if snapshot.get("is_paused") else ("LIVE" if snapshot.get("running") else "STOPPED")
     lines = [

@@ -354,6 +354,54 @@ class DashboardSessionResolverTests(unittest.TestCase):
         self.assertEqual(chosen["id"], 22)
         self.assertIn("PnL (realized+unrealized): $-5.00", text)
 
+    def test_mm_status_includes_volume_spot_session(self):
+        from src.nadobro.handlers import commands
+
+        state = {
+            "running": True,
+            "strategy": "vol",
+            "strategy_session_id": 55,
+            "product": "WGOOGLX",
+            "network": "mainnet",
+            "vol_market": "spot",
+            "vol_phase": "pending_fill",
+            "target_volume_usd": 10_000.0,
+            "volume_done_usd": 200.0,
+            "volume_remaining_usd": 9_800.0,
+            "session_realized_pnl_usd": 0.8,
+            "order_observability": {"orders_placed": 1, "orders_filled": 0, "orders_cancelled": 0},
+        }
+        status = {
+            "running": True,
+            "strategy": "vol",
+            "network": "mainnet",
+            "product": "WGOOGLX",
+            "vol_market": "spot",
+            "strategy_session_id": 55,
+        }
+        live_snap = {
+            "volume": 200.0,
+            "realized_pnl": 1.2,
+            "fees": 0.4,
+            "fills": 0,
+            "open_orders": 1,
+        }
+
+        with patch("src.nadobro.services.bot_runtime.get_user_bot_status", return_value=status), \
+             patch("src.nadobro.services.bot_runtime.get_user_bot_state", return_value=state), \
+             patch("src.nadobro.services.session_resolver.resolve_current_strategy_session",
+                   return_value={"id": 55, "product_id": 77, "status": "running"}), \
+             patch("src.nadobro.services.user_service.get_user_readonly_client", return_value=None), \
+             patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=live_snap):
+            text, is_active = commands.build_mm_status_text(42)
+
+        self.assertTrue(is_active)
+        self.assertIn("VOL WGOOGLX SPOT (mainnet) — LIVE", text)
+        self.assertIn("Phase: pending_fill", text)
+        self.assertIn("Volume: $200.00 / $10,000.00 (2.0%)", text)
+        self.assertIn("PnL: realized $+1.20", text)
+        self.assertIn("Orders: 1 open / 1 placed / 0 filled / 0 cancelled", text)
+
 
 class MultiprocessTimeoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegated_timeout_does_not_run_local_fallback(self):

@@ -1144,14 +1144,58 @@ class NadoClient:
             rows.extend(block_orders)
         return rows
 
+    def _open_order_product_ids(self, *, include_spot: bool = True, refresh: bool = False) -> list[int]:
+        """Product ids the portfolio open-order sweep should query.
+
+        Portfolio needs one consolidated "open limit orders" view. Historically
+        this only included perps, which made Volume-bot spot orders invisible
+        even though single-product spot order reads already worked.
+        """
+        product_ids: list[int] = []
+        seen: set[int] = set()
+
+        def _add(pid) -> None:
+            try:
+                pid_int = int(pid)
+            except (TypeError, ValueError):
+                return
+            if pid_int in seen:
+                return
+            seen.add(pid_int)
+            product_ids.append(pid_int)
+
+        for name in get_perp_products(network=self.network, client=self):
+            _add(get_product_id(name, network=self.network, client=self))
+
+        if include_spot:
+            try:
+                from src.nadobro.services.product_catalog import get_spot_catalog
+
+                quote_like = {"USDC", "USDC0", "USDT", "USDT0", "USD"}
+                catalog = get_spot_catalog(network=self.network, refresh=refresh)
+                spots = catalog.get("spots") or {}
+                sorted_spots = sorted(
+                    (row for row in spots.values() if isinstance(row, dict)),
+                    key=lambda row: int(row.get("id") or 1_000_000),
+                )
+                for row in sorted_spots:
+                    base = str(row.get("base") or row.get("symbol") or "").upper().strip()
+                    if base and base not in quote_like:
+                        _add(row.get("id"))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("spot product ids unavailable for open-order sweep: %s", exc, exc_info=True)
+
+        return product_ids
+
     def get_all_open_orders(
         self,
         refresh: bool = False,
         *,
         include_isolated: bool = True,
+        include_spot: bool = True,
         strict: bool = False,
     ) -> list[dict]:
-        """Fetch open orders for every perp product on a single sender in **one**
+        """Fetch open orders for every tracked product on a single sender in **one**
         gateway call (per sender), instead of the previous ``products × senders``
         ThreadPool fan-out.
 
@@ -1160,11 +1204,7 @@ class NadoClient:
         AND the extra batched call per child subaccount, dropping the
         per-user cost to a single round-trip.
         """
-        product_ids: list[int] = []
-        for name in get_perp_products(network=self.network, client=self):
-            pid = get_product_id(name, network=self.network, client=self)
-            if pid is not None:
-                product_ids.append(int(pid))
+        product_ids = self._open_order_product_ids(include_spot=include_spot, refresh=refresh)
         if not product_ids:
             if strict:
                 raise RuntimeError("product catalog unavailable for open-order sync")

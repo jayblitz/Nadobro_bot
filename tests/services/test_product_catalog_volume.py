@@ -68,6 +68,22 @@ def test_list_volume_spot_bases_dedupes_symbols(monkeypatch):
     assert pc.list_volume_spot_bases("testnet") == ["KBTC"]
 
 
+def test_get_product_name_resolves_spot_product_ids(monkeypatch):
+    catalog = _spot_catalog(
+        [
+            {"id": 77, "symbol": "WGOOGLX", "base": "WGOOGLX", "trading_status": "live"},
+        ]
+    )
+    monkeypatch.setattr(pc, "get_catalog", lambda network="mainnet", client=None, refresh=False: {
+        "perps": {},
+        "by_id": {},
+        "aliases": {},
+    })
+    monkeypatch.setattr(pc, "get_spot_catalog", lambda network="mainnet", refresh=False: catalog)
+
+    assert pc.get_product_name(77, network="mainnet") == "WGOOGLX"
+
+
 def test_is_spot_catalog_dynamic_reflects_data_source(monkeypatch):
     live = _spot_catalog([{"id": 1, "symbol": "BTC", "base": "BTC", "dynamic": True, "trading_status": "live"}])
     static = _spot_catalog([{"id": 1, "symbol": "BTC", "base": "BTC", "dynamic": False, "trading_status": "live"}])
