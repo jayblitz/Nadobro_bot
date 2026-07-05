@@ -296,8 +296,8 @@ STRATEGY_COPY: dict[str, StrategyCopy] = {
     ),
     "RGRID": StrategyCopy(
         "RGRID STRATEGY ACTIVE",
-        "Reversing the range.",
-        "Fading the move.",
+        "Selling strength.",
+        "Buying pullbacks.",
         "reverse",
     ),
     "MID MODE": StrategyCopy(
@@ -629,6 +629,77 @@ def _draw_icon(
         draw.line((x1 + 9, y2 - 12, cx, y1 + 14, x2 - 9, y2 - 12), fill=color, width=width)
 
 
+def _draw_strategy_mark(
+    draw: ImageDraw.ImageDraw,
+    strategy: str,
+    box: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+) -> None:
+    """Draw strategy icons without relying on host emoji fonts."""
+    x1, y1, x2, y2 = box
+    w = x2 - x1
+    h = y2 - y1
+    cx = x1 + w // 2
+    cy = y1 + h // 2
+    width = max(2, w // 13)
+
+    if strategy == "DGRID":
+        bolt = [
+            (x1 + int(w * 0.58), y1 + 1),
+            (x1 + int(w * 0.28), y1 + int(h * 0.55)),
+            (x1 + int(w * 0.49), y1 + int(h * 0.55)),
+            (x1 + int(w * 0.35), y2 - 1),
+            (x1 + int(w * 0.74), y1 + int(h * 0.42)),
+            (x1 + int(w * 0.52), y1 + int(h * 0.42)),
+        ]
+        draw.polygon(bolt, fill=color)
+    elif strategy == "GRID":
+        face = (x1 + 3, y1 + 8, x2 - 3, y2 - 2)
+        draw.rounded_rectangle(face, radius=max(3, w // 6), outline=color, width=width)
+        draw.line((cx, y1 + 3, cx, y1 + 8), fill=color, width=width)
+        draw.ellipse((cx - 2, y1, cx + 2, y1 + 4), fill=color)
+        eye_r = max(1, w // 14)
+        draw.ellipse((x1 + w // 3 - eye_r, cy - eye_r, x1 + w // 3 + eye_r, cy + eye_r), fill=color)
+        draw.ellipse((x2 - w // 3 - eye_r, cy - eye_r, x2 - w // 3 + eye_r, cy + eye_r), fill=color)
+        draw.arc((cx - w // 5, cy - 1, cx + w // 5, y2 - 6), 15, 165, fill=color, width=width)
+    elif strategy == "RGRID":
+        brick_h = max(4, h // 5)
+        rows = [
+            ((x1 + 2, y1 + 5, cx, y1 + 5 + brick_h), (cx + 2, y1 + 5, x2 - 2, y1 + 5 + brick_h)),
+            ((x1 + 8, y1 + 10 + brick_h, x2 - 8, y1 + 10 + 2 * brick_h),),
+            ((x1 + 2, y1 + 15 + 2 * brick_h, cx, y1 + 15 + 3 * brick_h), (cx + 2, y1 + 15 + 2 * brick_h, x2 - 2, y1 + 15 + 3 * brick_h)),
+        ]
+        for row in rows:
+            for rect in row:
+                draw.rounded_rectangle(rect, radius=2, fill=color)
+    elif strategy == "MID MODE":
+        draw.ellipse((x1 + 3, y1 + 3, x2 - 3, y2 - 3), outline=color, width=width)
+        draw.ellipse((cx - w // 5, cy - h // 5, cx + w // 5, cy + h // 5), outline=color, width=width)
+        draw.line((cx, y1 + 1, cx, y1 + h // 4), fill=color, width=width)
+        draw.line((cx, y2 - h // 4, cx, y2 - 1), fill=color, width=width)
+        draw.line((x1 + 1, cy, x1 + w // 4, cy), fill=color, width=width)
+        draw.line((x2 - w // 4, cy, x2 - 1, cy), fill=color, width=width)
+    elif strategy == "VOLUME BOT":
+        bar_w = max(3, w // 7)
+        gaps = (0.18, 0.40, 0.62)
+        heights = (0.38, 0.62, 0.86)
+        for frac_x, frac_h in zip(gaps, heights):
+            bx = x1 + int(w * frac_x)
+            by = y2 - int(h * frac_h)
+            draw.rounded_rectangle((bx, by, bx + bar_w, y2 - 3), radius=2, fill=color)
+        draw.line((x1 + 3, y2 - 3, x2 - 2, y2 - 3), fill=color, width=max(1, width - 1))
+    elif strategy == "DN":
+        draw.line((cx, y1 + 3, cx, y2 - 3), fill=color, width=width)
+        draw.line((x1 + 4, y1 + 10, x2 - 4, y1 + 10), fill=color, width=width)
+        draw.line((x1 + 8, y1 + 10, x1 + 2, cy), fill=color, width=max(1, width - 1))
+        draw.line((x1 + 8, y1 + 10, x1 + 14, cy), fill=color, width=max(1, width - 1))
+        draw.line((x2 - 8, y1 + 10, x2 - 14, cy), fill=color, width=max(1, width - 1))
+        draw.line((x2 - 8, y1 + 10, x2 - 2, cy), fill=color, width=max(1, width - 1))
+        draw.arc((x1 + 1, cy - 2, x1 + 16, y2 - 7), 0, 180, fill=color, width=width)
+        draw.arc((x2 - 16, cy - 2, x2 - 1, y2 - 7), 0, 180, fill=color, width=width)
+        draw.line((cx - w // 4, y2 - 3, cx + w // 4, y2 - 3), fill=color, width=width)
+
+
 def _asset_key(symbol: str) -> str:
     raw = symbol.strip()
     before_quote = re.split(r"[:/_]", raw, maxsplit=1)[0]
@@ -694,8 +765,6 @@ def _draw_strategy_tabs(draw: ImageDraw.ImageDraw, selected: str) -> None:
         "VOLUME BOT": 176,
         "DN": 72,
     }
-    emoji_font = _get_emoji_font(26)
-    dn_emoji_font = _get_emoji_font(20)
     for label in STRATEGIES:
         w = widths[label]
         is_selected = label == selected
@@ -710,13 +779,14 @@ def _draw_strategy_tabs(draw: ImageDraw.ImageDraw, selected: str) -> None:
             outline=outline,
             width=stroke_width,
         )
+        icon_color = GREEN_DARK_TEXT if is_selected else GREEN
         if label == "DN":
-            _draw_emoji(draw, (x + 10, y + 16), STRATEGY_EMOJIS[label], dn_emoji_font)
-            text_x = x + 44
+            _draw_strategy_mark(draw, label, (x + 12, y + 17, x + 32, y + 37), icon_color)
+            text_x = x + 43
             start_size = 15
             min_size = 13
         else:
-            _draw_emoji(draw, (x + 22, y + 14), STRATEGY_EMOJIS[label], emoji_font)
+            _draw_strategy_mark(draw, label, (x + 21, y + 14, x + 45, y + 39), icon_color)
             text_x = x + 66
             start_size = 21
             min_size = 15
@@ -753,24 +823,24 @@ def _draw_reaction_badge(draw: ImageDraw.ImageDraw, reaction: Reaction) -> None:
 def _draw_strategy_box(draw: ImageDraw.ImageDraw, selected: str) -> None:
     copy = STRATEGY_COPY[selected]
     color = RED if selected == "DN" else GREEN
-    box = (1000, 742, 1418, 852)
+    box = (1000, 734, 1432, 862)
     draw.rounded_rectangle(box, radius=14, fill=(4, 8, 24, 248), outline=PANEL_STROKE, width=2)
-    icon_outer = (1024, 762, 1094, 832)
+    icon_outer = (1024, 764, 1096, 836)
     draw.ellipse(icon_outer, outline=color, width=3)
-    _draw_emoji(draw, (1037, 773), STRATEGY_EMOJIS[selected], _get_emoji_font(48))
+    _draw_strategy_mark(draw, selected, (1042, 782, 1078, 819), color)
     title_font = _fit_font(
         draw,
         copy.title,
-        max_width=280,
-        start_size=24,
-        min_size=18,
+        max_width=296,
+        start_size=23,
+        min_size=17,
         bold=True,
         role="display",
     )
-    body_font = _get_font(21, bold=False)
-    draw.text((1112, 765), copy.title, fill=color, font=title_font)
-    draw.text((1112, 801), copy.subtitle, fill=WHITE, font=body_font)
-    draw.text((1112, 827), copy.subtitle2, fill=WHITE, font=body_font)
+    body_font = _get_font(20, bold=False)
+    draw.text((1112, 760), copy.title, fill=color, font=title_font)
+    draw.text((1112, 800), copy.subtitle, fill=WHITE, font=body_font)
+    draw.text((1112, 826), copy.subtitle2, fill=WHITE, font=body_font)
 
 
 def _draw_card_overlay(

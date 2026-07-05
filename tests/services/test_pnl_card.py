@@ -157,7 +157,7 @@ def test_v2_backgrounds_record_matching_master_sources():
             assert im.info.get("nadobro_reaction") == reaction
             assert im.info.get("nadobro_source_master") == expected_sources[reaction]
             assert im.info.get("nadobro_background_policy") == (
-                "matching-master-only; dynamic-ui-zones-cleared"
+                "matching-master-only; continuous-data-field"
             )
 
 
