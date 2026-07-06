@@ -279,6 +279,50 @@ class LiveSnapshotMathTests(unittest.TestCase):
         self.assertAlmostEqual(snap["volume"], 6100.0)
         self.assertEqual(snap["fills"], 40)
 
+    def test_dn_volume_uses_spot_and_perp_turnover(self):
+        venue = {"size_signed": -0.5, "entry": 100.0, "liq": 0.0, "leverage": 1.0,
+                 "margin_used": 100.0, "upnl": 0.0, "synced_ts": 9e18}
+        sess = {
+            "id": 10,
+            "strategy": "dn",
+            "product_id": 117,
+            "product_name": "WGOOGLX",
+            "started_at": None,
+            "stopped_at": None,
+        }
+        turnovers = {
+            117: {"volume": 200.0, "fills": 2},
+            118: {"volume": 300.0, "fills": 2},
+        }
+        open_orders = {117: 1, 118: 2}
+        seen_turnover_products = []
+        seen_open_products = []
+
+        def fake_turnover(_user, _network, product_id, *_args):
+            seen_turnover_products.append(int(product_id))
+            return turnovers[int(product_id)]
+
+        def fake_open_orders(_user, _network, product_id):
+            seen_open_products.append(int(product_id))
+            return open_orders[int(product_id)]
+
+        with patch.object(live_session, "_venue_position", return_value=venue), \
+             patch("src.nadobro.models.database.get_session_live_metrics",
+                   return_value={"fills": 0, "volume": 0.0, "fees": 0.0, "realized_pnl": 0.0}), \
+             patch("src.nadobro.models.database.get_session_turnover", side_effect=fake_turnover), \
+             patch("src.nadobro.models.database.count_open_orders_for_product", side_effect=fake_open_orders), \
+             patch("src.nadobro.services.product_catalog.get_dn_pair",
+                   return_value={"perp_product_id": 117, "spot_product_id": 118}):
+            snap = live_session.get_live_session_snapshot(
+                42, "mainnet", sess, state={"strategy": "dn", "notional_usd": 100.0}, client=None, mark=100.0,
+            )
+
+        self.assertEqual(sorted(seen_turnover_products), [117, 118])
+        self.assertEqual(sorted(seen_open_products), [117, 118])
+        self.assertAlmostEqual(snap["volume"], 500.0)
+        self.assertEqual(snap["fills"], 4)
+        self.assertEqual(snap["open_orders"], 3)
+
 
 class StatusRenderTests(unittest.TestCase):
     def test_status_lines_show_upnl_and_session_pnl(self):
@@ -353,6 +397,54 @@ class DashboardSessionResolverTests(unittest.TestCase):
         self.assertTrue(is_active)
         self.assertEqual(chosen["id"], 22)
         self.assertIn("PnL (realized+unrealized): $-5.00", text)
+
+    def test_mm_status_includes_volume_spot_session(self):
+        from src.nadobro.handlers import commands
+
+        state = {
+            "running": True,
+            "strategy": "vol",
+            "strategy_session_id": 55,
+            "product": "WGOOGLX",
+            "network": "mainnet",
+            "vol_market": "spot",
+            "vol_phase": "pending_fill",
+            "target_volume_usd": 10_000.0,
+            "volume_done_usd": 200.0,
+            "volume_remaining_usd": 9_800.0,
+            "session_realized_pnl_usd": 0.8,
+            "order_observability": {"orders_placed": 1, "orders_filled": 0, "orders_cancelled": 0},
+        }
+        status = {
+            "running": True,
+            "strategy": "vol",
+            "network": "mainnet",
+            "product": "WGOOGLX",
+            "vol_market": "spot",
+            "strategy_session_id": 55,
+        }
+        live_snap = {
+            "volume": 200.0,
+            "realized_pnl": 1.2,
+            "fees": 0.4,
+            "fills": 0,
+            "open_orders": 1,
+        }
+
+        with patch("src.nadobro.services.bot_runtime.get_user_bot_status", return_value=status), \
+             patch("src.nadobro.services.bot_runtime.get_user_bot_state", return_value=state), \
+             patch("src.nadobro.services.session_resolver.resolve_current_strategy_session",
+                   return_value={"id": 55, "product_id": 77, "status": "running"}), \
+             patch("src.nadobro.services.user_service.get_user_readonly_client", return_value=None), \
+             patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=live_snap):
+            text, is_active = commands.build_mm_status_text(42)
+
+        self.assertTrue(is_active)
+        self.assertIn("VOL WGOOGLX SPOT (mainnet) — LIVE", text)
+        self.assertIn("Phase: pending_fill", text)
+        self.assertIn("Volume: $200.00 / $10,000.00 (2.0%)", text)
+        self.assertIn("PnL: realized $+1.20", text)
+        self.assertIn("Orders: 1 open / 1 placed / 0 filled / 0 cancelled", text)
 
 
 class MultiprocessTimeoutTests(unittest.IsolatedAsyncioTestCase):

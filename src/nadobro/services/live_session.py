@@ -182,6 +182,56 @@ def _venue_position(telegram_id: int, network: str, product_id, client) -> dict:
     return db_view or flat
 
 
+def _session_strategy(session: dict, state: Optional[dict]) -> str:
+    return str(session.get("strategy") or (state or {}).get("strategy") or "").lower()
+
+
+def _session_product_ids_for_turnover(session: dict, state: Optional[dict], network: str) -> list[int]:
+    """Product ids whose venue turnover belongs to this session.
+
+    Most strategies own one product, stored on ``strategy_sessions.product_id``.
+    Delta Neutral is explicitly two-product: spot long + perp short. Its normal
+    session-tagged metrics count both legs, but the venue-turnover fallback must
+    also scan both product ids or missed executor/back-link fills on the spot leg
+    disappear from live volume.
+    """
+    product_ids: list[int] = []
+    seen: set[int] = set()
+
+    def _add(pid) -> None:
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            return
+        if pid_int in seen:
+            return
+        seen.add(pid_int)
+        product_ids.append(pid_int)
+
+    _add(session.get("product_id"))
+    if _session_strategy(session, state) not in {"dn", "delta_neutral", "delta-neutral"}:
+        return product_ids
+
+    product = str(session.get("product_name") or (state or {}).get("product") or "").strip()
+    candidates = [product]
+    if "-" in product:
+        candidates.append(product.split("-", 1)[0])
+    try:
+        from src.nadobro.services.product_catalog import get_dn_pair
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            dn_pair = get_dn_pair(candidate, network=network) or {}
+            for key in ("spot_product_id", "perp_product_id"):
+                _add(dn_pair.get(key))
+            if len(product_ids) > 1:
+                break
+    except Exception:  # noqa: BLE001
+        logger.debug("dn turnover product-id resolution failed", exc_info=True)
+    return product_ids
+
+
 def get_live_session_snapshot(
     telegram_id: int,
     network: str,
@@ -256,14 +306,20 @@ def get_live_session_snapshot(
     session_pnl_net = session_pnl - fees
     session_pnl_pct_net = (session_pnl_net / margin * 100.0) if margin > 0 else 0.0
 
-    # Volume = real turnover on the product for THIS run (matches Nado), not the
-    # under-counted session-tagged sum.
-    turnover = get_session_turnover(
-        int(telegram_id), network, int(product_id) if product_id is not None else None,
-        session.get("started_at"), session.get("stopped_at"),
-    ) if product_id is not None else {}
-    volume = max(_f(metrics.get("volume")), _f(turnover.get("volume")))
-    fills = max(int(metrics.get("fills") or 0), int(turnover.get("fills") or 0))
+    # Volume = real turnover for THIS run (matches Nado), not the under-counted
+    # session-tagged sum. DN owns two products (spot+perp), so aggregate both.
+    turnover_volume = 0.0
+    turnover_fills = 0
+    turnover_product_ids = _session_product_ids_for_turnover(session, state, network)
+    for turnover_pid in turnover_product_ids:
+        turnover = get_session_turnover(
+            int(telegram_id), network, int(turnover_pid),
+            session.get("started_at"), session.get("stopped_at"),
+        )
+        turnover_volume += _f(turnover.get("volume"))
+        turnover_fills += int(turnover.get("fills") or 0)
+    volume = max(_f(metrics.get("volume")), turnover_volume)
+    fills = max(int(metrics.get("fills") or 0), turnover_fills)
 
     # Position view = the run's own net position (baseline-excluded).
     has_position = abs(run_size) > 1e-12
@@ -273,13 +329,14 @@ def get_live_session_snapshot(
 
     # --- open orders for the product (session owns the product during a run) ---
     open_orders = 0
-    if product_id is not None:
-        open_orders = count_open_orders_for_product(int(telegram_id), network, int(product_id))
-        if open_orders == 0 and client is not None:
+    for open_pid in turnover_product_ids:
+        product_open_orders = count_open_orders_for_product(int(telegram_id), network, int(open_pid))
+        if product_open_orders == 0 and client is not None:
             try:
-                open_orders = len(client.get_open_orders(int(product_id)) or [])
+                product_open_orders = len(client.get_open_orders(int(open_pid)) or [])
             except Exception:  # noqa: BLE001
-                logger.debug("live open-orders read failed pid=%s", product_id, exc_info=True)
+                logger.debug("live open-orders read failed pid=%s", open_pid, exc_info=True)
+        open_orders += int(product_open_orders or 0)
 
     return {
         "product_id": product_id,

@@ -192,6 +192,54 @@ def resolve_session_id_for_controller(controller_id: str) -> Optional[int]:
     return resolve_running_session_id(strategy, user_id, network)
 
 
+def _resolve_engine_fill_product(strategy: str, trading_pair: str, network: str) -> tuple[int, str]:
+    """Best-effort product id/name for an engine fill row.
+
+    Perp-only lookup is wrong for strategies that trade spot through the engine
+    (DN long leg, Volume spot, Desk spot). Store the real spot product id so the
+    spot side remains visible in downstream product/volume views; session totals
+    still do not depend on this resolving successfully.
+    """
+    from src.nadobro.config import get_product_name
+    from src.nadobro.services.product_catalog import (
+        get_product_id,
+        get_spot_product_id,
+    )
+
+    pair = str(trading_pair or "").strip()
+    strategy_id = str(strategy or "").lower()
+    pair_upper = pair.upper()
+    product_id: Optional[int] = None
+
+    if strategy_id in {"vol", "volume", "volume_bot"}:
+        try:
+            from src.nadobro.config import normalize_volume_spot_symbol
+
+            product_id = get_spot_product_id(normalize_volume_spot_symbol(pair), network=network)
+        except Exception:  # noqa: BLE001
+            product_id = None
+    elif strategy_id in {"dn", "delta_neutral", "delta-neutral"} and not pair_upper.endswith("-PERP"):
+        base = pair.split("-", 1)[0]
+        product_id = get_spot_product_id(base, network=network)
+    elif pair_upper.endswith("-SPOT"):
+        product_id = get_spot_product_id(pair.split("-", 1)[0], network=network)
+
+    if product_id is None:
+        try:
+            product_id = get_product_id(pair, network=network)
+        except Exception:  # noqa: BLE001
+            product_id = None
+    if product_id is None:
+        return 0, pair
+    try:
+        product_name = get_product_name(int(product_id), network=network)
+    except Exception:  # noqa: BLE001
+        product_name = pair
+    if not product_name or str(product_name).startswith("ID:"):
+        product_name = pair
+    return int(product_id), str(product_name)
+
+
 class DbTradeRecorder:
     """Writes each engine fill into ``trades_<network>`` tagged with the
     active ``strategy_session_id``. Injected into executors by the runtime
@@ -251,7 +299,6 @@ class DbTradeRecorder:
         from datetime import datetime, timezone
 
         from src.nadobro.models.database import insert_trade
-        from src.nadobro.services.product_catalog import get_product_id
 
         parsed = _parse_controller_id(controller_id)
         if parsed is None:
@@ -290,15 +337,12 @@ class DbTradeRecorder:
 
         # Resolve product metadata best-effort; the volume/PnL math does not
         # depend on product_id, so an unresolved symbol must not drop the fill.
-        try:
-            product_id = get_product_id(str(trading_pair), network=network) or 0
-        except Exception:  # noqa: BLE001
-            product_id = 0
+        product_id, product_name = _resolve_engine_fill_product(strategy, str(trading_pair), network)
 
         data = {
             "user_id": int(user_id),
             "product_id": int(product_id),
-            "product_name": str(trading_pair),
+            "product_name": product_name,
             "order_type": "match",
             "side": "long" if side is TradeType.BUY else "short",
             "size": str(base),

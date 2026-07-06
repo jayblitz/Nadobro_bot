@@ -1,10 +1,18 @@
 """Desk runner — drives DeskController sessions from the scheduler.
 
 Every tick (a few seconds): read which users have active desk plans (the DB
-is the single source of truth — that's what makes a 24h TWAP survive a
-deploy), make sure each has a running engine session, tick it, relay its
-events to Telegram, and tear down sessions whose users have no active plans
-left.
+is the single source of truth), make sure each has a running engine session,
+tick it, relay its events to Telegram, and tear down sessions whose users
+have no active plans left.
+
+REDEPLOY CONTRACT (user rule, 2026-07-05): trades and strategies are strictly
+user-initiated — a redeploy must NEVER resume, re-fire, or re-arm anything on
+its own. On the first tick after boot, every still-active desk plan is stood
+down (guarded transition to ``cancelled``; fills kept) and its owner is told
+exactly what was NOT resumed, so they can re-initiate deliberately. This
+matches the engine strategies, which already skip auto-restore on startup
+(``restore_running_bots(enabled=False)``). Operators can restore the legacy
+resume-across-deploys behavior with ``NADO_DESK_RESUME_ON_RESTART=1``.
 
 Runs in the scheduler process only (like alerts/HOWL), so multiprocess
 strategy workers never race it. All DB and SDK calls go through
@@ -26,6 +34,15 @@ _bot_app = None
 _RUNNING: set[tuple[int, str]] = set()
 _NETWORKS = ("mainnet", "testnet")
 
+# Boot stand-down: flips to True once the first post-boot tick has parked (or
+# been told to keep) every plan left active by the previous process.
+_boot_standdown_done = False
+
+_STANDDOWN_NOTE = (
+    "stood down on redeploy — strategies are strictly user-initiated and are "
+    "never auto-resumed"
+)
+
 # spot market-hours cache: product -> (expires_ts, is_open)
 _SPOT_OPEN_TTL_SECONDS = 60.0
 _spot_open_cache: Dict[tuple[str, str], tuple[float, bool]] = {}
@@ -38,6 +55,15 @@ def set_bot_app(app) -> None:
 
 def desk_enabled() -> bool:
     return env_bool("NADO_DESK_ENABLE", True)
+
+
+def desk_resume_on_restart() -> bool:
+    """Legacy escape hatch: resume active plans across a redeploy. Default OFF
+    — the redeploy contract is that nothing trades without the user starting it."""
+    import os
+
+    return (os.environ.get("NADO_DESK_RESUME_ON_RESTART", "").strip().lower()
+            in ("1", "true", "yes", "on"))
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +196,18 @@ _EVENT_TEXT = {
         "⚠️ Desk: a restart interrupted an order on {product} and the outcome is unknown. "
         "The plan was stopped for safety — check Portfolio before re-running it."
     ),
+    # Redeploy stand-down (strictly user-initiated trading): worded per prior
+    # status so the user knows exactly what was NOT resumed.
+    "plan_parked_waiting": (
+        "🛑 Desk: a redeploy stopped the waiting trigger for {summary}. "
+        "Nothing was re-armed — strategies only start when you start them. "
+        "Re-run it from the Desk if you still want it."
+    ),
+    "plan_parked_running": (
+        "⚠️ Desk: a redeploy stopped {summary} — it was NOT resumed and its "
+        "exit watch is OFF (strategies only run when you start them). "
+        "Check Portfolio for any open position and close or re-arm it yourself."
+    ),
 }
 
 
@@ -200,12 +238,97 @@ async def _notify_event(telegram_id: int, evt: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# redeploy stand-down
+# ---------------------------------------------------------------------------
+
+async def _stand_down_on_boot() -> Optional[int]:
+    """Park every plan the previous process left active and tell each owner.
+
+    Returns the number of plans parked, or ``None`` when a DB error prevented
+    a COMPLETE stand-down — the caller must then retry next tick and must NOT
+    start ticking sessions, or an unparked plan would auto-resume after all.
+    Idempotent: ``finish_plan`` is a guarded transition, and already-parked
+    plans drop out of the active set."""
+    from src.nadobro.services.desk_plans import ST_RUNNING
+
+    parked = 0
+    for network in _NETWORKS:
+        try:
+            users = await run_blocking(desk_store.list_users_with_active_plans, network)
+        except Exception:  # noqa: BLE001 - DB blip: retry the whole pass next tick
+            logger.warning("desk: boot stand-down scan failed for %s — sessions stay "
+                           "parked until the stand-down completes", network, exc_info=True)
+            return None
+        for uid in users:
+            try:
+                records = await run_blocking(
+                    desk_store.list_active_plans, int(uid), network
+                ) or []
+            except Exception:  # noqa: BLE001
+                logger.warning("desk: boot stand-down plan read failed user=%s %s",
+                               uid, network, exc_info=True)
+                return None
+            for rec in records:
+                plan = rec.get("plan")
+                plan_id = getattr(plan, "plan_id", None) or rec.get("plan_id")
+                prior_status = str(rec.get("status") or "")
+                if not plan_id:
+                    continue
+                try:
+                    won = await run_blocking(
+                        desk_store.finish_plan, str(plan_id), network, "cancelled",
+                        error=_STANDDOWN_NOTE,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("desk: boot stand-down failed for plan %s user=%s %s",
+                                   plan_id, uid, network, exc_info=True)
+                    return None
+                if not won:
+                    continue  # someone else already finished it
+                parked += 1
+                logger.info(
+                    "desk: plan %s (user=%s network=%s status=%s) stood down on "
+                    "redeploy — not resumed, exit watch not re-armed",
+                    plan_id, uid, network, prior_status,
+                )
+                etype = ("plan_parked_running" if prior_status == ST_RUNNING
+                         else "plan_parked_waiting")
+                summary = ""
+                try:
+                    summary = plan.describe() if plan is not None else ""
+                except Exception:  # noqa: BLE001 - description is cosmetic
+                    summary = str(plan_id)
+                await _notify_event(int(uid), {"type": etype, "summary": summary})
+    return parked
+
+
+# ---------------------------------------------------------------------------
 # the scheduler job
 # ---------------------------------------------------------------------------
 
 async def tick_desk_runner() -> None:
+    global _boot_standdown_done
     if not desk_enabled() or _bot_app is None:
         return
+    # Redeploy contract: before ANY session is ensured or ticked, park what the
+    # previous process left active. A plan must never trade, re-arm an exit
+    # watch, or re-fire a trigger without the user starting it in THIS life of
+    # the bot.
+    if not _boot_standdown_done:
+        if desk_resume_on_restart():
+            logger.warning(
+                "desk: NADO_DESK_RESUME_ON_RESTART=1 — resuming active plans "
+                "across the redeploy (legacy behavior)"
+            )
+            _boot_standdown_done = True
+        else:
+            parked = await _stand_down_on_boot()
+            if parked is None:
+                return  # incomplete stand-down: retry next tick, tick nothing yet
+            _boot_standdown_done = True
+            if parked:
+                # Start sessions on the NEXT tick, from a provably clean slate.
+                return
     from src.nadobro.services.engine_runtime import RUNTIME
 
     active: set[tuple[int, str]] = set()

@@ -928,11 +928,20 @@ def get_product_id(name: str, network: str = "mainnet", client=None, refresh: bo
 
 def get_product_name(product_id: int, network: str = "mainnet", client=None, refresh: bool = False) -> str:
     catalog = get_catalog(network=network, client=client, refresh=refresh)
-    key = (catalog.get("by_id") or {}).get(int(product_id))
-    if not key:
+    try:
+        pid = int(product_id)
+    except (TypeError, ValueError):
         return f"ID:{product_id}"
-    row = (catalog.get("perps") or {}).get(key) or {}
-    return str(row.get("symbol") or f"{key}-PERP")
+    key = (catalog.get("by_id") or {}).get(pid)
+    if key:
+        row = (catalog.get("perps") or {}).get(key) or {}
+        return str(row.get("symbol") or f"{key}-PERP")
+    spot_catalog = get_spot_catalog(network=network, refresh=refresh)
+    spot_key = (spot_catalog.get("by_id") or {}).get(pid)
+    if spot_key:
+        row = (spot_catalog.get("spots") or {}).get(spot_key) or {}
+        return str(row.get("base") or row.get("symbol") or spot_key)
+    return f"ID:{product_id}"
 
 
 def get_product_max_leverage(

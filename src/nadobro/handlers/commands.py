@@ -298,8 +298,8 @@ async def cmd_revoke(update: Update, context: CallbackContext):
 # Phase 3: Tread-style live MM dashboard.
 # ---------------------------------------------------------------------------
 
-# Strategy IDs the MM dashboard supports (mid mode shipped in Phase 1).
-MM_STRATEGIES = ("grid", "rgrid", "dgrid", "mid")
+# Strategy IDs the live strategy dashboard supports.
+MM_STRATEGIES = ("grid", "rgrid", "dgrid", "mid", "vol")
 
 
 def _mm_dashboard_keyboard():
@@ -308,7 +308,7 @@ def _mm_dashboard_keyboard():
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Refresh MM board", callback_data="mm:status:refresh"),
+            InlineKeyboardButton("📊 Refresh status", callback_data="mm:status:refresh"),
             InlineKeyboardButton("🧾 Fills", callback_data="mm:fills"),
         ],
     ])
@@ -328,7 +328,7 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
     if strategy_id not in MM_STRATEGIES:
         return (
             "No MM strategy is currently active.\n\n"
-            "Start GRID, Reverse GRID, Dynamic GRID, or Mid Mode from the strategy hub "
+            "Start GRID, Reverse GRID, Dynamic GRID, Mid Mode, or Volume from the strategy hub "
             "and re-run /mm_status.",
             False,
         )
@@ -356,8 +356,28 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
     except Exception:
         live_snapshot = None
 
+    dashboard_state = dict(state)
+    for key in (
+        "order_observability",
+        "session_fees_usd",
+        "session_realized_pnl_usd",
+        "session_volume_usd",
+        "target_volume_usd",
+        "vol_closed_cycles",
+        "vol_cycles_completed",
+        "vol_last_order_digest",
+        "vol_last_order_kind",
+        "vol_market",
+        "vol_phase",
+        "volume_done_usd",
+        "volume_remaining_usd",
+    ):
+        value = status.get(key)
+        if value not in (None, "") and dashboard_state.get(key) in (None, "", 0, 0.0):
+            dashboard_state[key] = value
+
     snapshot = mm_dashboard.build_status_snapshot(
-        state=state,
+        state=dashboard_state,
         strategy_id=strategy_id,
         network=network,
         product=product,
@@ -408,8 +428,9 @@ async def cmd_mm_status(update: Update, context: CallbackContext):
         from src.nadobro.handlers.formatters import escape_md
         body = escape_md(text)
         markup = _mm_dashboard_keyboard() if is_active else None
+        header = "📊 *Strategy Status*" if is_active and text.lstrip().upper().startswith("VOL ") else "📊 *MM Status*"
         await update.message.reply_text(
-            f"📊 *MM Status*\n\n{body}",
+            f"{header}\n\n{body}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=markup,
         )
@@ -436,5 +457,4 @@ async def cmd_mm_fills(update: Update, context: CallbackContext):
         )
     except Exception:
         await update.message.reply_text(text)
-
 

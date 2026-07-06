@@ -278,9 +278,18 @@ def scan_edges() -> list[dict]:
     # Try X API first (real tweets → LLM analysis)
     findings = _scan_via_x_api()
 
-    # Fallback to Grok's built-in X search
+    # Fallback to Grok's built-in X search. NOTE: _scan_via_x_api returns None
+    # both when the tweet source is down AND when the LLM analysis failed, so log
+    # the true reason instead of always blaming "X API unavailable" (which had
+    # the operator chasing a healthy X API while the real fault was the model id).
     if findings is None:
-        logger.info("Edge scanner: X API unavailable, falling back to Grok search")
+        if _is_x_api_available():
+            logger.info(
+                "Edge scanner: X API is up but tweet analysis produced no result "
+                "(see the preceding warning for the real cause); trying Grok search"
+            )
+        else:
+            logger.info("Edge scanner: X API unavailable, falling back to Grok search")
         findings = _scan_via_grok_search()
 
     if findings is None:

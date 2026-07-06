@@ -1,15 +1,13 @@
 import asyncio
-import time
+import logging
 from decimal import Decimal
 
 import pytest
 from tests.engine._mock_nado import MockNadoAdapter
 
-from src.nadobro.engine.adapter.base import OrderState
 from src.nadobro.engine.controllers.volume_bot import VolumeBotController
 from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
-from src.nadobro.engine.types import OrderType, TradeType
 
 
 def _vb_kwargs(configs, *, adapter=None):
@@ -111,6 +109,35 @@ def test_sell_price_covers_positive_maker_fee_and_edge():
     asyncio.run(body())
 
 
+def test_sell_price_logs_when_order_book_guard_unavailable(caplog):
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        c = VolumeBotController(
+            user_id=1,
+            orchestrator=orch,
+            adapter=adapter,
+            inventory=InventoryRepository(),
+            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            controller_id="VB",
+        )
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=Decimal("100"))
+
+        adapter.fail_on.add("order_book")
+        adapter.fail_remaining = 1
+        caplog.set_level(logging.WARNING, logger="src.nadobro.engine.controllers.volume_bot")
+
+        await orch.tick_controller(c.id)
+
+        assert c.phase == "pending_close_fill"
+        assert "sell price using fee/entry floor without live book guard" in caplog.text
+        assert "post-only sell may reject or rest away from book" in caplog.text
+
+    asyncio.run(body())
+
+
 async def _fill_one_active(adapter, orch, c):
     active = list(orch.list(c.id, active_only=True))
     assert len(active) == 1
@@ -176,51 +203,9 @@ def test_loops_until_target_volume_then_completes():
     asyncio.run(body())
 
 
-def test_cross_on_timeout_replaces_unfilled_maker_buy_with_market():
-    # Option 5: a post-only buy that stays unfilled past the timeout is cancelled
-    # and re-placed as a taker MARKET order for the full size.
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
-        orch = ExecutorOrchestrator()
-        c = VolumeBotController(
-            user_id=1,
-            orchestrator=orch,
-            adapter=adapter,
-            inventory=InventoryRepository(),
-            configs={
-                "trading_pair": "KBTC",
-                "total_amount_quote": "100",
-                "vol_cross_after_seconds": 1,
-            },
-            controller_id="VB",
-        )
-        await orch.spawn_controller(c)
-        maker = orch.get(c.buy_id)
-        maker_id = maker.order.id
-        target = c.buy_target_base
-        assert maker.order.order_type is OrderType.LIMIT_MAKER
-        # Simulate the maker resting unfilled past the timeout.
-        c.buy_placed_ts = time.time() - 100
-
-        await orch.tick_controller(c.id)
-
-        assert c.buy_crossed is True
-        assert maker_id in adapter.cancelled              # maker cancelled
-        crossed = orch.get(c.buy_id)
-        assert crossed.id != maker.id                     # a NEW executor
-        assert crossed.order.order_type is OrderType.MARKET
-        assert crossed.order.amount_base == target        # full size re-placed
-        # The market buy auto-fills; the next tick advances to the sell leg.
-        await orch.tick_controller(c.id)
-        assert c.phase == "pending_close_fill"
-        assert c.entry_base == target
-
-    asyncio.run(body())
-
-
-def test_cross_does_not_double_place_when_maker_has_a_fill():
-    # Safety guard: if a fill lands at/before the cancel, _cross_to_taker must
-    # return None (no market order) so the position is never doubled.
+def test_buy_chases_price_up():
+    """The resting maker buy must FOLLOW the price: when mid runs away above
+    the initial gap + reprice threshold, cancel and requote near the new mid."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
         orch = ExecutorOrchestrator()
@@ -233,24 +218,24 @@ def test_cross_does_not_double_place_when_maker_has_a_fill():
             controller_id="VB",
         )
         await orch.spawn_controller(c)
-        maker = orch.get(c.buy_id)
-        # A partial fill exists on the resting maker.
-        adapter.fill_order(maker.order.id, amount=maker.order.amount_base / Decimal(2),
-                           price=maker.order.price, partial=True)
-        placed_before = len(adapter.placed)
+        first_buy = orch.get(c.buy_id)
+        first_price = first_buy.order.price
+        assert first_price < Decimal(100)          # rests below mid
 
-        result = await c._cross_to_taker(
-            maker, TradeType.BUY, c.buy_target_base, maker.config.position_action
-        )
+        adapter.set_mid(Decimal(101))              # > 5bp offset + 20bp threshold
+        await orch.tick_controller(c.id)
 
-        assert result is None                             # no cross
-        assert len(adapter.placed) == placed_before       # no new order placed
-        assert maker.order.id in adapter.cancelled        # maker still cancelled
+        assert c.buy_reprices == 1
+        assert first_buy.order.id in adapter.cancelled
+        second_buy = orch.get(c.buy_id)
+        assert second_buy.id != first_buy.id
+        assert second_buy.order.price > first_price   # requoted near the new mid
+        assert c.phase == "pending_fill"
 
     asyncio.run(body())
 
 
-def test_cross_disabled_when_timeout_zero():
+def test_buy_does_not_chase_within_threshold():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
         orch = ExecutorOrchestrator()
@@ -259,37 +244,167 @@ def test_cross_disabled_when_timeout_zero():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={
-                "trading_pair": "KBTC",
-                "total_amount_quote": "100",
-                "vol_cross_after_seconds": 0,
-            },
+            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
-        maker_id = orch.get(c.buy_id).order.id
-        c.buy_placed_ts = time.time() - 100  # well past any timeout
+        buy = orch.get(c.buy_id)
 
+        adapter.set_mid(Decimal("100.1"))          # 10bp: inside 5bp gap + 20bp band
         await orch.tick_controller(c.id)
 
-        # Disabled -> still resting, never crossed/cancelled.
-        assert c.buy_crossed is False
-        assert maker_id not in adapter.cancelled
-        assert c.phase == "pending_fill"
+        assert c.buy_reprices == 0
+        assert orch.get(c.buy_id).id == buy.id     # untouched
 
     asyncio.run(body())
 
 
-def test_effectively_full_tolerates_one_lot_rounding():
-    # A taker MARKET cross is lot-rounded DOWN by the venue, so an exact
-    # filled>=target test would strand the just-bought/sold base. The gate now
-    # treats a fill within one lot (mock lot_size = 0.001) as complete.
-    c = VolumeBotController(**_vb_kwargs({"trading_pair": "KBTC"}))
-    assert c._effectively_full(Decimal("1.33333"), Decimal("1.33333")) is True   # exact
-    assert c._effectively_full(Decimal("1.34"), Decimal("1.33333")) is True       # over
-    assert c._effectively_full(Decimal("1.333"), Decimal("1.33333")) is True      # within one lot
-    assert c._effectively_full(Decimal("1.30"), Decimal("1.33333")) is False      # >1 lot short
-    assert c._effectively_full(Decimal("0"), Decimal("1.0")) is False             # nothing filled
+def test_partial_buy_then_external_cancel_sells_the_partial():
+    """A buy that fills partially and then terminates must round-trip the
+    filled portion — completing without selling strands the bought base."""
+    from src.nadobro.engine.adapter.base import OrderState
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        c = VolumeBotController(
+            user_id=1,
+            orchestrator=orch,
+            adapter=adapter,
+            inventory=InventoryRepository(),
+            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            controller_id="VB",
+        )
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        half = buy.order.amount_base / Decimal(2)
+        adapter.fill_order(buy.order.id, amount=half, price=buy.order.price, partial=True)
+        adapter._orders[buy.order.id].state = OrderState.CANCELLED  # venue cancel
+
+        await orch.tick_controller(c.id)
+
+        assert c.phase == "pending_close_fill"
+        sell = orch.get(c.sell_id)
+        assert sell is not None
+        assert sell.order.amount_base == half      # sells exactly what filled
+
+    asyncio.run(body())
+
+
+def test_partial_sell_replaces_remainder_and_books_cycle_once():
+    from src.nadobro.engine.adapter.base import OrderState
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        c = VolumeBotController(
+            user_id=1,
+            orchestrator=orch,
+            adapter=adapter,
+            inventory=InventoryRepository(),
+            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            controller_id="VB",
+        )
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=buy.order.price)
+        await orch.tick_controller(c.id)
+
+        first_sell = orch.get(c.sell_id)
+        half = first_sell.order.amount_base / Decimal(2)
+        adapter.fill_order(first_sell.order.id, amount=half,
+                           price=first_sell.order.price, partial=True)
+        adapter._orders[first_sell.order.id].state = OrderState.CANCELLED
+        await orch.tick_controller(c.id)
+
+        # Remainder re-placed instead of stranding half the inventory.
+        second_sell = orch.get(c.sell_id)
+        assert second_sell.id != first_sell.id
+        assert second_sell.order.amount_base == half
+        assert c.completed is False
+
+        adapter.fill_order(second_sell.order.id, price=second_sell.order.price)
+        await orch.tick_controller(c.id)
+
+        assert c.completed is True
+        assert c.stop_reason == "round_trip_complete"
+        assert c.cycles_completed == 1
+        # Volume/PnL book BOTH sell legs exactly once.
+        assert c.sold_base == c.entry_base
+        assert c.session_volume_usd == c.entry_quote + c.sold_quote
+        assert c.session_realized_pnl_usd == c.sold_quote - c.entry_quote
+
+    asyncio.run(body())
+
+
+def test_zero_fill_buy_requotes_then_completes_no_fill():
+    from src.nadobro.engine.adapter.base import OrderState
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        c = VolumeBotController(
+            user_id=1,
+            orchestrator=orch,
+            adapter=adapter,
+            inventory=InventoryRepository(),
+            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            controller_id="VB",
+        )
+        await orch.spawn_controller(c)
+        for expected_retries in (1, 2, 3, 3):
+            buy = orch.get(c.buy_id)
+            adapter._orders[buy.order.id].state = OrderState.CANCELLED
+            await orch.tick_controller(c.id)
+            assert c.buy_retries == expected_retries
+
+        assert c.completed is True
+        assert c.stop_reason == "no_fill"
+
+    asyncio.run(body())
+
+
+def test_sell_spawn_raise_recovers_instead_of_stranding():
+    """If the sell spawn raises mid-transition, the controller must not park in
+    ``filled_wait_close`` forever — the next tick retries the sell."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        c = VolumeBotController(
+            user_id=1,
+            orchestrator=orch,
+            adapter=adapter,
+            inventory=InventoryRepository(),
+            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            controller_id="VB",
+        )
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=buy.order.price)
+
+        real_start_sell = c._start_sell_cycle
+        boom = {"armed": True}
+
+        async def flaky(amount_base=None):
+            if boom.pop("armed", False):
+                # A transient-classified error keeps the controller ACTIVE
+                # (backoff), which is exactly the case the recovery branch
+                # serves; an unknown error would mark it FAILED and take the
+                # engine's rebuild path instead.
+                raise RuntimeError("venue rate limited")
+            return await real_start_sell(amount_base)
+
+        c._start_sell_cycle = flaky
+        await orch.tick_controller(c.id)           # raise absorbed by orchestrator
+        assert c.phase == "filled_wait_close"      # held base, no branch lost
+        assert c.is_active                         # transient => stays ACTIVE
+
+        orch._controller_backoff_until.pop(c.id, None)   # backoff elapsed
+        await orch.tick_controller(c.id)           # recovery branch retries
+        assert c.phase == "pending_close_fill"
+        assert orch.get(c.sell_id) is not None
+
+    asyncio.run(body())
 
 
 def test_max_cycles_caps_runaway_loop():

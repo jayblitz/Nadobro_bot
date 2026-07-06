@@ -900,6 +900,9 @@ def map_strategy_config(
             # above entry after positive maker-fee coverage.
             "vol_maker_offset_bp": _f(settings, "vol_maker_offset_bp", 5.0),
             "vol_min_edge_bp": _f(settings, "vol_min_edge_bp", _f(settings, "vol_maker_offset_bp", 5.0)),
+            # Follow the price: requote the resting buy once mid runs this many
+            # bp beyond the initial maker gap (0 disables the chase).
+            "vol_reprice_bp": _f(settings, "vol_reprice_bp", 20.0),
         }
     # grid / rgrid / dgrid family.
     #
@@ -1404,6 +1407,15 @@ def _materialize_dn_leg_meta(
             )
 
 
+# Funding barely moves tick-to-tick (settled hourly), and every read charges
+# the archive host's shared per-IP token bucket — cache per (network, pid).
+_OVERLAY_FUNDING_TTL = 300.0
+_OVERLAY_FUNDING_CACHE: Dict[tuple, tuple[float, Optional[float]]] = {}
+# Persist the overlay signal only when the APPLIED action changed, plus a
+# heartbeat so Night HOWL still sees a quiet-but-alive overlay.
+_OVERLAY_PERSIST_HEARTBEAT = 600.0
+
+
 async def _maybe_apply_overlay(
     telegram_id: int,
     network: str,
@@ -1421,9 +1433,12 @@ async def _maybe_apply_overlay(
     untouched. Candle fetch + persistence run off the event loop."""
     try:
         from src.nadobro.services.overlay_actuator import (
+            APPLIED_OVERRIDE_KEYS,
             apply_overrides_to_configs,
             compute_overrides,
             overlay_applies,
+            rail_barriers,
+            stabilize_overrides,
         )
 
         if not overlay_applies(strategy):
@@ -1453,16 +1468,22 @@ async def _maybe_apply_overlay(
         # from the controller's in-memory inventory — no extra SDK call.
         funding_rate: Optional[float] = None
         if hasattr(client, "get_perp_funding_rates"):
-            try:
-                def _funding():
-                    return client.get_perp_funding_rates([int(pid)])  # type: ignore[attr-defined]
+            _fkey = (str(network), int(pid))
+            _fhit = _OVERLAY_FUNDING_CACHE.get(_fkey)
+            if _fhit is not None and (time.time() - _fhit[0]) < _OVERLAY_FUNDING_TTL:
+                funding_rate = _fhit[1]
+            else:
+                try:
+                    def _funding():
+                        return client.get_perp_funding_rates([int(pid)])  # type: ignore[attr-defined]
 
-                rates = await run_blocking_sdk(_funding) or {}
-                entry = rates.get(int(pid)) or rates.get(str(pid)) or {}
-                raw = entry.get("funding_rate") if isinstance(entry, dict) else None
-                funding_rate = float(raw) if raw is not None else None
-            except Exception:  # noqa: BLE001 - funding context is optional
-                funding_rate = None
+                    rates = await run_blocking_sdk(_funding) or {}
+                    entry = rates.get(int(pid)) or rates.get(str(pid)) or {}
+                    raw = entry.get("funding_rate") if isinstance(entry, dict) else None
+                    funding_rate = float(raw) if raw is not None else None
+                    _OVERLAY_FUNDING_CACHE[_fkey] = (time.time(), funding_rate)
+                except Exception:  # noqa: BLE001 - funding context is optional
+                    funding_rate = None
 
         position_side: Optional[str] = None
         try:
@@ -1487,22 +1508,45 @@ async def _maybe_apply_overlay(
             base_tp_pct=(base_tp if base_tp > 0 else 1.0),
         )
         overrides = compute_overrides(strategy, signal)
+        # Dead-band against the previously APPLIED values so a 4th-decimal
+        # signal wobble doesn't flip the live-config signature every candle
+        # refresh (each flip recenters the grid ladder / resets Mid quotes).
+        prev_applied = state.get("overlay_applied")
+        overrides = stabilize_overrides(
+            prev_applied if isinstance(prev_applied, dict) else None, overrides
+        )
+        applied = {k: overrides.get(k) for k in APPLIED_OVERRIDE_KEYS if k in overrides}
+        applied_changed = applied != prev_applied
+        state["overlay_applied"] = applied
         changed = apply_overrides_to_configs(strategy, configs, overrides)
 
         # Surface the regime-adjusted barriers to the session SL/TP rail (which
         # reads state, not configs). Persisted with state at end of cycle, so
-        # the rail uses them from the next cycle. Cleared to fall back to the
-        # user's config when the signal produced no barrier.
-        if signal.sl_pct is not None:
-            state["overlay_sl_pct"] = float(signal.sl_pct)
+        # the rail uses them from the next cycle. Bounded by the user's own
+        # config: SL is tighten-only (the user's session SL stays the
+        # kill-switch contract) and a barrier the user disarmed stays disarmed.
+        rail_sl, rail_tp = rail_barriers(base_sl, base_tp, signal)
+        if rail_sl is not None:
+            state["overlay_sl_pct"] = float(rail_sl)
         else:
             state.pop("overlay_sl_pct", None)
-        if signal.tp_pct is not None:
-            state["overlay_tp_pct"] = float(signal.tp_pct)
+        if rail_tp is not None:
+            state["overlay_tp_pct"] = float(rail_tp)
         else:
             state.pop("overlay_tp_pct", None)
 
         # Persist the signal + applied action for Night HOWL / audit (off loop).
+        # Throttled: only when the APPLIED action changed, plus a heartbeat —
+        # an unconditional insert every tick bloats overlay_signals by ~2k
+        # rows/day/session without adding information.
+        _last_persist = float(state.get("overlay_persist_ts") or 0.0)
+        if not applied_changed and (time.time() - _last_persist) < _OVERLAY_PERSIST_HEARTBEAT:
+            if changed:
+                logger.debug(
+                    "overlay held steady user=%s strategy=%s regime=%s",
+                    telegram_id, strategy, signal.regime,
+                )
+            return
         try:
             from src.nadobro.models.database import insert_overlay_signal
 
@@ -1526,6 +1570,7 @@ async def _maybe_apply_overlay(
                 "risks_json": list(signal.risks),
             }
             await run_blocking(insert_overlay_signal, row)
+            state["overlay_persist_ts"] = time.time()
         except Exception:  # noqa: BLE001 - persistence must never break a tick
             logger.debug("overlay signal persist failed", exc_info=True)
 

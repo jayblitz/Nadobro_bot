@@ -1612,7 +1612,11 @@ def fmt_status_overview(status: dict, onboarding: dict):
 
     strategy = (status.get("strategy") or "").upper()
     product = str(status.get("product") or "BTC").upper()
-    product_label = "MULTI" if product == "MULTI" else f"{product}-PERP"
+    product_base = product.replace("-PERP", "")
+    if strategy == "VOL" and str(status.get("vol_market") or "").lower() == "spot":
+        product_label = f"{product_base} SPOT"
+    else:
+        product_label = "MULTI" if product == "MULTI" else f"{product_base}-PERP"
     global_pause_active = bool(status.get("global_pause_active"))
     locally_paused = bool(status.get("is_paused"))
     runs = int(status.get("runs") or 0)

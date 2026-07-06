@@ -115,3 +115,60 @@ def test_mid_barrier_is_rail_only_no_triple_barrier():
 def test_no_barriers_when_signal_has_none():
     ov = oa.compute_overrides("grid", Signal(bias=0.5, regime="trend_up", entry_ok=True, scale=0.3))
     assert "sl_pct" not in ov and "tp_pct" not in ov
+
+
+def test_rail_barriers_sl_is_tighten_only():
+    # Trend regime widened the signal SL past the user's stop — the rail must
+    # stay at the user's number (the kill-switch contract).
+    sig = Signal(bias=0.7, regime="trend_up", sl_pct=0.65, tp_pct=1.6)
+    sl, tp = oa.rail_barriers(0.5, 1.0, sig)
+    assert sl == 0.5
+    assert tp == 1.6            # TP may follow the regime both ways
+    # Chop tightened the SL below the user's stop — the tighter value governs.
+    sig = Signal(bias=0.0, regime="chop", sl_pct=0.4, tp_pct=0.8)
+    sl, tp = oa.rail_barriers(0.5, 1.0, sig)
+    assert sl == 0.4
+    assert tp == 0.8
+
+
+def test_rail_barriers_disarmed_stays_disarmed():
+    sig = Signal(bias=0.5, regime="trend_up", sl_pct=0.65, tp_pct=1.6)
+    sl, tp = oa.rail_barriers(0.0, 0.0, sig)
+    assert sl is None and tp is None
+    # One-sided arming is respected per side.
+    sl, tp = oa.rail_barriers(0.5, 0.0, sig)
+    assert sl == 0.5 and tp is None
+
+
+def test_rail_barriers_none_when_signal_abstains():
+    sl, tp = oa.rail_barriers(0.5, 1.0, Signal())     # cold signal: no barriers
+    assert sl is None and tp is None
+
+
+def test_stabilize_overrides_deadbands_wobble():
+    prev = {"size_factor": 1.10, "spread_factor": 1.20, "directional_bias": 0.40,
+            "suppress_new_entries": False, "regime": "trend_up",
+            "sl_pct": 0.65, "tp_pct": 1.6}
+    wobble = dict(prev, size_factor=1.12, spread_factor=1.25, directional_bias=0.45)
+    out = oa.stabilize_overrides(prev, wobble)
+    # Sub-threshold wobble reuses the previously applied factors verbatim, so
+    # the live-config signature does not flap (no grid recenter / quote reset).
+    assert out["size_factor"] == 1.10
+    assert out["spread_factor"] == 1.20
+    assert out["directional_bias"] == 0.40
+
+
+def test_stabilize_overrides_material_changes_pass_through():
+    prev = {"size_factor": 1.10, "spread_factor": 1.20, "suppress_new_entries": False,
+            "regime": "trend_up", "sl_pct": 0.65, "tp_pct": 1.6}
+    # A full step in size passes through untouched.
+    big = dict(prev, size_factor=1.16)
+    assert oa.stabilize_overrides(prev, big)["size_factor"] == 1.16
+    # A regime flip always passes through (it changes the barriers).
+    flip = dict(prev, regime="chop", suppress_new_entries=True, size_factor=1.11)
+    assert oa.stabilize_overrides(prev, flip)["size_factor"] == 1.11
+    # A suppression flip always passes through (risk control).
+    supp = dict(prev, suppress_new_entries=True, size_factor=1.11)
+    assert oa.stabilize_overrides(prev, supp)["size_factor"] == 1.11
+    # No previous application: everything passes through.
+    assert oa.stabilize_overrides(None, dict(prev))["size_factor"] == 1.10

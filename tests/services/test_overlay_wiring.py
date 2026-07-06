@@ -23,12 +23,14 @@ class _FakeClient:
 def _isolate(monkeypatch):
     from src.nadobro.services import market_features as mf
     mf.reset_cache()
+    er._OVERLAY_FUNDING_CACHE.clear()
     monkeypatch.setenv("NADO_SIGNAL_OVERLAY", "1")
     # Persistence is best-effort; stub it so no DB is needed.
     import src.nadobro.models.database as db
     monkeypatch.setattr(db, "insert_overlay_signal", lambda row: 1, raising=False)
     yield
     mf.reset_cache()
+    er._OVERLAY_FUNDING_CACHE.clear()
 
 
 def test_overlay_steers_mid_bias_and_size():
@@ -88,6 +90,72 @@ def test_overlay_writes_barrier_state_for_rail():
     # Regime-adjusted barriers surfaced to state for the session rail.
     assert "overlay_sl_pct" in state and state["overlay_sl_pct"] > 0
     assert "overlay_tp_pct" in state and state["overlay_tp_pct"] > 0
+
+
+def test_overlay_rail_sl_never_widens_past_user_stop():
+    """The uptrend fixture reads as a trend (signal SL = base x 1.3), but the
+    rail barrier must stay clamped at the user's configured stop."""
+    cfg = {"order_amount_quote": Decimal("500"), "directional_bias": 0.0}
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5, "tp_pct": 1.0}
+    asyncio.run(er._maybe_apply_overlay(
+        7, "mainnet", "mid", "BTC", 2, cfg, state, client=_FakeClient(), mid=131.6,
+    ))
+    assert state["overlay_sl_pct"] <= 0.5
+
+
+def test_overlay_rail_stays_disarmed_when_user_has_no_sl_tp():
+    """A user who runs without a session SL/TP must not get rail barriers armed
+    by the overlay (the 10% drawdown cap is the backstop)."""
+    cfg = {"order_amount_quote": Decimal("500"), "directional_bias": 0.0}
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.0, "tp_pct": 0.0}
+    asyncio.run(er._maybe_apply_overlay(
+        7, "mainnet", "mid", "BTC", 2, cfg, state, client=_FakeClient(), mid=131.6,
+    ))
+    assert "overlay_sl_pct" not in state
+    assert "overlay_tp_pct" not in state
+
+
+def test_overlay_persist_throttled_while_signal_holds(monkeypatch):
+    """A steady signal must not insert a row every tick — only on an applied
+    change or the heartbeat."""
+    inserts = {"n": 0}
+    import src.nadobro.models.database as db
+    monkeypatch.setattr(
+        db, "insert_overlay_signal", lambda row: inserts.update(n=inserts["n"] + 1) or 1,
+        raising=False,
+    )
+    cfg_factory = lambda: {"order_amount_quote": Decimal("500"), "directional_bias": 0.0}
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5, "tp_pct": 1.0}
+    for _ in range(3):
+        asyncio.run(er._maybe_apply_overlay(
+            7, "mainnet", "mid", "BTC", 2, cfg_factory(), state,
+            client=_FakeClient(), mid=131.6,
+        ))
+    assert inserts["n"] == 1
+    # The stable factors are still applied to every cycle's fresh configs.
+    cfg = cfg_factory()
+    asyncio.run(er._maybe_apply_overlay(
+        7, "mainnet", "mid", "BTC", 2, cfg, state, client=_FakeClient(), mid=131.6,
+    ))
+    assert cfg["directional_bias"] != 0.0
+
+
+def test_overlay_funding_read_is_cached_across_ticks():
+    calls = {"funding": 0}
+
+    class _ClientWithFunding(_FakeClient):
+        def get_perp_funding_rates(self, product_ids):
+            calls["funding"] += 1
+            return {int(product_ids[0]): {"funding_rate": 0.0012}}
+
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5, "tp_pct": 1.0}
+    for _ in range(3):
+        asyncio.run(er._maybe_apply_overlay(
+            7, "mainnet", "mid", "BTC", 2,
+            {"order_amount_quote": Decimal("500"), "directional_bias": 0.0}, state,
+            client=_ClientWithFunding(), mid=131.6,
+        ))
+    assert calls["funding"] == 1
 
 
 def test_overlay_fetches_funding_without_breaking():

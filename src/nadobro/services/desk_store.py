@@ -3,8 +3,10 @@
 Lifecycle: draft -> awaiting_trigger -> running -> completed/cancelled/failed.
 Every transition is a guarded UPDATE (``... WHERE status = <expected>``), so
 restarts and concurrent workers cannot double-fire a trigger or resurrect a
-cancelled plan — whoever wins the UPDATE owns the transition. A 24h TWAP must
-survive a deploy: the runner re-attaches via ``list_active_plans`` on restore.
+cancelled plan — whoever wins the UPDATE owns the transition. Plans do NOT
+survive a redeploy: trading is strictly user-initiated, so the runner stands
+every still-active plan down on boot (see ``desk_runtime._stand_down_on_boot``)
+instead of re-attaching, unless ``NADO_DESK_RESUME_ON_RESTART=1``.
 
 All functions are synchronous DB calls — call via ``run_blocking`` from
 handlers/coroutines (the blocking-calls lint enforces this).
