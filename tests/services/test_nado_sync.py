@@ -262,7 +262,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
             return None  # open_orders / prior-trade / recorder-row / dedup all miss
 
         execute_calls = []
-        with patch.object(nado_sync, "_back_link_intent", return_value=(90, "strategy")), \
+        with patch.object(nado_sync, "_back_link_intent", return_value=(90, "strategy", True)), \
              patch.object(nado_sync, "query_one", side_effect=_q), \
              patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
             nado_sync._write_matches(42, "mainnet", [{
@@ -276,6 +276,53 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         assert params[1] == 2 and params[2] == "BTC"   # product_id/name from session
         assert params[16] == 90                        # attributed to the session
         assert params[17] == "strategy"                # counts in the rollup
+
+    def test_write_matches_window_fallback_skipped_for_tagged_manual_fill(self):
+        # A fill whose digest is TAGGED manual (a bot manual trade, incl. closes)
+        # must NOT be window-swallowed into a concurrent session on the same
+        # product: that hid it from History (session NOT NULL) while the session
+        # rollup still excluded it (source manual) — invisible everywhere.
+        execute_calls = []
+        window_calls = []
+
+        with patch.object(nado_sync, "_back_link_intent", return_value=(None, "manual", True)), \
+             patch.object(nado_sync, "_resolve_session_by_window",
+                          side_effect=lambda *a, **k: window_calls.append(a) or 77), \
+             patch.object(nado_sync, "query_one", return_value=None), \
+             patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
+            nado_sync._write_matches(42, "mainnet", [{
+                "submission_idx": "11", "digest": "0xmanualclose", "product_id": 2,
+                "base_filled": str(to_x18("0.5")), "quote_filled": str(to_x18("-50")),
+                "fee": str(to_x18("0.05")),
+            }])
+
+        assert window_calls == []                      # fallback never ran
+        ins = next(c for c in execute_calls if "INSERT INTO" in c[0])
+        params = ins[1]
+        assert params[16] is None                      # stays session-less
+        assert params[17] == "manual"                  # stays in History's source set
+
+    def test_write_matches_window_recovery_relabels_source_strategy(self):
+        # An UNTAGGED fill recovered by the product+time window is an engine fill
+        # whose placement link was lost. It must be labeled source='strategy' so
+        # the session rollup (which excludes 'manual') actually counts it —
+        # leaving it 'manual' made the recovery self-defeating.
+        execute_calls = []
+
+        with patch.object(nado_sync, "_back_link_intent", return_value=(None, "manual", False)), \
+             patch.object(nado_sync, "_resolve_session_by_window", return_value=77), \
+             patch.object(nado_sync, "query_one", return_value=None), \
+             patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
+            nado_sync._write_matches(42, "mainnet", [{
+                "submission_idx": "12", "digest": "0xorphan", "product_id": 2,
+                "base_filled": str(to_x18("0.5")), "quote_filled": str(to_x18("-50")),
+                "fee": str(to_x18("0.05")),
+            }])
+
+        ins = next(c for c in execute_calls if "INSERT INTO" in c[0])
+        params = ins[1]
+        assert params[16] == 77                        # window-attributed session
+        assert params[17] == "strategy"                # now counted by the rollup
 
     def test_write_open_orders_does_not_sweep_when_live_rows_have_no_digests(self):
         execute_calls = []
@@ -299,10 +346,11 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         rows = [intent_row, session_row]
 
         with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
-            sid, src = nado_sync._back_link_intent("0xfeed", "testnet")
+            sid, src, found = nado_sync._back_link_intent("0xfeed", "testnet")
 
         assert sid is None
         assert src == "bro"
+        assert found is True  # intent exists — window fallback must not run
 
     def test_back_link_intent_accepts_same_network_session(self):
         intent_row = {"value": {"strategy_session_id": 7, "source": "bro"}}
@@ -310,10 +358,11 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         rows = [intent_row, session_row]
 
         with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
-            sid, src = nado_sync._back_link_intent("0xfeed", "mainnet")
+            sid, src, found = nado_sync._back_link_intent("0xfeed", "mainnet")
 
         assert sid == 7
         assert src == "bro"
+        assert found is True
 
     def test_normalize_order_rows_treats_no_open_orders_message_as_empty(self):
         assert nado_sync._normalize_order_rows({"message": "No open orders"}) == []
@@ -348,15 +397,17 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         }
         rows = [intent_row, {"network": "testnet"}]
         with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
-            session_id, source = nado_sync._back_link_intent("0xdeadbeef", "testnet")
+            session_id, source, found = nado_sync._back_link_intent("0xdeadbeef", "testnet")
         assert session_id == 99
         assert source == "dgrid"
+        assert found is True
 
     def test_back_link_intent_defaults_to_manual_when_lookup_empty(self):
         with patch.object(nado_sync, "query_one", return_value=None):
-            session_id, source = nado_sync._back_link_intent("0xabc", "testnet")
+            session_id, source, found = nado_sync._back_link_intent("0xabc", "testnet")
         assert session_id is None
         assert source == "manual"
+        assert found is False  # truly untagged — window fallback may recover it
 
     def test_user_has_isolated_artifacts_detects_isolated_position(self):
         """Poll fan-out must include isolated subaccounts whenever the prior
@@ -508,7 +559,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             nado_sync,
             "_back_link_intent",
-            return_value=(7, "dgrid"),
+            return_value=(7, "dgrid", True),
         ):
             nado_sync._write_matches(
                 42,

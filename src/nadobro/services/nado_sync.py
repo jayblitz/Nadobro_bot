@@ -723,14 +723,26 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             # policy: degrade-ok(prior-trades product lookup best-effort; session-product fallback still runs)
             except Exception:  # noqa: BLE001 - recovery is best-effort
                 pass
-        session_id, source = _back_link_intent(digest, network)
-        if session_id is None:
-            # Digest back-link missed (no order_intents row for this fill).
+        session_id, source, intent_found = _back_link_intent(digest, network)
+        if session_id is None and not intent_found:
+            # Digest back-link missed (NO order_intents row for this fill).
             # Recover attribution by product + time window so the match still
             # counts toward its session's rollup (see _resolve_session_by_window).
+            # Gated on intent_found: a fill TAGGED manual (bot manual trade,
+            # incl. closes) must never be swallowed into a concurrent session
+            # on the same product — that hid it from History (session NOT NULL)
+            # while the rollup still excluded it (source manual): invisible
+            # everywhere.
             session_id = _resolve_session_by_window(
                 user_id, network, product_id, _timestamp_or_now(match.get("timestamp"))
             )
+            if session_id is not None:
+                # A window-recovered fill is an engine fill whose placement
+                # link was lost (this fallback's documented purpose). Label it
+                # source='strategy' so the session rollup — which excludes
+                # 'manual' — actually counts it; leaving it 'manual' made the
+                # recovery self-defeating (attributed but never totted up).
+                source = "strategy"
 
         # Last-resort product_id: a session-attributed fill whose id is still 0
         # inherits its SESSION's product. This is the stop-close case — the flatten
@@ -932,21 +944,29 @@ def _maybe_increment_session_win_loss(session_id: int | None, pnl_x18: str) -> N
         logger.debug("session win/loss increment failed session=%s", session_id, exc_info=True)
 
 
-def _back_link_intent(digest: str, network: str) -> tuple[int | None, str]:
-    """Resolve ``(strategy_session_id, source)`` from order_intents.
+def _back_link_intent(digest: str, network: str) -> tuple[int | None, str, bool]:
+    """Resolve ``(strategy_session_id, source, intent_found)`` from order_intents.
 
-    Strategies and engine adapters write to ``order_intents`` with ``value``
-    JSONB carrying ``strategy_session_id`` and ``source``. Venue-sync fills
-    only arrive with an ``order_digest``; this lookup re-attaches the tags
-    so per-session rollups and History (source=manual) filtering work.
-    Returns ``(None, "manual")`` when no intent is found.
+    Strategies, the engine adapter, and the close paths write to
+    ``order_intents`` with ``value`` JSONB carrying ``strategy_session_id``
+    and ``source``. Venue-sync fills only arrive with an ``order_digest``;
+    this lookup re-attaches the tags so per-session rollups and History
+    (source=manual) filtering work. Returns ``(None, "manual", False)`` when
+    no intent is found.
+
+    ``intent_found`` distinguishes "this digest has no tag at all" (an engine
+    fill whose placement link failed, or external venue activity — the window
+    fallback may recover it) from "this digest is TAGGED manual with no
+    session" (a genuine bot manual trade — the window fallback must NOT
+    swallow it into a concurrent session on the same product, or the fill
+    vanishes from History while staying excluded from the session rollup).
 
     Execution-mode safety: the resolved ``strategy_session_id`` is dropped
     if it doesn't belong to the same ``network`` as the incoming fill, so a
     testnet fill never links to a mainnet session (or vice-versa).
     """
     if not digest:
-        return None, "manual"
+        return None, "manual", False
     try:
         intent = query_one(
             "SELECT value FROM order_intents WHERE order_digest = %s ORDER BY updated_at DESC NULLS LAST LIMIT 1",
@@ -954,9 +974,9 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str]:
         )
     except Exception:
         logger.debug("intent back-link query failed digest=%s", digest, exc_info=True)
-        return None, "manual"
+        return None, "manual", False
     if not intent:
-        return None, "manual"
+        return None, "manual", False
     value = intent.get("value") or {}
     if isinstance(value, str):
         try:
@@ -966,7 +986,7 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str]:
         except Exception:
             value = {}
     if not isinstance(value, dict):
-        return None, "manual"
+        return None, "manual", True
     raw_session = value.get("strategy_session_id")
     session_id: int | None
     try:
@@ -989,8 +1009,8 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str]:
                 session_row.get("network") if session_row else None,
                 network,
             )
-            return None, source
-    return session_id, source
+            return None, source, True
+    return session_id, source, True
 
 
 def _resolve_session_by_window(

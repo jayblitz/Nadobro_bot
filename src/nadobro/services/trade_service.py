@@ -2350,6 +2350,8 @@ def close_position(
     product: str,
     size: float = None,
     network: str | None = None,
+    source: str = "manual",
+    strategy_session_id: int | None = None,
     **kwargs,
 ) -> dict:
     user = get_user(telegram_id)
@@ -2444,8 +2446,31 @@ def close_position(
             if not r.get("success"):
                 return {"success": False, "error": f"Failed to close position: {r.get('error', 'unknown')}"}
             close_digest = r.get("digest", "")
+            # Tag the close digest with its true origin BEFORE the venue match
+            # syncs. Close orders never went through the open-order intent
+            # reservation, so their fills arrived untagged and the window
+            # fallback could swallow a manual close into a concurrent session
+            # on the same product (hiding it from History), or orphan a
+            # session close as manual (losing the session's close volume).
+            if close_digest:
+                try:
+                    from src.nadobro.services.order_intents import link_digest_intent
+
+                    link_digest_intent(
+                        str(close_digest),
+                        selected_network,
+                        source=source,
+                        strategy_session_id=strategy_session_id,
+                    )
+                # policy: degrade-ok(close link best-effort; close fill still records, attribution falls back)
+                except Exception:  # noqa: BLE001 - link is best-effort
+                    pass
             close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
             fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, product_id)
+            # NOTE: source deliberately NOT forwarded to the synthetic close row —
+            # it stays 'manual' (rollup-excluded) so the intent-tagged venue fill
+            # is the SINGLE counted truth for session close volume; forwarding a
+            # non-manual source here would double-count the close in the rollup.
             _record_close_in_db(
                 telegram_id,
                 product_id,
@@ -2456,6 +2481,8 @@ def close_position(
                 fill_price=fill_price,
                 network=selected_network,
                 fill_data=close_fill_data,
+                order_digest=(str(close_digest) or None),
+                strategy_session_id=strategy_session_id,
             )
             leg_remaining -= this_close_size
             budget -= this_close_size
@@ -2595,7 +2622,13 @@ def close_delta_neutral_legs(
 
     perp_result: dict = {"success": True, "skipped": True}
     try:
-        close_result = close_position(telegram_id, perp_product, network=selected_network)
+        close_result = close_position(
+            telegram_id,
+            perp_product,
+            network=selected_network,
+            source=source,
+            strategy_session_id=strategy_session_id,
+        )
         if close_result.get("success") or "No open positions" in str(close_result.get("error") or ""):
             perp_result = close_result if close_result.get("success") else {"success": True, "skipped": True}
         else:
@@ -2752,12 +2785,23 @@ def close_all_positions(
                     # turnover (opens + closes); without this the flatten's ~equal
                     # close volume orphaned as source='manual', session=null (it
                     # fills after stopped_at, so the window fallback can't reach it).
-                    if strategy_session_id and close_digest:
+                    # Session-less flattens (/stop_all) are tagged manual so the
+                    # window fallback can't swallow them into an unrelated live
+                    # session on the same product.
+                    if close_digest:
                         try:
-                            from src.nadobro.services.engine_persistence import DbTradeRecorder
-                            DbTradeRecorder._link_intent(
-                                str(close_digest), int(strategy_session_id), selected_network
-                            )
+                            from src.nadobro.services.order_intents import link_digest_intent
+
+                            if strategy_session_id:
+                                link_digest_intent(
+                                    str(close_digest), selected_network,
+                                    source="strategy",
+                                    strategy_session_id=int(strategy_session_id),
+                                )
+                            else:
+                                link_digest_intent(
+                                    str(close_digest), selected_network, source="manual",
+                                )
                         # policy: degrade-ok(close link best-effort; close fill still records, attribution falls back to window)
                         except Exception:  # noqa: BLE001 - link is best-effort
                             pass
