@@ -1,5 +1,4 @@
 import logging
-import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,6 +14,7 @@ from src.nadobro.services.nado_client import (
 )
 from src.nadobro.i18n import get_active_language, localize_text
 from src.nadobro.config import get_nado_builder_routing_config, get_product_id
+from src.nadobro.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +318,7 @@ def ensure_active_wallet_ready(telegram_id: int) -> tuple[bool, str]:
             _loc("Wallet not linked. Use the Wallet button to connect your wallet (Linked Signer)."),
         )
     if user.network_mode.value == "mainnet":
-        require_linked = os.environ.get("NADO_REQUIRE_MAINNET_LINKED_SIGNER", "true").strip().lower() in ("1", "true", "yes", "on")
+        require_linked = env_bool("NADO_REQUIRE_MAINNET_LINKED_SIGNER", True)
         if require_linked and user.main_address and user.linked_signer_address:
             if str(user.main_address).lower() == str(user.linked_signer_address).lower():
                 return (

@@ -1,7 +1,7 @@
-import os
 from datetime import datetime, timezone
 
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
+from src.nadobro.utils.env import env_bool
 
 
 def _default_state() -> dict:
@@ -12,8 +12,7 @@ def _default_state() -> dict:
 
 
 def is_managed_agent_globally_enabled() -> bool:
-    raw = (os.environ.get("NADO_MANAGED_AGENT_ENABLED", "true") or "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return env_bool("NADO_MANAGED_AGENT_ENABLED", True)
 
 
 def get_managed_agent_state(telegram_id: int) -> dict:

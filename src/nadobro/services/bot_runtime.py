@@ -67,6 +67,7 @@ from src.nadobro.services.user_service import (
 )
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, record_metric
+from src.nadobro.utils.env import env_bool, env_tristate
 from src.nadobro.services.execution_queue import enqueue_strategy
 from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
 from src.nadobro.services.strategy_registry import (
@@ -98,21 +99,17 @@ def _strategy_cycle_timeout_seconds() -> float | None:
 
 
 def _vol_use_multiprocess() -> bool:
-    raw = (os.environ.get("NADO_VOL_USE_MULTIPROCESS") or "false").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return env_bool("NADO_VOL_USE_MULTIPROCESS", False)
 
 
 def _strategy_use_multiprocess(strategy: str) -> bool:
     strategy_key = str(strategy or "").lower().strip()
-    specific = (os.environ.get(f"NADO_{strategy_key.upper()}_USE_MULTIPROCESS") or "").strip().lower()
-    if specific in ("1", "true", "yes", "on"):
-        return True
-    if specific in ("0", "false", "no", "off"):
-        return False
+    specific = env_tristate(f"NADO_{strategy_key.upper()}_USE_MULTIPROCESS")
+    if specific is not None:
+        return specific
     if strategy_key == "vol":
         return _vol_use_multiprocess()
-    raw = (os.environ.get("NADO_USE_MULTIPROCESS_STRATEGIES") or "false").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return env_bool("NADO_USE_MULTIPROCESS_STRATEGIES", False)
 
 
 def _vol_call_timeout_seconds() -> float:

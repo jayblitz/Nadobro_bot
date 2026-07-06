@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import os
 
+from src.nadobro.utils.env import env_bool
+
 
 def env_flag(name: str, default: bool = False) -> bool:
-    """Return a boolean env flag using the project's existing truthy style."""
-    raw = os.environ.get(name)
-    if raw is None or str(raw).strip() == "":
-        return bool(default)
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    """Return a boolean env flag using the project's existing truthy style.
+
+    Thin alias kept for backwards compatibility; delegates to the shared
+    :func:`src.nadobro.utils.env.env_bool` so truthy semantics live in one
+    place.
+    """
+    return env_bool(name, default)
 
 
 def time_limit_enabled() -> bool:

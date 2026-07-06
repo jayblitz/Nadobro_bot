@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 
 from src.nadobro.services import desk_store
 from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +37,7 @@ def set_bot_app(app) -> None:
 
 
 def desk_enabled() -> bool:
-    import os
-
-    return (os.environ.get("NADO_DESK_ENABLE", "true").strip().lower()
-            in ("1", "true", "yes", "on"))
+    return env_bool("NADO_DESK_ENABLE", True)
 
 
 # ---------------------------------------------------------------------------

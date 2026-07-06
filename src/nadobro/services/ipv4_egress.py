@@ -11,8 +11,9 @@ Set ``NADO_FORCE_IPV4=1`` to opt back into IPv4-only egress.
 from __future__ import annotations
 
 import logging
-import os
 import socket
+
+from src.nadobro.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +22,7 @@ _INSTALLED = False
 
 def force_ipv4_enabled() -> bool:
     # Default off: dual-stack (IPv4 + IPv6). Opt in with NADO_FORCE_IPV4=1.
-    raw = os.environ.get("NADO_FORCE_IPV4", "0").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return env_bool("NADO_FORCE_IPV4", False)
 
 
 def install_ipv4_only_resolver() -> bool:

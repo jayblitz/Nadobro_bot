@@ -2,6 +2,8 @@ import logging
 import os
 from typing import Optional
 
+from src.nadobro.utils.env import env_bool
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BOT_USERNAME = (os.environ.get("BOT_USERNAME") or "Nadbro_bot").lstrip("@")
@@ -277,7 +279,7 @@ def is_product_isolated_only(product: str, network: str = None, client=None) -> 
 
 EST_FEE_RATE = 0.0003
 EST_FILL_EFFICIENCY = 0.45
-DUAL_MODE_CARD_FLOW = os.environ.get("DUAL_MODE_CARD_FLOW", "true").strip().lower() in ("1", "true", "yes", "on")
+DUAL_MODE_CARD_FLOW = env_bool("DUAL_MODE_CARD_FLOW", True)
 
 NADO_BUILDER_ID_ENV = "NADO_BUILDER_ID"
 NADO_BUILDER_FEE_RATE_ENV = "NADO_BUILDER_FEE_RATE"
