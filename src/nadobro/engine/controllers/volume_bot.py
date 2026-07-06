@@ -68,6 +68,16 @@ class VolumeBotController(Controller):
         )
         self.maker_fee_rate = self._maker_fee_rate()
 
+        # Option 5 (maker-first, cross-on-timeout): if a post-only leg is still
+        # UNFILLED after this many seconds, cancel it and re-place the full size
+        # as a taker MARKET order to guarantee the fill. 0 disables (pure maker).
+        # NB: do NOT use ``... or 60`` — an explicit 0 is falsy and must survive.
+        _cross_raw = self.cfg("vol_cross_after_seconds", 60)
+        try:
+            self.cross_after_seconds = max(0, int(float(_cross_raw if _cross_raw is not None else 60)))
+        except (TypeError, ValueError):
+            self.cross_after_seconds = 60
+
         self.session_volume_usd: Decimal = Decimal(0)
         self.session_realized_pnl_usd: Decimal = Decimal(0)
         self.cycles_completed = 0
@@ -85,6 +95,13 @@ class VolumeBotController(Controller):
         self.close_base_remaining = Decimal(0)
         self.last_order_digest = ""
         self.last_order_kind = ""
+        # Option 5 cross-on-timeout bookkeeping (per leg, reset each cycle).
+        self.buy_target_base = Decimal(0)
+        self.sell_target_base = Decimal(0)
+        self.buy_placed_ts = 0.0
+        self.sell_placed_ts = 0.0
+        self.buy_crossed = False
+        self.sell_crossed = False
 
     def _maker_fee_rate(self) -> Decimal:
         """Return positive maker fee cost as a fraction; rebates count as 0 cost."""
@@ -103,6 +120,23 @@ class VolumeBotController(Controller):
         self.completed = True
         self.stop_reason = reason
         self._set_stopped()
+
+    def _effectively_full(self, filled: Decimal, target: Decimal) -> bool:
+        """True when ``filled`` covers ``target`` within one venue lot.
+
+        A taker MARKET fill (the Option-5 cross path) — and a post-only maker
+        whose requested size was not lot-aligned — is rounded DOWN to the lot by
+        the venue, so an exact ``filled >= target`` test would misread a
+        venue-completed fill as partial and either strand the just-bought base
+        (buy) or drop the round-trip's volume/PnL and leave dust (sell). This
+        mirrors the adapter's own FILLED rule (nado.py: ``unfilled <= lot``)."""
+        if filled >= target:
+            return True
+        try:
+            lot = _dec(self.adapter.lot_size(self.trading_pair))
+        except Exception:  # noqa: BLE001 - degrade to exact compare if lot unknown
+            lot = Decimal(0)
+        return lot > 0 and (target - filled) <= lot
 
     async def _maker_buy_price(self) -> Decimal:
         try:
@@ -154,16 +188,17 @@ class VolumeBotController(Controller):
         self,
         side: TradeType,
         amount_base: Decimal,
-        price: Decimal,
+        price: Optional[Decimal],
         *,
         kind: str,
         position_action: PositionAction = PositionAction.OPEN,
+        execution_strategy: ExecutionStrategy = ExecutionStrategy.LIMIT_MAKER,
     ) -> tuple[bool, Optional[OrderExecutor]]:
         cfg = OrderExecutorConfig(
             self.trading_pair,
             side,
             amount_base,
-            ExecutionStrategy.LIMIT_MAKER,
+            execution_strategy,
             price=price,
             leverage=1,
             position_action=position_action,
@@ -175,13 +210,49 @@ class VolumeBotController(Controller):
             adapter=self.adapter,
             inventory=self.inventory,
         )
+        # MARKET crosses carry no price; size the risk request off live mid.
+        if price is not None and price > 0:
+            notional = amount_base * price
+        else:
+            notional = amount_base * await self.adapter.mid_price(self.trading_pair)
         ok = await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=amount_base * price)
+            ex, ExecutorRequest(order_amount_quote=notional)
         )
         if ok and ex.order is not None:
             self.last_order_digest = ex.order.id
             self.last_order_kind = kind
         return ok, ex if ok else None
+
+    async def _cross_to_taker(
+        self,
+        ex: OrderExecutor,
+        side: TradeType,
+        target_base: Decimal,
+        position_action: PositionAction,
+    ) -> Optional[OrderExecutor]:
+        """Cancel a timed-out post-only maker and, IF it is still unfilled,
+        re-place the full size as a taker MARKET order to guarantee the fill.
+
+        Returns the new market executor, or ``None`` when a fill landed at/before
+        the cancel (the caller then falls through to the normal terminal handling
+        instead of crossing — so a maker that filled right as we cancel can never
+        be double-placed as a second market order)."""
+        await self.orchestrator.stop(ex.id)
+        order = getattr(ex, "order", None)
+        filled = _dec(getattr(order, "filled_base", 0) or 0) if order is not None else Decimal(0)
+        if filled > 0:
+            return None
+        if target_base <= 0:
+            return None
+        ok, new_ex = await self._spawn_order(
+            side,
+            target_base,
+            None,
+            kind="cross",
+            position_action=position_action,
+            execution_strategy=ExecutionStrategy.MARKET,
+        )
+        return new_ex if ok else None
 
     async def _start_buy_cycle(self) -> bool:
         buy_price = await self._maker_buy_price()
@@ -202,6 +273,9 @@ class VolumeBotController(Controller):
             self.entry_price = Decimal(0)
             self.entry_fill_ts = 0.0
             self.close_base_remaining = Decimal(0)
+            self.buy_target_base = amount_base
+            self.buy_placed_ts = time.time()
+            self.buy_crossed = False
             return True
         self._complete("buy_spawn_failed")
         return False
@@ -220,6 +294,9 @@ class VolumeBotController(Controller):
             self.sell_id = ex.id
             self.close_base_remaining = amount_base
             self.phase = "pending_close_fill"
+            self.sell_target_base = amount_base
+            self.sell_placed_ts = time.time()
+            self.sell_crossed = False
             return True
         self._complete("sell_spawn_failed")
         return False
@@ -258,6 +335,24 @@ class VolumeBotController(Controller):
                 return
             self._sync_buy_progress(buy_ex)
             if not buy_ex.is_terminated:
+                # Option 5: the post-only buy is still resting. If it has been
+                # UNFILLED past the timeout, cross to a taker MARKET buy for the
+                # full size to guarantee the fill (once per cycle).
+                if (
+                    self.cross_after_seconds > 0
+                    and not self.buy_crossed
+                    and self.entry_base <= 0
+                    and self.buy_placed_ts > 0
+                    and (time.time() - self.buy_placed_ts) >= self.cross_after_seconds
+                ):
+                    self.buy_crossed = True
+                    new_ex = await self._cross_to_taker(
+                        buy_ex, TradeType.BUY, self.buy_target_base, PositionAction.OPEN
+                    )
+                    if new_ex is not None:
+                        self.buy_id = new_ex.id
+                    # Either way, let the next tick evaluate the outcome (the new
+                    # market order, or the maker fill that landed at cancel time).
                 return
             order = getattr(buy_ex, "order", None)
             if order is not None:
@@ -267,7 +362,7 @@ class VolumeBotController(Controller):
                 return
             filled_base = _dec(getattr(order, "filled_base", 0) or 0) if order is not None else Decimal(0)
             amount_base = _dec(getattr(order, "amount_base", 0) or 0) if order is not None else Decimal(0)
-            if order is None or filled_base < amount_base:
+            if order is None or not self._effectively_full(filled_base, amount_base):
                 self._complete("buy_not_fully_filled")
                 return
             self.session_volume_usd += self.entry_quote
@@ -282,6 +377,22 @@ class VolumeBotController(Controller):
                 return
             self._sync_sell_progress(sell_ex)
             if not sell_ex.is_terminated:
+                # Option 5: the post-only sell (close) is still resting. If it has
+                # been UNFILLED past the timeout, cross to a taker MARKET sell for
+                # the full size — guarantees the position is flattened (once/cycle).
+                if (
+                    self.cross_after_seconds > 0
+                    and not self.sell_crossed
+                    and self.close_base_remaining >= self.sell_target_base
+                    and self.sell_placed_ts > 0
+                    and (time.time() - self.sell_placed_ts) >= self.cross_after_seconds
+                ):
+                    self.sell_crossed = True
+                    new_ex = await self._cross_to_taker(
+                        sell_ex, TradeType.SELL, self.sell_target_base, PositionAction.CLOSE
+                    )
+                    if new_ex is not None:
+                        self.sell_id = new_ex.id
                 return
             order = getattr(sell_ex, "order", None)
             if order is None:
@@ -289,7 +400,7 @@ class VolumeBotController(Controller):
                 return
             self._sync_sell_progress(sell_ex)
             sold_base = _dec(getattr(order, "filled_base", 0) or 0)
-            if sold_base < self.entry_base:
+            if not self._effectively_full(sold_base, self.entry_base):
                 self._complete("sell_not_fully_filled")
                 return
             sell_quote = _dec(getattr(order, "filled_quote", 0) or 0)
