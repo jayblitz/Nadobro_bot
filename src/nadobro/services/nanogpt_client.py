@@ -9,6 +9,7 @@ from typing import Any
 
 from src.nadobro.services.provider_config import nanogpt_api_key, nanogpt_base_url as _configured_base_url
 from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
+from src.nadobro.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ def nanogpt_is_configured() -> bool:
 
 def nanogpt_base_url() -> str:
     raw = _configured_base_url()
-    if (os.environ.get("NANOGPT_USE_LEGACY_ENDPOINT") or "").strip().lower() in ("1", "true", "yes", "on"):
+    if env_bool("NANOGPT_USE_LEGACY_ENDPOINT", False):
         if raw.endswith("/v1"):
             return raw[: -len("/v1")] + "/v1legacy"
     return raw

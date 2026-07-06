@@ -9,6 +9,7 @@ from typing import Any
 
 from src.nadobro.services.execution_queue import get_queue_diagnostics
 from src.nadobro.services.perf import snapshot as perf_snapshot
+from src.nadobro.utils.env import env_bool
 from src.nadobro.config import (
     get_dn_products,
     get_perp_products,
@@ -27,15 +28,15 @@ _CLI_TIMEOUT_SECONDS = float(os.environ.get("NADO_TOOLING_CLI_TIMEOUT_SECONDS", 
 
 
 def tooling_enabled() -> bool:
-    return (os.environ.get("NADO_TOOLING_ENABLE", "true").strip().lower() in ("1", "true", "yes", "on"))
+    return env_bool("NADO_TOOLING_ENABLE", True)
 
 
 def twap_preview_enabled() -> bool:
-    return (os.environ.get("NADO_TOOLING_ENABLE_TWAP_PREVIEW", "true").strip().lower() in ("1", "true", "yes", "on"))
+    return env_bool("NADO_TOOLING_ENABLE_TWAP_PREVIEW", True)
 
 
 def trigger_preview_enabled() -> bool:
-    return (os.environ.get("NADO_TOOLING_ENABLE_TRIGGER_PREVIEW", "true").strip().lower() in ("1", "true", "yes", "on"))
+    return env_bool("NADO_TOOLING_ENABLE_TRIGGER_PREVIEW", True)
 
 
 def _network_to_data_env(network: str) -> str:

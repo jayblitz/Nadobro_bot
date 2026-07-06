@@ -323,7 +323,6 @@ def fmt_positions(positions, prices=None, mode_label: str | None = None):
         else:
             liq_str = "—"
 
-        lines.append(f"{side_emoji} *{escape_md(side)}* {escape_md(pname)}")
         lines.append(
             f"{_loc('Size')}: *{escape_md(f'{amount:.4f}')} {escape_md(base)}* \\| "
             f"{_loc('uPnL')}: {pnl_emoji} *{escape_md(pnl_str)}*"

@@ -38,6 +38,7 @@ load_dotenv()
 
 from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
 from src.nadobro.services.crypto import validate_encryption_key
+from src.nadobro.utils.env import env_bool
 
 if not ENCRYPTION_KEY:
     logger.error(
@@ -84,10 +85,10 @@ def check_config():
         sys.exit(1)
 
     if data_env == "nadoMainnet":
-        require_linked = os.environ.get("NADO_REQUIRE_MAINNET_LINKED_SIGNER", "true").strip().lower() in ("1", "true", "yes", "on")
+        require_linked = env_bool("NADO_REQUIRE_MAINNET_LINKED_SIGNER", True)
         if require_linked:
             logger.info("Mainnet guardrail enabled: linked signer required for active wallet readiness checks.")
-    if (os.environ.get("NADO_TOOLING_ENABLE", "true").strip().lower() in ("1", "true", "yes", "on")):
+    if env_bool("NADO_TOOLING_ENABLE", True):
         logger.info("Nado tooling adapter enabled (SDK writes remain primary).")
 
     logger.info("Configuration check passed (transport=%s)", transport_mode)
@@ -373,7 +374,10 @@ async def run_bot():
     if strategy_scheduler_enabled():
         await get_scheduler().start(_load_state)
         logger.info("Central strategy scheduler started")
-    auto_restore = os.environ.get("NADO_AUTO_RESTORE_STRATEGIES", "true").strip().lower() in ("1", "true", "yes", "on")
+    # Redeploys must never re-arm strategies on their own (operator rule:
+    # resume is strictly user-initiated). Opt back in with
+    # NADO_AUTO_RESTORE_STRATEGIES=1 only for supervised environments.
+    auto_restore = env_bool("NADO_AUTO_RESTORE_STRATEGIES", False)
     restore_running_bots(enabled=auto_restore)
     try:
         from src.nadobro.services.feature_flags import time_limit_enabled
@@ -384,9 +388,7 @@ async def run_bot():
     except Exception as e:
         logger.warning("Could not schedule startup time-limit catch-up: %s", e)
 
-    portfolio_history_enabled = os.environ.get(
-        "NADO_PORTFOLIO_HISTORY", "true"
-    ).strip().lower() in ("1", "true", "yes", "on")
+    portfolio_history_enabled = env_bool("NADO_PORTFOLIO_HISTORY", True)
     if portfolio_history_enabled:
         try:
             from src.nadobro.services.portfolio_history_worker import (
@@ -397,7 +399,7 @@ async def run_bot():
         except Exception as e:
             logger.warning("Could not start portfolio history worker: %s", e)
 
-    copy_enabled = os.environ.get("NADO_COPY_TRADING", "true").strip().lower() in ("1", "true", "yes", "on")
+    copy_enabled = env_bool("NADO_COPY_TRADING", True)
     if copy_enabled:
         await start_copy_polling()
         logger.info("Copy trading polling started")

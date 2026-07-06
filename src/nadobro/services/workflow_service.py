@@ -28,6 +28,7 @@ from src.nadobro.services.nanogpt_client import (
 from src.nadobro.services.provider_config import n8n_base_url, n8n_configured, n8n_deploy_headers
 from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
 from src.nadobro.services.source_registry import record_source
+from src.nadobro.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -357,8 +358,7 @@ def _workflow_key(user_id: int, workflow_id: str) -> str:
 def _workflows_llm_enabled() -> bool:
     if nanogpt_is_configured():
         return True
-    flag = (os.environ.get("N8N_WORKFLOWS_USE_LLM") or "").strip().lower() in ("1", "true", "yes", "on")
-    if not flag:
+    if not env_bool("N8N_WORKFLOWS_USE_LLM", False):
         return False
     return bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("XAI_API_KEY"))
 
