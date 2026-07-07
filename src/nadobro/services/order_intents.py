@@ -241,3 +241,49 @@ def should_skip_duplicate(intent_id: str, max_age_seconds: int = 120) -> tuple[b
     if age <= max_age_seconds and existing.get("status") in ACTIVE_STATUSES:
         return True, existing
     return False, existing
+
+
+def link_digest_intent(
+    digest: str,
+    network: str,
+    *,
+    source: str,
+    strategy_session_id: int | None = None,
+) -> bool:
+    """Tag an order digest with its ``source`` (and session, when known) so the
+    venue match-sync (``nado_sync._back_link_intent``) attributes the fill
+    correctly instead of guessing by product + time window.
+
+    This is the close-order counterpart of the engine's placement link
+    (``DbTradeRecorder._link_intent``): every bot-originated order — opens AND
+    closes, manual AND strategy — must leave a digest tag, because an untagged
+    fill is indistinguishable from external venue activity. Best-effort: a link
+    failure must never fail the order that produced the digest.
+
+    Returns True when the row was written, False otherwise.
+    """
+    import json
+
+    from src.nadobro.db import execute
+
+    if not digest:
+        return False
+    value: dict[str, Any] = {"source": str(source or "manual")}
+    if strategy_session_id is not None:
+        value["strategy_session_id"] = int(strategy_session_id)
+    intent_id = f"close:{network}:{digest}"
+    try:
+        execute(
+            """
+            INSERT INTO order_intents (intent_id, status, value, order_digest, updated_at)
+            VALUES (%s, 'filled', %s::jsonb, %s, now())
+            ON CONFLICT (intent_id) DO UPDATE SET
+              order_digest = EXCLUDED.order_digest,
+              value = EXCLUDED.value,
+              updated_at = now()
+            """,
+            (intent_id, json.dumps(value), str(digest)),
+        )
+        return True
+    except Exception:  # noqa: BLE001 - best-effort digest tag
+        return False

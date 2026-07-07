@@ -57,6 +57,7 @@ class StrategyScheduler:
 
     async def _loop(self) -> None:
         from src.nadobro.services.execution_queue import enqueue_strategy
+        from src.nadobro.services.cadence import effective_interval_seconds
 
         while self._running:
             now = time.time()
@@ -66,13 +67,14 @@ class StrategyScheduler:
                     if not state.get("running"):
                         self.unregister(session.user_id, session.network)
                         continue
-                    interval = max(1, int(state.get("interval_seconds") or 60))
+                    strategy = str(state.get("strategy") or "").lower().strip()
+                    raw_interval = max(1, int(state.get("interval_seconds") or 60))
+                    interval = effective_interval_seconds(strategy, raw_interval)
                     last_run = float(state.get("last_run_ts") or 0)
                     if last_run > 0 and (now - last_run) < interval:
                         continue
                     if session.last_enqueued > 0 and (now - session.last_enqueued) < interval:
                         continue
-                    strategy = str(state.get("strategy") or "").lower().strip()
                     bucket = int(now / max(1.0, _TICK_SECONDS))
                     enqueued = await enqueue_strategy(
                         {"telegram_id": session.user_id, "network": session.network, "strategy": strategy},

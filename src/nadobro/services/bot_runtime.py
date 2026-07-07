@@ -68,6 +68,7 @@ from src.nadobro.services.user_service import (
 from src.nadobro.services.async_utils import run_blocking
 from src.nadobro.services.perf import timed_metric, record_metric
 from src.nadobro.utils.env import env_bool, env_tristate
+from src.nadobro.services.cadence import FAST_CADENCE_STRATEGIES, effective_interval_seconds
 from src.nadobro.services.execution_queue import enqueue_strategy
 from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
 from src.nadobro.services.strategy_registry import (
@@ -1524,7 +1525,12 @@ def get_user_bot_status(telegram_id: int) -> dict:
     state = _load_state(telegram_id, network)
     global_pause_active = bool(is_trading_paused())
     last_run = _safe_last_run_ts(state.get("last_run_ts"))
-    interval = int(state.get("interval_seconds") or 60)
+    # Option 1: show the countdown against the effective cadence (fast for
+    # rgrid/mid) so the status card matches when the next cycle actually runs.
+    interval = effective_interval_seconds(
+        str(state.get("strategy") or "").lower().strip(),
+        int(state.get("interval_seconds") or 60),
+    )
     next_cycle_in = max(0, int(interval - (time.time() - last_run))) if last_run > 0 else 0
     other_running_networks: list[str] = []
     try:
@@ -1904,7 +1910,12 @@ async def _bot_loop(telegram_id: int, network: str):
             state = _load_state(telegram_id, network)
             if not state.get("running"):
                 break
-            interval = max(1, int(state.get("interval_seconds") or 60))
+            # Option 1: same effective cadence as the central scheduler, so the
+            # legacy per-user loop (scheduler disabled) also runs rgrid/mid fast.
+            _strat = str(state.get("strategy") or "").lower().strip()
+            interval = effective_interval_seconds(
+                _strat, max(1, int(state.get("interval_seconds") or 60))
+            )
             last_run = _safe_last_run_ts(state.get("last_run_ts"))
             now = time.time()
             # Avoid flooding the global strategy queue: only tick when the strategy interval has elapsed.
@@ -1941,7 +1952,14 @@ async def _bot_loop(telegram_id: int, network: str):
                 logger.error("Cycle failure for user %s: %s", telegram_id, cycle_error, exc_info=True)
                 state["last_error"] = str(cycle_error)
                 _save_state(telegram_id, network, state)
-            await asyncio.sleep(RUNTIME_TICK_SECONDS)
+            # Option 1: only the accelerated strategies (rgrid/mid) cap the poll
+            # sleep to their effective interval so they actually tick fast in this
+            # legacy path too; every other strategy keeps the exact original poll
+            # tick (no cadence change outside rgrid/mid).
+            if _strat in FAST_CADENCE_STRATEGIES:
+                await asyncio.sleep(max(0.5, min(float(RUNTIME_TICK_SECONDS), float(interval))))
+            else:
+                await asyncio.sleep(RUNTIME_TICK_SECONDS)
     except asyncio.CancelledError:
         logger.info("Strategy loop cancelled for user %s", telegram_id)
     finally:
@@ -2692,7 +2710,10 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         return True, None
 
     last_run = _safe_last_run_ts(state.get("last_run_ts"))
-    interval = int(state.get("interval_seconds") or 60)
+    # Option 1: honour the per-strategy effective cadence (fast for rgrid/mid).
+    # This in-cycle guard would otherwise skip every accelerated cycle back to
+    # the raw 60s interval and silently defeat the faster scheduler cadence.
+    interval = effective_interval_seconds(strategy, int(state.get("interval_seconds") or 60))
     if last_run > 0 and time.time() - last_run < interval:
         return True, "skipped_interval"
 
@@ -2811,18 +2832,43 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     if not client:
         raise RuntimeError("Wallet client unavailable")
 
-    with timed_metric("runtime.market_price.fetch"):
-        if strategy == "vol":
-            try:
-                mp = await asyncio.wait_for(
-                    run_blocking(client.get_market_price, product_id),
-                    timeout=_vol_call_timeout_seconds(),
-                )
-            except asyncio.TimeoutError:
-                raise RuntimeError("VOL market price call timed out")
-        else:
-            mp = await run_blocking(client.get_market_price, product_id)
-    mid = float(mp.get("mid") or 0.0)
+    # Option 7: overlap the two independent per-cycle reads (mid + open orders)
+    # so cycle latency is the slower of the two, not their sum. Engine strategies
+    # always take both paths and never early-return between the reads, so they
+    # gather; the legacy directional path stays sequential because its
+    # session-PnL rail can return before open orders are ever needed.
+    async def _fetch_mid() -> float:
+        with timed_metric("runtime.market_price.fetch"):
+            if strategy == "vol":
+                try:
+                    _mp = await asyncio.wait_for(
+                        run_blocking(client.get_market_price, product_id),
+                        timeout=_vol_call_timeout_seconds(),
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError("VOL market price call timed out")
+            else:
+                _mp = await run_blocking(client.get_market_price, product_id)
+        return float(_mp.get("mid") or 0.0)
+
+    async def _fetch_open_orders():
+        with timed_metric("runtime.open_orders.fetch"):
+            if strategy == "vol":
+                try:
+                    return await asyncio.wait_for(
+                        run_blocking(client.get_open_orders, product_id),
+                        timeout=_vol_call_timeout_seconds(),
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError("VOL open-orders call timed out")
+            return await run_blocking(client.get_open_orders, product_id)
+
+    _engine_cycle = strategy in ("grid", "rgrid", "dgrid", "mid", "dn", "vol")
+    open_orders = None
+    if _engine_cycle:
+        mid, open_orders = await asyncio.gather(_fetch_mid(), _fetch_open_orders())
+    else:
+        mid = await _fetch_mid()
     if mid <= 0:
         raise RuntimeError("Could not fetch market price")
 
@@ -2866,17 +2912,11 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         if rail is not None:
             return rail
 
-    with timed_metric("runtime.open_orders.fetch"):
-        if strategy == "vol":
-            try:
-                open_orders = await asyncio.wait_for(
-                    run_blocking(client.get_open_orders, product_id),
-                    timeout=_vol_call_timeout_seconds(),
-                )
-            except asyncio.TimeoutError:
-                raise RuntimeError("VOL open-orders call timed out")
-        else:
-            open_orders = await run_blocking(client.get_open_orders, product_id)
+    # Engine strategies already fetched this concurrently with mid above; the
+    # legacy path fetches it here, only after its session-PnL rail may have
+    # returned (so a rail exit never pays for an unused open-orders read).
+    if open_orders is None:
+        open_orders = await _fetch_open_orders()
 
     from src.nadobro.services.engine_runtime import (
         ENGINE_MAPPED_STRATEGIES, engine_v2_enabled, run_engine_cycle,
