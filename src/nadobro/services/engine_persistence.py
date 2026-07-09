@@ -306,13 +306,22 @@ class DbTradeRecorder:
         strategy, user_id, network = parsed
 
         session_id = self._resolve_session_id(strategy, user_id, network)
+        source = "strategy"
         if session_id is None:
-            # Engine running outside a tracked session (e.g. manual desk use).
-            # Nothing to attribute the fill to; skip rather than orphan a row.
             # Resolved per fill (indexed lookup) rather than cached, so a new run
             # reusing the same controller_id never misattributes to a stale,
             # already-finalized session.
-            return
+            if strategy != "desk":
+                # Engine running outside a tracked session: nothing to
+                # attribute the fill to; skip rather than orphan a row.
+                return
+            # Desk plans drive the engine WITHOUT a strategy session — they are
+            # user-initiated trades and belong on the History surface. Record
+            # them as MANUAL so the venue match enriches this row (digest +
+            # product already known here) and round-trip pairing picks it up;
+            # skipping them left desk fills to sync in as unattributable
+            # product_id=0 rows invisible to History (prod, 2026-07-09).
+            source = "manual"
 
         base = abs(_dec(amount_base))
         px = _dec(price)
@@ -352,12 +361,13 @@ class DbTradeRecorder:
             "fill_fee": str(trading_fee),
             "builder_fee": str(builder_fee),
             "status": "filled",
-            "source": "strategy",
-            "strategy_session_id": int(session_id),
+            "source": source,
             "is_taker": bool(is_taker),
             "created_at": when,
             "filled_at": when,
         }
+        if session_id is not None:
+            data["strategy_session_id"] = int(session_id)
         if order_id:
             data["order_digest"] = str(order_id)
             # Idempotency: if venue-sync already recorded this fill authoritatively
@@ -383,12 +393,45 @@ class DbTradeRecorder:
             data["realized_pnl"] = str(_dec(realized_pnl))
         insert_trade(data, network=network)
 
+        if session_id is None:
+            # Desk volume counts toward the user's volume counters + referral
+            # stats (update_trade_stats feeds record_referred_volume). Platform
+            # -placed trades never reach this path, so they stay excluded —
+            # that split is deliberate product policy.
+            try:
+                from src.nadobro.services.user_service import update_trade_stats
+
+                update_trade_stats(
+                    int(user_id), float(notional),
+                    increment_trade_count=True, network=network,
+                )
+            except Exception:  # noqa: BLE001 - counters must never break a fill
+                _recorder_logger.warning(
+                    "desk fill stats not updated user=%s — volume/referral "
+                    "counters will undercount", user_id, exc_info=True,
+                )
+
         # Link the order digest to this session in ``order_intents`` so the
         # venue match-sync (nado_sync._write_matches) back-links the
         # authoritative per-match ``realized_pnl_x18`` to the session and
         # enriches this row instead of writing an untagged duplicate.
         if order_id:
-            self._link_intent(str(order_id), int(session_id), network)
+            if session_id is not None:
+                self._link_intent(str(order_id), int(session_id), network)
+            else:
+                # Sessionless desk fill: tag the digest manual (+ product) so
+                # the venue match stays attributable even if the row above is
+                # ever lost — mirrors the manual close paths.
+                try:
+                    from src.nadobro.services.order_intents import link_digest_intent
+
+                    link_digest_intent(
+                        str(order_id), network, source="manual",
+                        product_id=int(data.get("product_id") or 0) or None,
+                        product_name=str(data.get("product_name") or "") or None,
+                    )
+                except Exception:  # noqa: BLE001 - tag is best-effort; the row is primary
+                    pass
 
     def link_placement(self, controller_id: str, order_id: Optional[str]) -> None:
         """Link a freshly-PLACED order digest to its live session BEFORE any fill.

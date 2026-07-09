@@ -708,22 +708,61 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         # for the same digest — execute_market_order and the engine recorder both
         # wrote one carrying the real product_id. This keeps text-to-trade fills OUT
         # of the product_id=0 bucket that History (get_paired_trades) excludes.
+        inherited_session: int | None = None
+        _prior_row_checked = False
         if int(product_id or 0) == 0 and digest:
+            _prior_row_checked = True
             try:
                 _tr = query_one(
-                    f"SELECT product_id, product_name FROM {table} "
+                    f"SELECT product_id, product_name, strategy_session_id FROM {table} "
                     f"WHERE order_digest = %s AND COALESCE(product_id, 0) <> 0 "
                     f"ORDER BY id ASC LIMIT 1",
                     (digest,),
                 )
-                if _tr and _tr.get("product_id"):
-                    product_id = int(_tr["product_id"])
-                    if not recovered_pname and _tr.get("product_name"):
-                        recovered_pname = str(_tr["product_name"])
+                if _tr:
+                    if _tr.get("product_id"):
+                        product_id = int(_tr["product_id"])
+                        if not recovered_pname and _tr.get("product_name"):
+                            recovered_pname = str(_tr["product_name"])
+                    if _tr.get("strategy_session_id"):
+                        inherited_session = int(_tr["strategy_session_id"])
             # policy: degrade-ok(prior-trades product lookup best-effort; session-product fallback still runs)
             except Exception:  # noqa: BLE001 - recovery is best-effort
                 pass
-        session_id, source, intent_found = _back_link_intent(digest, network)
+        session_id, source, intent_found, intent_pid, intent_pname = _back_link_intent(digest, network)
+        if int(product_id or 0) == 0 and intent_pid:
+            # Close tags carry the product (link_digest_intent): the only
+            # product source for an instantly-filled close that never rested
+            # in open_orders and has no product-carrying recorder row.
+            product_id = int(intent_pid)
+            if not recovered_pname and intent_pname:
+                recovered_pname = intent_pname
+        if session_id is None and not intent_found and digest and not _prior_row_checked:
+            # Lazy variant of the prior-row lookup above for fills whose
+            # product resolved earlier: only consulted when the intent row is
+            # missing, so the common (tagged) path costs no extra query.
+            try:
+                _tr = query_one(
+                    f"SELECT strategy_session_id FROM {table} "
+                    f"WHERE order_digest = %s AND strategy_session_id IS NOT NULL "
+                    f"ORDER BY id ASC LIMIT 1",
+                    (digest,),
+                )
+                if _tr and _tr.get("strategy_session_id"):
+                    inherited_session = int(_tr["strategy_session_id"])
+            # policy: degrade-ok(session-inherit lookup best-effort; fill stays unattributed, window fallback still runs)
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                pass
+        if session_id is None and not intent_found and inherited_session is not None:
+            # No intent row at all (best-effort link lost), but the bot's own
+            # recorder row for this digest knows the session. Inherit it and
+            # label the fill 'strategy' so the session rollup counts it —
+            # otherwise a session flatten orphans as manual/unattributed and
+            # its close volume/fees/PnL silently vanish from Performance
+            # (prod session #115, 2026-07-09).
+            session_id = inherited_session
+            source = "strategy"
+            intent_found = True
         if session_id is None and not intent_found:
             # Digest back-link missed (NO order_intents row for this fill).
             # Recover attribution by product + time window so the match still
@@ -944,8 +983,11 @@ def _maybe_increment_session_win_loss(session_id: int | None, pnl_x18: str) -> N
         logger.debug("session win/loss increment failed session=%s", session_id, exc_info=True)
 
 
-def _back_link_intent(digest: str, network: str) -> tuple[int | None, str, bool]:
-    """Resolve ``(strategy_session_id, source, intent_found)`` from order_intents.
+def _back_link_intent(
+    digest: str, network: str
+) -> tuple[int | None, str, bool, int | None, str | None]:
+    """Resolve ``(strategy_session_id, source, intent_found, product_id,
+    product_name)`` from order_intents.
 
     Strategies, the engine adapter, and the close paths write to
     ``order_intents`` with ``value`` JSONB carrying ``strategy_session_id``
@@ -966,7 +1008,7 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str, bool]
     testnet fill never links to a mainnet session (or vice-versa).
     """
     if not digest:
-        return None, "manual", False
+        return None, "manual", False, None, None
     try:
         intent = query_one(
             "SELECT value FROM order_intents WHERE order_digest = %s ORDER BY updated_at DESC NULLS LAST LIMIT 1",
@@ -974,9 +1016,9 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str, bool]
         )
     except Exception:
         logger.debug("intent back-link query failed digest=%s", digest, exc_info=True)
-        return None, "manual", False
+        return None, "manual", False, None, None
     if not intent:
-        return None, "manual", False
+        return None, "manual", False, None, None
     value = intent.get("value") or {}
     if isinstance(value, str):
         try:
@@ -986,7 +1028,7 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str, bool]
         except Exception:
             value = {}
     if not isinstance(value, dict):
-        return None, "manual", True
+        return None, "manual", True, None, None
     raw_session = value.get("strategy_session_id")
     session_id: int | None
     try:
@@ -994,6 +1036,14 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str, bool]
     except (TypeError, ValueError):
         session_id = None
     source = str(value.get("source") or "manual") or "manual"
+    # Product identity stored by link_digest_intent (close paths pass it): the
+    # only reliable product source for an instantly-filled close whose digest
+    # never rested in open_orders.
+    try:
+        intent_pid = int(value.get("product_id") or 0) or None
+    except (TypeError, ValueError):
+        intent_pid = None
+    intent_pname = str(value.get("product_name") or "").strip() or None
     if session_id is not None:
         try:
             session_row = query_one(
@@ -1009,8 +1059,8 @@ def _back_link_intent(digest: str, network: str) -> tuple[int | None, str, bool]
                 session_row.get("network") if session_row else None,
                 network,
             )
-            return None, source, True
-    return session_id, source, True
+            return None, source, True, intent_pid, intent_pname
+    return session_id, source, True, intent_pid, intent_pname
 
 
 def _resolve_session_by_window(

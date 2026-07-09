@@ -96,10 +96,12 @@ def _close_position_with_mocks(**close_kwargs):
     linked = []
     recorded = []
 
-    def _fake_link(digest, network, *, source, strategy_session_id=None):
+    def _fake_link(digest, network, *, source, strategy_session_id=None,
+                   product_id=None, product_name=None):
         linked.append({
             "digest": digest, "network": network,
             "source": source, "strategy_session_id": strategy_session_id,
+            "product_id": product_id, "product_name": product_name,
         })
         return True
 
@@ -136,6 +138,9 @@ def test_close_position_links_manual_close_digest():
     assert linked == [{
         "digest": "0xC1053", "network": "mainnet",
         "source": "manual", "strategy_session_id": None,
+        # Product travels with the tag so the instantly-filled close's venue
+        # match resolves out of the product_id=0 bucket History excludes.
+        "product_id": 2, "product_name": "BTC-PERP",
     }]
     # The synthetic close row carries the digest but keeps default source
     # ('manual', rollup-excluded) — the intent-tagged venue fill is the single
@@ -155,6 +160,7 @@ def test_close_position_links_session_close_digest():
     assert linked == [{
         "digest": "0xC1053", "network": "mainnet",
         "source": "dn", "strategy_session_id": 55,
+        "product_id": 2, "product_name": "BTC-PERP",
     }]
     _, kwargs = recorded[0]
     assert kwargs.get("order_digest") == "0xC1053"
