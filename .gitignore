@@ -63,7 +63,12 @@ relay/*.session
 relay/*.session-journal
 relay/.relay_auth_token_generated
 relay/.fly-bootstrap.env
-.claude/
+# Claude Code: machine-local state stays ignored, but the shared agent and
+# skill definitions are part of the repo (self-review loop).
+.claude/*
+!.claude/agents/
+!.claude/skills/
+!.claude/settings.json
 .DS_Store
 
 # Cursor MCP config may contain local Nado signer keys.
