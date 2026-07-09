@@ -157,21 +157,45 @@ def get_last_trade_for_rate_limit(telegram_id: int, network: str = "mainnet") ->
     )
 
 
-def find_open_trade(telegram_id: int, product_id: int, network: str = "mainnet") -> Optional[dict]:
+def find_open_trade(
+    telegram_id: int,
+    product_id: int,
+    network: str = "mainnet",
+    side: str | None = None,
+    ) -> Optional[dict]:
+    """Most recent open (not-yet-closed) row a MANUAL close should pair with.
+
+    Session-tagged fills are excluded: this matcher used to take the most
+    recent row regardless of source, so a manual close could grab a live
+    strategy session's fill, mark it closed, and stamp the venue's close
+    price/PnL onto it — corrupting that session's realized PnL and win/loss
+    counts (observed on prod 2026-07-09: four manual closes each stamped a
+    different session's fill). ``side`` narrows to the position side being
+    closed (a close ORDER's side is the opposite of the position's).
+    """
     table = _trades_table(network)
+    conds = [
+        "user_id = %s",
+        "product_id = %s",
+        "status IN ('filled', 'partially_filled')",
+        "COALESCE(open_trade_id, 0) = 0",
+        "order_type NOT ILIKE '%%close%%'",
+        "strategy_session_id IS NULL",
+    ]
+    params: list = [telegram_id, product_id]
+    if side:
+        conds.append("side = %s")
+        params.append(str(side))
+    where_sql = "\n          AND ".join(conds)
     return query_one(
         f"""
         SELECT *
         FROM {table}
-        WHERE user_id = %s
-          AND product_id = %s
-          AND status IN ('filled', 'partially_filled')
-          AND COALESCE(open_trade_id, 0) = 0
-          AND order_type NOT ILIKE '%%close%%'
+        WHERE {where_sql}
         ORDER BY COALESCE(filled_at, created_at) DESC
         LIMIT 1
         """,
-        (telegram_id, product_id),
+        tuple(params),
     )
 
 

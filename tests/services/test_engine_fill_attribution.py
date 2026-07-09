@@ -112,3 +112,71 @@ def test_recorder_resolves_dn_spot_leg_product_id():
     assert inserted[0]["product_id"] == 118
     assert inserted[0]["product_name"] == "WGOOGLX"
     assert inserted[0]["strategy_session_id"] == 90
+
+
+def test_recorder_records_sessionless_desk_fill_as_manual():
+    """Desk plans drive the engine WITHOUT a strategy session. Their fills are
+    user-initiated trades: record them as MANUAL (digest + product carried) so
+    the venue match enriches the row and History round-trips pair it — the old
+    skip left desk fills to sync in as unattributable product_id=0 rows
+    (prod 2026-07-09: text-to-trade desk orders invisible in History)."""
+    rec = DbTradeRecorder()
+    inserted: list = []
+    tagged: list = []
+    stats: list = []
+    with patch(
+        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        return_value=None,
+    ), patch(
+        "src.nadobro.services.engine_persistence._resolve_engine_fill_product",
+        return_value=(2, "BTC-PERP"),
+    ), patch(
+        "src.nadobro.models.database.insert_trade",
+        side_effect=lambda d, network=None: inserted.append(d) or 1,
+    ), patch(
+        "src.nadobro.services.order_intents.link_digest_intent",
+        side_effect=lambda *a, **k: tagged.append(k) or True,
+    ), patch("src.nadobro.db.query_one", return_value=None), patch(
+        "src.nadobro.services.user_service.update_trade_stats",
+        side_effect=lambda uid, vol, **k: stats.append((uid, vol)),
+    ):
+        rec.record(
+            "desk:42:mainnet", "BTC-PERP", TradeType.SELL,
+            "0.035", "63047.87775", "0.94927875", order_id="0xdesk",
+        )
+
+    assert len(inserted) == 1
+    data = inserted[0]
+    assert data["source"] == "manual"
+    assert "strategy_session_id" not in data
+    assert data["order_digest"] == "0xdesk"
+    assert data["side"] == "short"
+    assert data["product_id"] == 2
+    # Digest also tagged manual (+product) so the venue match stays
+    # attributable even if the recorder row is ever lost.
+    assert tagged and tagged[0].get("source") == "manual"
+    assert tagged[0].get("product_id") == 2
+    # Desk volume feeds the user volume counters -> referral stats
+    # (update_trade_stats calls record_referred_volume). Platform-placed
+    # trades never reach the recorder, so they stay excluded by design.
+    assert stats and stats[0][0] == 42
+    assert abs(stats[0][1] - 0.035 * 63047.87775) < 0.01
+
+
+def test_recorder_still_skips_sessionless_non_desk_fill():
+    """The stale-controller guard stays: a non-desk engine fill with no
+    running session must not orphan a row (misattribution protection)."""
+    rec = DbTradeRecorder()
+    inserted: list = []
+    with patch(
+        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        return_value=None,
+    ), patch(
+        "src.nadobro.models.database.insert_trade",
+        side_effect=lambda d, network=None: inserted.append(d) or 1,
+    ):
+        rec.record(
+            "rgrid:42:mainnet", "BTC-PERP", TradeType.BUY,
+            "0.01", "63000", "0.4", order_id="0xstale",
+        )
+    assert inserted == []

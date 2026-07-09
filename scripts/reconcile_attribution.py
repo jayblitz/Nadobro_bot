@@ -104,6 +104,24 @@ CHECKS: tuple[Check, ...] = (
         """,
     ),
     Check(
+        # A session-tagged engine fill must never acquire close stamps: that is
+        # the manual-close mis-pairing corruption (repaired on prod 2026-07-09;
+        # find_open_trade now excludes session fills — this guards the fix).
+        name="stamped_strategy_fills",
+        hard=True,
+        sql="""
+            SELECT t.id, t.user_id, t.product_name, t.side,
+                   t.strategy_session_id, t.close_price, t.pnl,
+                   COALESCE(t.closed_at, t.filled_at) AS ts
+            FROM {trades} t
+            WHERE COALESCE(t.closed_at, t.filled_at, t.created_at) >= now() - %(window)s::interval
+              AND t.strategy_session_id IS NOT NULL
+              AND t.order_type = 'match'
+              AND t.close_price IS NOT NULL
+            ORDER BY ts DESC
+        """,
+    ),
+    Check(
         name="session_rollup_mismatch",
         hard=True,
         sql="""

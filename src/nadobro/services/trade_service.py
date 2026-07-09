@@ -2131,7 +2131,12 @@ def _record_close_in_db(
         if open_trade_id:
             open_trade = get_trade_by_id(int(open_trade_id), network=selected_network)
         if not open_trade:
-            open_trade = find_open_trade(telegram_id, product_id, network=selected_network)
+            # ``side`` on this close row is the ORDER side; the open being
+            # closed sits on the opposite (position) side.
+            pos_side = "long" if str(side).lower() in ("short", "sell") else "short"
+            open_trade = find_open_trade(
+                telegram_id, product_id, network=selected_network, side=pos_side
+            )
         is_full_close = close_size >= pos_size
 
         if open_trade:
@@ -2461,6 +2466,8 @@ def close_position(
                         selected_network,
                         source=source,
                         strategy_session_id=strategy_session_id,
+                        product_id=product_id,
+                        product_name=get_product_name(product_id, network=selected_network),
                     )
                 # policy: degrade-ok(close link best-effort; close fill still records, attribution falls back)
                 except Exception:  # noqa: BLE001 - link is best-effort
@@ -2797,16 +2804,25 @@ def close_all_positions(
                                     str(close_digest), selected_network,
                                     source="strategy",
                                     strategy_session_id=int(strategy_session_id),
+                                    product_id=pid,
+                                    product_name=product_name,
                                 )
                             else:
                                 link_digest_intent(
                                     str(close_digest), selected_network, source="manual",
+                                    product_id=pid,
+                                    product_name=product_name,
                                 )
                         # policy: degrade-ok(close link best-effort; close fill still records, attribution falls back to window)
                         except Exception:  # noqa: BLE001 - link is best-effort
                             pass
                     close_fill_data = _resolve_fill_data(client, close_digest, selected_network) if close_digest else None
                     fill_price = (close_fill_data or {}).get("fill_price") or _get_post_fill_price(client, pid)
+                    # Pass the digest through: the recorder row is the venue
+                    # sync's fallback source for product AND session when the
+                    # order_intents write above was lost — without the digest
+                    # the synced close fill lands product_id=0/unattributed
+                    # (invisible to History, missing from the session rollup).
                     _record_close_in_db(
                         telegram_id,
                         pid,
@@ -2817,6 +2833,8 @@ def close_all_positions(
                         fill_price=fill_price,
                         network=selected_network,
                         fill_data=close_fill_data,
+                        order_digest=(str(close_digest) or None),
+                        strategy_session_id=(int(strategy_session_id) if strategy_session_id else None),
                     )
                 else:
                     errors.append(

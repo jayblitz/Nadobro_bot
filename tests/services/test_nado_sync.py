@@ -234,7 +234,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
                 return None                                   # digest gone
             if "NOT ILIKE" in sql:
                 return None                                   # no recorder row to enrich
-            if "SELECT product_id, product_name FROM trades_" in sql:
+            if "SELECT product_id, product_name, strategy_session_id FROM trades_" in sql:
                 return {"product_id": 9, "product_name": "SOL-PERP"}  # prior OWN row
             return None                                       # dedup / back-link / window
 
@@ -262,7 +262,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
             return None  # open_orders / prior-trade / recorder-row / dedup all miss
 
         execute_calls = []
-        with patch.object(nado_sync, "_back_link_intent", return_value=(90, "strategy", True)), \
+        with patch.object(nado_sync, "_back_link_intent", return_value=(90, "strategy", True, None, None)), \
              patch.object(nado_sync, "query_one", side_effect=_q), \
              patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
             nado_sync._write_matches(42, "mainnet", [{
@@ -285,7 +285,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         execute_calls = []
         window_calls = []
 
-        with patch.object(nado_sync, "_back_link_intent", return_value=(None, "manual", True)), \
+        with patch.object(nado_sync, "_back_link_intent", return_value=(None, "manual", True, None, None)), \
              patch.object(nado_sync, "_resolve_session_by_window",
                           side_effect=lambda *a, **k: window_calls.append(a) or 77), \
              patch.object(nado_sync, "query_one", return_value=None), \
@@ -309,7 +309,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         # leaving it 'manual' made the recovery self-defeating.
         execute_calls = []
 
-        with patch.object(nado_sync, "_back_link_intent", return_value=(None, "manual", False)), \
+        with patch.object(nado_sync, "_back_link_intent", return_value=(None, "manual", False, None, None)), \
              patch.object(nado_sync, "_resolve_session_by_window", return_value=77), \
              patch.object(nado_sync, "query_one", return_value=None), \
              patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
@@ -346,7 +346,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         rows = [intent_row, session_row]
 
         with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
-            sid, src, found = nado_sync._back_link_intent("0xfeed", "testnet")
+            sid, src, found, _pid, _pname = nado_sync._back_link_intent("0xfeed", "testnet")
 
         assert sid is None
         assert src == "bro"
@@ -358,7 +358,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         rows = [intent_row, session_row]
 
         with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
-            sid, src, found = nado_sync._back_link_intent("0xfeed", "mainnet")
+            sid, src, found, _pid, _pname = nado_sync._back_link_intent("0xfeed", "mainnet")
 
         assert sid == 7
         assert src == "bro"
@@ -408,14 +408,14 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         }
         rows = [intent_row, {"network": "testnet"}]
         with patch.object(nado_sync, "query_one", side_effect=lambda *a, **k: rows.pop(0) if rows else None):
-            session_id, source, found = nado_sync._back_link_intent("0xdeadbeef", "testnet")
+            session_id, source, found, _pid, _pname = nado_sync._back_link_intent("0xdeadbeef", "testnet")
         assert session_id == 99
         assert source == "dgrid"
         assert found is True
 
     def test_back_link_intent_defaults_to_manual_when_lookup_empty(self):
         with patch.object(nado_sync, "query_one", return_value=None):
-            session_id, source, found = nado_sync._back_link_intent("0xabc", "testnet")
+            session_id, source, found, _pid, _pname = nado_sync._back_link_intent("0xabc", "testnet")
         assert session_id is None
         assert source == "manual"
         assert found is False  # truly untagged — window fallback may recover it
@@ -570,7 +570,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             nado_sync,
             "_back_link_intent",
-            return_value=(7, "dgrid", True),
+            return_value=(7, "dgrid", True, None, None),
         ):
             nado_sync._write_matches(
                 42,
@@ -589,3 +589,79 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
             )
         win_updates = [c for c in execute_calls if "win_count" in str(c[0])]
         assert win_updates
+
+
+class AttributionRegression20260709Tests(unittest.TestCase):
+    """Guardrails for the 2026-07-09 prod attribution audit.
+
+    Root causes: (a) a session flatten whose order_intents write was lost
+    orphaned as manual/unattributed (session #115 lost its close volume), and
+    (b) bot close fills landed product_id=0 (invisible to History's round-trip
+    pairing) because nothing carried the product for instantly-filled closes.
+    """
+
+    def _dispatch(self, handlers):
+        def _q(sql, *params):
+            for key, resp in handlers:
+                if key in sql:
+                    return resp
+            return None
+        return _q
+
+    def test_write_matches_inherits_session_from_recorder_close_row_when_intent_missing(self):
+        execute_calls = []
+        handlers = [
+            ("WHERE submission_idx = %s", None),                 # dedup: new fill
+            ("FROM open_orders", None),                          # market close: gone
+            ("COALESCE(product_id, 0) <> 0 ", {                  # recorder close row
+                "product_id": 1, "product_name": "BTC",
+                "strategy_session_id": 115,
+            }),
+            ("FROM order_intents", None),                        # intent write was lost
+            ("NOT ILIKE", None),                                 # no enrichable row
+        ]
+        with patch.object(nado_sync, "query_one", side_effect=self._dispatch(handlers)), \
+             patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
+            inserted = nado_sync._write_matches(42, "mainnet", [{
+                "submission_idx": "77", "digest": "0xflatten",
+                "base_filled": str(to_x18("-0.00525")),
+                "quote_filled": str(to_x18("329.80")),
+                "fee": str(to_x18("0.14")),
+            }])
+
+        assert inserted == 1
+        insert_calls = [c for c in execute_calls if "INSERT INTO" in c[0]]
+        assert len(insert_calls) == 1
+        params = insert_calls[0][1]
+        assert params[1] == 1                 # product inherited, not ID:0
+        assert params[2] == "BTC"
+        assert params[16] == 115              # session inherited from recorder row
+        assert params[17] == "strategy"       # counted by the session rollup
+
+    def test_write_matches_resolves_product_from_intent_value(self):
+        execute_calls = []
+        handlers = [
+            ("WHERE submission_idx = %s", None),
+            ("FROM open_orders", None),
+            ("COALESCE(product_id, 0) <> 0 ", None),             # no recorder row
+            ("FROM order_intents", {"value": {
+                "source": "manual", "product_id": 2, "product_name": "BTC-PERP",
+            }}),
+            ("NOT ILIKE", None),
+        ]
+        with patch.object(nado_sync, "query_one", side_effect=self._dispatch(handlers)), \
+             patch.object(nado_sync, "execute", side_effect=lambda *a, **k: execute_calls.append(a)):
+            inserted = nado_sync._write_matches(42, "mainnet", [{
+                "submission_idx": "78", "digest": "0xmanualclose",
+                "base_filled": str(to_x18("0.035")),
+                "quote_filled": str(to_x18("-2200")),
+                "fee": str(to_x18("0.72")),
+            }])
+
+        assert inserted == 1
+        insert_calls = [c for c in execute_calls if "INSERT INTO" in c[0]]
+        params = insert_calls[0][1]
+        assert params[1] == 2                 # product recovered from the close tag
+        assert params[2] == "BTC-PERP"
+        assert params[16] is None             # manual close: no session
+        assert params[17] == "manual"

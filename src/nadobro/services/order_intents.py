@@ -249,6 +249,8 @@ def link_digest_intent(
     *,
     source: str,
     strategy_session_id: int | None = None,
+    product_id: int | None = None,
+    product_name: str | None = None,
 ) -> bool:
     """Tag an order digest with its ``source`` (and session, when known) so the
     venue match-sync (``nado_sync._back_link_intent``) attributes the fill
@@ -271,6 +273,14 @@ def link_digest_intent(
     value: dict[str, Any] = {"source": str(source or "manual")}
     if strategy_session_id is not None:
         value["strategy_session_id"] = int(strategy_session_id)
+    # Product identity travels with the tag: a market close fills instantly, so
+    # by sync time its digest is gone from open_orders and the venue match
+    # (which carries NO product_id) would land in the product_id=0 bucket that
+    # History's round-trip pairing excludes.
+    if product_id:
+        value["product_id"] = int(product_id)
+    if product_name:
+        value["product_name"] = str(product_name)
     intent_id = f"close:{network}:{digest}"
     try:
         execute(
@@ -286,4 +296,11 @@ def link_digest_intent(
         )
         return True
     except Exception:  # noqa: BLE001 - best-effort digest tag
+        # Still best-effort (never fail the order), but LOUD: a lost close tag
+        # is how a session flatten orphans as manual and drops out of the
+        # session's volume/fees/PnL (prod session #115, 2026-07-09).
+        logger.warning(
+            "close digest link failed digest=%s network=%s source=%s session=%s",
+            digest, network, source, strategy_session_id, exc_info=True,
+        )
         return False
