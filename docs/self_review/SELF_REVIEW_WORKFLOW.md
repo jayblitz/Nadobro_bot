@@ -55,6 +55,12 @@ Each item is an invariant the bot must satisfy. Status reflects the 2026-06-20
 audit. `[test]` = covered by `tests/engine/test_sltp_invariants.py`. Fix the
 Critical/High items first.
 
+Every open item has a ready-to-paste `/goal` prompt with a deterministic exit
+criterion in [`GOAL_LOOPS.md`](GOAL_LOOPS.md) — run them as goal loops instead
+of babysitting fix sessions. Recurring drift detection (nightly attribution
+reconciliation via `scripts/reconcile_attribution.py`, PR babysitting, the
+alpha-brief prototype) lives in [`SCHEDULED_LOOPS.md`](SCHEDULED_LOOPS.md).
+
 ### SL/TP (priority)
 - [x] **DN-RAIL** (Critical) — *FIXED 2026-06-20:* DN now gets a post-dispatch session SL/TP rail (`bot_runtime.py`, dn block) that flattens both legs via `close_delta_neutral_legs`. Tested in `tests/services/test_session_safety_rails.py`.
 - [x] **SLTP-GROSS** (High) — *FIXED 2026-06-20:* the snapshot exposes `session_pnl_net`/`session_pnl_pct_net` (gross minus fees) and the rail judges the stop on the net basis; displayed gross PnL unchanged. `live_session.py`, `bot_runtime.py`. Tested.

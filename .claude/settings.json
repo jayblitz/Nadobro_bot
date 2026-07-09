@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -m pytest -q)",
+      "Bash(.venv/bin/python -m mypy src/nadobro/engine)",
+      "Bash(bash scripts/self_review.sh)",
+      "Bash(bash scripts/self_review.sh --full)",
+      "Bash(PYTHON=.venv/bin/python bash scripts/self_review.sh)",
+      "Bash(PYTHON=.venv/bin/python bash scripts/self_review.sh --full)"
+    ]
+  }
+}
