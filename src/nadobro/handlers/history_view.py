@@ -61,8 +61,9 @@ def render_history_view(
         volume = _dec(trip.get("volume_usd"))
         hold = _hold_duration(trip.get("open_ts"), trip.get("close_ts"))
         margin = "iso" if bool(trip.get("isolated")) else "cross"
+        closed_at = _fmt_ts(trip.get("close_ts"))
         lines.extend([
-            f"{idx}. {b(pair)}  {side} · {margin}",
+            f"{idx}. {b(pair)}  {side} · {margin}" + (f" · {closed_at}" if closed_at else ""),
             f"    {_fmt_size(abs(size))} @ {money(open_px)} → {money(close_px)} · held {hold}",
             f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Fees -{money(abs(fees))} · "
             f"Funding {signed_money(-funding)} · Vol {money(volume)}",  # funding_paid > 0 is a cost
@@ -132,6 +133,13 @@ def _dec(value: Any) -> Decimal:
         return Decimal(str(value))
     except Exception:
         return Decimal("0")
+
+
+def _fmt_ts(value: Any) -> str:
+    """Compact close timestamp (UTC) so trades are identifiable at a glance."""
+    if not isinstance(value, datetime):
+        return ""
+    return f"{value:%b} {value.day}, {value:%H:%M}"
 
 
 def _hold_duration(open_ts: Any, close_ts: Any) -> str:

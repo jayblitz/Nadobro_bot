@@ -195,3 +195,25 @@ def test_compute_round_trips_reads_network_scoped_table():
     assert "trades_mainnet" not in captured[0]
     assert "trades_mainnet" in captured[1]
     assert "trades_testnet" not in captured[1]
+
+
+def test_round_trips_only_pair_complete_recording_era():
+    """History epoch guard: fills before 2026-07-09 have provable holes
+    (unrecorded desk fills, ~500 product_id=0 legs), so FIFO pairings crossing
+    that era fabricate multi-day holds — prod showed a Jul 3 short "closed" by
+    a Jul 8 buy as a 4d13h trip that never existed."""
+    from unittest.mock import patch as _patch
+
+    from src.nadobro.services import trade_service as _ts
+
+    captured = {}
+
+    def _qa(sql, params):
+        captured["sql"], captured["params"] = sql, params
+        return []
+
+    with _patch("src.nadobro.db.query_all", side_effect=_qa):
+        _ts.compute_round_trips(42, "mainnet", limit=10)
+
+    assert ">= %s::timestamptz" in captured["sql"]
+    assert str(captured["params"][1]).startswith("2026-07-09")
