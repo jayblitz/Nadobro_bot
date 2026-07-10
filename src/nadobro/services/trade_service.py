@@ -3093,6 +3093,15 @@ def compute_round_trips(
     """
     from src.nadobro.db import query_all as _query_all
 
+    def _history_epoch() -> str:
+        # Override with NADO_HISTORY_EPOCH (ISO timestamp) if pre-fix rows are
+        # ever repaired enough to extend the window backwards.
+        import os
+
+        from src.nadobro.services.provider_config import clean_env_value
+
+        return clean_env_value(os.environ.get("NADO_HISTORY_EPOCH")) or "2026-07-09T00:00:00+00:00"
+
     table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
     try:
         rows = _query_all(
@@ -3121,9 +3130,15 @@ def compute_round_trips(
               -- BTC with ETH, so they're excluded rather than shown WRONG. The
               -- recording fix (resolve product_id at insert) lands separately.
               AND COALESCE(product_id, 0) <> 0
+              -- History epoch: before 2026-07-09 the manual stream has PROVABLE
+              -- holes (desk fills unrecorded, ~500 unattributable product_id=0
+              -- legs), so FIFO pairings crossing that era fabricate multi-day
+              -- holds (an old lot whose real close is invisible gets "closed"
+              -- by a much later fill). Pair only the complete-recording era.
+              AND COALESCE(filled_at, created_at) >= %s::timestamptz
             ORDER BY COALESCE(filled_at, created_at) ASC, id ASC
             """,
-            (int(telegram_id),),
+            (int(telegram_id), _history_epoch()),
         )
     except Exception:
         logger.warning("compute_round_trips failed user=%s", telegram_id, exc_info=True)
