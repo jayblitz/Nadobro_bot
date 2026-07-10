@@ -494,7 +494,7 @@ def test_portfolio_history_network_separation_roundtrip():
     ]
 
 
-def test_history_fill_price_repair_and_round_trip_pairing():
+def test_history_fill_price_repair_and_round_trip_pairing(monkeypatch):
     """0015 repair + compute_round_trips regression (the '$0.00 entry' bug).
 
     A fill stamped with submission_idx + x18 amounts but human price 0 must be
@@ -506,6 +506,11 @@ def test_history_fill_price_repair_and_round_trip_pairing():
 
     from src.nadobro.db import execute, init_db, query_one
     from src.nadobro.services.trade_service import compute_round_trips
+
+    # This test uses controlled fixture dates (June 2026); disable the
+    # production History epoch (the 2026-07-09 pre-remediation cutoff) so the
+    # pairer sees them. The cutoff is exercised in test_round_trips.py.
+    monkeypatch.setenv("NADO_HISTORY_EPOCH", "1970-01-01T00:00:00+00:00")
 
     uid = 777002
     x18 = 10 ** 18
@@ -548,7 +553,7 @@ def test_history_fill_price_repair_and_round_trip_pairing():
     assert 5 not in trips, "price-less fill without x18 must not render a $0 trip"
 
 
-def test_history_excludes_copy_and_strategy_includes_tp_close():
+def test_history_excludes_copy_and_strategy_includes_tp_close(monkeypatch):
     """History = normal trades only. A copy fill (source='copy') and a strategy
     fill (source='strategy' + session) never appear; a manual open + a TP-style
     close (source='manual', order_type='match', no session) DO pair into a
@@ -557,6 +562,10 @@ def test_history_excludes_copy_and_strategy_includes_tp_close():
 
     from src.nadobro.db import execute, init_db, query_one
     from src.nadobro.services.trade_service import compute_round_trips
+
+    # Controlled fixture dates (June 2026); disable the production History epoch
+    # (2026-07-09 pre-remediation cutoff) so the pairer sees them.
+    monkeypatch.setenv("NADO_HISTORY_EPOCH", "1970-01-01T00:00:00+00:00")
 
     uid = 880200
     t0 = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
