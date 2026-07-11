@@ -896,13 +896,22 @@ def map_strategy_config(
             # round-trip) and a hard cycle ceiling so the loop can't run away.
             "target_volume_usd": Decimal(str(_f(settings, "target_volume_usd", 0.0))),
             "max_cycles": int(max(1, _f(settings, "vol_max_cycles", 100))),
-            # Buy rests at/inside the book; sell uses this as the minimum edge
-            # above entry after positive maker-fee coverage.
-            "vol_maker_offset_bp": _f(settings, "vol_maker_offset_bp", 5.0),
-            "vol_min_edge_bp": _f(settings, "vol_min_edge_bp", _f(settings, "vol_maker_offset_bp", 5.0)),
-            # Follow the price: requote the resting buy once mid runs this many
-            # bp beyond the initial maker gap (0 disables the chase).
-            "vol_reprice_bp": _f(settings, "vol_reprice_bp", 20.0),
+            # v3 quoting: passive distance below the touch for the buy
+            # (0 = join/improve the best bid — the v2 5bp-under-mid default
+            # rested BELOW the best bid on tight books and stalled for hours).
+            "vol_buy_offset_bp": _f(settings, "vol_buy_offset_bp", 0.0),
+            # Bounded round-trip cost in bp of notional (replaces the v2
+            # forced-profit sell floor that made cycles impossible in a flat
+            # or falling market). The session SL rail stays the hard backstop.
+            "vol_max_cycle_loss_bp": _f(settings, "vol_max_cycle_loss_bp", 20.0),
+            # Requote cadence for BOTH legs: unfilled after this many seconds
+            # → cancel and re-place at the fresh touch (0 disables).
+            "vol_requote_seconds": _f(settings, "vol_requote_seconds", 20.0),
+            # Maker-first deadline: a leg unfilled this long is finished with
+            # a marketable LIMIT priced vol_cross_slippage_bp through the
+            # touch (still price-bounded; fills as taker). 0 = pure maker.
+            "vol_cross_after_seconds": _f(settings, "vol_cross_after_seconds", 75.0),
+            "vol_cross_slippage_bp": _f(settings, "vol_cross_slippage_bp", 15.0),
         }
     # grid / rgrid / dgrid family.
     #
@@ -1168,6 +1177,26 @@ def map_risk_limits(
             max_open_executors=6,
             max_single_order_quote=Decimal(str(per_order_cap)),
             max_position_size_quote=Decimal(str(per_order_cap)),
+        )
+    # Volume bot sizes off session_margin_usd (same key order as its config
+    # branch). The generic grid fallback below reads cycle_notional_usd /
+    # notional_usd — keys vol never sets — so EVERY vol session got $100 caps:
+    # a configured $500 margin failed its first buy spawn outright, and even
+    # the default $100 died on the close because the venue lot-rounds the buy
+    # fill UP (prod session 104: held $101.01, sell request > $100 cap →
+    # rejected 1.4s after the fill, spot stranded). Headroom covers lot
+    # rounding plus the touch moving between the two legs.
+    if str(strategy or "").lower() == "vol":
+        vol_margin = _f(
+            settings, "session_margin_usd",
+            _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0)),
+        )
+        vol_cap = max(10.0, vol_margin) * 1.25 + 25.0
+        return RiskLimits(
+            # Resting leg + its replacement mid-requote + one recovery spawn.
+            max_open_executors=3,
+            max_single_order_quote=Decimal(str(vol_cap)),
+            max_position_size_quote=Decimal(str(vol_cap)),
         )
     # Grid/MM family: caps must follow the DEPLOYED notional (margin x leverage),
     # or the Risk Engine rejects every leveraged order — the same "LIVE but 0

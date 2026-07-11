@@ -1,4 +1,4 @@
-"""Option 1: per-strategy effective cadence (fast for rgrid/mid only)."""
+"""Option 1: per-strategy effective cadence (fast for rgrid/mid/vol)."""
 from __future__ import annotations
 
 import pytest
@@ -17,13 +17,13 @@ def _clean_env(monkeypatch):
     yield
 
 
-@pytest.mark.parametrize("strategy", ["rgrid", "mid", "RGRID", " Mid "])
+@pytest.mark.parametrize("strategy", ["rgrid", "mid", "vol", "RGRID", " Mid ", " VOL "])
 def test_fast_strategies_capped_to_default_fast(strategy):
     # Default 60s configured -> capped to the 8s fast default.
     assert effective_interval_seconds(strategy, 60) == 8.0
 
 
-@pytest.mark.parametrize("strategy", ["grid", "dgrid", "vol", "dn", "", None])
+@pytest.mark.parametrize("strategy", ["grid", "dgrid", "dn", "", None])
 def test_other_strategies_unchanged(strategy):
     assert effective_interval_seconds(strategy, 60) == 60.0
     assert effective_interval_seconds(strategy, 5) == 5.0

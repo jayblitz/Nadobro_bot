@@ -193,23 +193,19 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "notional_usd": 100.0,
         "fixed_margin_usd": 100.0,
         "target_volume_usd": 10000.0,
-        "interval_seconds": 10,
+        # v3 ping-pong is timer-driven (requote/cross deadlines) — 5s ticks
+        # via the fast-cadence set; the old 10s doubled every reaction lag.
+        "interval_seconds": 5,
         "tp_pct": 1.0,
         "sl_pct": 1.0,
-        "vol_direction": "long",
-        "vol_signal_filter_enabled": True,
-        "vol_trade_exits_enabled": True,
-        "vol_direction_mode": "signal",
-        "vol_trade_tp_pct": 0.4,
-        "vol_trade_sl_pct": 0.2,
-        "vol_hold_min_seconds": 60,
-        "vol_hold_max_seconds": 540,
-        "vol_ema_len": 50,
-        "vol_rsi_len": 14,
-        "vol_rsi_long_max": 50.0,
-        "vol_rsi_short_min": 50.0,
-        "vol_max_spread_bp": 12.0,
-        "vol_min_edge_bp": 4.0,
+        # v3 quoting knobs (see engine_runtime.map_strategy_config vol branch
+        # for semantics). The signal-filter/direction keys retired in 2026-05
+        # (docs/volume_bot.md) were dropped from these defaults 2026-07-11.
+        "vol_buy_offset_bp": 0.0,
+        "vol_max_cycle_loss_bp": 20.0,
+        "vol_requote_seconds": 20.0,
+        "vol_cross_after_seconds": 75.0,
+        "vol_cross_slippage_bp": 15.0,
     },
     "bro": {
         "budget_usd": 500.0,
