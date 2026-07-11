@@ -1,10 +1,35 @@
-"""Volume Bot controller — spot-only single-order volume cycle.
+"""Volume Bot controller — fast spot maker ping-pong (v3).
 
-Each cycle places exactly one post-only buy, waits until that buy is fully
-filled, then places exactly one post-only sell for the filled base amount. The
-sell quote is anchored to the actual entry fill and raised enough to cover
-positive maker fees plus a small configured edge. Multiple cycles repeat until
-the target cumulative volume or max-cycle safety cap is reached.
+Objective: maximum executed spot volume per unit time at minimum cost, using
+limit orders on BOTH legs. Each cycle is one buy → sell round trip of
+``total_amount_quote``; cycles repeat until ``target_volume_usd`` (or the
+``max_cycles`` safety cap) is reached.
+
+The v2 controller produced almost no volume in production (max one fill per
+session): the buy rested 5bp below mid with a ~25bp requote dead band (56 min
+to fill $101 on KBTC), the sell was priced max(breakeven+edge, ask) with NO
+requote path at all (8.5 h stall on WNVDAX), and the whole machine was gated
+on per-cycle PROFIT — impossible in a flat/falling market. v3 replaces the
+pricing and recovery mechanics while keeping the proven cycle accounting:
+
+* Quotes are glued to the TOUCH: the buy joins the best bid (improving it by
+  one tick when the spread leaves room), the sell joins the best ask the same
+  way. Post-only, so every resting fill pays the maker fee (~1.8bp).
+* BOTH legs requote on a timer (``vol_requote_seconds``): unfilled after N
+  seconds → cancel and re-place at the fresh touch. No drift dead band.
+* Per-cycle PROFIT is no longer required. The sell floor is the cycle's
+  breakeven MINUS ``vol_max_cycle_loss_bp`` — a volume bot buys turnover with
+  a bounded, configurable cost per cycle. The session SL rail remains the
+  hard backstop.
+* Maker-first, cross-on-deadline: a leg still unfilled after
+  ``vol_cross_after_seconds`` (0 disables) is finished with a marketable
+  LIMIT priced ``vol_cross_slippage_bp`` through the touch — still a limit
+  order (bounded price), fills as taker. Restores the 8bf08d0 feature lost in
+  the d10e6f1 merge.
+* Market-hours aware: RWA spots (WNVDAX, WQQQX, …) have no live book when the
+  underlying market is closed. A missing best bid/ask puts the controller in
+  a ``market_closed`` wait state instead of quoting into a dead book (or
+  failing the spawn) — it resumes automatically when the book comes back.
 """
 from __future__ import annotations
 
@@ -14,6 +39,7 @@ from decimal import Decimal
 from typing import Optional
 
 from src.nadobro.engine.controllers.controller_base import Controller
+from src.nadobro.engine.executor_base import Executor
 from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExecutorConfig
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import ExecutionStrategy, PositionAction, TradeType, _dec
@@ -57,18 +83,28 @@ class VolumeBotController(Controller):
         self.total_amount_quote = _dec(self.cfg("total_amount_quote", "100"))
         self.target_volume_usd = _dec(self.cfg("target_volume_usd", "0"))
         self.max_cycles = max(1, int(self.cfg("max_cycles", 100) or 100))
-        self.buy_offset_bp = _non_negative_decimal(
-            self.cfg("vol_buy_offset_bp", self.cfg("vol_maker_offset_bp", 5.0))
+        # Passive distance BELOW the touch for the buy (0 = join/improve the
+        # best bid). The v2 default of 5bp-under-mid is retired: on a tight
+        # book that rests below the best bid and needs a down-move to fill.
+        self.buy_offset_bp = _non_negative_decimal(self.cfg("vol_buy_offset_bp", 0))
+        # Bounded cost of one round trip, in bp of the cycle notional,
+        # measured against the fee-inclusive breakeven. Replaces the v2
+        # forced-profit floor (breakeven + edge) that made cycles impossible
+        # to complete unless price rose past entry + 2×fees + edge.
+        self.max_cycle_loss_bp = _non_negative_decimal(
+            self.cfg("vol_max_cycle_loss_bp", 20.0)
         )
-        self.sell_edge_bp = _non_negative_decimal(
-            self.cfg(
-                "vol_sell_edge_bp",
-                self.cfg("vol_min_edge_bp", self.cfg("vol_maker_offset_bp", 5.0)),
-            )
+        # Requote cadence: a resting leg older than this is cancelled and
+        # re-placed at the fresh touch. Applies to BOTH legs (v2 chased only
+        # the buy, and only after a ~25bp adverse run).
+        self.requote_seconds = float(self.cfg("vol_requote_seconds", 20.0) or 0.0)
+        # Maker-first deadline: a leg unfilled this long is finished with a
+        # marketable LIMIT priced ``cross_slippage_bp`` through the touch.
+        # 0 disables crossing (pure maker mode).
+        self.cross_after_seconds = float(self.cfg("vol_cross_after_seconds", 75.0) or 0.0)
+        self.cross_slippage_bp = _non_negative_decimal(
+            self.cfg("vol_cross_slippage_bp", 15.0)
         )
-        # Follow the price: requote the resting buy once mid has run this many
-        # bp ABOVE the initial maker gap (0 disables the chase).
-        self.reprice_bp = _non_negative_decimal(self.cfg("vol_reprice_bp", 20.0))
         self.maker_fee_rate = self._maker_fee_rate()
 
         self.session_volume_usd: Decimal = Decimal(0)
@@ -93,16 +129,25 @@ class VolumeBotController(Controller):
         self.sold_quote = Decimal(0)
         self.sold_fee_quote = Decimal(0)
         self._accounted_sells: set = set()
+        # Leg timers. ``leg_started_ts`` is set once per leg per cycle (the
+        # cross deadline measures total leg age across requotes);
+        # ``leg_quoted_ts`` resets on every placement (the requote timer).
+        self.leg_started_ts = 0.0
+        self.leg_quoted_ts = 0.0
+        self.leg_crossed = False
         # Bounded recovery counters (reset each completed cycle).
         self.buy_retries = 0
-        self.buy_reprices = 0
         self.sell_attempts = 0
+        self.requotes = 0
+        self.crosses = 0
+        self.market_closed = False
+        self._market_closed_logged = False
         self.last_order_digest = ""
         self.last_order_kind = ""
 
     _MAX_BUY_RETRIES = 3
-    _MAX_BUY_REPRICES = 200
     _MAX_SELL_ATTEMPTS = 5
+    _MAX_REQUOTES_PER_CYCLE = 120
 
     def _maker_fee_rate(self) -> Decimal:
         """Return positive maker fee cost as a fraction; rebates count as 0 cost."""
@@ -122,51 +167,87 @@ class VolumeBotController(Controller):
         self.stop_reason = reason
         self._set_stopped()
 
-    async def _maker_buy_price(self) -> Decimal:
+    # -- book helpers -------------------------------------------------------
+
+    async def _touch(self) -> Optional[tuple[Decimal, Decimal]]:
+        """(best_bid, best_ask) when the book is LIVE, else None.
+
+        A missing side is the market-closed signal for RWA spots (the venue
+        keeps the product listed but the book empties outside market hours).
+        v2 fell back to mid_price here and quoted into the dead book all
+        night; v3 waits instead.
+        """
         try:
             book = await self.adapter.order_book(self.trading_pair)
             bid, ask = book.best_bid, book.best_ask
-            if bid is not None and ask is not None and bid > 0 and ask > 0:
-                px = (bid + ask) / Decimal(2) if bid < ask else bid
-            elif bid is not None and bid > 0:
-                px = bid
-            else:
-                px = await self.adapter.mid_price(self.trading_pair)
+        except Exception:  # noqa: BLE001 - a dead feed is handled as closed
+            return None
+        if bid is None or ask is None or bid <= 0 or ask <= 0:
+            return None
+        return bid, ask
+
+    def _tick(self) -> Decimal:
+        try:
+            tick = self.adapter.tick_size(self.trading_pair)
         except Exception:  # noqa: BLE001
-            px = await self.adapter.mid_price(self.trading_pair)
+            tick = Decimal(0)
+        return tick if tick > 0 else Decimal(0)
+
+    @staticmethod
+    def _snap(price: Decimal, tick: Decimal, *, up: bool) -> Decimal:
+        """Quantize to the venue tick, away from the aggressive side."""
+        if tick <= 0 or price <= 0:
+            return price
+        steps = price / tick
+        snapped = steps.to_integral_value(rounding="ROUND_CEILING" if up else "ROUND_FLOOR")
+        return snapped * tick
+
+    def _buy_price(self, bid: Decimal, ask: Decimal) -> Decimal:
+        """Join the best bid; improve it by one tick when the spread leaves
+        room (price-time priority: an improving quote is first in line)."""
+        tick = self._tick()
+        px = bid
+        if tick > 0 and (ask - bid) >= tick * 2:
+            px = bid + tick
         offset = self.buy_offset_bp / Decimal(10000)
         if offset > 0:
             px = px * (Decimal(1) - offset)
-        return px
+        return self._snap(px, tick, up=False)
 
-    async def _maker_sell_price(self) -> Decimal:
+    def _cycle_breakeven(self) -> Decimal:
+        """Sell price at which the round trip nets exactly zero after both
+        maker fees. Estimated from the entry when the buy fee is unknown."""
         if self.entry_base <= 0 or self.entry_quote <= 0:
-            return await self.adapter.mid_price(self.trading_pair)
-
-        estimated_buy_fee = self.entry_quote * self.maker_fee_rate
-        buy_fee = self.entry_fee_quote if self.entry_fee_quote != 0 else estimated_buy_fee
+            return Decimal(0)
+        buy_fee = self.entry_fee_quote if self.entry_fee_quote != 0 else (
+            self.entry_quote * self.maker_fee_rate
+        )
         gross_cost = self.entry_quote + buy_fee
-        fee_denominator = Decimal(1) - self.maker_fee_rate
-        fee_floor = gross_cost / (self.entry_base * fee_denominator)
-        edge_floor = self.entry_price * (Decimal(1) + (self.sell_edge_bp / Decimal(10000)))
-        px = max(fee_floor, edge_floor)
+        denominator = Decimal(1) - self.maker_fee_rate
+        return gross_cost / (self.entry_base * denominator)
 
-        try:
-            book = await self.adapter.order_book(self.trading_pair)
-            bid, ask = book.best_bid, book.best_ask
-            if ask is not None and ask > 0:
-                px = max(px, ask)
-            if bid is not None and bid > 0 and px <= bid:
-                px = bid * (Decimal(1) + Decimal("0.0001"))
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "volume_bot: sell price using fee/entry floor without live book guard; "
-                "post-only sell may reject or rest away from book pair=%s controller=%s",
-                self.trading_pair,
-                self.id,
-                exc_info=True,
-            )
-        return px
+    def _sell_floor(self) -> Decimal:
+        """Lowest acceptable sell price: breakeven minus the loss budget."""
+        breakeven = self._cycle_breakeven()
+        if breakeven <= 0:
+            return Decimal(0)
+        return breakeven * (Decimal(1) - self.max_cycle_loss_bp / Decimal(10000))
+
+    def _sell_price(self, bid: Decimal, ask: Decimal) -> Decimal:
+        """Join the best ask (improving by one tick when the spread leaves
+        room), clamped to the loss floor. The v2 rule px >= max(breakeven +
+        edge, ask) forced per-cycle profit and never quoted inside the
+        spread; v3 sells AT the market and bounds the downside instead."""
+        tick = self._tick()
+        px = ask
+        if tick > 0 and (ask - bid) >= tick * 2:
+            px = ask - tick
+        floor = self._sell_floor()
+        if floor > 0 and px < floor:
+            px = floor
+        return self._snap(px, tick, up=True)
+
+    # -- order plumbing ------------------------------------------------------
 
     async def _spawn_order(
         self,
@@ -175,13 +256,14 @@ class VolumeBotController(Controller):
         price: Decimal,
         *,
         kind: str,
+        execution: ExecutionStrategy = ExecutionStrategy.LIMIT_MAKER,
         position_action: PositionAction = PositionAction.OPEN,
     ) -> tuple[bool, Optional[OrderExecutor]]:
         cfg = OrderExecutorConfig(
             self.trading_pair,
             side,
             amount_base,
-            ExecutionStrategy.LIMIT_MAKER,
+            execution,
             price=price,
             leverage=1,
             position_action=position_action,
@@ -201,8 +283,20 @@ class VolumeBotController(Controller):
             self.last_order_kind = kind
         return ok, ex if ok else None
 
+    def _mark_quoted(self, *, new_leg: bool) -> None:
+        now = time.time()
+        if new_leg:
+            self.leg_started_ts = now
+            self.leg_crossed = False
+        self.leg_quoted_ts = now
+
     async def _start_buy_cycle(self) -> bool:
-        buy_price = await self._maker_buy_price()
+        touch = await self._touch()
+        if touch is None:
+            self._enter_market_closed()
+            return False
+        self._exit_market_closed()
+        buy_price = self._buy_price(*touch)
         if buy_price <= 0:
             self._complete("invalid_buy_price")
             return False
@@ -214,6 +308,7 @@ class VolumeBotController(Controller):
             self.buy_id = ex.id
             self.sell_id = None
             self.phase = "pending_fill"
+            self._mark_quoted(new_leg=True)
             self.entry_base = Decimal(0)
             self.entry_quote = Decimal(0)
             self.entry_fee_quote = Decimal(0)
@@ -228,11 +323,50 @@ class VolumeBotController(Controller):
         self._complete("buy_spawn_failed")
         return False
 
+    async def _requote_buy(self, buy_ex: Executor) -> bool:
+        """Cancel the resting buy and re-place at the fresh touch. A partial
+        fill flips the cycle to the sell leg for what we actually hold."""
+        self.requotes += 1
+        await self.orchestrator.stop(buy_ex.id)  # type: ignore[attr-defined]
+        self._sync_buy_progress(buy_ex)
+        if self.entry_base > 0:
+            self.session_volume_usd += self.entry_quote
+            self.phase = "filled_wait_close"
+            await self._start_sell_cycle()
+            return True
+        touch = await self._touch()
+        if touch is None:
+            self._enter_market_closed()
+            return False
+        buy_price = self._buy_price(*touch)
+        if buy_price <= 0:
+            self._complete("invalid_buy_price")
+            return False
+        amount_base = self.total_amount_quote / buy_price
+        ok, ex = await self._spawn_order(TradeType.BUY, amount_base, buy_price, kind="buy")
+        if ok and ex is not None:
+            self.buy_id = ex.id
+            self._mark_quoted(new_leg=False)
+            return True
+        self._complete("buy_spawn_failed")
+        return False
+
     async def _start_sell_cycle(self, amount_base: Optional[Decimal] = None) -> bool:
-        sell_price = await self._maker_sell_price()
         amount = amount_base if amount_base is not None else (self.entry_base - self.sold_base)
         if amount <= 0:
             self._complete("sell_nothing_to_close")
+            return False
+        touch = await self._touch()
+        if touch is None:
+            # Holding inventory with a dead book: wait for the market to
+            # reopen rather than failing the leg (the RWA overnight case).
+            self._enter_market_closed()
+            self.close_base_remaining = amount
+            return False
+        self._exit_market_closed()
+        sell_price = self._sell_price(*touch)
+        if sell_price <= 0:
+            self._complete("invalid_sell_price")
             return False
         ok, ex = await self._spawn_order(
             TradeType.SELL,
@@ -244,10 +378,111 @@ class VolumeBotController(Controller):
         if ok and ex is not None:
             self.sell_id = ex.id
             self.close_base_remaining = amount
+            new_leg = self.phase != "pending_close_fill"
             self.phase = "pending_close_fill"
+            self._mark_quoted(new_leg=new_leg)
             return True
         self._complete("sell_spawn_failed")
         return False
+
+    async def _requote_sell(self, sell_ex: Executor) -> bool:
+        """Cancel the resting sell and re-place the remainder at the fresh
+        touch. v2 had no sell requote at all — one resting sell above a
+        falling market stalled the session forever (8.5 h in prod)."""
+        self.requotes += 1
+        await self.orchestrator.stop(sell_ex.id)  # type: ignore[attr-defined]
+        self._book_sell_fill(sell_ex)
+        remaining = self.entry_base - self.sold_base
+        if remaining <= 0:
+            self._finish_cycle_and_continue_marker = True
+            return True
+        return await self._start_sell_cycle(remaining)
+
+    async def _cross_leg(self, ex: Executor, side: TradeType) -> bool:
+        """Finish a stalled leg with a marketable LIMIT through the touch —
+        still a limit order (price-bounded), fills immediately as taker."""
+        touch = await self._touch()
+        if touch is None:
+            self._enter_market_closed()
+            return False
+        bid, ask = touch
+        self.crosses += 1
+        self.leg_crossed = True
+        await self.orchestrator.stop(ex.id)  # type: ignore[attr-defined]
+        slip = self.cross_slippage_bp / Decimal(10000)
+        tick = self._tick()
+        if side is TradeType.BUY:
+            self._sync_buy_progress(ex)
+            remaining_quote = self.total_amount_quote - self.entry_quote
+            if remaining_quote <= 0:
+                return True
+            px = self._snap(ask * (Decimal(1) + slip), tick, up=True)
+            amount = remaining_quote / px
+            ok, new_ex = await self._spawn_order(
+                TradeType.BUY, amount, px, kind="buy_cross",
+                execution=ExecutionStrategy.LIMIT,
+            )
+            if ok and new_ex is not None:
+                self.buy_id = new_ex.id
+                self.leg_quoted_ts = time.time()
+                return True
+            self._complete("buy_spawn_failed")
+            return False
+        self._book_sell_fill(ex)
+        remaining = self.entry_base - self.sold_base
+        if remaining <= 0:
+            self._finish_cycle_and_continue_marker = True
+            return True
+        px = bid * (Decimal(1) - slip)
+        floor = self._sell_floor()
+        if floor > 0 and px < floor:
+            # Crossing would exceed the per-cycle loss budget: keep resting at
+            # the floor instead (bounded loss beats unbounded, but never blow
+            # through the user's cost cap silently).
+            logger.warning(
+                "volume_bot: cross skipped — bid %s below loss floor %s; "
+                "sell keeps resting pair=%s controller=%s",
+                px, floor, self.trading_pair, self.id,
+            )
+            return await self._start_sell_cycle(remaining)
+        px = self._snap(px, tick, up=False)
+        ok, new_ex = await self._spawn_order(
+            TradeType.SELL, remaining, px, kind="sell_cross",
+            execution=ExecutionStrategy.LIMIT,
+            position_action=PositionAction.CLOSE,
+        )
+        if ok and new_ex is not None:
+            self.sell_id = new_ex.id
+            self.close_base_remaining = remaining
+            self.leg_quoted_ts = time.time()
+            return True
+        self._complete("sell_spawn_failed")
+        return False
+
+    # -- market-hours wait ----------------------------------------------------
+
+    def _enter_market_closed(self) -> None:
+        self.market_closed = True
+        if self.phase not in ("done",):
+            self.phase = "market_closed"
+        if not self._market_closed_logged:
+            self._market_closed_logged = True
+            logger.warning(
+                "volume_bot: no live book for %s (market closed?) — waiting, "
+                "no orders placed controller=%s",
+                self.trading_pair, self.id,
+            )
+
+    def _exit_market_closed(self) -> None:
+        if self.market_closed:
+            logger.info(
+                "volume_bot: book is live again for %s — resuming controller=%s",
+                self.trading_pair, self.id,
+            )
+        self.market_closed = False
+        self._market_closed_logged = False
+
+    # -- fill accounting -------------------------------------------------------
 
     def _sell_remainder_placeable(self, remaining: Decimal) -> bool:
         """A residue below the venue lot / min-notional cannot be re-sold."""
@@ -261,44 +496,6 @@ class VolumeBotController(Controller):
         if min_notional > 0 and self.entry_price > 0 and remaining * self.entry_price < min_notional:
             return False
         return True
-
-    async def _maybe_chase_buy(self, buy_ex: object) -> None:
-        """Follow the price: when mid runs away ABOVE the resting maker buy,
-        cancel it and requote (selling any partial fill first). A resting buy
-        that price falls INTO simply fills, so only upward drift is chased."""
-        if self.reprice_bp <= 0:
-            return
-        order = getattr(buy_ex, "order", None)
-        resting = _dec(getattr(order, "price", 0) or 0) if order is not None else Decimal(0)
-        if resting <= 0:
-            return
-        try:
-            mid = await self.adapter.mid_price(self.trading_pair)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "volume_bot: mid unavailable — cannot follow price this tick; "
-                "buy keeps resting at %s pair=%s controller=%s",
-                resting, self.trading_pair, self.id,
-            )
-            return
-        if mid <= 0:
-            return
-        drift = (mid - resting) / mid
-        if drift <= (self.buy_offset_bp + self.reprice_bp) / Decimal(10000):
-            return
-        self.buy_reprices += 1
-        await self.orchestrator.stop(buy_ex.id)  # type: ignore[attr-defined]
-        self._sync_buy_progress(buy_ex)
-        if self.entry_base > 0:
-            # Part of the chased buy filled — round-trip it before requoting.
-            self.session_volume_usd += self.entry_quote
-            self.phase = "filled_wait_close"
-            await self._start_sell_cycle()
-            return
-        if self.buy_reprices >= self._MAX_BUY_REPRICES:
-            self._complete("buy_chase_exhausted")
-            return
-        await self._start_buy_cycle()
 
     def _sync_buy_progress(self, buy_ex: object) -> None:
         order = getattr(buy_ex, "order", None)
@@ -314,17 +511,35 @@ class VolumeBotController(Controller):
         if self.entry_fill_ts <= 0:
             self.entry_fill_ts = time.time()
 
-    def _sync_sell_progress(self, sell_ex: object) -> None:
-        order = getattr(sell_ex, "order", None)
+    def _merge_buy_fill(self, buy_ex: object) -> None:
+        """Accumulate a cross-order buy fill ON TOP of the maker portion (the
+        maker executor was already folded into entry_* before the cross)."""
+        order = getattr(buy_ex, "order", None)
         if order is None:
             return
-        sold_base = _dec(getattr(order, "filled_base", 0) or 0)
-        self.close_base_remaining = max(
-            Decimal(0), self.entry_base - self.sold_base - sold_base
-        )
+        filled_base = _dec(getattr(order, "filled_base", 0) or 0)
+        if filled_base <= 0:
+            return
+        self.entry_base += filled_base
+        self.entry_quote += _dec(getattr(order, "filled_quote", 0) or 0)
+        self.entry_fee_quote += _dec(getattr(order, "fee_quote", 0) or 0)
+        self.entry_price = self.entry_quote / self.entry_base if self.entry_base > 0 else Decimal(0)
+        if self.entry_fill_ts <= 0:
+            self.entry_fill_ts = time.time()
+
+    def _book_sell_fill(self, sell_ex: object) -> None:
+        """Book a sell executor's fill exactly once."""
+        order = getattr(sell_ex, "order", None)
+        sid = str(getattr(sell_ex, "id", "") or "")
+        if order is not None and sid and sid not in self._accounted_sells:
+            self._accounted_sells.add(sid)
+            self.sold_base += _dec(getattr(order, "filled_base", 0) or 0)
+            self.sold_quote += _dec(getattr(order, "filled_quote", 0) or 0)
+            self.sold_fee_quote += _dec(getattr(order, "fee_quote", 0) or 0)
+        self.close_base_remaining = max(Decimal(0), self.entry_base - self.sold_base)
 
     def _finish_cycle(self) -> None:
-        """Book the completed round trip and decide: stop or start the next."""
+        """Book the completed round trip and reset per-cycle state."""
         self.session_volume_usd += self.sold_quote
         self.session_realized_pnl_usd += (
             self.sold_quote - self.entry_quote - self.entry_fee_quote - self.sold_fee_quote
@@ -334,6 +549,25 @@ class VolumeBotController(Controller):
         self.buy_retries = 0
         self.sell_attempts = 0
 
+    # Set by requote/cross paths when the remainder went to zero mid-transition
+    # (the fill landed between our cancel and the re-place).
+    _finish_cycle_and_continue_marker = False
+
+    async def _after_cycle(self) -> None:
+        self._finish_cycle()
+        self.sell_id = None
+        self.phase = "cycle_gap"
+        if self.target_volume_usd <= 0:
+            self._complete("round_trip_complete")
+        elif self._target_reached():
+            self._complete("target_volume_hit")
+        elif self.cycles_completed >= self.max_cycles:
+            self._complete("max_cycles")
+        else:
+            await self._start_buy_cycle()
+
+    # -- lifecycle --------------------------------------------------------------
+
     async def on_start(self) -> None:
         await self._start_buy_cycle()
 
@@ -341,14 +575,54 @@ class VolumeBotController(Controller):
         for ex in self.my_executors(active_only=True):
             await self.orchestrator.tick(ex.id)
 
+        if self._finish_cycle_and_continue_marker:
+            self._finish_cycle_and_continue_marker = False
+            await self._after_cycle()
+            return
+
+        if self.phase == "market_closed":
+            # No inventory → try to start a buy; inventory held → resume the
+            # sell. Both paths re-check the book and fall back to waiting.
+            if self.entry_base - self.sold_base > 0:
+                await self._start_sell_cycle(self.entry_base - self.sold_base)
+            else:
+                await self._start_buy_cycle()
+            return
+
+        now = time.time()
+
         if self.phase == "pending_fill" and self.buy_id is not None:
             buy_ex = self.orchestrator.get(self.buy_id)
             if buy_ex is None:
                 return
-            self._sync_buy_progress(buy_ex)
+            was_cross = self.last_order_kind == "buy_cross" and buy_ex.id == self.buy_id
             if not buy_ex.is_terminated:
-                await self._maybe_chase_buy(buy_ex)
+                if not was_cross:
+                    # Live partial visibility (metrics + market-closed sell
+                    # sizing). Cross orders merge at termination instead —
+                    # syncing them here would overwrite the maker portion.
+                    self._sync_buy_progress(buy_ex)
+                leg_age = now - self.leg_started_ts if self.leg_started_ts else 0.0
+                quote_age = now - self.leg_quoted_ts if self.leg_quoted_ts else 0.0
+                if (
+                    self.cross_after_seconds > 0
+                    and not self.leg_crossed
+                    and leg_age >= self.cross_after_seconds
+                ):
+                    await self._cross_leg(buy_ex, TradeType.BUY)
+                    return
+                if (
+                    self.requote_seconds > 0
+                    and not was_cross
+                    and quote_age >= self.requote_seconds
+                    and self.requotes < self._MAX_REQUOTES_PER_CYCLE
+                ):
+                    await self._requote_buy(buy_ex)
                 return
+            if was_cross:
+                self._merge_buy_fill(buy_ex)
+            else:
+                self._sync_buy_progress(buy_ex)
             if self.entry_base > 0:
                 # Fully or PARTIALLY filled then terminated: round-trip what we
                 # actually hold. Completing here without selling would strand
@@ -394,18 +668,33 @@ class VolumeBotController(Controller):
             sell_ex = self.orchestrator.get(self.sell_id)
             if sell_ex is None:
                 return
-            self._sync_sell_progress(sell_ex)
             if not sell_ex.is_terminated:
+                order = getattr(sell_ex, "order", None)
+                if order is not None:
+                    live_filled = _dec(getattr(order, "filled_base", 0) or 0)
+                    self.close_base_remaining = max(
+                        Decimal(0), self.entry_base - self.sold_base - live_filled
+                    )
+                leg_age = now - self.leg_started_ts if self.leg_started_ts else 0.0
+                quote_age = now - self.leg_quoted_ts if self.leg_quoted_ts else 0.0
+                was_cross = self.last_order_kind == "sell_cross"
+                if (
+                    self.cross_after_seconds > 0
+                    and not self.leg_crossed
+                    and leg_age >= self.cross_after_seconds
+                ):
+                    await self._cross_leg(sell_ex, TradeType.SELL)
+                    return
+                if (
+                    self.requote_seconds > 0
+                    and not was_cross
+                    and quote_age >= self.requote_seconds
+                    and self.requotes < self._MAX_REQUOTES_PER_CYCLE
+                ):
+                    await self._requote_sell(sell_ex)
+                    return
                 return
-            # Book each sell executor exactly once — a follow-up spawn raising
-            # mid-transition re-enters this branch on the next tick.
-            order = getattr(sell_ex, "order", None)
-            sid = str(getattr(sell_ex, "id", "") or "")
-            if order is not None and sid and sid not in self._accounted_sells:
-                self._accounted_sells.add(sid)
-                self.sold_base += _dec(getattr(order, "filled_base", 0) or 0)
-                self.sold_quote += _dec(getattr(order, "filled_quote", 0) or 0)
-                self.sold_fee_quote += _dec(getattr(order, "fee_quote", 0) or 0)
+            self._book_sell_fill(sell_ex)
             remaining = self.entry_base - self.sold_base
             if remaining > 0:
                 # Partial close: re-place the remainder unless it is venue dust
@@ -423,17 +712,7 @@ class VolumeBotController(Controller):
                     "pair=%s controller=%s",
                     remaining, self.sell_attempts, self.trading_pair, self.id,
                 )
-            self._finish_cycle()
-            self.sell_id = None
-            self.phase = "cycle_gap"
-            if self.target_volume_usd <= 0:
-                self._complete("round_trip_complete")
-            elif self._target_reached():
-                self._complete("target_volume_hit")
-            elif self.cycles_completed >= self.max_cycles:
-                self._complete("max_cycles")
-            else:
-                await self._start_buy_cycle()
+            await self._after_cycle()
 
     def volume_metrics(self) -> dict:
         volume_done = self.session_volume_usd
@@ -450,7 +729,11 @@ class VolumeBotController(Controller):
             "vol_entry_price": float(self.entry_price),
             "vol_entry_fill_ts": float(self.entry_fill_ts or 0.0),
             "vol_close_size": float(self.close_base_remaining),
-            "vol_buy_reprices": int(self.buy_reprices),
+            "vol_requotes": int(self.requotes),
+            "vol_crosses": int(self.crosses),
+            "vol_market_closed": bool(self.market_closed),
+            # Legacy metric names kept for the strategy card / status readers.
+            "vol_buy_reprices": int(self.requotes),
             "vol_last_order_digest": self.last_order_digest,
             "vol_last_order_kind": self.last_order_kind,
         }

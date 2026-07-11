@@ -17,7 +17,8 @@ automated strategies. PostgreSQL via psycopg2 raw SQL — no ORM. Entry point: `
   `PYTHON=.venv/bin/python bash scripts/self_review.sh` (`--full` adds the whole engine suite).
   Loop, audit agents, and triage protocol: `.claude/skills/self-review/SKILL.md` and
   `docs/self_review/SELF_REVIEW_WORKFLOW.md`.
-- Type-check (advisory, non-blocking): `.venv/bin/python -m mypy src/nadobro/engine`
+- Type-check (BLOCKING in CI — ci.yml runs it as a required job): `.venv/bin/python -m mypy src/nadobro/engine`.
+  `scripts/self_review.sh` fails on it too, so a green local gate matches CI.
 
 ## Layout (`src/nadobro/`)
 

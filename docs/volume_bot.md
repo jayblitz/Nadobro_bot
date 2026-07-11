@@ -1,144 +1,76 @@
-# Volume Bot (Spot)
+# Volume Bot (Spot) — v3
 
-Volume Bot is Nadobro's automated maker-volume strategy. It rotates a fixed USDT0 amount through a single Nado spot product with a `buy → wait → sell` loop, every order posted as `post_only` so the user only pays (or earns) the maker fee. The bot stops when the cumulative executed volume reaches the user's target or when realized session PnL hits the configured stop-loss.
-
-This document describes the canonical 2026-05 spec. The earlier perp / signal-filtered variant has been retired.
+Volume Bot is Nadobro's automated spot maker-volume strategy: a fast
+buy → sell ping-pong of a fixed USDT0 amount through one Nado spot product,
+**limit orders on both legs**, repeating until the cumulative executed volume
+reaches the user's target. v3 (2026-07) replaced the v2 mechanics after a
+production audit showed v2 had never completed a target (best session: $101
+of a $10,000 target; one sell rested unfilled 8.5 hours).
 
 ## At a glance
 
 | Property | Value |
 | --- | --- |
-| Markets | Nado spot products (KBTC, WETH, USDC, …) |
+| Markets | Nado spot products (KBTC, WETH, WNVDAX, …) |
 | Leverage | 1x (spot) |
-| Order type | `post_only` limit, both legs |
-| Direction | Round-trip buy → sell, one open position at a time |
-| Stop condition | Target volume hit, session SL hit, or manual stop |
-| Per-cycle notional | Session margin (single configurable value) |
+| Order type | post-only limit both legs; marketable LIMIT on the cross deadline |
+| Direction | Round-trip buy → sell, one cycle at a time |
+| Stop conditions | Target volume, max cycles, session SL rail, manual stop |
+| Maker fee (mainnet, measured) | ~1.8 bp per leg |
 
-Supported products are pulled live from `list_volume_spot_product_names()` in `src/nadobro/market_categories.py`.
+Implementation: `src/nadobro/engine/controllers/volume_bot.py` (engine v2
+controller — the legacy `src/nadobro/strategies/` module this doc used to
+reference is gone). Config mapping: `engine_runtime.map_strategy_config` /
+risk caps: `map_risk_limits` (dedicated `vol` branch sized off
+`session_margin_usd`).
 
-## The loop
+## The v3 loop
 
 ```text
-idle
-  ├─ place_buy   (post_only limit at the bid)
-  ├─ wait_buy_fill
-  ├─ wait_close_timer  (60s default hold between buy fill and sell post)
-  ├─ place_sell  (post_only limit at the ask)
-  ├─ wait_sell_fill
-  └─ session checks:
-       cumulative volume >= target_volume_usd  → stop (target_volume_hit)
-       realized PnL <= -margin * SL%           → stop (sl_hit)
-       otherwise                                → idle (next cycle)
+place buy   post-only AT the touch (join best bid; improve 1 tick if spread allows)
+  │   unfilled vol_requote_seconds (20s) → cancel, re-place at fresh touch
+  │   unfilled vol_cross_after_seconds (75s) → marketable LIMIT through the
+  │   touch by vol_cross_slippage_bp (15bp) — price-bounded, fills as taker
+  ▼
+buy filled → place sell   post-only AT the ask, same requote/cross treatment,
+  │   floored at breakeven − vol_max_cycle_loss_bp (20bp): a volume bot pays a
+  │   BOUNDED cost per cycle instead of demanding per-cycle profit
+  ▼
+sell filled → book volume (both legs) → next cycle | target hit → stop
 ```
 
-Every cycle pushes `2 × session_margin` of executed volume into the user's stats — once on the buy leg, once on the sell leg.
+No live book (best bid/ask missing — RWA spots outside US market hours) puts
+the controller in a `market_closed` wait state: no orders, no failure, resumes
+automatically when the book returns.
 
 ## Configuration
 
-Three knobs, exposed in the Volume strategy card under **Advanced** and in Telegram presets:
+User-facing (strategy card): **Session margin** (`session_margin_usd`, the
+per-cycle notional), **Stop loss %** (`sl_pct`, session-PnL rail), **Target
+volume** (`target_volume_usd`).
 
-### Session margin (USD)
-The per-cycle notional. Also the SL denominator. A `$500` session margin means each round-trip cycles $500 through the market, and a `0.5%` SL halts the bot at `-$2.50` of session realized PnL.
+Engine knobs (settings passthrough, sane defaults): `vol_buy_offset_bp` (0 =
+join the touch), `vol_max_cycle_loss_bp` (20), `vol_requote_seconds` (20),
+`vol_cross_after_seconds` (75, 0 = pure maker), `vol_cross_slippage_bp` (15),
+`vol_max_cycles` (100). Tick cadence: 5s (fast-cadence set).
 
-Stored as `state["session_margin_usd"]`. Mirrors into legacy `target_notional_usd` / `fixed_margin_usd` for backward-compat readers (copy-trade, preview cards from older builds).
+## Cost model
 
-Presets: `$100`, `$500`, `$1000`, plus `✍️ Custom Margin`.
+Target volume × maker fee is the floor cost (e.g. $10,000 × 1.8bp ≈ $1.80 per
+side that rests). Each crossed leg pays the taker fee instead, and each cycle
+may additionally cost up to `vol_max_cycle_loss_bp` of the cycle notional in
+adverse moves — bounded per cycle, with the session SL rail as the hard stop.
 
-### Stop loss %
-Applied to **session realized PnL**, not per-trade. The bot halts when `session_realized_pnl_usd ≤ -session_margin × SL%`.
+## What v3 fixed (2026-07 audit)
 
-Stored as `state["sl_pct"]`. Presets: `0.5%`, `1.0%`, `2.0%`, plus `✍️ Custom SL`.
-
-### Target volume (USD)
-Cumulative executed volume target across all cycles (buy + sell legs combined). The bot stops once `session_executed_volume_usd ≥ target_volume_usd`.
-
-Stored as `state["target_volume_usd"]`. Presets: `$10k`, `$25k`, `$100k`, plus `✍️ Custom Target`.
-
-## Pre-flight analytics card
-
-Before the user presses **Start**, the Volume dashboard shows:
-
-```text
-Market:           {ASSET} SPOT
-Session margin:   $500.00
-Stop loss:        0.50%
-Target volume:    $25,000.00
-
-Pre-flight analytics
-  Est. cycles to target: 25
-  Est. fees (maker 3.0bp): $7.50
-  Est. PnL if SL hits:    -$2.50
-  Slippage:               post-only (maker fills only)
-```
-
-Math used by `_build_strategy_preview_text` in `src/nadobro/handlers/callbacks.py`:
-
-```python
-est_cycles      = ceil(target_volume / (2 * session_margin))
-est_fees_usd    = target_volume * (maker_fee_bp / 10_000)
-est_pnl_at_sl   = -session_margin * (sl_pct / 100)
-slippage        = 0  # post-only orders fill at the maker price by construction
-```
-
-`maker_fee_bp` defaults to `EST_FEE_RATE × 10_000` from `src/nadobro/config.py` (3 bps as of writing) and can be overridden per-user via `vol_maker_fee_bp`. Slippage in the traditional sense is zero, but **drift risk** between the buy fill and the sell post is real and gets surfaced in the live statistics block (`vol_spread_bp`).
-
-## Live statistics
-
-After Start, the same card switches to a live view:
-
-```text
-Live statistics
-  Volume done:    $X,XXX / $25,000
-  Volume remaining: $X,XXX
-  Fees paid:      $X.XX
-  Realized PnL:   +/-$X.XX
-  Phase:          IDLE | PLACE_BUY | WAIT_BUY_FILL | WAIT_CLOSE_TIMER | PLACE_SELL | WAIT_SELL_FILL
-```
-
-`session_realized_pnl_usd`, `session_executed_volume_usd`, `vol_phase`, and `session_fees_usd` are updated by `_run_volume_spot_cycle` on every fill.
-
-## Stop conditions
-
-| Reason | Trigger | Result |
-| --- | --- | --- |
-| `target_volume_hit` | `volume_done_usd >= target_volume_usd` | Strategy stops cleanly, banner: `✅ Target volume reached`. |
-| `sl_hit` | `session_realized_pnl_usd <= -margin × SL%` | Strategy stops cleanly, banner: `🛑 SL hit`. Any open sell leg is force-closed via IOC. |
-| `user_stop` | User taps Stop in the strategy card | Same as SL cleanup. |
-| `insufficient_margin` | USDT0 balance < session_margin at cycle start | One-shot error, strategy stays running and retries next tick. |
-
-## What was retired in 2026-05
-
-- **Volume perp mode** — the Perp/Spot toggle, dual LONG/SHORT entry, per-asset MAX-leverage sizing.
-- **Signal-filter gating** — EMA, RSI, edge-bp, and regime-classifier checks that used to skip cycles ("VOL spot skipped entry: long signal filter did not confirm setup"). The new spec is deliberately dumb: every cycle attempts a maker buy.
-- **Take-profit %** — TP is no longer a Volume concept; target volume drives session end.
-- **LONG / SHORT direction** — round-trip buy → sell only.
-
-Operator-callable env flags for any of those features have been removed.
-
-## Code map
-
-| File | Role |
+| Audit ID | v2 defect |
 | --- | --- |
-| `src/nadobro/strategies/volume_bot.py` | `run_cycle`, `_run_volume_spot_cycle`, `_resolve_target_notional`, fill bookkeeping. |
-| `src/nadobro/handlers/keyboards.py` | `strategy_action_kb` for Volume (single Start button, no perp toggle), `_strategy_config_section_kb` (margin / SL / target presets + custom). |
-| `src/nadobro/handlers/callbacks.py` | `_build_strategy_preview_text` Volume branch (analytics card), input validator + limits for `session_margin_usd` / `sl_pct` / `target_volume_usd`. |
-| `src/nadobro/services/bot_runtime.py` | Start banner, cycle-zero alert, `_market_label_for_strategy` that returns `{PRODUCT} SPOT` for Volume. |
-| `src/nadobro/services/trade_service.py` | `execute_spot_limit_order` (post-only buys/sells). |
-| `src/nadobro/market_categories.py` | `list_volume_spot_product_names`, `normalize_volume_spot_symbol`. |
+| VOL-RISK-CAP | No `vol` branch in `map_risk_limits` → $100 caps for every session; lot-rounded closes rejected (prod: sell refused 1.4s after the buy fill, spot stranded) |
+| VOL-SELL-NO-CHASE | Sell leg had no requote/timeout at all (8.5h stall) |
+| VOL-SELL-PROFIT-FLOOR | Sell ≥ max(breakeven+edge, ask) demanded per-cycle profit |
+| VOL-BUY-DEAD-BAND | Buy at mid−5bp with ~25bp requote dead band (56-min fills) |
+| VOL-CROSS-REGRESSION | 8bf08d0 cross-on-timeout + tests lost in the d10e6f1 merge |
+| VOL-NO-MARKET-HOURS | Quoted into closed RWA books all night |
+| VOL-TICK-CADENCE | 10–20s reaction latency |
 
-## Worked example
-
-User picks `KBTC` on mainnet, sets margin `$500`, SL `0.5%`, target `$25,000`.
-
-- Estimated cycles: `25,000 / (2 × 500) = 25`.
-- Estimated fees at 3 bps maker: `25,000 × 0.0003 = $7.50`.
-- Estimated SL PnL: `-500 × 0.005 = -$2.50`.
-
-The bot starts, posts a maker buy at the KBTC bid for `$500 / bid` size, waits for it to fill, waits 60s, posts a maker sell at the ask, waits for it to fill, then loops. After roughly 25 successful round-trips, the bot stops with a target-volume notice. If the cumulative realized PnL drops to `-$2.50` first, the bot halts with an SL notice instead.
-
-## See also
-
-- [docs.nado.xyz/products](https://docs.nado.xyz/products) — Nado spot product list.
-- [docs.nado.xyz/fees-and-rebates](https://docs.nado.xyz/fees-and-rebates) — fee schedule.
-- [`docs/mm_strategy_design.md`](mm_strategy_design.md) — the perp market-making family that complements Volume.
+Guardrails: `tests/engine/controllers/test_volume_bot.py` (20 tests).

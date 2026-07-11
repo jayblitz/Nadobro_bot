@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import os
 
-# Strategies whose cadence Option 1 accelerates. Deliberately just these two
-# while the logic is under test — do NOT add grid/dgrid/vol/dn here.
-FAST_CADENCE_STRATEGIES = frozenset({"rgrid", "mid"})
+# Strategies whose cadence Option 1 accelerates. Grid/dgrid/dn stay on the
+# default cadence; vol joined 2026-07-11 — its v3 requote/cross deadlines are
+# timer-driven and a 20s tick made every reaction lag two buckets.
+FAST_CADENCE_STRATEGIES = frozenset({"rgrid", "mid", "vol"})
 
 
 def _env_float(name: str, default: float) -> float:
