@@ -39,6 +39,7 @@ from decimal import Decimal
 from typing import Optional
 
 from src.nadobro.engine.controllers.controller_base import Controller
+from src.nadobro.engine.executor_base import Executor
 from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExecutorConfig
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import ExecutionStrategy, PositionAction, TradeType, _dec
@@ -322,7 +323,7 @@ class VolumeBotController(Controller):
         self._complete("buy_spawn_failed")
         return False
 
-    async def _requote_buy(self, buy_ex: OrderExecutor) -> bool:
+    async def _requote_buy(self, buy_ex: Executor) -> bool:
         """Cancel the resting buy and re-place at the fresh touch. A partial
         fill flips the cycle to the sell leg for what we actually hold."""
         self.requotes += 1
@@ -384,7 +385,7 @@ class VolumeBotController(Controller):
         self._complete("sell_spawn_failed")
         return False
 
-    async def _requote_sell(self, sell_ex: OrderExecutor) -> bool:
+    async def _requote_sell(self, sell_ex: Executor) -> bool:
         """Cancel the resting sell and re-place the remainder at the fresh
         touch. v2 had no sell requote at all — one resting sell above a
         falling market stalled the session forever (8.5 h in prod)."""
@@ -397,7 +398,7 @@ class VolumeBotController(Controller):
             return True
         return await self._start_sell_cycle(remaining)
 
-    async def _cross_leg(self, ex: OrderExecutor, side: TradeType) -> bool:
+    async def _cross_leg(self, ex: Executor, side: TradeType) -> bool:
         """Finish a stalled leg with a marketable LIMIT through the touch —
         still a limit order (price-bounded), fills immediately as taker."""
         touch = await self._touch()
