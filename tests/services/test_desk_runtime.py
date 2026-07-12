@@ -20,7 +20,7 @@ install_test_stubs()
 import inspect
 
 from src.nadobro.engine.controllers import desk as desk_ctrl
-from src.nadobro.services import desk_runtime
+from src.nadobro.trading import desk_runtime
 
 
 def test_every_emitted_event_has_a_notification_template():
@@ -36,7 +36,7 @@ def test_every_emitted_event_has_a_notification_template():
 
 
 def test_spot_market_open_fails_open(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     def boom(**kw):
         raise RuntimeError("catalog down")
@@ -48,7 +48,7 @@ def test_spot_market_open_fails_open(monkeypatch):
 
 
 def test_spot_market_closed_detected(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     monkeypatch.setattr(pc, "get_spot_catalog", lambda **kw: {
         "spots": {"QQQX": {"trading_status": "halted"}}
@@ -58,7 +58,7 @@ def test_spot_market_closed_detected(monkeypatch):
 
 
 def test_spot_market_hours_flag(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     monkeypatch.setattr(pc, "get_spot_catalog", lambda **kw: {
         "spots": {"QQQX": {"trading_status": "live", "market_hours": {"is_open": False}}}
@@ -68,7 +68,7 @@ def test_spot_market_hours_flag(monkeypatch):
 
 
 def test_crypto_spot_with_no_hours_is_open(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     monkeypatch.setattr(pc, "get_spot_catalog", lambda **kw: {
         "spots": {"ETH": {"trading_status": "live"}}
@@ -114,7 +114,7 @@ def test_tick_starts_active_and_tears_down_stale(monkeypatch):
 
     monkeypatch.setattr(desk_runtime, "_ensure_session", fake_ensure)
     monkeypatch.setattr(desk_runtime, "_stop_session", fake_stop)
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.RUNTIME", FakeRuntime())
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.RUNTIME", FakeRuntime())
 
     asyncio.run(desk_runtime.tick_desk_runner())
 
@@ -215,7 +215,7 @@ def test_resume_env_flag_restores_legacy_resume(monkeypatch):
             ticked.append((uid, network, strat))
 
     monkeypatch.setattr(desk_runtime, "_ensure_session", fake_ensure)
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.RUNTIME", FakeRuntime())
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.RUNTIME", FakeRuntime())
 
     asyncio.run(desk_runtime.tick_desk_runner())
 
@@ -273,14 +273,14 @@ def test_failed_controller_is_rebuilt_not_ticked_dead(monkeypatch):
         start = AsyncMock()
 
     fake = FakeRuntime()
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.RUNTIME", fake)
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.build_adapter",
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.RUNTIME", fake)
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.build_adapter",
                         lambda *a, **k: object())
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.build_product_meta_from_catalog",
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.build_product_meta_from_catalog",
                         lambda *a, **k: {})
-    monkeypatch.setattr("src.nadobro.services.user_service.get_user_nado_client",
+    monkeypatch.setattr("src.nadobro.users.user_service.get_user_nado_client",
                         lambda *a, **k: object())
-    monkeypatch.setattr("src.nadobro.services.engine_persistence.DbInventoryRepository",
+    monkeypatch.setattr("src.nadobro.trading.engine_persistence.DbInventoryRepository",
                         lambda *a, **k: object())
 
     asyncio.run(desk_runtime._ensure_session(7, "mainnet"))

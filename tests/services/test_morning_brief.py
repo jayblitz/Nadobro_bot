@@ -3,8 +3,9 @@ import asyncio
 import pytest
 
 from src.nadobro.connectors.news import NewsItem
-from src.nadobro.services import market_snapshot, morning_brief, news_aggregator
-from src.nadobro.services.market_snapshot import SnapshotPayload, SnapshotRow
+from src.nadobro.market_data import market_snapshot, news_aggregator
+from src.nadobro.llm import morning_brief
+from src.nadobro.market_data.market_snapshot import SnapshotPayload, SnapshotRow
 
 
 @pytest.fixture(autouse=True)
@@ -94,7 +95,7 @@ def test_brief_renders_with_canned_grok_json(monkeypatch):
     def fake_chat_json(messages, schema=None, model=None):
         return canned, "grok"
 
-    import src.nadobro.services.bro_llm as bro_llm
+    import src.nadobro.llm.bro_llm as bro_llm
     monkeypatch.setattr(bro_llm, "chat_json", fake_chat_json)
 
     text, sources = asyncio.run(morning_brief.render_morning_brief(network="mainnet"))
@@ -130,7 +131,7 @@ def test_brief_handles_enum_network(monkeypatch):
     def fake_chat_json(messages, schema=None, model=None):
         return {"snapshot_lines": ["BTC: $1"], "news_drivers": [], "insight": "ok"}, "grok"
 
-    import src.nadobro.services.bro_llm as bro_llm
+    import src.nadobro.llm.bro_llm as bro_llm
     monkeypatch.setattr(bro_llm, "chat_json", fake_chat_json)
 
     # Before fix this raised: TypeError: Object of type FakeNetworkMode is not JSON serializable
@@ -149,7 +150,7 @@ def test_brief_falls_back_when_llm_fails(monkeypatch):
     def fake_chat_json(messages, schema=None, model=None):
         raise RuntimeError("no key")
 
-    import src.nadobro.services.bro_llm as bro_llm
+    import src.nadobro.llm.bro_llm as bro_llm
     monkeypatch.setattr(bro_llm, "chat_json", fake_chat_json)
 
     text, _ = asyncio.run(morning_brief.render_morning_brief(network="mainnet"))

@@ -9,7 +9,7 @@ them when the exact underlying_key match misses.
 """
 from __future__ import annotations
 
-import src.nadobro.services.product_catalog as pc
+import src.nadobro.venue.product_catalog as pc
 
 
 def _patch_catalog(monkeypatch):

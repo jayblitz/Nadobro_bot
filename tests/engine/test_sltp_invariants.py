@@ -26,11 +26,11 @@ from decimal import Decimal
 
 import pytest
 
-from src.nadobro.services.engine_runtime import (
+from src.nadobro.strategy.engine_runtime import (
     ENGINE_MAPPED_STRATEGIES,
     map_strategy_config,
 )
-from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+from src.nadobro.strategy.strategy_registry import effective_sl_tp_pct
 
 MID = Decimal("100")
 PRODUCT = "BTC-PERP"

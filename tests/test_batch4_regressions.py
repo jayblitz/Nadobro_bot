@@ -4,7 +4,7 @@ install_test_stubs()
 
 
 def test_update_trade_stats_uses_atomic_increment_sql(monkeypatch):
-    from src.nadobro.services import user_service
+    from src.nadobro.users import user_service
 
     captured = {}
     monkeypatch.setattr(user_service, "invalidate_user_cache", lambda _telegram_id: None)
@@ -25,7 +25,7 @@ def test_update_trade_stats_uses_atomic_increment_sql(monkeypatch):
 
 
 def test_copy_tpsl_refresh_cancels_only_tracked_digests(monkeypatch):
-    from src.nadobro.services import copy_service
+    from src.nadobro.trading import copy_service
     import src.nadobro.db as db
 
     cancelled = []

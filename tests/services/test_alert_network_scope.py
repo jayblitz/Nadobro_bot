@@ -12,7 +12,8 @@ import asyncio
 
 def test_build_alert_context_pins_positions_to_evaluation_network(monkeypatch):
     from src.nadobro.models import database as db_models
-    from src.nadobro.services import scheduler, user_service
+    from src.nadobro.runtime import scheduler
+    from src.nadobro.users import user_service
 
     pnl_alert = {
         "id": 1,

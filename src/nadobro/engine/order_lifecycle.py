@@ -37,10 +37,11 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional
 
+from src.nadobro.utils.env import env_float
 from src.nadobro.engine import order_tags
 from src.nadobro.engine.adapter.base import OrderState
 
-_TRUST_TTL_SECONDS = float(os.environ.get("NADO_WS_LIFECYCLE_TTL_SECONDS", "8"))
+_TRUST_TTL_SECONDS = env_float("NADO_WS_LIFECYCLE_TTL_SECONDS", 8.0)
 _MAX_ENTRIES = 8192
 
 _lock = threading.RLock()

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, AsyncIterator, Deque, Dict, List, Optional
 from src.nadobro.engine.executor_base import Executor, ExecutorFailed, TradeRecorder
 from src.nadobro.engine.risk import ExecutorRequest, RiskEngine
 from src.nadobro.engine.types import CloseType, RiskState
+from src.nadobro.utils.env import env_int
 
 if TYPE_CHECKING:
     from src.nadobro.engine.controllers.controller_base import Controller
@@ -27,10 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return max(1, int(os.environ.get(name, default)))
-    except (TypeError, ValueError):
-        return default
+    return max(1, env_int(name, default))
 
 
 # BUG-TICK-1 fix: a controller used to be marked FAILED (terminal, no recovery)

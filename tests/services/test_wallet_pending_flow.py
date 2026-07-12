@@ -8,7 +8,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.handlers import messages
-from src.nadobro.services.wallet_pending_flow import (
+from src.nadobro.users.wallet_pending_flow import (
     clear_wallet_pending_flow,
     load_wallet_pending_flow,
     persist_wallet_pending_flow,
@@ -24,7 +24,7 @@ class WalletPendingFlowTests(unittest.TestCase):
             from cryptography.fernet import Fernet
 
             os.environ["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
-            from src.nadobro.services import crypto
+            from src.nadobro.core import crypto
 
             crypto._fernet_instance = None  # drop any cached (key-less) instance
 

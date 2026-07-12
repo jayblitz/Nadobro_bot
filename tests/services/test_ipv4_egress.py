@@ -9,7 +9,7 @@ import pytest
 
 @pytest.fixture()
 def fresh_ipv4():
-    from src.nadobro.services import ipv4_egress
+    from src.nadobro.core import ipv4_egress
 
     importlib.reload(ipv4_egress)
     return ipv4_egress

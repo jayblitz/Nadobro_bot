@@ -54,7 +54,7 @@ def _schema():
 
 def test_db_inventory_condor_example_persists_and_reads_back():
     from src.nadobro.engine.types import TradeType
-    from src.nadobro.services.engine_persistence import DbInventoryRepository
+    from src.nadobro.trading.engine_persistence import DbInventoryRepository
 
     repo = DbInventoryRepository()
     uid, pair, cid = 9001, "SOL-USDC", "grid-x"
@@ -72,7 +72,7 @@ def test_db_inventory_condor_example_persists_and_reads_back():
 
 def test_controller_progress_roundtrip_and_clear():
     from decimal import Decimal
-    from src.nadobro.services.engine_persistence import (
+    from src.nadobro.trading.engine_persistence import (
         upsert_controller_progress, get_controller_progress, clear_controller_progress,
     )
 
@@ -105,7 +105,7 @@ def test_db_executor_store_persists_lifecycle():
 
     from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExecutorConfig
     from src.nadobro.engine.types import CloseType, ExecutionStrategy, TradeType
-    from src.nadobro.services.engine_persistence import DbExecutorStore
+    from src.nadobro.trading.engine_persistence import DbExecutorStore
 
     adapter = MockNadoAdapter(mid=Decimal(100))
     cfg = OrderExecutorConfig("SOL-USDC", TradeType.BUY, Decimal(1), ExecutionStrategy.MARKET)
@@ -125,7 +125,7 @@ def test_db_executor_store_persists_lifecycle():
 
 
 def test_db_kill_switch_persists_across_instances():
-    from src.nadobro.services.engine_persistence import DbKillSwitchStore
+    from src.nadobro.trading.engine_persistence import DbKillSwitchStore
 
     DbKillSwitchStore().engage("drawdown breach")
     fresh = DbKillSwitchStore()
@@ -141,7 +141,7 @@ def test_count_engine_orders_scoped_per_run():
     past run of the same strategy into the current one."""
     import uuid
     from src.nadobro.db import execute
-    from src.nadobro.services.engine_persistence import count_engine_orders
+    from src.nadobro.trading.engine_persistence import count_engine_orders
 
     cid = "grid:777:mainnet"
     # Run A (session 101): 2 executors, one closed -> 3 placed.
@@ -180,8 +180,8 @@ def test_remote_active_scoped_to_run_ignores_stale_rows():
     that is the permanent stale-row trap that blocked order placement."""
     import uuid
     from src.nadobro.db import execute
-    from src.nadobro.services.engine_runtime import _remote_active
-    from src.nadobro.services.engine_persistence import terminate_engine_executors
+    from src.nadobro.strategy.engine_runtime import _remote_active
+    from src.nadobro.trading.engine_persistence import terminate_engine_executors
 
     cid = "dgrid:888:mainnet"
     # Prior run (session 1) left an ACTIVE row behind.
@@ -407,7 +407,7 @@ def test_snapshot_uses_venue_upnl_and_real_turnover():
     from unittest.mock import patch
     from datetime import datetime, timezone
     from src.nadobro.db import execute
-    from src.nadobro.services import live_session
+    from src.nadobro.trading import live_session
 
     execute(_TRADES_DDL)
     execute("DELETE FROM trades_mainnet WHERE user_id = 4041")
@@ -453,7 +453,7 @@ def test_portfolio_history_network_separation_roundtrip():
 
     from src.nadobro.db import query_one
     from src.nadobro.engine.portfolio import PortfolioHistoryRow
-    from src.nadobro.services.portfolio_history_worker import DbPortfolioHistoryRepository
+    from src.nadobro.portfolio.portfolio_history_worker import DbPortfolioHistoryRepository
 
     # The 0014 PK swap actually happened (fixture applied 0007 then 0014).
     pk = query_one(
@@ -505,7 +505,7 @@ def test_history_fill_price_repair_and_round_trip_pairing(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     from src.nadobro.db import execute, init_db, query_one
-    from src.nadobro.services.trade_service import compute_round_trips
+    from src.nadobro.trading.trade_service import compute_round_trips
 
     # This test uses controlled fixture dates (June 2026); disable the
     # production History epoch (the 2026-07-09 pre-remediation cutoff) so the
@@ -561,7 +561,7 @@ def test_history_excludes_copy_and_strategy_includes_tp_close(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     from src.nadobro.db import execute, init_db, query_one
-    from src.nadobro.services.trade_service import compute_round_trips
+    from src.nadobro.trading.trade_service import compute_round_trips
 
     # Controlled fixture dates (June 2026); disable the production History epoch
     # (2026-07-09 pre-remediation cutoff) so the pairer sees them.

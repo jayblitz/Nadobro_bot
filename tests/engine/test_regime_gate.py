@@ -440,7 +440,7 @@ def test_reverse_grid_arms_in_both_trends():
 def test_map_strategy_config_disables_gate_for_rgrid():
     from decimal import Decimal as _D
 
-    from src.nadobro.services.engine_runtime import map_strategy_config
+    from src.nadobro.strategy.engine_runtime import map_strategy_config
 
     # rgrid now runs the dynamic directional-ladder engine (DynamicGridController),
     # which never pauses on trend/breakout (on_tick calls evaluate_quote_gate with

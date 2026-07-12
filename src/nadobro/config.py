@@ -77,7 +77,7 @@ def _default_catalog_network() -> str:
 def get_product_id(name: str, network: str = None, client=None) -> Optional[int]:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import get_product_id as _catalog_product_id
+        from src.nadobro.venue.product_catalog import get_product_id as _catalog_product_id
 
         pid = _catalog_product_id(name, network=network_name, client=client)
         if pid is not None:
@@ -89,7 +89,7 @@ def get_product_id(name: str, network: str = None, client=None) -> Optional[int]
 def get_product_name(product_id: int, network: str = None, client=None) -> str:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import get_product_name as _catalog_product_name
+        from src.nadobro.venue.product_catalog import get_product_name as _catalog_product_name
 
         resolved = _catalog_product_name(product_id, network=network_name, client=client)
         if resolved and not resolved.startswith("ID:"):
@@ -105,7 +105,7 @@ def get_product_name(product_id: int, network: str = None, client=None) -> str:
 def get_spot_product_id(name: str, network: str = None, client=None) -> Optional[int]:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import get_spot_product_id as _catalog_spot_product_id
+        from src.nadobro.venue.product_catalog import get_spot_product_id as _catalog_spot_product_id
 
         pid = _catalog_spot_product_id(name, network=network_name)
         if pid is not None:
@@ -118,7 +118,7 @@ def get_spot_product_id(name: str, network: str = None, client=None) -> Optional
 def get_spot_metadata(name: str, network: str = None) -> dict:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import get_spot_metadata as _catalog_spot_metadata
+        from src.nadobro.venue.product_catalog import get_spot_metadata as _catalog_spot_metadata
 
         metadata = _catalog_spot_metadata(name, network=network_name)
         if metadata:
@@ -149,7 +149,7 @@ PRODUCT_MAX_LEVERAGE = {
 def get_product_max_leverage(product: str, network: str = None, client=None) -> int:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import get_product_max_leverage as _catalog_max_leverage
+        from src.nadobro.venue.product_catalog import get_product_max_leverage as _catalog_max_leverage
 
         return int(_catalog_max_leverage(product, network=network_name, client=client))
     except Exception:
@@ -162,7 +162,7 @@ def get_product_max_leverage(product: str, network: str = None, client=None) -> 
 def get_perp_products(network: str = None, client=None) -> list[str]:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import list_perp_names
+        from src.nadobro.venue.product_catalog import list_perp_names
 
         products = list_perp_names(network=network_name, client=client)
         if products:
@@ -175,7 +175,7 @@ def get_perp_products(network: str = None, client=None) -> list[str]:
 def get_dn_pair(product: str, network: str = None, client=None) -> dict:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import get_dn_pair as _catalog_dn_pair
+        from src.nadobro.venue.product_catalog import get_dn_pair as _catalog_dn_pair
 
         pair = _catalog_dn_pair(product, network=network_name, client=client)
         if pair:
@@ -241,7 +241,7 @@ def list_volume_spot_product_names(network: str = None, client=None) -> list[str
     """
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import list_volume_spot_bases
+        from src.nadobro.venue.product_catalog import list_volume_spot_bases
 
         names = list_volume_spot_bases(network=network_name)
         if names:
@@ -258,7 +258,7 @@ def list_volume_spot_product_names(network: str = None, client=None) -> list[str
 def get_dn_products(network: str = None, client=None) -> list[str]:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import list_dn_product_names as _catalog_dn_products
+        from src.nadobro.venue.product_catalog import list_dn_product_names as _catalog_dn_products
 
         products = _catalog_dn_products(network=network_name, client=client)
         if products:
@@ -271,7 +271,7 @@ def get_dn_products(network: str = None, client=None) -> list[str]:
 def is_product_isolated_only(product: str, network: str = None, client=None) -> bool:
     network_name = str(network or _default_catalog_network())
     try:
-        from src.nadobro.services.product_catalog import is_product_isolated_only as _catalog_isolated_only
+        from src.nadobro.venue.product_catalog import is_product_isolated_only as _catalog_isolated_only
 
         return bool(_catalog_isolated_only(product, network=network_name, client=client))
     except Exception:

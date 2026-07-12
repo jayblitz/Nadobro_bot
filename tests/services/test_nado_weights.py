@@ -1,7 +1,7 @@
 """Tests for documented Nado rate-limit weights (nado_weights)."""
 from __future__ import annotations
 
-from src.nadobro.services.nado_weights import execute_weight, query_weight
+from src.nadobro.venue.nado_weights import execute_weight, query_weight
 
 
 def test_fixed_query_weights():

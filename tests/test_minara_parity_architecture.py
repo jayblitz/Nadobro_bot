@@ -3,7 +3,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 def test_source_registry_records_freshness():
-    from src.nadobro.services.source_registry import SourceRegistry
+    from src.nadobro.connectors.source_registry import SourceRegistry
 
     registry = SourceRegistry()
     rec = registry.record("coinmarketcap", ttl_seconds=120, detail="quotes")
@@ -28,7 +28,7 @@ def test_dmind_degraded_mode_without_key(monkeypatch):
     monkeypatch.delenv("NANOGPT_API_KEY", raising=False)
     monkeypatch.delenv("NANO_GPT_API_KEY", raising=False)
 
-    from src.nadobro.services.dmind_service import analyze_financial_context
+    from src.nadobro.llm.dmind_service import analyze_financial_context
 
     result = analyze_financial_context("score BTC", context="BTC context")
     assert result["ok"] is False
@@ -36,14 +36,14 @@ def test_dmind_degraded_mode_without_key(monkeypatch):
 
 
 def test_nanogpt_json_extract_strips_fences():
-    from src.nadobro.services.nanogpt_client import extract_json_object
+    from src.nadobro.llm.nanogpt_client import extract_json_object
 
     raw = '```json\n{"a": 1}\n```'
     assert extract_json_object(raw) == {"a": 1}
 
 
 def test_strategy_fsm_infers_failed_recoverable_state():
-    from src.nadobro.services.strategy_fsm import PHASE_FAILED, infer_phase
+    from src.nadobro.strategy.strategy_fsm import PHASE_FAILED, infer_phase
 
     phase = infer_phase({"running": True, "last_error": "archive fill sync failed"})
 
@@ -53,7 +53,7 @@ def test_strategy_fsm_infers_failed_recoverable_state():
 
 
 def test_strategy_fsm_maps_volume_pending_fill_to_waiting_fill():
-    from src.nadobro.services.strategy_fsm import PHASE_WAITING_FILL, infer_phase
+    from src.nadobro.strategy.strategy_fsm import PHASE_WAITING_FILL, infer_phase
 
     phase = infer_phase({"running": True, "vol_phase": "pending_fill"})
 
@@ -70,9 +70,9 @@ def test_workflow_builder_selects_funding_template(monkeypatch):
     monkeypatch.delenv("NANOGPT_API_KEY", raising=False)
     monkeypatch.delenv("NANO_GPT_API_KEY", raising=False)
     monkeypatch.delenv("N8N_WORKFLOWS_USE_LLM", raising=False)
-    monkeypatch.setattr("src.nadobro.services.workflow_service.set_bot_state", fake_set)
+    monkeypatch.setattr("src.nadobro.llm.workflow_service.set_bot_state", fake_set)
 
-    from src.nadobro.services.workflow_service import build_and_save_workflow
+    from src.nadobro.llm.workflow_service import build_and_save_workflow
 
     result = build_and_save_workflow(123, "When BTC funding is above threshold recommend a grid")
 
@@ -100,8 +100,8 @@ def test_n8n_deploy_resolves_fly_style_secrets(monkeypatch):
 
         return Resp()
 
-    monkeypatch.setattr("src.nadobro.services.workflow_service.requests.post", fake_post)
-    from src.nadobro.services.workflow_service import deploy_to_n8n
+    monkeypatch.setattr("src.nadobro.llm.workflow_service.requests.post", fake_post)
+    from src.nadobro.llm.workflow_service import deploy_to_n8n
 
     out = deploy_to_n8n(
         {"id": "abc", "name": "T", "nodes": [], "connections": {}, "template_id": "t"}
@@ -145,9 +145,9 @@ def test_workflow_builder_llm_path(monkeypatch):
 
         return True, json.dumps(body), {}
 
-    monkeypatch.setattr("src.nadobro.services.workflow_service.nanogpt_chat_completion", fake_complete)
+    monkeypatch.setattr("src.nadobro.llm.workflow_service.nanogpt_chat_completion", fake_complete)
 
-    from src.nadobro.services.workflow_service import build_workflow_from_prompt
+    from src.nadobro.llm.workflow_service import build_workflow_from_prompt
 
     wf = build_workflow_from_prompt("Alert me when ETH funding is extreme")
     assert wf["template_id"] == "llm_generated"
@@ -164,10 +164,10 @@ def test_order_intent_suppresses_recent_duplicate(monkeypatch):
     def fake_set(key, value):
         store[key] = value
 
-    monkeypatch.setattr("src.nadobro.services.order_intents.get_bot_state", fake_get)
-    monkeypatch.setattr("src.nadobro.services.order_intents.set_bot_state", fake_set)
+    monkeypatch.setattr("src.nadobro.trading.order_intents.get_bot_state", fake_get)
+    monkeypatch.setattr("src.nadobro.trading.order_intents.set_bot_state", fake_set)
 
-    from src.nadobro.services.order_intents import create_order_intent, should_skip_duplicate
+    from src.nadobro.trading.order_intents import create_order_intent, should_skip_duplicate
 
     create_order_intent("abc", {"trade_id": 7, "status": "pending"})
     skip, existing = should_skip_duplicate("abc")

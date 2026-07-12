@@ -1,4 +1,6 @@
 import os
+
+from src.nadobro.utils.env import env_int
 import logging
 import psycopg2
 import psycopg2.pool
@@ -8,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 _pool = None
 _pool_pid = None
-_DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "2"))
-_DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "30"))
+_DB_POOL_MIN = env_int("DB_POOL_MIN", 2)
+_DB_POOL_MAX = env_int("DB_POOL_MAX", 30)
 
 # Connection-level network hardening. Production runs against Supabase's
 # direct host, which is IPv6-only on Fly — when that route flaps ("No route
@@ -19,7 +21,7 @@ _DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "30"))
 # detect half-dead pooled connections instead of failing the first query
 # after an outage.
 _DB_CONNECT_KWARGS = {
-    "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT_SECONDS", "10")),
+    "connect_timeout": env_int("DB_CONNECT_TIMEOUT_SECONDS", 10),
     "keepalives": 1,
     "keepalives_idle": 30,
     "keepalives_interval": 10,
@@ -93,7 +95,7 @@ def get_pool():
         # anyway. Letting psycopg2/libpq resolve dual-stack is simpler and works.
         if db_label == "Supabase":
             try:
-                from src.nadobro.services.ipv4_egress import force_ipv4_enabled
+                from src.nadobro.core.ipv4_egress import force_ipv4_enabled
             except Exception:  # pragma: no cover - keep DB init resilient
                 force_ipv4_enabled = lambda: False  # noqa: E731
             if force_ipv4_enabled():
@@ -835,7 +837,7 @@ def init_db():
                         rollup_engine_session_pnl_funding,
                         rollup_session_from_trades,
                     )
-                    from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+                    from src.nadobro.strategy.engine_runtime import ENGINE_MAPPED_STRATEGIES
 
                     rollup_session_from_trades(_sid, _net)
                     _srow = query_one(

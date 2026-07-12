@@ -11,8 +11,8 @@ import logging
 from src.nadobro.handlers.formatters import escape_md, fmt_settings
 from src.nadobro.handlers.keyboards import settings_kb, settings_leverage_kb, settings_slippage_kb, settings_language_kb, risk_profile_kb
 from src.nadobro.i18n import _ACTIVE_LANG
-from src.nadobro.services.settings_service import update_user_settings
-from src.nadobro.services.user_service import get_user, update_user_language
+from src.nadobro.users.settings_service import update_user_settings
+from src.nadobro.users.user_service import get_user, update_user_language
 from telegram.constants import ParseMode
 
 from src.nadobro.handlers.callbacks import _edit_loc, _get_user_settings  # noqa: E402

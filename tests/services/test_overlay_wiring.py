@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.nadobro.services import engine_runtime as er
+from src.nadobro.strategy import engine_runtime as er
 
 
 class _FakeClient:
@@ -21,7 +21,7 @@ class _FakeClient:
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
-    from src.nadobro.services import market_features as mf
+    from src.nadobro.strategy import market_features as mf
     mf.reset_cache()
     er._OVERLAY_FUNDING_CACHE.clear()
     monkeypatch.setenv("NADO_SIGNAL_OVERLAY", "1")

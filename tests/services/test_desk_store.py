@@ -16,8 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
-from src.nadobro.services import desk_store
-from src.nadobro.services.desk_plans import (
+from src.nadobro.trading import desk_store
+from src.nadobro.trading.desk_plans import (
     ST_AWAITING_TRIGGER,
     ST_CANCELLED,
     ST_COMPLETED,

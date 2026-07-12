@@ -7,7 +7,7 @@ the leg is provably flat (or only dust remains) and reports any real residual.
 """
 from __future__ import annotations
 
-import src.nadobro.services.trade_service as ts
+import src.nadobro.trading.trade_service as ts
 
 
 class _FakeRO:

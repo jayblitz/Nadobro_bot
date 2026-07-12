@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from src.nadobro.services import pnl_card as pc
+from src.nadobro.portfolio import pnl_card as pc
 
 PNG_HEADER = b"\x89PNG\r\n\x1a\n"
 

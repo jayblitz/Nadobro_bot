@@ -7,7 +7,7 @@ from _stubs import install_test_stubs  # noqa: F401
 
 install_test_stubs()
 
-from src.nadobro.services.cadence import effective_interval_seconds
+from src.nadobro.core.cadence import effective_interval_seconds
 
 
 @pytest.fixture(autouse=True)

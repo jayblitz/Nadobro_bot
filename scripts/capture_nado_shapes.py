@@ -25,13 +25,13 @@ import os
 def _client():
     tid = os.environ.get("TELEGRAM_ID")
     if tid:
-        from src.nadobro.services.bot_runtime import get_user_nado_client
+        from src.nadobro.strategy.bot_runtime import get_user_nado_client
 
         c = get_user_nado_client(int(tid))
         if c is None:
             raise SystemExit("get_user_nado_client returned None — is the wallet linked on testnet?")
         return c
-    from src.nadobro.services.nado_client import NadoClient
+    from src.nadobro.venue.nado_client import NadoClient
 
     addr = os.environ["NADO_ADDRESS"]
     c = NadoClient.from_address(addr, network=os.environ.get("NADO_NETWORK", "testnet"))

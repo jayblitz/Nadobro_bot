@@ -1,11 +1,11 @@
 from telegram.ext import CallbackContext
 
-from src.nadobro.services.strategy_pending_input import clear_strategy_pending_input
-from src.nadobro.services.text_trade_pending import (
+from src.nadobro.strategy.strategy_pending_input import clear_strategy_pending_input
+from src.nadobro.trading.text_trade_pending import (
     clear_text_close_all_pending,
     clear_text_trade_pending,
 )
-from src.nadobro.services.wallet_pending_flow import clear_wallet_pending_flow
+from src.nadobro.users.wallet_pending_flow import clear_wallet_pending_flow
 
 # Any in-progress conversational/multi-step state that should be discarded
 # when users intentionally navigate back home.

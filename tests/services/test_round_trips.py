@@ -19,7 +19,7 @@ from _stubs import install_test_stubs  # noqa: F401
 
 install_test_stubs()
 
-from src.nadobro.services import trade_service
+from src.nadobro.trading import trade_service
 
 
 def _row(
@@ -204,7 +204,7 @@ def test_round_trips_only_pair_complete_recording_era():
     a Jul 8 buy as a 4d13h trip that never existed."""
     from unittest.mock import patch as _patch
 
-    from src.nadobro.services import trade_service as _ts
+    from src.nadobro.trading import trade_service as _ts
 
     captured = {}
 

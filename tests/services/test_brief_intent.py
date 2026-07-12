@@ -1,4 +1,4 @@
-from src.nadobro.services.brief_intent import is_brief_request
+from src.nadobro.llm.brief_intent import is_brief_request
 
 POSITIVE = [
     "morning brief",

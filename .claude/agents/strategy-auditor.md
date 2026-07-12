@@ -18,9 +18,9 @@ the `sltp-tracer` agent — note SL/TP issues but don't deep-dive the shared rai
 ## Where things live
 - Controllers: `src/nadobro/engine/controllers/{grid_trading,reverse_grid,dynamic_grid,market_making,volume_bot,copy_trading,delta_neutral}.py`
 - Executors: `src/nadobro/engine/executors/`
-- Config mapping: `src/nadobro/services/engine_runtime.py` (`map_strategy_config`, `map_risk_limits`, `ENGINE_MAPPED_STRATEGIES`)
-- Identity/defaults: `src/nadobro/services/strategy_registry.py`
-- Live copy path: `src/nadobro/services/copy_service.py` (NOT the dead `controllers/copy_trading.py`)
+- Config mapping: `src/nadobro/strategy/engine_runtime.py` (`map_strategy_config`, `map_risk_limits`, `ENGINE_MAPPED_STRATEGIES`)
+- Identity/defaults: `src/nadobro/strategy/strategy_registry.py`
+- Live copy path: `src/nadobro/trading/copy_service.py` (NOT the dead `controllers/copy_trading.py`)
 - Intended behavior: `docs/*.md` — read the design doc, then verify code matches (docs are sometimes stale; flag drift).
 
 ## Method

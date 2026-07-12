@@ -17,7 +17,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.models import database as db_mod
-from src.nadobro.services import copy_service
+from src.nadobro.trading import copy_service
 
 
 def _stash_sql(captured: list):

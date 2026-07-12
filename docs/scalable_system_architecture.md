@@ -35,14 +35,14 @@ The product should be organized around a few durable backend capabilities rather
 Current active backend modules should move toward this ownership model:
 
 - `src/nadobro/handlers/`: Telegram presentation and interaction routing only.
-- `src/nadobro/services/portfolio_service.py`: portfolio snapshot read model.
-- `src/nadobro/services/trade_service.py`: trade commands and local trade ledger helpers.
-- `src/nadobro/services/nlp_vault_service.py`: NLP vault snapshot and mint/burn orchestration (see `docs/nado_vault.md`).
-- `src/nadobro/services/nado_client.py`: Nado SDK/REST client, product and subaccount live state, NLP execute wrappers.
-- `src/nadobro/services/nado_archive.py`: archive/indexer query adapter.
-- `src/nadobro/services/bot_runtime.py`: strategy orchestration and lifecycle.
-- `src/nadobro/services/workflow_service.py`: n8n workflow generation/deployment.
-- `src/nadobro/services/dmind_service.py` and `nanogpt_client.py`: financial LLM routing.
+- `src/nadobro/portfolio/portfolio_service.py`: portfolio snapshot read model.
+- `src/nadobro/trading/trade_service.py`: trade commands and local trade ledger helpers.
+- `src/nadobro/vault/nlp_vault_service.py`: NLP vault snapshot and mint/burn orchestration (see `docs/nado_vault.md`).
+- `src/nadobro/venue/nado_client.py`: Nado SDK/REST client, product and subaccount live state, NLP execute wrappers.
+- `src/nadobro/venue/nado_archive.py`: archive/indexer query adapter.
+- `src/nadobro/strategy/bot_runtime.py`: strategy orchestration and lifecycle.
+- `src/nadobro/llm/workflow_service.py`: n8n workflow generation/deployment.
+- `src/nadobro/llm/dmind_service.py` and `nanogpt_client.py`: financial LLM routing.
 
 ## Data Flow
 
@@ -147,7 +147,7 @@ Use cache close to ownership:
 
 ## Implementation Code Added
 
-`src/nadobro/services/portfolio_service.py` is the first service-layer read model:
+`src/nadobro/portfolio/portfolio_service.py` is the first service-layer read model:
 
 - `get_portfolio_snapshot()` merges live positions, market prices, trade analytics, open orders, and local ledger hints.
 - `PortfolioSnapshot` provides a stable contract for Telegram and future API/n8n consumers.

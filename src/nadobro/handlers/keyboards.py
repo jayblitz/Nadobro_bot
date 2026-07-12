@@ -94,6 +94,14 @@ REPLY_BUTTON_MAP.update({
     "Alert Engine": "alert:menu",
     "⚙️ Control Panel": "settings:view",
     "Control Panel": "settings:view",
+    # Translation-collision losers: some locales translate two English labels
+    # identically (e.g. ko "⚙️ 설정" for both Settings and Configure, ru
+    # "◀ Назад" for both Back and Prev), and resolve_reply_button_text can
+    # only return one sibling. Alias the non-reply sibling to the same action
+    # so localized taps still route. Guarded by
+    # tests/test_i18n_reply_routing.py::test_reply_buttons_route_in_every_language.
+    "⚙️ Configure": "settings:view",
+    "◀ Prev": "trade_flow:back",
     "📡 Market Radar": "points:view",
     "Market Radar": "points:view",
     "Strategies": "nav:strategy_hub",
@@ -876,33 +884,6 @@ def strategy_hub_kb():
     ])
 
 
-def points_scope_kb() -> InlineKeyboardMarkup:
-    """LOWIQPTS flow: only weekly snapshot via relay; no period toggles in UI."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🏆 Refresh points", callback_data="points:refresh"),
-            InlineKeyboardButton("❌ Cancel LOWIQPTS", callback_data="points:cancel"),
-        ],
-        [
-            InlineKeyboardButton("🏠 Home", callback_data="nav:main"),
-        ],
-    ])
-
-
-def points_followup_options_kb(options: list[str]):
-    rows = []
-    clean = [str(opt).strip() for opt in (options or []) if str(opt).strip()]
-    for i in range(0, len(clean), 2):
-        row = []
-        for j, label in enumerate(clean[i:i + 2]):
-            row.append(InlineKeyboardButton(label[:32], callback_data=f"points:replyopt:{i + j}"))
-        if row:
-            rows.append(row)
-    rows.append([InlineKeyboardButton("❌ Cancel LOWIQPTS", callback_data="points:cancel")])
-    rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:main")])
-    return InlineKeyboardMarkup(rows)
-
-
 def strategy_action_kb(
     strategy_id: str,
     selected_product: str = "BTC",
@@ -1136,21 +1117,6 @@ def bro_config_section_kb(section: str):
     return InlineKeyboardMarkup(rows)
 
 
-def howl_approval_kb(suggestion_count: int):
-    rows = []
-    for i in range(suggestion_count):
-        rows.append([
-            InlineKeyboardButton(f"✅ Apply #{i+1}", callback_data=f"howl:approve:{i}"),
-            InlineKeyboardButton(f"❌ Reject #{i+1}", callback_data=f"howl:reject:{i}"),
-        ])
-    rows.append([
-        InlineKeyboardButton("✅ Apply All", callback_data="howl:approve_all"),
-        InlineKeyboardButton("❌ Dismiss All", callback_data="howl:dismiss"),
-    ])
-    rows.append([
-        InlineKeyboardButton("◀ Back", callback_data="strategy:preview:bro"),
-    ])
-    return InlineKeyboardMarkup(rows)
 
 
 def close_product_kb(network: str = "mainnet"):

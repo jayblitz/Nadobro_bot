@@ -18,13 +18,13 @@ if ROOT not in sys.path:
 def _client():
     tid = os.environ.get("TELEGRAM_ID")
     if tid:
-        from src.nadobro.services.user_service import get_user_nado_client
+        from src.nadobro.users.user_service import get_user_nado_client
 
         c = get_user_nado_client(int(tid))
         if c is None:
             raise SystemExit("get_user_nado_client returned None")
         return c
-    from src.nadobro.services.nado_client import NadoClient
+    from src.nadobro.venue.nado_client import NadoClient
 
     addr = os.environ["NADO_ADDRESS"]
     c = NadoClient.from_address(addr, network=os.environ.get("NADO_NETWORK", "mainnet"))
@@ -38,7 +38,7 @@ def dump(label: str, value) -> None:
 
 
 def main() -> None:
-    from src.nadobro.services.nado_archive import query_nlp_lp_events, query_nlp_snapshots
+    from src.nadobro.venue.nado_archive import query_nlp_lp_events, query_nlp_snapshots
 
     c = _client()
     network = c.network

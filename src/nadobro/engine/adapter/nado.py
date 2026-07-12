@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, Optional, Sequence
 
+from src.nadobro.utils.env import env_float
 from src.nadobro.engine.adapter.base import (
     AdapterError,
     Fill,
@@ -43,10 +44,10 @@ from src.nadobro.engine.types import OrderType, TradeType, _dec
 from src.nadobro.utils.x18 import from_x18
 
 # The sole permitted venue import inside the engine.
-from src.nadobro.services.nado_client import NadoClient
+from src.nadobro.venue.nado_client import NadoClient
 # Pure-math isolated-margin sizing shared with the manual trade path so both
 # size an isolated-only leg identically.
-from src.nadobro.services.margin import compute_isolated_margin
+from src.nadobro.quant.margin import compute_isolated_margin
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ _FILLED_STATES = ("filled", "matched", "complete", "completed")
 # tick's polls reuse it. TTL is far below the strategy tick interval (30-60s) so a
 # fill is at most this stale before the next tick's fresh fetch. Poll-only path
 # (verify-after-cancel / reconcile stay uncached — they need post-mutation truth).
-_OPEN_ORDERS_SNAP_TTL_S = float(os.environ.get("NADO_OPEN_ORDERS_SNAP_TTL_SECONDS", "2.0"))
+_OPEN_ORDERS_SNAP_TTL_S = env_float("NADO_OPEN_ORDERS_SNAP_TTL_SECONDS", 2.0)
 
 # AUDIT-FIX-3: warn once per process per non-unit leverage so we don't spam logs.
 _warned_leverage_set: set[int] = set()
@@ -770,7 +771,7 @@ class NadoAdapter(NadoAdapterBase):
             )
         except Exception as exc:  # noqa: BLE001 - normalize venue errors
             raise AdapterError(f"funding_since failed: {exc}") from exc
-        from src.nadobro.services.portfolio_calculator import funding_payment_amount
+        from src.nadobro.quant.portfolio_calculator import funding_payment_amount
 
         paid_total = Decimal(0)
         for row in rows or []:

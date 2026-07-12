@@ -93,7 +93,7 @@ def test_relay_poll_events_is_scoped_to_session(monkeypatch):
 
 
 def test_points_relay_poll_uses_session_scoped_cursor(monkeypatch):
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     captured = {}
 
@@ -117,7 +117,7 @@ def test_points_relay_poll_uses_session_scoped_cursor(monkeypatch):
 
 
 def test_points_relay_polls_all_pending_sessions(monkeypatch):
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     calls: list[tuple[str, object]] = []
 
@@ -142,7 +142,7 @@ def test_points_relay_polls_all_pending_sessions(monkeypatch):
 
 def test_claim_pending_never_fallback_to_foreign_queue():
     """Dropped queue[0] fallback: unattributed relay text must not bind another user's pending row."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     w = "0x" + "ab" * 20
     row = {"req_id": "a", "chat_id": 1, "telegram_id": 1, "wallet": w, "ts": time.time(), "relay_session_id": ""}
@@ -155,7 +155,7 @@ def test_claim_pending_never_fallback_to_foreign_queue():
 
 
 def test_claim_pending_matches_wallet_in_reply_text():
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     w = "0x" + "cd" * 20
     row = {"req_id": "b", "chat_id": 2, "telegram_id": 99, "wallet": w, "ts": time.time(), "relay_session_id": ""}
@@ -171,7 +171,7 @@ def test_claim_pending_matches_wallet_in_reply_text():
 
 def test_claim_pending_prefers_newest_wallet_row_when_stacked():
     """Multiple pending rows for one wallet: wallet fallback must bind to latest refresh, not queue[0]."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     w = "0x" + "ee" * 20
     wl = str(w).lower()
@@ -189,7 +189,7 @@ def test_claim_pending_prefers_newest_wallet_row_when_stacked():
 
 def test_lowiqpts_option_prompt_does_not_complete_pending_when_parse_matches(monkeypatch):
     """Regression: metrics embedded alongside Yes/No options must not drop pending before the user taps."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     completed: list[dict] = []
     monkeypatch.setattr(points_service, "_schedule_timeout", lambda *a, **k: None)
@@ -228,7 +228,7 @@ def test_lowiqpts_option_prompt_does_not_complete_pending_when_parse_matches(mon
 
 def test_lowiqpts_mid_prompt_metrics_without_options_or_hints_does_not_complete(monkeypatch):
     """Extra-cost style prompts can embed Points:/Volume: without inline options; stay pending."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     completed: list[dict] = []
     monkeypatch.setattr(points_service, "_schedule_timeout", lambda *a, **k: None)
@@ -272,7 +272,7 @@ def test_lowiqpts_mid_prompt_metrics_without_options_or_hints_does_not_complete(
 
 def test_parse_lowiq_points_reply_no_infer_zero_from_no_trades_phrase():
     """Loose 'no trades' copy must not produce a parsed snapshot (was prematurely completing relay)."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     assert (
         points_service.parse_lowiq_points_reply(
@@ -285,7 +285,7 @@ def test_parse_lowiq_points_reply_no_infer_zero_from_no_trades_phrase():
 def test_points_refresh_timeout_rearms_while_heartbeat_keeps_request_fresh(monkeypatch):
     """LOWIQPTS takes 20+ min per step; the poll heartbeat keeps req['ts'] fresh, so the
     timeout job must re-arm instead of dropping a still-live pending request."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     rescheduled: list[str] = []
     monkeypatch.setattr(
@@ -322,7 +322,7 @@ def test_points_refresh_timeout_rearms_while_heartbeat_keeps_request_fresh(monke
 
 def test_points_refresh_timeout_drops_request_when_genuinely_stale(monkeypatch):
     """No heartbeat for the full window: the request is expired and the user is notified."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     monkeypatch.setattr(points_service, "_schedule_timeout", lambda *a, **k: None)
     close_mock = AsyncMock()
@@ -356,7 +356,7 @@ def test_points_refresh_timeout_drops_request_when_genuinely_stale(monkeypatch):
 
 def test_orphan_lowiqpts_reply_pattern_matches_bare_number_and_yes_no():
     """Safety net classifier for messages that almost certainly wanted to reach the relay."""
-    from src.nadobro.services.points_service import looks_like_orphan_lowiqpts_reply
+    from src.nadobro.users.points_service import looks_like_orphan_lowiqpts_reply
 
     for s in ["0", " 0 ", "12", "0.5", "yes", "Yes", "YES", "no", "n", "y"]:
         assert looks_like_orphan_lowiqpts_reply(s), f"expected match: {s!r}"
@@ -365,7 +365,7 @@ def test_orphan_lowiqpts_reply_pattern_matches_bare_number_and_yes_no():
 
 
 def test_serialize_relay_state_captures_queue_and_cursors():
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     req = {"req_id": "r1", "chat_id": 1, "wallet": "0xabc", "relay_session_id": "sess_1"}
     bot_data = {
@@ -383,7 +383,7 @@ def test_serialize_relay_state_captures_queue_and_cursors():
 
 def test_rehydrate_lowiqpts_pending_state_round_trip(monkeypatch):
     """A bot restart must resume in-flight refreshes from bot_state, not drop them."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     wallet_a = "0x" + "ab" * 20
     wallet_b = "0x" + "cd" * 20
@@ -428,7 +428,7 @@ def test_rehydrate_lowiqpts_pending_state_round_trip(monkeypatch):
 
 def test_poll_finalizes_dead_relay_session(monkeypatch):
     """If the relay session expired underneath us, stop polling it and notify the user."""
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     async def _poll_events(*, session_id, cursor):
         return {"ok": True, "events": [], "next_cursor": None, "session_status": "expired"}
@@ -461,7 +461,7 @@ def test_poll_finalizes_dead_relay_session(monkeypatch):
 
 
 def test_parse_lowiq_points_reply_handles_markdown_volume_lines():
-    from src.nadobro.services import points_service
+    from src.nadobro.users import points_service
 
     blob = """📊 NADO REPORT
 Period: 1 May - 8 May Epoch 14

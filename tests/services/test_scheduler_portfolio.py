@@ -10,7 +10,9 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import nado_sync, scheduler
+from src.nadobro.venue import nado_sync
+
+from src.nadobro.runtime import scheduler
 
 
 class SchedulerPortfolioTests(unittest.IsolatedAsyncioTestCase):

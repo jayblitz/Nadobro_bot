@@ -15,7 +15,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.models import database as db
-from src.nadobro.services import trade_service
+from src.nadobro.trading import trade_service
 
 
 class FindOpenTradeGuardrails(unittest.TestCase):

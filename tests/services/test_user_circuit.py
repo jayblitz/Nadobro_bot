@@ -9,7 +9,7 @@ def _fresh_module(monkeypatch):
     monkeypatch.setenv("NADO_USER_CIRCUIT_THRESHOLD", "3")
     monkeypatch.setenv("NADO_USER_CIRCUIT_WINDOW_SECONDS", "60")
     monkeypatch.setenv("NADO_USER_CIRCUIT_COOLDOWN_SECONDS", "120")
-    from src.nadobro.services import user_circuit
+    from src.nadobro.core import user_circuit
 
     importlib.reload(user_circuit)
     return user_circuit

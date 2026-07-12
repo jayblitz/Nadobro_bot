@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.nadobro.services import llm_gateway
+from src.nadobro.llm import llm_gateway
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +64,7 @@ def test_model_env_inline_comment_is_stripped(monkeypatch):
 
 
 def test_base_url_and_key_inline_comment_is_stripped(monkeypatch):
-    from src.nadobro.services import provider_config as pc
+    from src.nadobro.connectors import provider_config as pc
     # A base URL pasted with a trailing "# note" was the "no host specified"
     # failure — the OpenAI client got an unparseable host.
     monkeypatch.setenv("NANOGPT_BASE_URL", "https://nano-gpt.com/api/v1   # base url")
@@ -80,7 +80,7 @@ def test_bro_llm_prefers_gateway(monkeypatch):
     monkeypatch.setenv("NANOGPT_API_KEY", "sk-test")
     monkeypatch.setenv("XAI_API_KEY", "xai-should-not-win")
     llm_gateway.reset_cache()
-    import src.nadobro.services.bro_llm as bro_llm
+    import src.nadobro.llm.bro_llm as bro_llm
     client = bro_llm._get_client()
     assert client is not None and "nano-gpt.com" in str(client.base_url)
 
@@ -89,7 +89,7 @@ def test_knowledge_service_general_gateway_but_xsearch_native(monkeypatch):
     monkeypatch.setenv("NANOGPT_API_KEY", "sk-test")
     monkeypatch.setenv("XAI_API_KEY", "xai-native")
     llm_gateway.reset_cache()
-    import src.nadobro.services.knowledge_service as ks
+    import src.nadobro.llm.knowledge_service as ks
     ks._xai_client = None
     ks._openai_client = None
     # General reasoning -> gateway; model resolves to the gateway chat model.
@@ -102,7 +102,7 @@ def test_knowledge_service_general_gateway_but_xsearch_native(monkeypatch):
 def test_knowledge_service_no_native_xai_without_key(monkeypatch):
     monkeypatch.setenv("NANOGPT_API_KEY", "sk-test")
     llm_gateway.reset_cache()
-    import src.nadobro.services.knowledge_service as ks
+    import src.nadobro.llm.knowledge_service as ks
     ks._xai_client = None
     # No XAI key -> no native client -> X-search path disabled, general still works.
     assert ks._get_native_xai_client() is None

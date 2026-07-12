@@ -11,10 +11,10 @@ import logging
 from src.nadobro.handlers.formatters import escape_md
 from src.nadobro.handlers.keyboards import back_kb, copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb, copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb
 from src.nadobro.i18n import localize_text, get_active_language
-from src.nadobro.services.admin_service import is_admin
-from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.onboarding_service import is_new_onboarding_complete
-from src.nadobro.services.user_service import get_user, ensure_active_wallet_ready
+from src.nadobro.users.admin_service import is_admin
+from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.users.onboarding_service import is_new_onboarding_complete
+from src.nadobro.users.user_service import get_user, ensure_active_wallet_ready
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 async def _handle_copy(query, data, context, telegram_id):
-    from src.nadobro.services.copy_service import (
+    from src.nadobro.trading.copy_service import (
         get_available_traders, get_user_copies, start_copy, stop_copy,
         pause_copy, resume_copy, get_trader_stats, get_trader_preview,
     )
-    from src.nadobro.services.admin_service import (
+    from src.nadobro.users.admin_service import (
         add_copy_trader, remove_copy_trader, list_copy_traders,
     )
 

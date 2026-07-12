@@ -15,13 +15,13 @@ from src.nadobro.config import get_dn_pair, get_dn_products, get_perp_products, 
 from src.nadobro.handlers.commands import build_status_dashboard_parts
 from src.nadobro.handlers.formatters import escape_md, fmt_price
 from src.nadobro.handlers.keyboards import back_kb, dn_funding_rates_kb, strategy_action_kb, strategy_product_picker_kb
-from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
-from src.nadobro.services.onboarding_service import is_new_onboarding_complete
-from src.nadobro.services.perf import timed_metric
-from src.nadobro.services.settings_service import get_user_settings, update_user_settings
-from src.nadobro.services.strategy_pending_input import persist_strategy_pending_input
-from src.nadobro.services.user_service import get_user_readonly_client, get_user_wallet_info, get_user, ensure_active_wallet_ready
+from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.strategy.bot_runtime import stop_user_bot, get_user_bot_status
+from src.nadobro.users.onboarding_service import is_new_onboarding_complete
+from src.nadobro.core.perf import timed_metric
+from src.nadobro.users.settings_service import get_user_settings, update_user_settings
+from src.nadobro.strategy.strategy_pending_input import persist_strategy_pending_input
+from src.nadobro.users.user_service import get_user_readonly_client, get_user_wallet_info, get_user, ensure_active_wallet_ready
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 import time
@@ -199,7 +199,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id == "bro":
             # Legacy Alpha Agent dashboard remains reachable only when the operator
             # has explicitly re-enabled the legacy autoloop via env var.
-            from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
+            from src.nadobro.core.feature_flags import legacy_bro_autoloop_enabled
             if not legacy_bro_autoloop_enabled():
                 # Alpha Agent has been retired; route back to the strategy hub.
                 await _handle_nav(query, "nav:strategy_hub", telegram_id, context)
@@ -224,7 +224,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             # "catalog endpoint is failing/Cloudflare-blocked right now" so the
             # user gets accurate guidance for the active mode.
             try:
-                from src.nadobro.services.product_catalog import is_spot_catalog_dynamic
+                from src.nadobro.venue.product_catalog import is_spot_catalog_dynamic
 
                 catalog_live = is_spot_catalog_dynamic(network)
             except Exception:
@@ -455,7 +455,7 @@ async def _handle_strategy(query, data, context, telegram_id):
 
         # Tiny Budget — resolve venue minimum and required leverage.
         try:
-            from src.nadobro.services.product_catalog import (
+            from src.nadobro.venue.product_catalog import (
                 get_product_min_quote_notional_usd,
             )
             venue_min = get_product_min_quote_notional_usd(selected_product, network=network)
@@ -648,7 +648,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             else:
                 cfg[field] = value
             if field == "notional_usd":
-                from src.nadobro.services.settings_service import sync_cycle_notional_with_margin
+                from src.nadobro.users.settings_service import sync_cycle_notional_with_margin
 
                 sync_cycle_notional_with_margin(strategies, strategy_id)
 
@@ -941,7 +941,7 @@ def _mm_cycle_budget_preflight(
     if strategy_id not in ("grid", "rgrid", "dgrid", "mid"):
         return True, 0.0, 0.0, 0.0, 0, 0.0
 
-    from src.nadobro.services.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD, estimate_mm_quote_capacity
+    from src.nadobro.quant.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD, estimate_mm_quote_capacity
 
     margin_usd = max(0.0, float(strategy_conf.get("notional_usd", 100.0) or 0.0))
     cycle_cfg = max(0.0, float(strategy_conf.get("cycle_notional_usd", margin_usd) or 0.0))
@@ -1833,7 +1833,7 @@ def _build_bro_preview_text(telegram_id: int) -> str:
         except Exception:
             pass
 
-    from src.nadobro.services.bot_runtime import get_user_bot_status
+    from src.nadobro.strategy.bot_runtime import get_user_bot_status
     bot_status = get_user_bot_status(telegram_id)
     is_running = bool(bot_status.get("running") and bot_status.get("strategy") == "bro")
     if is_running:
@@ -1903,8 +1903,8 @@ def _append_mm_pretrade_breakdown(
     and the live ``/mm_status`` command stay in sync.
     """
     try:
-        from src.nadobro.services import mm_dashboard
-        from src.nadobro.services.nado_archive import get_pair_24h_volume_usd
+        from src.nadobro.strategy import mm_dashboard
+        from src.nadobro.venue.nado_archive import get_pair_24h_volume_usd
 
         network, settings = get_user_settings(telegram_id)
         conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -2090,7 +2090,7 @@ def _build_strategy_preview_text(
     if strategy_id in ("grid", "rgrid", "dgrid", "mid"):
         try:
             from src.nadobro.models.database import get_strategy_sessions_by_user
-            from src.nadobro.services.live_session import get_live_session_snapshot
+            from src.nadobro.trading.live_session import get_live_session_snapshot
 
             _runs = get_strategy_sessions_by_user(
                 telegram_id, strategy=strategy_id, network=network, limit=1
@@ -2119,7 +2119,7 @@ def _build_strategy_preview_text(
         maker_fee_rate = conf.get("vol_maker_fee_rate")
         if maker_fee_rate is None:
             try:
-                from src.nadobro.services.product_catalog import get_spot_maker_fee_rate
+                from src.nadobro.venue.product_catalog import get_spot_maker_fee_rate
 
                 maker_fee_rate = get_spot_maker_fee_rate(product, network=network)
             except Exception:

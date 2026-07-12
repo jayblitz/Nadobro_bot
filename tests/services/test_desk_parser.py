@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.nadobro.services.desk_parser import (
+from src.nadobro.trading.desk_parser import (
     DeskParseResult,
     looks_like_desk_text,
     parse_desk_intent,
 )
-from src.nadobro.services.desk_plans import ExecutionPlan
+from src.nadobro.trading.desk_plans import ExecutionPlan
 
 PERPS = {"BTC", "ETH", "SOL", "HYPE"}
 SPOTS = {"BTC", "ETH", "SOL", "QQQX", "SPYX"}

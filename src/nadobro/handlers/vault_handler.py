@@ -8,15 +8,15 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
 
-from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.nlp_vault_service import (
+from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.vault.nlp_vault_service import (
     deposit_to_vault,
     estimate_withdraw_fee_usdt0,
     get_user_vault_snapshot,
     withdraw_from_vault,
 )
-from src.nadobro.services.user_service import get_user
-from src.nadobro.services.vault_deposit_watch_service import (
+from src.nadobro.users.user_service import get_user
+from src.nadobro.vault.vault_deposit_watch_service import (
     disable_deposit_watch,
     enable_deposit_watch,
 )

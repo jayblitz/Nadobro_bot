@@ -7,8 +7,8 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services.nado_client import NadoClient
-from src.nadobro.services.trade_service import _normalize_net_positions
+from src.nadobro.venue.nado_client import NadoClient
+from src.nadobro.trading.trade_service import _normalize_net_positions
 
 
 class _FakeResponse:
@@ -27,7 +27,7 @@ class _FakeResponse:
 
 class MaskPayloadTests(unittest.TestCase):
     def test_mask_payload_redacts_hex_keeps_reason_and_caps_length(self):
-        from src.nadobro.services.nado_client import _mask_payload
+        from src.nadobro.venue.nado_client import _mask_payload
 
         raw = (
             '{"reason":"ip_query_only","blocked":true,'
@@ -207,8 +207,8 @@ class NadoClientReliabilityTests(unittest.TestCase):
             _FakeResponse(payload={"status": "success", "data": {"ok": True}}),
         ]
 
-        with patch("src.nadobro.services.nado_client._rest_session.get", side_effect=responses), patch(
-            "src.nadobro.services.nado_client.time.sleep", return_value=None
+        with patch("src.nadobro.venue.nado_client._rest_session.get", side_effect=responses), patch(
+            "src.nadobro.venue.nado_client.time.sleep", return_value=None
         ):
             data = client._query_rest("symbols")
 
@@ -219,8 +219,8 @@ class NadoClientReliabilityTests(unittest.TestCase):
     def test_query_rest_uses_post_for_multi_product_queries(self):
         client = NadoClient(private_key="0xabc", network="mainnet")
         response = _FakeResponse(payload={"status": "success", "data": {"market_prices": []}})
-        with patch("src.nadobro.services.nado_client._rest_session.get") as mock_get, patch(
-            "src.nadobro.services.nado_client._rest_session.post", return_value=response
+        with patch("src.nadobro.venue.nado_client._rest_session.get") as mock_get, patch(
+            "src.nadobro.venue.nado_client._rest_session.post", return_value=response
         ) as mock_post:
             data = client._query_rest("market_prices", {"product_ids": [1, 2]})
 
@@ -251,8 +251,8 @@ class NadoClientReliabilityTests(unittest.TestCase):
         request is unavailable AND the gateway is throttling/blocked, callers
         must serve cached data — never fan out to one REST call per product,
         which amplifies load exactly when we must back off."""
-        import src.nadobro.services.nado_client as nc
-        from src.nadobro.services import gateway_budget
+        import src.nadobro.venue.nado_client as nc
+        from src.nadobro.venue import gateway_budget
 
         client = NadoClient.from_address("0x" + "0" * 40, network="testnet")
 
@@ -284,7 +284,7 @@ class NadoClientReliabilityTests(unittest.TestCase):
 
     def test_get_all_open_orders_sweeps_spot_products(self):
         """Portfolio open orders must include Volume-bot spot orders, not only perps."""
-        from src.nadobro.services import product_catalog as pc
+        from src.nadobro.venue import product_catalog as pc
 
         client = NadoClient.from_address("0x" + "1" * 40, network="mainnet")
         client._initialized = True
@@ -321,8 +321,8 @@ class NadoClientReliabilityTests(unittest.TestCase):
         nado_mod.utils = utils_mod
         utils_mod.math = math_mod
 
-        with patch("src.nadobro.services.nado_client.get_perp_products", return_value=["BTC"]), \
-             patch("src.nadobro.services.nado_client.get_product_id", return_value=2), \
+        with patch("src.nadobro.venue.nado_client.get_perp_products", return_value=["BTC"]), \
+             patch("src.nadobro.venue.nado_client.get_product_id", return_value=2), \
              patch.object(pc, "get_catalog", return_value={"perps": {}, "by_id": {}, "aliases": {}}), \
              patch.object(pc, "get_spot_catalog", return_value=spot_catalog), \
              patch.object(client, "_gateway_allowed", return_value=True), \
@@ -480,7 +480,7 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertEqual(len(net[1]["legs"]), 2)
 
     def test_isolated_subaccounts_response_parsing(self):
-        from src.nadobro.services.nado_archive import (
+        from src.nadobro.venue.nado_archive import (
             _isolated_subaccounts_list_from_response,
             isolated_subaccount_from_row,
             query_isolated_subaccounts_for_parent,
@@ -502,7 +502,7 @@ class NadoClientReliabilityTests(unittest.TestCase):
 
         # bytes32: 20-byte address + 12-byte subaccount identifier.
         parent_hex = "0x" + "ab" * 20 + "00" * 12
-        with patch("src.nadobro.services.nado_archive._post", side_effect=_fake_post):
+        with patch("src.nadobro.venue.nado_archive._post", side_effect=_fake_post):
             query_isolated_subaccounts_for_parent("mainnet", parent_hex)
 
         # Nado archive expects ``subaccount`` as a 32-element ``u8`` array
@@ -515,7 +515,7 @@ class NadoClientReliabilityTests(unittest.TestCase):
         self.assertEqual(sent[20:], [0] * 12)
 
     def test_archive_unwraps_orders_under_data(self):
-        from src.nadobro.services.nado_archive import _orders_list_from_archive_response
+        from src.nadobro.venue.nado_archive import _orders_list_from_archive_response
 
         row = {"digest": "0xabc", "base_filled": 1e18, "quote_filled": 100e18}
         self.assertEqual(
@@ -524,7 +524,7 @@ class NadoClientReliabilityTests(unittest.TestCase):
         )
 
     def test_parse_order_reads_camelCase_fill_fields(self):
-        from src.nadobro.services.nado_archive import _parse_order
+        from src.nadobro.venue.nado_archive import _parse_order
 
         o = _parse_order(
             {
@@ -824,7 +824,7 @@ def test_align_price_post_only_never_rounds_into_the_book():
     """Post-only alignment must round AWAY from crossing: buys floor, sells
     ceil. HALF_UP could push a buy up onto the ask and the venue rejects the
     crossing post-only order (the volume bot's maker slices)."""
-    from src.nadobro.services.nado_client import NadoClient
+    from src.nadobro.venue.nado_client import NadoClient
 
     # increment 0.5: 100.3 would HALF_UP to 100.5 for a buy — must floor to 100.0
     assert NadoClient._align_price_to_increment(100.3, 0.5, True, "post_only") == 100.0

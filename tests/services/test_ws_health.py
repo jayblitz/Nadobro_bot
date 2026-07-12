@@ -8,7 +8,7 @@ import time
 def _fresh_module(monkeypatch):
     monkeypatch.setenv("NADO_WS_HEALTH_SECONDS", "45")
     monkeypatch.setenv("NADO_WS_RECONCILE_SECONDS", "300")
-    from src.nadobro.services import ws_health
+    from src.nadobro.venue import ws_health
 
     importlib.reload(ws_health)
     return ws_health

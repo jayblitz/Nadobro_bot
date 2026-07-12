@@ -4,16 +4,16 @@ This bot talks to three Nado endpoints over HTTPS:
 
 | What                | Host                                | Used by                                            |
 | ------------------- | ----------------------------------- | -------------------------------------------------- |
-| Gateway REST        | `gateway.{mainnet,testnet}.nado.xyz` | `services.nado_client`, `services.product_catalog` |
-| Archive REST        | `archive.{mainnet,testnet}.nado.xyz` | `services.nado_archive`                            |
-| Archive v2 symbols  | `archive.{...}.nado.xyz/v2/symbols`  | `services.product_catalog`                         |
+| Gateway REST        | `gateway.{mainnet,testnet}.nado.xyz` | `venue.nado_client`, `venue.product_catalog` |
+| Archive REST        | `archive.{mainnet,testnet}.nado.xyz` | `venue.nado_archive`                            |
+| Archive v2 symbols  | `archive.{...}.nado.xyz/v2/symbols`  | `venue.product_catalog`                         |
 
 When Cloudflare (Nado's edge) decides our traffic looks botty, it answers any
 plain JSON request with a 403 Forbidden whose body is an HTML "Just a moment…"
 interstitial. Symptoms:
 
 ```
-WARNING] src.nadobro.services.nado_client: REST returned non-JSON status=403
+WARNING] src.nadobro.venue.nado_client: REST returned non-JSON status=403
 content_type=text/html; charset=UTF-8 body='<!DOCTYPE html>...Just a moment...'
 ```
 
@@ -26,7 +26,7 @@ Until the challenge clears, the bot has:
 
 ## How the code defends itself
 
-The defenses live in `services/http_session.py`:
+The defenses live in `core/http_session.py`:
 
 1. **Hardened headers**: every outbound call goes through a shared
    `requests.Session` configured with browser-like `User-Agent`,
@@ -42,7 +42,7 @@ The defenses live in `services/http_session.py`:
    path (`NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS`, default 86400s / 24h).
 4. **Throttled logs**: only one Cloudflare-warning line per host per minute
    (was: hundreds per second).
-5. **Unified gateway budget** (`services/gateway_budget.py`): every Nado REST/SDK
+5. **Unified gateway budget** (`venue/gateway_budget.py`): every Nado REST/SDK
    call passes through host + per-user token buckets and an in-flight cap.
    Nado `error_code=1000` opens a host rate-limit circuit (default 60s cooldown).
    Callers **must skip** and serve cache when `try_acquire` returns false — never
@@ -89,7 +89,7 @@ The defenses live in `services/http_session.py`:
 
 ## What to do when you see the storm in logs
 
-1. Check `services.http_session.breaker_snapshot()` (or grep
+1. Check `core.http_session.breaker_snapshot()` (or grep
    `Cloudflare circuit OPEN`). If the breaker is open, the bot is correctly
    self-throttling; users keep seeing the *previous* catalog instead of an
    empty list. No action required on the bot side.

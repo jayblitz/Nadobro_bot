@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.nadobro.services import sli
+from src.nadobro.core import sli
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +57,7 @@ def test_per_user_filter():
 def test_cardinality_cap_evicts_lru(monkeypatch):
     import importlib
     monkeypatch.setenv("NADO_SLI_MAX_SERIES", "5")
-    from src.nadobro.services import sli as sli_module
+    from src.nadobro.core import sli as sli_module
 
     importlib.reload(sli_module)
     for uid in range(10):

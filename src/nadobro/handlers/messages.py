@@ -7,20 +7,20 @@ from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode, ChatAction
 from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language, resolve_reply_button_text
-from src.nadobro.services.user_service import (
+from src.nadobro.users.user_service import (
     get_or_create_user, get_user_readonly_client, get_user_wallet_info, get_user,
     ensure_active_wallet_ready, save_linked_signer, get_user_nado_client,
 )
-from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
-from src.nadobro.services.trade_service import close_position, close_all_positions, get_trade_analytics
-from src.nadobro.services.alert_service import create_alert
-from src.nadobro.services.conversation_intent import classify_conversation_intent
-from src.nadobro.services.trading_bro_service import answer_mode_for_text, stream_trading_bro_answer
-from src.nadobro.services.settings_service import get_user_settings, update_user_settings
-from src.nadobro.services.bot_runtime import start_user_bot
-from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness, is_new_onboarding_complete
-from src.nadobro.services.crypto import encrypt_with_server_key
-from src.nadobro.services.admin_service import is_trading_paused
+from src.nadobro.trading.trade_service import execute_market_order, execute_limit_order
+from src.nadobro.trading.trade_service import close_position, close_all_positions, get_trade_analytics
+from src.nadobro.notify.alert_service import create_alert
+from src.nadobro.llm.conversation_intent import classify_conversation_intent
+from src.nadobro.llm.trading_bro_service import answer_mode_for_text, stream_trading_bro_answer
+from src.nadobro.users.settings_service import get_user_settings, update_user_settings
+from src.nadobro.strategy.bot_runtime import start_user_bot
+from src.nadobro.users.onboarding_service import get_resume_step, evaluate_readiness, is_new_onboarding_complete
+from src.nadobro.core.crypto import encrypt_with_server_key
+from src.nadobro.users.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id, get_product_max_leverage, get_perp_products
 from src.nadobro.handlers.formatters import (
     escape_md, format_ai_response, fmt_positions, fmt_trade_preview, fmt_strategy_update,
@@ -33,10 +33,11 @@ from src.nadobro.handlers.keyboards import (
     trade_direction_kb, trade_order_type_kb, trade_product_reply_kb,
     trade_leverage_reply_kb, trade_size_reply_kb, trade_tpsl_kb,
     trade_tpsl_edit_kb, trade_confirm_reply_kb, SIZE_PRESETS,
-    mode_kb, strategy_hub_kb, wallet_kb, positions_kb, points_scope_kb,
+    mode_kb, strategy_hub_kb, wallet_kb, positions_kb,
     alerts_kb, settings_kb, close_product_kb, confirm_close_all_kb, portfolio_kb,
     bro_answer_kb, referral_kb,
 )
+from src.nadobro.users.points_ui import points_scope_kb
 from src.nadobro.handlers.trade_card import (
     open_trade_card_from_message,
     handle_trade_card_text_input,
@@ -50,18 +51,18 @@ from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.state_reset import clear_pending_user_state
 from src.nadobro.handlers.wallet_view import build_wallet_view_payload, hydrate_wallet_flow_context
 from src.nadobro.handlers.formatters import fmt_points_dashboard
-from src.nadobro.services.points_service import (
+from src.nadobro.users.points_service import (
     get_points_dashboard,
     looks_like_orphan_lowiqpts_reply,
     request_points_refresh,
     relay_user_reply_to_lowiqpts,
 )
-from src.nadobro.services.strategy_pending_input import (
+from src.nadobro.strategy.strategy_pending_input import (
     clear_strategy_pending_input,
     load_strategy_pending_input,
 )
-from src.nadobro.services.wallet_pending_flow import clear_wallet_pending_flow
-from src.nadobro.services.referral_service import (
+from src.nadobro.users.wallet_pending_flow import clear_wallet_pending_flow
+from src.nadobro.users.referral_service import (
     auto_generate_referral_code,
     claim_referral_code,
     get_referral_dashboard,
@@ -70,8 +71,8 @@ from src.nadobro.services.referral_service import (
     redeem_referral_code,
     validate_custom_code,
 )
-from src.nadobro.services.managed_agent_state import is_managed_agent_enabled
-from src.nadobro.services.managed_agent_service import handle_managed_agent_turn
+from src.nadobro.llm.managed_agent_state import is_managed_agent_enabled
+from src.nadobro.llm.managed_agent_service import handle_managed_agent_turn
 
 
 async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
@@ -108,8 +109,8 @@ from src.nadobro.handlers.intent_handlers import (
     handle_trade_intent_message,
 )
 from src.nadobro.handlers.intent_parser import parse_interaction_intent
-from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk
-from src.nadobro.services.perf import timed_metric, log_slow, increment_counter
+from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
+from src.nadobro.core.perf import timed_metric, log_slow, increment_counter
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +294,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         max_leverage = float(action_data.get("max_leverage", 10))
         cumulative_stop_loss_pct = action_data.get("cumulative_stop_loss_pct")
         cumulative_take_profit_pct = action_data.get("cumulative_take_profit_pct")
-        from src.nadobro.services.copy_service import start_copy
+        from src.nadobro.trading.copy_service import start_copy
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
         # Risk factor scales the per-trade budget slice inside the user's total allocation.
@@ -514,7 +515,7 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     if await handle_vault_text(update, context):
         return
 
-    from src.nadobro.services.brief_intent import is_brief_request
+    from src.nadobro.llm.brief_intent import is_brief_request
     if is_brief_request(text):
         from src.nadobro.handlers.brief_commands import _send_brief
         await _send_brief(update, context)
@@ -545,7 +546,7 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     # calls. Throttle it per-user so a single account can't spam expensive
     # inference. Quick paths above (buttons, trade flows) are intentionally not
     # rate-limited so normal UX stays snappy.
-    from src.nadobro.services.user_rate_limit import check_rate_limit as _llm_rate_limit
+    from src.nadobro.core.user_rate_limit import check_rate_limit as _llm_rate_limit
 
     allowed, retry_after = _llm_rate_limit(telegram_id, "llm")
     if not allowed:
@@ -1409,7 +1410,7 @@ async def _handle_wallet_flow(update, context, telegram_id, text):
         save_linked_signer(telegram_id, main_addr, linked_addr, ciphertext)
         # SECURITY: append-only audit trail for a sensitive key event.
         try:
-            from src.nadobro.services.audit_log import record_audit_event
+            from src.nadobro.users.audit_log import record_audit_event
 
             record_audit_event(telegram_id, "wallet_linked", f"signer={linked_addr}")
         except Exception:
@@ -1692,7 +1693,7 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         else:
             cfg[field] = value
         if field == "notional_usd":
-            from src.nadobro.services.settings_service import sync_cycle_notional_with_margin
+            from src.nadobro.users.settings_service import sync_cycle_notional_with_margin
 
             sync_cycle_notional_with_margin(strategies, strategy)
 
@@ -2102,7 +2103,7 @@ async def _handle_pending_copy_wallet(update, context, telegram_id, text):
         )
         return True
 
-    from src.nadobro.services.copy_service import add_trader
+    from src.nadobro.trading.copy_service import add_trader
     ok, msg, trader_id = add_trader(
         wallet,
         label=wallet[:10],
@@ -2131,7 +2132,7 @@ async def _handle_pending_admin_copy_wallet(update, context, telegram_id, text):
         return False
     context.user_data.pop("pending_admin_copy_wallet", None)
 
-    from src.nadobro.services.admin_service import is_admin as check_admin, add_copy_trader
+    from src.nadobro.users.admin_service import is_admin as check_admin, add_copy_trader
     if not check_admin(telegram_id):
         await _reply_loc(update.message, "⚠️ Admin access required\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=persistent_menu_kb())
         return True

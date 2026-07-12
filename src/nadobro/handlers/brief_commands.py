@@ -11,15 +11,15 @@ from telegram.ext import CallbackContext
 
 from src.nadobro.handlers.formatters import escape_md, fmt_bro_answer_card
 from src.nadobro.handlers.keyboards import bro_answer_kb
-from src.nadobro.services.morning_brief import render_morning_brief
-from src.nadobro.services.user_service import get_or_create_user
+from src.nadobro.llm.morning_brief import render_morning_brief
+from src.nadobro.users.user_service import get_or_create_user
 
 logger = logging.getLogger(__name__)
 
 
 async def _run_blocking_safe(fn, *args):
     try:
-        from src.nadobro.services.async_utils import run_blocking
+        from src.nadobro.core.async_utils import run_blocking
 
         return await run_blocking(fn, *args)
     except Exception:  # noqa: BLE001
@@ -39,7 +39,7 @@ async def cmd_night_howl(update: Update, context: CallbackContext) -> None:
         return
     telegram_id = update.effective_user.id
     network = _network_for(telegram_id)
-    from src.nadobro.services.night_howl_service import get_report, list_report_dates
+    from src.nadobro.llm.night_howl_service import get_report, list_report_dates
 
     arg = str(context.args[0]).strip().lower() if context.args else ""
 

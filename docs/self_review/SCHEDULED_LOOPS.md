@@ -55,7 +55,7 @@ Attribution drift was detected by scripts/reconcile_attribution.py — report
 below. Triage per docs/self_review/SELF_REVIEW_WORKFLOW.md: re-run each hard
 finding's underlying query read-only, classify each [VERIFIED] / [SUSPECTED] /
 benign with file:line evidence from the attribution path
-(services/order_intents.py::link_digest_intent, nado_sync._back_link_intent,
+(trading/order_intents.py::link_digest_intent, nado_sync._back_link_intent,
 session rollup in models/database.py). For each [VERIFIED] regression, add a
 strict-xfail guardrail per the protocol and propose the fix on a branch. Never
 modify production data. Report:
@@ -92,7 +92,7 @@ say "no edge today" instead of padding.
 ```
 
 Read the output for a week; whatever proves useful is the spec for the in-bot
-version (route it through services/llm_gateway.py like everything else).
+version (route it through llm/llm_gateway.py like everything else).
 
 ## Not scheduled here
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-from src.nadobro.services.execution_queue import _FairStrategyQueue
+from src.nadobro.trading.execution_queue import _FairStrategyQueue
 
 
 async def _alternates_between_users() -> None:

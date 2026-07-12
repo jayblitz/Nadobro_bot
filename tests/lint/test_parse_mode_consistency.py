@@ -24,10 +24,10 @@ import ast
 import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-SCAN = (
-    sorted((REPO_ROOT / "src/nadobro/handlers").glob("*.py"))
-    + sorted((REPO_ROOT / "src/nadobro/services").glob("*.py"))
-)
+# All bot packages: message builders live in handlers/ and the domain
+# packages (llm/, strategies/, trading/, notify/, ...) since the services/
+# decomposition. Scanning the whole tree keeps every builder classified.
+SCAN = sorted((REPO_ROOT / "src/nadobro").rglob("*.py"))
 SENDS = {"_edit_loc", "reply_text", "send_message", "edit_message_text"}
 
 

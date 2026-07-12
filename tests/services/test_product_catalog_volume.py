@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.nadobro.services import product_catalog as pc
+from src.nadobro.venue import product_catalog as pc
 
 
 def _spot_catalog(rows: list[dict]) -> dict:

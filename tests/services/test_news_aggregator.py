@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from src.nadobro.connectors.news import NewsItem
-from src.nadobro.services import news_aggregator
+from src.nadobro.market_data import news_aggregator
 
 
 @pytest.fixture(autouse=True)

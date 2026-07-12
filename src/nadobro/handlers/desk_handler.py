@@ -22,10 +22,10 @@ from telegram.constants import ParseMode
 
 from src.nadobro.handlers.callbacks import _edit_loc
 from src.nadobro.i18n import get_active_language, localize_text
-from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services import desk_store
-from src.nadobro.services.desk_parser import looks_like_desk_text, parse_desk_intent
-from src.nadobro.services.desk_plans import (
+from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.trading import desk_store
+from src.nadobro.trading.desk_parser import looks_like_desk_text, parse_desk_intent
+from src.nadobro.trading.desk_plans import (
     ST_AWAITING_TRIGGER,
     ST_DRAFT,
     ST_RUNNING,
@@ -36,8 +36,8 @@ from src.nadobro.services.desk_plans import (
     resolve_trigger,
     validate_plan,
 )
-from src.nadobro.services.onboarding_service import get_resume_step
-from src.nadobro.services.user_service import (
+from src.nadobro.users.onboarding_service import get_resume_step
+from src.nadobro.users.user_service import (
     ensure_active_wallet_ready,
     get_user,
     get_user_readonly_client,

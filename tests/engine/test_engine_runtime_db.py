@@ -50,8 +50,8 @@ def _schema():
 
 def test_runtime_drives_grid_and_persists_fill_and_executor():
     async def body():
-        from src.nadobro.services.engine_persistence import DbExecutorStore, DbInventoryRepository
-        from src.nadobro.services.engine_runtime import EngineRuntime
+        from src.nadobro.trading.engine_persistence import DbExecutorStore, DbInventoryRepository
+        from src.nadobro.strategy.engine_runtime import EngineRuntime
 
         adapter = MockNadoAdapter(mid=Decimal(100))   # venue double
         inventory = DbInventoryRepository()            # REAL Postgres

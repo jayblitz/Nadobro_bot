@@ -1,0 +1,211 @@
+import logging
+from datetime import datetime
+from src.nadobro.models.database import AlertCondition, insert_alert, get_alerts_by_user, get_alert_by_id_and_user, update_alert, get_all_active_alerts, update_alert_triggered
+from src.nadobro.config import get_product_id, get_product_name
+from src.nadobro.users.user_service import get_user
+from src.nadobro.i18n import get_active_language, localize_text
+
+logger = logging.getLogger(__name__)
+
+
+def _loc(text):
+    return localize_text(text, get_active_language())
+
+
+def create_alert(telegram_id: int, product: str, condition: str, target_value: float) -> dict:
+    user = get_user(telegram_id)
+    if not user:
+        return {"success": False, "error": _loc("User not found.")}
+    network = user.network_mode.value
+
+    product_id = get_product_id(product, network=network)
+    if product_id is None:
+        return {"success": False, "error": _loc("Unknown product '{product}'.").format(product=product)}
+
+    cond_map = {
+        "above": AlertCondition.ABOVE.value,
+        "below": AlertCondition.BELOW.value,
+        "funding_above": AlertCondition.FUNDING_ABOVE.value,
+        "funding_below": AlertCondition.FUNDING_BELOW.value,
+        "pnl_above": AlertCondition.PNL_ABOVE.value,
+        "pnl_below": AlertCondition.PNL_BELOW.value,
+    }
+    alert_cond = cond_map.get(condition)
+    if not alert_cond:
+        return {"success": False, "error": _loc("Unknown condition '{condition}'.").format(condition=condition)}
+
+    # Wrap insert_alert to surface DB / validation errors as a structured
+    # response instead of crashing the upstream Telegram handler. Without
+    # this, any exception (pool exhausted, table missing, ValueError from
+    # the column whitelist) propagates uncaught and the user sees nothing
+    # — they tap "Set price" → type a number → silence. (Audit 2026-05.)
+    try:
+        alert_id = insert_alert({
+            "user_id": telegram_id,
+            "product_id": product_id,
+            "product_name": get_product_name(product_id, network=network),
+            "condition": alert_cond,
+            "target_value": target_value,
+        }, network=network)
+    except Exception as e:
+        logger.exception(
+            "create_alert insert failed user=%s product=%s condition=%s",
+            telegram_id, product, condition,
+        )
+        return {"success": False, "error": _loc("Database error. Please try again.")}
+    if not alert_id:
+        return {"success": False, "error": _loc("Failed to create alert.")}
+
+    return {
+        "success": True,
+        "alert_id": alert_id,
+        "product": get_product_name(product_id, network=network),
+        "condition": condition,
+        "target": target_value,
+    }
+
+
+def get_user_alerts(telegram_id: int) -> list:
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    alerts = get_alerts_by_user(telegram_id, active_only=True, network=network)
+    rows = [
+        {
+            "id": a.get("id"),
+            "kind": "price",
+            "product": a.get("product_name"),
+            "condition": a.get("condition"),
+            "target": a.get("target_value"),
+            "network": network,
+            "created_at": (a.get("created_at") or "")[:19] if a.get("created_at") else "",
+        }
+        for a in alerts
+    ]
+    # Bug #2 fix: the NLP vault deposit watch lives in a *separate* table and
+    # was never surfaced here — so an enabled deposit alert showed "Stop
+    # deposit alerts" in the vault screen yet "No active alerts" in the Alert
+    # Engine. Merge an active watch in as a read-only display row (toggled off
+    # via the vault screen, not the numeric alert:del path).
+    rows.extend(_vault_deposit_watch_rows(telegram_id, network))
+    return rows
+
+
+def _vault_deposit_watch_rows(telegram_id: int, network: str) -> list:
+    try:
+        from src.nadobro.models.database import get_vault_deposit_watch
+        watch = get_vault_deposit_watch(telegram_id, network=network)
+    except Exception:  # noqa: BLE001 - a missing/locked watch table must not break the alert list
+        logger.warning("vault deposit watch lookup failed for alert listing", exc_info=True)
+        return []
+    if not (watch and watch.get("enabled")):
+        return []
+    created = watch.get("created_at") or watch.get("updated_at") or ""
+    return [{
+        "id": "vault-deposit",
+        "kind": "vault_deposit",
+        "product": "NLP Vault",
+        "condition": "deposit_capacity_open",
+        "target": 0,
+        "network": network,
+        "created_at": str(created)[:19] if created else "",
+    }]
+
+
+def delete_alert(telegram_id: int, alert_id: int) -> dict:
+    user = get_user(telegram_id)
+    network = user.network_mode.value if user else "mainnet"
+    alert = get_alert_by_id_and_user(alert_id, telegram_id, network=network)
+    if not alert:
+        return {"success": False, "error": _loc("Alert not found.")}
+    update_alert(alert_id, is_active=False, network=network)
+    return {"success": True, "message": _loc("Alert #{alert_id} deleted.").format(alert_id=alert_id)}
+
+
+def get_triggered_alerts(
+    prices: dict,
+    funding_rates: dict = None,
+    positions_by_user: dict = None,
+    network: str = None,
+) -> list:
+    # When `network` is provided, evaluate only alerts in that network's
+    # table and use it as the source-of-truth for `update_alert_triggered`.
+    # Without this scope, alerts from BOTH networks are evaluated against
+    # the caller's single price feed — a testnet alert can fire on mainnet
+    # prices and vice versa. (Audit 2026-05.)
+    triggered = []
+    active_alerts = get_all_active_alerts(network=network)
+    for alert in active_alerts:
+        if network and (alert.get("network") or network) != network:
+            # Belt-and-suspenders: drop any row whose network column
+            # disagrees with the requested scope.
+            continue
+        product_name = (alert.get("product_name") or "").replace("-PERP", "")
+        cond = alert.get("condition")
+        target = float(alert.get("target_value") or 0)
+        should_trigger = False
+        current_value = 0
+
+        if cond in (AlertCondition.ABOVE.value, AlertCondition.BELOW.value):
+            if product_name not in prices:
+                continue
+            current_value = prices[product_name].get("mid", 0)
+            if current_value == 0:
+                continue
+            if cond == AlertCondition.ABOVE.value and current_value >= target:
+                should_trigger = True
+            elif cond == AlertCondition.BELOW.value and current_value <= target:
+                should_trigger = True
+
+        elif cond in (AlertCondition.FUNDING_ABOVE.value, AlertCondition.FUNDING_BELOW.value):
+            if not funding_rates or product_name not in funding_rates:
+                continue
+            current_value = funding_rates[product_name]
+            if cond == AlertCondition.FUNDING_ABOVE.value and current_value >= target:
+                should_trigger = True
+            elif cond == AlertCondition.FUNDING_BELOW.value and current_value <= target:
+                should_trigger = True
+
+        elif cond in (AlertCondition.PNL_ABOVE.value, AlertCondition.PNL_BELOW.value):
+            if not positions_by_user:
+                continue
+            user_id = alert.get("user_id")
+            user_positions = positions_by_user.get(user_id, [])
+            position_pnl = None
+            for pos in user_positions:
+                pos_product = (pos.get("product_name") or "").replace("-PERP", "")
+                if pos_product == product_name:
+                    pnl = pos.get("unrealized_pnl")
+                    if pnl is not None:
+                        position_pnl = float(pnl)
+                    break
+            if position_pnl is None:
+                continue
+            current_value = position_pnl
+            if cond == AlertCondition.PNL_ABOVE.value and current_value >= target:
+                should_trigger = True
+            elif cond == AlertCondition.PNL_BELOW.value and current_value <= target:
+                should_trigger = True
+
+        if should_trigger:
+            # When the caller scoped by network, rows came from a single
+            # network table without a `network` column — use the param as
+            # source-of-truth so we update the right table.
+            alert_network = network or alert.get("network") or "mainnet"
+            update_alert_triggered(alert["id"], network=alert_network)
+            if cond in (AlertCondition.FUNDING_ABOVE.value, AlertCondition.FUNDING_BELOW.value):
+                value_type = "funding_rate"
+            elif cond in (AlertCondition.PNL_ABOVE.value, AlertCondition.PNL_BELOW.value):
+                value_type = "pnl"
+            else:
+                value_type = "price"
+            triggered.append({
+                "user_id": alert.get("user_id"),
+                "product": alert.get("product_name"),
+                "condition": cond,
+                "target": target,
+                "value_type": value_type,
+                "current_value": current_value,
+                # Backwards compatibility for older callers that still read this key.
+                "current_price": current_value,
+            })
+    return triggered

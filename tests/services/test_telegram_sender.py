@@ -15,7 +15,7 @@ def fresh_sender(monkeypatch):
     monkeypatch.setenv("TELEGRAM_GLOBAL_BURST", "1000")
     monkeypatch.setenv("TELEGRAM_CHAT_RPS", "1000")
     monkeypatch.setenv("TELEGRAM_CHAT_BURST", "1000")
-    from src.nadobro.services import telegram_sender
+    from src.nadobro.notify import telegram_sender
 
     importlib.reload(telegram_sender)
     return telegram_sender
@@ -31,7 +31,7 @@ def test_send_is_rate_shaped(monkeypatch):
     monkeypatch.setenv("TELEGRAM_GLOBAL_BURST", "5")
     monkeypatch.setenv("TELEGRAM_CHAT_RPS", "1000")
     monkeypatch.setenv("TELEGRAM_CHAT_BURST", "1000")
-    from src.nadobro.services import telegram_sender
+    from src.nadobro.notify import telegram_sender
 
     importlib.reload(telegram_sender)
 
@@ -67,7 +67,7 @@ def test_priority_lane_jumps_queue(monkeypatch):
     monkeypatch.setenv("TELEGRAM_GLOBAL_BURST", "1")
     monkeypatch.setenv("TELEGRAM_CHAT_RPS", "1000")
     monkeypatch.setenv("TELEGRAM_CHAT_BURST", "1000")
-    from src.nadobro.services import telegram_sender
+    from src.nadobro.notify import telegram_sender
 
     importlib.reload(telegram_sender)
 
@@ -123,7 +123,7 @@ def test_lane_cap_drops_oldest_info(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_RPS", "1000")
     monkeypatch.setenv("TELEGRAM_CHAT_BURST", "1000")
     monkeypatch.setenv("TELEGRAM_LANE_CAPACITY_INFO", "3")
-    from src.nadobro.services import telegram_sender
+    from src.nadobro.notify import telegram_sender
 
     importlib.reload(telegram_sender)
 

@@ -223,7 +223,7 @@ def test_discretion_windows_exposure_vwap():
 
 
 def test_rgrid_defaults_to_directional_ladder_momentum_is_optin():
-    from src.nadobro.services.engine_runtime import map_strategy_config
+    from src.nadobro.strategy.engine_runtime import map_strategy_config
     # rgrid now DEFAULTS to the dynamic directional recycling ladder
     # (DynamicGridController: long ladder in uptrends, short ladder in downtrends,
     # booking profit per level) — user choice. It is NOT the fill-anchored maker.
@@ -416,7 +416,7 @@ def test_grid_metrics_reports_green_red_reset_levels():
 
 
 def test_runtime_opt_in_maps_override_and_treadfi_defaults():
-    from src.nadobro.services.engine_runtime import map_strategy_config
+    from src.nadobro.strategy.engine_runtime import map_strategy_config
 
     grid_cfg = map_strategy_config(
         "grid", {"fill_anchored": 1, "notional_usd": 100.0, "levels": 2},

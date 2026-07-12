@@ -8,7 +8,7 @@ giant account-wide "close" (the session 47 / 51 corruption). See
 """
 from __future__ import annotations
 
-from src.nadobro.services.trade_service import _resolve_close_session_id
+from src.nadobro.trading.trade_service import _resolve_close_session_id
 
 
 def _open(session_id, size):

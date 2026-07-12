@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.nadobro.services import market_features as mf
+from src.nadobro.strategy import market_features as mf
 
 
 @pytest.fixture(autouse=True)

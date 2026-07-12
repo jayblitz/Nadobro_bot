@@ -18,7 +18,7 @@ def _reset_gateway_state():
     sys.modules so reload-based tests are covered too.
     """
     yield
-    mod = sys.modules.get("src.nadobro.services.gateway_budget")
+    mod = sys.modules.get("src.nadobro.venue.gateway_budget")
     if mod is None:
         return
     with mod._lock:
@@ -36,7 +36,7 @@ def _fresh_module(monkeypatch):
     monkeypatch.setenv("NADO_GATEWAY_RL_THRESHOLD", "2")
     monkeypatch.setenv("NADO_GATEWAY_RL_WINDOW_SECONDS", "30")
     monkeypatch.setenv("NADO_GATEWAY_RL_COOLDOWN_SECONDS", "60")
-    from src.nadobro.services import gateway_budget
+    from src.nadobro.venue import gateway_budget
 
     importlib.reload(gateway_budget)
     return gateway_budget
@@ -49,7 +49,7 @@ def test_try_acquire_releases_on_host_throttle(monkeypatch):
     def _deny(_url, *, cost=1.0, max_wait=None):
         return False
 
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", _deny)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", _deny)
     assert mod.try_acquire(url, user_id=42) is False
     snap = mod.snapshot()
     assert 42 not in snap["user_inflight"]
@@ -65,7 +65,7 @@ def test_query_weight_forwarded_to_host_bucket(monkeypatch):
         seen["cost"] = cost
         return True
 
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", _record)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", _record)
     assert mod.try_acquire(url, user_id=1, weight=10) is True
     assert seen["cost"] == 10
     mod.release(1)
@@ -77,9 +77,9 @@ def test_per_user_bucket_drains_by_weight(monkeypatch):
     monkeypatch.setenv("NADO_USER_GATEWAY_BURST", "10")
     monkeypatch.setenv("NADO_USER_MAX_INFLIGHT", "100")
     import importlib
-    from src.nadobro.services import gateway_budget as mod
+    from src.nadobro.venue import gateway_budget as mod
     importlib.reload(mod)
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", lambda *_a, **_k: True)
     url = "https://gateway.mainnet.nado.xyz/query"
     # First weight-8 call fits in the burst-10 bucket; the next weight-8 call
     # cannot (only ~2 tokens left) and is denied with a tiny wait budget.
@@ -92,12 +92,12 @@ def test_execute_lane_uses_wallet_budget(monkeypatch):
     monkeypatch.setenv("NADO_WALLET_EXECUTE_RPS", "0.0001")
     monkeypatch.setenv("NADO_WALLET_EXECUTE_BURST", "5")
     import importlib
-    from src.nadobro.services import gateway_budget as mod
+    from src.nadobro.venue import gateway_budget as mod
     importlib.reload(mod)
     # Host throttle must NOT be consulted for executes.
     def _boom(*_a, **_k):
         raise AssertionError("execute lane must not touch the host bucket")
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", _boom)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", _boom)
     url = "https://gateway.mainnet.nado.xyz/execute"
     wallet = "0xabc"
     assert mod.try_acquire(url, kind="execute", wallet=wallet, weight=5, max_wait=0.01) is True
@@ -118,7 +118,7 @@ def test_execute_lane_needs_no_release(monkeypatch):
 def test_per_user_inflight_cap(monkeypatch):
     mod = _fresh_module(monkeypatch)
     url = "https://gateway.mainnet.nado.xyz/query"
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", lambda *_a, **_k: True)
     assert mod.try_acquire(url, user_id=7) is True
     assert mod.try_acquire(url, user_id=7) is True
     assert mod.try_acquire(url, user_id=7) is True
@@ -142,7 +142,7 @@ def test_rate_limit_circuit_opens(monkeypatch):
 
 
 def test_is_rate_limit_error():
-    from src.nadobro.services.gateway_budget import is_rate_limit_error
+    from src.nadobro.venue.gateway_budget import is_rate_limit_error
 
     assert is_rate_limit_error('Too many requests "error_code":1000')
     assert is_rate_limit_error(Exception("error_code=1000"))
@@ -157,7 +157,7 @@ def test_write_circuit_blocks_executes_not_queries(monkeypatch):
     doomed orders into the ban, while queries keep flowing.
     """
     mod = _fresh_module(monkeypatch)
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", lambda *_a, **_k: True)
     query_url = "https://gateway.mainnet.nado.xyz/query"
     execute_url = "https://gateway.mainnet.nado.xyz/execute"
 
@@ -178,7 +178,7 @@ def test_write_circuit_blocks_executes_not_queries(monkeypatch):
 def test_write_circuit_clears_on_success(monkeypatch):
     """A successful write clears the ban so executes resume immediately."""
     mod = _fresh_module(monkeypatch)
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", lambda *_a, **_k: True)
     url = "https://gateway.mainnet.nado.xyz/execute"
 
     mod.record_ip_query_only(url)
@@ -194,7 +194,7 @@ def test_write_circuit_expires_after_cooldown(monkeypatch):
     """The ban auto-expires once the cooldown window elapses."""
     monkeypatch.setenv("NADO_WRITE_BAN_COOLDOWN_SECONDS", "0.05")
     mod = _fresh_module(monkeypatch)
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", lambda *_a, **_k: True)
     url = "https://gateway.mainnet.nado.xyz/execute"
 
     mod.record_ip_query_only(url)
@@ -207,7 +207,7 @@ def test_write_circuit_expires_after_cooldown(monkeypatch):
 def test_write_circuit_is_per_host(monkeypatch):
     """The ban is keyed by host and does not leak across venues."""
     mod = _fresh_module(monkeypatch)
-    monkeypatch.setattr("src.nadobro.services.http_session.throttle_host", lambda *_a, **_k: True)
+    monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", lambda *_a, **_k: True)
     banned = "https://gateway.mainnet.nado.xyz/execute"
     other = "https://gateway.testnet.nado.xyz/execute"
 

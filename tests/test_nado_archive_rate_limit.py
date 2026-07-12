@@ -7,7 +7,7 @@ install_test_stubs()
 
 
 def _reset_archive_rate_state():
-    import src.nadobro.services.nado_archive as archive
+    import src.nadobro.venue.nado_archive as archive
 
     archive._rate_limited_until = 0.0
     archive._last_request_at = 0.0
@@ -15,7 +15,7 @@ def _reset_archive_rate_state():
 
 
 def test_post_sets_global_cooldown_on_429():
-    import src.nadobro.services.nado_archive as archive
+    import src.nadobro.venue.nado_archive as archive
 
     _reset_archive_rate_state()
     response = MagicMock()
@@ -35,7 +35,7 @@ def test_post_sets_global_cooldown_on_429():
 
 
 def test_post_skips_requests_while_rate_limited():
-    import src.nadobro.services.nado_archive as archive
+    import src.nadobro.venue.nado_archive as archive
 
     _reset_archive_rate_state()
     archive._rate_limited_until = time.time() + 30.0
@@ -49,7 +49,7 @@ def test_post_skips_requests_while_rate_limited():
 
 
 def test_query_orders_by_digests_parses_batch_response():
-    import src.nadobro.services.nado_archive as archive
+    import src.nadobro.venue.nado_archive as archive
 
     payload = {
         "orders": [
@@ -67,7 +67,7 @@ def test_query_orders_by_digests_parses_batch_response():
 
 
 def test_query_order_by_digest_stops_polling_when_rate_limited():
-    import src.nadobro.services.nado_archive as archive
+    import src.nadobro.venue.nado_archive as archive
 
     _reset_archive_rate_state()
     archive._rate_limited_until = time.time() + 30.0

@@ -3,13 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from src.nadobro.services.vault_metrics_service import (
+from src.nadobro.vault.vault_metrics_service import (
     annualize_apr_from_snapshots,
     build_lp_ledger_from_archive,
     compute_pnl_from_ledger,
     deposit_room_usdt0,
 )
-from src.nadobro.services.vault_deposit_watch_service import (
+from src.nadobro.vault.vault_deposit_watch_service import (
     should_notify_deposit_opening,
     user_eligible_for_deposit_watch,
 )

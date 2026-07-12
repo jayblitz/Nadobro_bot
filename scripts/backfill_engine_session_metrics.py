@@ -34,7 +34,7 @@ from __future__ import annotations
 import argparse
 
 from src.nadobro.db import execute, query_all, query_one
-from src.nadobro.services.engine_runtime import (
+from src.nadobro.strategy.engine_runtime import (
     ENGINE_MAPPED_STRATEGIES,
     deterministic_controller_id,
 )

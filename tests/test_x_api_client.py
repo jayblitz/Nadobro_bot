@@ -5,7 +5,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import x_api_client
+from src.nadobro.market_data import x_api_client
 
 
 class _Resp:

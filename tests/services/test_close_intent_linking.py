@@ -23,8 +23,8 @@ from _stubs import install_test_stubs  # noqa: F401
 
 install_test_stubs()
 
-from src.nadobro.services import order_intents
-from src.nadobro.services import trade_service
+from src.nadobro.trading import order_intents
+from src.nadobro.trading import trade_service
 
 
 class _FakeNetworkMode:
@@ -121,8 +121,8 @@ def _close_position_with_mocks(**close_kwargs):
          patch.object(trade_service, "_resolve_fill_data", return_value=None), \
          patch.object(trade_service, "_get_post_fill_price", return_value=100.0), \
          patch.object(trade_service, "_record_close_in_db", side_effect=_fake_record), \
-         patch("src.nadobro.services.order_intents.link_digest_intent", side_effect=_fake_link), \
-         patch("src.nadobro.services.settings_service.get_user_settings",
+         patch("src.nadobro.trading.order_intents.link_digest_intent", side_effect=_fake_link), \
+         patch("src.nadobro.users.settings_service.get_user_settings",
                return_value=(True, {"default_leverage": 3})):
         result = trade_service.close_position(1234, "BTC", **close_kwargs)
     return result, linked, recorded, client

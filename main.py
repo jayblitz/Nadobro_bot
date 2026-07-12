@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-from src.nadobro.services.log_redaction import RedactingFormatter, SensitiveDataRedactFilter
+from src.nadobro.core.log_redaction import RedactingFormatter, SensitiveDataRedactFilter
 
 
 _redact_filter = SensitiveDataRedactFilter()
@@ -37,8 +37,8 @@ logger = logging.getLogger("nadobro")
 load_dotenv()
 
 from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
-from src.nadobro.services.crypto import validate_encryption_key
-from src.nadobro.utils.env import env_bool
+from src.nadobro.core.crypto import validate_encryption_key
+from src.nadobro.utils.env import env_bool, env_int, env_str
 
 if not ENCRYPTION_KEY:
     logger.error(
@@ -143,11 +143,11 @@ async def _start_bootstrap_health_server(port: int):
 def _runtime_health_payload() -> dict:
     payload = {"status": "ok", "ts": time.time()}
     try:
-        from src.nadobro.services.execution_queue import get_queue_diagnostics
-        from src.nadobro.services.runtime_supervisor import get_runtime_supervisor_diagnostics
-        from src.nadobro.services.copy_service import get_copy_polling_diagnostics
-        from src.nadobro.services.scheduler import get_scheduler_diagnostics
-        from src.nadobro.services.perf import summary_lines
+        from src.nadobro.trading.execution_queue import get_queue_diagnostics
+        from src.nadobro.runtime.runtime_supervisor import get_runtime_supervisor_diagnostics
+        from src.nadobro.trading.copy_service import get_copy_polling_diagnostics
+        from src.nadobro.runtime.scheduler import get_scheduler_diagnostics
+        from src.nadobro.core.perf import summary_lines
 
         queue_diag = get_queue_diagnostics()
         scheduler_diag = get_scheduler_diagnostics()
@@ -165,13 +165,13 @@ def _runtime_health_payload() -> dict:
         if not scheduler_diag.get("running"):
             payload["status"] = "degraded"
         try:
-            from src.nadobro.services.gateway_budget import snapshot as gateway_snapshot
-            from src.nadobro.services.ws_health import snapshot as ws_snapshot
-            from src.nadobro.services.market_feed import snapshot as market_snapshot
-            from src.nadobro.services.async_utils import pool_stats
-            from src.nadobro.services.user_circuit import snapshot as circuit_snapshot
-            from src.nadobro.services.feature_flags import strategy_scheduler_enabled
-            from src.nadobro.services.strategy_scheduler import get_scheduler
+            from src.nadobro.venue.gateway_budget import snapshot as gateway_snapshot
+            from src.nadobro.venue.ws_health import snapshot as ws_snapshot
+            from src.nadobro.venue.market_feed import snapshot as market_snapshot
+            from src.nadobro.core.async_utils import pool_stats
+            from src.nadobro.core.user_circuit import snapshot as circuit_snapshot
+            from src.nadobro.core.feature_flags import strategy_scheduler_enabled
+            from src.nadobro.strategy.strategy_scheduler import get_scheduler
 
             payload["gateway"] = gateway_snapshot()
             payload["ws_health"] = ws_snapshot()
@@ -221,7 +221,7 @@ def setup_bot():
         user = update.effective_user
         if user:
             from src.nadobro.i18n import _ACTIVE_LANG, normalize_lang
-            from src.nadobro.services.user_service import get_user
+            from src.nadobro.users.user_service import get_user
             existing = get_user(user.id)
             if existing is not None and getattr(existing, "language", None):
                 # Respect the user's stored choice (single source of truth).
@@ -300,36 +300,36 @@ async def run_bot():
     logger.info("Setting up Telegram bot...")
     bot_app = setup_bot()
 
-    from src.nadobro.services.scheduler import set_bot_app, set_check_client, start_scheduler
-    from src.nadobro.services.bot_runtime import (
+    from src.nadobro.runtime.scheduler import set_bot_app, set_check_client, start_scheduler
+    from src.nadobro.strategy.bot_runtime import (
         set_bot_app as set_runtime_app,
         restore_running_bots,
         stop_runtime,
         handle_strategy_job,
     )
-    from src.nadobro.services.runtime_supervisor import (
+    from src.nadobro.runtime.runtime_supervisor import (
         start_runtime_supervisor,
         stop_runtime_supervisor,
     )
-    from src.nadobro.services.scheduler import handle_alert_job
-    from src.nadobro.services.execution_queue import register_handlers, start_workers, stop_workers
-    from src.nadobro.services.copy_service import set_copy_bot_app
-    from src.nadobro.services.copy_service import start_copy_polling, stop_copy_polling
-    from src.nadobro.services.vault_deposit_watch_service import set_vault_watch_bot_app
+    from src.nadobro.runtime.scheduler import handle_alert_job
+    from src.nadobro.trading.execution_queue import register_handlers, start_workers, stop_workers
+    from src.nadobro.trading.copy_service import set_copy_bot_app
+    from src.nadobro.trading.copy_service import start_copy_polling, stop_copy_polling
+    from src.nadobro.vault.vault_deposit_watch_service import set_vault_watch_bot_app
     set_bot_app(bot_app)
     set_runtime_app(bot_app)
     set_copy_bot_app(bot_app)
     set_vault_watch_bot_app(bot_app)
     register_handlers(handle_strategy_job, handle_alert_job)
-    _sw_raw = (os.environ.get("NADO_STRATEGY_WORKERS") or "").strip()
+    _sw_raw = env_str("NADO_STRATEGY_WORKERS")
     _sw = int(_sw_raw) if _sw_raw else None
     start_workers(
         strategy_workers=_sw,
-        alert_workers=int(os.environ.get("NADO_ALERT_WORKERS", "1")),
+        alert_workers=env_int("NADO_ALERT_WORKERS", 1),
     )
     start_runtime_supervisor()
-    from src.nadobro.services.runtime_supervisor import runtime_mode
-    from src.nadobro.services.execution_queue import get_queue_diagnostics
+    from src.nadobro.runtime.runtime_supervisor import runtime_mode
+    from src.nadobro.trading.execution_queue import get_queue_diagnostics
 
     _diag = get_queue_diagnostics()
     logger.info(
@@ -341,7 +341,7 @@ async def run_bot():
     )
 
     try:
-        from src.nadobro.services.nado_client import NadoClient
+        from src.nadobro.venue.nado_client import NadoClient
         alert_network = (os.environ.get("NADO_ALERT_CHECK_NETWORK") or "testnet").strip().lower()
         alert_pk = (os.environ.get("NADO_ALERT_CHECK_PRIVATE_KEY") or "").strip()
         alert_address = (
@@ -352,14 +352,14 @@ async def run_bot():
             # NO_ORDERS_AUDIT-FIX-R6b: go through the digest-keyed cache so
             # we don't pay the SDK init cost on every restart-without-restart
             # (e.g. health-check restarts).
-            from src.nadobro.services.nado_client import get_or_create_signing_client
+            from src.nadobro.venue.nado_client import get_or_create_signing_client
             alert_client = get_or_create_signing_client(alert_pk, alert_network)
         else:
             # Read-only client is sufficient for alert price checks.
-            from src.nadobro.services.nado_client import get_or_create_readonly_client
+            from src.nadobro.venue.nado_client import get_or_create_readonly_client
             alert_client = get_or_create_readonly_client(alert_address, alert_network)
         set_check_client(alert_client)
-        from src.nadobro.services.market_feed import bind_fetcher
+        from src.nadobro.venue.market_feed import bind_fetcher
 
         bind_fetcher(alert_client.get_all_market_prices)
         logger.info("Alert price-check client initialized (network=%s)", alert_network)
@@ -367,9 +367,9 @@ async def run_bot():
         logger.warning(f"Alert price-check client failed to initialize: {e}")
 
     start_scheduler()
-    from src.nadobro.services.feature_flags import strategy_scheduler_enabled
-    from src.nadobro.services.strategy_scheduler import get_scheduler
-    from src.nadobro.services.bot_runtime import _load_state
+    from src.nadobro.core.feature_flags import strategy_scheduler_enabled
+    from src.nadobro.strategy.strategy_scheduler import get_scheduler
+    from src.nadobro.strategy.bot_runtime import _load_state
 
     if strategy_scheduler_enabled():
         await get_scheduler().start(_load_state)
@@ -380,8 +380,8 @@ async def run_bot():
     auto_restore = env_bool("NADO_AUTO_RESTORE_STRATEGIES", False)
     restore_running_bots(enabled=auto_restore)
     try:
-        from src.nadobro.services.feature_flags import time_limit_enabled
-        from src.nadobro.services.time_limit_watcher import time_limit_tick
+        from src.nadobro.core.feature_flags import time_limit_enabled
+        from src.nadobro.strategy.time_limit_watcher import time_limit_tick
 
         if time_limit_enabled():
             asyncio.create_task(time_limit_tick())
@@ -391,7 +391,7 @@ async def run_bot():
     portfolio_history_enabled = env_bool("NADO_PORTFOLIO_HISTORY", True)
     if portfolio_history_enabled:
         try:
-            from src.nadobro.services.portfolio_history_worker import (
+            from src.nadobro.portfolio.portfolio_history_worker import (
                 start_portfolio_history_worker,
             )
 
@@ -417,10 +417,10 @@ async def run_bot():
             base = f"{parsed.scheme}://{parsed.netloc}"
             webhook_url = base + webhook_path
 
-    webhook_listen = os.environ.get("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0").strip()
+    webhook_listen = env_str("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0")
     # Prefer TELEGRAM_WEBHOOK_PORT when set so a reverse proxy can own PORT (e.g. nginx on 8080, PTB on 8082).
-    _wh = os.environ.get("TELEGRAM_WEBHOOK_PORT", "").strip()
-    webhook_port = int(_wh) if _wh else int(os.environ.get("PORT", "8080"))
+    _wh = env_str("TELEGRAM_WEBHOOK_PORT")
+    webhook_port = int(_wh) if _wh else env_int("PORT", 8080)
     bootstrap_health_server = None
     async def _start_polling_mode():
         # Ensure Telegram stops sending updates to webhook before polling starts.
@@ -449,7 +449,7 @@ async def run_bot():
     # in flight before this process (re)started so the user's flow resumes
     # instead of silently dropping their pending request.
     try:
-        from src.nadobro.services.points_service import rehydrate_lowiqpts_pending_state
+        from src.nadobro.users.points_service import rehydrate_lowiqpts_pending_state
         rehydrate_lowiqpts_pending_state(bot_app)
     except Exception as e:
         logger.warning("LOWIQPTS pending-state rehydration failed (non-fatal): %s", e)
@@ -579,10 +579,10 @@ async def run_bot():
         pass
     finally:
         logger.info("Shutting down...")
-        from src.nadobro.services.scheduler import stop_scheduler
-        from src.nadobro.services.feature_flags import strategy_scheduler_enabled
-        from src.nadobro.services.strategy_scheduler import get_scheduler
-        from src.nadobro.services.nado_ws import portfolio_ws
+        from src.nadobro.runtime.scheduler import stop_scheduler
+        from src.nadobro.core.feature_flags import strategy_scheduler_enabled
+        from src.nadobro.strategy.strategy_scheduler import get_scheduler
+        from src.nadobro.venue.nado_ws import portfolio_ws
 
         stop_scheduler()
         if strategy_scheduler_enabled():
