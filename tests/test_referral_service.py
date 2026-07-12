@@ -9,7 +9,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import referral_service
+from src.nadobro.users import referral_service
 
 
 class _FakeCursor:

@@ -16,7 +16,7 @@ from src.nadobro.config import (
     get_product_id,
     list_volume_spot_product_names,
 )
-from src.nadobro.services.user_service import (
+from src.nadobro.users.user_service import (
     get_runtime_wallet_readiness,
     get_user,
     get_user_readonly_client,
@@ -296,7 +296,7 @@ def parse_trigger_intent(text: str) -> dict[str, Any] | None:
 
 def get_ops_diagnostics(telegram_id: int | None = None) -> dict[str, Any]:
     from src.nadobro.strategy.bot_runtime import get_runtime_diagnostics
-    from src.nadobro.services.runtime_supervisor import runtime_mode
+    from src.nadobro.runtime.runtime_supervisor import runtime_mode
 
     payload: dict[str, Any] = {
         "ts": time.time(),

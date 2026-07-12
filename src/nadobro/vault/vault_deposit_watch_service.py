@@ -14,9 +14,9 @@ from src.nadobro.models.database import (
     update_vault_watch_last_mintable,
 )
 from src.nadobro.core.async_utils import run_blocking, run_blocking_db, run_blocking_sdk
-from src.nadobro.services.nlp_vault_service import PRIVATE_ALPHA_CAP_USDT0, get_user_vault_snapshot
-from src.nadobro.services.user_service import get_user, get_user_nado_client
-from src.nadobro.services.vault_metrics_service import get_pool_metrics
+from src.nadobro.vault.nlp_vault_service import PRIVATE_ALPHA_CAP_USDT0, get_user_vault_snapshot
+from src.nadobro.users.user_service import get_user, get_user_nado_client
+from src.nadobro.vault.vault_metrics_service import get_pool_metrics
 
 logger = logging.getLogger(__name__)
 

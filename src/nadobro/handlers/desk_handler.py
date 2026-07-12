@@ -36,8 +36,8 @@ from src.nadobro.trading.desk_plans import (
     resolve_trigger,
     validate_plan,
 )
-from src.nadobro.services.onboarding_service import get_resume_step
-from src.nadobro.services.user_service import (
+from src.nadobro.users.onboarding_service import get_resume_step
+from src.nadobro.users.user_service import (
     ensure_active_wallet_ready,
     get_user,
     get_user_readonly_client,

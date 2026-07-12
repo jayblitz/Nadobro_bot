@@ -4,13 +4,13 @@ import os
 from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.nadobro.utils.env import env_float, env_int
-from src.nadobro.services.alert_service import get_triggered_alerts
+from src.nadobro.notify.alert_service import get_triggered_alerts
 from src.nadobro.trading.stop_loss_service import process_stop_losses
 from src.nadobro.venue.nado_client import NadoClient
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.core.perf import timed_metric
 from src.nadobro.trading.execution_queue import enqueue_alert
-from src.nadobro.services.lowiq_relay_client import relay_poll_interval_seconds
+from src.nadobro.users.lowiq_relay_client import relay_poll_interval_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ async def _build_alert_context(network: str | None = None) -> tuple[dict, dict]:
     never-fire)."""
     from src.nadobro.models.database import get_all_active_alerts, AlertCondition
     from src.nadobro.config import get_product_id
-    from src.nadobro.services.user_service import get_user_readonly_client
+    from src.nadobro.users.user_service import get_user_readonly_client
 
     funding_rates: dict = {}
     positions_by_user: dict = {}
@@ -314,7 +314,7 @@ async def tick_howl():
                 howl_data = await run_blocking(run_howl_analysis, telegram_id, network, state)
                 if howl_data and howl_data.get("suggestions"):
                     msg = format_howl_message(howl_data)
-                    from src.nadobro.handlers.keyboards import howl_approval_kb
+                    from src.nadobro.llm.howl_ui import howl_approval_kb
                     from src.nadobro.i18n import language_context, get_user_language, localize_text, localize_markup, get_active_language
                     suggestions_count = len(howl_data.get("suggestions", []))
                     try:
@@ -404,7 +404,7 @@ async def poll_lowiqpts_relay():
     if not _bot_app:
         return
     try:
-        from src.nadobro.services.points_service import poll_lowiqpts_relay_events
+        from src.nadobro.users.points_service import poll_lowiqpts_relay_events
         await poll_lowiqpts_relay_events(_bot_app)
     except Exception as e:
         logger.error("LOWIQPTS relay poll failed: %s", e)
@@ -543,7 +543,7 @@ async def sync_pending_fills():
             query_orders_by_subaccount,
         )
         from src.nadobro.trading.trade_service import reconcile_close_trade_fill
-        from src.nadobro.services.user_service import update_trade_stats
+        from src.nadobro.users.user_service import update_trade_stats
 
         pending = await run_blocking(claim_pending_fill_syncs, _FILL_SYNC_BATCH_SIZE)
         if not pending:
@@ -620,7 +620,7 @@ async def sync_pending_fills():
                         # misclassifying late archive indexing as cancellation.
                         if attempts >= 8:
                             try:
-                                from src.nadobro.services.user_service import get_user_nado_client
+                                from src.nadobro.users.user_service import get_user_nado_client
                                 user_id = entry["user_id"]
                                 product_id = entry["product_id"]
                                 client = await run_blocking(get_user_nado_client, int(user_id), network=network)
@@ -747,7 +747,7 @@ async def sync_pending_fills():
                     if is_partial:
                         digest_still_open = True
                         try:
-                            from src.nadobro.services.user_service import get_user_nado_client
+                            from src.nadobro.users.user_service import get_user_nado_client
                             user_id = entry["user_id"]
                             product_id = entry["product_id"]
                             client = await run_blocking(get_user_nado_client, int(user_id), network=network)
@@ -860,7 +860,7 @@ async def tick_vault_deposit_watch_job():
     from src.nadobro.core.feature_flags import vault_deposit_watch_enabled
     if not vault_deposit_watch_enabled():
         return
-    from src.nadobro.services.vault_deposit_watch_service import tick_vault_deposit_watch
+    from src.nadobro.vault.vault_deposit_watch_service import tick_vault_deposit_watch
     # Watches are stored per-network; tick both networks every cycle so we
     # don't miss capacity openings depending on which network the env points
     # to. Each call is a no-op if no users are opted in for that network.

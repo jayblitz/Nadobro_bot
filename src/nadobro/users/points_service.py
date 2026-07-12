@@ -9,8 +9,8 @@ from io import BytesIO
 from typing import Optional
 
 from src.nadobro.utils.env import env_int
-from src.nadobro.handlers.keyboards import points_followup_options_kb, points_scope_kb
-from src.nadobro.services.lowiq_relay_client import (
+from src.nadobro.users.points_ui import points_followup_options_kb, points_scope_kb
+from src.nadobro.users.lowiq_relay_client import (
     close_session as relay_close_session,
     poll_events as relay_poll_events,
     relay_is_configured,
@@ -20,7 +20,7 @@ from src.nadobro.services.lowiq_relay_client import (
 )
 from src.nadobro.models.database import get_bot_state, set_bot_state
 from src.nadobro.core.async_utils import run_blocking
-from src.nadobro.services.user_service import get_user
+from src.nadobro.users.user_service import get_user
 
 logger = logging.getLogger(__name__)
 

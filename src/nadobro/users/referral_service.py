@@ -14,7 +14,7 @@ import psycopg2.extras
 
 from src.nadobro.config import BOT_USERNAME
 from src.nadobro.db import execute, get_db, put_db, query_all, query_one
-from src.nadobro.services.invite_service import (
+from src.nadobro.users.invite_service import (
     INVITE_CODE_LENGTH,
     _generate_plain_code,
     _hash_code,

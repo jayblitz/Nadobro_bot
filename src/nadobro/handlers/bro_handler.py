@@ -13,8 +13,8 @@ from src.nadobro.handlers.formatters import escape_md
 from src.nadobro.handlers.keyboards import back_kb
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.strategy.bot_runtime import get_user_bot_status
-from src.nadobro.services.settings_service import get_user_settings, update_user_settings
-from src.nadobro.services.user_service import get_user
+from src.nadobro.users.settings_service import get_user_settings, update_user_settings
+from src.nadobro.users.user_service import get_user
 from telegram.constants import ParseMode
 
 from src.nadobro.handlers.callbacks import _edit_loc  # noqa: E402
@@ -171,7 +171,7 @@ async def _handle_bro(query, data, telegram_id, context):
     elif action == "status":
         from src.nadobro.strategy.bot_runtime import get_user_bot_status
         from src.nadobro.trading.budget_guard import get_budget_status
-        from src.nadobro.services.settings_service import get_strategy_settings
+        from src.nadobro.users.settings_service import get_strategy_settings
         bot_status = get_user_bot_status(telegram_id)
         _, bro_conf = get_strategy_settings(telegram_id, "bro")
         bro_settings = {"budget_usd": bro_conf.get("budget_usd", 500), "risk_level": bro_conf.get("risk_level", "balanced"), "max_loss_pct": bro_conf.get("max_loss_pct", 15)}
@@ -239,7 +239,7 @@ async def _handle_bro(query, data, telegram_id, context):
 
     elif action == "explain":
         from src.nadobro.trading.budget_guard import get_budget_status
-        from src.nadobro.services.settings_service import get_strategy_settings
+        from src.nadobro.users.settings_service import get_strategy_settings
         from src.nadobro.llm.bro_llm import explain_position
         _, bro_conf = get_strategy_settings(telegram_id, "bro")
         bro_settings = {"budget_usd": bro_conf.get("budget_usd", 500), "risk_level": bro_conf.get("risk_level", "balanced"), "max_loss_pct": bro_conf.get("max_loss_pct", 15)}
@@ -275,7 +275,7 @@ async def _handle_bro(query, data, telegram_id, context):
             reasoning = matching_trade.get("reasoning", "No entry data") if matching_trade else "Opened before current session"
             signals = matching_trade.get("signals", []) if matching_trade else []
 
-            from src.nadobro.services.user_service import get_user_readonly_client as _get_ro
+            from src.nadobro.users.user_service import get_user_readonly_client as _get_ro
             ro = _get_ro(telegram_id)
             current_price = entry
             if ro:
@@ -304,7 +304,7 @@ async def _handle_bro(query, data, telegram_id, context):
 
     elif action == "gameplan":
         from src.nadobro.trading.budget_guard import get_budget_status
-        from src.nadobro.services.settings_service import get_strategy_settings
+        from src.nadobro.users.settings_service import get_strategy_settings
         from src.nadobro.llm.bro_llm import generate_game_plan
         _, bro_conf = get_strategy_settings(telegram_id, "bro")
         bro_settings = {"budget_usd": bro_conf.get("budget_usd", 500), "risk_level": bro_conf.get("risk_level", "balanced"), "max_loss_pct": bro_conf.get("max_loss_pct", 15)}
@@ -333,7 +333,7 @@ async def _handle_bro(query, data, telegram_id, context):
 
     elif action == "howl":
         from src.nadobro.llm.howl_service import get_pending_howl, format_howl_message
-        from src.nadobro.handlers.keyboards import howl_approval_kb
+        from src.nadobro.llm.howl_ui import howl_approval_kb
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
         pending = get_pending_howl(telegram_id, network)

@@ -144,9 +144,9 @@ def _runtime_health_payload() -> dict:
     payload = {"status": "ok", "ts": time.time()}
     try:
         from src.nadobro.trading.execution_queue import get_queue_diagnostics
-        from src.nadobro.services.runtime_supervisor import get_runtime_supervisor_diagnostics
+        from src.nadobro.runtime.runtime_supervisor import get_runtime_supervisor_diagnostics
         from src.nadobro.trading.copy_service import get_copy_polling_diagnostics
-        from src.nadobro.services.scheduler import get_scheduler_diagnostics
+        from src.nadobro.runtime.scheduler import get_scheduler_diagnostics
         from src.nadobro.core.perf import summary_lines
 
         queue_diag = get_queue_diagnostics()
@@ -221,7 +221,7 @@ def setup_bot():
         user = update.effective_user
         if user:
             from src.nadobro.i18n import _ACTIVE_LANG, normalize_lang
-            from src.nadobro.services.user_service import get_user
+            from src.nadobro.users.user_service import get_user
             existing = get_user(user.id)
             if existing is not None and getattr(existing, "language", None):
                 # Respect the user's stored choice (single source of truth).
@@ -300,22 +300,22 @@ async def run_bot():
     logger.info("Setting up Telegram bot...")
     bot_app = setup_bot()
 
-    from src.nadobro.services.scheduler import set_bot_app, set_check_client, start_scheduler
+    from src.nadobro.runtime.scheduler import set_bot_app, set_check_client, start_scheduler
     from src.nadobro.strategy.bot_runtime import (
         set_bot_app as set_runtime_app,
         restore_running_bots,
         stop_runtime,
         handle_strategy_job,
     )
-    from src.nadobro.services.runtime_supervisor import (
+    from src.nadobro.runtime.runtime_supervisor import (
         start_runtime_supervisor,
         stop_runtime_supervisor,
     )
-    from src.nadobro.services.scheduler import handle_alert_job
+    from src.nadobro.runtime.scheduler import handle_alert_job
     from src.nadobro.trading.execution_queue import register_handlers, start_workers, stop_workers
     from src.nadobro.trading.copy_service import set_copy_bot_app
     from src.nadobro.trading.copy_service import start_copy_polling, stop_copy_polling
-    from src.nadobro.services.vault_deposit_watch_service import set_vault_watch_bot_app
+    from src.nadobro.vault.vault_deposit_watch_service import set_vault_watch_bot_app
     set_bot_app(bot_app)
     set_runtime_app(bot_app)
     set_copy_bot_app(bot_app)
@@ -328,7 +328,7 @@ async def run_bot():
         alert_workers=env_int("NADO_ALERT_WORKERS", 1),
     )
     start_runtime_supervisor()
-    from src.nadobro.services.runtime_supervisor import runtime_mode
+    from src.nadobro.runtime.runtime_supervisor import runtime_mode
     from src.nadobro.trading.execution_queue import get_queue_diagnostics
 
     _diag = get_queue_diagnostics()
@@ -391,7 +391,7 @@ async def run_bot():
     portfolio_history_enabled = env_bool("NADO_PORTFOLIO_HISTORY", True)
     if portfolio_history_enabled:
         try:
-            from src.nadobro.services.portfolio_history_worker import (
+            from src.nadobro.portfolio.portfolio_history_worker import (
                 start_portfolio_history_worker,
             )
 
@@ -449,7 +449,7 @@ async def run_bot():
     # in flight before this process (re)started so the user's flow resumes
     # instead of silently dropping their pending request.
     try:
-        from src.nadobro.services.points_service import rehydrate_lowiqpts_pending_state
+        from src.nadobro.users.points_service import rehydrate_lowiqpts_pending_state
         rehydrate_lowiqpts_pending_state(bot_app)
     except Exception as e:
         logger.warning("LOWIQPTS pending-state rehydration failed (non-fatal): %s", e)
@@ -579,7 +579,7 @@ async def run_bot():
         pass
     finally:
         logger.info("Shutting down...")
-        from src.nadobro.services.scheduler import stop_scheduler
+        from src.nadobro.runtime.scheduler import stop_scheduler
         from src.nadobro.core.feature_flags import strategy_scheduler_enabled
         from src.nadobro.strategy.strategy_scheduler import get_scheduler
         from src.nadobro.venue.nado_ws import portfolio_ws

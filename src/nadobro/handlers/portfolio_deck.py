@@ -9,7 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from src.nadobro.handlers.orders_view import order_kind_label
 from src.nadobro.core.feature_flags import portfolio_sync_enabled, portfolio_sync_interval_seconds
 from src.nadobro.venue.nado_sync import sync_user
-from src.nadobro.services.user_service import get_user
+from src.nadobro.users.user_service import get_user
 from src.nadobro.utils.visual import b, divider, esc, money, pct, pnl_dot, signed_money, stale_banner, time_ago
 
 
@@ -262,7 +262,7 @@ def _as_dt(value: Any) -> datetime | None:
 async def fetch_engine_portfolio_state(user_id: int):
     """Engine v2 portfolio state, sourced through engine.portfolio (no
     handler-level PnL aggregation)."""
-    from src.nadobro.services.portfolio_history_worker import build_db_portfolio
+    from src.nadobro.portfolio.portfolio_history_worker import build_db_portfolio
 
     return await build_db_portfolio().state(user_id)
 

@@ -23,7 +23,7 @@ from src.nadobro.config import (
     MIN_TRADE_SIZE_USD,
     get_nado_builder_routing_config,
 )
-from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
+from src.nadobro.users.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
 from src.nadobro.venue.nado_archive import query_order_by_digest
 from src.nadobro.venue.product_catalog import is_product_id_isolated_only
 from src.nadobro.venue.nado_tooling_service import get_account_snapshot
@@ -213,7 +213,7 @@ def _enqueue_fill_sync(trade_id: int, network: str, user_id: int, client, digest
 def _clear_portfolio_caches(user_id: int, network: str) -> None:
     try:
         from src.nadobro.venue.nado_sync import clear_cache as clear_nado_sync_cache
-        from src.nadobro.services.portfolio_service import clear_portfolio_snapshot_cache
+        from src.nadobro.portfolio.portfolio_service import clear_portfolio_snapshot_cache
 
         clear_nado_sync_cache(int(user_id), network)
         clear_portfolio_snapshot_cache(int(user_id), network)
@@ -920,7 +920,7 @@ def execute_market_order(
             payload.update(sl_result)
         # SECURITY: append-only audit of every signed order (manual + agent).
         try:
-            from src.nadobro.services.audit_log import record_audit_event
+            from src.nadobro.users.audit_log import record_audit_event
 
             record_audit_event(
                 telegram_id,
@@ -1720,7 +1720,7 @@ def apply_tp_sl_to_open_position(
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
 
-    from src.nadobro.services.settings_service import get_user_settings
+    from src.nadobro.users.settings_service import get_user_settings
 
     _, settings = get_user_settings(telegram_id)
     leverage = float(settings.get("default_leverage", 3) or 3)
@@ -1842,7 +1842,7 @@ def limit_close_position(
     if not client:
         return {"success": False, "error": "Wallet not initialized or key migration required."}
 
-    from src.nadobro.services.settings_service import get_user_settings
+    from src.nadobro.users.settings_service import get_user_settings
 
     _, settings = get_user_settings(telegram_id)
     leverage = float(settings.get("default_leverage", 3) or 3)
@@ -2399,7 +2399,7 @@ def close_position(
     full_close_requested = size is None or close_size >= pos_size
     close_slippage_pct = max(0.1, float(kwargs.get("slippage_pct") or 1.0))
 
-    from src.nadobro.services.settings_service import get_user_settings
+    from src.nadobro.users.settings_service import get_user_settings
 
     _, settings = get_user_settings(telegram_id)
     leverage = max(1.0, float(settings.get("default_leverage", 3) or 3))
@@ -2744,7 +2744,7 @@ def close_all_positions(
             "products": [],
         }
 
-    from src.nadobro.services.settings_service import get_user_settings
+    from src.nadobro.users.settings_service import get_user_settings
 
     _, settings = get_user_settings(telegram_id)
     leverage = max(1.0, float(settings.get("default_leverage", 3) or 3))
@@ -3098,7 +3098,7 @@ def compute_round_trips(
         # ever repaired enough to extend the window backwards.
         import os
 
-        from src.nadobro.llm.provider_config import clean_env_value
+        from src.nadobro.connectors.provider_config import clean_env_value
 
         return clean_env_value(os.environ.get("NADO_HISTORY_EPOCH")) or "2026-07-09T00:00:00+00:00"
 

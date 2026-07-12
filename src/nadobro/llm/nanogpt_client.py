@@ -7,7 +7,7 @@ import logging
 import os
 from typing import Any
 
-from src.nadobro.llm.provider_config import nanogpt_api_key, nanogpt_base_url as _configured_base_url
+from src.nadobro.connectors.provider_config import nanogpt_api_key, nanogpt_base_url as _configured_base_url
 from src.nadobro.llm.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
 from src.nadobro.utils.env import env_bool
 
@@ -27,7 +27,7 @@ def nanogpt_base_url() -> str:
 
 
 def nanogpt_default_model() -> str:
-    from src.nadobro.llm.provider_config import clean_env_value
+    from src.nadobro.connectors.provider_config import clean_env_value
 
     return clean_env_value(os.environ.get("NANOGPT_MODEL")) or "chatgpt-4o-latest"
 

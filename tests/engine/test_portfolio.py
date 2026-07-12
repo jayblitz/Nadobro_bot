@@ -16,7 +16,7 @@ from src.nadobro.engine.portfolio import (
     PortfolioHistoryRow,
 )
 from src.nadobro.engine.types import TradeType
-from src.nadobro.services.portfolio_history_worker import (
+from src.nadobro.portfolio.portfolio_history_worker import (
     SnapshotAccountProvider,
     run_retention_once,
     run_sampler_once,

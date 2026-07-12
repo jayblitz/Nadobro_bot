@@ -32,11 +32,11 @@ from src.nadobro.handlers.keyboards import (
     trade_card_confirm_kb,
 )
 from src.nadobro.handlers.home_card import build_home_card_text_async
-from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.services.onboarding_service import get_resume_step, is_new_onboarding_complete
-from src.nadobro.services.settings_service import get_user_settings
+from src.nadobro.users.admin_service import is_trading_paused
+from src.nadobro.users.onboarding_service import get_resume_step, is_new_onboarding_complete
+from src.nadobro.users.settings_service import get_user_settings
 from src.nadobro.trading.trade_service import execute_market_order, execute_limit_order
-from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
+from src.nadobro.users.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
 
 logger = logging.getLogger(__name__)
 

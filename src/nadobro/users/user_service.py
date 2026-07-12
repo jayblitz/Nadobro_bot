@@ -451,7 +451,7 @@ def update_trade_stats(
     )
     invalidate_user_cache(telegram_id)
     try:
-        from src.nadobro.services.referral_service import record_referred_volume
+        from src.nadobro.users.referral_service import record_referred_volume
 
         record_referred_volume(
             int(telegram_id),
@@ -485,7 +485,7 @@ def remove_user_private_key(telegram_id: int, network: str = "testnet") -> tuple
     invalidate_user_cache(telegram_id)
     _invalidate_user_caches(prior_address, telegram_id)
     try:
-        from src.nadobro.services.audit_log import record_audit_event
+        from src.nadobro.users.audit_log import record_audit_event
 
         record_audit_event(telegram_id, "wallet_unlinked", f"network={network}")
     except Exception:
@@ -520,7 +520,7 @@ def update_user_language(telegram_id: int, lang: str, *, source: str = "settings
             telegram_id, previous or "en", new_lang, source,
         )
         try:
-            from src.nadobro.services.audit_log import record_audit_event
+            from src.nadobro.users.audit_log import record_audit_event
             record_audit_event(
                 telegram_id, "language_changed", f"{previous or 'en'}->{new_lang} via {source}"
             )

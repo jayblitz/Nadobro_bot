@@ -17,11 +17,11 @@ from src.nadobro.handlers.formatters import escape_md, fmt_price
 from src.nadobro.handlers.keyboards import back_kb, dn_funding_rates_kb, strategy_action_kb, strategy_product_picker_kb
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.strategy.bot_runtime import stop_user_bot, get_user_bot_status
-from src.nadobro.services.onboarding_service import is_new_onboarding_complete
+from src.nadobro.users.onboarding_service import is_new_onboarding_complete
 from src.nadobro.core.perf import timed_metric
-from src.nadobro.services.settings_service import get_user_settings, update_user_settings
+from src.nadobro.users.settings_service import get_user_settings, update_user_settings
 from src.nadobro.strategy.strategy_pending_input import persist_strategy_pending_input
-from src.nadobro.services.user_service import get_user_readonly_client, get_user_wallet_info, get_user, ensure_active_wallet_ready
+from src.nadobro.users.user_service import get_user_readonly_client, get_user_wallet_info, get_user, ensure_active_wallet_ready
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 import time
@@ -648,7 +648,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             else:
                 cfg[field] = value
             if field == "notional_usd":
-                from src.nadobro.services.settings_service import sync_cycle_notional_with_margin
+                from src.nadobro.users.settings_service import sync_cycle_notional_with_margin
 
                 sync_cycle_notional_with_margin(strategies, strategy_id)
 

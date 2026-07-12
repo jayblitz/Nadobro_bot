@@ -64,7 +64,7 @@ def test_model_env_inline_comment_is_stripped(monkeypatch):
 
 
 def test_base_url_and_key_inline_comment_is_stripped(monkeypatch):
-    from src.nadobro.llm import provider_config as pc
+    from src.nadobro.connectors import provider_config as pc
     # A base URL pasted with a trailing "# note" was the "no host specified"
     # failure — the OpenAI client got an unparseable host.
     monkeypatch.setenv("NANOGPT_BASE_URL", "https://nano-gpt.com/api/v1   # base url")

@@ -15,7 +15,7 @@ install_test_stubs()
 
 from src.nadobro.venue import nado_client
 
-from src.nadobro.services import user_service
+from src.nadobro.users import user_service
 
 
 def _seed_two_users():

@@ -137,7 +137,7 @@ async def _ensure_session(telegram_id: int, network: str) -> bool:
         build_adapter,
         build_product_meta_from_catalog,
     )
-    from src.nadobro.services.user_service import get_user_nado_client
+    from src.nadobro.users.user_service import get_user_nado_client
 
     key = (int(telegram_id), network)
     existing = RUNTIME._controllers.get((key[0], network, "desk"))  # noqa: SLF001

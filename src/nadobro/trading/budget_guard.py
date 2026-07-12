@@ -1,8 +1,8 @@
 import logging
 from typing import Optional
 
-from src.nadobro.services.user_service import get_user, get_user_readonly_client
-from src.nadobro.services.settings_service import get_user_settings
+from src.nadobro.users.user_service import get_user, get_user_readonly_client
+from src.nadobro.users.settings_service import get_user_settings
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from src.nadobro.services.settings_service import get_user_settings, update_user_settings
+from src.nadobro.users.settings_service import get_user_settings, update_user_settings
 from src.nadobro.utils.env import env_bool
 
 

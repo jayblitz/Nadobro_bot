@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
-from src.nadobro.services.settings_service import get_strategy_settings, update_user_settings
+from src.nadobro.users.settings_service import get_strategy_settings, update_user_settings
 from src.nadobro.llm.bro_llm import analyze_for_howl
 from src.nadobro.db import query_all
 
@@ -264,7 +264,7 @@ def approve_howl_suggestion(telegram_id: int, network: str, suggestion_index: in
             telegram_id, param, error,
         )
         try:
-            from src.nadobro.services.audit_log import record_audit_event
+            from src.nadobro.users.audit_log import record_audit_event
 
             record_audit_event(
                 telegram_id, "howl_suggestion_rejected", f"param={param} reason={error}"

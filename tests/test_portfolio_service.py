@@ -5,7 +5,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import portfolio_service
+from src.nadobro.portfolio import portfolio_service
 
 
 class _Mode:

@@ -17,7 +17,7 @@ from src.nadobro.handlers import callbacks, home_card, formatters
 from src.nadobro.i18n import get_active_language, language_context
 from src.nadobro.strategy import bot_runtime
 from src.nadobro.trading import execution_queue
-from src.nadobro.services import runtime_supervisor
+from src.nadobro.runtime import runtime_supervisor
 from src.nadobro.trading import trade_service
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.strategy.strategy_lifecycle import cleanup_strategy_positions
@@ -288,7 +288,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             return func(*args, **kwargs)
 
         with patch(
-            "src.nadobro.services.settings_service.get_strategy_settings",
+            "src.nadobro.users.settings_service.get_strategy_settings",
             return_value=({}, {}),
         ), patch.object(
             bot_runtime, "is_trading_paused", return_value=False
@@ -335,7 +335,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             return func(*args, **kwargs)
 
         with patch(
-            "src.nadobro.services.settings_service.get_strategy_settings",
+            "src.nadobro.users.settings_service.get_strategy_settings",
             return_value=({}, {}),
         ), patch.object(
             bot_runtime, "is_trading_paused", return_value=False
@@ -644,7 +644,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             # _run_cycle merges saved strategy settings into state each cycle;
             # pin to no overrides so the test's sl_pct/tp_pct are authoritative
             # regardless of whether a DB (with default sl_pct=0.5) is present.
-            "src.nadobro.services.settings_service.get_strategy_settings",
+            "src.nadobro.users.settings_service.get_strategy_settings",
             return_value=("mainnet", {}),
         ), patch(
             # The session rail now resolves the run via session_resolver
@@ -885,7 +885,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIn("currently closed", msg)
 
     def test_dn_strategy_defaults_include_worker_group_and_funding_mode(self):
-        from src.nadobro.services.runtime_supervisor import strategy_worker_group
+        from src.nadobro.runtime.runtime_supervisor import strategy_worker_group
 
         dn = bot_runtime._strategy_defaults("dn")
         self.assertEqual(dn.get("funding_entry_mode"), "wait")
@@ -902,7 +902,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
 
     def test_dgrid_strategy_defaults_and_worker_group(self):
-        from src.nadobro.services.runtime_supervisor import strategy_worker_group
+        from src.nadobro.runtime.runtime_supervisor import strategy_worker_group
 
         dgrid = bot_runtime._strategy_defaults("dgrid")
         self.assertEqual(strategy_worker_group("dgrid"), "mm_grid")

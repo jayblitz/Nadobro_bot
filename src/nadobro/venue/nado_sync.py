@@ -25,7 +25,7 @@ from src.nadobro.quant.portfolio_calculator import (
     compute_total_equity,
     positions_from_account_summary,
 )
-from src.nadobro.services.user_service import get_user, get_user_nado_client
+from src.nadobro.users.user_service import get_user, get_user_nado_client
 from src.nadobro.utils.x18 import from_x18
 
 logger = logging.getLogger(__name__)

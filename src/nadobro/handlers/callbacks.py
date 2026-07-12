@@ -23,13 +23,13 @@ from src.nadobro.handlers.keyboards import (
     settings_slippage_kb, settings_language_kb, close_product_kb, confirm_close_all_kb, back_kb,
     risk_profile_kb, strategy_hub_kb, strategy_action_kb, strategy_product_picker_kb,
     onboarding_language_kb,
-    points_scope_kb,
     referral_kb,
     mode_kb,     home_card_kb, status_kb, portfolio_kb, portfolio_history_kb, portfolio_analytics_kb,
     onboarding_accept_tos_kb, getting_started_kb,
     copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb,
     copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb,
 )
+from src.nadobro.users.points_ui import points_scope_kb
 from src.nadobro.handlers.trade_card import handle_trade_card_callback, open_trade_card_from_callback
 from src.nadobro.handlers.render_utils import plain_text_fallback
 from src.nadobro.handlers.wallet_view import build_wallet_view_payload
@@ -39,7 +39,7 @@ from src.nadobro.handlers.home_card import (
 )
 from src.nadobro.handlers.commands import build_status_dashboard_parts
 from src.nadobro.handlers.state_reset import clear_pending_user_state
-from src.nadobro.services.user_service import (
+from src.nadobro.users.user_service import (
     get_or_create_user, get_user_nado_client, get_user_readonly_client, get_user_wallet_info,
     switch_network, get_user, remove_user_private_key, ensure_active_wallet_ready, update_user_language,
 )
@@ -47,17 +47,17 @@ from src.nadobro.trading.trade_service import (
     execute_market_order, execute_limit_order, close_position,
     close_all_positions, get_trade_history, get_trade_analytics,
 )
-from src.nadobro.services.alert_service import create_alert, get_user_alerts, delete_alert
-from src.nadobro.services.admin_service import is_trading_paused, is_admin
+from src.nadobro.notify.alert_service import create_alert, get_user_alerts, delete_alert
+from src.nadobro.users.admin_service import is_trading_paused, is_admin
 from src.nadobro.strategy.bot_runtime import stop_user_bot, get_user_bot_status
-from src.nadobro.services.settings_service import get_user_settings, update_user_settings
-from src.nadobro.services.points_service import (
+from src.nadobro.users.settings_service import get_user_settings, update_user_settings
+from src.nadobro.users.points_service import (
     get_points_dashboard,
     relay_option_reply_to_lowiqpts,
     relay_user_reply_to_lowiqpts,
     request_points_refresh,
 )
-from src.nadobro.services.referral_service import (
+from src.nadobro.users.referral_service import (
     auto_generate_referral_code,
     get_referral_dashboard,
     get_user_referral_code,
@@ -65,7 +65,7 @@ from src.nadobro.services.referral_service import (
     MIN_CODE_LEN,
 )
 from src.nadobro.strategy.strategy_pending_input import persist_strategy_pending_input
-from src.nadobro.services.onboarding_service import (
+from src.nadobro.users.onboarding_service import (
     get_resume_step,
     evaluate_readiness,
     set_new_onboarding_language,
@@ -1002,7 +1002,7 @@ async def _handle_howl(query, data, telegram_id, context):
             text = format_howl_message(pending)
             suggestions = pending.get("suggestions", [])
             pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
-            from src.nadobro.handlers.keyboards import howl_approval_kb
+            from src.nadobro.llm.howl_ui import howl_approval_kb
             # format_howl_message is HTML; escape_md-wrapping it both killed
             # the intended formatting AND (post-HTML) showed raw tags.
             from src.nadobro.utils.visual import esc as _esc
@@ -1024,7 +1024,7 @@ async def _handle_howl(query, data, telegram_id, context):
             text = format_howl_message(pending)
             suggestions = pending.get("suggestions", [])
             pending_count = sum(1 for s in suggestions if s.get("status", "pending") == "pending")
-            from src.nadobro.handlers.keyboards import howl_approval_kb
+            from src.nadobro.llm.howl_ui import howl_approval_kb
             from src.nadobro.utils.visual import esc as _esc
             await _edit_loc(query,
                 f"{'❌' if ok else '⚠️'} {_esc(msg)}\n\n{text}",

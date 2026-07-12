@@ -2,8 +2,8 @@ from eth_account import Account
 
 from src.nadobro.handlers.formatters import fmt_wallet_connect_card, fmt_wallet_info
 from src.nadobro.handlers.keyboards import wallet_kb, wallet_kb_not_linked
-from src.nadobro.services.user_service import get_user_wallet_info
-from src.nadobro.services.wallet_pending_flow import (
+from src.nadobro.users.user_service import get_user_wallet_info
+from src.nadobro.users.wallet_pending_flow import (
     load_wallet_pending_flow,
     persist_wallet_pending_flow,
 )

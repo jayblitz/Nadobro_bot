@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
-from src.nadobro.services.user_service import (
+from src.nadobro.users.user_service import (
     get_user,
     has_mode_private_key,
     get_user_readonly_client,

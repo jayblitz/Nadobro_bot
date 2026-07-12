@@ -7,7 +7,7 @@ from src.nadobro.models.database import (
     get_recent_admin_logs as db_get_recent_admin_logs,
 )
 from src.nadobro.config import ADMIN_USER_IDS
-from src.nadobro.services.user_service import get_all_users_count, get_active_users_count
+from src.nadobro.users.user_service import get_all_users_count, get_active_users_count
 
 logger = logging.getLogger(__name__)
 

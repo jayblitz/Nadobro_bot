@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.services.onboarding_service import is_new_onboarding_complete
-from src.nadobro.services.user_service import ensure_active_wallet_ready
+from src.nadobro.users.admin_service import is_trading_paused
+from src.nadobro.users.onboarding_service import is_new_onboarding_complete
+from src.nadobro.users.user_service import ensure_active_wallet_ready
 
 
 @dataclass(frozen=True)

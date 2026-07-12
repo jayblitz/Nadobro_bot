@@ -453,7 +453,7 @@ def test_portfolio_history_network_separation_roundtrip():
 
     from src.nadobro.db import query_one
     from src.nadobro.engine.portfolio import PortfolioHistoryRow
-    from src.nadobro.services.portfolio_history_worker import DbPortfolioHistoryRepository
+    from src.nadobro.portfolio.portfolio_history_worker import DbPortfolioHistoryRepository
 
     # The 0014 PK swap actually happened (fixture applied 0007 then 0014).
     pk = query_one(

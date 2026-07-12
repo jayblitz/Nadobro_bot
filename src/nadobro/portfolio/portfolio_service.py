@@ -10,7 +10,7 @@ from src.nadobro.trading.trade_service import (
     get_open_limit_orders,
     get_trade_analytics,
 )
-from src.nadobro.services.user_service import get_user, get_user_readonly_client
+from src.nadobro.users.user_service import get_user, get_user_readonly_client
 
 logger = logging.getLogger(__name__)
 

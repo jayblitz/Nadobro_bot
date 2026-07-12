@@ -12,7 +12,7 @@ from telegram.ext import CallbackContext
 from src.nadobro.handlers.formatters import escape_md, fmt_bro_answer_card
 from src.nadobro.handlers.keyboards import bro_answer_kb
 from src.nadobro.llm.morning_brief import render_morning_brief
-from src.nadobro.services.user_service import get_or_create_user
+from src.nadobro.users.user_service import get_or_create_user
 
 logger = logging.getLogger(__name__)
 

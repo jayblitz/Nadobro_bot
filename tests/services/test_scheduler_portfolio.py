@@ -12,7 +12,7 @@ install_test_stubs()
 
 from src.nadobro.venue import nado_sync
 
-from src.nadobro.services import scheduler
+from src.nadobro.runtime import scheduler
 
 
 class SchedulerPortfolioTests(unittest.IsolatedAsyncioTestCase):

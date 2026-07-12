@@ -8,7 +8,7 @@ from src.nadobro.llm.conversation_intent import classify_conversation_intent, is
 from src.nadobro.strategy.strategy_registry import infer_strategy_from_text
 from src.nadobro.llm.trading_bro_service import answer_trading_bro_question
 from src.nadobro.trading.trading_readiness import check_trading_readiness
-from src.nadobro.services.user_service import get_user
+from src.nadobro.users.user_service import get_user
 
 logger = logging.getLogger(__name__)
 

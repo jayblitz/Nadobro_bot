@@ -137,7 +137,7 @@ def test_recorder_records_sessionless_desk_fill_as_manual():
         "src.nadobro.trading.order_intents.link_digest_intent",
         side_effect=lambda *a, **k: tagged.append(k) or True,
     ), patch("src.nadobro.db.query_one", return_value=None), patch(
-        "src.nadobro.services.user_service.update_trade_stats",
+        "src.nadobro.users.user_service.update_trade_stats",
         side_effect=lambda uid, vol, **k: stats.append((uid, vol)),
     ):
         rec.record(

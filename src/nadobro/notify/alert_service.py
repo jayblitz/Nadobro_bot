@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from src.nadobro.models.database import AlertCondition, insert_alert, get_alerts_by_user, get_alert_by_id_and_user, update_alert, get_all_active_alerts, update_alert_triggered
 from src.nadobro.config import get_product_id, get_product_name
-from src.nadobro.services.user_service import get_user
+from src.nadobro.users.user_service import get_user
 from src.nadobro.i18n import get_active_language, localize_text
 
 logger = logging.getLogger(__name__)

@@ -536,7 +536,7 @@ def build_report(
         get_trades_by_user,
     )
     from src.nadobro.strategy.bot_runtime import _load_state
-    from src.nadobro.services.user_service import get_user_readonly_client
+    from src.nadobro.users.user_service import get_user_readonly_client
 
     now_utc = now_utc or datetime.now(timezone.utc)
     try:
@@ -661,7 +661,7 @@ def night_howl_enabled(telegram_id: int) -> bool:
     """Per-user opt-out. Stored in settings as ``night_howl_enabled``; default
     True (on). Users can turn it off without losing saved reports."""
     try:
-        from src.nadobro.services.settings_service import get_user_settings
+        from src.nadobro.users.settings_service import get_user_settings
 
         _, settings = get_user_settings(telegram_id)
         val = (settings or {}).get("night_howl_enabled", True)
@@ -674,7 +674,7 @@ def _user_tz_offset(telegram_id: int) -> float:
     """User's UTC offset in hours for local-8am delivery. Stored in settings as
     ``howl_tz_offset``; defaults to 0 (UTC) when unset."""
     try:
-        from src.nadobro.services.settings_service import get_user_settings
+        from src.nadobro.users.settings_service import get_user_settings
 
         _, settings = get_user_settings(telegram_id)
         return _f((settings or {}).get("howl_tz_offset"), 0.0)

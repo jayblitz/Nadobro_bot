@@ -11,7 +11,7 @@ import pytest
 def watch_module(monkeypatch):
     monkeypatch.setenv("VAULT_DEPOSIT_CLOSED_EPSILON_USDT0", "1.0")
     monkeypatch.setenv("VAULT_DEPOSIT_OPEN_MIN_USDT0", "100.0")
-    import src.nadobro.services.vault_deposit_watch_service as mod
+    import src.nadobro.vault.vault_deposit_watch_service as mod
     importlib.reload(mod)
     yield mod
 

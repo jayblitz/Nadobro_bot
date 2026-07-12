@@ -18,7 +18,7 @@ if ROOT not in sys.path:
 def _client():
     tid = os.environ.get("TELEGRAM_ID")
     if tid:
-        from src.nadobro.services.user_service import get_user_nado_client
+        from src.nadobro.users.user_service import get_user_nado_client
 
         c = get_user_nado_client(int(tid))
         if c is None:

@@ -22,7 +22,7 @@ from src.nadobro.handlers.keyboards import portfolio_analytics_kb
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.core.perf import timed_metric
 from src.nadobro.trading.trade_service import close_all_positions
-from src.nadobro.services.user_service import get_user_nado_client, get_user
+from src.nadobro.users.user_service import get_user_nado_client, get_user
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
@@ -395,8 +395,8 @@ async def _handle_portfolio(query, data, telegram_id):
         # round-trips from History use ``portfolio:share_pnl:rt:{trade_id}``.
         import io as _io
 
-        from src.nadobro.services.pnl_card import generate_pnl_card
-        from src.nadobro.services.pnl_card_builder import (
+        from src.nadobro.portfolio.pnl_card import generate_pnl_card
+        from src.nadobro.portfolio.pnl_card_builder import (
             build_pnl_card_data,
             build_round_trip_card_data,
         )

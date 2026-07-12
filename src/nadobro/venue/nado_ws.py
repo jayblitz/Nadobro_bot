@@ -122,7 +122,7 @@ class NadoPortfolioWs:
         simply won't get the authenticated streams and stay on REST polling.
         """
         try:
-            from src.nadobro.services.user_service import get_user_nado_client
+            from src.nadobro.users.user_service import get_user_nado_client
 
             client = get_user_nado_client(int(sub.user_id), network=sub.network)
             if client is None:

@@ -17,8 +17,8 @@ from src.nadobro.models.database import (
     set_bot_state,
 )
 from src.nadobro.venue.nado_archive import query_nlp_lp_events
-from src.nadobro.services.user_service import get_user, get_user_nado_client
-from src.nadobro.services.vault_metrics_service import (
+from src.nadobro.users.user_service import get_user, get_user_nado_client
+from src.nadobro.vault.vault_metrics_service import (
     build_lp_ledger_from_archive,
     compute_pnl_from_ledger,
     deposit_room_usdt0,

@@ -122,7 +122,7 @@ def _close_position_with_mocks(**close_kwargs):
          patch.object(trade_service, "_get_post_fill_price", return_value=100.0), \
          patch.object(trade_service, "_record_close_in_db", side_effect=_fake_record), \
          patch("src.nadobro.trading.order_intents.link_digest_intent", side_effect=_fake_link), \
-         patch("src.nadobro.services.settings_service.get_user_settings",
+         patch("src.nadobro.users.settings_service.get_user_settings",
                return_value=(True, {"default_leverage": 3})):
         result = trade_service.close_position(1234, "BTC", **close_kwargs)
     return result, linked, recorded, client

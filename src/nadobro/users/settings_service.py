@@ -7,7 +7,7 @@ from src.nadobro.strategy.strategy_registry import (
     normalize_strategy_id,
     settings_strategy_defaults,
 )
-from src.nadobro.services.user_service import get_user
+from src.nadobro.users.user_service import get_user
 
 SETTINGS_PREFIX = "user_settings:"
 

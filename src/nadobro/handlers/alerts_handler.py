@@ -18,8 +18,8 @@ from src.nadobro.handlers.formatters import (
 )
 from src.nadobro.handlers.keyboards import alerts_kb, alert_product_kb, alert_condition_kb, alert_delete_kb, back_kb
 from src.nadobro.i18n import localize_text, get_active_language
-from src.nadobro.services.alert_service import get_user_alerts, delete_alert
-from src.nadobro.services.user_service import get_user
+from src.nadobro.notify.alert_service import get_user_alerts, delete_alert
+from src.nadobro.users.user_service import get_user
 from telegram.constants import ParseMode
 
 from src.nadobro.handlers.callbacks import _edit_loc  # noqa: E402

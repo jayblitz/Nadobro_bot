@@ -11,7 +11,7 @@ from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.trading.execution_queue import enqueue_strategy
 from src.nadobro.core.feature_flags import time_limit_enabled
 from src.nadobro.trading.trade_service import execute_market_order
-from src.nadobro.services.user_service import get_user_nado_client
+from src.nadobro.users.user_service import get_user_nado_client
 
 logger = logging.getLogger(__name__)
 _bot_app = None

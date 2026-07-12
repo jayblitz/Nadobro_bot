@@ -8,7 +8,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.handlers import messages
-from src.nadobro.services.wallet_pending_flow import (
+from src.nadobro.users.wallet_pending_flow import (
     clear_wallet_pending_flow,
     load_wallet_pending_flow,
     persist_wallet_pending_flow,

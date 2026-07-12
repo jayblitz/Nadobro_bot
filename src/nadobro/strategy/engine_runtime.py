@@ -22,7 +22,6 @@ from typing import Any, Dict, Iterable, Optional
 
 from src.nadobro.engine.adapter.base import NadoAdapterBase
 from src.nadobro.engine.controllers.controller_base import Controller, ControllerState
-from src.nadobro.engine.controllers.copy_trading import CopyController
 from src.nadobro.engine.controllers.delta_neutral import DeltaNeutralController
 from src.nadobro.engine.controllers.desk import DeskController
 from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
@@ -49,7 +48,9 @@ CONTROLLER_REGISTRY: Dict[str, type] = {
     "mid": MarketMakingController,
     "dn": DeltaNeutralController,
     "vol": VolumeBotController,
-    "copy": CopyController,
+    # NOTE: live copy trading is trading/copy_service.py (poll-based), not an
+    # engine controller. The old CopyController was unreachable (never in
+    # ENGINE_MAPPED_STRATEGIES) and was removed with its tests.
     # Desk text-to-trade plans. NOT in ENGINE_MAPPED_STRATEGIES — desk
     # sessions are driven by services/desk_runtime's scheduler job, not by
     # bot_runtime strategy cycles.

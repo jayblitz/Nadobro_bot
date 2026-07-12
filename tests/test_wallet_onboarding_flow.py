@@ -79,8 +79,8 @@ class WalletOnboardingFlowTests(unittest.TestCase):
     def test_trade_callback_shows_wallet_error_when_wallet_missing(self):
         tid = 9_888_776_655
         from src.nadobro.db import execute
-        from src.nadobro.services.onboarding_service import set_new_onboarding_tos_accepted
-        from src.nadobro.services.user_service import get_or_create_user
+        from src.nadobro.users.onboarding_service import set_new_onboarding_tos_accepted
+        from src.nadobro.users.user_service import get_or_create_user
 
         query = SimpleNamespace(edit_message_text=AsyncMock())
         context = SimpleNamespace(user_data={})

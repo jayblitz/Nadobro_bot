@@ -116,8 +116,8 @@ def test_english_is_passthrough():
 
 def test_update_user_language_persists_logs_and_audits(monkeypatch):
     """Switching language must persist (normalized) and leave an audit trail."""
-    us = pytest.importorskip("src.nadobro.services.user_service")
-    import src.nadobro.services.audit_log as audit_log
+    us = pytest.importorskip("src.nadobro.users.user_service")
+    import src.nadobro.users.audit_log as audit_log
 
     recorded = {"updates": [], "audits": []}
     monkeypatch.setattr(us, "query_one", lambda sql, params=None: {"language": "en"})
@@ -139,7 +139,7 @@ def test_update_user_language_persists_logs_and_audits(monkeypatch):
 
 def test_get_or_create_user_seeds_from_device_locale(monkeypatch):
     """A brand-new user's row is seeded from the Telegram client locale."""
-    us = pytest.importorskip("src.nadobro.services.user_service")
+    us = pytest.importorskip("src.nadobro.users.user_service")
 
     inserts = []
     monkeypatch.setattr(us, "query_one", lambda sql, params=None: None)

@@ -52,14 +52,14 @@ from src.nadobro.models.database import (
     get_running_strategy_sessions, rollup_session_from_trades,
 )
 from src.nadobro.db import query_all
-from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.services.settings_service import get_strategy_settings
+from src.nadobro.users.admin_service import is_trading_paused
+from src.nadobro.users.settings_service import get_strategy_settings
 from src.nadobro.trading.trade_service import (
     close_all_positions,
     close_delta_neutral_legs,
     get_trade_analytics,
 )
-from src.nadobro.services.user_service import (
+from src.nadobro.users.user_service import (
     get_user_nado_client,
     get_user_readonly_client,
     get_user,
@@ -1107,7 +1107,7 @@ def start_user_bot(
         # Keep saved VOL prefs aligned with this run so dashboards / Advanced match execution.
         if vol_market_kw == "perp":
             try:
-                from src.nadobro.services.settings_service import update_user_settings
+                from src.nadobro.users.settings_service import update_user_settings
 
                 d = str(state.get("vol_direction") or "long").strip().lower()
                 d = "short" if d == "short" else "long"
@@ -1124,7 +1124,7 @@ def start_user_bot(
                     telegram_id,
                     exc_info=True,
                 )
-    from src.nadobro.services.runtime_supervisor import strategy_worker_group
+    from src.nadobro.runtime.runtime_supervisor import strategy_worker_group
 
     state["worker_group"] = strategy_worker_group(strategy)
     session_id = _create_session(
@@ -1157,7 +1157,7 @@ def start_user_bot(
         from src.nadobro.strategy import engine_runtime as _er
 
         if _er.engine_v2_enabled() and strategy in _er.ENGINE_MAPPED_STRATEGIES:
-            from src.nadobro.services.runtime_supervisor import (
+            from src.nadobro.runtime.runtime_supervisor import (
                 is_multiprocess_enabled as _is_mp,
                 strategy_worker_group as _swg,
                 submit_cycle_job as _submit_job,
@@ -1735,7 +1735,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
 
 def get_runtime_diagnostics() -> dict:
     from src.nadobro.trading.execution_queue import get_queue_diagnostics
-    from src.nadobro.services.runtime_supervisor import runtime_mode
+    from src.nadobro.runtime.runtime_supervisor import runtime_mode
 
     active_loops = len([t for t in _tasks.values() if not t.done()])
     pending_keys = len(_job_pending_payloads)
@@ -2028,7 +2028,7 @@ async def handle_strategy_job(payload: dict):
                 return
             try:
                 from src.nadobro.trading.execution_queue import get_queue_diagnostics
-                from src.nadobro.services.runtime_supervisor import (
+                from src.nadobro.runtime.runtime_supervisor import (
                     is_multiprocess_enabled,
                     strategy_worker_group,
                     submit_cycle_job,
@@ -2354,7 +2354,7 @@ def _best_effort_pair_24h_volume_usd(telegram_id: int, network: str, product: st
     """Pair 24h USD volume for POV sizing; 0 on any failure (so duration stays
     opt-out rather than crashing the start)."""
     try:
-        from src.nadobro.services.user_service import get_user_readonly_client
+        from src.nadobro.users.user_service import get_user_readonly_client
         client = get_user_readonly_client(telegram_id, network=network)
         if client is None:
             return 0.0
@@ -2643,7 +2643,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     try:
         strategy_key = str(state.get("strategy") or "").lower()
         if strategy_key:
-            from src.nadobro.services.settings_service import get_strategy_settings
+            from src.nadobro.users.settings_service import get_strategy_settings
 
             _, cfg = get_strategy_settings(telegram_id, strategy_key)
             if isinstance(cfg, dict):

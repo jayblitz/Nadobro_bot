@@ -12,10 +12,6 @@ import pytest
 
 from src.nadobro.engine.adapter.base import OrderState
 from src.nadobro.engine.adapter.nado import NadoAdapter, OrderRegistry, ProductMeta, _OrderRef
-from src.nadobro.engine.controllers.copy_trading import (
-    CopyController,
-    SignalDedupeStore,
-)
 from src.nadobro.engine.controllers.market_making import MarketMakingController
 from src.nadobro.engine.executors.dca_executor import (
     DCAExecutor,
@@ -458,89 +454,6 @@ def test_mm1_children_are_ticked_each_cycle():
         orch.tick = tracking_tick  # type: ignore[assignment]
         await orch.tick_controller(c.id)
         assert ticks["count"] >= 2, "child executors must be ticked"
-
-    asyncio.run(body())
-
-
-# --------------------------------------------------------------------------
-# Copy Trading — BUG-CT-1 (dedupe survives across calls), BUG-CT-3
-# --------------------------------------------------------------------------
-def test_ct1_dedupe_store_prevents_replay():
-    """BUG-CT-1: an injected SignalDedupeStore makes already-processed
-    signals stay skipped even after the controller's in-memory set is
-    cleared (simulating a restart).
-    """
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
-
-        class MemDedupe(SignalDedupeStore):
-            def __init__(self):
-                self.seen = set()
-
-            def is_processed(self, controller_id, sig_id):
-                return sig_id in self.seen
-
-            def mark_processed(self, controller_id, sig_id):
-                self.seen.add(sig_id)
-
-        dedupe = MemDedupe()
-        sigs = [{
-            "id": "s1", "pair": PAIR, "side": "BUY", "price": Decimal(100),
-            "amount_quote": Decimal(10),
-        }]
-
-        def source():
-            return sigs
-
-        orch = ExecutorOrchestrator()
-        c1 = CopyController(
-            user_id=1, orchestrator=orch, adapter=adapter,
-            inventory=InventoryRepository(),
-            configs={"signal_source": source, "dedupe_store": dedupe},
-            controller_id="CT1",
-        )
-        await orch.spawn_controller(c1)
-        await orch.tick_controller(c1.id)
-        assert "s1" in dedupe.seen
-        first_count = len(orch.list(c1.id))
-        # Simulate "restart": brand-new controller with empty in-mem set but
-        # same dedupe store. Should NOT re-spawn for s1.
-        c2 = CopyController(
-            user_id=1, orchestrator=orch, adapter=adapter,
-            inventory=InventoryRepository(),
-            configs={"signal_source": source, "dedupe_store": dedupe},
-            controller_id="CT2",
-        )
-        await orch.spawn_controller(c2)
-        await orch.tick_controller(c2.id)
-        assert orch.list(c2.id) == []
-
-    asyncio.run(body())
-
-
-def test_ct3_malformed_signal_does_not_kill_controller():
-    """BUG-CT-3: missing pair/price must skip the signal and continue, not
-    raise KeyError out of on_tick.
-    """
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
-        bad = {"id": "s-bad"}  # missing pair, side, price
-        good = {
-            "id": "s-good", "pair": PAIR, "side": "BUY", "price": Decimal(100),
-            "amount_quote": Decimal(10),
-        }
-        orch = ExecutorOrchestrator()
-        c = CopyController(
-            user_id=1, orchestrator=orch, adapter=adapter,
-            inventory=InventoryRepository(),
-            configs={"signal_source": lambda: [bad, good]},
-            controller_id="CT",
-        )
-        await orch.spawn_controller(c)
-        # Should not raise.
-        await orch.tick_controller(c.id)
-        # Good signal still spawned.
-        assert len(orch.list(c.id)) >= 1
 
     asyncio.run(body())
 

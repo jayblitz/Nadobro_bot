@@ -399,7 +399,7 @@ class DbTradeRecorder:
             # -placed trades never reach this path, so they stay excluded —
             # that split is deliberate product policy.
             try:
-                from src.nadobro.services.user_service import update_trade_stats
+                from src.nadobro.users.user_service import update_trade_stats
 
                 update_trade_stats(
                     int(user_id), float(notional),

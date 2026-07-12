@@ -12,7 +12,7 @@ from src.nadobro.handlers.formatters import escape_md, fmt_wallet_balance_card, 
 from src.nadobro.handlers.keyboards import wallet_kb, wallet_kb_not_linked, wallet_revoke_confirm_kb
 from src.nadobro.handlers.wallet_view import build_wallet_view_payload
 from src.nadobro.core.async_utils import run_blocking
-from src.nadobro.services.user_service import get_user_readonly_client, get_user_wallet_info, switch_network, get_user, remove_user_private_key
+from src.nadobro.users.user_service import get_user_readonly_client, get_user_wallet_info, switch_network, get_user, remove_user_private_key
 from telegram.constants import ParseMode
 
 from src.nadobro.handlers.callbacks import _edit_loc  # noqa: E402

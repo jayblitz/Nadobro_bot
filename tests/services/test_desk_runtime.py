@@ -278,7 +278,7 @@ def test_failed_controller_is_rebuilt_not_ticked_dead(monkeypatch):
                         lambda *a, **k: object())
     monkeypatch.setattr("src.nadobro.strategy.engine_runtime.build_product_meta_from_catalog",
                         lambda *a, **k: {})
-    monkeypatch.setattr("src.nadobro.services.user_service.get_user_nado_client",
+    monkeypatch.setattr("src.nadobro.users.user_service.get_user_nado_client",
                         lambda *a, **k: object())
     monkeypatch.setattr("src.nadobro.trading.engine_persistence.DbInventoryRepository",
                         lambda *a, **k: object())

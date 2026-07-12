@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.nadobro.services import pnl_card_builder as builder
+from src.nadobro.portfolio import pnl_card_builder as builder
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +273,7 @@ class TestBuildPnLCardDataShape:
 # ---------------------------------------------------------------------------
 class TestBuilderFeedsRenderer:
     def test_renderer_accepts_builder_output(self):
-        from src.nadobro.services import pnl_card
+        from src.nadobro.portfolio import pnl_card
 
         session = {
             "user_id": 42,

@@ -23,17 +23,17 @@ from src.nadobro.handlers.keyboards import (
     strategy_hub_kb,
     wallet_kb,
     positions_kb,
-    points_scope_kb,
     alerts_kb,
     settings_kb,
     referral_kb,
     persistent_menu_kb,
 )
+from src.nadobro.users.points_ui import points_scope_kb
 from src.nadobro.handlers.wallet_view import build_wallet_view_payload
-from src.nadobro.services.settings_service import get_user_settings
-from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
-from src.nadobro.services.points_service import get_points_dashboard
-from src.nadobro.services.referral_service import get_referral_dashboard
+from src.nadobro.users.settings_service import get_user_settings
+from src.nadobro.users.user_service import get_user, get_user_readonly_client, get_user_wallet_info
+from src.nadobro.users.points_service import get_points_dashboard
+from src.nadobro.users.referral_service import get_referral_dashboard
 from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk_capped
 from src.nadobro.core.perf import timed_metric
 

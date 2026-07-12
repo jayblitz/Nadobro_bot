@@ -1052,7 +1052,7 @@ def _x_search_via_grok(query: str, is_nado_q: bool, is_points_q: bool, weekday: 
 
 def _get_user_network(telegram_id: int) -> str:
     try:
-        from src.nadobro.services.user_service import get_user
+        from src.nadobro.users.user_service import get_user
         user = get_user(telegram_id)
         return user.network_mode.value if user else "mainnet"
     except Exception:

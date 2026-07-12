@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.nadobro.llm.provider_config import provider_configured
+from src.nadobro.connectors.provider_config import provider_configured
 
 
 @dataclass(frozen=True)

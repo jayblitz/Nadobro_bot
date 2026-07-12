@@ -38,7 +38,7 @@ from src.nadobro.models.database import (
     get_latest_copy_snapshot,
     get_copy_trades_by_mirror,
 )
-from src.nadobro.services.user_service import get_user, get_user_nado_client
+from src.nadobro.users.user_service import get_user, get_user_nado_client
 from src.nadobro.trading.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.venue.nado_client import NadoClient
 from src.nadobro.venue.nado_archive import query_order_by_digest

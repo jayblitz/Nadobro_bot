@@ -17,9 +17,9 @@ from src.nadobro.handlers.formatters import (
     humanize_exchange_error,
 )
 from src.nadobro.handlers.intent_parser import parse_trade_intent, parse_position_management_intent
-from src.nadobro.services.admin_service import is_trading_paused
-from src.nadobro.services.onboarding_service import get_resume_step
-from src.nadobro.services.settings_service import get_user_settings
+from src.nadobro.users.admin_service import is_trading_paused
+from src.nadobro.users.onboarding_service import get_resume_step
+from src.nadobro.users.settings_service import get_user_settings
 from src.nadobro.trading.trade_service import (
     apply_tp_sl_to_open_position,
     close_position,
@@ -28,7 +28,7 @@ from src.nadobro.trading.trade_service import (
     get_account_and_performance_snapshot,
     limit_close_position,
 )
-from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
+from src.nadobro.users.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
 from src.nadobro.config import get_product_id, get_product_max_leverage
 from src.nadobro.venue.nado_tooling_service import tooling_enabled
 from src.nadobro.core.async_utils import run_blocking

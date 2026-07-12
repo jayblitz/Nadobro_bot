@@ -41,7 +41,7 @@ async def run_sampler_once(
     portfolio: Portfolio, user_ids: List[int], now: Optional[datetime] = None
 ) -> int:
     """Snapshot each user once. Returns the number of rows written."""
-    from src.nadobro.services.portfolio_service import PortfolioSnapshotUnavailable
+    from src.nadobro.portfolio.portfolio_service import PortfolioSnapshotUnavailable
 
     written = 0
     for uid in user_ids:
@@ -338,12 +338,12 @@ class SnapshotAccountProvider(AccountProvider):
         return str(getattr(snapshot, "network", None) or "mainnet")
 
     def _snapshot(self, user_id: int) -> object:
-        from src.nadobro.services.portfolio_service import get_portfolio_snapshot
+        from src.nadobro.portfolio.portfolio_service import get_portfolio_snapshot
 
         return get_portfolio_snapshot(user_id)
 
     def _spot_balances(self, user_id: int) -> Dict[object, Decimal]:
-        from src.nadobro.services.user_service import get_user_readonly_client
+        from src.nadobro.users.user_service import get_user_readonly_client
 
         # network=None resolves the user's active network — same network the
         # perp snapshot above was taken on, so one sample never mixes modes.

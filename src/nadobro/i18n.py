@@ -93,7 +93,7 @@ def _resolve_missing(base: str, lang: str) -> str:
 
 def get_user_language(telegram_id: int) -> str:
     # Lazy import avoids circular imports.
-    from src.nadobro.services.user_service import get_user
+    from src.nadobro.users.user_service import get_user
     user = get_user(telegram_id)
     return normalize_lang(getattr(user, "language", "en"))
 
