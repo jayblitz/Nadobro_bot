@@ -214,8 +214,8 @@ async def render_morning_brief(
     if cached and (now - cached[0]) < ttl_seconds:
         return cached[1].text, cached[1].sources
 
-    from src.nadobro.services.market_snapshot import gather_snapshot
-    from src.nadobro.services.news_aggregator import fetch_news_bundle
+    from src.nadobro.market_data.market_snapshot import gather_snapshot
+    from src.nadobro.market_data.news_aggregator import fetch_news_bundle
 
     edge_findings: list[dict] = []
     try:

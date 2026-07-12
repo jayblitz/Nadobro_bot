@@ -1,6 +1,6 @@
 import json
 
-from src.nadobro.services.nado_ws import (
+from src.nadobro.venue.nado_ws import (
     _PORTFOLIO_STREAMS,
     _is_auth_or_error,
     _should_invalidate,
@@ -83,7 +83,7 @@ def test_subscribe_message_schema_matches_docs():
 def test_route_lifecycle_feeds_order_update_and_fill():
     from src.nadobro.engine import order_lifecycle, order_tags
     from src.nadobro.engine.adapter.base import OrderState
-    from src.nadobro.services.nado_ws import _route_lifecycle
+    from src.nadobro.venue.nado_ws import _route_lifecycle
 
     order_lifecycle.clear()
     order_tags.clear()
@@ -108,7 +108,7 @@ def test_sign_stream_authentication_message_shape(monkeypatch):
     expiration} + signature (ws-v2 frame shape), signed with the
     StreamAuthentication EIP-712 type. expiration is a stringified ms value."""
     from eth_account import Account
-    from src.nadobro.services.nado_client import NadoClient
+    from src.nadobro.venue.nado_client import NadoClient
 
     subaccount = "0x" + "11" * 32
 

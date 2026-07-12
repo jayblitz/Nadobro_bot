@@ -30,7 +30,7 @@ from src.nadobro.services.trade_service import (
 )
 from src.nadobro.services.user_service import ensure_active_wallet_ready, get_user_readonly_client, get_user
 from src.nadobro.config import get_product_id, get_product_max_leverage
-from src.nadobro.services.nado_tooling_service import tooling_enabled
+from src.nadobro.venue.nado_tooling_service import tooling_enabled
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.services.text_trade_pending import (
     clear_text_trade_pending,

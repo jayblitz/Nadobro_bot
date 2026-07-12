@@ -133,7 +133,7 @@ def _is_cmc_available() -> bool:
 def _fetch_fear_greed_index() -> str:
     if _is_cmc_available():
         try:
-            from src.nadobro.services.cmc_client import get_fear_greed_index, format_fear_greed
+            from src.nadobro.market_data.cmc_client import get_fear_greed_index, format_fear_greed
             data = get_fear_greed_index()
             return format_fear_greed(data)
         except Exception as e:
@@ -974,7 +974,7 @@ def _execute_x_search(query: str) -> tuple[str, list[str]]:
 def _x_search_via_api(query: str, is_nado_q: bool, is_points_q: bool):
     """Search X via direct API v2. Returns None to trigger Grok fallback."""
     try:
-        from src.nadobro.services.x_api_client import (
+        from src.nadobro.market_data.x_api_client import (
             is_available, get_nado_tweets, search_topic_tweets,
             format_tweets_for_context,
         )
@@ -1161,7 +1161,7 @@ def _execute_price_brief(
     requested_fields: set[str] | None = None,
 ) -> tuple[str, list[str]]:
     from src.nadobro.config import get_product_id, get_perp_products
-    from src.nadobro.services.nado_client import NadoClient
+    from src.nadobro.venue.nado_client import NadoClient
 
     symbol = (product or "").strip().upper().replace("-PERP", "")
     product_id = get_product_id(symbol, network=network)
@@ -1182,7 +1182,7 @@ def _execute_price_brief(
     change_24h = None
     try:
         # NO_ORDERS_AUDIT-FIX-R6b: route through the digest-keyed cache.
-        from src.nadobro.services.nado_client import get_or_create_readonly_client
+        from src.nadobro.venue.nado_client import get_or_create_readonly_client
         client = get_or_create_readonly_client("0x0000000000000000000000000000000000000000", network)
         stats = client.get_product_market_stats(product_id)
         mid = float(stats.get("mid") or 0) or None
@@ -1202,7 +1202,7 @@ def _execute_price_brief(
     cmc_sources = []
     if _is_cmc_available():
         try:
-            from src.nadobro.services.cmc_client import get_crypto_quotes
+            from src.nadobro.market_data.cmc_client import get_crypto_quotes
             data = get_crypto_quotes([symbol]) or {}
             row = data.get(symbol) or {}
             quote_usd = ((row.get("quote") or {}).get("USD") or {})
@@ -1288,7 +1288,7 @@ def _execute_price_brief(
 
 def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, list[str]]:
     from src.nadobro.config import get_product_id, get_perp_products
-    from src.nadobro.services.nado_client import NadoClient
+    from src.nadobro.venue.nado_client import NadoClient
 
     symbol = product.strip().upper().replace("-PERP", "")
     product_id = get_product_id(symbol, network=network)
@@ -1297,7 +1297,7 @@ def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, li
         if symbol == "ALL":
             try:
                 # NO_ORDERS_AUDIT-FIX-R6b: cached.
-                from src.nadobro.services.nado_client import get_or_create_readonly_client
+                from src.nadobro.venue.nado_client import get_or_create_readonly_client
                 client = get_or_create_readonly_client("0x0000000000000000000000000000000000000000", network)
                 prices = client.get_all_market_prices()
                 lines = ["[LIVE PRICES FROM NADO DEX]"]
@@ -1314,7 +1314,7 @@ def _execute_live_price(product: str, network: str = "mainnet") -> tuple[str, li
 
     try:
         # NO_ORDERS_AUDIT-FIX-R6b: cached.
-        from src.nadobro.services.nado_client import get_or_create_readonly_client
+        from src.nadobro.venue.nado_client import get_or_create_readonly_client
         client = get_or_create_readonly_client("0x0000000000000000000000000000000000000000", network)
         price_data = client.get_market_price(product_id)
         mid = price_data.get("mid", 0)
@@ -1382,7 +1382,7 @@ def _execute_crypto_info(symbols_str: str) -> tuple[str, list[str]]:
     if not _is_cmc_available():
         return "[CRYPTO INFO] CoinMarketCap data not available — CMC_API_KEY not set.", []
     try:
-        from src.nadobro.services.cmc_client import get_crypto_quotes, format_crypto_quote
+        from src.nadobro.market_data.cmc_client import get_crypto_quotes, format_crypto_quote
         symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
         if not symbols:
             symbols = ["BTC"]
@@ -1404,7 +1404,7 @@ def _execute_trending_cryptos() -> tuple[str, list[str]]:
     if not _is_cmc_available():
         return "[TRENDING] CoinMarketCap data not available — CMC_API_KEY not set.", []
     try:
-        from src.nadobro.services.cmc_client import get_trending, format_trending
+        from src.nadobro.market_data.cmc_client import get_trending, format_trending
         data = get_trending()
         formatted = format_trending(data)
         if formatted and "No trending data" not in formatted:
@@ -1419,7 +1419,7 @@ def _execute_global_market_data() -> tuple[str, list[str]]:
     if not _is_cmc_available():
         return "[GLOBAL MARKET] CoinMarketCap data not available — CMC_API_KEY not set.", []
     try:
-        from src.nadobro.services.cmc_client import get_global_metrics, format_global_metrics
+        from src.nadobro.market_data.cmc_client import get_global_metrics, format_global_metrics
         data = get_global_metrics()
         formatted = format_global_metrics(data)
         fng = _fetch_fear_greed_index()
@@ -1883,7 +1883,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
     # Check if X questions can be handled: either via Grok (xai_client) or X API v2
     _x_api_ready = False
     try:
-        from src.nadobro.services.x_api_client import is_available as _x_is_available
+        from src.nadobro.market_data.x_api_client import is_available as _x_is_available
         _x_api_ready = _x_is_available()
     except Exception:
         pass
@@ -2134,7 +2134,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
     # Check if X questions can be handled: either via Grok (xai_client) or X API v2
     _x_api_ready2 = False
     try:
-        from src.nadobro.services.x_api_client import is_available as _x_is_available2
+        from src.nadobro.market_data.x_api_client import is_available as _x_is_available2
         _x_api_ready2 = _x_is_available2()
     except Exception:
         pass

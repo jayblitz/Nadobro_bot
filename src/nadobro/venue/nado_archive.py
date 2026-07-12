@@ -184,7 +184,7 @@ def _from_x18(value) -> float:
 def _derive_archive_weight(payload: dict) -> float:
     """Documented archive IP weight for a ``_post`` payload (``{type: params}``)."""
     try:
-        from src.nadobro.services.nado_weights import query_weight
+        from src.nadobro.venue.nado_weights import query_weight
     except Exception:
         return 5.0
     if not isinstance(payload, dict) or not payload:

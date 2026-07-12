@@ -224,7 +224,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             # "catalog endpoint is failing/Cloudflare-blocked right now" so the
             # user gets accurate guidance for the active mode.
             try:
-                from src.nadobro.services.product_catalog import is_spot_catalog_dynamic
+                from src.nadobro.venue.product_catalog import is_spot_catalog_dynamic
 
                 catalog_live = is_spot_catalog_dynamic(network)
             except Exception:
@@ -455,7 +455,7 @@ async def _handle_strategy(query, data, context, telegram_id):
 
         # Tiny Budget — resolve venue minimum and required leverage.
         try:
-            from src.nadobro.services.product_catalog import (
+            from src.nadobro.venue.product_catalog import (
                 get_product_min_quote_notional_usd,
             )
             venue_min = get_product_min_quote_notional_usd(selected_product, network=network)
@@ -1904,7 +1904,7 @@ def _append_mm_pretrade_breakdown(
     """
     try:
         from src.nadobro.services import mm_dashboard
-        from src.nadobro.services.nado_archive import get_pair_24h_volume_usd
+        from src.nadobro.venue.nado_archive import get_pair_24h_volume_usd
 
         network, settings = get_user_settings(telegram_id)
         conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -2119,7 +2119,7 @@ def _build_strategy_preview_text(
         maker_fee_rate = conf.get("vol_maker_fee_rate")
         if maker_fee_rate is None:
             try:
-                from src.nadobro.services.product_catalog import get_spot_maker_fee_rate
+                from src.nadobro.venue.product_catalog import get_spot_maker_fee_rate
 
                 maker_fee_rate = get_spot_maker_fee_rate(product, network=network)
             except Exception:

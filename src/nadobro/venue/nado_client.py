@@ -521,17 +521,17 @@ class NadoClient:
         :meth:`_gateway_release`; execute/archive paths set it False (token
         bucket only, nothing to release).
         """
-        from src.nadobro.services.gateway_budget import try_acquire
+        from src.nadobro.venue.gateway_budget import try_acquire
         target = url or self._rest_url()
         uid = getattr(self, "acting_user_id", None) if user_scoped else None
         return try_acquire(target, user_id=uid, weight=weight, kind=kind, wallet=wallet)
 
     def _gateway_release(self) -> None:
-        from src.nadobro.services.gateway_budget import release
+        from src.nadobro.venue.gateway_budget import release
         release(getattr(self, "acting_user_id", None))
 
     def _record_gateway_error(self, exc: Exception) -> None:
-        from src.nadobro.services.gateway_budget import is_rate_limit_error, record_gateway_failure
+        from src.nadobro.venue.gateway_budget import is_rate_limit_error, record_gateway_failure
         if is_rate_limit_error(exc):
             record_gateway_failure(self._rest_url(), exc)
 
@@ -567,7 +567,7 @@ class NadoClient:
             return None
 
     def _query_rest(self, query_type: str, extra_params: Optional[dict] = None) -> Optional[dict]:
-        from src.nadobro.services.nado_weights import query_weight
+        from src.nadobro.venue.nado_weights import query_weight
         if not self._gateway_allowed(weight=query_weight(query_type, extra_params)):
             return None
         params = {"type": query_type}
@@ -688,7 +688,7 @@ class NadoClient:
             cached = self._read_shared_cache(candles_redis_key)
             if isinstance(cached, list):
                 return cached
-        from src.nadobro.services.nado_weights import query_weight
+        from src.nadobro.venue.nado_weights import query_weight
         if not self._gateway_allowed(
             weight=query_weight("candlesticks", {"limit": limit}),
             url=self._archive_url(),
@@ -793,7 +793,7 @@ class NadoClient:
         # throttling/blocking this host, the budget contract requires us to
         # back off and serve cached data — NOT fan out to one REST call per
         # product, which would amplify load exactly when we must reduce it.
-        from src.nadobro.services.gateway_budget import is_gateway_blocked
+        from src.nadobro.venue.gateway_budget import is_gateway_blocked
         if is_gateway_blocked(self._rest_url()):
             with _caches_lock:
                 cached = _ALL_PRICES_CACHE.get(self.network)
@@ -1166,7 +1166,7 @@ class NadoClient:
 
         if include_spot:
             try:
-                from src.nadobro.services.product_catalog import get_spot_catalog
+                from src.nadobro.venue.product_catalog import get_spot_catalog
 
                 quote_like = {"USDC", "USDC0", "USDT", "USDT0", "USD"}
                 catalog = get_spot_catalog(network=self.network, refresh=refresh)
@@ -1248,7 +1248,7 @@ class NadoClient:
         """
         if not self._ensure_sdk_client():
             return []
-        from src.nadobro.services.nado_weights import query_weight
+        from src.nadobro.venue.nado_weights import query_weight
         # _gateway_allowed -> try_acquire can time.sleep() on a starved token
         # bucket. This runs in the coroutine body (not inside _call), so doing it
         # inline would block the event loop. Run it in the SDK pool.
@@ -2003,7 +2003,7 @@ class NadoClient:
 
     def _isolated_subaccount_hexes(self) -> list[str]:
         try:
-            from src.nadobro.services.nado_archive import (
+            from src.nadobro.venue.nado_archive import (
                 isolated_subaccount_from_row,
                 query_isolated_subaccounts_for_parent,
             )
@@ -2616,7 +2616,7 @@ class NadoClient:
         signed params, so a socket hiccup never drops an order.
         """
         from nado_protocol.engine_client.types.execute import ExecuteResponse
-        from src.nadobro.services import nado_ws_actions
+        from src.nadobro.venue import nado_ws_actions
 
         is_place = op == "place_order"
         send_rest = (
@@ -2800,7 +2800,7 @@ class NadoClient:
                     # A confirmed execute proves the IP can write again — close
                     # any open ip_query_only write circuit immediately.
                     try:
-                        from src.nadobro.services.gateway_budget import clear_write_ban
+                        from src.nadobro.venue.gateway_budget import clear_write_ban
                         clear_write_ban(self._rest_url())
                     except Exception as e:  # noqa: BLE001
                         logger.warning(
@@ -2840,7 +2840,7 @@ class NadoClient:
             compact_result = lowered_result.replace("_", "").replace("-", "")
             if (is_failure_result or is_blocked_result) and "ipqueryonly" in compact_result:
                 try:
-                    from src.nadobro.services.gateway_budget import record_ip_query_only
+                    from src.nadobro.venue.gateway_budget import record_ip_query_only
                     record_ip_query_only(self._rest_url())
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
@@ -2885,7 +2885,7 @@ class NadoClient:
             compact_err = err_str.lower().replace("_", "").replace("-", "")
             if "ipqueryonly" in compact_err:
                 try:
-                    from src.nadobro.services.gateway_budget import record_ip_query_only
+                    from src.nadobro.venue.gateway_budget import record_ip_query_only
                     record_ip_query_only(self._rest_url())
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
@@ -3170,7 +3170,7 @@ class NadoClient:
             # and return a transient failure the caller can retry.
             if self._result_is_ip_query_only(result):
                 try:
-                    from src.nadobro.services.gateway_budget import record_ip_query_only
+                    from src.nadobro.venue.gateway_budget import record_ip_query_only
                     record_ip_query_only(self._rest_url())
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
@@ -3191,7 +3191,7 @@ class NadoClient:
                     "ip_query_only": True,
                 }
             try:
-                from src.nadobro.services.gateway_budget import clear_write_ban
+                from src.nadobro.venue.gateway_budget import clear_write_ban
                 clear_write_ban(self._rest_url())
             except Exception as e:  # noqa: BLE001
                 logger.warning(
@@ -3205,7 +3205,7 @@ class NadoClient:
             compact_err = err_str.lower().replace("_", "").replace("-", "")
             if "ipqueryonly" in compact_err:
                 try:
-                    from src.nadobro.services.gateway_budget import record_ip_query_only
+                    from src.nadobro.venue.gateway_budget import record_ip_query_only
                     record_ip_query_only(self._rest_url())
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
@@ -3245,7 +3245,7 @@ class NadoClient:
         (that field is a monotonic settlement index, not a rate). Sign is
         preserved so callers can tell favorable from unfavorable funding.
         """
-        from src.nadobro.services.nado_weights import query_weight
+        from src.nadobro.venue.nado_weights import query_weight
 
         ids = [int(p) for p in (product_ids or []) if p is not None]
         if not ids:

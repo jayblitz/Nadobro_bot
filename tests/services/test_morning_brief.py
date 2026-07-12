@@ -3,8 +3,9 @@ import asyncio
 import pytest
 
 from src.nadobro.connectors.news import NewsItem
-from src.nadobro.services import market_snapshot, morning_brief, news_aggregator
-from src.nadobro.services.market_snapshot import SnapshotPayload, SnapshotRow
+from src.nadobro.market_data import market_snapshot, news_aggregator
+from src.nadobro.services import morning_brief
+from src.nadobro.market_data.market_snapshot import SnapshotPayload, SnapshotRow
 
 
 @pytest.fixture(autouse=True)

@@ -77,7 +77,7 @@ def _spot_market_open_sync(product: str, network: str) -> bool:
         return cached[1]
     is_open = True
     try:
-        from src.nadobro.services import product_catalog as pc
+        from src.nadobro.venue import product_catalog as pc
 
         spots = (pc.get_spot_catalog(network=network) or {}).get("spots") or {}
         row = spots.get(key[0]) if isinstance(spots, dict) else None

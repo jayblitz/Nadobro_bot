@@ -872,7 +872,7 @@ def map_strategy_config(
         except Exception:
             vol_pair = str(product or "")
         try:
-            from src.nadobro.services.product_catalog import get_spot_maker_fee_rate
+            from src.nadobro.venue.product_catalog import get_spot_maker_fee_rate
 
             spot_maker_fee_rate = get_spot_maker_fee_rate(vol_pair, network=network)
         except Exception:
@@ -1299,7 +1299,7 @@ def build_product_meta_from_catalog(client: object) -> Dict[str, object]:
     string a strategy uses for ``trading_pair`` resolves.
     """
     from src.nadobro.engine.adapter.nado import ProductMeta
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     out: Dict[str, object] = {}
     network = str(getattr(client, "network", None) or "mainnet")
@@ -1387,7 +1387,7 @@ def _materialize_dn_leg_meta(
     controller fails to start cleanly instead of mis-trading.
     """
     from src.nadobro.engine.adapter.nado import ProductMeta
-    from src.nadobro.services.product_catalog import (
+    from src.nadobro.venue.product_catalog import (
         get_dn_pair,
         is_product_isolated_only,
     )

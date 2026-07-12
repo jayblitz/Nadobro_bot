@@ -251,7 +251,7 @@ def test_deck_hides_pct_when_unknown():
 def test_sync_resolves_placeholder_product_names():
     from unittest.mock import patch
 
-    from src.nadobro.services.nado_sync import _resolve_product_names
+    from src.nadobro.venue.nado_sync import _resolve_product_names
 
     positions = [{"product_id": 2, "symbol": "Product_2", "product_name": ""}]
     orders = [{"product_id": 4, "product_name": "Product_4"}]

@@ -44,7 +44,7 @@ def build_market_intelligence_snapshot(
     }
 
     try:
-        from src.nadobro.services.market_scanner import build_market_snapshot, format_snapshot_for_llm
+        from src.nadobro.market_data.market_scanner import build_market_snapshot, format_snapshot_for_llm
 
         if client is not None:
             market_snapshot = build_market_snapshot(client, products)

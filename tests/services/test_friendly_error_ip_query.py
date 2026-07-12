@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.nadobro.services.nado_client import NadoClient
+from src.nadobro.venue.nado_client import NadoClient
 
 
 def _make_client(verify_result: dict) -> NadoClient:

@@ -8,7 +8,7 @@ import time
 from typing import Optional
 
 from src.nadobro.utils.env import env_int
-from src.nadobro.services.nado_archive import query_nlp_lp_events, query_nlp_snapshots
+from src.nadobro.venue.nado_archive import query_nlp_lp_events, query_nlp_snapshots
 
 logger = logging.getLogger(__name__)
 

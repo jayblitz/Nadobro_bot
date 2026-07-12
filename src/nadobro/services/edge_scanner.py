@@ -183,7 +183,7 @@ def _scan_via_x_api():
     Returns list of edges, or None if X API is unavailable (triggers fallback).
     """
     try:
-        from src.nadobro.services.x_api_client import is_available, get_nado_tweets, format_tweets_for_edge_analysis
+        from src.nadobro.market_data.x_api_client import is_available, get_nado_tweets, format_tweets_for_edge_analysis
     except ImportError:
         return None
 
@@ -326,7 +326,7 @@ def scan_edges() -> list[dict]:
 
 def _is_x_api_available() -> bool:
     try:
-        from src.nadobro.services.x_api_client import is_available
+        from src.nadobro.market_data.x_api_client import is_available
         return is_available()
     except Exception:
         return False

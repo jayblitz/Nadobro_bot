@@ -18,7 +18,7 @@ def _reset_gateway_state():
     sys.modules so reload-based tests are covered too.
     """
     yield
-    mod = sys.modules.get("src.nadobro.services.gateway_budget")
+    mod = sys.modules.get("src.nadobro.venue.gateway_budget")
     if mod is None:
         return
     with mod._lock:
@@ -36,7 +36,7 @@ def _fresh_module(monkeypatch):
     monkeypatch.setenv("NADO_GATEWAY_RL_THRESHOLD", "2")
     monkeypatch.setenv("NADO_GATEWAY_RL_WINDOW_SECONDS", "30")
     monkeypatch.setenv("NADO_GATEWAY_RL_COOLDOWN_SECONDS", "60")
-    from src.nadobro.services import gateway_budget
+    from src.nadobro.venue import gateway_budget
 
     importlib.reload(gateway_budget)
     return gateway_budget
@@ -77,7 +77,7 @@ def test_per_user_bucket_drains_by_weight(monkeypatch):
     monkeypatch.setenv("NADO_USER_GATEWAY_BURST", "10")
     monkeypatch.setenv("NADO_USER_MAX_INFLIGHT", "100")
     import importlib
-    from src.nadobro.services import gateway_budget as mod
+    from src.nadobro.venue import gateway_budget as mod
     importlib.reload(mod)
     monkeypatch.setattr("src.nadobro.core.http_session.throttle_host", lambda *_a, **_k: True)
     url = "https://gateway.mainnet.nado.xyz/query"
@@ -92,7 +92,7 @@ def test_execute_lane_uses_wallet_budget(monkeypatch):
     monkeypatch.setenv("NADO_WALLET_EXECUTE_RPS", "0.0001")
     monkeypatch.setenv("NADO_WALLET_EXECUTE_BURST", "5")
     import importlib
-    from src.nadobro.services import gateway_budget as mod
+    from src.nadobro.venue import gateway_budget as mod
     importlib.reload(mod)
     # Host throttle must NOT be consulted for executes.
     def _boom(*_a, **_k):
@@ -142,7 +142,7 @@ def test_rate_limit_circuit_opens(monkeypatch):
 
 
 def test_is_rate_limit_error():
-    from src.nadobro.services.gateway_budget import is_rate_limit_error
+    from src.nadobro.venue.gateway_budget import is_rate_limit_error
 
     assert is_rate_limit_error('Too many requests "error_code":1000')
     assert is_rate_limit_error(Exception("error_code=1000"))

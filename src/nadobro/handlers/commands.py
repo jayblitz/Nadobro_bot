@@ -27,7 +27,7 @@ from src.nadobro.handlers.keyboards import (
     back_kb,
 )
 from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_automation_for_user
-from src.nadobro.services.nado_tooling_service import get_ops_diagnostics
+from src.nadobro.venue.nado_tooling_service import get_ops_diagnostics
 from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
     get_new_onboarding_state,

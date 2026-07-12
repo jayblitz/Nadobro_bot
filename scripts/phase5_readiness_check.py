@@ -84,7 +84,7 @@ def _check(name: str, fn) -> CheckResult:
 
 
 def check_catalog_min_size(network: str, product: str):
-    from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
+    from src.nadobro.venue.product_catalog import get_product_min_quote_notional_usd
 
     def run():
         value = get_product_min_quote_notional_usd(product, network=network)
@@ -96,7 +96,7 @@ def check_catalog_min_size(network: str, product: str):
 
 
 def check_catalog_increments(network: str, product: str):
-    from src.nadobro.services.product_catalog import (
+    from src.nadobro.venue.product_catalog import (
         get_product_size_increment,
         get_product_price_increment,
     )
@@ -126,7 +126,7 @@ def check_catalog_max_leverage(network: str, product: str):
 
 
 def check_maker_taker_fees(network: str, product: str):
-    from src.nadobro.services.product_catalog import (
+    from src.nadobro.venue.product_catalog import (
         get_product_maker_fee_rate,
         get_product_taker_fee_rate,
     )
@@ -143,7 +143,7 @@ def check_maker_taker_fees(network: str, product: str):
 
 def check_tiny_budget_math(network: str, product: str, collateral: float):
     from src.nadobro.config import get_product_max_leverage
-    from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
+    from src.nadobro.venue.product_catalog import get_product_min_quote_notional_usd
 
     def run():
         min_size = get_product_min_quote_notional_usd(product, network=network)
@@ -174,7 +174,7 @@ def check_tiny_budget_math(network: str, product: str, collateral: float):
 def check_pov_engine(network: str, product: str, collateral: float, preset: str):
     from src.nadobro.config import get_product_id
     from src.nadobro.quant import pov_engine
-    from src.nadobro.services.nado_archive import get_pair_24h_volume_usd
+    from src.nadobro.venue.nado_archive import get_pair_24h_volume_usd
 
     def run():
         pid = get_product_id(product, network=network)

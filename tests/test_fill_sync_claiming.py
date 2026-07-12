@@ -46,7 +46,8 @@ def test_release_fill_sync_only_releases_claimed_rows():
 
 
 def test_sync_pending_fills_does_not_cancel_recorded_fill_when_archive_missing():
-    from src.nadobro.services import nado_archive, scheduler, user_service
+    from src.nadobro.venue import nado_archive
+    from src.nadobro.services import scheduler, user_service
 
     entry = {
         "id": 7,
@@ -86,7 +87,8 @@ def test_sync_pending_fills_does_not_cancel_recorded_fill_when_archive_missing()
 
 
 def test_sync_pending_fills_does_not_cancel_after_digest_poll_hits_rate_limit():
-    from src.nadobro.services import nado_archive, scheduler, user_service
+    from src.nadobro.venue import nado_archive
+    from src.nadobro.services import scheduler, user_service
 
     entry = {
         "id": 8,

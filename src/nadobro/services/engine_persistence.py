@@ -201,7 +201,7 @@ def _resolve_engine_fill_product(strategy: str, trading_pair: str, network: str)
     still do not depend on this resolving successfully.
     """
     from src.nadobro.config import get_product_name
-    from src.nadobro.services.product_catalog import (
+    from src.nadobro.venue.product_catalog import (
         get_product_id,
         get_spot_product_id,
     )

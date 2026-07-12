@@ -60,7 +60,7 @@ def test_only_adapter_may_import_connectors_nado() -> None:
 ENGINE_ROOT = SRC_ROOT / "engine"
 ENGINE_VENUE_FORBIDDEN = (
     "nadobro.services.nado_client",
-    "src.nadobro.services.nado_client",
+    "src.nadobro.venue.nado_client",
     "services.nado_client",
 )
 

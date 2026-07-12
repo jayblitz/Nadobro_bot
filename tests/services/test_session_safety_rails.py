@@ -311,7 +311,7 @@ class LiveSnapshotMathTests(unittest.TestCase):
                    return_value={"fills": 0, "volume": 0.0, "fees": 0.0, "realized_pnl": 0.0}), \
              patch("src.nadobro.models.database.get_session_turnover", side_effect=fake_turnover), \
              patch("src.nadobro.models.database.count_open_orders_for_product", side_effect=fake_open_orders), \
-             patch("src.nadobro.services.product_catalog.get_dn_pair",
+             patch("src.nadobro.venue.product_catalog.get_dn_pair",
                    return_value={"perp_product_id": 117, "spot_product_id": 118}):
             snap = live_session.get_live_session_snapshot(
                 42, "mainnet", sess, state={"strategy": "dn", "notional_usd": 100.0}, client=None, mark=100.0,

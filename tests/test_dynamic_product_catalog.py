@@ -7,7 +7,7 @@ install_test_stubs()
 from src.nadobro.config import PRODUCTS
 from src.nadobro.handlers.intent_parser import parse_trade_intent
 from src.nadobro.handlers.keyboards import trade_product_reply_kb
-from src.nadobro.services import product_catalog
+from src.nadobro.venue import product_catalog
 
 
 class DynamicProductCatalogTests(unittest.TestCase):

@@ -165,9 +165,9 @@ def _runtime_health_payload() -> dict:
         if not scheduler_diag.get("running"):
             payload["status"] = "degraded"
         try:
-            from src.nadobro.services.gateway_budget import snapshot as gateway_snapshot
-            from src.nadobro.services.ws_health import snapshot as ws_snapshot
-            from src.nadobro.services.market_feed import snapshot as market_snapshot
+            from src.nadobro.venue.gateway_budget import snapshot as gateway_snapshot
+            from src.nadobro.venue.ws_health import snapshot as ws_snapshot
+            from src.nadobro.venue.market_feed import snapshot as market_snapshot
             from src.nadobro.core.async_utils import pool_stats
             from src.nadobro.core.user_circuit import snapshot as circuit_snapshot
             from src.nadobro.core.feature_flags import strategy_scheduler_enabled
@@ -341,7 +341,7 @@ async def run_bot():
     )
 
     try:
-        from src.nadobro.services.nado_client import NadoClient
+        from src.nadobro.venue.nado_client import NadoClient
         alert_network = (os.environ.get("NADO_ALERT_CHECK_NETWORK") or "testnet").strip().lower()
         alert_pk = (os.environ.get("NADO_ALERT_CHECK_PRIVATE_KEY") or "").strip()
         alert_address = (
@@ -352,14 +352,14 @@ async def run_bot():
             # NO_ORDERS_AUDIT-FIX-R6b: go through the digest-keyed cache so
             # we don't pay the SDK init cost on every restart-without-restart
             # (e.g. health-check restarts).
-            from src.nadobro.services.nado_client import get_or_create_signing_client
+            from src.nadobro.venue.nado_client import get_or_create_signing_client
             alert_client = get_or_create_signing_client(alert_pk, alert_network)
         else:
             # Read-only client is sufficient for alert price checks.
-            from src.nadobro.services.nado_client import get_or_create_readonly_client
+            from src.nadobro.venue.nado_client import get_or_create_readonly_client
             alert_client = get_or_create_readonly_client(alert_address, alert_network)
         set_check_client(alert_client)
-        from src.nadobro.services.market_feed import bind_fetcher
+        from src.nadobro.venue.market_feed import bind_fetcher
 
         bind_fetcher(alert_client.get_all_market_prices)
         logger.info("Alert price-check client initialized (network=%s)", alert_network)
@@ -582,7 +582,7 @@ async def run_bot():
         from src.nadobro.services.scheduler import stop_scheduler
         from src.nadobro.core.feature_flags import strategy_scheduler_enabled
         from src.nadobro.services.strategy_scheduler import get_scheduler
-        from src.nadobro.services.nado_ws import portfolio_ws
+        from src.nadobro.venue.nado_ws import portfolio_ws
 
         stop_scheduler()
         if strategy_scheduler_enabled():

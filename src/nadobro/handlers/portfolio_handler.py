@@ -41,7 +41,7 @@ _BG_REFRESH: dict[tuple[int, str], asyncio.Task] = {}
 
 
 def _cached_snapshot(telegram_id: int, network: str | None):
-    from src.nadobro.services.nado_sync import get_cached_snapshot, mark_user_active
+    from src.nadobro.venue.nado_sync import get_cached_snapshot, mark_user_active
 
     mark_user_active(int(telegram_id))
     return get_cached_snapshot(int(telegram_id), network)

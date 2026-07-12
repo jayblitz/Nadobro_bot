@@ -54,7 +54,7 @@ def _record(rec, venue_row_exists: bool):
         "src.nadobro.services.engine_persistence.resolve_running_session_id",
         return_value=90,
     ), patch(
-        "src.nadobro.services.product_catalog.get_product_id", return_value=2
+        "src.nadobro.venue.product_catalog.get_product_id", return_value=2
     ), patch(
         "src.nadobro.db.query_one",
         return_value=({"": 1} if venue_row_exists else None),
@@ -93,9 +93,9 @@ def test_recorder_resolves_dn_spot_leg_product_id():
         "src.nadobro.services.engine_persistence.resolve_running_session_id",
         return_value=90,
     ), patch(
-        "src.nadobro.services.product_catalog.get_spot_product_id", return_value=118
+        "src.nadobro.venue.product_catalog.get_spot_product_id", return_value=118
     ), patch(
-        "src.nadobro.services.product_catalog.get_product_id",
+        "src.nadobro.venue.product_catalog.get_product_id",
         side_effect=AssertionError("DN spot leg must not use perp resolver"),
     ), patch(
         "src.nadobro.config.get_product_name", return_value="WGOOGLX"

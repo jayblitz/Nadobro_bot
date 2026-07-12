@@ -991,7 +991,7 @@ def start_user_bot(
     # Surface a precise actionable error instead.
     if strategy == "vol" and vol_market_kw == "spot":
         from src.nadobro.config import get_spot_metadata
-        from src.nadobro.services.product_catalog import _x18_to_float
+        from src.nadobro.venue.product_catalog import _x18_to_float
 
         _, _vol_cfg = get_strategy_settings(telegram_id, "vol")
         _notional = float(
@@ -1060,7 +1060,7 @@ def start_user_bot(
             if _dur > 0:
                 state["mm_run_duration_minutes"] = _dur
                 state["mm_duration_target_notified"] = False
-            from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
+            from src.nadobro.venue.product_catalog import get_product_min_quote_notional_usd
             from src.nadobro.quant.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD
             _min_notional = (
                 get_product_min_quote_notional_usd(product.upper(), network=network)
@@ -1096,7 +1096,7 @@ def start_user_bot(
         state["volume_done_usd"] = 0.0
         state["volume_remaining_usd"] = float(state.get("target_volume_usd") or 0.0)
         try:
-            from src.nadobro.services.product_catalog import get_spot_maker_fee_rate
+            from src.nadobro.venue.product_catalog import get_spot_maker_fee_rate
 
             _fee_rate = get_spot_maker_fee_rate(str(product), network=network)
             if _fee_rate is not None:

@@ -24,9 +24,9 @@ from src.nadobro.config import (
     get_nado_builder_routing_config,
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client, get_user_readonly_client, update_trade_stats, ensure_active_wallet_ready
-from src.nadobro.services.nado_archive import query_order_by_digest
-from src.nadobro.services.product_catalog import is_product_id_isolated_only
-from src.nadobro.services.nado_tooling_service import get_account_snapshot
+from src.nadobro.venue.nado_archive import query_order_by_digest
+from src.nadobro.venue.product_catalog import is_product_id_isolated_only
+from src.nadobro.venue.nado_tooling_service import get_account_snapshot
 
 logger = logging.getLogger(__name__)
 _submit_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="nadobro-submit")
@@ -212,7 +212,7 @@ def _enqueue_fill_sync(trade_id: int, network: str, user_id: int, client, digest
 
 def _clear_portfolio_caches(user_id: int, network: str) -> None:
     try:
-        from src.nadobro.services.nado_sync import clear_cache as clear_nado_sync_cache
+        from src.nadobro.venue.nado_sync import clear_cache as clear_nado_sync_cache
         from src.nadobro.services.portfolio_service import clear_portfolio_snapshot_cache
 
         clear_nado_sync_cache(int(user_id), network)
@@ -403,7 +403,7 @@ def _order_sender_params(client, network: str) -> list[str | None]:
     """
     Subaccounts that may hold perp orders: None = default subaccount, else isolated child hex.
     """
-    from src.nadobro.services.nado_archive import isolated_subaccount_from_row, query_isolated_subaccounts_for_parent
+    from src.nadobro.venue.nado_archive import isolated_subaccount_from_row, query_isolated_subaccounts_for_parent
 
     out: list[str | None] = [None]
     try:

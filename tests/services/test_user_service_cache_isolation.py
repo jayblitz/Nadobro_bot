@@ -13,7 +13,9 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import nado_client, user_service
+from src.nadobro.venue import nado_client
+
+from src.nadobro.services import user_service
 
 
 def _seed_two_users():
@@ -35,7 +37,7 @@ def _seed_two_users():
 def test_invalidate_user_caches_only_clears_target_address(monkeypatch):
     addr_a, addr_b = _seed_two_users()
     monkeypatch.setattr(
-        "src.nadobro.services.nado_sync.clear_cache", lambda *_a, **_k: None, raising=False,
+        "src.nadobro.venue.nado_sync.clear_cache", lambda *_a, **_k: None, raising=False,
     )
     user_service._invalidate_user_caches(addr_a, telegram_id=1)
     assert f"{addr_a}_mainnet" not in nado_client._client_cache
@@ -51,7 +53,7 @@ def test_invalidate_user_caches_handles_missing_address(monkeypatch):
     not touch any cache entries.
     """
     monkeypatch.setattr(
-        "src.nadobro.services.nado_sync.clear_cache", lambda *_a, **_k: None, raising=False,
+        "src.nadobro.venue.nado_sync.clear_cache", lambda *_a, **_k: None, raising=False,
     )
     nado_client._client_cache["0xdead_mainnet"] = object()
     user_service._invalidate_user_caches(None, telegram_id=2)

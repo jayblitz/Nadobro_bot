@@ -68,7 +68,7 @@ def _augment_with_cmc(rows: list[SnapshotRow]) -> None:
 
         if not _is_cmc_available():
             return
-        from src.nadobro.services.cmc_client import get_crypto_quotes
+        from src.nadobro.market_data.cmc_client import get_crypto_quotes
 
         symbols = [r.symbol for r in rows]
         if not symbols:
@@ -99,7 +99,7 @@ def _gather_sync(network: str) -> SnapshotPayload:
         _fetch_fear_greed_index,
         _parse_fng_snapshot,
     )
-    from src.nadobro.services.nado_client import NadoClient
+    from src.nadobro.venue.nado_client import NadoClient
 
     perp_symbols = []
     try:
@@ -111,7 +111,7 @@ def _gather_sync(network: str) -> SnapshotPayload:
     if perp_symbols:
         try:
             # NO_ORDERS_AUDIT-FIX-R6b: route through the digest-keyed cache.
-            from src.nadobro.services.nado_client import get_or_create_readonly_client
+            from src.nadobro.venue.nado_client import get_or_create_readonly_client
             client = get_or_create_readonly_client("0x0000000000000000000000000000000000000000", network)
         except Exception as exc:
             logger.warning("snapshot Nado client init failed: %s", exc)

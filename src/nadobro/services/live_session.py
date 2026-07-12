@@ -217,7 +217,7 @@ def _session_product_ids_for_turnover(session: dict, state: Optional[dict], netw
     if "-" in product:
         candidates.append(product.split("-", 1)[0])
     try:
-        from src.nadobro.services.product_catalog import get_dn_pair
+        from src.nadobro.venue.product_catalog import get_dn_pair
 
         for candidate in candidates:
             if not candidate:

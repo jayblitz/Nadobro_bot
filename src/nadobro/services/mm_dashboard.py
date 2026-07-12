@@ -14,7 +14,7 @@ from src.nadobro.config import (
     get_product_max_leverage,
 )
 from src.nadobro.quant import pov_engine
-from src.nadobro.services.product_catalog import (
+from src.nadobro.venue.product_catalog import (
     get_product_maker_fee_rate,
     get_product_min_quote_notional_usd,
     get_product_taker_fee_rate,

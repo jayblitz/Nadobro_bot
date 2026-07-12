@@ -44,7 +44,7 @@ from src.nadobro.engine.types import OrderType, TradeType, _dec
 from src.nadobro.utils.x18 import from_x18
 
 # The sole permitted venue import inside the engine.
-from src.nadobro.services.nado_client import NadoClient
+from src.nadobro.venue.nado_client import NadoClient
 # Pure-math isolated-margin sizing shared with the manual trade path so both
 # size an isolated-only leg identically.
 from src.nadobro.quant.margin import compute_isolated_margin

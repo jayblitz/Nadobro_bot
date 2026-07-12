@@ -36,7 +36,7 @@ def test_every_emitted_event_has_a_notification_template():
 
 
 def test_spot_market_open_fails_open(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     def boom(**kw):
         raise RuntimeError("catalog down")
@@ -48,7 +48,7 @@ def test_spot_market_open_fails_open(monkeypatch):
 
 
 def test_spot_market_closed_detected(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     monkeypatch.setattr(pc, "get_spot_catalog", lambda **kw: {
         "spots": {"QQQX": {"trading_status": "halted"}}
@@ -58,7 +58,7 @@ def test_spot_market_closed_detected(monkeypatch):
 
 
 def test_spot_market_hours_flag(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     monkeypatch.setattr(pc, "get_spot_catalog", lambda **kw: {
         "spots": {"QQQX": {"trading_status": "live", "market_hours": {"is_open": False}}}
@@ -68,7 +68,7 @@ def test_spot_market_hours_flag(monkeypatch):
 
 
 def test_crypto_spot_with_no_hours_is_open(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     monkeypatch.setattr(pc, "get_spot_catalog", lambda **kw: {
         "spots": {"ETH": {"trading_status": "live"}}

@@ -6,7 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.services.alert_service import get_triggered_alerts
 from src.nadobro.services.stop_loss_service import process_stop_losses
-from src.nadobro.services.nado_client import NadoClient
+from src.nadobro.venue.nado_client import NadoClient
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.core.perf import timed_metric
 from src.nadobro.services.execution_queue import enqueue_alert
@@ -251,7 +251,7 @@ async def tick_price_tracker():
     if not _check_client:
         return
     try:
-        from src.nadobro.services.price_tracker import record_prices_snapshot
+        from src.nadobro.market_data.price_tracker import record_prices_snapshot
         prices = await _get_market_snapshot()
         if prices:
             await run_blocking(record_prices_snapshot, prices)
@@ -536,7 +536,7 @@ async def sync_pending_fills():
             increment_session_metrics,
             get_trade_by_id,
         )
-        from src.nadobro.services.nado_archive import (
+        from src.nadobro.venue.nado_archive import (
             is_archive_rate_limited,
             query_order_by_digest,
             query_orders_by_digests,
@@ -848,7 +848,7 @@ async def tick_news_warmup() -> None:
         pass
 
     try:
-        from src.nadobro.services.news_aggregator import fetch_news_bundle
+        from src.nadobro.market_data.news_aggregator import fetch_news_bundle
 
         bundle = await fetch_news_bundle()
         logger.info("news warmup ok: %d items, %d sources", len(bundle.items), len(bundle.sources_used))
@@ -904,7 +904,7 @@ def start_scheduler():
             id="time_limit_watcher", replace_existing=True, **_SHORT_TICK,
         )
     if portfolio_sync_enabled():
-        from src.nadobro.services.nado_sync import sync_active_users
+        from src.nadobro.venue.nado_sync import sync_active_users
 
         scheduler.add_job(
             sync_active_users,

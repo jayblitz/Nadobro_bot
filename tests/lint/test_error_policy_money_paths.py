@@ -26,12 +26,12 @@ ENGINE_ROOT = REPO_ROOT / "src" / "nadobro" / "engine"
 # policy landed). Lower these as files are cleaned up. NEVER raise one.
 SERVICES_BASELINE: dict[str, int] = {
     # Cleaned 2026-06-10 (warnings added / degrade-ok tags) — keep at zero.
-    "src/nadobro/services/nado_client.py": 0,
+    "src/nadobro/venue/nado_client.py": 0,
     "src/nadobro/services/trade_service.py": 0,
     "src/nadobro/services/bot_runtime.py": 0,
     "src/nadobro/services/engine_runtime.py": 0,
     "src/nadobro/services/copy_service.py": 0,
-    "src/nadobro/services/nado_sync.py": 0,
+    "src/nadobro/venue/nado_sync.py": 0,
     # Already clean — keep them that way.
     "src/nadobro/services/order_intents.py": 0,
     "src/nadobro/services/strategy_runtime.py": 0,

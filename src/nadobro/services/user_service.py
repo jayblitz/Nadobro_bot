@@ -6,7 +6,7 @@ from typing import Optional
 
 from src.nadobro.models.database import UserRow, NetworkMode
 from src.nadobro.db import query_one, query_all, execute, query_count
-from src.nadobro.services.nado_client import (
+from src.nadobro.venue.nado_client import (
     get_nado_client,
     NadoClient,
     clear_client_cache,
@@ -213,7 +213,7 @@ def _invalidate_user_caches(address: Optional[str], telegram_id: int) -> None:
             if key.startswith(f"ro:{addr}:"):
                 _readonly_cache.pop(key, None)
     try:
-        from src.nadobro.services.nado_sync import clear_cache as _clear_portfolio_snapshot_cache
+        from src.nadobro.venue.nado_sync import clear_cache as _clear_portfolio_snapshot_cache
 
         _clear_portfolio_snapshot_cache(int(telegram_id))
     except Exception:
@@ -240,7 +240,7 @@ def get_user_readonly_client(telegram_id: int, network: str | None = None) -> Op
     # client is shared with every other consumer (knowledge_service, copy
     # service, market_snapshot). The 60s ``_readonly_cache`` TTL stays in
     # place as a per-user fast path that avoids the lock on every call.
-    from src.nadobro.services.nado_client import get_or_create_readonly_client
+    from src.nadobro.venue.nado_client import get_or_create_readonly_client
     client = get_or_create_readonly_client(
         user.main_address, selected_network, user_id=int(telegram_id),
     )

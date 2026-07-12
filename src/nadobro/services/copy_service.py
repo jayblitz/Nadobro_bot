@@ -40,8 +40,8 @@ from src.nadobro.models.database import (
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
-from src.nadobro.services.nado_client import NadoClient
-from src.nadobro.services.nado_archive import query_order_by_digest
+from src.nadobro.venue.nado_client import NadoClient
+from src.nadobro.venue.nado_archive import query_order_by_digest
 from src.nadobro.core.async_utils import run_blocking
 
 logger = logging.getLogger(__name__)
@@ -392,7 +392,7 @@ def get_trader_preview(trader_id: int, network: str = "mainnet", requester_user_
         return {"found": False}
     wallet = str(trader.get("wallet_address") or "")
     # NO_ORDERS_AUDIT-FIX-R6b: cached.
-    from src.nadobro.services.nado_client import get_or_create_readonly_client
+    from src.nadobro.venue.nado_client import get_or_create_readonly_client
     client = get_or_create_readonly_client(wallet, network)
     positions = client.get_all_positions() or []
     balance = client.get_balance() or {}
@@ -499,7 +499,7 @@ async def _poll_all_mirrors():
 
 def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict:
     # NO_ORDERS_AUDIT-FIX-R6b: cached.
-    from src.nadobro.services.nado_client import get_or_create_readonly_client
+    from src.nadobro.venue.nado_client import get_or_create_readonly_client
     leader_client = get_or_create_readonly_client(wallet, network)
     leader_positions = leader_client.get_all_positions() or []
     leader_pos_map = {}

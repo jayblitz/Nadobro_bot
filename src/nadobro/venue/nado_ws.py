@@ -11,7 +11,7 @@ from typing import Any
 
 from src.nadobro.utils.env import env_float
 from src.nadobro.core.ipv4_egress import websocket_connect_kwargs
-from src.nadobro.services.ws_health import mark_connected, mark_disconnected, touch
+from src.nadobro.venue.ws_health import mark_connected, mark_disconnected, touch
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +205,7 @@ class NadoPortfolioWs:
             if now - last < _DEBOUNCE_SECONDS:
                 return
         _pending_sync[key] = now
-        from src.nadobro.services.nado_sync import sync_user
+        from src.nadobro.venue.nado_sync import sync_user
         try:
             await sync_user(user_id, network=network, reason=reason, force=force)
         except Exception:

@@ -292,8 +292,8 @@ async def sync_user(
 
         if reason == "poll" and not force:
             try:
-                from src.nadobro.services.gateway_budget import is_gateway_blocked
-                from src.nadobro.services.ws_health import is_healthy, reconcile_due
+                from src.nadobro.venue.gateway_budget import is_gateway_blocked
+                from src.nadobro.venue.ws_health import is_healthy, reconcile_due
 
                 gateway = NADO_MAINNET_REST if network == "mainnet" else NADO_TESTNET_REST
                 if is_gateway_blocked(gateway):
@@ -359,7 +359,7 @@ async def sync_user(
             client.acting_user_id = int(user_id)
             if portfolio_ws_enabled() and not str(reason).startswith("ws"):
                 try:
-                    from src.nadobro.services.nado_ws import PortfolioWsSubscription, portfolio_ws
+                    from src.nadobro.venue.nado_ws import PortfolioWsSubscription, portfolio_ws
 
                     subaccount = getattr(client, "subaccount_hex", None)
                     if subaccount:
@@ -1121,7 +1121,7 @@ def _resolve_session_by_window(
     if not sessions:
         return None
     try:
-        from src.nadobro.services.product_catalog import get_dn_pair
+        from src.nadobro.venue.product_catalog import get_dn_pair
 
         for sess in sessions:
             product = str(sess.get("product_name") or "").strip()

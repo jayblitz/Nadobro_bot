@@ -336,7 +336,7 @@ def test_build_product_meta_from_catalog(monkeypatch):
     flag perps vs spot. Regression for the bug where get_all_products_info()
     returned {"perp","spot"} (not a "products" list) so the builder yielded {}.
     """
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     # x18-scaled: 0.5 tick, 0.001 lot, 5 min-notional.
     X18 = 10 ** 18
@@ -387,7 +387,7 @@ def test_dual_listed_base_keeps_spot_and_perp_addressable(monkeypatch):
     (e.g. ETH) must keep the bare base on the perp (grid/MM expect that) AND
     expose a -SPOT alias on the spot product, or a spot 'buy 2 ETH' silently
     opens a perp."""
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     X18 = 10 ** 18
     perps = {"perps": {"ETH": {
@@ -416,7 +416,7 @@ def test_dual_listed_base_keeps_spot_and_perp_addressable(monkeypatch):
 
 
 def test_build_product_meta_handles_bad_catalog(monkeypatch):
-    from src.nadobro.services import product_catalog as pc
+    from src.nadobro.venue import product_catalog as pc
 
     def _boom(**kw):
         raise RuntimeError("down")

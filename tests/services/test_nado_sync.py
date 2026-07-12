@@ -7,7 +7,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import nado_sync
+from src.nadobro.venue import nado_sync
 from src.nadobro.utils.x18 import to_x18
 
 
@@ -369,7 +369,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(nado_sync, "query_one", return_value=None), \
              patch.object(nado_sync, "query_all", return_value=[{"id": 90, "product_name": "WGOOGLX"}]), \
-             patch("src.nadobro.services.product_catalog.get_dn_pair",
+             patch("src.nadobro.venue.product_catalog.get_dn_pair",
                    return_value={"perp_product_id": 117, "spot_product_id": 118}):
             sid = nado_sync._resolve_session_by_window(42, "mainnet", 118, ts)
 
@@ -556,7 +556,7 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             # tick_budget = max(5.0, 6*0.85) = 5.1s; user_timeout = ~5.1 < 30 =>
             # budget-truncated, not a wedge.
-            with self.assertLogs("src.nadobro.services.nado_sync", level="DEBUG") as cm:
+            with self.assertLogs("src.nadobro.venue.nado_sync", level="DEBUG") as cm:
                 await nado_sync.sync_active_users(reason="test")
 
         joined = "\n".join(cm.output)

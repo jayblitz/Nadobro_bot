@@ -283,7 +283,7 @@ def _gateway_blocked(url: str) -> bool:
     if is_circuit_open(url):
         return True
     try:
-        from src.nadobro.services.gateway_budget import is_gateway_rate_limited
+        from src.nadobro.venue.gateway_budget import is_gateway_rate_limited
         return is_gateway_rate_limited(url)
     except Exception:
         return False

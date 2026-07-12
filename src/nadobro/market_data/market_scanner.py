@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.nadobro.services.price_tracker import get_full_technicals, get_all_technicals, classify_regime
+from src.nadobro.market_data.price_tracker import get_full_technicals, get_all_technicals, classify_regime
 from src.nadobro.core.async_utils import run_blocking
 
 logger = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ SENTIMENT_CACHE_TTL = 300
 
 def _get_cmc_data(products: list[str]) -> dict:
     try:
-        from src.nadobro.services.cmc_client import (
+        from src.nadobro.market_data.cmc_client import (
             get_crypto_quotes,
             get_fear_greed_index,
             get_global_metrics,
