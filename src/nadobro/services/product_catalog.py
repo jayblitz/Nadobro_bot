@@ -5,6 +5,7 @@ from typing import Optional
 
 import requests
 
+from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.config import (
     PRODUCTS,
     PRODUCT_MAX_LEVERAGE,
@@ -20,13 +21,13 @@ logger = logging.getLogger(__name__)
 
 # Product metadata changes rarely; default to hourly refresh to avoid hammering
 # archive/gateway on every strategy tick or menu render.
-_CATALOG_TTL_SECONDS = int(os.environ.get("NADO_PRODUCT_CATALOG_TTL_SECONDS", "3600"))
+_CATALOG_TTL_SECONDS = env_int("NADO_PRODUCT_CATALOG_TTL_SECONDS", 3600)
 # When the live fetch fails or the circuit is open, keep serving the
 # previously-cached catalog for this longer window so the UI keeps working
 # instead of collapsing to an empty list while Cloudflare challenges clear.
-_CATALOG_STALE_TTL_SECONDS = int(os.environ.get("NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS", "86400"))
-_DYNAMIC_DEFAULT_MAX_LEVERAGE = int(os.environ.get("NADO_DYNAMIC_DEFAULT_MAX_LEVERAGE", "20"))
-_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
+_CATALOG_STALE_TTL_SECONDS = env_int("NADO_PRODUCT_CATALOG_STALE_TTL_SECONDS", 86400)
+_DYNAMIC_DEFAULT_MAX_LEVERAGE = env_int("NADO_DYNAMIC_DEFAULT_MAX_LEVERAGE", 20)
+_REQUEST_TIMEOUT_SECONDS = env_float("NADO_HTTP_TIMEOUT_SECONDS", 6.0)
 
 _catalog_cache: dict[str, dict] = {}
 _spot_catalog_cache: dict[str, dict] = {}

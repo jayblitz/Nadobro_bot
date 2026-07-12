@@ -42,6 +42,8 @@ import itertools
 import json
 import logging
 import os
+
+from src.nadobro.utils.env import env_bool, env_float
 import threading
 from typing import Any, Optional
 
@@ -50,9 +52,7 @@ logger = logging.getLogger(__name__)
 # v2 requires a websocket ping every 30 seconds to keep the connection alive.
 _PING_INTERVAL_SECONDS = 30
 _PING_TIMEOUT_SECONDS = 30
-_DEFAULT_REQUEST_TIMEOUT_SECONDS = float(
-    os.environ.get("NADO_WS_V2_REQUEST_TIMEOUT_SECONDS", "5.0")
-)
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = env_float("NADO_WS_V2_REQUEST_TIMEOUT_SECONDS", 5.0)
 
 # Executes that echo `id` back in ExecuteResponse.id (per the WebSocket v2 docs).
 # These are the only requests we route over this hot-path socket; everything
@@ -72,12 +72,7 @@ def actions_url_for_network(network: str) -> str:
 
 def v2_enabled() -> bool:
     """Feature flag. v2 stays off until validated on testnet alongside v1."""
-    return os.environ.get("NADO_WS_V2_ENABLED", "false").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return env_bool("NADO_WS_V2_ENABLED")
 
 
 # ---------------------------------------------------------------------------

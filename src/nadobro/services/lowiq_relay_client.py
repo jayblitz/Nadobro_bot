@@ -1,13 +1,15 @@
 import logging
 import os
+
+from src.nadobro.utils.env import env_float, env_int
 from typing import Any, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT_SECONDS = float(os.environ.get("LOWIQPTS_RELAY_TIMEOUT_SECONDS", "210") or "210")
-_DEFAULT_POLL_LIMIT = int(os.environ.get("LOWIQPTS_RELAY_POLL_LIMIT", "25") or "25")
+_DEFAULT_TIMEOUT_SECONDS = env_float("LOWIQPTS_RELAY_TIMEOUT_SECONDS", 210.0)
+_DEFAULT_POLL_LIMIT = env_int("LOWIQPTS_RELAY_POLL_LIMIT", 25)
 
 _shared_client: Optional[httpx.AsyncClient] = None
 

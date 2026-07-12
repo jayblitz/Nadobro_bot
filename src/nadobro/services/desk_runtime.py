@@ -60,10 +60,7 @@ def desk_enabled() -> bool:
 def desk_resume_on_restart() -> bool:
     """Legacy escape hatch: resume active plans across a redeploy. Default OFF
     — the redeploy contract is that nothing trades without the user starting it."""
-    import os
-
-    return (os.environ.get("NADO_DESK_RESUME_ON_RESTART", "").strip().lower()
-            in ("1", "true", "yes", "on"))
+    return env_bool("NADO_DESK_RESUME_ON_RESTART")
 
 
 # ---------------------------------------------------------------------------

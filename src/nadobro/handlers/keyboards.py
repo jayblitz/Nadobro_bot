@@ -94,6 +94,14 @@ REPLY_BUTTON_MAP.update({
     "Alert Engine": "alert:menu",
     "⚙️ Control Panel": "settings:view",
     "Control Panel": "settings:view",
+    # Translation-collision losers: some locales translate two English labels
+    # identically (e.g. ko "⚙️ 설정" for both Settings and Configure, ru
+    # "◀ Назад" for both Back and Prev), and resolve_reply_button_text can
+    # only return one sibling. Alias the non-reply sibling to the same action
+    # so localized taps still route. Guarded by
+    # tests/test_i18n_reply_routing.py::test_reply_buttons_route_in_every_language.
+    "⚙️ Configure": "settings:view",
+    "◀ Prev": "trade_flow:back",
     "📡 Market Radar": "points:view",
     "Market Radar": "points:view",
     "Strategies": "nav:strategy_hub",

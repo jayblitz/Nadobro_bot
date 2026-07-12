@@ -16,6 +16,7 @@ from typing import Optional
 import requests
 
 from src.nadobro.services.log_redaction import redact_sensitive_text
+from src.nadobro.utils.env import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +30,9 @@ _TWEET_CACHE_MAX_ENTRIES = 128
 _credits_depleted_until = 0.0
 _credits_next_probe_at = 0.0
 _credits_depleted_logged = False
-_CREDITS_BACKOFF_SECONDS = int(os.environ.get("X_API_CREDITS_DEPLETED_BACKOFF_SECONDS", str(6 * 60 * 60)))
+_CREDITS_BACKOFF_SECONDS = env_int("X_API_CREDITS_DEPLETED_BACKOFF_SECONDS", 6 * 60 * 60)
 # After CreditsDepleted, retry at most this often (so topping up credits recovers without a deploy).
-_CREDITS_PROBE_SECONDS = int(os.environ.get("X_API_CREDITS_PROBE_SECONDS", str(5 * 60)))
+_CREDITS_PROBE_SECONDS = env_int("X_API_CREDITS_PROBE_SECONDS", 5 * 60)
 
 
 def _prune_tweet_cache(now: float | None = None) -> None:

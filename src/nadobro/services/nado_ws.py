@@ -9,13 +9,14 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from src.nadobro.utils.env import env_float
 from src.nadobro.services.ipv4_egress import websocket_connect_kwargs
 from src.nadobro.services.ws_health import mark_connected, mark_disconnected, touch
 
 logger = logging.getLogger(__name__)
 
 # Debounce WS invalidations — coalesce bursts into one sync per window.
-_DEBOUNCE_SECONDS = float(os.environ.get("NADO_WS_DEBOUNCE_SECONDS", "2.0"))
+_DEBOUNCE_SECONDS = env_float("NADO_WS_DEBOUNCE_SECONDS", 2.0)
 _pending_sync: dict[tuple[int, str], float] = {}
 
 # Subscriptions (streams) WebSocket streams we use for portfolio invalidation.

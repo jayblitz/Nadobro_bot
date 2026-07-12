@@ -7,11 +7,12 @@ import os
 import time
 from typing import Optional
 
+from src.nadobro.utils.env import env_int
 from src.nadobro.services.nado_archive import query_nlp_lp_events, query_nlp_snapshots
 
 logger = logging.getLogger(__name__)
 
-_POOL_METRICS_TTL_SECONDS = max(30, int(os.environ.get("NADO_VAULT_POOL_METRICS_TTL", "60")))
+_POOL_METRICS_TTL_SECONDS = max(30, env_int("NADO_VAULT_POOL_METRICS_TTL", 60))
 _pool_metrics_cache: dict[str, tuple[float, dict]] = {}
 
 

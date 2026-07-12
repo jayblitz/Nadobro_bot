@@ -11,6 +11,8 @@ Stores findings in an in-memory cache and optionally indexes them in Pinecone.
 import json
 import logging
 import os
+
+from src.nadobro.utils.env import env_int
 import time
 from datetime import datetime, timezone
 
@@ -23,7 +25,7 @@ _edge_cache: dict = {
     "last_scan": 0.0,
 }
 
-SCAN_INTERVAL_SECONDS = int(os.environ.get("EDGE_SCAN_INTERVAL_SECONDS", "1800"))  # 30 min
+SCAN_INTERVAL_SECONDS = env_int("EDGE_SCAN_INTERVAL_SECONDS", 1800)  # 30 min
 
 
 def get_recent_findings(limit: int = 10) -> list[dict]:

@@ -13,14 +13,16 @@ buckets that have been idle longer than the refill window.
 from __future__ import annotations
 
 import os
+
+from src.nadobro.utils.env import env_float
 import threading
 import time
 from dataclasses import dataclass
 
 # Defaults tuned for the AI chat path: a burst of ~6 messages, then ~1 every
 # 4 seconds (≈15/min sustained). Override per deployment via env.
-_DEFAULT_CAPACITY = float(os.environ.get("NADO_LLM_RL_CAPACITY", "6"))
-_DEFAULT_REFILL_PER_SEC = float(os.environ.get("NADO_LLM_RL_REFILL_PER_SEC", "0.25"))
+_DEFAULT_CAPACITY = env_float("NADO_LLM_RL_CAPACITY", 6.0)
+_DEFAULT_REFILL_PER_SEC = env_float("NADO_LLM_RL_REFILL_PER_SEC", 0.25)
 _MAX_BUCKETS = 5000
 
 _lock = threading.Lock()

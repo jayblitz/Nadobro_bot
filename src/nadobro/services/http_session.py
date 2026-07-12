@@ -44,6 +44,7 @@ from urllib.parse import urlsplit
 import requests
 from requests.adapters import HTTPAdapter
 
+from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.services.ipv4_egress import install_ipv4_only_resolver
 
 logger = logging.getLogger(__name__)
@@ -56,20 +57,20 @@ install_ipv4_only_resolver()
 # ---------------------------------------------------------------------------
 # Tunables (all overridable via env so prod can react without a redeploy).
 # ---------------------------------------------------------------------------
-_HTTP_POOL_CONNECTIONS = int(os.environ.get("NADO_HTTP_POOL_CONNECTIONS", "64"))
-_HTTP_POOL_MAXSIZE = int(os.environ.get("NADO_HTTP_POOL_MAXSIZE", "64"))
-_CF_RETRY_MAX = int(os.environ.get("NADO_CF_RETRY_MAX", "2"))
-_CF_RETRY_BASE_SECONDS = float(os.environ.get("NADO_CF_RETRY_BASE_SECONDS", "0.5"))
-_CF_RETRY_JITTER_SECONDS = float(os.environ.get("NADO_CF_RETRY_JITTER_SECONDS", "0.4"))
+_HTTP_POOL_CONNECTIONS = env_int("NADO_HTTP_POOL_CONNECTIONS", 64)
+_HTTP_POOL_MAXSIZE = env_int("NADO_HTTP_POOL_MAXSIZE", 64)
+_CF_RETRY_MAX = env_int("NADO_CF_RETRY_MAX", 2)
+_CF_RETRY_BASE_SECONDS = env_float("NADO_CF_RETRY_BASE_SECONDS", 0.5)
+_CF_RETRY_JITTER_SECONDS = env_float("NADO_CF_RETRY_JITTER_SECONDS", 0.4)
 
 # Circuit breaker: if we see this many CF challenges in this window, freeze
 # outbound traffic to that host for the cooldown.
-_CF_BREAKER_THRESHOLD = int(os.environ.get("NADO_CF_BREAKER_THRESHOLD", "8"))
-_CF_BREAKER_WINDOW_SECONDS = float(os.environ.get("NADO_CF_BREAKER_WINDOW_SECONDS", "10"))
-_CF_BREAKER_COOLDOWN_SECONDS = float(os.environ.get("NADO_CF_BREAKER_COOLDOWN_SECONDS", "30"))
+_CF_BREAKER_THRESHOLD = env_int("NADO_CF_BREAKER_THRESHOLD", 8)
+_CF_BREAKER_WINDOW_SECONDS = env_float("NADO_CF_BREAKER_WINDOW_SECONDS", 10.0)
+_CF_BREAKER_COOLDOWN_SECONDS = env_float("NADO_CF_BREAKER_COOLDOWN_SECONDS", 30.0)
 
 # Log dedup: only emit one Cloudflare-challenge warning per host per window.
-_CF_LOG_THROTTLE_SECONDS = float(os.environ.get("NADO_CF_LOG_THROTTLE_SECONDS", "60"))
+_CF_LOG_THROTTLE_SECONDS = env_float("NADO_CF_LOG_THROTTLE_SECONDS", 60.0)
 
 # Per-host **weight** token bucket: models Nado's documented per-IP query
 # budget of 2400 weight/min == 400 weight/10s == **40 weight/s, burst 400**
@@ -79,9 +80,9 @@ _CF_LOG_THROTTLE_SECONDS = float(os.environ.get("NADO_CF_LOG_THROTTLE_SECONDS", 
 # each gets its own bucket and its own 2400/min IP budget automatically.
 # Defaults carry a ~10% safety margin (36/360) to absorb clock drift and the
 # per-minute-vs-per-10s nuance; raise toward 40/400 or lower via env in prod.
-_HTTP_RPS_PER_HOST = float(os.environ.get("NADO_HTTP_RPS_PER_HOST", "36"))
-_HTTP_BURST_PER_HOST = float(os.environ.get("NADO_HTTP_BURST_PER_HOST", "360"))
-_HTTP_BUCKET_MAX_WAIT_SECONDS = float(os.environ.get("NADO_HTTP_BUCKET_MAX_WAIT_SECONDS", "2.5"))
+_HTTP_RPS_PER_HOST = env_float("NADO_HTTP_RPS_PER_HOST", 36.0)
+_HTTP_BURST_PER_HOST = env_float("NADO_HTTP_BURST_PER_HOST", 360.0)
+_HTTP_BUCKET_MAX_WAIT_SECONDS = env_float("NADO_HTTP_BUCKET_MAX_WAIT_SECONDS", 2.5)
 
 
 # ---------------------------------------------------------------------------

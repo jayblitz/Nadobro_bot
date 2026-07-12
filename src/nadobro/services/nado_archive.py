@@ -13,25 +13,26 @@ import time
 import requests
 from typing import Optional
 
+from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.config import NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE
 from src.nadobro.services.log_redaction import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 8.0
-_MAX_RETRIES = max(0, int(os.environ.get("NADO_ARCHIVE_MAX_RETRIES", "1")))
-_RETRY_BASE_SECONDS = float(os.environ.get("NADO_ARCHIVE_RETRY_BASE_SECONDS", "0.5"))
-_MAX_CONCURRENT = max(1, int(os.environ.get("NADO_ARCHIVE_MAX_CONCURRENT", "3")))
-_MIN_INTERVAL_SECONDS = max(0.0, float(os.environ.get("NADO_ARCHIVE_MIN_INTERVAL_SECONDS", "0.35")))
+_MAX_RETRIES = max(0, env_int("NADO_ARCHIVE_MAX_RETRIES", 1))
+_RETRY_BASE_SECONDS = env_float("NADO_ARCHIVE_RETRY_BASE_SECONDS", 0.5)
+_MAX_CONCURRENT = max(1, env_int("NADO_ARCHIVE_MAX_CONCURRENT", 3))
+_MIN_INTERVAL_SECONDS = max(0.0, env_float("NADO_ARCHIVE_MIN_INTERVAL_SECONDS", 0.35))
 # BUG-NAR-1 fix: 429 cooldown is now exponential, anchored on Retry-After
 # when provided. _429_COOLDOWN_SECONDS is the *base*; consecutive 429s within
 # a cooldown window double the wait (capped at _429_COOLDOWN_MAX_SECONDS).
-_429_COOLDOWN_SECONDS = max(1.0, float(os.environ.get("NADO_ARCHIVE_429_COOLDOWN_SECONDS", "12")))
+_429_COOLDOWN_SECONDS = max(1.0, env_float("NADO_ARCHIVE_429_COOLDOWN_SECONDS", 12.0))
 _429_COOLDOWN_MAX_SECONDS = max(
     _429_COOLDOWN_SECONDS,
-    float(os.environ.get("NADO_ARCHIVE_429_COOLDOWN_MAX_SECONDS", "300")),
+    env_float("NADO_ARCHIVE_429_COOLDOWN_MAX_SECONDS", 300.0),
 )
-_POOL_SIZE = max(_MAX_CONCURRENT, int(os.environ.get("NADO_ARCHIVE_POOL_MAXSIZE", str(_MAX_CONCURRENT + 2))))
+_POOL_SIZE = max(_MAX_CONCURRENT, env_int("NADO_ARCHIVE_POOL_MAXSIZE", _MAX_CONCURRENT + 2))
 
 _rate_lock = threading.RLock()
 _request_semaphore = threading.Semaphore(_MAX_CONCURRENT)

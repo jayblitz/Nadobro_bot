@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, Optional, Sequence
 
+from src.nadobro.utils.env import env_float
 from src.nadobro.engine.adapter.base import (
     AdapterError,
     Fill,
@@ -72,7 +73,7 @@ _FILLED_STATES = ("filled", "matched", "complete", "completed")
 # tick's polls reuse it. TTL is far below the strategy tick interval (30-60s) so a
 # fill is at most this stale before the next tick's fresh fetch. Poll-only path
 # (verify-after-cancel / reconcile stay uncached — they need post-mutation truth).
-_OPEN_ORDERS_SNAP_TTL_S = float(os.environ.get("NADO_OPEN_ORDERS_SNAP_TTL_SECONDS", "2.0"))
+_OPEN_ORDERS_SNAP_TTL_S = env_float("NADO_OPEN_ORDERS_SNAP_TTL_SECONDS", 2.0)
 
 # AUDIT-FIX-3: warn once per process per non-unit leverage so we don't spam logs.
 _warned_leverage_set: set[int] = set()

@@ -4,13 +4,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+
+from src.nadobro.utils.env import env_float
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-_TICK_SECONDS = float(os.environ.get("NADO_STRATEGY_SCHEDULER_TICK_SECONDS", "2.0"))
+_TICK_SECONDS = env_float("NADO_STRATEGY_SCHEDULER_TICK_SECONDS", 2.0)
 _load_state: Optional[Callable[[int, str], dict]] = None
 
 

@@ -8,6 +8,7 @@ import time
 from io import BytesIO
 from typing import Optional
 
+from src.nadobro.utils.env import env_int
 from src.nadobro.handlers.keyboards import points_followup_options_kb, points_scope_kb
 from src.nadobro.services.lowiq_relay_client import (
     close_session as relay_close_session,
@@ -48,18 +49,18 @@ _POINTS_WINDOW_LABEL = "Last 7 Days"
 # replies ("0", "Yes") were handled by other bots instead of the relay.
 _POINTS_REPLY_TIMEOUT_SECONDS = max(
     60,
-    int(os.environ.get("LOWIQPTS_REPLY_TIMEOUT_SECONDS", "900") or "900"),
+    env_int("LOWIQPTS_REPLY_TIMEOUT_SECONDS", 900),
 )
 _LOWIQPTS_PENDING_TTL_SECONDS = max(
     300,
-    int(os.environ.get("LOWIQPTS_PENDING_TTL_SECONDS", "1800") or "1800"),
+    env_int("LOWIQPTS_PENDING_TTL_SECONDS", 1800),
 )
 
 POINTS_RELAY_TIMEOUT = max(
     210,
-    int(os.environ.get("POINTS_RELAY_TIMEOUT", "210") or "210"),
+    env_int("POINTS_RELAY_TIMEOUT", 210),
 )
-POINTS_MAX_RETRIES = int(os.environ.get("POINTS_MAX_RETRIES", "3"))
+POINTS_MAX_RETRIES = env_int("POINTS_MAX_RETRIES", 3)
 
 
 def _friendly_lowiqpts_relay_failure(code: str | None, *, for_refresh: bool) -> str | None:

@@ -14,12 +14,14 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+
+from src.nadobro.utils.env import env_float, env_int
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, ParamSpec, TypeVar
 
-_DB_WORKERS = int(os.environ.get("NADO_DB_POOL_WORKERS", "30"))
-_SDK_WORKERS = int(os.environ.get("NADO_SDK_POOL_WORKERS", "12"))
-_MISC_WORKERS = int(os.environ.get("NADO_MISC_POOL_WORKERS", "8"))
+_DB_WORKERS = env_int("NADO_DB_POOL_WORKERS", 30)
+_SDK_WORKERS = env_int("NADO_SDK_POOL_WORKERS", 12)
+_MISC_WORKERS = env_int("NADO_MISC_POOL_WORKERS", 8)
 
 _db_pool = ThreadPoolExecutor(max_workers=max(1, _DB_WORKERS), thread_name_prefix="nadobro-db")
 _sdk_pool = ThreadPoolExecutor(max_workers=max(1, _SDK_WORKERS), thread_name_prefix="nadobro-sdk")
@@ -54,7 +56,7 @@ async def run_blocking_sdk(func: Callable[P, R], *args: P.args, **kwargs: P.kwar
 # is far too long to make a Telegram tap wait. ``run_blocking_sdk_capped`` bounds
 # the *await* so the handler returns a placeholder; the underlying thread keeps
 # running (it warms the cache for the next render) — we just stop blocking on it.
-_SDK_CALL_CEILING_SECONDS = float(os.environ.get("NADO_SDK_CALL_CEILING_SECONDS", "1.5"))
+_SDK_CALL_CEILING_SECONDS = env_float("NADO_SDK_CALL_CEILING_SECONDS", 1.5)
 
 
 async def run_blocking_sdk_capped(

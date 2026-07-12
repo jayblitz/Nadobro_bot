@@ -9,6 +9,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional
+from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.config import (
     NADO_TESTNET_REST, NADO_MAINNET_REST,
     NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE,
@@ -19,19 +20,19 @@ from src.nadobro.config import (
 logger = logging.getLogger(__name__)
 
 _price_cache = {}
-_PRICE_CACHE_TTL = int(os.environ.get("NADO_PRICE_CACHE_TTL_SECONDS", "10"))
+_PRICE_CACHE_TTL = env_int("NADO_PRICE_CACHE_TTL_SECONDS", 10)
 _ALL_PRODUCTS_CACHE = {}
 # Product list is static metadata — align with catalog hourly refresh.
-_ALL_PRODUCTS_TTL = int(os.environ.get("NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS", "3600"))
+_ALL_PRODUCTS_TTL = env_int("NADO_ALL_PRODUCTS_CACHE_TTL_SECONDS", 3600)
 # Shared, network-scoped Redis TTL for the *latest* candlestick query. Short by
 # design (1m candles go stale fast) but long enough to collapse the per-tick
 # 200-bar fetches that the dgrid candle_provider issues every cycle for every
 # user into a single indexer query per window. Set to 0 to disable.
-_CANDLES_CACHE_TTL = int(os.environ.get("NADO_CANDLES_CACHE_TTL_SECONDS", "30"))
+_CANDLES_CACHE_TTL = env_int("NADO_CANDLES_CACHE_TTL_SECONDS", 30)
 # Product size/price increments are effectively static venue metadata. Cache
 # the parsed map per network so each worker boot reuses one all_products query
 # instead of re-fetching it. Aligns with the catalog hourly refresh.
-_INCREMENTS_CACHE_TTL = int(os.environ.get("NADO_INCREMENTS_CACHE_TTL_SECONDS", "3600"))
+_INCREMENTS_CACHE_TTL = env_int("NADO_INCREMENTS_CACHE_TTL_SECONDS", 3600)
 # Last good full price snapshot per network. Served when the gateway budget
 # is throttling/blocked so callers back off instead of fanning out to one
 # REST call per product (which is what the gateway is meant to prevent).
@@ -70,7 +71,7 @@ _shared_cache: "dict[str, tuple[float, object]]" = {}  # key -> (expires_at, val
 # Long-lived "last known balance" copy for the click/render path. The live
 # balance still uses NADO_BALANCE_CACHE_TTL_SECONDS (30s); this only backs the
 # non-blocking display read so a tap never falls through to the gateway.
-_BALANCE_DISPLAY_TTL = int(os.environ.get("NADO_BALANCE_DISPLAY_TTL_SECONDS", "900") or "900")
+_BALANCE_DISPLAY_TTL = env_int("NADO_BALANCE_DISPLAY_TTL_SECONDS", 900)
 
 
 def _shared_cache_get(key: str):
@@ -102,7 +103,7 @@ _price_increment_cache = {}
 _size_increment_x18_cache = {}
 _price_increment_x18_cache = {}
 _min_size_x18_cache = {}
-_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"))
+_REQUEST_TIMEOUT_SECONDS = env_float("NADO_HTTP_TIMEOUT_SECONDS", 6.0)
 # The nado_protocol SDK builds plain ``requests.Session()`` objects and calls
 # ``session.post/get`` with NO ``timeout=`` — so a stalled gateway connection
 # (the exact failure mode of an ip_query_only / saturated host that accepts the
@@ -110,21 +111,21 @@ _REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NADO_HTTP_TIMEOUT_SECONDS", "6"
 # wedges ``sync_active_users`` (holding the portfolio_sync max_instances slot)
 # and can hang an order placement. We force a (connect, read) timeout onto every
 # SDK session so no call can block indefinitely. Override via env.
-_SDK_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("NADO_SDK_CONNECT_TIMEOUT_SECONDS", "5"))
-_SDK_READ_TIMEOUT_SECONDS = float(os.environ.get("NADO_SDK_READ_TIMEOUT_SECONDS", "12"))
+_SDK_CONNECT_TIMEOUT_SECONDS = env_float("NADO_SDK_CONNECT_TIMEOUT_SECONDS", 5.0)
+_SDK_READ_TIMEOUT_SECONDS = env_float("NADO_SDK_READ_TIMEOUT_SECONDS", 12.0)
 # Capacity for legacy ThreadPool fan-out paths (e.g. per-product positions). Set
 # conservatively to 2 so we never burst N concurrent requests into Cloudflare;
 # the batched open-orders path (``get_subaccount_multi_products_open_orders``)
 # avoids this fan-out entirely.
-_FANOUT_WORKERS = int(os.environ.get("NADO_FANOUT_WORKERS", "2"))
-_REST_MAX_RETRIES = int(os.environ.get("NADO_REST_MAX_RETRIES", "2"))
-_REST_RETRY_BASE_SECONDS = float(os.environ.get("NADO_REST_RETRY_BASE_SECONDS", "0.25"))
-_REST_RETRY_JITTER_SECONDS = float(os.environ.get("NADO_REST_RETRY_JITTER_SECONDS", "0.2"))
-_REST_POOL_CONNECTIONS = int(os.environ.get("NADO_HTTP_POOL_CONNECTIONS", "64"))
-_REST_POOL_MAXSIZE = int(os.environ.get("NADO_HTTP_POOL_MAXSIZE", "64"))
-_OPEN_ORDERS_CACHE_TTL = float(os.environ.get("NADO_OPEN_ORDERS_CACHE_TTL_SECONDS", "5.0"))
-_POSITIONS_FALLBACK_TTL = float(os.environ.get("NADO_POSITIONS_FALLBACK_TTL_SECONDS", "6.0"))
-_POSITIONS_FALLBACK_MAX_PRODUCTS = int(os.environ.get("NADO_POSITIONS_FALLBACK_MAX_PRODUCTS", "16"))
+_FANOUT_WORKERS = env_int("NADO_FANOUT_WORKERS", 2)
+_REST_MAX_RETRIES = env_int("NADO_REST_MAX_RETRIES", 2)
+_REST_RETRY_BASE_SECONDS = env_float("NADO_REST_RETRY_BASE_SECONDS", 0.25)
+_REST_RETRY_JITTER_SECONDS = env_float("NADO_REST_RETRY_JITTER_SECONDS", 0.2)
+_REST_POOL_CONNECTIONS = env_int("NADO_HTTP_POOL_CONNECTIONS", 64)
+_REST_POOL_MAXSIZE = env_int("NADO_HTTP_POOL_MAXSIZE", 64)
+_OPEN_ORDERS_CACHE_TTL = env_float("NADO_OPEN_ORDERS_CACHE_TTL_SECONDS", 5.0)
+_POSITIONS_FALLBACK_TTL = env_float("NADO_POSITIONS_FALLBACK_TTL_SECONDS", 6.0)
+_POSITIONS_FALLBACK_MAX_PRODUCTS = env_int("NADO_POSITIONS_FALLBACK_MAX_PRODUCTS", 16)
 
 # Nado requires a finite order expiration; limit/post-only orders used 3600s (1h) before.
 # Default 7 days. Override with NADO_LIMIT_ORDER_EXPIRATION_SECONDS (seconds, min 60). IOC stays 10s.
@@ -191,9 +192,7 @@ _positions_fallback_cache: dict[tuple[str, str], dict] = {}
 # to multiple seconds of avoidable latency per DGRID cycle. Cache successful
 # verifications for a short window; failures and errors bypass the cache.
 _linked_signer_cache: dict[tuple[str, str, str], dict] = {}
-_LINKED_SIGNER_CACHE_TTL_SECONDS = float(
-    os.environ.get("NADO_LINKED_SIGNER_CACHE_SECONDS", "60") or "60"
-)
+_LINKED_SIGNER_CACHE_TTL_SECONDS = env_float("NADO_LINKED_SIGNER_CACHE_SECONDS", 60.0)
 
 # Window applied to ``recvTime`` on signed query/execute payloads. The value
 # is a *deadline* — Nado rejects the request with error_code 2011 ("Request
@@ -202,7 +201,7 @@ _LINKED_SIGNER_CACHE_TTL_SECONDS = float(
 # host clock drift; production logs showed 2011 on get_trigger_orders.
 _RECV_TIME_WINDOW_SECONDS = max(
     5.0,
-    float(os.environ.get("NADO_RECV_TIME_WINDOW_SECONDS", "60") or "60"),
+    env_float("NADO_RECV_TIME_WINDOW_SECONDS", 60.0),
 )
 
 
@@ -870,9 +869,7 @@ class NadoClient:
         # TTL kept short (30s default) so wallet deposit / withdraw / fill
         # visibility doesn't lag noticeably.
         redis_key = f"balance:{self.network}:{self.subaccount_hex}"
-        balance_ttl_seconds = int(
-            os.environ.get("NADO_BALANCE_CACHE_TTL_SECONDS", "30") or "30"
-        )
+        balance_ttl_seconds = env_int("NADO_BALANCE_CACHE_TTL_SECONDS", 30)
 
         if not force and balance_ttl_seconds > 0:
             cached = self._read_balance_cache(redis_key)

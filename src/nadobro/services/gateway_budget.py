@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import logging
 import os
+
+from src.nadobro.utils.env import env_float, env_int
 import threading
 import time
 from dataclasses import dataclass, field
@@ -48,21 +50,21 @@ logger = logging.getLogger(__name__)
 
 # Per-user fair share of the per-IP query budget (now in *weight*/s, not
 # requests/s). Defaults bumped to track Nado's 40 weight/s IP ceiling.
-_USER_RPS = float(os.environ.get("NADO_USER_GATEWAY_RPS", "8"))
-_USER_BURST = float(os.environ.get("NADO_USER_GATEWAY_BURST", "24"))
-_USER_MAX_WAIT = float(os.environ.get("NADO_USER_GATEWAY_MAX_WAIT_SECONDS", "2.0"))
-_USER_MAX_INFLIGHT = int(os.environ.get("NADO_USER_MAX_INFLIGHT", "4"))
-_USER_BUCKET_MAX = int(os.environ.get("NADO_USER_GATEWAY_BUCKETS_MAX", "8192"))
+_USER_RPS = env_float("NADO_USER_GATEWAY_RPS", 8.0)
+_USER_BURST = env_float("NADO_USER_GATEWAY_BURST", 24.0)
+_USER_MAX_WAIT = env_float("NADO_USER_GATEWAY_MAX_WAIT_SECONDS", 2.0)
+_USER_MAX_INFLIGHT = env_int("NADO_USER_MAX_INFLIGHT", 4)
+_USER_BUCKET_MAX = env_int("NADO_USER_GATEWAY_BUCKETS_MAX", 8192)
 
 # Per-wallet execute budget (weight/s). Nado allows 600/min == 100/10s == 10
 # weight/s per wallet; default carries a ~10% safety margin (9/90).
-_WALLET_RPS = float(os.environ.get("NADO_WALLET_EXECUTE_RPS", "9"))
-_WALLET_BURST = float(os.environ.get("NADO_WALLET_EXECUTE_BURST", "90"))
-_WALLET_BUCKET_MAX = int(os.environ.get("NADO_WALLET_EXECUTE_BUCKETS_MAX", "8192"))
+_WALLET_RPS = env_float("NADO_WALLET_EXECUTE_RPS", 9.0)
+_WALLET_BURST = env_float("NADO_WALLET_EXECUTE_BURST", 90.0)
+_WALLET_BUCKET_MAX = env_int("NADO_WALLET_EXECUTE_BUCKETS_MAX", 8192)
 
-_RL_THRESHOLD = int(os.environ.get("NADO_GATEWAY_RL_THRESHOLD", "4"))
-_RL_WINDOW = float(os.environ.get("NADO_GATEWAY_RL_WINDOW_SECONDS", "15"))
-_RL_COOLDOWN = float(os.environ.get("NADO_GATEWAY_RL_COOLDOWN_SECONDS", "60"))
+_RL_THRESHOLD = env_int("NADO_GATEWAY_RL_THRESHOLD", 4)
+_RL_WINDOW = env_float("NADO_GATEWAY_RL_WINDOW_SECONDS", 15.0)
+_RL_COOLDOWN = env_float("NADO_GATEWAY_RL_COOLDOWN_SECONDS", 60.0)
 
 # ip_query_only WRITE circuit. Nado downgrades a saturated IP to query-only:
 # reads still work, but every execute (place/cancel) is rejected with
@@ -72,7 +74,7 @@ _RL_COOLDOWN = float(os.environ.get("NADO_GATEWAY_RL_COOLDOWN_SECONDS", "60"))
 # churning executors into FAILED. When we observe an ip_query_only rejection we
 # open a short per-host write circuit so executes short-circuit (cheap, no
 # round-trip) until the ban is likely lifted; queries are unaffected.
-_WRITE_BAN_COOLDOWN = float(os.environ.get("NADO_WRITE_BAN_COOLDOWN_SECONDS", "45"))
+_WRITE_BAN_COOLDOWN = env_float("NADO_WRITE_BAN_COOLDOWN_SECONDS", 45.0)
 
 
 @dataclass

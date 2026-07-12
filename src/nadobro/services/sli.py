@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import logging
 import os
+
+from src.nadobro.utils.env import env_int
 import threading
 import time
 from collections import OrderedDict, deque
@@ -47,8 +49,8 @@ logger = logging.getLogger(__name__)
 
 
 # Tunables (overridable via env so prod can react without a redeploy).
-_MAX_SAMPLES_PER_SERIES = int(os.environ.get("NADO_SLI_SAMPLES", "400"))
-_MAX_SERIES = int(os.environ.get("NADO_SLI_MAX_SERIES", "4096"))
+_MAX_SAMPLES_PER_SERIES = env_int("NADO_SLI_SAMPLES", 400)
+_MAX_SERIES = env_int("NADO_SLI_MAX_SERIES", 4096)
 
 
 def _label_key(labels: Optional[dict]) -> str:

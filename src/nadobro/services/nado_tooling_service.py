@@ -9,7 +9,7 @@ from typing import Any
 
 from src.nadobro.services.execution_queue import get_queue_diagnostics
 from src.nadobro.services.perf import snapshot as perf_snapshot
-from src.nadobro.utils.env import env_bool
+from src.nadobro.utils.env import env_bool, env_float
 from src.nadobro.config import (
     get_dn_products,
     get_perp_products,
@@ -24,7 +24,7 @@ from src.nadobro.services.user_service import (
 
 logger = logging.getLogger(__name__)
 
-_CLI_TIMEOUT_SECONDS = float(os.environ.get("NADO_TOOLING_CLI_TIMEOUT_SECONDS", "6.0"))
+_CLI_TIMEOUT_SECONDS = env_float("NADO_TOOLING_CLI_TIMEOUT_SECONDS", 6.0)
 
 
 def tooling_enabled() -> bool:

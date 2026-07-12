@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 
+from src.nadobro.utils.env import env_int
 from src.nadobro.engine.desk_plan import (  # noqa: F401 - re-exports
     ACTIVE_STATUSES,
     ALGOS,
@@ -42,7 +43,7 @@ from src.nadobro.engine.desk_plan import (  # noqa: F401 - re-exports
 def daily_plan_cap() -> int:
     """Max NEW plans per user per UTC day (default 5; env-overridable)."""
     try:
-        return max(1, int(os.environ.get("NADO_DESK_DAILY_PLAN_CAP", "5")))
+        return max(1, env_int("NADO_DESK_DAILY_PLAN_CAP", 5))
     except (TypeError, ValueError):
         return 5
 

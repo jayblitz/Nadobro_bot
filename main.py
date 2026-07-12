@@ -38,7 +38,7 @@ load_dotenv()
 
 from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
 from src.nadobro.services.crypto import validate_encryption_key
-from src.nadobro.utils.env import env_bool
+from src.nadobro.utils.env import env_bool, env_int, env_str
 
 if not ENCRYPTION_KEY:
     logger.error(
@@ -321,11 +321,11 @@ async def run_bot():
     set_copy_bot_app(bot_app)
     set_vault_watch_bot_app(bot_app)
     register_handlers(handle_strategy_job, handle_alert_job)
-    _sw_raw = (os.environ.get("NADO_STRATEGY_WORKERS") or "").strip()
+    _sw_raw = env_str("NADO_STRATEGY_WORKERS")
     _sw = int(_sw_raw) if _sw_raw else None
     start_workers(
         strategy_workers=_sw,
-        alert_workers=int(os.environ.get("NADO_ALERT_WORKERS", "1")),
+        alert_workers=env_int("NADO_ALERT_WORKERS", 1),
     )
     start_runtime_supervisor()
     from src.nadobro.services.runtime_supervisor import runtime_mode
@@ -417,10 +417,10 @@ async def run_bot():
             base = f"{parsed.scheme}://{parsed.netloc}"
             webhook_url = base + webhook_path
 
-    webhook_listen = os.environ.get("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0").strip()
+    webhook_listen = env_str("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0")
     # Prefer TELEGRAM_WEBHOOK_PORT when set so a reverse proxy can own PORT (e.g. nginx on 8080, PTB on 8082).
-    _wh = os.environ.get("TELEGRAM_WEBHOOK_PORT", "").strip()
-    webhook_port = int(_wh) if _wh else int(os.environ.get("PORT", "8080"))
+    _wh = env_str("TELEGRAM_WEBHOOK_PORT")
+    webhook_port = int(_wh) if _wh else env_int("PORT", 8080)
     bootstrap_health_server = None
     async def _start_polling_mode():
         # Ensure Telegram stops sending updates to webhook before polling starts.

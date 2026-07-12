@@ -14,6 +14,7 @@ import secrets
 import string
 
 from src.nadobro.config import ENCRYPTION_KEY
+from src.nadobro.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +32,7 @@ def _invite_pepper() -> str:
     pepper = os.environ.get("INVITE_CODE_PEPPER") or ENCRYPTION_KEY
     if pepper:
         return pepper
-    if os.environ.get("NADOBRO_ALLOW_DEV_INVITE_PEPPER", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    ):
+    if env_bool("NADOBRO_ALLOW_DEV_INVITE_PEPPER"):
         logger.warning(
             "INVITE_CODE_PEPPER and ENCRYPTION_KEY are unset; using development "
             "invite-code pepper because NADOBRO_ALLOW_DEV_INVITE_PEPPER is set "

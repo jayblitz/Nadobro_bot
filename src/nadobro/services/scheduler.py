@@ -3,6 +3,7 @@ import asyncio
 import os
 from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.services.alert_service import get_triggered_alerts
 from src.nadobro.services.stop_loss_service import process_stop_losses
 from src.nadobro.services.nado_client import NadoClient
@@ -16,11 +17,11 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="UTC")
 _bot_app = None
 _check_client = None
-_ALERT_SCAN_SECONDS = int(os.environ.get("ALERT_SCAN_SECONDS", "5"))
+_ALERT_SCAN_SECONDS = env_int("ALERT_SCAN_SECONDS", 5)
 # Archive indexer can lag behind fills; allow longer polling than inline trade resolution.
-_FILL_SYNC_DIGEST_WAIT = float(os.environ.get("NADO_FILL_SYNC_DIGEST_WAIT_SECONDS", "8"))
-_FILL_SYNC_DIGEST_POLL = float(os.environ.get("NADO_FILL_SYNC_DIGEST_POLL_SECONDS", "1.0"))
-_MARKET_SNAPSHOT_TTL_SECONDS = float(os.environ.get("NADO_MARKET_SNAPSHOT_TTL_SECONDS", "3.0"))
+_FILL_SYNC_DIGEST_WAIT = env_float("NADO_FILL_SYNC_DIGEST_WAIT_SECONDS", 8.0)
+_FILL_SYNC_DIGEST_POLL = env_float("NADO_FILL_SYNC_DIGEST_POLL_SECONDS", 1.0)
+_MARKET_SNAPSHOT_TTL_SECONDS = env_float("NADO_MARKET_SNAPSHOT_TTL_SECONDS", 3.0)
 _last_market_snapshot: dict = {"ts": 0.0, "prices": {}}
 # AUDIT-FIX-SCH-2: serialize cache fetches so two coroutines don't both miss
 # the cache and fire concurrent get_all_market_prices() requests. Lazy-init
@@ -511,9 +512,9 @@ async def _notify_limit_order_cancelled_once(
         logger.warning("Failed to send limit-cancel notification: %s", e)
 
 
-_FILL_SYNC_BATCH_SIZE = int(os.environ.get("NADO_FILL_SYNC_BATCH_SIZE", "10"))
-_FILL_SYNC_CONCURRENCY = max(1, int(os.environ.get("NADO_FILL_SYNC_CONCURRENCY", "2")))
-_FILL_SYNC_DIGEST_BATCH = max(1, int(os.environ.get("NADO_FILL_SYNC_DIGEST_BATCH", "10")))
+_FILL_SYNC_BATCH_SIZE = env_int("NADO_FILL_SYNC_BATCH_SIZE", 10)
+_FILL_SYNC_CONCURRENCY = max(1, env_int("NADO_FILL_SYNC_CONCURRENCY", 2))
+_FILL_SYNC_DIGEST_BATCH = max(1, env_int("NADO_FILL_SYNC_DIGEST_BATCH", 10))
 
 
 def _chunked(items: list, size: int):
@@ -827,8 +828,8 @@ async def initial_ai_setup():
         logger.error("Initial AI setup failed: %s", e)
 
 
-_EDGE_SCAN_SECONDS = int(os.environ.get("EDGE_SCAN_INTERVAL_SECONDS", "1800"))
-_NEWS_WARMUP_MINUTES = int(os.environ.get("NEWS_WARMUP_MINUTES", "12"))
+_EDGE_SCAN_SECONDS = env_int("EDGE_SCAN_INTERVAL_SECONDS", 1800)
+_NEWS_WARMUP_MINUTES = env_int("NEWS_WARMUP_MINUTES", 12)
 
 
 async def tick_news_warmup() -> None:

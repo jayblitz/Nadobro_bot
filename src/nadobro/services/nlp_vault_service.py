@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.nadobro.utils.env import env_int
 from src.nadobro.models.database import (
     get_bot_state,
     get_vault_deposit_watch,
@@ -34,7 +35,7 @@ WITHDRAW_FEE_FLOOR_USDT0 = 1.0
 USDT0_PRODUCT_ID = 0
 
 # Re-sync archive mint/burn events at most every N seconds per user.
-_LP_EVENTS_SYNC_TTL_SECONDS = max(60, int(os.environ.get("NADO_VAULT_LP_EVENTS_SYNC_TTL", "300")))
+_LP_EVENTS_SYNC_TTL_SECONDS = max(60, env_int("NADO_VAULT_LP_EVENTS_SYNC_TTL", 300))
 
 
 def lockup_remaining_seconds(last_mint_ts_ms: Optional[int]) -> int:

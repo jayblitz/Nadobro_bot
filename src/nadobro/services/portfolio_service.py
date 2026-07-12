@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.services.trade_service import (
     get_open_limit_orders,
     get_trade_analytics,
@@ -13,8 +14,8 @@ from src.nadobro.services.user_service import get_user, get_user_readonly_client
 
 logger = logging.getLogger(__name__)
 
-_SNAPSHOT_TTL_SECONDS = float(os.environ.get("PORTFOLIO_SNAPSHOT_TTL_SECONDS", "2.0"))
-_SNAPSHOT_CACHE_MAX_ENTRIES = int(os.environ.get("PORTFOLIO_SNAPSHOT_CACHE_MAX_ENTRIES", "256"))
+_SNAPSHOT_TTL_SECONDS = env_float("PORTFOLIO_SNAPSHOT_TTL_SECONDS", 2.0)
+_SNAPSHOT_CACHE_MAX_ENTRIES = env_int("PORTFOLIO_SNAPSHOT_CACHE_MAX_ENTRIES", 256)
 _snapshot_cache: dict[tuple[int, str], dict[str, Any]] = {}
 
 

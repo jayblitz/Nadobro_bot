@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+
+from src.nadobro.utils.env import env_float, env_int
 import threading
 import time
 from dataclasses import dataclass, field
@@ -16,10 +18,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_THRESHOLD = int(os.environ.get("NADO_USER_CIRCUIT_THRESHOLD", "5"))
-_WINDOW = float(os.environ.get("NADO_USER_CIRCUIT_WINDOW_SECONDS", "60"))
-_COOLDOWN = float(os.environ.get("NADO_USER_CIRCUIT_COOLDOWN_SECONDS", "120"))
-_MAX_TRACKED = int(os.environ.get("NADO_USER_CIRCUIT_MAX_TRACKED", "4096"))
+_THRESHOLD = env_int("NADO_USER_CIRCUIT_THRESHOLD", 5)
+_WINDOW = env_float("NADO_USER_CIRCUIT_WINDOW_SECONDS", 60.0)
+_COOLDOWN = env_float("NADO_USER_CIRCUIT_COOLDOWN_SECONDS", 120.0)
+_MAX_TRACKED = env_int("NADO_USER_CIRCUIT_MAX_TRACKED", 4096)
 
 _lock = threading.RLock()
 _states: dict[tuple[int, str], "_UserCircuitState"] = {}

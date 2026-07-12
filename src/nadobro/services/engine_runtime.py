@@ -1808,13 +1808,17 @@ async def run_engine_cycle(
         # whole platform or another run/strategy. Empty for a fresh session.
         if configs.get("controller_override") == "fill_anchored":
             try:
+                from src.nadobro.services.async_utils import run_blocking_db
                 from src.nadobro.services.engine_persistence import resolve_running_session_id
                 from src.nadobro.models.database import get_session_recent_fills
 
-                _sid = resolve_running_session_id(strategy, telegram_id, network)
+                _sid = await run_blocking_db(
+                    resolve_running_session_id, strategy, telegram_id, network
+                )
                 if _sid:
-                    configs["seed_fills"] = get_session_recent_fills(
-                        int(_sid), network, limit=_FILL_HISTORY_SEED, user_id=telegram_id
+                    configs["seed_fills"] = await run_blocking_db(
+                        get_session_recent_fills,
+                        int(_sid), network, limit=_FILL_HISTORY_SEED, user_id=telegram_id,
                     )
             except Exception:  # noqa: BLE001 - seeding is best-effort, never block start
                 logger.debug("fill-anchored seed_fills skipped", exc_info=True)

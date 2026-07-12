@@ -57,6 +57,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.services import sli
 from src.nadobro.services.bounded_cache import LRUCache
 
@@ -66,19 +67,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Tunables.
 # ---------------------------------------------------------------------------
-TELEGRAM_GLOBAL_RPS = float(os.environ.get("TELEGRAM_GLOBAL_RPS", "25"))
-TELEGRAM_GLOBAL_BURST = float(os.environ.get("TELEGRAM_GLOBAL_BURST", "30"))
-TELEGRAM_CHAT_RPS = float(os.environ.get("TELEGRAM_CHAT_RPS", "1"))
-TELEGRAM_CHAT_BURST = float(os.environ.get("TELEGRAM_CHAT_BURST", "2"))
+TELEGRAM_GLOBAL_RPS = env_float("TELEGRAM_GLOBAL_RPS", 25.0)
+TELEGRAM_GLOBAL_BURST = env_float("TELEGRAM_GLOBAL_BURST", 30.0)
+TELEGRAM_CHAT_RPS = env_float("TELEGRAM_CHAT_RPS", 1.0)
+TELEGRAM_CHAT_BURST = env_float("TELEGRAM_CHAT_BURST", 2.0)
 TELEGRAM_LANE_CAPACITY: dict[str, int] = {
-    "user_reply": int(os.environ.get("TELEGRAM_LANE_CAPACITY_USER_REPLY", "1000")),
-    "order": int(os.environ.get("TELEGRAM_LANE_CAPACITY_ORDER", "1000")),
-    "alert": int(os.environ.get("TELEGRAM_LANE_CAPACITY_ALERT", "2000")),
-    "info": int(os.environ.get("TELEGRAM_LANE_CAPACITY_INFO", "2000")),
+    "user_reply": env_int("TELEGRAM_LANE_CAPACITY_USER_REPLY", 1000),
+    "order": env_int("TELEGRAM_LANE_CAPACITY_ORDER", 1000),
+    "alert": env_int("TELEGRAM_LANE_CAPACITY_ALERT", 2000),
+    "info": env_int("TELEGRAM_LANE_CAPACITY_INFO", 2000),
 }
-TELEGRAM_PER_CHAT_BUCKETS_MAX = int(os.environ.get("TELEGRAM_PER_CHAT_BUCKETS_MAX", "8192"))
-TELEGRAM_DEDUPE_TTL_SECONDS = float(os.environ.get("TELEGRAM_DEDUPE_TTL_SECONDS", "30"))
-TELEGRAM_MAX_RETRY_AFTER = float(os.environ.get("TELEGRAM_MAX_RETRY_AFTER", "20"))
+TELEGRAM_PER_CHAT_BUCKETS_MAX = env_int("TELEGRAM_PER_CHAT_BUCKETS_MAX", 8192)
+TELEGRAM_DEDUPE_TTL_SECONDS = env_float("TELEGRAM_DEDUPE_TTL_SECONDS", 30.0)
+TELEGRAM_MAX_RETRY_AFTER = env_float("TELEGRAM_MAX_RETRY_AFTER", 20.0)
 
 
 class Lane(str, enum.Enum):

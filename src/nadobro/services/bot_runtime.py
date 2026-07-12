@@ -2796,7 +2796,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
             try:
                 orders = 1 if bro_action in ("open_long", "open_short", "close") else 0
                 filled = orders if result.get("success") else 0
-                increment_session_metrics(
+                await run_blocking(
+                    increment_session_metrics,
                     int(session_id),
                     cycles=1,
                     orders_placed=orders,
@@ -3235,7 +3236,8 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     session_id = state.get("strategy_session_id")
     if session_id and result.get("success", True):
         try:
-            increment_session_metrics(
+            await run_blocking(
+                increment_session_metrics,
                 int(session_id),
                 cycles=1,
                 orders_placed=orders_placed,

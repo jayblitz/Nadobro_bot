@@ -1,5 +1,7 @@
 import logging
 import os
+
+from src.nadobro.utils.env import env_float, env_int
 import threading
 import time
 from collections import defaultdict, deque
@@ -15,11 +17,11 @@ _MAX_SAMPLES = 400
 # crosses the target, which is the signal that the gateway/event-loop is
 # degrading for everyone (not just one unlucky tap). Tunable via env.
 _SLO_THRESHOLDS_MS: dict[str, float] = {
-    "callback.total": float(os.environ.get("NADO_SLO_CALLBACK_P95_MS", "1000")),
-    "message.total": float(os.environ.get("NADO_SLO_MESSAGE_P95_MS", "2500")),
-    "card.home.build": float(os.environ.get("NADO_SLO_HOME_BUILD_P95_MS", "250")),
+    "callback.total": env_float("NADO_SLO_CALLBACK_P95_MS", 1000.0),
+    "message.total": env_float("NADO_SLO_MESSAGE_P95_MS", 2500.0),
+    "card.home.build": env_float("NADO_SLO_HOME_BUILD_P95_MS", 250.0),
 }
-_SLO_MIN_SAMPLES = int(os.environ.get("NADO_SLO_MIN_SAMPLES", "20"))
+_SLO_MIN_SAMPLES = env_int("NADO_SLO_MIN_SAMPLES", 20)
 _metrics: dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_SAMPLES))
 _counters: dict[str, int] = defaultdict(int)
 _lock = threading.Lock()

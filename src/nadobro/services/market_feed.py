@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+
+from src.nadobro.utils.env import env_float
 import time
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-_TTL = float(os.environ.get("NADO_MARKET_FEED_TTL_SECONDS", "3.0"))
+_TTL = env_float("NADO_MARKET_FEED_TTL_SECONDS", 3.0)
 _lock = asyncio.Lock()
 _cache: dict[str, dict[str, Any]] = {}
 _ts: dict[str, float] = {}

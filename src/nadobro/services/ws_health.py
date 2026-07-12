@@ -7,12 +7,14 @@ serve cached snapshots and only reconcile on a longer interval.
 from __future__ import annotations
 
 import os
+
+from src.nadobro.utils.env import env_float
 import threading
 import time
 from typing import Optional
 
-_HEALTH_SECONDS = float(os.environ.get("NADO_WS_HEALTH_SECONDS", "45"))
-_RECONCILE_SECONDS = float(os.environ.get("NADO_WS_RECONCILE_SECONDS", "300"))
+_HEALTH_SECONDS = env_float("NADO_WS_HEALTH_SECONDS", 45.0)
+_RECONCILE_SECONDS = env_float("NADO_WS_RECONCILE_SECONDS", 300.0)
 
 _lock = threading.RLock()
 _last_event: dict[tuple[int, str], float] = {}

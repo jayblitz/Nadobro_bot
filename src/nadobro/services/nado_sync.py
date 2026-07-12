@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from src.nadobro.utils.env import env_float
 from src.nadobro.db import execute, query_all, query_one
 from src.nadobro.config import NADO_MAINNET_REST, NADO_TESTNET_REST
 from src.nadobro.services.feature_flags import (
@@ -37,14 +38,14 @@ _inflight: dict[tuple[int, str], asyncio.Lock] = {}
 # tick (and its apscheduler max_instances=1 slot) indefinitely. A breach here
 # means a worker thread is wedged on a dead connection — we log + skip the user
 # rather than letting the whole tick hang for 40 minutes.
-_SYNC_USER_TIMEOUT_SECONDS = float(os.environ.get("NADO_SYNC_USER_TIMEOUT_SECONDS", "30"))
+_SYNC_USER_TIMEOUT_SECONDS = env_float("NADO_SYNC_USER_TIMEOUT_SECONDS", 30.0)
 # Don't start a new user with less than this much budget left in the tick:
 # a sub-second slice would time out even a cache hit and get mislabelled as a
 # "wedged" sync. Such users are simply deferred to the next tick (the cursor is
 # not advanced past them). Clamped so a deliberately tiny per-user timeout still
 # allows a user to be attempted.
 _MIN_USER_SYNC_BUDGET_SECONDS = min(
-    float(os.environ.get("NADO_SYNC_MIN_USER_BUDGET_SECONDS", "2.0")),
+    env_float("NADO_SYNC_MIN_USER_BUDGET_SECONDS", 2.0),
     _SYNC_USER_TIMEOUT_SECONDS,
 )
 
