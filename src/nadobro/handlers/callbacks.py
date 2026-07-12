@@ -43,13 +43,13 @@ from src.nadobro.services.user_service import (
     get_or_create_user, get_user_nado_client, get_user_readonly_client, get_user_wallet_info,
     switch_network, get_user, remove_user_private_key, ensure_active_wallet_ready, update_user_language,
 )
-from src.nadobro.services.trade_service import (
+from src.nadobro.trading.trade_service import (
     execute_market_order, execute_limit_order, close_position,
     close_all_positions, get_trade_history, get_trade_analytics,
 )
 from src.nadobro.services.alert_service import create_alert, get_user_alerts, delete_alert
 from src.nadobro.services.admin_service import is_trading_paused, is_admin
-from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
+from src.nadobro.strategy.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.points_service import (
     get_points_dashboard,
@@ -64,7 +64,7 @@ from src.nadobro.services.referral_service import (
     MAX_CODE_LEN,
     MIN_CODE_LEN,
 )
-from src.nadobro.services.strategy_pending_input import persist_strategy_pending_input
+from src.nadobro.strategy.strategy_pending_input import persist_strategy_pending_input
 from src.nadobro.services.onboarding_service import (
     get_resume_step,
     evaluate_readiness,
@@ -87,7 +87,7 @@ from src.nadobro.config import (
 )
 from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
 from src.nadobro.core.perf import timed_metric, log_slow
-from src.nadobro.services.trading_readiness import check_trading_readiness
+from src.nadobro.trading.trading_readiness import check_trading_readiness
 
 logger = logging.getLogger(__name__)
 

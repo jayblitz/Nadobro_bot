@@ -15,14 +15,14 @@ from src.nadobro.handlers.intent_handlers import _enrich_trade_payload
 from src.nadobro.handlers.intent_parser import parse_interaction_intent, parse_position_management_intent
 from src.nadobro.handlers import callbacks, home_card, formatters
 from src.nadobro.i18n import get_active_language, language_context
-from src.nadobro.services import bot_runtime
-from src.nadobro.services import execution_queue
+from src.nadobro.strategy import bot_runtime
+from src.nadobro.trading import execution_queue
 from src.nadobro.services import runtime_supervisor
-from src.nadobro.services import trade_service
+from src.nadobro.trading import trade_service
 from src.nadobro.core.async_utils import run_blocking
-from src.nadobro.services.strategy_lifecycle import cleanup_strategy_positions
-from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
-from src.nadobro.services.trade_service import _place_take_profit_order
+from src.nadobro.strategy.strategy_lifecycle import cleanup_strategy_positions
+from src.nadobro.trading.stop_loss_service import _should_trigger_stop_loss
+from src.nadobro.trading.trade_service import _place_take_profit_order
 
 
 class RuntimeAndLeverageTests(unittest.TestCase):
@@ -243,7 +243,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             bot_runtime, "_finalize_session"
         ), patch.object(
             bot_runtime, "cleanup_strategy_positions", return_value={"success": True}
-        ), patch("src.nadobro.services.engine_runtime.RUNTIME", runtime):
+        ), patch("src.nadobro.strategy.engine_runtime.RUNTIME", runtime):
             ok, msg = bot_runtime.stop_user_bot(123, cancel_orders=True)
 
         self.assertTrue(ok, msg)
@@ -262,7 +262,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             bot_runtime, "_finalize_session"
         ), patch.object(
             bot_runtime, "cleanup_strategy_positions", return_value={"success": True}
-        ), patch("src.nadobro.services.engine_runtime.RUNTIME", runtime):
+        ), patch("src.nadobro.strategy.engine_runtime.RUNTIME", runtime):
             ok, msg = bot_runtime.stop_all_user_bots(456, cancel_orders=True)
 
         self.assertTrue(ok, msg)
@@ -509,7 +509,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
     def test_stop_all_automation_for_user_merges_messages(self):
         telegram_id = 99
         with patch.object(bot_runtime, "stop_all_user_bots", return_value=(True, "Stopped 1 running strategy loop(s).")), patch(
-            "src.nadobro.services.copy_service.stop_all_copies", return_value=(True, "Stopped 1 copy mirror(s).")
+            "src.nadobro.trading.copy_service.stop_all_copies", return_value=(True, "Stopped 1 copy mirror(s).")
         ):
             ok, msg = bot_runtime.stop_all_automation_for_user(telegram_id)
         self.assertTrue(ok)
@@ -518,7 +518,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
     def test_stop_all_automation_for_user_ok_when_only_copy_stops(self):
         with patch.object(bot_runtime, "stop_all_user_bots", return_value=(False, "No running strategy bot found.")), patch(
-            "src.nadobro.services.copy_service.stop_all_copies", return_value=(True, "Stopped 1 copy mirror(s).")
+            "src.nadobro.trading.copy_service.stop_all_copies", return_value=(True, "Stopped 1 copy mirror(s).")
         ):
             ok, msg = bot_runtime.stop_all_automation_for_user(42)
         self.assertTrue(ok)
@@ -543,8 +543,8 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             calls.append(("dn", args, kwargs))
             return {"success": True}
 
-        with patch("src.nadobro.services.strategy_lifecycle.close_delta_neutral_legs", side_effect=_dn_stub), patch(
-            "src.nadobro.services.strategy_lifecycle.close_all_positions"
+        with patch("src.nadobro.strategy.strategy_lifecycle.close_delta_neutral_legs", side_effect=_dn_stub), patch(
+            "src.nadobro.strategy.strategy_lifecycle.close_all_positions"
         ) as close_all:
             res = cleanup_strategy_positions(42, "mainnet", {"strategy": "delta_neutral", "product": "BTC"})
 
@@ -563,12 +563,12 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             "vol_close_size": 0.0005,
             "strategy_session_id": 77,
         }
-        with patch("src.nadobro.services.strategy_lifecycle.get_spot_product_id", return_value=42), patch(
-            "src.nadobro.services.strategy_lifecycle.get_spot_metadata", return_value={"symbol": "KBTC"}
+        with patch("src.nadobro.strategy.strategy_lifecycle.get_spot_product_id", return_value=42), patch(
+            "src.nadobro.strategy.strategy_lifecycle.get_spot_metadata", return_value={"symbol": "KBTC"}
         ), patch(
-            "src.nadobro.services.strategy_lifecycle.stop_volume_spot_cleanup", return_value={"success": True}
+            "src.nadobro.strategy.strategy_lifecycle.stop_volume_spot_cleanup", return_value={"success": True}
         ) as spot_cleanup, patch(
-            "src.nadobro.services.strategy_lifecycle.close_all_positions"
+            "src.nadobro.strategy.strategy_lifecycle.close_all_positions"
         ) as close_all:
             res = cleanup_strategy_positions(42, "mainnet", state)
 
@@ -586,10 +586,10 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             "vol_entry_fill_ts": 0.0,
             "vol_entry_size": 0.001,
         }
-        with patch("src.nadobro.services.strategy_lifecycle.get_spot_product_id", return_value=42), patch(
-            "src.nadobro.services.strategy_lifecycle.get_spot_metadata", return_value={"symbol": "KBTC"}
+        with patch("src.nadobro.strategy.strategy_lifecycle.get_spot_product_id", return_value=42), patch(
+            "src.nadobro.strategy.strategy_lifecycle.get_spot_metadata", return_value={"symbol": "KBTC"}
         ), patch(
-            "src.nadobro.services.strategy_lifecycle.stop_volume_spot_cleanup", return_value={"success": True}
+            "src.nadobro.strategy.strategy_lifecycle.stop_volume_spot_cleanup", return_value={"success": True}
         ) as spot_cleanup:
             res = cleanup_strategy_positions(42, "mainnet", state)
 
@@ -633,10 +633,10 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         ), patch.object(
             bot_runtime, "get_user_nado_client", return_value=FakeClient()
         ), patch(
-            "src.nadobro.services.engine_runtime.engine_v2_enabled",
+            "src.nadobro.strategy.engine_runtime.engine_v2_enabled",
             return_value=False,
         ), patch(
-            "src.nadobro.services.engine_runtime.ENGINE_MAPPED_STRATEGIES",
+            "src.nadobro.strategy.engine_runtime.ENGINE_MAPPED_STRATEGIES",
             set(),
         ), patch.object(
             bot_runtime, "_dispatch_strategy", return_value={"success": True, "orders_placed": 0}
@@ -651,10 +651,10 @@ class RuntimeAndLeverageTests(unittest.TestCase):
             # (binds to THIS run's session id), not the bare
             # get_active_strategy_session. Mock what the rail actually calls so
             # the snapshot SL/TP path is exercised.
-            "src.nadobro.services.session_resolver.resolve_current_strategy_session",
+            "src.nadobro.trading.session_resolver.resolve_current_strategy_session",
             return_value=sess,
         ), patch(
-            "src.nadobro.services.live_session.get_live_session_snapshot", return_value=snapshot
+            "src.nadobro.trading.live_session.get_live_session_snapshot", return_value=snapshot
         ), patch.object(
             bot_runtime, "_finalize_session"
         ), patch.object(
@@ -749,7 +749,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
         from src.nadobro.core import feature_flags
 
-        from src.nadobro.services import strategy_scheduler
+        from src.nadobro.strategy import strategy_scheduler
 
         sched = SimpleNamespace(register=MagicMock())
         with patch.object(
@@ -1005,7 +1005,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
 
 class MMDurationTests(unittest.TestCase):
     def test_hard_cap_modes(self):
-        from src.nadobro.services.bot_runtime import _mm_duration_is_hard_cap
+        from src.nadobro.strategy.bot_runtime import _mm_duration_is_hard_cap
         # Mid / D-Grid: duration is a HARD cap. Grid / R-Grid: soft target.
         self.assertTrue(_mm_duration_is_hard_cap("mid"))
         self.assertTrue(_mm_duration_is_hard_cap("dgrid"))
@@ -1013,7 +1013,7 @@ class MMDurationTests(unittest.TestCase):
         self.assertFalse(_mm_duration_is_hard_cap("rgrid"))
 
     def test_resolve_run_duration(self):
-        from src.nadobro.services.bot_runtime import _resolve_mm_run_duration_minutes
+        from src.nadobro.strategy.bot_runtime import _resolve_mm_run_duration_minutes
         # Opt-out: no preset, no custom → 0 (no cap, unchanged behavior).
         self.assertEqual(_resolve_mm_run_duration_minutes({}, 100.0, 1_000_000.0), 0.0)
         # Custom duration with no volume → returned as typed.
@@ -1028,7 +1028,7 @@ class MMDurationTests(unittest.TestCase):
         self.assertAlmostEqual(c, 1000.0, places=6)
 
     def test_resolve_cycle_notional(self):
-        from src.nadobro.services.bot_runtime import _resolve_mm_cycle_notional_usd
+        from src.nadobro.strategy.bot_runtime import _resolve_mm_cycle_notional_usd
         base = {"interval_seconds": 60}  # 1-minute cycle; vol 14.4M → vpm 10000
         # Participation scales the chunk: aggressive 0.10 > normal 0.05 > passive 0.01.
         agg = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "aggressive"}, 100000, 14_400_000, 100)
@@ -1057,20 +1057,20 @@ class MMDurationTests(unittest.TestCase):
 
 class TwapPauseTests(unittest.TestCase):
     def test_disabled_by_default(self):
-        from src.nadobro.services.bot_runtime import _twap_should_pause
+        from src.nadobro.strategy.bot_runtime import _twap_should_pause
         st = {}  # no twap_pause_move_bp → off
         self.assertFalse(_twap_should_pause(st, "mid", 100.0))
         self.assertFalse(st.get("twap_paused"))
 
     def test_rgrid_never_pauses(self):
-        from src.nadobro.services.bot_runtime import _twap_should_pause
+        from src.nadobro.strategy.bot_runtime import _twap_should_pause
         # Even with a tight threshold and a huge move, R-Grid is excluded
         # (its momentum entry must fire on fast moves).
         st = {"twap_pause_move_bp": 50, "twap_last_mid": 100.0}
         self.assertFalse(_twap_should_pause(st, "rgrid", 130.0))
 
     def test_pauses_on_fast_move_resumes_when_settled(self):
-        from src.nadobro.services.bot_runtime import _twap_should_pause
+        from src.nadobro.strategy.bot_runtime import _twap_should_pause
         st = {"twap_pause_move_bp": 200}  # 2% per-cycle threshold
         # First cycle establishes the baseline — no prior mid, no pause.
         self.assertFalse(_twap_should_pause(st, "mid", 100.0))

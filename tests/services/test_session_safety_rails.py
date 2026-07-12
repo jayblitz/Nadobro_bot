@@ -15,7 +15,9 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import bot_runtime, engine_runtime, live_session, mm_dashboard
+from src.nadobro.strategy import bot_runtime, engine_runtime, mm_dashboard
+
+from src.nadobro.trading import live_session
 
 
 async def _fake_run_blocking(fn, *args, **kwargs):
@@ -42,7 +44,7 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot_runtime, "run_blocking", _fake_run_blocking), \
              patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=sess), \
              patch("src.nadobro.models.database.get_active_strategy_session_for_strategy") as active_sess, \
-             patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=snap), \
+             patch("src.nadobro.trading.live_session.get_live_session_snapshot", return_value=snap), \
              patch.object(engine_runtime.RUNTIME, "stop", new=self._engine_stop), \
              patch.object(bot_runtime, "_finalize_session") as fin, \
              patch.object(bot_runtime, "_save_state"), \
@@ -95,7 +97,7 @@ class SessionPnlRailTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot_runtime, "run_blocking", _fake_run_blocking), \
              patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=sess), \
              patch("src.nadobro.models.database.get_active_strategy_session_for_strategy"), \
-             patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=snap), \
+             patch("src.nadobro.trading.live_session.get_live_session_snapshot", return_value=snap), \
              patch.object(engine_runtime.RUNTIME, "stop", new=self._engine_stop), \
              patch.object(bot_runtime, "_finalize_session") as fin, \
              patch.object(bot_runtime, "_save_state"), \
@@ -386,12 +388,12 @@ class DashboardSessionResolverTests(unittest.TestCase):
                 "liq_price": 0.0,
             }
 
-        with patch("src.nadobro.services.bot_runtime.get_user_bot_status", return_value=status), \
-             patch("src.nadobro.services.bot_runtime.get_user_bot_state", return_value=state), \
+        with patch("src.nadobro.strategy.bot_runtime.get_user_bot_status", return_value=status), \
+             patch("src.nadobro.strategy.bot_runtime.get_user_bot_state", return_value=state), \
              patch("src.nadobro.models.database.get_strategy_session_by_id", return_value=state_sess), \
              patch("src.nadobro.models.database.get_active_strategy_session_for_strategy", return_value=wrong_newest), \
              patch("src.nadobro.services.user_service.get_user_readonly_client", return_value=None), \
-             patch("src.nadobro.services.live_session.get_live_session_snapshot", side_effect=fake_snapshot):
+             patch("src.nadobro.trading.live_session.get_live_session_snapshot", side_effect=fake_snapshot):
             text, is_active = commands.build_mm_status_text(42)
 
         self.assertTrue(is_active)
@@ -431,12 +433,12 @@ class DashboardSessionResolverTests(unittest.TestCase):
             "open_orders": 1,
         }
 
-        with patch("src.nadobro.services.bot_runtime.get_user_bot_status", return_value=status), \
-             patch("src.nadobro.services.bot_runtime.get_user_bot_state", return_value=state), \
-             patch("src.nadobro.services.session_resolver.resolve_current_strategy_session",
+        with patch("src.nadobro.strategy.bot_runtime.get_user_bot_status", return_value=status), \
+             patch("src.nadobro.strategy.bot_runtime.get_user_bot_state", return_value=state), \
+             patch("src.nadobro.trading.session_resolver.resolve_current_strategy_session",
                    return_value={"id": 55, "product_id": 77, "status": "running"}), \
              patch("src.nadobro.services.user_service.get_user_readonly_client", return_value=None), \
-             patch("src.nadobro.services.live_session.get_live_session_snapshot", return_value=live_snap):
+             patch("src.nadobro.trading.live_session.get_live_session_snapshot", return_value=live_snap):
             text, is_active = commands.build_mm_status_text(42)
 
         self.assertTrue(is_active)
@@ -477,7 +479,7 @@ class MultiprocessTimeoutTests(unittest.IsolatedAsyncioTestCase):
              patch("src.nadobro.services.runtime_supervisor.is_multiprocess_enabled", return_value=True), \
              patch("src.nadobro.services.runtime_supervisor.strategy_worker_group", return_value="mm_grid"), \
              patch("src.nadobro.services.runtime_supervisor.submit_cycle_job", side_effect=timed_out_submit), \
-             patch("src.nadobro.services.execution_queue.get_queue_diagnostics", return_value={}):
+             patch("src.nadobro.trading.execution_queue.get_queue_diagnostics", return_value={}):
             await bot_runtime.handle_strategy_job({"telegram_id": 42, "network": "mainnet"})
 
         local_run.assert_not_called()

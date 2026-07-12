@@ -3,11 +3,11 @@ import re
 from typing import NotRequired, TypedDict
 
 from src.nadobro.config import get_perp_products
-from src.nadobro.services.bot_runtime import start_user_bot, stop_all_automation_for_user
+from src.nadobro.strategy.bot_runtime import start_user_bot, stop_all_automation_for_user
 from src.nadobro.llm.conversation_intent import classify_conversation_intent, is_educational_request
-from src.nadobro.services.strategy_registry import infer_strategy_from_text
+from src.nadobro.strategy.strategy_registry import infer_strategy_from_text
 from src.nadobro.llm.trading_bro_service import answer_trading_bro_question
-from src.nadobro.services.trading_readiness import check_trading_readiness
+from src.nadobro.trading.trading_readiness import check_trading_readiness
 from src.nadobro.services.user_service import get_user
 
 logger = logging.getLogger(__name__)

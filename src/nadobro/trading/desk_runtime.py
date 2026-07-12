@@ -24,7 +24,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-from src.nadobro.services import desk_store
+from src.nadobro.trading import desk_store
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.utils.env import env_bool
 
@@ -131,8 +131,8 @@ def _desk_configs(telegram_id: int, network: str) -> Dict[str, Any]:
 
 
 async def _ensure_session(telegram_id: int, network: str) -> bool:
-    from src.nadobro.services.engine_persistence import DbInventoryRepository
-    from src.nadobro.services.engine_runtime import (
+    from src.nadobro.trading.engine_persistence import DbInventoryRepository
+    from src.nadobro.strategy.engine_runtime import (
         RUNTIME,
         build_adapter,
         build_product_meta_from_catalog,
@@ -163,7 +163,7 @@ async def _ensure_session(telegram_id: int, network: str) -> bool:
 
 
 async def _stop_session(telegram_id: int, network: str) -> None:
-    from src.nadobro.services.engine_runtime import RUNTIME
+    from src.nadobro.strategy.engine_runtime import RUNTIME
 
     try:
         await RUNTIME.stop(int(telegram_id), network, "desk")
@@ -246,7 +246,7 @@ async def _stand_down_on_boot() -> Optional[int]:
     start ticking sessions, or an unparked plan would auto-resume after all.
     Idempotent: ``finish_plan`` is a guarded transition, and already-parked
     plans drop out of the active set."""
-    from src.nadobro.services.desk_plans import ST_RUNNING
+    from src.nadobro.trading.desk_plans import ST_RUNNING
 
     parked = 0
     for network in _NETWORKS:
@@ -326,7 +326,7 @@ async def tick_desk_runner() -> None:
             if parked:
                 # Start sessions on the NEXT tick, from a provably clean slate.
                 return
-    from src.nadobro.services.engine_runtime import RUNTIME
+    from src.nadobro.strategy.engine_runtime import RUNTIME
 
     active: set[tuple[int, str]] = set()
     for network in _NETWORKS:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.nadobro.services.desk_plans import (
+from src.nadobro.trading.desk_plans import (
     EntryTrigger,
     ExecutionPlan,
     ExitPlan,

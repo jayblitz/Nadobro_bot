@@ -1,7 +1,7 @@
 from telegram.ext import CallbackContext
 
-from src.nadobro.services.strategy_pending_input import clear_strategy_pending_input
-from src.nadobro.services.text_trade_pending import (
+from src.nadobro.strategy.strategy_pending_input import clear_strategy_pending_input
+from src.nadobro.trading.text_trade_pending import (
     clear_text_close_all_pending,
     clear_text_trade_pending,
 )

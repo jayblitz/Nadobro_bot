@@ -88,7 +88,7 @@ class BacktestEngine:
         self._idx = 0
         cfg = dict(configs)
         cfg.setdefault("candle_provider", self._candle_provider)
-        from src.nadobro.services.engine_runtime import build_controller
+        from src.nadobro.strategy.engine_runtime import build_controller
 
         self.controller = build_controller(
             strategy, user_id=user_id, configs=cfg, orchestrator=self.orchestrator,

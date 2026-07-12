@@ -535,7 +535,7 @@ def build_report(
         get_account_realized_pnl_windows,
         get_trades_by_user,
     )
-    from src.nadobro.services.bot_runtime import _load_state
+    from src.nadobro.strategy.bot_runtime import _load_state
     from src.nadobro.services.user_service import get_user_readonly_client
 
     now_utc = now_utc or datetime.now(timezone.utc)
@@ -589,7 +589,7 @@ def build_report(
         product = str(state.get("product") or "")
         if strategy and product:
             try:
-                from src.nadobro.services.engine_runtime import (
+                from src.nadobro.strategy.engine_runtime import (
                     ENGINE_MAPPED_STRATEGIES, map_strategy_config,
                 )
                 if strategy in ENGINE_MAPPED_STRATEGIES:

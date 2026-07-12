@@ -837,7 +837,7 @@ def init_db():
                         rollup_engine_session_pnl_funding,
                         rollup_session_from_trades,
                     )
-                    from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+                    from src.nadobro.strategy.engine_runtime import ENGINE_MAPPED_STRATEGIES
 
                     rollup_session_from_trades(_sid, _net)
                     _srow = query_one(

@@ -25,7 +25,7 @@ import os
 def _client():
     tid = os.environ.get("TELEGRAM_ID")
     if tid:
-        from src.nadobro.services.bot_runtime import get_user_nado_client
+        from src.nadobro.strategy.bot_runtime import get_user_nado_client
 
         c = get_user_nado_client(int(tid))
         if c is None:

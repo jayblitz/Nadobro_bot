@@ -118,7 +118,7 @@ def switch_network(telegram_id: int, network: str) -> tuple[bool, str]:
     # Stop all active strategies before changing the active mode so teardown
     # runs against the old network state instead of racing the new one.
     try:
-        from src.nadobro.services.bot_runtime import stop_all_strategies_for_user
+        from src.nadobro.strategy.bot_runtime import stop_all_strategies_for_user
         stop_all_strategies_for_user(telegram_id)
         logger.info("Stopped all strategies for user %s due to network switch", telegram_id)
     except Exception as e:

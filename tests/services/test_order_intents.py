@@ -4,7 +4,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import order_intents, trade_service
+from src.nadobro.trading import order_intents, trade_service
 
 
 def test_build_intent_id_uses_manual_nonce_to_allow_repeated_orders():

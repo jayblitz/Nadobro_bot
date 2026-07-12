@@ -385,7 +385,7 @@ def _loads(value: object) -> Dict[str, object]:
 
 
 def build_db_portfolio() -> Portfolio:
-    from src.nadobro.services.engine_persistence import DbInventoryRepository
+    from src.nadobro.trading.engine_persistence import DbInventoryRepository
 
     return Portfolio(
         inventory=DbInventoryRepository(),

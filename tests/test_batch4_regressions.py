@@ -25,7 +25,7 @@ def test_update_trade_stats_uses_atomic_increment_sql(monkeypatch):
 
 
 def test_copy_tpsl_refresh_cancels_only_tracked_digests(monkeypatch):
-    from src.nadobro.services import copy_service
+    from src.nadobro.trading import copy_service
     import src.nadobro.db as db
 
     cancelled = []

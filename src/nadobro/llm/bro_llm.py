@@ -259,7 +259,7 @@ def make_decision(
     except Exception:
         finance_context = ""
 
-    from src.nadobro.services.budget_guard import get_bro_profile
+    from src.nadobro.trading.budget_guard import get_bro_profile
     profile_data = get_bro_profile(bro_profile)
 
     system = SYSTEM_PROMPT.format(
@@ -413,7 +413,7 @@ def generate_game_plan(
     if not client:
         return None
 
-    from src.nadobro.services.budget_guard import get_bro_profile
+    from src.nadobro.trading.budget_guard import get_bro_profile
     profile_data = get_bro_profile(bro_profile)
 
     positions_text = _format_positions(positions)

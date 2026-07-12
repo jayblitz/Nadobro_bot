@@ -99,7 +99,7 @@ def get_runtime_supervisor_diagnostics() -> dict[str, Any]:
 
 def _run_cycle_job(payload: dict[str, Any]) -> dict[str, Any]:
     # Imported lazily inside workers so this module stays lightweight.
-    from src.nadobro.services.bot_runtime import run_cycle_job_sync
+    from src.nadobro.strategy.bot_runtime import run_cycle_job_sync
 
     return run_cycle_job_sync(payload)
 

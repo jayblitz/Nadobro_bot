@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from src.nadobro.services.desk_plans import (
+from src.nadobro.trading.desk_plans import (
     DEFAULT_TWAP_INTERVAL_SECONDS,
     EntryTrigger,
     ExecutionPlan,

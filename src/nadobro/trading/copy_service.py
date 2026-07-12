@@ -39,7 +39,7 @@ from src.nadobro.models.database import (
     get_copy_trades_by_mirror,
 )
 from src.nadobro.services.user_service import get_user, get_user_nado_client
-from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
+from src.nadobro.trading.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.venue.nado_client import NadoClient
 from src.nadobro.venue.nado_archive import query_order_by_digest
 from src.nadobro.core.async_utils import run_blocking

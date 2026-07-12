@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from src.nadobro.services import trade_service
+from src.nadobro.trading import trade_service
 
 
 class _ReadonlyClient:

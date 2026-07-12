@@ -5,11 +5,11 @@ from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.services.alert_service import get_triggered_alerts
-from src.nadobro.services.stop_loss_service import process_stop_losses
+from src.nadobro.trading.stop_loss_service import process_stop_losses
 from src.nadobro.venue.nado_client import NadoClient
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.core.perf import timed_metric
-from src.nadobro.services.execution_queue import enqueue_alert
+from src.nadobro.trading.execution_queue import enqueue_alert
 from src.nadobro.services.lowiq_relay_client import relay_poll_interval_seconds
 
 logger = logging.getLogger(__name__)
@@ -162,13 +162,13 @@ def set_bot_app(app):
     global _bot_app
     _bot_app = app
     try:
-        from src.nadobro.services.time_limit_watcher import set_bot_app as set_time_limit_bot_app
+        from src.nadobro.strategy.time_limit_watcher import set_bot_app as set_time_limit_bot_app
 
         set_time_limit_bot_app(app)
     except Exception:
         pass
     try:
-        from src.nadobro.services.desk_runtime import set_bot_app as set_desk_bot_app
+        from src.nadobro.trading.desk_runtime import set_bot_app as set_desk_bot_app
 
         set_desk_bot_app(app)
     except Exception:
@@ -281,7 +281,7 @@ async def tick_howl():
         return
     try:
         from src.nadobro.llm.howl_service import run_howl_analysis, format_howl_message, get_pending_howl
-        from src.nadobro.services.bot_runtime import _load_state
+        from src.nadobro.strategy.bot_runtime import _load_state
         from src.nadobro.db import query_all
         import json
 
@@ -542,7 +542,7 @@ async def sync_pending_fills():
             query_orders_by_digests,
             query_orders_by_subaccount,
         )
-        from src.nadobro.services.trade_service import reconcile_close_trade_fill
+        from src.nadobro.trading.trade_service import reconcile_close_trade_fill
         from src.nadobro.services.user_service import update_trade_stats
 
         pending = await run_blocking(claim_pending_fill_syncs, _FILL_SYNC_BATCH_SIZE)
@@ -880,7 +880,7 @@ def start_scheduler():
         vault_deposit_watch_enabled,
         vault_deposit_watch_interval_seconds,
     )
-    from src.nadobro.services.time_limit_watcher import time_limit_tick
+    from src.nadobro.strategy.time_limit_watcher import time_limit_tick
 
     # Misfire / coalesce tuning. The event loop occasionally blocks for 5-20s
     # (slow callback, archive 422 retries, place_order chains) and short-tick
@@ -958,7 +958,7 @@ def start_scheduler():
     # Desk text-to-trade plan runner: trigger watch + TWAP/exit driving.
     # 5s keeps price triggers responsive without hammering the venue (mids
     # are fetched once per product per tick inside the controller).
-    from src.nadobro.services.desk_runtime import desk_enabled, tick_desk_runner
+    from src.nadobro.trading.desk_runtime import desk_enabled, tick_desk_runner
 
     if desk_enabled():
         scheduler.add_job(

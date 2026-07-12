@@ -247,7 +247,7 @@ def build_round_trip_card_data(
     id). The card uses ``strategy="manual"`` so the renderer picks the
     neutral history skin.
     """
-    from src.nadobro.services.trade_service import find_round_trip
+    from src.nadobro.trading.trade_service import find_round_trip
 
     rt = find_round_trip(int(telegram_id), network, str(round_trip_key))
     if not rt:

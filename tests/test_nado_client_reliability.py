@@ -8,7 +8,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.venue.nado_client import NadoClient
-from src.nadobro.services.trade_service import _normalize_net_positions
+from src.nadobro.trading.trade_service import _normalize_net_positions
 
 
 class _FakeResponse:

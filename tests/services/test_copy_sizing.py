@@ -8,7 +8,7 @@ the leader's leverage, capped by the user's max.
 """
 from __future__ import annotations
 
-from src.nadobro.services.copy_service import (
+from src.nadobro.trading.copy_service import (
     _compute_copy_sizing,
     _entry_deviation_too_far,
     _leader_max_notional,

@@ -107,7 +107,7 @@ def process_stop_losses(prices: dict) -> list[dict]:
         from src.nadobro.i18n import get_user_language
         user_lang = get_user_language(user_id)
 
-        from src.nadobro.services.trade_service import close_position
+        from src.nadobro.trading.trade_service import close_position
 
         close_result = close_position(user_id, product, network=network)
         if close_result.get("success"):

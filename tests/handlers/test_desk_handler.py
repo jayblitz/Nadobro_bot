@@ -18,7 +18,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.handlers import desk_handler
-from src.nadobro.services.desk_plans import (
+from src.nadobro.trading.desk_plans import (
     EntryTrigger,
     ExecutionPlan,
     ExitPlan,

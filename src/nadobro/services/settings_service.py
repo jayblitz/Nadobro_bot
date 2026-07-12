@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
-from src.nadobro.services.strategy_registry import (
+from src.nadobro.strategy.strategy_registry import (
     MARKET_MAKING_STRATEGIES,
     normalize_strategy_id,
     settings_strategy_defaults,

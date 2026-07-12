@@ -11,13 +11,13 @@ from src.nadobro.services.user_service import (
     get_or_create_user, get_user_readonly_client, get_user_wallet_info, get_user,
     ensure_active_wallet_ready, save_linked_signer, get_user_nado_client,
 )
-from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
-from src.nadobro.services.trade_service import close_position, close_all_positions, get_trade_analytics
+from src.nadobro.trading.trade_service import execute_market_order, execute_limit_order
+from src.nadobro.trading.trade_service import close_position, close_all_positions, get_trade_analytics
 from src.nadobro.services.alert_service import create_alert
 from src.nadobro.llm.conversation_intent import classify_conversation_intent
 from src.nadobro.llm.trading_bro_service import answer_mode_for_text, stream_trading_bro_answer
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
-from src.nadobro.services.bot_runtime import start_user_bot
+from src.nadobro.strategy.bot_runtime import start_user_bot
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness, is_new_onboarding_complete
 from src.nadobro.core.crypto import encrypt_with_server_key
 from src.nadobro.services.admin_service import is_trading_paused
@@ -56,7 +56,7 @@ from src.nadobro.services.points_service import (
     request_points_refresh,
     relay_user_reply_to_lowiqpts,
 )
-from src.nadobro.services.strategy_pending_input import (
+from src.nadobro.strategy.strategy_pending_input import (
     clear_strategy_pending_input,
     load_strategy_pending_input,
 )
@@ -293,7 +293,7 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         max_leverage = float(action_data.get("max_leverage", 10))
         cumulative_stop_loss_pct = action_data.get("cumulative_stop_loss_pct")
         cumulative_take_profit_pct = action_data.get("cumulative_take_profit_pct")
-        from src.nadobro.services.copy_service import start_copy
+        from src.nadobro.trading.copy_service import start_copy
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
         # Risk factor scales the per-trade budget slice inside the user's total allocation.
@@ -2102,7 +2102,7 @@ async def _handle_pending_copy_wallet(update, context, telegram_id, text):
         )
         return True
 
-    from src.nadobro.services.copy_service import add_trader
+    from src.nadobro.trading.copy_service import add_trader
     ok, msg, trader_id = add_trader(
         wallet,
         label=wallet[:10],

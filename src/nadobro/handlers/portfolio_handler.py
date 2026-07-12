@@ -21,7 +21,7 @@ import time
 from src.nadobro.handlers.keyboards import portfolio_analytics_kb
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.core.perf import timed_metric
-from src.nadobro.services.trade_service import close_all_positions
+from src.nadobro.trading.trade_service import close_all_positions
 from src.nadobro.services.user_service import get_user_nado_client, get_user
 from telegram.constants import ParseMode
 from telegram.error import BadRequest

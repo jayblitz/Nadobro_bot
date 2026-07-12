@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from src.nadobro.config import get_spot_metadata, get_spot_product_id, normalize_volume_spot_symbol
-from src.nadobro.services.strategy_registry import normalize_strategy_id
-from src.nadobro.services.trade_service import close_all_positions, close_delta_neutral_legs, stop_volume_spot_cleanup
+from src.nadobro.strategy.strategy_registry import normalize_strategy_id
+from src.nadobro.trading.trade_service import close_all_positions, close_delta_neutral_legs, stop_volume_spot_cleanup
 
 
 def _volume_spot_managed_size(state: dict[str, Any]) -> float:

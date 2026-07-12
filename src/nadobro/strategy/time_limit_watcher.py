@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 
 from src.nadobro.models.database import fetch_due_time_limits
 from src.nadobro.core.async_utils import run_blocking
-from src.nadobro.services.execution_queue import enqueue_strategy
+from src.nadobro.trading.execution_queue import enqueue_strategy
 from src.nadobro.core.feature_flags import time_limit_enabled
-from src.nadobro.services.trade_service import execute_market_order
+from src.nadobro.trading.trade_service import execute_market_order
 from src.nadobro.services.user_service import get_user_nado_client
 
 logger = logging.getLogger(__name__)

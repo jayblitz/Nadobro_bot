@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.nadobro.utils.env import env_float, env_int
-from src.nadobro.services.trade_service import (
+from src.nadobro.trading.trade_service import (
     get_open_limit_orders,
     get_trade_analytics,
 )

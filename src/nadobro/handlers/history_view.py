@@ -27,7 +27,7 @@ def render_history_view(
       mint a per-trade card. The card is requested via
       ``portfolio:share_pnl:rt:{trip_key}``.
     """
-    from src.nadobro.services.trade_service import compute_round_trips
+    from src.nadobro.trading.trade_service import compute_round_trips
 
     network = str(snapshot.get("network") or "mainnet")
     user_id = int(snapshot.get("user_id") or 0)

@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.nadobro.services import overlay_actuator as oa
+from src.nadobro.strategy import overlay_actuator as oa
 from src.nadobro.llm.signal_engine import Signal
 
 

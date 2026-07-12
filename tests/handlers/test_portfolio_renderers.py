@@ -92,7 +92,7 @@ def test_portfolio_deck_and_subviews_render_without_local_sync_text():
 
     # History view pulls round-trips from the DB; stub them out for the
     # smoke test so the renderer still produces a valid card.
-    with patch("src.nadobro.services.trade_service.compute_round_trips", return_value=[]):
+    with patch("src.nadobro.trading.trade_service.compute_round_trips", return_value=[]):
         view_text, view_kb = render_history_view(_snapshot())
     assert "TESTNET" in view_text
     assert view_kb.inline_keyboard
@@ -137,7 +137,7 @@ def test_history_renders_round_trips_newest_first():
         },
     ]
     with patch(
-        "src.nadobro.services.trade_service.compute_round_trips",
+        "src.nadobro.trading.trade_service.compute_round_trips",
         return_value=round_trips,
     ):
         text, kb = render_history_view(_snapshot())

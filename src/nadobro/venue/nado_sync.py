@@ -950,7 +950,7 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
             # PnL gets overwritten).
             _srow = query_one("SELECT strategy FROM strategy_sessions WHERE id = %s", (_sid,))
             _strat = str((_srow or {}).get("strategy") or "").lower()
-            from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+            from src.nadobro.strategy.engine_runtime import ENGINE_MAPPED_STRATEGIES
             if _strat in ENGINE_MAPPED_STRATEGIES:
                 rollup_engine_session_pnl_funding(_sid, network)
         except Exception:  # noqa: BLE001 - re-rollup is best-effort, never break sync

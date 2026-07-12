@@ -57,7 +57,7 @@ def get_recent_admin_logs(limit: int = 20) -> list:
 def add_copy_trader(admin_id: int, wallet: str, label: str = "", is_curated: bool = False) -> tuple[bool, str]:
     if not is_admin(admin_id):
         return False, "Unauthorized."
-    from src.nadobro.services.copy_service import add_trader
+    from src.nadobro.trading.copy_service import add_trader
     ok, msg, trader_id = add_trader(wallet, label=label, is_curated=is_curated)
     if ok:
         log_admin_action(admin_id, "add_copy_trader", f"wallet={wallet[:16]}... label={label} curated={is_curated}")
@@ -67,7 +67,7 @@ def add_copy_trader(admin_id: int, wallet: str, label: str = "", is_curated: boo
 def remove_copy_trader(admin_id: int, trader_id: int) -> tuple[bool, str]:
     if not is_admin(admin_id):
         return False, "Unauthorized."
-    from src.nadobro.services.copy_service import remove_trader
+    from src.nadobro.trading.copy_service import remove_trader
     ok, msg = remove_trader(trader_id, requester_user_id=admin_id, is_admin=True)
     if ok:
         log_admin_action(admin_id, "remove_copy_trader", f"trader_id={trader_id}")
@@ -75,7 +75,7 @@ def remove_copy_trader(admin_id: int, trader_id: int) -> tuple[bool, str]:
 
 
 def list_copy_traders() -> list[dict]:
-    from src.nadobro.services.copy_service import get_available_traders
+    from src.nadobro.trading.copy_service import get_available_traders
     return get_available_traders()
 
 

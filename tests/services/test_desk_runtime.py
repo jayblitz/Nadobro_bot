@@ -20,7 +20,7 @@ install_test_stubs()
 import inspect
 
 from src.nadobro.engine.controllers import desk as desk_ctrl
-from src.nadobro.services import desk_runtime
+from src.nadobro.trading import desk_runtime
 
 
 def test_every_emitted_event_has_a_notification_template():
@@ -114,7 +114,7 @@ def test_tick_starts_active_and_tears_down_stale(monkeypatch):
 
     monkeypatch.setattr(desk_runtime, "_ensure_session", fake_ensure)
     monkeypatch.setattr(desk_runtime, "_stop_session", fake_stop)
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.RUNTIME", FakeRuntime())
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.RUNTIME", FakeRuntime())
 
     asyncio.run(desk_runtime.tick_desk_runner())
 
@@ -215,7 +215,7 @@ def test_resume_env_flag_restores_legacy_resume(monkeypatch):
             ticked.append((uid, network, strat))
 
     monkeypatch.setattr(desk_runtime, "_ensure_session", fake_ensure)
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.RUNTIME", FakeRuntime())
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.RUNTIME", FakeRuntime())
 
     asyncio.run(desk_runtime.tick_desk_runner())
 
@@ -273,14 +273,14 @@ def test_failed_controller_is_rebuilt_not_ticked_dead(monkeypatch):
         start = AsyncMock()
 
     fake = FakeRuntime()
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.RUNTIME", fake)
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.build_adapter",
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.RUNTIME", fake)
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.build_adapter",
                         lambda *a, **k: object())
-    monkeypatch.setattr("src.nadobro.services.engine_runtime.build_product_meta_from_catalog",
+    monkeypatch.setattr("src.nadobro.strategy.engine_runtime.build_product_meta_from_catalog",
                         lambda *a, **k: {})
     monkeypatch.setattr("src.nadobro.services.user_service.get_user_nado_client",
                         lambda *a, **k: object())
-    monkeypatch.setattr("src.nadobro.services.engine_persistence.DbInventoryRepository",
+    monkeypatch.setattr("src.nadobro.trading.engine_persistence.DbInventoryRepository",
                         lambda *a, **k: object())
 
     asyncio.run(desk_runtime._ensure_session(7, "mainnet"))

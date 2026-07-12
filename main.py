@@ -143,9 +143,9 @@ async def _start_bootstrap_health_server(port: int):
 def _runtime_health_payload() -> dict:
     payload = {"status": "ok", "ts": time.time()}
     try:
-        from src.nadobro.services.execution_queue import get_queue_diagnostics
+        from src.nadobro.trading.execution_queue import get_queue_diagnostics
         from src.nadobro.services.runtime_supervisor import get_runtime_supervisor_diagnostics
-        from src.nadobro.services.copy_service import get_copy_polling_diagnostics
+        from src.nadobro.trading.copy_service import get_copy_polling_diagnostics
         from src.nadobro.services.scheduler import get_scheduler_diagnostics
         from src.nadobro.core.perf import summary_lines
 
@@ -171,7 +171,7 @@ def _runtime_health_payload() -> dict:
             from src.nadobro.core.async_utils import pool_stats
             from src.nadobro.core.user_circuit import snapshot as circuit_snapshot
             from src.nadobro.core.feature_flags import strategy_scheduler_enabled
-            from src.nadobro.services.strategy_scheduler import get_scheduler
+            from src.nadobro.strategy.strategy_scheduler import get_scheduler
 
             payload["gateway"] = gateway_snapshot()
             payload["ws_health"] = ws_snapshot()
@@ -301,7 +301,7 @@ async def run_bot():
     bot_app = setup_bot()
 
     from src.nadobro.services.scheduler import set_bot_app, set_check_client, start_scheduler
-    from src.nadobro.services.bot_runtime import (
+    from src.nadobro.strategy.bot_runtime import (
         set_bot_app as set_runtime_app,
         restore_running_bots,
         stop_runtime,
@@ -312,9 +312,9 @@ async def run_bot():
         stop_runtime_supervisor,
     )
     from src.nadobro.services.scheduler import handle_alert_job
-    from src.nadobro.services.execution_queue import register_handlers, start_workers, stop_workers
-    from src.nadobro.services.copy_service import set_copy_bot_app
-    from src.nadobro.services.copy_service import start_copy_polling, stop_copy_polling
+    from src.nadobro.trading.execution_queue import register_handlers, start_workers, stop_workers
+    from src.nadobro.trading.copy_service import set_copy_bot_app
+    from src.nadobro.trading.copy_service import start_copy_polling, stop_copy_polling
     from src.nadobro.services.vault_deposit_watch_service import set_vault_watch_bot_app
     set_bot_app(bot_app)
     set_runtime_app(bot_app)
@@ -329,7 +329,7 @@ async def run_bot():
     )
     start_runtime_supervisor()
     from src.nadobro.services.runtime_supervisor import runtime_mode
-    from src.nadobro.services.execution_queue import get_queue_diagnostics
+    from src.nadobro.trading.execution_queue import get_queue_diagnostics
 
     _diag = get_queue_diagnostics()
     logger.info(
@@ -368,8 +368,8 @@ async def run_bot():
 
     start_scheduler()
     from src.nadobro.core.feature_flags import strategy_scheduler_enabled
-    from src.nadobro.services.strategy_scheduler import get_scheduler
-    from src.nadobro.services.bot_runtime import _load_state
+    from src.nadobro.strategy.strategy_scheduler import get_scheduler
+    from src.nadobro.strategy.bot_runtime import _load_state
 
     if strategy_scheduler_enabled():
         await get_scheduler().start(_load_state)
@@ -381,7 +381,7 @@ async def run_bot():
     restore_running_bots(enabled=auto_restore)
     try:
         from src.nadobro.core.feature_flags import time_limit_enabled
-        from src.nadobro.services.time_limit_watcher import time_limit_tick
+        from src.nadobro.strategy.time_limit_watcher import time_limit_tick
 
         if time_limit_enabled():
             asyncio.create_task(time_limit_tick())
@@ -581,7 +581,7 @@ async def run_bot():
         logger.info("Shutting down...")
         from src.nadobro.services.scheduler import stop_scheduler
         from src.nadobro.core.feature_flags import strategy_scheduler_enabled
-        from src.nadobro.services.strategy_scheduler import get_scheduler
+        from src.nadobro.strategy.strategy_scheduler import get_scheduler
         from src.nadobro.venue.nado_ws import portfolio_ws
 
         stop_scheduler()

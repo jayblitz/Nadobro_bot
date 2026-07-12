@@ -85,7 +85,7 @@ def test_analyze_activity_llm_bad_shape_keeps_fallback(monkeypatch):
 
 def test_night_howl_report_includes_overlay_section(monkeypatch):
     import src.nadobro.models.database as db
-    import src.nadobro.services.bot_runtime as br
+    import src.nadobro.strategy.bot_runtime as br
     import src.nadobro.llm.night_howl_service as nh
 
     now = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)

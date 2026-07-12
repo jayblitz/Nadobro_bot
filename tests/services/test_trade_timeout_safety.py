@@ -8,7 +8,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 from src.nadobro.models.database import TradeStatus
-from src.nadobro.services import trade_service
+from src.nadobro.trading import trade_service
 
 
 class _Client:
@@ -38,10 +38,10 @@ class TradeTimeoutSafetyTests(unittest.TestCase):
         ), patch.object(
             trade_service, "_submit_with_timeout", return_value=(False, "Order submit timed out after 25s")
         ), patch(
-            "src.nadobro.services.order_intents.reserve_order_intent",
+            "src.nadobro.trading.order_intents.reserve_order_intent",
             return_value=(True, {"intent_id": "intent"}),
         ), patch(
-            "src.nadobro.services.order_intents.update_order_intent"
+            "src.nadobro.trading.order_intents.update_order_intent"
         ):
             result = trade_service.execute_market_order(
                 telegram_id=42,

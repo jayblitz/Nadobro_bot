@@ -627,7 +627,7 @@ def test_vol_risk_limits_track_session_margin():
     rounding headroom. The old grid fallback gave every vol session $100 caps:
     prod session 104's lot-rounded $101.01 close was rejected 1.4s after the
     buy fill (max_single_order_quote), stranding the bought spot."""
-    from src.nadobro.services.engine_runtime import map_risk_limits
+    from src.nadobro.strategy.engine_runtime import map_risk_limits
 
     lim = map_risk_limits({"session_margin_usd": 100.0}, "vol")
     assert float(lim.max_single_order_quote) == 150.0     # covers $101.01

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _handle_copy(query, data, context, telegram_id):
-    from src.nadobro.services.copy_service import (
+    from src.nadobro.trading.copy_service import (
         get_available_traders, get_user_copies, start_copy, stop_copy,
         pause_copy, resume_copy, get_trader_stats, get_trader_preview,
     )

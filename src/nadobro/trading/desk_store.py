@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from src.nadobro.db import execute, execute_returning, query_all, query_one
-from src.nadobro.services.desk_plans import (
+from src.nadobro.trading.desk_plans import (
     ACTIVE_STATUSES,
     ST_AWAITING_TRIGGER,
     ST_CANCELLED,

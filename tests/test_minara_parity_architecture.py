@@ -43,7 +43,7 @@ def test_nanogpt_json_extract_strips_fences():
 
 
 def test_strategy_fsm_infers_failed_recoverable_state():
-    from src.nadobro.services.strategy_fsm import PHASE_FAILED, infer_phase
+    from src.nadobro.strategy.strategy_fsm import PHASE_FAILED, infer_phase
 
     phase = infer_phase({"running": True, "last_error": "archive fill sync failed"})
 
@@ -53,7 +53,7 @@ def test_strategy_fsm_infers_failed_recoverable_state():
 
 
 def test_strategy_fsm_maps_volume_pending_fill_to_waiting_fill():
-    from src.nadobro.services.strategy_fsm import PHASE_WAITING_FILL, infer_phase
+    from src.nadobro.strategy.strategy_fsm import PHASE_WAITING_FILL, infer_phase
 
     phase = infer_phase({"running": True, "vol_phase": "pending_fill"})
 
@@ -164,10 +164,10 @@ def test_order_intent_suppresses_recent_duplicate(monkeypatch):
     def fake_set(key, value):
         store[key] = value
 
-    monkeypatch.setattr("src.nadobro.services.order_intents.get_bot_state", fake_get)
-    monkeypatch.setattr("src.nadobro.services.order_intents.set_bot_state", fake_set)
+    monkeypatch.setattr("src.nadobro.trading.order_intents.get_bot_state", fake_get)
+    monkeypatch.setattr("src.nadobro.trading.order_intents.set_bot_state", fake_set)
 
-    from src.nadobro.services.order_intents import create_order_intent, should_skip_duplicate
+    from src.nadobro.trading.order_intents import create_order_intent, should_skip_duplicate
 
     create_order_intent("abc", {"trade_id": 7, "status": "pending"})
     skip, existing = should_skip_duplicate("abc")

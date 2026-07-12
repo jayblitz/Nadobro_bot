@@ -7,7 +7,7 @@ import subprocess
 import time
 from typing import Any
 
-from src.nadobro.services.execution_queue import get_queue_diagnostics
+from src.nadobro.trading.execution_queue import get_queue_diagnostics
 from src.nadobro.core.perf import snapshot as perf_snapshot
 from src.nadobro.utils.env import env_bool, env_float
 from src.nadobro.config import (
@@ -295,7 +295,7 @@ def parse_trigger_intent(text: str) -> dict[str, Any] | None:
 
 
 def get_ops_diagnostics(telegram_id: int | None = None) -> dict[str, Any]:
-    from src.nadobro.services.bot_runtime import get_runtime_diagnostics
+    from src.nadobro.strategy.bot_runtime import get_runtime_diagnostics
     from src.nadobro.services.runtime_supervisor import runtime_mode
 
     payload: dict[str, Any] = {

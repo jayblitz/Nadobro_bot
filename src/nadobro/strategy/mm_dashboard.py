@@ -166,7 +166,7 @@ def build_pretrade_breakdown(
     cycle_cfg = max(0.0, _safe_float(conf.get("cycle_notional_usd"), notional_usd))
     # Honor the per-strategy SL field (rgrid/dgrid store it as rgrid_stop_loss_pct)
     # so the "max loss" preview matches the SL the engine actually enforces.
-    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+    from src.nadobro.strategy.strategy_registry import effective_sl_tp_pct
     sl_pct = max(0.0, effective_sl_tp_pct(strategy_id, conf)[0])
     # F8 (Phase 5 audit): mirror mm_bot.run_cycle's safety-factor logic exactly.
     # mm_bot only honors a state-set safety factor when it's >= 1.0; otherwise

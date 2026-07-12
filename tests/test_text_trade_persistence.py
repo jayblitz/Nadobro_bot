@@ -66,9 +66,9 @@ def _patched_execute(sql, params=()):
 
 
 _store_patches = [
-    patch("src.nadobro.services.text_trade_pending.get_bot_state", _patched_get_bot_state),
-    patch("src.nadobro.services.text_trade_pending.set_bot_state", _patched_set_bot_state),
-    patch("src.nadobro.services.text_trade_pending.execute", _patched_execute),
+    patch("src.nadobro.trading.text_trade_pending.get_bot_state", _patched_get_bot_state),
+    patch("src.nadobro.trading.text_trade_pending.set_bot_state", _patched_set_bot_state),
+    patch("src.nadobro.trading.text_trade_pending.execute", _patched_execute),
 ]
 
 
@@ -91,7 +91,7 @@ class TextTradePendingPersistenceTests(unittest.TestCase):
         _stop_patches()
 
     def test_persist_and_load_roundtrip(self):
-        from src.nadobro.services.text_trade_pending import (
+        from src.nadobro.trading.text_trade_pending import (
             clear_text_trade_pending,
             load_text_trade_pending,
             persist_text_trade_pending,
@@ -112,7 +112,7 @@ class TextTradePendingPersistenceTests(unittest.TestCase):
         self.assertIsNone(load_text_trade_pending(42))
 
     def test_load_returns_none_after_ttl(self):
-        from src.nadobro.services import text_trade_pending as ttp
+        from src.nadobro.trading import text_trade_pending as ttp
 
         ttp.persist_text_trade_pending(7, {"direction": "long", "product": "ETH"})
         # Force the stored timestamp to be beyond the TTL window.
@@ -124,7 +124,7 @@ class TextTradePendingPersistenceTests(unittest.TestCase):
         self.assertNotIn(f"text_trade_pending:7", _store.store)
 
     def test_close_all_persistence_roundtrip(self):
-        from src.nadobro.services.text_trade_pending import (
+        from src.nadobro.trading.text_trade_pending import (
             clear_text_close_all_pending,
             load_text_close_all_pending,
             persist_text_close_all_pending,
@@ -149,7 +149,7 @@ class HandlePendingTextTradeConfirmationHydrationTest(unittest.TestCase):
 
     def test_confirm_hydrates_pending_from_bot_state_and_executes(self):
         from src.nadobro.handlers import intent_handlers
-        from src.nadobro.services.text_trade_pending import persist_text_trade_pending
+        from src.nadobro.trading.text_trade_pending import persist_text_trade_pending
 
         payload = {
             "direction": "short", "product": "BTC", "order_type": "limit",
@@ -195,7 +195,7 @@ class HandlePendingTextTradeConfirmationHydrationTest(unittest.TestCase):
 
     def test_cancel_clears_persisted_state(self):
         from src.nadobro.handlers import intent_handlers
-        from src.nadobro.services.text_trade_pending import persist_text_trade_pending
+        from src.nadobro.trading.text_trade_pending import persist_text_trade_pending
 
         persist_text_trade_pending(
             555,

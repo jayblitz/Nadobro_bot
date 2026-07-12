@@ -26,7 +26,7 @@ full chain and verify each link:
 - **Dead inputs**: any strategy where the user sets SL/TP but no code reads it (e.g. vol).
 
 ## Method & rules
-- `git log -p --follow src/nadobro/services/strategy_registry.py | head -200` and the same for `live_session.py` to see prior SL/TP fixes and avoid re-flagging fixed issues.
+- `git log -p --follow src/nadobro/strategy/strategy_registry.py | head -200` and the same for `live_session.py` to see prior SL/TP fixes and avoid re-flagging fixed issues.
 - Where feasible, write a tiny throwaway repro with `python3 -c` calling `effective_sl_tp_pct` / `map_strategy_config` to demonstrate the bug empirically (read-only, no file writes).
 - Every claim cites `file:line` + a code quote, tagged `[VERIFIED]`/`[SUSPECTED]`. Never invent a bug; mark clean paths clean.
 - Cross-check against `tests/engine/test_sltp_invariants.py` — if an invariant there is green but you think it's broken, you are probably wrong; re-trace.

@@ -233,7 +233,7 @@ def test_build_report_bounds_trade_query_to_last_24h(monkeypatch, memstore):
     monkeypatch.setattr(db, "get_trades_by_user", _trades)
     monkeypatch.setattr(db, "get_account_realized_pnl_windows", lambda *a, **k: {})
     # DB-independent: stub the live-state read the backtest branch would make.
-    import src.nadobro.services.bot_runtime as br
+    import src.nadobro.strategy.bot_runtime as br
     monkeypatch.setattr(br, "_load_state", lambda *a, **k: {})
 
     report = nh.build_report(7, "mainnet", now_utc=now)

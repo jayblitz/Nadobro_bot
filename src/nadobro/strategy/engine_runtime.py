@@ -72,7 +72,7 @@ def build_adapter(
 
 
 def build_risk_engine(limits: Optional[RiskLimits] = None) -> RiskEngine:
-    from src.nadobro.services.engine_persistence import DbKillSwitchStore
+    from src.nadobro.trading.engine_persistence import DbKillSwitchStore
 
     return RiskEngine(limits or RiskLimits(), kill_switch=DbKillSwitchStore())
 
@@ -157,7 +157,7 @@ class EngineRuntime:
         # the build/tick gate would skip building — strategy never places an
         # order. Scoping to the active session means only THIS run's executors
         # count, and stale rows from dead runs are ignored.
-        from src.nadobro.services.engine_persistence import resolve_running_session_id
+        from src.nadobro.trading.engine_persistence import resolve_running_session_id
         session_id = resolve_running_session_id(strategy, user_id, network)
         return _remote_active(strategy, user_id, network, session_id)
 
@@ -268,7 +268,7 @@ class EngineRuntime:
             # process leaves stale ACTIVE rows that _remote_active would treat as
             # "still running" — blocking the next run from ever building.
             try:
-                from src.nadobro.services.engine_persistence import terminate_engine_executors
+                from src.nadobro.trading.engine_persistence import terminate_engine_executors
                 terminate_engine_executors(cid)
             except Exception:  # noqa: BLE001
                 logger.debug("cross-process executor terminate sweep failed for %s", cid, exc_info=True)
@@ -277,7 +277,7 @@ class EngineRuntime:
         # Clear the live-progress row so a stopped strategy doesn't leave stale
         # cycles/funding behind for the next start. Best-effort.
         try:
-            from src.nadobro.services.engine_persistence import clear_controller_progress
+            from src.nadobro.trading.engine_persistence import clear_controller_progress
 
             clear_controller_progress(deterministic_controller_id(strategy, user_id, network))
         except Exception:  # noqa: BLE001
@@ -575,7 +575,7 @@ def _remote_active(
 
 
 def _default_runtime() -> EngineRuntime:
-    from src.nadobro.services.engine_persistence import (
+    from src.nadobro.trading.engine_persistence import (
         DbExecutorStore,
         DbTradeRecorder,
     )
@@ -753,7 +753,7 @@ def map_strategy_config(
     # SL/TP honor the per-strategy fields (rgrid/dgrid store them under
     # rgrid_stop_loss_pct / rgrid_take_profit_pct), so a user's custom value
     # drives the barrier instead of the sl_pct/tp_pct default.
-    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+    from src.nadobro.strategy.strategy_registry import effective_sl_tp_pct
     _sl_pct, _tp_pct = effective_sl_tp_pct(strategy, settings)
     if _tp_pct <= 0:
         _tp_pct = _f(settings, "tp_pct", 0.6)
@@ -1227,7 +1227,7 @@ def _persist_dn_progress(telegram_id: int, network: str, strategy: str) -> None:
         controller = RUNTIME._controllers.get((telegram_id, network, strategy))  # noqa: SLF001
         if controller is None:
             return
-        from src.nadobro.services.engine_persistence import upsert_controller_progress
+        from src.nadobro.trading.engine_persistence import upsert_controller_progress
 
         upsert_controller_progress(
             controller.id,
@@ -1461,7 +1461,7 @@ async def _maybe_apply_overlay(
     mapped ``configs`` in place. Best-effort: any failure leaves the base config
     untouched. Candle fetch + persistence run off the event loop."""
     try:
-        from src.nadobro.services.overlay_actuator import (
+        from src.nadobro.strategy.overlay_actuator import (
             APPLIED_OVERRIDE_KEYS,
             apply_overrides_to_configs,
             compute_overrides,
@@ -1477,9 +1477,9 @@ async def _maybe_apply_overlay(
             return
 
         from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
-        from src.nadobro.services import market_features as _mf
+        from src.nadobro.strategy import market_features as _mf
         from src.nadobro.llm.signal_engine import build_signal
-        from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+        from src.nadobro.strategy.strategy_registry import effective_sl_tp_pct
 
         def _gather() -> Dict[str, Dict[str, object]]:
             def _fetch(p, tf, lim):
@@ -1625,7 +1625,7 @@ async def run_engine_cycle(
     """Gated per-cycle driver called from bot_runtime's async loop. Starts the
     controller on first cycle, ticks it thereafter. Returns a dispatch-style
     result dict. Live execution validated on testnet."""
-    from src.nadobro.services.engine_persistence import DbInventoryRepository
+    from src.nadobro.trading.engine_persistence import DbInventoryRepository
 
     strategy = str(state.get("strategy") or "")
     if strategy not in ENGINE_MAPPED_STRATEGIES:
@@ -1695,7 +1695,7 @@ async def run_engine_cycle(
     # left a non-terminated executor row making is_running() True — otherwise a
     # crashed/recycled worker would no-op forever. The main/non-worker fallback
     # still defers to a live owner (is_running True) so it never double-builds.
-    from src.nadobro.services.bot_runtime import is_process_worker_mode
+    from src.nadobro.strategy.bot_runtime import is_process_worker_mode
     _has_local = RUNTIME.has_local_active(telegram_id, network, strategy)
     _worker_mode = is_process_worker_mode()
     _should_build = _should_build_controller(
@@ -1754,7 +1754,7 @@ async def run_engine_cycle(
             # stable across runs) can never bleed into a new run.
             if int(_f(state, "runs", 0)) > 0:
                 try:
-                    from src.nadobro.services.engine_persistence import (
+                    from src.nadobro.trading.engine_persistence import (
                         get_controller_progress,
                     )
 
@@ -1781,7 +1781,7 @@ async def run_engine_cycle(
                         if _phase in {"OPENING", "HOLDING", "CLOSING"}:
                             try:
                                 from src.nadobro.core.async_utils import run_blocking_sdk
-                                from src.nadobro.services.trade_service import (
+                                from src.nadobro.trading.trade_service import (
                                     close_delta_neutral_legs,
                                 )
                                 logger.warning(
@@ -1809,7 +1809,7 @@ async def run_engine_cycle(
         if configs.get("controller_override") == "fill_anchored":
             try:
                 from src.nadobro.core.async_utils import run_blocking_db
-                from src.nadobro.services.engine_persistence import resolve_running_session_id
+                from src.nadobro.trading.engine_persistence import resolve_running_session_id
                 from src.nadobro.models.database import get_session_recent_fills
 
                 _sid = await run_blocking_db(

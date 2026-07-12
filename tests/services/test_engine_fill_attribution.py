@@ -15,7 +15,7 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import patch
 
-from src.nadobro.services.engine_persistence import DbTradeRecorder
+from src.nadobro.trading.engine_persistence import DbTradeRecorder
 from src.nadobro.engine.types import TradeType
 
 
@@ -23,7 +23,7 @@ def test_link_placement_writes_intent_at_placement():
     rec = DbTradeRecorder()
     execs: list = []
     with patch(
-        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        "src.nadobro.trading.engine_persistence.resolve_running_session_id",
         return_value=90,
     ), patch("src.nadobro.db.execute", side_effect=lambda *a, **k: execs.append(a)):
         rec.link_placement("rgrid:42:mainnet", "0xdeadbeef")
@@ -41,7 +41,7 @@ def test_link_placement_noop_without_session():
     rec = DbTradeRecorder()
     execs: list = []
     with patch(
-        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        "src.nadobro.trading.engine_persistence.resolve_running_session_id",
         return_value=None,
     ), patch("src.nadobro.db.execute", side_effect=lambda *a, **k: execs.append(a)):
         rec.link_placement("rgrid:42:mainnet", "0xabc")
@@ -51,7 +51,7 @@ def test_link_placement_noop_without_session():
 def _record(rec, venue_row_exists: bool):
     inserted: list = []
     with patch(
-        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        "src.nadobro.trading.engine_persistence.resolve_running_session_id",
         return_value=90,
     ), patch(
         "src.nadobro.venue.product_catalog.get_product_id", return_value=2
@@ -90,7 +90,7 @@ def test_recorder_resolves_dn_spot_leg_product_id():
     inserted: list = []
 
     with patch(
-        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        "src.nadobro.trading.engine_persistence.resolve_running_session_id",
         return_value=90,
     ), patch(
         "src.nadobro.venue.product_catalog.get_spot_product_id", return_value=118
@@ -125,16 +125,16 @@ def test_recorder_records_sessionless_desk_fill_as_manual():
     tagged: list = []
     stats: list = []
     with patch(
-        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        "src.nadobro.trading.engine_persistence.resolve_running_session_id",
         return_value=None,
     ), patch(
-        "src.nadobro.services.engine_persistence._resolve_engine_fill_product",
+        "src.nadobro.trading.engine_persistence._resolve_engine_fill_product",
         return_value=(2, "BTC-PERP"),
     ), patch(
         "src.nadobro.models.database.insert_trade",
         side_effect=lambda d, network=None: inserted.append(d) or 1,
     ), patch(
-        "src.nadobro.services.order_intents.link_digest_intent",
+        "src.nadobro.trading.order_intents.link_digest_intent",
         side_effect=lambda *a, **k: tagged.append(k) or True,
     ), patch("src.nadobro.db.query_one", return_value=None), patch(
         "src.nadobro.services.user_service.update_trade_stats",
@@ -169,7 +169,7 @@ def test_recorder_still_skips_sessionless_non_desk_fill():
     rec = DbTradeRecorder()
     inserted: list = []
     with patch(
-        "src.nadobro.services.engine_persistence.resolve_running_session_id",
+        "src.nadobro.trading.engine_persistence.resolve_running_session_id",
         return_value=None,
     ), patch(
         "src.nadobro.models.database.insert_trade",

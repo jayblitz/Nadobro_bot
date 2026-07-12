@@ -54,7 +54,7 @@ from src.nadobro.models.database import (
 from src.nadobro.db import query_all
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.services.settings_service import get_strategy_settings
-from src.nadobro.services.trade_service import (
+from src.nadobro.trading.trade_service import (
     close_all_positions,
     close_delta_neutral_legs,
     get_trade_analytics,
@@ -69,16 +69,16 @@ from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.core.perf import timed_metric, record_metric
 from src.nadobro.utils.env import env_bool, env_tristate
 from src.nadobro.core.cadence import FAST_CADENCE_STRATEGIES, effective_interval_seconds
-from src.nadobro.services.execution_queue import enqueue_strategy
+from src.nadobro.trading.execution_queue import enqueue_strategy
 from src.nadobro.core.feature_flags import legacy_bro_autoloop_enabled
-from src.nadobro.services.strategy_registry import (
+from src.nadobro.strategy.strategy_registry import (
     SUPPORTED_STRATEGIES,
     migrate_state_strategy,
     normalize_strategy_id,
     runtime_strategy_default,
     strategy_display_name,
 )
-from src.nadobro.services.strategy_lifecycle import cleanup_strategy_positions
+from src.nadobro.strategy.strategy_lifecycle import cleanup_strategy_positions
 
 logger = logging.getLogger(__name__)
 
@@ -480,7 +480,7 @@ def _stop_engine_runtime_for_state(telegram_id: int, network: str, state: dict) 
     if not strategy:
         return True, None
     try:
-        from src.nadobro.services import engine_runtime
+        from src.nadobro.strategy import engine_runtime
     except Exception as exc:  # noqa: BLE001
         logger.warning("engine runtime import failed during stop user=%s: %s", telegram_id, exc, exc_info=True)
         return False, str(exc)
@@ -751,7 +751,7 @@ def _finalize_session(state: dict, stop_reason: str = "stopped"):
     # funding AFTER the human-column rollup so the session card matches reality.
     # Gated to engine strategies so legacy sessions keep their rollup PnL.
     try:
-        from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+        from src.nadobro.strategy.engine_runtime import ENGINE_MAPPED_STRATEGIES
 
         strat = _normalize_strategy_id(str(state.get("strategy") or ""))
         if strat in ENGINE_MAPPED_STRATEGIES:
@@ -1052,7 +1052,7 @@ def start_user_bot(
             # Match map_strategy_config's deployed basis exactly: cycle_notional
             # fallback notional, × the EFFECTIVE leverage (mm_leverage_override,
             # venue-capped) — otherwise the duration + chunk cap would be skewed.
-            from src.nadobro.services.engine_runtime import _effective_leverage
+            from src.nadobro.strategy.engine_runtime import _effective_leverage
             _notional = float(state.get("cycle_notional_usd") or state.get("notional_usd") or 0.0)
             _deployed = _notional * _effective_leverage(state, float(state.get("leverage") or 1.0))
             _vol = _best_effort_pair_24h_volume_usd(telegram_id, network, product.upper())
@@ -1154,7 +1154,7 @@ def start_user_bot(
     # (e.g., engine_v2 disabled, controller construction failed) DOES bubble
     # up and we tear down the session so the user can retry cleanly.
     try:
-        from src.nadobro.services import engine_runtime as _er
+        from src.nadobro.strategy import engine_runtime as _er
 
         if _er.engine_v2_enabled() and strategy in _er.ENGINE_MAPPED_STRATEGIES:
             from src.nadobro.services.runtime_supervisor import (
@@ -1375,7 +1375,7 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
         task.cancel()
     try:
         from src.nadobro.core.feature_flags import strategy_scheduler_enabled
-        from src.nadobro.services.strategy_scheduler import get_scheduler
+        from src.nadobro.strategy.strategy_scheduler import get_scheduler
 
         if strategy_scheduler_enabled():
             get_scheduler().unregister(telegram_id, network)
@@ -1498,7 +1498,7 @@ def stop_all_user_bots(telegram_id: int, cancel_orders: bool = True) -> tuple[bo
 def stop_all_automation_for_user(telegram_id: int) -> tuple[bool, str]:
     """Stop strategy loops (with Nado cleanup) and halt active copy mirrors."""
     ok_bot, msg_bot = stop_all_user_bots(telegram_id, cancel_orders=True)
-    from src.nadobro.services.copy_service import stop_all_copies
+    from src.nadobro.trading.copy_service import stop_all_copies
 
     ok_copy, msg_copy = stop_all_copies(telegram_id)
     parts = [msg_bot]
@@ -1579,13 +1579,13 @@ def get_user_bot_status(telegram_id: int) -> dict:
     engine_order_counts: dict = {}
     _strat_lc = str(state.get("strategy") or "").lower()
     try:
-        from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES as _EMS
+        from src.nadobro.strategy.engine_runtime import ENGINE_MAPPED_STRATEGIES as _EMS
     except Exception:  # noqa: BLE001
         _EMS = ()
     if _strat_lc in _EMS:
         try:
-            from src.nadobro.services.engine_runtime import deterministic_controller_id
-            from src.nadobro.services.engine_persistence import (
+            from src.nadobro.strategy.engine_runtime import deterministic_controller_id
+            from src.nadobro.trading.engine_persistence import (
                 get_controller_progress, count_engine_orders,
                 resolve_running_session_id,
             )
@@ -1604,7 +1604,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
             engine_order_counts = {}
 
     try:
-        from src.nadobro.services.strategy_fsm import infer_phase
+        from src.nadobro.strategy.strategy_fsm import infer_phase
 
         strategy_phase = infer_phase(state).to_dict()
     except Exception:
@@ -1734,7 +1734,7 @@ def get_user_bot_status(telegram_id: int) -> dict:
 
 
 def get_runtime_diagnostics() -> dict:
-    from src.nadobro.services.execution_queue import get_queue_diagnostics
+    from src.nadobro.trading.execution_queue import get_queue_diagnostics
     from src.nadobro.services.runtime_supervisor import runtime_mode
 
     active_loops = len([t for t in _tasks.values() if not t.done()])
@@ -1875,7 +1875,7 @@ def _ensure_task(telegram_id: int, network: str):
     from src.nadobro.core.feature_flags import strategy_scheduler_enabled
 
     if strategy_scheduler_enabled():
-        from src.nadobro.services.strategy_scheduler import get_scheduler
+        from src.nadobro.strategy.strategy_scheduler import get_scheduler
 
         get_scheduler().register(telegram_id, network)
         return
@@ -1969,7 +1969,7 @@ async def _bot_loop(telegram_id: int, network: str):
 async def handle_strategy_job(payload: dict):
     kind = str((payload or {}).get("kind") or "")
     if kind.startswith("time_limit"):
-        from src.nadobro.services.time_limit_watcher import handle_time_limit_job
+        from src.nadobro.strategy.time_limit_watcher import handle_time_limit_job
         await handle_time_limit_job(payload)
         return
     if kind == "condition_order":
@@ -2027,7 +2027,7 @@ async def handle_strategy_job(payload: dict):
                 _job_coalesce_counts.pop(key, None)
                 return
             try:
-                from src.nadobro.services.execution_queue import get_queue_diagnostics
+                from src.nadobro.trading.execution_queue import get_queue_diagnostics
                 from src.nadobro.services.runtime_supervisor import (
                     is_multiprocess_enabled,
                     strategy_worker_group,
@@ -2235,7 +2235,7 @@ def _dispatch_strategy(strategy: str, telegram_id: int, network: str, state: dic
         return {"success": True, "action": "skipped", "reason": "alpha_agent_autoloop_removed"}
     # Engine v2: legacy run_cycle dispatch retired; strategies are managed by
     # engine controllers via the orchestrator (see services/strategy_runtime).
-    from src.nadobro.services.strategy_runtime import dispatch_cycle
+    from src.nadobro.strategy.strategy_runtime import dispatch_cycle
 
     return dispatch_cycle(
         strategy, telegram_id, network, state,
@@ -2413,7 +2413,7 @@ async def _evaluate_mm_duration_rail(
     # before we flatten — otherwise close_all_positions races the still-live
     # controller and leaves "1 open orders remain" (mirrors the SL/TP rail).
     try:
-        from src.nadobro.services import engine_runtime as _er_dur
+        from src.nadobro.strategy import engine_runtime as _er_dur
         if strategy in _er_dur.ENGINE_MAPPED_STRATEGIES:
             await _er_dur.RUNTIME.stop(telegram_id, network, strategy)
     except Exception:  # noqa: BLE001 - close_all_positions is the backstop
@@ -2464,7 +2464,7 @@ async def _evaluate_session_pnl_rail(
     # Honor the per-strategy SL/TP (rgrid/dgrid store them under rgrid_* keys);
     # previously this read sl_pct/tp_pct only, so a custom rgrid/dgrid SL was
     # ignored and the rail used the 0.8 default.
-    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+    from src.nadobro.strategy.strategy_registry import effective_sl_tp_pct
     sl_pct, tp_pct = effective_sl_tp_pct(strategy, state)
     # Overlay-adaptive barriers: when the financial overlay steers this strategy
     # and has written regime-adjusted SL/TP (widen in a trend, tighten in chop),
@@ -2472,7 +2472,7 @@ async def _evaluate_session_pnl_rail(
     # (the engine caps the widening at ~1.3x the user's base) and backstopped by
     # the 10% overlay drawdown cap below.
     try:
-        from src.nadobro.services.overlay_actuator import overlay_applies
+        from src.nadobro.strategy.overlay_actuator import overlay_applies
         if overlay_applies(strategy):
             ov_sl = state.get("overlay_sl_pct")
             ov_tp = state.get("overlay_tp_pct")
@@ -2485,7 +2485,7 @@ async def _evaluate_session_pnl_rail(
     if sl_pct <= 0 and tp_pct <= 0:
         return None
 
-    from src.nadobro.services.session_resolver import resolve_current_strategy_session
+    from src.nadobro.trading.session_resolver import resolve_current_strategy_session
 
     sess = await run_blocking(
         resolve_current_strategy_session,
@@ -2507,7 +2507,7 @@ async def _evaluate_session_pnl_rail(
         )
         _save_state(telegram_id, network, state)
         try:
-            from src.nadobro.services import engine_runtime as _er_stop
+            from src.nadobro.strategy import engine_runtime as _er_stop
             if strategy in _er_stop.ENGINE_MAPPED_STRATEGIES:
                 await _er_stop.RUNTIME.stop(telegram_id, network, strategy)
         except Exception:  # noqa: BLE001 - close_coro still runs as the backstop
@@ -2526,7 +2526,7 @@ async def _evaluate_session_pnl_rail(
         )
         return True, None
 
-    from src.nadobro.services.live_session import get_live_session_snapshot
+    from src.nadobro.trading.live_session import get_live_session_snapshot
 
     snap = await run_blocking(
         get_live_session_snapshot, telegram_id, network, sess,
@@ -2554,7 +2554,7 @@ async def _evaluate_session_pnl_rail(
     # stand-down. It reuses THIS snapshot (no extra live-session read).
     if not reason:
         try:
-            from src.nadobro.services.overlay_actuator import (
+            from src.nadobro.strategy.overlay_actuator import (
                 OVERLAY_DRAWDOWN_CAP_PCT,
                 overlay_applies,
                 overlay_drawdown_breached,
@@ -2573,7 +2573,7 @@ async def _evaluate_session_pnl_rail(
     if reason == "tp_hit":
         state["last_error"] = None
     elif reason == "overlay_drawdown":
-        from src.nadobro.services.overlay_actuator import OVERLAY_DRAWDOWN_CAP_PCT as _cap
+        from src.nadobro.strategy.overlay_actuator import OVERLAY_DRAWDOWN_CAP_PCT as _cap
         state["last_error"] = (
             f"Stopped by overlay drawdown kill-switch (≥{_cap:.0f}% of "
             f"margin): PnL ${pnl:,.2f} ({pct:.2f}% of "
@@ -2594,7 +2594,7 @@ async def _evaluate_session_pnl_rail(
     # on THIS cycle's loop (where the orchestrator was just ticked) so its
     # loop-bound primitives are valid; close_coro is the backstop.
     try:
-        from src.nadobro.services import engine_runtime as _er_stop
+        from src.nadobro.strategy import engine_runtime as _er_stop
         if strategy in _er_stop.ENGINE_MAPPED_STRATEGIES:
             await _er_stop.RUNTIME.stop(telegram_id, network, strategy)
     except Exception:  # noqa: BLE001 - close_coro still runs as the backstop
@@ -2633,7 +2633,7 @@ async def _evaluate_session_pnl_rail(
 
 async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
     try:
-        from src.nadobro.services.strategy_fsm import PHASE_SCANNING, apply_phase
+        from src.nadobro.strategy.strategy_fsm import PHASE_SCANNING, apply_phase
 
         apply_phase(state, PHASE_SCANNING, "Strategy cycle started.")
     except Exception:  # policy: degrade-ok(phase indicator is display-only)
@@ -2919,7 +2919,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     if open_orders is None:
         open_orders = await _fetch_open_orders()
 
-    from src.nadobro.services.engine_runtime import (
+    from src.nadobro.strategy.engine_runtime import (
         ENGINE_MAPPED_STRATEGIES, engine_v2_enabled, run_engine_cycle,
     )
 
@@ -3147,7 +3147,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         state["last_action"] = "engine_completed"
         _save_state(telegram_id, network, state)
         try:
-            from src.nadobro.services import engine_runtime as _er_done
+            from src.nadobro.strategy import engine_runtime as _er_done
             if strategy in _er_done.ENGINE_MAPPED_STRATEGIES:
                 await _er_done.RUNTIME.stop(telegram_id, network, strategy)
         except Exception:  # noqa: BLE001 - finalize already persisted; stop is cleanup
@@ -3263,7 +3263,7 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
         # loop — /mm_status reads live numbers on-demand regardless, and
         # _finalize_session always does the authoritative pass at stop.
         try:
-            from src.nadobro.services.engine_runtime import ENGINE_MAPPED_STRATEGIES
+            from src.nadobro.strategy.engine_runtime import ENGINE_MAPPED_STRATEGIES
 
             if (
                 prev_runs % 6 == 0

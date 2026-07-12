@@ -26,7 +26,7 @@ from src.nadobro.handlers.keyboards import (
     compose_status_overview_kb,
     back_kb,
 )
-from src.nadobro.services.bot_runtime import get_user_bot_status, stop_all_automation_for_user
+from src.nadobro.strategy.bot_runtime import get_user_bot_status, stop_all_automation_for_user
 from src.nadobro.venue.nado_tooling_service import get_ops_diagnostics
 from src.nadobro.services.onboarding_service import (
     is_new_onboarding_complete,
@@ -319,8 +319,8 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
 
     Caller is responsible for MarkdownV2-escaping when sending to Telegram.
     """
-    from src.nadobro.services.bot_runtime import get_user_bot_state, get_user_bot_status
-    from src.nadobro.services import mm_dashboard
+    from src.nadobro.strategy.bot_runtime import get_user_bot_state, get_user_bot_status
+    from src.nadobro.strategy import mm_dashboard
 
     status = get_user_bot_status(telegram_id) or {}
     state = get_user_bot_state(telegram_id) or {}
@@ -341,8 +341,8 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
     # the Nado UI instead of the engine-empty in-memory ``state``.
     live_snapshot = None
     try:
-        from src.nadobro.services.live_session import get_live_session_snapshot
-        from src.nadobro.services.session_resolver import resolve_current_strategy_session
+        from src.nadobro.trading.live_session import get_live_session_snapshot
+        from src.nadobro.trading.session_resolver import resolve_current_strategy_session
         from src.nadobro.services.user_service import get_user_readonly_client
 
         sess = resolve_current_strategy_session(
@@ -389,8 +389,8 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
 
 
 def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:
-    from src.nadobro.services.bot_runtime import get_user_bot_state, get_user_bot_status
-    from src.nadobro.services import mm_dashboard
+    from src.nadobro.strategy.bot_runtime import get_user_bot_state, get_user_bot_status
+    from src.nadobro.strategy import mm_dashboard
 
     state = get_user_bot_state(telegram_id) or {}
     # Prefer DB-recorded fills for the active session (engine strategies record
@@ -400,7 +400,7 @@ def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:
         from src.nadobro.models.database import (
             get_session_recent_fills,
         )
-        from src.nadobro.services.session_resolver import resolve_current_strategy_session
+        from src.nadobro.trading.session_resolver import resolve_current_strategy_session
 
         status = get_user_bot_status(telegram_id) or {}
         network = str(status.get("network") or state.get("network") or "mainnet")

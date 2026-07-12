@@ -628,7 +628,7 @@ def execute_market_order(
         order_nonce = f"manual:{uuid.uuid4().hex}"
     if not intent_id:
         try:
-            from src.nadobro.services.order_intents import build_intent_id
+            from src.nadobro.trading.order_intents import build_intent_id
 
             intent_id = build_intent_id(
                 user_id=telegram_id,
@@ -645,7 +645,7 @@ def execute_market_order(
             intent_id = None
     if intent_id:
         try:
-            from src.nadobro.services.order_intents import (
+            from src.nadobro.trading.order_intents import (
                 OrderIntentReservationError,
                 reserve_order_intent,
             )
@@ -723,7 +723,7 @@ def execute_market_order(
         return {"success": False, "error": "Failed to record trade."}
     if intent_id:
         try:
-            from src.nadobro.services.order_intents import update_order_intent
+            from src.nadobro.trading.order_intents import update_order_intent
 
             update_order_intent(intent_id, status="recorded", trade_id=trade_id)
         except Exception as e:
@@ -779,7 +779,7 @@ def execute_market_order(
             )
         if intent_id:
             try:
-                from src.nadobro.services.order_intents import update_order_intent
+                from src.nadobro.trading.order_intents import update_order_intent
 
                 update_order_intent(intent_id, status="recorded", error=unknown_msg, trade_id=trade_id)
             except Exception as e:
@@ -801,7 +801,7 @@ def execute_market_order(
                     network=network,
                 )
                 if intent_id:
-                    from src.nadobro.services.order_intents import update_order_intent
+                    from src.nadobro.trading.order_intents import update_order_intent
 
                     update_order_intent(intent_id, status="submitted", trade_id=trade_id, order_digest=digest)
             except Exception as e:
@@ -826,7 +826,7 @@ def execute_market_order(
             update_trade(trade_id, update_data, network=network)
             if intent_id:
                 try:
-                    from src.nadobro.services.order_intents import update_order_intent
+                    from src.nadobro.trading.order_intents import update_order_intent
 
                     update_order_intent(
                         intent_id,
@@ -1453,7 +1453,7 @@ def execute_limit_order(
         order_nonce = f"manual:{uuid.uuid4().hex}"
     if not intent_id:
         try:
-            from src.nadobro.services.order_intents import build_intent_id
+            from src.nadobro.trading.order_intents import build_intent_id
 
             intent_id = build_intent_id(
                 user_id=telegram_id,
@@ -1471,7 +1471,7 @@ def execute_limit_order(
             intent_id = None
     if intent_id:
         try:
-            from src.nadobro.services.order_intents import (
+            from src.nadobro.trading.order_intents import (
                 OrderIntentReservationError,
                 reserve_order_intent,
             )
@@ -1534,7 +1534,7 @@ def execute_limit_order(
         return {"success": False, "error": "Failed to record trade."}
     if intent_id:
         try:
-            from src.nadobro.services.order_intents import update_order_intent
+            from src.nadobro.trading.order_intents import update_order_intent
 
             update_order_intent(intent_id, status="recorded", trade_id=trade_id)
         except Exception as e:
@@ -1577,7 +1577,7 @@ def execute_limit_order(
             )
             if intent_id:
                 try:
-                    from src.nadobro.services.order_intents import update_order_intent
+                    from src.nadobro.trading.order_intents import update_order_intent
 
                     update_order_intent(intent_id, status="submitted", trade_id=trade_id, order_digest=digest)
                 except Exception as e:
@@ -1597,7 +1597,7 @@ def execute_limit_order(
             logger.error("Failed to update limit trade %s status to FAILED: %s", trade_id, e)
         if intent_id:
             try:
-                from src.nadobro.services.order_intents import update_order_intent
+                from src.nadobro.trading.order_intents import update_order_intent
 
                 update_order_intent(intent_id, status="failed", error=result.get("error", "Unknown error"), trade_id=trade_id)
             except Exception as e:
@@ -1669,7 +1669,7 @@ def _arm_stop_loss_rule(
 ) -> dict:
     if stop_price is None:
         return {}
-    from src.nadobro.services.stop_loss_service import register_stop_loss_rule
+    from src.nadobro.trading.stop_loss_service import register_stop_loss_rule
 
     side = "LONG" if is_long else "SHORT"
     result = register_stop_loss_rule(
@@ -2459,7 +2459,7 @@ def close_position(
             # session close as manual (losing the session's close volume).
             if close_digest:
                 try:
-                    from src.nadobro.services.order_intents import link_digest_intent
+                    from src.nadobro.trading.order_intents import link_digest_intent
 
                     link_digest_intent(
                         str(close_digest),
@@ -2797,7 +2797,7 @@ def close_all_positions(
                     # session on the same product.
                     if close_digest:
                         try:
-                            from src.nadobro.services.order_intents import link_digest_intent
+                            from src.nadobro.trading.order_intents import link_digest_intent
 
                             if strategy_session_id:
                                 link_digest_intent(

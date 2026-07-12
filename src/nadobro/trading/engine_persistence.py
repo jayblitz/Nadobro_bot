@@ -423,7 +423,7 @@ class DbTradeRecorder:
                 # the venue match stays attributable even if the row above is
                 # ever lost — mirrors the manual close paths.
                 try:
-                    from src.nadobro.services.order_intents import link_digest_intent
+                    from src.nadobro.trading.order_intents import link_digest_intent
 
                     link_digest_intent(
                         str(order_id), network, source="manual",

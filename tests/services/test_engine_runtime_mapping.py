@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from src.nadobro.engine.types import TripleBarrierConfig
-from src.nadobro.services import engine_runtime as er
+from src.nadobro.strategy import engine_runtime as er
 
 
 def test_map_grid_config_centers_band_and_sets_barriers():
@@ -447,7 +447,7 @@ def test_spread_is_per_strategy_user_set():
     """The quoting step must come from the strategy's own user-set spread, not a
     single hardcoded spread_bp for everyone."""
     from decimal import Decimal
-    from src.nadobro.services.engine_runtime import map_strategy_config
+    from src.nadobro.strategy.engine_runtime import map_strategy_config
 
     mid = Decimal("100")
 
@@ -487,7 +487,7 @@ def test_min_max_spread_bp_drive_auto_spread_bounds():
     """min_spread_bp / max_spread_bp (and dgrid_*) now set the per-side spread
     floor/cap (bps → fraction). Unset preserves the legacy 1.5bp / 50bp band."""
     from decimal import Decimal
-    from src.nadobro.services.engine_runtime import map_strategy_config
+    from src.nadobro.strategy.engine_runtime import map_strategy_config
 
     mid = Decimal("100")
     g = map_strategy_config(
@@ -529,7 +529,7 @@ def test_mid_directional_bias_scales_net_exposure_cap_and_clamps():
     (the documented '20% additional margin'), scaling linearly, and bias is
     clamped to [-1, 1]."""
     from decimal import Decimal
-    from src.nadobro.services.engine_runtime import map_strategy_config
+    from src.nadobro.strategy.engine_runtime import map_strategy_config
 
     mid = Decimal("100")
     neutral = map_strategy_config("mid", {"notional_usd": 100.0, "levels": 1}, mid, product="BTC-PERP")
@@ -559,8 +559,8 @@ def test_sl_tp_is_per_strategy_user_set():
     """rgrid/dgrid SL/TP come from rgrid_stop_loss_pct / rgrid_take_profit_pct
     (the fields the UI writes), not the generic sl_pct/tp_pct default."""
     from decimal import Decimal
-    from src.nadobro.services.engine_runtime import map_strategy_config
-    from src.nadobro.services.strategy_registry import effective_sl_tp_pct
+    from src.nadobro.strategy.engine_runtime import map_strategy_config
+    from src.nadobro.strategy.strategy_registry import effective_sl_tp_pct
 
     # resolver
     assert effective_sl_tp_pct("dgrid", {"rgrid_stop_loss_pct": 10.0, "rgrid_take_profit_pct": 50.0,
@@ -585,7 +585,7 @@ def test_should_build_controller_truth_table():
     """The build gate must let the cycle-running worker ADOPT a controller it
     lacks locally (even against a stale remote row), while the non-worker
     fallback defers to a live owner so it never double-builds."""
-    from src.nadobro.services.engine_runtime import _should_build_controller as B
+    from src.nadobro.strategy.engine_runtime import _should_build_controller as B
 
     # Local FAILED controller -> always rebuild.
     assert B(needs_recovery=True, has_local_active=True, worker_mode=True, is_running=True) is True

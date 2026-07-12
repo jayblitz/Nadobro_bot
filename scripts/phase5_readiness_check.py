@@ -205,7 +205,7 @@ def check_pov_engine(network: str, product: str, collateral: float, preset: str)
 
 def check_pretrade_breakdown(network: str, product: str, collateral: float, preset: str, bias: float):
     from src.nadobro.config import get_product_max_leverage
-    from src.nadobro.services import mm_dashboard
+    from src.nadobro.strategy import mm_dashboard
     from src.nadobro.config import NADO_BUILDER_FEE_RATE_1_BPS
 
     def run():
