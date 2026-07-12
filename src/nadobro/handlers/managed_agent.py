@@ -10,7 +10,7 @@ from src.nadobro.handlers.formatters import (
 )
 from src.nadobro.handlers.keyboards import persistent_menu_kb
 from src.nadobro.core.perf import increment_counter
-from src.nadobro.services.managed_agent_state import (
+from src.nadobro.llm.managed_agent_state import (
     get_managed_agent_state,
     is_managed_agent_globally_enabled,
     set_managed_agent_enabled,

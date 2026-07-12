@@ -7,7 +7,7 @@ prompt-injected suggestion can't weaken the Alpha Agent's risk rails.
 """
 from __future__ import annotations
 
-from src.nadobro.services.howl_service import validate_howl_param as v
+from src.nadobro.llm.howl_service import validate_howl_param as v
 
 
 def test_rejects_unknown_parameter():

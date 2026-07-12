@@ -35,8 +35,8 @@ try:
 except Exception:  # optional in degraded/test environments
     OpenAI = None  # type: ignore
 
-from src.nadobro.services.provider_config import nanogpt_api_key
-from src.nadobro.services.nanogpt_client import nanogpt_base_url
+from src.nadobro.llm.provider_config import nanogpt_api_key
+from src.nadobro.llm.nanogpt_client import nanogpt_base_url
 
 _client: Optional["OpenAI"] = None
 
@@ -62,7 +62,7 @@ def gateway_configured() -> bool:
 
 def _timeout() -> float:
     try:
-        from src.nadobro.services.provider_runtime import provider_timeout_seconds
+        from src.nadobro.llm.provider_runtime import provider_timeout_seconds
 
         return provider_timeout_seconds("nanogpt", 90)
     except Exception:
@@ -93,7 +93,7 @@ def model_for(task: str, fallback: Optional[str] = None) -> str:
     trailing ``# note``/description — the exact failure that made the edge
     scanner send ``"...  # edge/market scan"`` and get 400 model_not_supported —
     is stripped back to the bare model id."""
-    from src.nadobro.services.provider_config import clean_env_value
+    from src.nadobro.llm.provider_config import clean_env_value
 
     env, default = _TASK_MODEL_ENV.get(task, ("", ""))
     if env:

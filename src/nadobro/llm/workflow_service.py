@@ -19,14 +19,14 @@ from uuid import uuid4
 import requests
 
 from src.nadobro.models.database import get_bot_state, set_bot_state
-from src.nadobro.services.nanogpt_client import (
+from src.nadobro.llm.nanogpt_client import (
     extract_json_object,
     nanogpt_chat_completion,
     nanogpt_is_configured,
     openai_compatible_chat,
 )
-from src.nadobro.services.provider_config import n8n_base_url, n8n_configured, n8n_deploy_headers
-from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
+from src.nadobro.llm.provider_config import n8n_base_url, n8n_configured, n8n_deploy_headers
+from src.nadobro.llm.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
 from src.nadobro.connectors.source_registry import record_source
 from src.nadobro.utils.env import env_bool
 
@@ -365,7 +365,7 @@ def _workflows_llm_enabled() -> bool:
 
 def _workflow_llm_complete(messages: list[dict[str, Any]]) -> tuple[bool, str]:
     if nanogpt_is_configured():
-        from src.nadobro.services.provider_config import clean_env_value
+        from src.nadobro.llm.provider_config import clean_env_value
 
         model = (
             clean_env_value(os.environ.get("NANOGPT_WORKFLOW_MODEL"))

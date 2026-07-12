@@ -12,7 +12,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.nadobro.services import night_howl_service as nh
+from src.nadobro.llm import night_howl_service as nh
 
 NOW = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc).timestamp()
 

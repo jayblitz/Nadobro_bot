@@ -3098,7 +3098,7 @@ def compute_round_trips(
         # ever repaired enough to extend the window backwards.
         import os
 
-        from src.nadobro.services.provider_config import clean_env_value
+        from src.nadobro.llm.provider_config import clean_env_value
 
         return clean_env_value(os.environ.get("NADO_HISTORY_EPOCH")) or "2026-07-09T00:00:00+00:00"
 

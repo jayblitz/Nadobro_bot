@@ -995,7 +995,7 @@ async def _handle_howl(query, data, telegram_id, context):
 
     if action == "approve" and len(parts) >= 3:
         index = int(parts[2])
-        from src.nadobro.services.howl_service import approve_howl_suggestion, get_pending_howl, format_howl_message
+        from src.nadobro.llm.howl_service import approve_howl_suggestion, get_pending_howl, format_howl_message
         ok, msg = approve_howl_suggestion(telegram_id, network, index)
         pending = get_pending_howl(telegram_id, network)
         if pending:
@@ -1017,7 +1017,7 @@ async def _handle_howl(query, data, telegram_id, context):
 
     elif action == "reject" and len(parts) >= 3:
         index = int(parts[2])
-        from src.nadobro.services.howl_service import reject_howl_suggestion, get_pending_howl, format_howl_message
+        from src.nadobro.llm.howl_service import reject_howl_suggestion, get_pending_howl, format_howl_message
         ok, msg = reject_howl_suggestion(telegram_id, network, index)
         pending = get_pending_howl(telegram_id, network)
         if pending:
@@ -1036,7 +1036,7 @@ async def _handle_howl(query, data, telegram_id, context):
             await _edit_loc(query, "{prefix} {msg}", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"), prefix=prefix, msg=escape_md(msg))
 
     elif action == "approve_all":
-        from src.nadobro.services.howl_service import approve_howl_suggestion, get_pending_howl
+        from src.nadobro.llm.howl_service import approve_howl_suggestion, get_pending_howl
         pending = get_pending_howl(telegram_id, network)
         if pending:
             results = []
@@ -1050,7 +1050,7 @@ async def _handle_howl(query, data, telegram_id, context):
             await _edit_loc(query, "No pending HOWL suggestions\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
 
     elif action == "dismiss":
-        from src.nadobro.services.howl_service import dismiss_all_howl
+        from src.nadobro.llm.howl_service import dismiss_all_howl
         dismiss_all_howl(telegram_id, network)
         await _edit_loc(query, "🐺 HOWL suggestions dismissed\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb("strategy:preview:bro"))
 

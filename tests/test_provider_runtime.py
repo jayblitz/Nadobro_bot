@@ -18,7 +18,7 @@ class _Response:
 
 
 def test_post_json_with_retries_retries_transient_status(monkeypatch):
-    from src.nadobro.services import provider_runtime
+    from src.nadobro.llm import provider_runtime
 
     calls = []
 
@@ -44,7 +44,7 @@ def test_post_json_with_retries_retries_transient_status(monkeypatch):
 
 
 def test_nanogpt_chat_uses_provider_timeout_and_records_degraded(monkeypatch):
-    from src.nadobro.services import nanogpt_client
+    from src.nadobro.llm import nanogpt_client
 
     degraded = {}
 

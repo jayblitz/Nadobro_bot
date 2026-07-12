@@ -1478,7 +1478,7 @@ async def _maybe_apply_overlay(
 
         from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
         from src.nadobro.services import market_features as _mf
-        from src.nadobro.services.signal_engine import build_signal
+        from src.nadobro.llm.signal_engine import build_signal
         from src.nadobro.services.strategy_registry import effective_sl_tp_pct
 
         def _gather() -> Dict[str, Dict[str, object]]:

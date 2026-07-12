@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from src.nadobro.services import overlay_actuator as oa
-from src.nadobro.services.signal_engine import Signal
+from src.nadobro.llm.signal_engine import Signal
 
 
 def test_drawdown_kill_switch():

@@ -142,7 +142,7 @@ def _get_analysis_client():
     """Pick the best available LLM client for edge analysis. NanoGPT gateway
     (one key: Claude / GPT / DMind) is primary; native Grok/OpenAI fall back."""
     try:
-        from src.nadobro.services.llm_gateway import chat_client, model_for
+        from src.nadobro.llm.llm_gateway import chat_client, model_for
 
         gw = chat_client()
         if gw is not None:
@@ -315,7 +315,7 @@ def scan_edges() -> list[dict]:
     # Index into Pinecone if available
     if findings:
         try:
-            from src.nadobro.services.vector_store import index_x_findings_batch, is_available
+            from src.nadobro.llm.vector_store import index_x_findings_batch, is_available
             if is_available():
                 index_x_findings_batch(findings)
         except Exception:
@@ -377,7 +377,7 @@ async def async_initial_scan():
 
     # Index knowledge base into Pinecone
     try:
-        from src.nadobro.services.vector_store import index_knowledge_base, is_available
+        from src.nadobro.llm.vector_store import index_knowledge_base, is_available
         if is_available():
             await loop.run_in_executor(None, index_knowledge_base)
     except Exception:

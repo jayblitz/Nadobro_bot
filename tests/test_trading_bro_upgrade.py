@@ -46,7 +46,7 @@ if "cryptography.fernet" not in sys.modules:
 
 class TradingBroUpgradeTests(unittest.TestCase):
     def test_classifier_treats_mm_build_question_as_learning(self):
-        from src.nadobro.services.conversation_intent import classify_conversation_intent
+        from src.nadobro.llm.conversation_intent import classify_conversation_intent
 
         intent = classify_conversation_intent(
             "How can I build a working MM bot which runs on telegram and has GRID, RGRID, Dynamic GRID and Volume bot?"
@@ -56,7 +56,7 @@ class TradingBroUpgradeTests(unittest.TestCase):
         self.assertGreaterEqual(intent.confidence, 0.8)
 
     def test_managed_agent_does_not_launch_for_educational_strategy_question(self):
-        from src.nadobro.services.managed_agent_service import _is_strategy_start_request
+        from src.nadobro.llm.managed_agent_service import _is_strategy_start_request
 
         self.assertFalse(
             _is_strategy_start_request(
@@ -66,8 +66,8 @@ class TradingBroUpgradeTests(unittest.TestCase):
         self.assertTrue(_is_strategy_start_request("start dgrid BTC 3x"))
 
     def test_trading_bro_question_preserves_user_message_for_router(self):
-        from src.nadobro.services.knowledge_service import _question_for_routing
-        from src.nadobro.services.trading_bro_service import build_trading_bro_question
+        from src.nadobro.llm.knowledge_service import _question_for_routing
+        from src.nadobro.llm.trading_bro_service import build_trading_bro_question
 
         framed = build_trading_bro_question("How do I build an MM bot?", mode="strategy_design")
 
@@ -75,7 +75,7 @@ class TradingBroUpgradeTests(unittest.TestCase):
         self.assertEqual(_question_for_routing(framed), "How do I build an MM bot?")
 
     def test_source_policy_omits_generic_sources_and_keeps_live_provenance(self):
-        from src.nadobro.services.knowledge_service import (
+        from src.nadobro.llm.knowledge_service import (
             _append_freshness_if_live,
             _append_x_links_if_needed,
             _format_provenance_line,
@@ -169,7 +169,7 @@ class TradingBroUpgradeTests(unittest.TestCase):
         self.assertNotIn("`", card.split("*Direct Referrals*")[0])
 
     def test_trading_bro_prompt_uses_cool_buddy_tone(self):
-        from src.nadobro.services.trading_bro_service import build_trading_bro_question
+        from src.nadobro.llm.trading_bro_service import build_trading_bro_question
 
         framed = build_trading_bro_question("Explain D-GRID", mode="educational_guide")
 

@@ -1,7 +1,7 @@
 """Signal fusion engine — deterministic multi-timeframe read → Signal."""
 from __future__ import annotations
 
-from src.nadobro.services.signal_engine import Signal, build_signal
+from src.nadobro.llm.signal_engine import Signal, build_signal
 
 
 def _tf(trend, rsi, hist, drift, vr, atr=0.01):

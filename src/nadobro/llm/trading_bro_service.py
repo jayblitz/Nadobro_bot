@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from src.nadobro.services.conversation_intent import classify_conversation_intent
-from src.nadobro.services.knowledge_service import answer_nado_question, stream_nado_answer
+from src.nadobro.llm.conversation_intent import classify_conversation_intent
+from src.nadobro.llm.knowledge_service import answer_nado_question, stream_nado_answer
 
 
 def answer_mode_for_text(text: str) -> str:

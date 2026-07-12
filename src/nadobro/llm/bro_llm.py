@@ -24,7 +24,7 @@ DECISION_CACHE_TTL = 240
 
 def _llm_timeout_seconds() -> float:
     try:
-        from src.nadobro.services.provider_runtime import provider_timeout_seconds
+        from src.nadobro.llm.provider_runtime import provider_timeout_seconds
 
         return provider_timeout_seconds("bro_llm", 45)
     except Exception:
@@ -35,7 +35,7 @@ def _get_client() -> Optional[OpenAI]:
     # Prefer the NanoGPT gateway (one key: Claude / GPT / DMind) when configured;
     # fall back to native Grok only when NanoGPT is absent.
     try:
-        from src.nadobro.services.llm_gateway import chat_client
+        from src.nadobro.llm.llm_gateway import chat_client
 
         gw = chat_client()
         if gw is not None:
@@ -73,7 +73,7 @@ def chat_json(messages: list[dict], schema: dict | None = None, model: str | Non
     NanoGPT gateway is primary (one key, per-task model); native Grok / OpenAI
     remain fallbacks for when NanoGPT is not configured or is down.
     """
-    from src.nadobro.services.llm_gateway import gateway_configured, model_for
+    from src.nadobro.llm.llm_gateway import gateway_configured, model_for
 
     providers: list[tuple[str, Optional[OpenAI], str]] = []
     if gateway_configured():
@@ -236,7 +236,7 @@ def make_decision(
 
     finance_context = ""
     try:
-        from src.nadobro.services.dmind_service import analyze_financial_context, build_degraded_notice
+        from src.nadobro.llm.dmind_service import analyze_financial_context, build_degraded_notice
 
         dmind = analyze_financial_context(
             "Score this autonomous Nado strategy decision context.",

@@ -280,7 +280,7 @@ async def tick_howl():
     if not _bot_app:
         return
     try:
-        from src.nadobro.services.howl_service import run_howl_analysis, format_howl_message, get_pending_howl
+        from src.nadobro.llm.howl_service import run_howl_analysis, format_howl_message, get_pending_howl
         from src.nadobro.services.bot_runtime import _load_state
         from src.nadobro.db import query_all
         import json
@@ -343,7 +343,7 @@ async def tick_night_howl():
     if not _bot_app:
         return
     try:
-        from src.nadobro.services.night_howl_service import (
+        from src.nadobro.llm.night_howl_service import (
             build_report, last_sent_date, mark_sent, night_howl_due,
             night_howl_enabled, _user_tz_offset,
         )
@@ -803,7 +803,7 @@ async def sync_pending_fills():
 async def tick_edge_scanner():
     """Scan for trading edges, promotions, and multipliers on X."""
     try:
-        from src.nadobro.services.edge_scanner import async_scan_edges
+        from src.nadobro.llm.edge_scanner import async_scan_edges
         await async_scan_edges()
     except Exception as e:
         logger.error("Edge scanner tick failed: %s", e)
@@ -822,7 +822,7 @@ async def tick_perf_slo():
 async def initial_ai_setup():
     """Run initial AI setup: KB indexing + first edge scan."""
     try:
-        from src.nadobro.services.edge_scanner import async_initial_scan
+        from src.nadobro.llm.edge_scanner import async_initial_scan
         await async_initial_scan()
     except Exception as e:
         logger.error("Initial AI setup failed: %s", e)
@@ -839,7 +839,7 @@ async def tick_news_warmup() -> None:
     avoid burning outbound HTTP calls on idle days.
     """
     try:
-        from src.nadobro.services.knowledge_service import _chat_history
+        from src.nadobro.llm.knowledge_service import _chat_history
 
         if not _chat_history:
             logger.debug("news warmup skipped: no recent chat activity")

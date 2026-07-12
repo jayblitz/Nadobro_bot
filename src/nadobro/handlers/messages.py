@@ -14,8 +14,8 @@ from src.nadobro.services.user_service import (
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.trade_service import close_position, close_all_positions, get_trade_analytics
 from src.nadobro.services.alert_service import create_alert
-from src.nadobro.services.conversation_intent import classify_conversation_intent
-from src.nadobro.services.trading_bro_service import answer_mode_for_text, stream_trading_bro_answer
+from src.nadobro.llm.conversation_intent import classify_conversation_intent
+from src.nadobro.llm.trading_bro_service import answer_mode_for_text, stream_trading_bro_answer
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.bot_runtime import start_user_bot
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness, is_new_onboarding_complete
@@ -70,8 +70,8 @@ from src.nadobro.services.referral_service import (
     redeem_referral_code,
     validate_custom_code,
 )
-from src.nadobro.services.managed_agent_state import is_managed_agent_enabled
-from src.nadobro.services.managed_agent_service import handle_managed_agent_turn
+from src.nadobro.llm.managed_agent_state import is_managed_agent_enabled
+from src.nadobro.llm.managed_agent_service import handle_managed_agent_turn
 
 
 async def _reply_loc(message, text, parse_mode=None, reply_markup=None, **fmt):
@@ -514,7 +514,7 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     if await handle_vault_text(update, context):
         return
 
-    from src.nadobro.services.brief_intent import is_brief_request
+    from src.nadobro.llm.brief_intent import is_brief_request
     if is_brief_request(text):
         from src.nadobro.handlers.brief_commands import _send_brief
         await _send_brief(update, context)

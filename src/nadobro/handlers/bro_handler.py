@@ -240,7 +240,7 @@ async def _handle_bro(query, data, telegram_id, context):
     elif action == "explain":
         from src.nadobro.services.budget_guard import get_budget_status
         from src.nadobro.services.settings_service import get_strategy_settings
-        from src.nadobro.services.bro_llm import explain_position
+        from src.nadobro.llm.bro_llm import explain_position
         _, bro_conf = get_strategy_settings(telegram_id, "bro")
         bro_settings = {"budget_usd": bro_conf.get("budget_usd", 500), "risk_level": bro_conf.get("risk_level", "balanced"), "max_loss_pct": bro_conf.get("max_loss_pct", 15)}
         budget_status = await run_blocking(get_budget_status, telegram_id, bro_settings)
@@ -305,7 +305,7 @@ async def _handle_bro(query, data, telegram_id, context):
     elif action == "gameplan":
         from src.nadobro.services.budget_guard import get_budget_status
         from src.nadobro.services.settings_service import get_strategy_settings
-        from src.nadobro.services.bro_llm import generate_game_plan
+        from src.nadobro.llm.bro_llm import generate_game_plan
         _, bro_conf = get_strategy_settings(telegram_id, "bro")
         bro_settings = {"budget_usd": bro_conf.get("budget_usd", 500), "risk_level": bro_conf.get("risk_level", "balanced"), "max_loss_pct": bro_conf.get("max_loss_pct", 15)}
         budget_status = await run_blocking(get_budget_status, telegram_id, bro_settings)
@@ -332,7 +332,7 @@ async def _handle_bro(query, data, telegram_id, context):
         await _edit_loc(query, text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=bro_action_kb())
 
     elif action == "howl":
-        from src.nadobro.services.howl_service import get_pending_howl, format_howl_message
+        from src.nadobro.llm.howl_service import get_pending_howl, format_howl_message
         from src.nadobro.handlers.keyboards import howl_approval_kb
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"

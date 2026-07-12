@@ -219,7 +219,7 @@ async def render_morning_brief(
 
     edge_findings: list[dict] = []
     try:
-        from src.nadobro.services.edge_scanner import get_recent_findings
+        from src.nadobro.llm.edge_scanner import get_recent_findings
 
         edge_findings = get_recent_findings(limit=10)
     except Exception as exc:
@@ -242,7 +242,7 @@ async def render_morning_brief(
 
     parsed: dict = {}
     try:
-        from src.nadobro.services.bro_llm import chat_json
+        from src.nadobro.llm.bro_llm import chat_json
 
         parsed, _provider = await asyncio.to_thread(chat_json, messages, None, None)
     except Exception as exc:

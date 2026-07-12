@@ -75,7 +75,7 @@ def _fallback_recommendations(
 ) -> List[str]:
     """Deterministic recommendations (the existing heuristics) plus a one-line
     overlay note, used when the finance LLM is unavailable."""
-    from src.nadobro.services.night_howl_service import derive_recommendations
+    from src.nadobro.llm.night_howl_service import derive_recommendations
 
     recs = list(derive_recommendations(pattern, backtests))
     dom = signal_summary.get("dominant_regime")
@@ -103,7 +103,7 @@ def analyze_activity(
     """
     fallback = _fallback_recommendations(pattern, signal_summary, backtests)
     try:
-        from src.nadobro.services.dmind_service import (
+        from src.nadobro.llm.dmind_service import (
             analyze_financial_context,
             is_finance_expert_configured,
         )
@@ -154,7 +154,7 @@ def analyze_activity(
         return {"recommendations": fallback, "narrative": "", "risks": [],
                 "provider": str(result.get("provider") or "none"), "degraded": True}
 
-    from src.nadobro.services.nanogpt_client import extract_json_object
+    from src.nadobro.llm.nanogpt_client import extract_json_object
 
     parsed = extract_json_object(str(result.get("text") or "")) or {}
     recs = [str(r).strip() for r in (parsed.get("recommendations") or []) if str(r).strip()]

@@ -64,7 +64,7 @@ def _build_row_from_stats(symbol: str, stats: dict) -> SnapshotRow:
 def _augment_with_cmc(rows: list[SnapshotRow]) -> None:
     """Fill missing 24h change / mid from CoinMarketCap when available."""
     try:
-        from src.nadobro.services.knowledge_service import _is_cmc_available
+        from src.nadobro.llm.knowledge_service import _is_cmc_available
 
         if not _is_cmc_available():
             return
@@ -95,7 +95,7 @@ def _augment_with_cmc(rows: list[SnapshotRow]) -> None:
 
 def _gather_sync(network: str) -> SnapshotPayload:
     from src.nadobro.config import get_perp_products, get_product_id
-    from src.nadobro.services.knowledge_service import (
+    from src.nadobro.llm.knowledge_service import (
         _fetch_fear_greed_index,
         _parse_fng_snapshot,
     )

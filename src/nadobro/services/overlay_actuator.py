@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Dict, Mapping, Optional, Tuple
 
 from src.nadobro.core.feature_flags import env_flag
-from src.nadobro.services.signal_engine import Signal
+from src.nadobro.llm.signal_engine import Signal
 
 OVERLAY_STRATEGIES = ("grid", "rgrid", "dgrid", "mid")
 

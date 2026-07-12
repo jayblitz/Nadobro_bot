@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.nadobro.models.database import get_bot_state_raw, set_bot_state
 from src.nadobro.services.settings_service import get_strategy_settings, update_user_settings
-from src.nadobro.services.bro_llm import analyze_for_howl
+from src.nadobro.llm.bro_llm import analyze_for_howl
 from src.nadobro.db import query_all
 
 logger = logging.getLogger(__name__)

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.nadobro.services import signal_analyst as sa
+from src.nadobro.llm import signal_analyst as sa
 
 
 def _rows():
@@ -52,7 +52,7 @@ def test_analyze_activity_falls_back_without_finance_llm(monkeypatch):
 
 def test_analyze_activity_uses_llm_when_configured(monkeypatch):
     monkeypatch.setenv("NANOGPT_API_KEY", "sk-test")
-    import src.nadobro.services.dmind_service as dmind
+    import src.nadobro.llm.dmind_service as dmind
 
     monkeypatch.setattr(dmind, "is_finance_expert_configured", lambda: True)
     monkeypatch.setattr(dmind, "analyze_financial_context", lambda *a, **k: {
@@ -71,7 +71,7 @@ def test_analyze_activity_uses_llm_when_configured(monkeypatch):
 
 def test_analyze_activity_llm_bad_shape_keeps_fallback(monkeypatch):
     monkeypatch.setenv("NANOGPT_API_KEY", "sk-test")
-    import src.nadobro.services.dmind_service as dmind
+    import src.nadobro.llm.dmind_service as dmind
 
     monkeypatch.setattr(dmind, "is_finance_expert_configured", lambda: True)
     monkeypatch.setattr(dmind, "analyze_financial_context", lambda *a, **k: {
@@ -86,7 +86,7 @@ def test_analyze_activity_llm_bad_shape_keeps_fallback(monkeypatch):
 def test_night_howl_report_includes_overlay_section(monkeypatch):
     import src.nadobro.models.database as db
     import src.nadobro.services.bot_runtime as br
-    import src.nadobro.services.night_howl_service as nh
+    import src.nadobro.llm.night_howl_service as nh
 
     now = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
     # One venue-confirmed fill in-window so the report is non-empty.

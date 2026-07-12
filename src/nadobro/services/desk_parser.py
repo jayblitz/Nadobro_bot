@@ -457,7 +457,7 @@ def parse_desk_intent(
 
     if allow_llm:
         if chat_json_fn is None:
-            from src.nadobro.services.bro_llm import chat_json as chat_json_fn  # type: ignore[no-redef]
+            from src.nadobro.llm.bro_llm import chat_json as chat_json_fn  # type: ignore[no-redef]
         llm = _llm_parse(
             text,
             perp_symbols=perp_symbols,

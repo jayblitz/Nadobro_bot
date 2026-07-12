@@ -620,7 +620,7 @@ def build_report(
         analyst_provider = "none"
         try:
             from src.nadobro.models.database import get_overlay_signals
-            from src.nadobro.services.signal_analyst import (
+            from src.nadobro.llm.signal_analyst import (
                 analyze_activity, summarize_overlay_signals,
             )
 

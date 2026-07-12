@@ -160,7 +160,7 @@ def _fetch_fear_greed_index() -> str:
 def _gateway_client():
     """NanoGPT gateway client (one key: Claude / GPT / DMind) or None."""
     try:
-        from src.nadobro.services.llm_gateway import chat_client
+        from src.nadobro.llm.llm_gateway import chat_client
 
         return chat_client()
     except Exception:  # policy: degrade-ok(fall back to native providers)
@@ -239,7 +239,7 @@ def _model_for(provider: str) -> str:
     # When the NanoGPT gateway is active, all general reasoning uses the
     # gateway chat model regardless of the nominal provider label.
     try:
-        from src.nadobro.services.llm_gateway import gateway_configured, model_for
+        from src.nadobro.llm.llm_gateway import gateway_configured, model_for
 
         if gateway_configured():
             return model_for("chat")
@@ -351,7 +351,7 @@ def _expand_with_synonyms(tokens: set) -> set:
 def _search_knowledge_sections(query: str, top_k: int = 4) -> str:
     # Try Pinecone semantic search first
     try:
-        from src.nadobro.services.vector_store import is_available, search_similar, NS_KNOWLEDGE
+        from src.nadobro.llm.vector_store import is_available, search_similar, NS_KNOWLEDGE
         if is_available():
             hits = search_similar(query, top_k=top_k, namespace=NS_KNOWLEDGE)
             if hits:
@@ -1440,7 +1440,7 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str, network: str 
         # Supplement with relevant past Q&A from vector store
         qa_supplement = ""
         try:
-            from src.nadobro.services.vector_store import search_qa_history, is_available as _vs_ok
+            from src.nadobro.llm.vector_store import search_qa_history, is_available as _vs_ok
             if _vs_ok():
                 qa_hits = search_qa_history(query, top_k=2)
                 qa_parts = []
@@ -1491,7 +1491,7 @@ def _execute_agent_tool(tool_name: str, args: dict, question: str, network: str 
 def _execute_current_edges() -> tuple[str, list[str]]:
     """Return cached edges from the edge scanner."""
     try:
-        from src.nadobro.services.edge_scanner import get_edges_context, get_cached_edges
+        from src.nadobro.llm.edge_scanner import get_edges_context, get_cached_edges
         context = get_edges_context()
         if context:
             return context, [OFFICIAL_SOURCES["x_nado"]]
@@ -1965,7 +1965,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
         # Inject active edges/promotions into context when relevant
         if "[CURRENT EDGES" not in gathered_context:
             try:
-                from src.nadobro.services.edge_scanner import get_edges_context
+                from src.nadobro.llm.edge_scanner import get_edges_context
                 edges_ctx = get_edges_context()
                 if edges_ctx:
                     gathered_context = gathered_context + "\n\n" + edges_ctx
@@ -2053,7 +2053,7 @@ async def stream_nado_answer(question: str, telegram_id: int = None, user_name: 
 
             # Index unique Q&A pairs into Pinecone for future retrieval
             try:
-                from src.nadobro.services.vector_store import index_qa_if_unique, is_available as _vs_available
+                from src.nadobro.llm.vector_store import index_qa_if_unique, is_available as _vs_available
                 if _vs_available() and not _is_casual_message(question):
                     import threading
                     threading.Thread(
@@ -2213,7 +2213,7 @@ async def answer_nado_question(question: str, telegram_id: int = None, user_name
         # Inject active edges/promotions into context when relevant
         if "[CURRENT EDGES" not in gathered_context:
             try:
-                from src.nadobro.services.edge_scanner import get_edges_context
+                from src.nadobro.llm.edge_scanner import get_edges_context
                 edges_ctx = get_edges_context()
                 if edges_ctx:
                     gathered_context = gathered_context + "\n\n" + edges_ctx
