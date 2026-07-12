@@ -34,8 +34,8 @@ from src.nadobro.services.settings_service import get_user_settings
 from src.nadobro.services.user_service import get_user, get_user_readonly_client, get_user_wallet_info
 from src.nadobro.services.points_service import get_points_dashboard
 from src.nadobro.services.referral_service import get_referral_dashboard
-from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk_capped
-from src.nadobro.services.perf import timed_metric
+from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk_capped
+from src.nadobro.core.perf import timed_metric
 
 # Wall-clock ceiling for the data views (positions/wallet) that still issue a
 # live SDK call on the click path. Generous enough for a warm gateway, short
@@ -106,7 +106,7 @@ def _warm_balance_async(client) -> None:
             if now - last < _WARM_DEDUPE_SECONDS:
                 return
             _warm_inflight[key] = now
-        from src.nadobro.services.async_utils import _sdk_pool
+        from src.nadobro.core.async_utils import _sdk_pool
 
         _sdk_pool.submit(_safe_warm_balance, client, key)
     except Exception:

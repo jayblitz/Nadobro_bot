@@ -25,7 +25,7 @@ def record_audit_event(user_id: int | None, action: str, details: str | None = N
     """Insert one append-only audit row. Never raises."""
     try:
         from src.nadobro.db import execute
-        from src.nadobro.services.log_redaction import redact_sensitive_text
+        from src.nadobro.core.log_redaction import redact_sensitive_text
 
         safe_action = str(action or "unknown")[:128]
         safe_details = None

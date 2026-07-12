@@ -155,7 +155,7 @@ def get_user_nado_client(telegram_id: int, network: str | None = None, **kwargs)
         return None
     try:
         import base64
-        from src.nadobro.services.crypto import decrypt_with_server_key
+        from src.nadobro.core.crypto import decrypt_with_server_key
         ciphertext = base64.b64decode(enc_pk) if isinstance(enc_pk, str) else enc_pk
         pk_bytes = decrypt_with_server_key(ciphertext)
         pk = pk_bytes.decode("utf-8") if isinstance(pk_bytes, bytes) else pk_bytes

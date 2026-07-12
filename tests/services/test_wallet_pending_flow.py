@@ -24,7 +24,7 @@ class WalletPendingFlowTests(unittest.TestCase):
             from cryptography.fernet import Fernet
 
             os.environ["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
-            from src.nadobro.services import crypto
+            from src.nadobro.core import crypto
 
             crypto._fernet_instance = None  # drop any cached (key-less) instance
 

@@ -95,7 +95,7 @@ def get_pool():
         # anyway. Letting psycopg2/libpq resolve dual-stack is simpler and works.
         if db_label == "Supabase":
             try:
-                from src.nadobro.services.ipv4_egress import force_ipv4_enabled
+                from src.nadobro.core.ipv4_egress import force_ipv4_enabled
             except Exception:  # pragma: no cover - keep DB init resilient
                 force_ipv4_enabled = lambda: False  # noqa: E731
             if force_ipv4_enabled():

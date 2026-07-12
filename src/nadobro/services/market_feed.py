@@ -48,7 +48,7 @@ async def get_prices(network: str = "mainnet", *, force_refresh: bool = False) -
     if _fetcher is None:
         return dict(_cache.get(net, {}))
     try:
-        from src.nadobro.services.async_utils import run_blocking_sdk
+        from src.nadobro.core.async_utils import run_blocking_sdk
         prices = await run_blocking_sdk(_fetcher)
     except Exception as exc:
         logger.debug("market_feed fetch failed network=%s err=%s", net, exc)

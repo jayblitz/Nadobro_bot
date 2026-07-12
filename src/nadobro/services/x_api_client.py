@@ -15,7 +15,7 @@ from typing import Optional
 
 import requests
 
-from src.nadobro.services.log_redaction import redact_sensitive_text
+from src.nadobro.core.log_redaction import redact_sensitive_text
 from src.nadobro.utils.env import env_int
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ def _clear_credits_depleted_state() -> None:
 
 def _record_x_source(detail: str, confidence: float = 0.85):
     try:
-        from src.nadobro.services.source_registry import record_source
+        from src.nadobro.connectors.source_registry import record_source
 
         record_source(
             "x",

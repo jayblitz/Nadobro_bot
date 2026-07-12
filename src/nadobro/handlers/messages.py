@@ -19,7 +19,7 @@ from src.nadobro.services.trading_bro_service import answer_mode_for_text, strea
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.bot_runtime import start_user_bot
 from src.nadobro.services.onboarding_service import get_resume_step, evaluate_readiness, is_new_onboarding_complete
-from src.nadobro.services.crypto import encrypt_with_server_key
+from src.nadobro.core.crypto import encrypt_with_server_key
 from src.nadobro.services.admin_service import is_trading_paused
 from src.nadobro.config import get_product_id, get_product_max_leverage, get_perp_products
 from src.nadobro.handlers.formatters import (
@@ -108,8 +108,8 @@ from src.nadobro.handlers.intent_handlers import (
     handle_trade_intent_message,
 )
 from src.nadobro.handlers.intent_parser import parse_interaction_intent
-from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk
-from src.nadobro.services.perf import timed_metric, log_slow, increment_counter
+from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
+from src.nadobro.core.perf import timed_metric, log_slow, increment_counter
 
 logger = logging.getLogger(__name__)
 
@@ -545,7 +545,7 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
     # calls. Throttle it per-user so a single account can't spam expensive
     # inference. Quick paths above (buttons, trade flows) are intentionally not
     # rate-limited so normal UX stays snappy.
-    from src.nadobro.services.user_rate_limit import check_rate_limit as _llm_rate_limit
+    from src.nadobro.core.user_rate_limit import check_rate_limit as _llm_rate_limit
 
     allowed, retry_after = _llm_rate_limit(telegram_id, "llm")
     if not allowed:

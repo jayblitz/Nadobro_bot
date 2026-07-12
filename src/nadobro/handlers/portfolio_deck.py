@@ -7,7 +7,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.nadobro.handlers.orders_view import order_kind_label
-from src.nadobro.services.feature_flags import portfolio_sync_enabled, portfolio_sync_interval_seconds
+from src.nadobro.core.feature_flags import portfolio_sync_enabled, portfolio_sync_interval_seconds
 from src.nadobro.services.nado_sync import sync_user
 from src.nadobro.services.user_service import get_user
 from src.nadobro.utils.visual import b, divider, esc, money, pct, pnl_dot, signed_money, stale_banner, time_ago

@@ -37,7 +37,7 @@ def record_provider_degraded(
     source_url: str = "",
 ) -> None:
     try:
-        from src.nadobro.services.source_registry import record_source
+        from src.nadobro.connectors.source_registry import record_source
 
         record_source(
             provider,

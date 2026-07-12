@@ -8,7 +8,7 @@ import time
 
 from src.nadobro.db import execute
 from src.nadobro.models.database import get_bot_state, set_bot_state
-from src.nadobro.services.crypto import decrypt_with_server_key, encrypt_with_server_key
+from src.nadobro.core.crypto import decrypt_with_server_key, encrypt_with_server_key
 
 logger = logging.getLogger(__name__)
 

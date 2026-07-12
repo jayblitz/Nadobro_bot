@@ -49,7 +49,7 @@ def _set_cache(key: str, data):
 
 def _record_cmc_source(detail: str, ttl: int = CMC_CACHE_TTL, confidence: float = 0.9):
     try:
-        from src.nadobro.services.source_registry import record_source
+        from src.nadobro.connectors.source_registry import record_source
 
         record_source(
             "coinmarketcap",

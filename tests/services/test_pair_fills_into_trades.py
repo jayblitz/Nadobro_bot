@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from src.nadobro.services.portfolio_calculator import pair_fills_into_trades
+from src.nadobro.quant.portfolio_calculator import pair_fills_into_trades
 
 T0 = datetime(2026, 6, 21, 0, 0, 0, tzinfo=timezone.utc)
 

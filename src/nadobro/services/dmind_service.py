@@ -16,7 +16,7 @@ from typing import Any
 from src.nadobro.services.nanogpt_client import nanogpt_chat_completion, nanogpt_is_configured
 from src.nadobro.services.provider_config import dmind_configured
 from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds
-from src.nadobro.services.source_registry import record_source
+from src.nadobro.connectors.source_registry import record_source
 
 logger = logging.getLogger(__name__)
 

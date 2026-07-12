@@ -177,7 +177,7 @@ def is_gateway_rate_limited(url: str) -> bool:
 
 def is_gateway_blocked(url: str) -> bool:
     try:
-        from src.nadobro.services.http_session import is_circuit_open
+        from src.nadobro.core.http_session import is_circuit_open
         return is_circuit_open(url) or is_gateway_rate_limited(url)
     except Exception:
         return is_gateway_rate_limited(url)
@@ -296,7 +296,7 @@ def try_acquire(
             _user_inflight[uid] = _user_inflight.get(uid, 0) + 1
     allowed = True
     try:
-        from src.nadobro.services.http_session import throttle_host
+        from src.nadobro.core.http_session import throttle_host
         if not throttle_host(url, cost=w, max_wait=wait):
             allowed = False
         elif uid is not None and not _user_bucket(uid).try_acquire(max_wait=wait, cost=w):
@@ -327,7 +327,7 @@ def snapshot() -> dict:
         inflight = dict(_user_inflight)
         rl_open = {h: s.open_until for h, s in _gateway_rl.items() if time.time() < s.open_until}
     try:
-        from src.nadobro.services.http_session import bucket_snapshot, breaker_snapshot
+        from src.nadobro.core.http_session import bucket_snapshot, breaker_snapshot
         host_buckets = bucket_snapshot()
         breakers = breaker_snapshot()
     except Exception:

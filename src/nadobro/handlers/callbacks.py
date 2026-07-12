@@ -85,8 +85,8 @@ from src.nadobro.config import (
     list_volume_spot_product_names,
     normalize_volume_spot_symbol,
 )
-from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk
-from src.nadobro.services.perf import timed_metric, log_slow
+from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
+from src.nadobro.core.perf import timed_metric, log_slow
 from src.nadobro.services.trading_readiness import check_trading_readiness
 
 logger = logging.getLogger(__name__)

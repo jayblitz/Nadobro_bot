@@ -15,7 +15,7 @@ from typing import Optional
 
 from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.config import NADO_TESTNET_ARCHIVE, NADO_MAINNET_ARCHIVE
-from src.nadobro.services.log_redaction import redact_sensitive_text
+from src.nadobro.core.log_redaction import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ def _get_session() -> requests.Session:
         # Share the hardened session (browser-like UA + Accept headers + pool
         # adapters) so the archive endpoint stops getting Cloudflare-challenged
         # on every poll. Pool sizes already chosen for high concurrency.
-        from src.nadobro.services.http_session import SESSION as _shared
+        from src.nadobro.core.http_session import SESSION as _shared
 
         _session = _shared
     return _session
@@ -217,7 +217,7 @@ def _post(url: str, payload: dict, *, weight: float | None = None) -> dict | lis
     # for this host. Avoids stacking up archive calls into a queue that just
     # gets 403'd back to back.
     try:
-        from src.nadobro.services.http_session import is_circuit_open
+        from src.nadobro.core.http_session import is_circuit_open
 
         if is_circuit_open(url):
             return None
@@ -228,7 +228,7 @@ def _post(url: str, payload: dict, *, weight: float | None = None) -> dict | lis
     # weight bucket so this path and the SDK indexer paths in nado_client share
     # one 2400/min archive budget. Skip (serve None) when starved.
     try:
-        from src.nadobro.services.http_session import throttle_host
+        from src.nadobro.core.http_session import throttle_host
 
         cost = _derive_archive_weight(payload) if weight is None else float(weight)
         if not throttle_host(url, cost=cost):
@@ -277,7 +277,7 @@ def _post(url: str, payload: dict, *, weight: float | None = None) -> dict | lis
                 # let the breaker capture the failure so callers stop hammering.
                 if status == 403 and "text/html" in content_type.lower():
                     try:
-                        from src.nadobro.services.http_session import _log_cf_warning, _record_challenge, _host  # noqa: WPS437
+                        from src.nadobro.core.http_session import _log_cf_warning, _record_challenge, _host  # noqa: WPS437
 
                         _log_cf_warning(url, status, body)
                         _record_challenge(_host(url))

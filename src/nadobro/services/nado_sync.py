@@ -13,14 +13,14 @@ from typing import Any
 from src.nadobro.utils.env import env_float
 from src.nadobro.db import execute, query_all, query_one
 from src.nadobro.config import NADO_MAINNET_REST, NADO_TESTNET_REST
-from src.nadobro.services.feature_flags import (
+from src.nadobro.core.feature_flags import (
     portfolio_heavy_sync_seconds,
     portfolio_poll_cache_seconds,
     portfolio_sync_interval_seconds,
     portfolio_sync_users_per_tick,
     portfolio_ws_enabled,
 )
-from src.nadobro.services.portfolio_calculator import (
+from src.nadobro.quant.portfolio_calculator import (
     aggregate_trading_stats,
     compute_total_equity,
     positions_from_account_summary,
@@ -100,7 +100,7 @@ def _user_has_isolated_artifacts(snapshot: dict[str, Any] | None) -> bool:
 
 def _gateway_circuit_open(network: str) -> bool:
     try:
-        from src.nadobro.services.http_session import is_circuit_open
+        from src.nadobro.core.http_session import is_circuit_open
 
         gateway = NADO_MAINNET_REST if _normalize_network(network) == "mainnet" else NADO_TESTNET_REST
         return bool(is_circuit_open(gateway))
@@ -183,7 +183,7 @@ async def sync_active_users(reason: str = "poll") -> None:
 
     if reason == "poll":
         try:
-            from src.nadobro.services.http_session import is_circuit_open
+            from src.nadobro.core.http_session import is_circuit_open
 
             if is_circuit_open(NADO_MAINNET_REST) and is_circuit_open(NADO_TESTNET_REST):
                 logger.debug("portfolio sync skipped: Cloudflare circuit open on both gateways")
@@ -351,7 +351,7 @@ async def sync_user(
 
         started = time.perf_counter()
         try:
-            from src.nadobro.services.async_utils import run_blocking_sdk
+            from src.nadobro.core.async_utils import run_blocking_sdk
 
             client = await run_blocking_sdk(get_user_nado_client, int(user_id), network)
             if not client:

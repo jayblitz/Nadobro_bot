@@ -12,7 +12,7 @@ from src.nadobro.handlers.formatters import escape_md
 from src.nadobro.handlers.keyboards import back_kb, copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb, copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb
 from src.nadobro.i18n import localize_text, get_active_language
 from src.nadobro.services.admin_service import is_admin
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.services.onboarding_service import is_new_onboarding_complete
 from src.nadobro.services.user_service import get_user, ensure_active_wallet_ready
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup

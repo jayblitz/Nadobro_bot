@@ -146,14 +146,14 @@ def _limit_order_expiration_seconds() -> int:
 # Share the hardened session (browser-like UA + Accept headers) with the rest
 # of the bot so Cloudflare's lightweight bot check lets our REST traffic
 # through. The shared SESSION already mounts pool-sized HTTPS/HTTP adapters.
-from src.nadobro.services.http_session import SESSION as _rest_session  # noqa: E402
+from src.nadobro.core.http_session import SESSION as _rest_session  # noqa: E402
 
 # Per-user portfolio-sync reads run their blocking SDK work in the dedicated
 # SDK thread pool, not the shared default executor that asyncio.to_thread uses.
 # This isolates wedge-prone background polling from latency-critical paths
 # (order execution, WS auth, Telegram-reply DB reads) that also fan work out to
 # the default executor — a poll storm can no longer starve them.
-from src.nadobro.services.async_utils import run_blocking_sdk  # noqa: E402
+from src.nadobro.core.async_utils import run_blocking_sdk  # noqa: E402
 
 
 def _install_session_timeout(session, timeout) -> bool:
@@ -554,7 +554,7 @@ class NadoClient:
             # challenging us. Route those through the throttled CF logger.
             if status_code == 403 and "text/html" in content_type.lower():
                 try:
-                    from src.nadobro.services.http_session import _log_cf_warning  # noqa: WPS437
+                    from src.nadobro.core.http_session import _log_cf_warning  # noqa: WPS437
 
                     _log_cf_warning(getattr(resp, "url", ""), status_code, snippet)
                 except Exception:  # policy: degrade-ok(log-dedup helper is best-effort)

@@ -267,7 +267,7 @@ class SnapshotAccountProvider(AccountProvider):
         self._network = network
 
     async def accounts(self, user_id: int) -> Accounts:
-        from src.nadobro.services.async_utils import run_blocking
+        from src.nadobro.core.async_utils import run_blocking
 
         snapshot = await run_blocking(self._snapshot, user_id)
         accounts: Accounts = {"nado_perps": {}, "nado_spot": {}, "nado_vault": {}}
@@ -315,7 +315,7 @@ class SnapshotAccountProvider(AccountProvider):
         return accounts
 
     async def mark_prices(self, user_id: int) -> Dict[str, Decimal]:
-        from src.nadobro.services.async_utils import run_blocking
+        from src.nadobro.core.async_utils import run_blocking
 
         snapshot = await run_blocking(self._snapshot, user_id)
         marks: Dict[str, Decimal] = {}
@@ -332,7 +332,7 @@ class SnapshotAccountProvider(AccountProvider):
         2s snapshot cache keeps the two calls coherent)."""
         if self._network is not None:
             return str(self._network)
-        from src.nadobro.services.async_utils import run_blocking
+        from src.nadobro.core.async_utils import run_blocking
 
         snapshot = await run_blocking(self._snapshot, user_id)
         return str(getattr(snapshot, "network", None) or "mainnet")

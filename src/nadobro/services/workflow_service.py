@@ -27,7 +27,7 @@ from src.nadobro.services.nanogpt_client import (
 )
 from src.nadobro.services.provider_config import n8n_base_url, n8n_configured, n8n_deploy_headers
 from src.nadobro.services.provider_runtime import post_json_with_retries, provider_timeout_seconds, record_provider_degraded
-from src.nadobro.services.source_registry import record_source
+from src.nadobro.connectors.source_registry import record_source
 from src.nadobro.utils.env import env_bool
 
 logger = logging.getLogger(__name__)

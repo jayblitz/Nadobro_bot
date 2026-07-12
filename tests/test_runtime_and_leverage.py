@@ -19,7 +19,7 @@ from src.nadobro.services import bot_runtime
 from src.nadobro.services import execution_queue
 from src.nadobro.services import runtime_supervisor
 from src.nadobro.services import trade_service
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.services.strategy_lifecycle import cleanup_strategy_positions
 from src.nadobro.services.stop_loss_service import _should_trigger_stop_loss
 from src.nadobro.services.trade_service import _place_take_profit_order
@@ -715,7 +715,7 @@ class RuntimeAndLeverageTests(unittest.TestCase):
     def test_ensure_task_uses_cached_loop_when_called_off_loop(self):
         # Legacy per-user loop path: only taken when the central strategy
         # scheduler feature flag is OFF (it defaults ON), so pin it off here.
-        from src.nadobro.services import feature_flags
+        from src.nadobro.core import feature_flags
 
         calls = []
 
@@ -747,7 +747,9 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         # the session to the central scheduler instead of spawning a loop.
         from unittest.mock import MagicMock
 
-        from src.nadobro.services import feature_flags, strategy_scheduler
+        from src.nadobro.core import feature_flags
+
+        from src.nadobro.services import strategy_scheduler
 
         sched = SimpleNamespace(register=MagicMock())
         with patch.object(

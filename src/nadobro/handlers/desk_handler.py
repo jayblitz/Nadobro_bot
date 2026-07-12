@@ -22,7 +22,7 @@ from telegram.constants import ParseMode
 
 from src.nadobro.handlers.callbacks import _edit_loc
 from src.nadobro.i18n import get_active_language, localize_text
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.services import desk_store
 from src.nadobro.services.desk_parser import looks_like_desk_text, parse_desk_intent
 from src.nadobro.services.desk_plans import (

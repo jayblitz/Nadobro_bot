@@ -173,7 +173,7 @@ def check_tiny_budget_math(network: str, product: str, collateral: float):
 
 def check_pov_engine(network: str, product: str, collateral: float, preset: str):
     from src.nadobro.config import get_product_id
-    from src.nadobro.services import pov_engine
+    from src.nadobro.quant import pov_engine
     from src.nadobro.services.nado_archive import get_pair_24h_volume_usd
 
     def run():

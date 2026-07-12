@@ -6,7 +6,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services import rate_limit  # noqa: E402
+from src.nadobro.core import rate_limit  # noqa: E402
 
 
 class IsRateLimitErrorTests(unittest.TestCase):

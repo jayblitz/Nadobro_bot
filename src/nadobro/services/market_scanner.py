@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.nadobro.services.price_tracker import get_full_technicals, get_all_technicals, classify_regime
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 
 logger = logging.getLogger(__name__)
 

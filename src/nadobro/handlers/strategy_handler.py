@@ -15,10 +15,10 @@ from src.nadobro.config import get_dn_pair, get_dn_products, get_perp_products, 
 from src.nadobro.handlers.commands import build_status_dashboard_parts
 from src.nadobro.handlers.formatters import escape_md, fmt_price
 from src.nadobro.handlers.keyboards import back_kb, dn_funding_rates_kb, strategy_action_kb, strategy_product_picker_kb
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.services.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.services.onboarding_service import is_new_onboarding_complete
-from src.nadobro.services.perf import timed_metric
+from src.nadobro.core.perf import timed_metric
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.strategy_pending_input import persist_strategy_pending_input
 from src.nadobro.services.user_service import get_user_readonly_client, get_user_wallet_info, get_user, ensure_active_wallet_ready
@@ -199,7 +199,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id == "bro":
             # Legacy Alpha Agent dashboard remains reachable only when the operator
             # has explicitly re-enabled the legacy autoloop via env var.
-            from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
+            from src.nadobro.core.feature_flags import legacy_bro_autoloop_enabled
             if not legacy_bro_autoloop_enabled():
                 # Alpha Agent has been retired; route back to the strategy hub.
                 await _handle_nav(query, "nav:strategy_hub", telegram_id, context)
@@ -941,7 +941,7 @@ def _mm_cycle_budget_preflight(
     if strategy_id not in ("grid", "rgrid", "dgrid", "mid"):
         return True, 0.0, 0.0, 0.0, 0, 0.0
 
-    from src.nadobro.services.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD, estimate_mm_quote_capacity
+    from src.nadobro.quant.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD, estimate_mm_quote_capacity
 
     margin_usd = max(0.0, float(strategy_conf.get("notional_usd", 100.0) or 0.0))
     cycle_cfg = max(0.0, float(strategy_conf.get("cycle_notional_usd", margin_usd) or 0.0))

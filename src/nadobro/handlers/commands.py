@@ -37,7 +37,7 @@ from src.nadobro.config import DUAL_MODE_CARD_FLOW
 from src.nadobro.handlers.home_card import (
     open_home_card_from_command,
 )
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.services.referral_service import (
     REFERRAL_LINK_PREFIX,
     normalize_referral_payload,

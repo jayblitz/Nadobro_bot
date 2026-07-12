@@ -65,12 +65,12 @@ from src.nadobro.services.user_service import (
     get_user,
     run_strategy_start_preflight,
 )
-from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.perf import timed_metric, record_metric
+from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.core.perf import timed_metric, record_metric
 from src.nadobro.utils.env import env_bool, env_tristate
-from src.nadobro.services.cadence import FAST_CADENCE_STRATEGIES, effective_interval_seconds
+from src.nadobro.core.cadence import FAST_CADENCE_STRATEGIES, effective_interval_seconds
 from src.nadobro.services.execution_queue import enqueue_strategy
-from src.nadobro.services.feature_flags import legacy_bro_autoloop_enabled
+from src.nadobro.core.feature_flags import legacy_bro_autoloop_enabled
 from src.nadobro.services.strategy_registry import (
     SUPPORTED_STRATEGIES,
     migrate_state_strategy,
@@ -1061,7 +1061,7 @@ def start_user_bot(
                 state["mm_run_duration_minutes"] = _dur
                 state["mm_duration_target_notified"] = False
             from src.nadobro.services.product_catalog import get_product_min_quote_notional_usd
-            from src.nadobro.services.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD
+            from src.nadobro.quant.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD
             _min_notional = (
                 get_product_min_quote_notional_usd(product.upper(), network=network)
                 or DEFAULT_MIN_ORDER_NOTIONAL_USD
@@ -1374,7 +1374,7 @@ def stop_user_bot(telegram_id: int, cancel_orders: bool = True) -> tuple[bool, s
     if task:
         task.cancel()
     try:
-        from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+        from src.nadobro.core.feature_flags import strategy_scheduler_enabled
         from src.nadobro.services.strategy_scheduler import get_scheduler
 
         if strategy_scheduler_enabled():
@@ -1872,7 +1872,7 @@ def _schedule_task_on_loop(telegram_id: int, network: str):
 
 
 def _ensure_task(telegram_id: int, network: str):
-    from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+    from src.nadobro.core.feature_flags import strategy_scheduler_enabled
 
     if strategy_scheduler_enabled():
         from src.nadobro.services.strategy_scheduler import get_scheduler
@@ -1980,7 +1980,7 @@ async def handle_strategy_job(payload: dict):
     telegram_id = int(payload.get("telegram_id"))
     network = str(payload.get("network"))
     try:
-        from src.nadobro.services.user_circuit import is_open, last_error
+        from src.nadobro.core.user_circuit import is_open, last_error
 
         if is_open(telegram_id, network):
             logger.info(
@@ -2137,7 +2137,7 @@ async def handle_strategy_job(payload: dict):
                 if ok:
                     _job_stats["cycles_ok"] += 1
                     try:
-                        from src.nadobro.services.user_circuit import record_success
+                        from src.nadobro.core.user_circuit import record_success
 
                         record_success(telegram_id, network)
                     except Exception as e:
@@ -2152,7 +2152,7 @@ async def handle_strategy_job(payload: dict):
                 else:
                     _job_stats["cycles_failed"] += 1
                     try:
-                        from src.nadobro.services.user_circuit import record_failure
+                        from src.nadobro.core.user_circuit import record_failure
 
                         record_failure(telegram_id, network, error_msg or "unknown cycle error")
                     except Exception as e:
@@ -2167,7 +2167,7 @@ async def handle_strategy_job(payload: dict):
                 logger.error("Strategy cycle crash for user %s on %s: %s", telegram_id, network, e, exc_info=True)
                 strategy_name = str(state.get("strategy") or "strategy").upper()
                 try:
-                    from src.nadobro.services.user_circuit import record_failure
+                    from src.nadobro.core.user_circuit import record_failure
 
                     record_failure(telegram_id, network, str(e))
                 except Exception as circuit_err:
@@ -2298,7 +2298,7 @@ def _resolve_mm_run_duration_minutes(state: dict, deployed_usd: float, vol_24h_u
     ([Aggressive … 10×Passive]) when 24h volume is known; otherwise the
     participation preset implies the duration (compute_pov_duration). Opt-in:
     with neither a custom duration nor a preset (or no volume), returns 0."""
-    from src.nadobro.services import pov_engine
+    from src.nadobro.quant import pov_engine
 
     try:
         custom = float(state.get("mm_duration_minutes") or 0.0)
@@ -2332,7 +2332,7 @@ def _resolve_mm_cycle_notional_usd(
     cadence-correct chunk, not pov_engine.cycle_notional (which assumes a
     1/multiplier-minute cycle the bot does not run). Floored at the venue min
     notional, capped at the deployed budget (one order can't exceed margin)."""
-    from src.nadobro.services import pov_engine
+    from src.nadobro.quant import pov_engine
 
     preset = state.get("participation_preset")
     deployed = max(0.0, float(deployed_usd or 0.0))

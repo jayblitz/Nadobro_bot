@@ -1584,7 +1584,7 @@ def _filter_official_sources(sources: list[str]) -> list[str]:
 
 def _append_freshness(answer: str, limit: int = 3) -> str:
     try:
-        from src.nadobro.services.source_registry import freshness_footer
+        from src.nadobro.connectors.source_registry import freshness_footer
 
         footer = freshness_footer(limit=limit)
     except Exception:

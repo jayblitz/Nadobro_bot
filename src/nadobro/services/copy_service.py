@@ -42,7 +42,7 @@ from src.nadobro.services.user_service import get_user, get_user_nado_client
 from src.nadobro.services.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.services.nado_client import NadoClient
 from src.nadobro.services.nado_archive import query_order_by_digest
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 
 logger = logging.getLogger(__name__)
 

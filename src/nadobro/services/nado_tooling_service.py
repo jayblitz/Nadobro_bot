@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from src.nadobro.services.execution_queue import get_queue_diagnostics
-from src.nadobro.services.perf import snapshot as perf_snapshot
+from src.nadobro.core.perf import snapshot as perf_snapshot
 from src.nadobro.utils.env import env_bool, env_float
 from src.nadobro.config import (
     get_dn_products,

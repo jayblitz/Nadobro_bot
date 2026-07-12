@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from src.nadobro.services.bounded_cache import KeyedLockMap, LRUCache
+from src.nadobro.core.bounded_cache import KeyedLockMap, LRUCache
 
 
 class TestLRUCache:

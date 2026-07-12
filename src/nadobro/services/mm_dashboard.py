@@ -13,13 +13,13 @@ from src.nadobro.config import (
     NADO_BUILDER_FEE_RATE_1_BPS,
     get_product_max_leverage,
 )
-from src.nadobro.services import pov_engine
+from src.nadobro.quant import pov_engine
 from src.nadobro.services.product_catalog import (
     get_product_maker_fee_rate,
     get_product_min_quote_notional_usd,
     get_product_taker_fee_rate,
 )
-from src.nadobro.services.mm_quote_math import (
+from src.nadobro.quant.mm_quote_math import (
     DEFAULT_MIN_ORDER_NOTIONAL_USD,
     MID_FULL_BIAS_MARGIN_UPLIFT,
     MM_COLLATERAL_SAFETY_FACTOR,

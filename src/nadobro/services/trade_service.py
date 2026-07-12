@@ -36,13 +36,13 @@ _submit_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="nadobro-sub
 # and this manual path compute it identically. These thin wrappers preserve the
 # existing private call sites in this module.
 def _isolated_margin_safety_multiplier() -> float:
-    from src.nadobro.services.margin import isolated_margin_safety_multiplier
+    from src.nadobro.quant.margin import isolated_margin_safety_multiplier
 
     return isolated_margin_safety_multiplier()
 
 
 def _compute_isolated_margin(size: float, price: float, leverage: float) -> float | None:
-    from src.nadobro.services.margin import compute_isolated_margin
+    from src.nadobro.quant.margin import compute_isolated_margin
 
     return compute_isolated_margin(size, price, leverage)
 

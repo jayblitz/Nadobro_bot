@@ -13,7 +13,7 @@ from src.nadobro.models.database import (
     set_vault_deposit_watch,
     update_vault_watch_last_mintable,
 )
-from src.nadobro.services.async_utils import run_blocking, run_blocking_db, run_blocking_sdk
+from src.nadobro.core.async_utils import run_blocking, run_blocking_db, run_blocking_sdk
 from src.nadobro.services.nlp_vault_service import PRIVATE_ALPHA_CAP_USDT0, get_user_vault_snapshot
 from src.nadobro.services.user_service import get_user, get_user_nado_client
 from src.nadobro.services.vault_metrics_service import get_pool_metrics

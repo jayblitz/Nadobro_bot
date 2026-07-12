@@ -3,7 +3,7 @@ from _stubs import install_test_stubs
 install_test_stubs()
 
 def test_source_registry_records_freshness():
-    from src.nadobro.services.source_registry import SourceRegistry
+    from src.nadobro.connectors.source_registry import SourceRegistry
 
     registry = SourceRegistry()
     rec = registry.record("coinmarketcap", ttl_seconds=120, detail="quotes")

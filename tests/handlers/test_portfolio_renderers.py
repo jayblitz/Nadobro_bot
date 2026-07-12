@@ -274,7 +274,7 @@ def test_sync_resolves_placeholder_product_names():
 def test_unrealized_pnl_pct_cross_falls_back_to_margin_used():
     from decimal import Decimal
 
-    from src.nadobro.services.portfolio_calculator import unrealized_pnl_pct
+    from src.nadobro.quant.portfolio_calculator import unrealized_pnl_pct
 
     # SDK cross rows often omit leverage; margin_used must back the pct
     # instead of returning None (rendered as a fake 0.00%).

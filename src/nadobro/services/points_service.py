@@ -19,7 +19,7 @@ from src.nadobro.services.lowiq_relay_client import (
     start_session as relay_start_session,
 )
 from src.nadobro.models.database import get_bot_state, set_bot_state
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.services.user_service import get_user
 
 logger = logging.getLogger(__name__)

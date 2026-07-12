@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-from src.nadobro.services.log_redaction import RedactingFormatter, SensitiveDataRedactFilter
+from src.nadobro.core.log_redaction import RedactingFormatter, SensitiveDataRedactFilter
 
 
 _redact_filter = SensitiveDataRedactFilter()
@@ -37,7 +37,7 @@ logger = logging.getLogger("nadobro")
 load_dotenv()
 
 from src.nadobro.config import TELEGRAM_TOKEN, ENCRYPTION_KEY, DATABASE_URL
-from src.nadobro.services.crypto import validate_encryption_key
+from src.nadobro.core.crypto import validate_encryption_key
 from src.nadobro.utils.env import env_bool, env_int, env_str
 
 if not ENCRYPTION_KEY:
@@ -147,7 +147,7 @@ def _runtime_health_payload() -> dict:
         from src.nadobro.services.runtime_supervisor import get_runtime_supervisor_diagnostics
         from src.nadobro.services.copy_service import get_copy_polling_diagnostics
         from src.nadobro.services.scheduler import get_scheduler_diagnostics
-        from src.nadobro.services.perf import summary_lines
+        from src.nadobro.core.perf import summary_lines
 
         queue_diag = get_queue_diagnostics()
         scheduler_diag = get_scheduler_diagnostics()
@@ -168,9 +168,9 @@ def _runtime_health_payload() -> dict:
             from src.nadobro.services.gateway_budget import snapshot as gateway_snapshot
             from src.nadobro.services.ws_health import snapshot as ws_snapshot
             from src.nadobro.services.market_feed import snapshot as market_snapshot
-            from src.nadobro.services.async_utils import pool_stats
-            from src.nadobro.services.user_circuit import snapshot as circuit_snapshot
-            from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+            from src.nadobro.core.async_utils import pool_stats
+            from src.nadobro.core.user_circuit import snapshot as circuit_snapshot
+            from src.nadobro.core.feature_flags import strategy_scheduler_enabled
             from src.nadobro.services.strategy_scheduler import get_scheduler
 
             payload["gateway"] = gateway_snapshot()
@@ -367,7 +367,7 @@ async def run_bot():
         logger.warning(f"Alert price-check client failed to initialize: {e}")
 
     start_scheduler()
-    from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+    from src.nadobro.core.feature_flags import strategy_scheduler_enabled
     from src.nadobro.services.strategy_scheduler import get_scheduler
     from src.nadobro.services.bot_runtime import _load_state
 
@@ -380,7 +380,7 @@ async def run_bot():
     auto_restore = env_bool("NADO_AUTO_RESTORE_STRATEGIES", False)
     restore_running_bots(enabled=auto_restore)
     try:
-        from src.nadobro.services.feature_flags import time_limit_enabled
+        from src.nadobro.core.feature_flags import time_limit_enabled
         from src.nadobro.services.time_limit_watcher import time_limit_tick
 
         if time_limit_enabled():
@@ -580,7 +580,7 @@ async def run_bot():
     finally:
         logger.info("Shutting down...")
         from src.nadobro.services.scheduler import stop_scheduler
-        from src.nadobro.services.feature_flags import strategy_scheduler_enabled
+        from src.nadobro.core.feature_flags import strategy_scheduler_enabled
         from src.nadobro.services.strategy_scheduler import get_scheduler
         from src.nadobro.services.nado_ws import portfolio_ws
 

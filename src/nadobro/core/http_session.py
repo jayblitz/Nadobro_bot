@@ -45,7 +45,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from src.nadobro.utils.env import env_float, env_int
-from src.nadobro.services.ipv4_egress import install_ipv4_only_resolver
+from src.nadobro.core.ipv4_egress import install_ipv4_only_resolver
 
 logger = logging.getLogger(__name__)
 

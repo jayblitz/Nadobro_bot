@@ -35,7 +35,7 @@ SERVICES_BASELINE: dict[str, int] = {
     # Already clean — keep them that way.
     "src/nadobro/services/order_intents.py": 0,
     "src/nadobro/services/strategy_runtime.py": 0,
-    "src/nadobro/services/crypto.py": 0,
+    "src/nadobro/core/crypto.py": 0,
     "src/nadobro/services/execution_queue.py": 0,
     "src/nadobro/services/strategy_scheduler.py": 0,
 }

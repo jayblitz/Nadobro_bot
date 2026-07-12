@@ -58,8 +58,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from src.nadobro.utils.env import env_float, env_int
-from src.nadobro.services import sli
-from src.nadobro.services.bounded_cache import LRUCache
+from src.nadobro.core import sli
+from src.nadobro.core.bounded_cache import LRUCache
 
 logger = logging.getLogger(__name__)
 

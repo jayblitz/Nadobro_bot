@@ -1019,7 +1019,7 @@ def _derive_session_realized_pnl(
     session_id: int,
 ) -> float | None:
     """Replay this session's fills to realize closed legs while residual inventory remains."""
-    from src.nadobro.services.portfolio_calculator import realized_pnl_windows_from_rows
+    from src.nadobro.quant.portfolio_calculator import realized_pnl_windows_from_rows
 
     rows = query_all(
         f"""
@@ -1198,7 +1198,7 @@ def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> di
     ALSO dropped every REAL manual fill (unlinked venue fills default to
     source='manual'), so a manual trader's account PnL read ~0 — removed.
     Returns an empty dict on any error so the display path never raises."""
-    from src.nadobro.services.portfolio_calculator import realized_pnl_windows_from_rows
+    from src.nadobro.quant.portfolio_calculator import realized_pnl_windows_from_rows
 
     table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
     try:
@@ -1239,7 +1239,7 @@ def get_paired_trades(
     duplicate recorder/match pair can never double-count. Pairing is position-
     aware (see ``portfolio_calculator.pair_fills_into_trades``). Returns newest
     closed trades first, with any still-open position last. ``[]`` on any error."""
-    from src.nadobro.services.portfolio_calculator import pair_fills_into_trades
+    from src.nadobro.quant.portfolio_calculator import pair_fills_into_trades
 
     table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
     # product_id 0 = product-less venue fills (this indexer's match feed carries no

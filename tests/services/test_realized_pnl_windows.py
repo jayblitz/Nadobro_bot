@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from src.nadobro.services.portfolio_calculator import realized_pnl_windows_from_rows
+from src.nadobro.quant.portfolio_calculator import realized_pnl_windows_from_rows
 
 NOW = datetime(2026, 6, 21, 12, 0, 0, tzinfo=timezone.utc)
 

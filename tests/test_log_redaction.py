@@ -6,7 +6,7 @@ from _stubs import install_test_stubs
 
 install_test_stubs()
 
-from src.nadobro.services.log_redaction import (
+from src.nadobro.core.log_redaction import (
     RedactingFormatter,
     SensitiveDataRedactFilter,
     redact_sensitive_text,

@@ -25,7 +25,7 @@ import pytest
 @pytest.fixture()
 def fresh_http():
     """Reload http_session so per-test config tweaks land cleanly."""
-    from src.nadobro.services import http_session
+    from src.nadobro.core import http_session
 
     importlib.reload(http_session)
     return http_session

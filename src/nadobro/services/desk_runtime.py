@@ -25,7 +25,7 @@ import time
 from typing import Any, Dict, Optional
 
 from src.nadobro.services import desk_store
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.utils.env import env_bool
 
 logger = logging.getLogger(__name__)

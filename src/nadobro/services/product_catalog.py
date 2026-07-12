@@ -15,7 +15,7 @@ from src.nadobro.config import (
     NADO_TESTNET_ARCHIVE,
     NADO_TESTNET_REST,
 )
-from src.nadobro.services.http_session import SESSION as _rest_session, cf_get
+from src.nadobro.core.http_session import SESSION as _rest_session, cf_get
 
 logger = logging.getLogger(__name__)
 

@@ -146,7 +146,7 @@ def compute_user_pattern(
         # since_created_at=cutoff) and these rows carry created_at, which the
         # replay's window bucketer doesn't read — so we read its ``all`` bucket,
         # which over the pre-scoped input IS the window's realized PnL.
-        from src.nadobro.services.portfolio_calculator import (
+        from src.nadobro.quant.portfolio_calculator import (
             realized_pnl_windows_from_rows,
         )
 

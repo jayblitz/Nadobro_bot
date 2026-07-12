@@ -11,7 +11,7 @@ import logging
 from src.nadobro.config import get_perp_products, get_product_id
 from src.nadobro.handlers.formatters import escape_md
 from src.nadobro.handlers.keyboards import back_kb
-from src.nadobro.services.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.services.bot_runtime import get_user_bot_status
 from src.nadobro.services.settings_service import get_user_settings, update_user_settings
 from src.nadobro.services.user_service import get_user

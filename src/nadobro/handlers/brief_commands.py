@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 async def _run_blocking_safe(fn, *args):
     try:
-        from src.nadobro.services.async_utils import run_blocking
+        from src.nadobro.core.async_utils import run_blocking
 
         return await run_blocking(fn, *args)
     except Exception:  # noqa: BLE001

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.nadobro.utils.env import env_float
-from src.nadobro.services.ipv4_egress import websocket_connect_kwargs
+from src.nadobro.core.ipv4_egress import websocket_connect_kwargs
 from src.nadobro.services.ws_health import mark_connected, mark_disconnected, touch
 
 logger = logging.getLogger(__name__)

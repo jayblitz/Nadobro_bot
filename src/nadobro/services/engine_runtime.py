@@ -1476,7 +1476,7 @@ async def _maybe_apply_overlay(
         if pid is None or client is None or not hasattr(client, "get_candlesticks"):
             return
 
-        from src.nadobro.services.async_utils import run_blocking, run_blocking_sdk
+        from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
         from src.nadobro.services import market_features as _mf
         from src.nadobro.services.signal_engine import build_signal
         from src.nadobro.services.strategy_registry import effective_sl_tp_pct
@@ -1662,7 +1662,7 @@ async def run_engine_cycle(
             # event loop (the exact starvation class the blocking lint guards
             # — invisible here because the call is one level indirect).
             try:
-                from src.nadobro.services.async_utils import run_blocking_sdk
+                from src.nadobro.core.async_utils import run_blocking_sdk
 
                 # 1m candles, last 200 — enough for ema_slow_period=50 + atr_window=14.
                 return await run_blocking_sdk(
@@ -1780,7 +1780,7 @@ async def run_engine_cycle(
                         _phase = str(_prog.get("phase") or "").upper()
                         if _phase in {"OPENING", "HOLDING", "CLOSING"}:
                             try:
-                                from src.nadobro.services.async_utils import run_blocking_sdk
+                                from src.nadobro.core.async_utils import run_blocking_sdk
                                 from src.nadobro.services.trade_service import (
                                     close_delta_neutral_legs,
                                 )
@@ -1808,7 +1808,7 @@ async def run_engine_cycle(
         # whole platform or another run/strategy. Empty for a fresh session.
         if configs.get("controller_override") == "fill_anchored":
             try:
-                from src.nadobro.services.async_utils import run_blocking_db
+                from src.nadobro.core.async_utils import run_blocking_db
                 from src.nadobro.services.engine_persistence import resolve_running_session_id
                 from src.nadobro.models.database import get_session_recent_fills
 

@@ -7,8 +7,8 @@ from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.services.alert_service import get_triggered_alerts
 from src.nadobro.services.stop_loss_service import process_stop_losses
 from src.nadobro.services.nado_client import NadoClient
-from src.nadobro.services.async_utils import run_blocking
-from src.nadobro.services.perf import timed_metric
+from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.core.perf import timed_metric
 from src.nadobro.services.execution_queue import enqueue_alert
 from src.nadobro.services.lowiq_relay_client import relay_poll_interval_seconds
 
@@ -812,7 +812,7 @@ async def tick_edge_scanner():
 async def tick_perf_slo():
     """Aggregate SLO watchdog: warn when click/message p95 degrades fleet-wide."""
     try:
-        from src.nadobro.services.perf import check_slo
+        from src.nadobro.core.perf import check_slo
 
         check_slo()
     except Exception as e:
@@ -857,7 +857,7 @@ async def tick_news_warmup() -> None:
 
 
 async def tick_vault_deposit_watch_job():
-    from src.nadobro.services.feature_flags import vault_deposit_watch_enabled
+    from src.nadobro.core.feature_flags import vault_deposit_watch_enabled
     if not vault_deposit_watch_enabled():
         return
     from src.nadobro.services.vault_deposit_watch_service import tick_vault_deposit_watch
@@ -873,7 +873,7 @@ async def tick_vault_deposit_watch_job():
 
 def start_scheduler():
     relay_poll_seconds = relay_poll_interval_seconds()
-    from src.nadobro.services.feature_flags import (
+    from src.nadobro.core.feature_flags import (
         portfolio_sync_enabled,
         portfolio_sync_interval_seconds,
         time_limit_enabled,

@@ -47,7 +47,7 @@ from src.nadobro.utils.x18 import from_x18
 from src.nadobro.services.nado_client import NadoClient
 # Pure-math isolated-margin sizing shared with the manual trade path so both
 # size an isolated-only leg identically.
-from src.nadobro.services.margin import compute_isolated_margin
+from src.nadobro.quant.margin import compute_isolated_margin
 
 logger = logging.getLogger(__name__)
 
@@ -771,7 +771,7 @@ class NadoAdapter(NadoAdapterBase):
             )
         except Exception as exc:  # noqa: BLE001 - normalize venue errors
             raise AdapterError(f"funding_since failed: {exc}") from exc
-        from src.nadobro.services.portfolio_calculator import funding_payment_amount
+        from src.nadobro.quant.portfolio_calculator import funding_payment_amount
 
         paid_total = Decimal(0)
         for row in rows or []:

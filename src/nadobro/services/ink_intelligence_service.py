@@ -7,7 +7,7 @@ from typing import Any
 
 from src.nadobro.connectors.provider_catalog import provider_catalog
 from src.nadobro.services.dmind_service import analyze_financial_context, build_degraded_notice
-from src.nadobro.services.source_registry import freshness_footer, record_source, source_health_snapshot
+from src.nadobro.connectors.source_registry import freshness_footer, record_source, source_health_snapshot
 
 
 @dataclass

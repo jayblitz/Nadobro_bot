@@ -59,7 +59,7 @@ class StrategyScheduler:
 
     async def _loop(self) -> None:
         from src.nadobro.services.execution_queue import enqueue_strategy
-        from src.nadobro.services.cadence import effective_interval_seconds
+        from src.nadobro.core.cadence import effective_interval_seconds
 
         while self._running:
             now = time.time()
