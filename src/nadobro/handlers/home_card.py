@@ -42,9 +42,9 @@ from src.nadobro.core.perf import timed_metric
 # enough that a hung host yields a "refreshing" placeholder instead of a 30s
 # freeze. These also run on the SDK pool (not the misc pool) so a slow gateway
 # can never starve unrelated DB reads. Tunable via env.
-import os as _os
+from src.nadobro.utils.env import env_float as _env_float
 
-_DATA_VIEW_CEILING_SECONDS = float(_os.environ.get("NADO_DATA_VIEW_CEILING_SECONDS", "6.0"))
+_DATA_VIEW_CEILING_SECONDS = _env_float("NADO_DATA_VIEW_CEILING_SECONDS", 6.0)
 
 logger = logging.getLogger(__name__)
 

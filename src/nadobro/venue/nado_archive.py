@@ -7,7 +7,6 @@ after trades are placed via the Nado SDK (which only returns a digest).
 Archive docs: https://docs.nado.xyz/developer-resources/api/archive-indexer
 """
 import logging
-import os
 import threading
 import time
 import requests

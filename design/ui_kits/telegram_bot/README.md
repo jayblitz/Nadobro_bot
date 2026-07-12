@@ -10,5 +10,5 @@ Interactive, click-thru recreation of the NadoBro Telegram surface. The bot live
 ## Mapped from codebase
 - Card markup pattern → `src/nadobro/handlers/formatters.py` (`md2_rule`, `_ui_header`, `_ui_section`).
 - Inline / reply keyboards → `src/nadobro/handlers/keyboards.py` (`home_card_kb`, `trade_direction_kb`, leverage row).
-- Share card → `src/nadobro/services/pnl_card.py` (uses `pnl_card_master.png` as the painted base).
-- Persona / tone → `services/knowledge_service.py` (`CASUAL_SYSTEM_PROMPT`).
+- Share card → `src/nadobro/portfolio/pnl_card.py` (paints over the `assets/cards/pnl_v2/` reaction backgrounds; the old `pnl_card_master.png` base was retired with the v2 branding).
+- Persona / tone → `llm/knowledge_service.py` (`CASUAL_SYSTEM_PROMPT`).

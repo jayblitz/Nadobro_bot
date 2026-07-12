@@ -41,7 +41,6 @@ import asyncio
 import itertools
 import json
 import logging
-import os
 
 from src.nadobro.utils.env import env_bool, env_float
 import threading

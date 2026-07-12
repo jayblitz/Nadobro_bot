@@ -59,8 +59,19 @@ def desk_enabled() -> bool:
 
 def desk_resume_on_restart() -> bool:
     """Legacy escape hatch: resume active plans across a redeploy. Default OFF
-    — the redeploy contract is that nothing trades without the user starting it."""
-    return env_bool("NADO_DESK_RESUME_ON_RESTART")
+    — the redeploy contract is that nothing trades without the user starting it.
+
+    Deliberately FAIL-CLOSED: the value must be a bare truthy token. Unlike
+    env_bool, no inline-comment stripping — a value like "true # migration"
+    has been inert (False) historically, and silently honoring it after an
+    upgrade would auto-resume live trading with no user action. Guarded by
+    tests/trading/test_desk_resume_fail_closed.py.
+    """
+    import os
+
+    return os.environ.get("NADO_DESK_RESUME_ON_RESTART", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 # ---------------------------------------------------------------------------

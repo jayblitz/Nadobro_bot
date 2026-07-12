@@ -1,9 +1,7 @@
 import logging
-import os
 import time
 from typing import Optional
 
-import requests
 
 from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.config import (

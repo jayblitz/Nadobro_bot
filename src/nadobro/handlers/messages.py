@@ -423,7 +423,7 @@ async def _handle_message_inner(update, context, telegram_id, username, text, st
                 logger.warning("ref_ free-text redeem failed for %s: %s", telegram_id, exc)
             return
 
-    resolved_text = resolve_reply_button_text(text)
+    resolved_text = resolve_reply_button_text(text, prefer=REPLY_BUTTON_MAP.__contains__)
     flow = context.user_data.get("trade_flow") or {}
     current_state = flow.get("state")
     if current_state == "product":

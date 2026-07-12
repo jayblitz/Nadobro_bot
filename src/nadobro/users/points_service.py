@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import logging
-import os
 import re
 import secrets
 import time
