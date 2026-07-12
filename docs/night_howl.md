@@ -22,7 +22,7 @@ live settings.
 
 ## Architecture
 
-`src/nadobro/services/night_howl_service.py`
+`src/nadobro/llm/night_howl_service.py`
 
 - **Pure (unit-tested):** `compute_user_pattern`, `derive_recommendations`,
   `compare_configs` (drives the backtester), `night_howl_due` (per-user local-8am

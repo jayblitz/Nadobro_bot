@@ -4,8 +4,9 @@ Python 3.11 bot (python-telegram-bot 22.x; long-polling in dev, webhook on Fly.i
 trading perps on Nado: natural-language trades, 1CT linked-signer wallets, live PnL, alerts, and
 automated strategies. PostgreSQL via psycopg2 raw SQL — no ORM. Entry point: `main.py`.
 
-`replit.md` is the legacy product doc — useful history, but partially stale (it still describes
-`src/nadobro/strategies/`, which no longer exists). Trust code over it.
+`replit.md` is the legacy product doc — useful history, but partially stale (it predates both the
+Engine-v2 cutover and the 2026-07 services/ decomposition). Trust code over it.
+`docs/ARCHITECTURE.md` is the authoritative package map and layering contract.
 
 ## Commands
 
@@ -20,25 +21,37 @@ automated strategies. PostgreSQL via psycopg2 raw SQL — no ORM. Entry point: `
 - Type-check (BLOCKING in CI — ci.yml runs it as a required job): `.venv/bin/python -m mypy src/nadobro/engine`.
   `scripts/self_review.sh` fails on it too, so a green local gate matches CI.
 
-## Layout (`src/nadobro/`)
+## Layout (`src/nadobro/`) — see docs/ARCHITECTURE.md for the full map
 
-- `config.py` — env vars + product/market constants. Env values may carry inline `#` comments:
-  parse booleans via `utils/env.py::env_bool` and provider values via
-  `services/provider_config.py::clean_env_value`, never raw `os.environ` reads.
-- `db.py` + `models/database.py` — psycopg2 pool, raw-SQL CRUD. Tables are split per network
-  (`trades_testnet`/`trades_mainnet`, `alerts_*`); `bot_state` is a KV store for settings/strategy state.
-- `handlers/` — Telegram UI: `commands.py`, `callbacks.py` (button router), `messages.py` (free text +
-  passphrase flow), `keyboards.py`, `home_card.py`/`trade_card.py` (edit-in-place card pattern).
-- `services/` — business logic. Load-bearing ones:
-  - `bot_runtime.py` — strategy lifecycle + the session SL/TP rail (`_evaluate_session_pnl_rail`)
-  - `engine_runtime.py` — `map_strategy_config`, `map_risk_limits`, `ENGINE_MAPPED_STRATEGIES`
-  - `live_session.py` — live session PnL snapshot (`session_pnl`, net-of-fees variants)
-  - `strategy_registry.py` — strategy identity/defaults, `effective_sl_tp_pct`
-  - `llm_gateway.py` — ALL LLM reasoning routes through here (NanoGPT, per-task model env vars)
-  - `copy_service.py` — the LIVE copy-trading path (not `engine/controllers/copy_trading.py`, which is dead)
-- `engine/` — Engine v2: `controllers/` (grid_trading, reverse_grid, dynamic_grid, market_making,
-  volume_bot, delta_neutral, desk), `executors/`, `risk.py`, and `backtester/` — a cost-aware
-  (fees + funding + slippage) sim harness that drives the same controllers as live.
+Layering (enforced by `tests/lint/test_architecture_layers.py` — domain packages never import
+`handlers/`; the package import-edge set can only shrink):
+
+- Leaves: `utils/` (env parsing — ALL env reads go through `utils/env.py`: `env_bool/env_int/
+  env_float/env_str/clean_env_value`; values may carry inline `#` comments), `core/` (thread
+  pools `async_utils`, caches, rate limits, HTTP session, `log_redaction`, perf/SLI, flags),
+  `quant/` (pure math: `margin`, `portfolio_calculator` fill pairing, `mm_quote_math`, `pov_engine`).
+- `config.py` — env vars + product/market constants. `db.py` + `models/database.py` — psycopg2
+  pool, raw-SQL CRUD. Tables are split per network (`trades_testnet`/`trades_mainnet`, `alerts_*`);
+  `bot_state` is a KV store for settings/strategy state.
+- Integration: `venue/` (Nado REST/WS clients, fill `nado_sync`, archive indexer, product catalog,
+  `gateway_budget`), `market_data/` (CMC/HL/X/news/scanners), `llm/` (`llm_gateway.py` — ALL LLM
+  reasoning routes through here; NanoGPT, per-task model env vars — plus AI chat, knowledge/vector,
+  HOWL/edge/signals/briefs, managed agent), `connectors/` (+ `provider_config.py`, source registry).
+- Domain: `engine/` — Engine v2: `controllers/` (grid_trading, dynamic_grid, market_making,
+  volume_bot, delta_neutral, desk, fill_anchored), `executors/`, `risk.py`, `backtester/` — a
+  cost-aware (fees + funding + slippage) sim harness driving the same controllers as live.
+  `trading/` — `trade_service.py`, `order_intents.py` (digest tagging), `live_session.py` (live
+  session PnL snapshot, net-of-fees variants), `engine_persistence.py`, desk suite,
+  `copy_service.py` (the LIVE copy-trading path; the old engine CopyController was unreachable
+  and is removed). `strategy/` — `bot_runtime.py` (strategy lifecycle + the session SL/TP rail
+  `_evaluate_session_pnl_rail`), `engine_runtime.py` (`map_strategy_config`, `map_risk_limits`,
+  `ENGINE_MAPPED_STRATEGIES`), `strategy_registry.py` (identity/defaults, `effective_sl_tp_pct`).
+  `users/`, `portfolio/`, `vault/`, `notify/` (rate-limited `telegram_sender`, alerts),
+  `runtime/` (`scheduler.py`, supervisor).
+- `handlers/` — Telegram UI: `commands.py`, `callbacks.py` (button router), `messages.py` (free
+  text + passphrase flow), `keyboards.py`, `home_card.py`/`trade_card.py` (edit-in-place cards).
+  Domain-owned keyboards a service must send itself live in the domain (`users/points_ui.py`,
+  `llm/howl_ui.py`).
 - `relay/` (repo root) — separate FastAPI/Telethon microservice for @lowiqpts points lookups,
   deployed independently.
 
@@ -49,7 +62,7 @@ automated strategies. PostgreSQL via psycopg2 raw SQL — no ORM. Entry point: `
   portfolio views show real numbers — keep that bridge in sync when touching fill handling.
 - The venue reports NO per-fill realized PnL (`realized_pnl_x18` is always 0). All PnL comes from
   our own fill attribution; attribution bugs corrupt History and volume. Close orders must be
-  digest-tagged (`services/order_intents.py::link_digest_intent`) so closes reconcile instead of
+  digest-tagged (`trading/order_intents.py::link_digest_intent`) so closes reconcile instead of
   leaking into History as phantom trades.
 - Funding: `funding_rate_x18` is a signed DAILY rate settled hourly (indexer
   `get_perp_funding_rate(s)`); `cum_funding_x18` is NOT a rate — don't treat it as one.
@@ -70,10 +83,10 @@ automated strategies. PostgreSQL via psycopg2 raw SQL — no ORM. Entry point: `
   strict-xfail guardrail in `tests/engine/test_sltp_invariants.py` referencing its audit ID; the
   fix makes it XPASS → delete the marker in the same PR. Never fix silently, never let red tests
   accumulate.
-- Secrets: log output passes through redaction (`services/log_redaction.py`); never log tokens or
+- Secrets: log output passes through redaction (`core/log_redaction.py`); never log tokens or
   keys; `attached_assets/` stays gitignored (git history was purged of a leaked token once —
   don't make it twice).
-- All LLM calls go through `services/llm_gateway.py` — don't call providers directly. Exception:
+- All LLM calls go through `llm/llm_gateway.py` — don't call providers directly. Exception:
   Grok X-search stays on the native xAI path.
 
 ## Git / PRs

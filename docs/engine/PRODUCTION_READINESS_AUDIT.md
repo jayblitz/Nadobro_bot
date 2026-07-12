@@ -19,7 +19,7 @@ correctness requires your Postgres / Nado testnet + 1CT signer.
 ## A. CRITICAL — the engine is not connected to the live runtime
 
 ### A1. No production wiring of the engine
-- **Files:** `services/strategy_runtime.py`, `services/bot_runtime.py`
+- **Files:** `strategy/strategy_runtime.py`, `strategy/bot_runtime.py`
 - **State:** `_dispatch_strategy` → `strategy_runtime.dispatch_cycle` returns
   `{"action":"skipped","reason":"engine_v2_controller_managed"}`. **No** code path
   constructs `ExecutorOrchestrator`, instantiates any controller, or calls
@@ -119,7 +119,7 @@ correctness requires your Postgres / Nado testnet + 1CT signer.
 - `engine/inventory.py` math, `engine/risk.py` gate logic, all executors/controllers/
   routines **logic** — real and unit-tested (just not fed real I/O yet).
 - DB migrations `0007`/`0008` + `db.py` table DDL — real (pending validation on your DB).
-- `services/mm_quote_math.py` — real (extracted verbatim).
+- `quant/mm_quote_math.py` — real (extracted verbatim).
 - The existing legacy `/portfolio` account/positions view — unchanged, still real.
 
 ---

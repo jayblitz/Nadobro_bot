@@ -48,7 +48,7 @@ RGRID-GATE checkbox ticked with a dated note. Stop after 3 tries.
 ```
 
 **2. DGRID-SHADOW-KEYS (Med)** — dgrid defaults must not carry dead `sl_pct`/`tp_pct` copies that
-shadow the live `rgrid_*` values (`services/strategy_registry.py`):
+shadow the live `rgrid_*` values (`strategy/strategy_registry.py`):
 
 ```
 /goal Close DGRID-SHADOW-KEYS: add a guardrail asserting dgrid defaults carry no sl_pct/tp_pct

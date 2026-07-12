@@ -26,7 +26,7 @@ Source: [docs.nado.xyz/nlp](https://docs.nado.xyz/nlp).
 
 | Rule | Value | Where it's enforced |
 | --- | --- | --- |
-| Quote asset | USDT0 only | `services/nlp_vault_service.py:USDT0_PRODUCT_ID` |
+| Quote asset | USDT0 only | `vault/nlp_vault_service.py:USDT0_PRODUCT_ID` |
 | Private Alpha cap per account | 20,000 USDT0 | `PRIVATE_ALPHA_CAP_USDT0` |
 | Post-mint lockup before burns are allowed | 4 days | `LOCKUP_SECONDS`, `lockup_remaining_seconds()` |
 | Withdraw fee | $1 sequencer + max($1, 10 bps × amount) | `estimate_withdraw_fee_usdt0()` |
@@ -39,7 +39,7 @@ If a user tries to burn within the lockup window, Nadobro fails fast with a frie
 
 ### Service layer
 
-`src/nadobro/services/nlp_vault_service.py` orchestrates everything:
+`src/nadobro/vault/nlp_vault_service.py` orchestrates everything:
 
 ```text
 get_user_vault_snapshot(telegram_id) -> dict
@@ -55,7 +55,7 @@ withdraw_from_vault(telegram_id, nlp_amount) -> dict
 
 ### SDK wrappers
 
-`src/nadobro/services/nado_client.py` exposes two new methods that wrap the pinned `nado-protocol==0.3.3` Python SDK:
+`src/nadobro/venue/nado_client.py` exposes two new methods that wrap the pinned `nado-protocol==0.3.3` Python SDK:
 
 ```python
 # Deposit

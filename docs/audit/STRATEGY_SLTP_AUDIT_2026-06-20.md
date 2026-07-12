@@ -101,7 +101,7 @@ The same `sl_pct` is used as a **price-move barrier** (`engine_runtime.py:599,61
 
 ---
 
-## 4. Copy trading (live path: `services/copy_service.py`)
+## 4. Copy trading (live path: `trading/copy_service.py`)
 
 - **COPY-SIZE — High [VERIFIED]** (`copy_service.py:719-723`) — follower size = `margin_per_trade × leverage / leader_entry`; the leader's actual position size (available at `:758`) is never used. No proportional ratio. A leader's tiny probe and max-conviction position are copied at identical notional. *Fix:* scale by `leader_size × (allocation / leader_equity)`.
 - **COPY-LEVERAGE — Med-High [VERIFIED]** (`copy_service.py:720`) — always opens at the user's max leverage; the leader's actual leverage is never captured. A leader at 2x is mirrored at 10x. *Fix:* `min(leader_leverage, max_leverage)`.
@@ -125,7 +125,7 @@ The same `sl_pct` is used as a **price-move barrier** (`engine_runtime.py:599,61
 
 - **FUNDING-SIGN — Med [VERIFIED]** — two contradictory funding sign conventions: `live_session.py:247` / `bot_runtime.py:1346` treat funding paid-positive (cost); `pnl_card_builder.py:125-152` treats it received-positive (added to PnL). The same run can report different funding economics across `/mm_status`, the share card, and the stop summary. *Fix:* one signed convention in one helper, called everywhere.
 - **NO-LIQ-CHECK — Low [SUSPECTED]** — no engine-side liquidation-distance gate; relies on venue auto-liq + the 1.20 margin safety multiplier. Probably adequate for 1x DN / isolated grid, but no defense-in-depth. *Fix:* add a liquidation-distance gate.
-- **Clean:** `engine/risk.py` gates, `orchestrator.py` orphan handling, `order_lifecycle.py` terminal-state safety, `engine/portfolio.py` (engine-side net = realized − fees + unrealized is **correct** — note the divergence from what the user sees), `services/margin.py`.
+- **Clean:** `engine/risk.py` gates, `orchestrator.py` orphan handling, `order_lifecycle.py` terminal-state safety, `engine/portfolio.py` (engine-side net = realized − fees + unrealized is **correct** — note the divergence from what the user sees), `quant/margin.py`.
 
 ---
 

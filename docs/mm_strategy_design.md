@@ -171,11 +171,11 @@ New block `MM_AS_DEFAULTS` with `gamma`, `sigma_halflife_sec`, `fill_intensity_A
 
 ### 6.3 Reused infrastructure
 
-`services/nado_client.py` — `place_limit_order(post_only=True, reduce_only=...)`, `cancel_order`, `get_open_orders`, `get_market_price`, `_price_increment_cache`, `_size_increment_cache`. No changes needed.
+`venue/nado_client.py` — `place_limit_order(post_only=True, reduce_only=...)`, `cancel_order`, `get_open_orders`, `get_market_price`, `_price_increment_cache`, `_size_increment_cache`. No changes needed.
 
-`services/trade_service.py` — `execute_limit_order(post_only=True)` for the happy path, `execute_market_order(reduce_only=True)` for emergency flatten. No changes needed.
+`trading/trade_service.py` — `execute_limit_order(post_only=True)` for the happy path, `execute_market_order(reduce_only=True)` for emergency flatten. No changes needed.
 
-`services/nado_archive.py` — `query_order_by_digest` to confirm fills and realized PnL, `query_matches_by_subaccount` for the online fill-intensity estimator. No changes needed.
+`venue/nado_archive.py` — `query_order_by_digest` to confirm fills and realized PnL, `query_matches_by_subaccount` for the online fill-intensity estimator. No changes needed.
 
 `strategies/mm_bot.py` helpers — `_update_both_emas`, `_reprice_post_only_quote` (renamed to `reprice_post_only_quote` and promoted to a shared module), tick-aware dedupe via `_price_increment_cache`. Moving these into a shared `strategies/_quoting_utils.py` is a mechanical refactor in phase 1.
 
