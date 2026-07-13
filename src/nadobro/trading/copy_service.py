@@ -34,6 +34,7 @@ from src.nadobro.models.database import (
     get_open_copy_positions,
     get_open_copy_position_for_product,
     close_copy_position,
+    reduce_copy_position,
     save_copy_snapshot,
     get_latest_copy_snapshot,
     get_copy_trades_by_mirror,
@@ -43,13 +44,23 @@ from src.nadobro.trading.trade_service import execute_market_order, execute_limi
 from src.nadobro.venue.nado_client import NadoClient
 from src.nadobro.venue.nado_archive import query_order_by_digest
 from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.utils.env import env_bool, env_float
 
 logger = logging.getLogger(__name__)
 
 MAX_MIRRORS_PER_USER = 5
-MIN_MARGIN_PER_TRADE = 5.0
+# Product floor: copy trading requires at least $100 margin per trade so the
+# proportional mirror of a serious leader position clears venue minimums.
+MIN_MARGIN_PER_TRADE = 100.0
 MAX_MARGIN_PER_TRADE = 5000.0
 POLL_INTERVAL_SECONDS = 30
+# Partial-close mirroring: when the leader trims a position below the baseline
+# we copied by more than this fraction, the same fraction of the copy is
+# closed reduce-only. Kill switch: NADO_COPY_PARTIAL_CLOSES=false.
+PARTIAL_CLOSES_ENABLED = env_bool("NADO_COPY_PARTIAL_CLOSES", True)
+PARTIAL_CLOSE_MIN_DELTA_PCT = env_float("NADO_COPY_PARTIAL_MIN_DELTA_PCT", 5.0)
+# Below this remaining fraction a partial becomes a full close (avoids dust).
+PARTIAL_CLOSE_DUST_FRACTION = 0.05
 _bot_app = None
 _poll_task: Optional[asyncio.Task] = None
 
@@ -803,7 +814,16 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     continue
                 copy_pos_by_product.pop(pid, None)
             else:
-                await run_blocking(_update_tp_sl_if_changed, existing, leader_pos, user_id, network)
+                resized = await _mirror_partial_close_if_needed(
+                    existing, leader_pos, user_id, mirror_id, network
+                )
+                if resized == "closed":
+                    copy_pos_by_product.pop(pid, None)
+                    continue
+                await run_blocking(
+                    _update_tp_sl_if_changed, existing, leader_pos, user_id, network,
+                    force=(resized == "reduced"),
+                )
                 continue
 
         # New position from leader — open a copy
@@ -995,8 +1015,123 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
     return digests
 
 
-def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, network: str):
-    """Check if leader's TP/SL changed and update the copy position's orders."""
+def _partial_close_fraction(baseline_leader_size: float, new_leader_size: float) -> float:
+    """Fraction of the copy to close when the leader trims below our baseline.
+
+    Baseline is the leader size we last mirrored (at open, or after the last
+    partial). A leader ADD does not move the baseline — so add-then-trim back
+    to the baseline correctly mirrors nothing, and only a trim BELOW the
+    baseline reduces the copy. Returns 0.0 when the delta is under the
+    PARTIAL_CLOSE_MIN_DELTA_PCT noise threshold, 1.0 for a dust remainder.
+    """
+    baseline = float(baseline_leader_size or 0.0)
+    new = float(new_leader_size or 0.0)
+    if baseline <= 0 or new >= baseline:
+        return 0.0
+    fraction = (baseline - new) / baseline
+    if fraction * 100.0 < PARTIAL_CLOSE_MIN_DELTA_PCT:
+        return 0.0
+    if (1.0 - fraction) <= PARTIAL_CLOSE_DUST_FRACTION:
+        return 1.0
+    return fraction
+
+
+async def _mirror_partial_close_if_needed(
+    existing_cp: dict, leader_pos: dict, user_id: int, mirror_id: int, network: str
+) -> str:
+    """Mirror a leader's partial close onto the copy position.
+
+    Returns "reduced" (copy shrunk; caller re-places TP/SL for the new size),
+    "closed" (dust remainder -> fully closed), or "" (no action).
+    """
+    if not PARTIAL_CLOSES_ENABLED:
+        return ""
+    baseline = float(existing_cp.get("leader_size") or 0.0)
+    new_leader = float(leader_pos.get("size") or 0.0)
+    fraction = _partial_close_fraction(baseline, new_leader)
+    if fraction <= 0.0:
+        return ""
+
+    copy_size = float(existing_cp.get("size") or 0.0)
+    if copy_size <= 0:
+        return ""
+    product_name = existing_cp.get("product_name") or get_product_name(
+        existing_cp["product_id"], network=network
+    )
+    product_key = product_name.replace("-PERP", "")
+    is_close_long = existing_cp["side"].upper() != "LONG"
+    close_size = copy_size if fraction >= 1.0 else copy_size * fraction
+
+    try:
+        result = await run_blocking(
+            execute_market_order,
+            telegram_id=user_id,
+            product=product_key,
+            size=close_size,
+            is_long=is_close_long,
+            leverage=float(existing_cp.get("leverage", 1.0)),
+            slippage_pct=1.5,
+            enforce_rate_limit=False,
+            reduce_only=True,
+            source="copy",
+            network=network,
+        )
+        if not result.get("success"):
+            logger.warning(
+                "copy partial close failed for position %s: %s",
+                existing_cp["id"], result.get("error", "close failed"),
+            )
+            return ""
+        close_digest = str(result.get("digest") or "")
+        fill_data = (
+            await run_blocking(query_order_by_digest, network, close_digest, 2.0, 0.25)
+            if close_digest
+            else None
+        )
+        pnl = float((fill_data or {}).get("realized_pnl", result.get("pnl", 0)) or 0.0)
+        await run_blocking(update_mirror_cumulative_pnl, mirror_id, pnl)
+
+        if fraction >= 1.0:
+            await run_blocking(
+                close_copy_position, existing_cp["id"], pnl=pnl, reason="leader_partial_dust"
+            )
+            await _notify_user(
+                user_id,
+                f"📋 Copy Position Closed\n"
+                f"{product_name}: Leader trimmed to dust → Your position closed\n"
+                f"P&L: ${pnl:+,.2f}",
+            )
+            return "closed"
+
+        remaining = copy_size - close_size
+        await run_blocking(
+            reduce_copy_position, existing_cp["id"], remaining, new_leader, pnl
+        )
+        # Keep the in-memory row consistent for the TP/SL resize that follows.
+        existing_cp["size"] = remaining
+        existing_cp["leader_size"] = new_leader
+        await _notify_user(
+            user_id,
+            f"📋 Copy Position Reduced\n"
+            f"{product_name}: Leader closed {fraction * 100.0:.0f}% → "
+            f"Your position reduced to {remaining:g}\n"
+            f"Realized P&L: ${pnl:+,.2f}",
+        )
+        return "reduced"
+    except Exception as e:  # noqa: BLE001 - one mirror's failure must not stall the poll
+        logger.error("copy partial close error for position %s: %s", existing_cp["id"], e)
+        return ""
+
+
+def _update_tp_sl_if_changed(
+    existing_cp: dict, leader_pos: dict, user_id: int, network: str, force: bool = False
+):
+    """Check if leader's TP/SL changed and update the copy position's orders.
+
+    ``force`` re-places the bracket even at unchanged prices — used after a
+    partial close so the resting reduce-only orders match the shrunken size
+    (they were placed for the pre-reduction size).
+    """
     new_tp = leader_pos.get("tp_price")
     new_sl = leader_pos.get("sl_price")
     old_tp = existing_cp.get("tp_price")
@@ -1006,8 +1141,10 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
     tp_changed = (new_tp or 0) != (old_tp or 0)
     sl_changed = (new_sl or 0) != (old_sl or 0)
 
-    if not tp_changed and not sl_changed:
+    if not tp_changed and not sl_changed and not force:
         return
+    if force and not (new_tp or new_sl or old_tp or old_sl):
+        return  # nothing bracketed — nothing to resize
 
     # Update the copy_positions record
     from src.nadobro.db import execute as db_execute

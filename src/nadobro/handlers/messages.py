@@ -294,11 +294,30 @@ async def _execute_authorized_action(message, context, telegram_id: int, action_
         max_leverage = float(action_data.get("max_leverage", 10))
         cumulative_stop_loss_pct = action_data.get("cumulative_stop_loss_pct")
         cumulative_take_profit_pct = action_data.get("cumulative_take_profit_pct")
-        from src.nadobro.trading.copy_service import start_copy
+        from src.nadobro.trading.copy_service import (
+            MAX_MARGIN_PER_TRADE,
+            MIN_MARGIN_PER_TRADE,
+            start_copy,
+        )
         user = get_user(telegram_id)
         network = user.network_mode.value if user else "mainnet"
-        # Risk factor scales the per-trade budget slice inside the user's total allocation.
-        margin_per_trade = max(5.0, min(5000.0, budget_usd, budget_usd * max(risk_factor, 0.1)))
+        if budget_usd < MIN_MARGIN_PER_TRADE:
+            reply = (
+                f"⚠️ Copy trading needs a margin of at least "
+                f"${MIN_MARGIN_PER_TRADE:,.0f}\\."
+            )
+            await _reply_loc(message,
+                reply,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=persistent_menu_kb(),
+            )
+            return False, f"margin below ${MIN_MARGIN_PER_TRADE:,.0f} minimum"
+        # Risk factor scales the per-trade budget slice inside the user's total
+        # allocation, floored at the product's $100 minimum margin.
+        margin_per_trade = max(
+            MIN_MARGIN_PER_TRADE,
+            min(MAX_MARGIN_PER_TRADE, budget_usd, budget_usd * max(risk_factor, 0.1)),
+        )
         start_kwargs = {
             "network": network,
             "margin_per_trade": margin_per_trade,

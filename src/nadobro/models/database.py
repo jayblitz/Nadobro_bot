@@ -470,6 +470,35 @@ def get_curated_copy_traders() -> list:
     )
 
 
+def update_copy_trader_stats(
+    trader_id: int,
+    *,
+    total_pnl_usd: float = 0.0,
+    total_volume_usd: float = 0.0,
+    nado_points: float = 0.0,
+    win_rate: Optional[float] = None,
+) -> None:
+    """Stamp leaderboard performance stats onto a copy_traders row.
+
+    Fills the stat columns (added with idx_copy_traders_leaderboard) that had
+    no writer until the NadoExplorer discovery flow. Display-only data —
+    sizing/mirroring never read these.
+    """
+    execute(
+        """UPDATE copy_traders
+           SET total_pnl_usd = %s, total_volume_usd = %s, nado_points = %s,
+               win_rate = %s, last_updated_at = NOW()
+           WHERE id = %s""",
+        (
+            float(total_pnl_usd),
+            float(total_volume_usd),
+            float(nado_points),
+            None if win_rate is None else float(win_rate),
+            int(trader_id),
+        ),
+    )
+
+
 def deactivate_copy_trader(trader_id: int):
     execute("UPDATE copy_traders SET active = false WHERE id = %s", (trader_id,))
 
@@ -744,6 +773,25 @@ def get_open_copy_position_for_product(mirror_id: int, product_id: int) -> Optio
     return query_one(
         "SELECT * FROM copy_positions WHERE mirror_id = %s AND product_id = %s AND status = 'open' ORDER BY opened_at DESC LIMIT 1",
         (mirror_id, product_id),
+    )
+
+
+def reduce_copy_position(
+    position_id: int, new_size: float, new_leader_size: float, pnl_delta: float = 0.0
+) -> None:
+    """Shrink an open copy position after mirroring a leader's partial close.
+
+    ``size`` is the follower's remaining base size, ``leader_size`` becomes the
+    new baseline the next partial-close comparison measures against, and the
+    realized PnL of the closed slice accumulates on the row (the final
+    close_copy_position pnl then only carries the LAST slice, so dashboards
+    sum row pnl rather than overwrite it).
+    """
+    execute(
+        """UPDATE copy_positions
+           SET size = %s, leader_size = %s, pnl = COALESCE(pnl, 0) + %s
+           WHERE id = %s AND status = 'open'""",
+        (float(new_size), float(new_leader_size), float(pnl_delta), int(position_id)),
     )
 
 

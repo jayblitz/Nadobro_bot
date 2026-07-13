@@ -45,10 +45,10 @@ Package responsibilities:
 | `db.py`/`models/` | psycopg2 pool + raw-SQL CRUD; per-network tables (`trades_testnet`/`trades_mainnet`), `bot_state` KV | core, quant, utils |
 | `connectors/` | news/data connectors, provider catalog, LLM-provider env resolution (`provider_config`), source freshness registry | core, utils |
 | `venue/` | Nado access: `nado_client` (REST/SDK), `nado_ws*`, fill `nado_sync`, `nado_archive` indexer, `product_catalog`, `market_feed`, `gateway_budget`, `ws_health` | db/models, quant, core, trading (queue diagnostics) |
-| `market_data/` | CMC/HL/X clients, news aggregator, scanners, price tracker | connectors, core |
+| `market_data/` | CMC/HL/X clients, news aggregator, scanners, price tracker, `nadoexplorer_client` (public leaderboard/trader-stats API, 120 rpm/IP budget-aware) | connectors, core |
 | `llm/` | `llm_gateway` (ALL LLM calls route here; Grok X-search stays native xAI), NanoGPT client, AI chat (`bro_llm`), knowledge + vector store, HOWL/night-HOWL, edge scanner, signals, briefs, managed agent, `howl_ui` | venue, market_data, users, trading, strategy (managed agent) |
 | `engine/` | Engine v2: orchestrator, controllers (grid/rgrid/dgrid/mid/vol/dn/desk), executors, risk, cost-aware backtester | venue (adapter), quant, utils |
-| `trading/` | order/trade domain: `trade_service`, `order_intents` (digest tagging), `live_session` (session PnL snapshot), `engine_persistence`, desk suite, `copy_service` (LIVE copy path), stop-loss, readiness, risk/budget | engine, venue, users, llm (desk parser) |
+| `trading/` | order/trade domain: `trade_service`, `order_intents` (digest tagging), `live_session` (session PnL snapshot), `engine_persistence`, desk suite, `copy_service` (LIVE copy mirroring plane: venue read-only polling, sizing, TP/SL brackets, full+partial close mirroring), `copy_discovery` (NadoExplorer leaderboard/preview plane), stop-loss, readiness, risk/budget | engine, venue, users, llm (desk parser), market_data (copy discovery) |
 | `strategy/` | strategy lifecycle: `bot_runtime` (session SL/TP rail), `engine_runtime` (`map_strategy_config`, `CONTROLLER_REGISTRY`, `ENGINE_MAPPED_STRATEGIES`), registry, FSM, schedulers, MM overlay + dashboard | trading, engine, llm, users, venue |
 | `users/` | user accounts, settings, onboarding, invites/referrals/points (`points_ui`), admin, audit log, wallet flows | strategy (registry defaults, stop-on-unlink), venue |
 | `portfolio/` | portfolio views, history worker, PnL cards | trading, engine, users, venue |

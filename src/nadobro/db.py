@@ -1254,6 +1254,10 @@ def init_db():
                 ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION;
                 ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS risk_factor DOUBLE PRECISION DEFAULT 1.0;
                 ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS last_synced_fill_tid BIGINT;
+                -- copy_service reads this per-mirror open gate (COPY-NO-SLIPPAGE), but the
+                -- column never existed, so it silently always used the 1.5 default.
+                -- Materialize it so the gate is real (and per-mirror configurable).
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS max_entry_deviation_pct DOUBLE PRECISION DEFAULT 1.5;
 
                 ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS original_trade_digest TEXT;
                 ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS copied_order_digest TEXT;

@@ -1163,12 +1163,46 @@ def copy_hub_kb(traders: list, is_admin_user: bool = False):
             f"{label}{curated}",
             callback_data=f"copy:trader:{t['id']}",
         )])
+    rows.append([InlineKeyboardButton("🏆 Top Traders", callback_data="copy:lb:0")])
     rows.append([InlineKeyboardButton("📋 My Copies", callback_data="copy:dashboard")])
     rows.append([InlineKeyboardButton("➕ Add Custom Wallet", callback_data="copy:add_custom")])
     if is_admin_user:
         rows.append([InlineKeyboardButton("⚙️ Manage Traders", callback_data="copy:admin:menu")])
     rows.append([InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub")])
     return InlineKeyboardMarkup(rows)
+
+
+def copy_leaderboard_kb(rows_data: list, page: int, sort: str):
+    """NadoExplorer leaderboard page: one button per ranked trader, pager, and
+    a PnL/ROI sort toggle. Wallets ride in callback_data (fits the 64-byte
+    Telegram limit: 'copy:lb:view:' + 42-char address = 55 bytes)."""
+    rows = []
+    for r in rows_data:
+        wallet = r["wallet_address"]
+        pnl = r.get("pnl_usd", 0.0)
+        wr = r.get("win_rate", 0.0) * 100.0
+        label = f"#{r.get('rank', '?')} {wallet[:6]}…{wallet[-4:]} · ${pnl:+,.0f} · {wr:.0f}%"
+        rows.append([InlineKeyboardButton(label, callback_data=f"copy:lb:view:{wallet}")])
+    pager = []
+    if page > 0:
+        pager.append(InlineKeyboardButton("◀ Prev", callback_data=f"copy:lb:{page - 1}:{sort}"))
+    if len(rows_data) >= 5:
+        pager.append(InlineKeyboardButton("Next ▶", callback_data=f"copy:lb:{page + 1}:{sort}"))
+    if pager:
+        rows.append(pager)
+    other_sort = "roi" if sort == "pnl" else "pnl"
+    rows.append([InlineKeyboardButton(
+        f"↕️ Sort by {other_sort.upper()}", callback_data=f"copy:lb:0:{other_sort}"
+    )])
+    rows.append([InlineKeyboardButton("◀ Back", callback_data="copy:hub")])
+    return InlineKeyboardMarkup(rows)
+
+
+def copy_lb_trader_kb(wallet: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶ Copy This Trader", callback_data=f"copy:lb:follow:{wallet}")],
+        [InlineKeyboardButton("◀ Back to Leaderboard", callback_data="copy:lb:0")],
+    ])
 
 
 def copy_trader_preview_kb(trader_id: int):
@@ -1179,15 +1213,16 @@ def copy_trader_preview_kb(trader_id: int):
 
 
 def copy_budget_kb():
+    # Floor is $100 — copy trading's minimum margin (copy_service.MIN_MARGIN_PER_TRADE).
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("$50", callback_data="copy:budget:50"),
             InlineKeyboardButton("$100", callback_data="copy:budget:100"),
             InlineKeyboardButton("$250", callback_data="copy:budget:250"),
+            InlineKeyboardButton("$500", callback_data="copy:budget:500"),
         ],
         [
-            InlineKeyboardButton("$500", callback_data="copy:budget:500"),
             InlineKeyboardButton("$1000", callback_data="copy:budget:1000"),
+            InlineKeyboardButton("$2500", callback_data="copy:budget:2500"),
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
     ])

@@ -93,6 +93,7 @@ ALLOWED_EDGES = {
     ("trading", "core"),
     ("trading", "db"),
     ("trading", "engine"),
+    ("trading", "market_data"),  # copy_discovery consumes the NadoExplorer client
     ("trading", "models"),
     ("trading", "users"),
     ("trading", "utils"),
