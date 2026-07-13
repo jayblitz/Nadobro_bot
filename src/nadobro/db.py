@@ -1258,6 +1258,17 @@ def init_db():
                 -- column never existed, so it silently always used the 1.5 default.
                 -- Materialize it so the gate is real (and per-mirror configurable).
                 ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS max_entry_deviation_pct DOUBLE PRECISION DEFAULT 1.5;
+                -- COPY-RAIL accounting spine: realized PnL is DERIVED (price pairing,
+                -- gross) because the venue reports no per-fill realized PnL; fees and
+                -- volume accumulate separately; the last poll's unrealized PnL is
+                -- persisted so tap-path UI never calls the venue. strategy_session_id
+                -- links the mirror run to a strategy_sessions row (strategy='copy')
+                -- so Performance/rollup (volume/fees/funding) work like any session.
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS cumulative_fees_usd DOUBLE PRECISION DEFAULT 0;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS cumulative_volume_usd DOUBLE PRECISION DEFAULT 0;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS last_unrealized_pnl_usd DOUBLE PRECISION DEFAULT 0;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS last_rail_checked_at TIMESTAMPTZ;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS strategy_session_id BIGINT;
 
                 ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS original_trade_digest TEXT;
                 ALTER TABLE copy_trades ADD COLUMN IF NOT EXISTS copied_order_digest TEXT;

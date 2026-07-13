@@ -1608,6 +1608,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
             lines.append(f"{_loc('Last:')} {escape_md(_fmt_action_label(last_action))}")
         if status.get("last_error"):
             lines.append(f"{_loc('Note:')} {escape_md(str(status.get('last_error'))[:120])}")
+        lines.extend(_fmt_copy_mirror_lines(status, _loc))
         return "\n".join(lines)
 
     strategy = (status.get("strategy") or "").upper()
@@ -1856,7 +1857,30 @@ def fmt_status_overview(status: dict, onboarding: dict):
         if inventory_source and inventory_source != "exchange":
             lines.append(f"{_loc('Inventory source')}: *{escape_md(inventory_source.upper())}*")
 
+    lines.extend(_fmt_copy_mirror_lines(status, _loc))
     return "\n".join(lines)
+
+
+def _fmt_copy_mirror_lines(status: dict, loc) -> list[str]:
+    """Copy Trading block for /status — one line per active mirror with the
+    rail-consistent net PnL (realized derived gross + last unrealized - fees)."""
+    mirrors = status.get("copy_mirrors") or []
+    if not mirrors:
+        return []
+    lines = ["", f"*{loc('Copy Trading')}*"]
+    for m in mirrors:
+        net = float(m.get("net_pnl") or 0.0)
+        allocated = float(m.get("total_allocated_usd") or 0.0)
+        pct = (net / allocated * 100.0) if allocated > 0 else 0.0
+        state = loc("PAUSED") if m.get("paused") else loc("LIVE")
+        net_str = f"+${net:,.2f}" if net >= 0 else f"-${abs(net):,.2f}"
+        lines.append(
+            f"🔁 *{escape_md(str(m.get('trader_label') or '?'))}* \\[{state}\\] · "
+            f"{loc('Positions:')} {int(m.get('open_positions') or 0)} · "
+            f"{loc('Net PnL:')} *{escape_md(net_str)}* \\({escape_md(f'{pct:+.1f}%')}\\) "
+            f"{loc('of')} ${escape_md(f'{allocated:,.0f}')}"
+        )
+    return lines
 
 
 def fmt_ops_overview(status: dict, ops: dict) -> str:

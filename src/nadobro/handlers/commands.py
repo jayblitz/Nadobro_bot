@@ -55,6 +55,12 @@ async def build_status_dashboard_parts(
     """
     status = await run_blocking(get_user_bot_status, telegram_id)
     onboarding = await run_blocking(evaluate_readiness, telegram_id)
+    try:
+        from src.nadobro.trading.copy_service import get_user_copies
+
+        status["copy_mirrors"] = await run_blocking(get_user_copies, telegram_id)
+    except Exception:  # noqa: BLE001 - copy section is additive; status must render
+        status["copy_mirrors"] = []
     text = fmt_status_overview(status, onboarding)
     merged = compose_status_overview_kb(
         is_running=bool(status.get("running")),
@@ -325,12 +331,34 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
     status = get_user_bot_status(telegram_id) or {}
     state = get_user_bot_state(telegram_id) or {}
     strategy_id = str(status.get("strategy") or state.get("strategy") or "").lower()
+
+    # Copy Trading block — rendered whether or not an MM strategy runs, with
+    # the rail-consistent net PnL (realized derived gross + unrealized - fees).
+    copy_lines: list[str] = []
+    try:
+        from src.nadobro.trading.copy_service import get_user_copies
+
+        for m in get_user_copies(telegram_id):
+            net = float(m.get("net_pnl") or 0.0)
+            allocated = float(m.get("total_allocated_usd") or 0.0)
+            pct = (net / allocated * 100.0) if allocated > 0 else 0.0
+            copy_lines.append(
+                f"🔁 {m.get('trader_label')} [{'PAUSED' if m.get('paused') else 'LIVE'}] · "
+                f"{int(m.get('open_positions') or 0)} position(s) · "
+                f"net {net:+,.2f} USD ({pct:+.1f}% of {allocated:,.0f}) · "
+                f"vol {float(m.get('cumulative_volume_usd') or 0.0):,.0f} · "
+                f"fees {float(m.get('cumulative_fees_usd') or 0.0):,.2f}"
+            )
+    except Exception:  # noqa: BLE001 - copy block is additive
+        pass
+    copy_block = ("\n\nCopy Trading\n" + "\n".join(copy_lines)) if copy_lines else ""
+
     if strategy_id not in MM_STRATEGIES:
         return (
             "No MM strategy is currently active.\n\n"
             "Start GRID, Reverse GRID, Dynamic GRID, Mid Mode, or Volume from the strategy hub "
-            "and re-run /mm_status.",
-            False,
+            "and re-run /mm_status." + copy_block,
+            bool(copy_lines),
         )
     network = str(status.get("network") or state.get("network") or "mainnet")
     product = str(status.get("product") or state.get("product") or "BTC").upper()
@@ -385,7 +413,7 @@ def build_mm_status_text(telegram_id: int) -> tuple[str, bool]:
         live_snapshot=live_snapshot,
     )
     lines = mm_dashboard.render_status_lines(snapshot)
-    return ("\n".join(lines), True)
+    return ("\n".join(lines) + copy_block, True)
 
 
 def build_mm_fills_text(telegram_id: int, limit: int = 10) -> str:

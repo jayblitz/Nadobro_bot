@@ -776,6 +776,45 @@ def get_open_copy_position_for_product(mirror_id: int, product_id: int) -> Optio
     )
 
 
+def update_mirror_accounting(
+    mirror_id: int,
+    *,
+    pnl_delta: float = 0.0,
+    fees_delta: float = 0.0,
+    volume_delta: float = 0.0,
+) -> None:
+    """Additive accounting update for a copy mirror.
+
+    ``pnl_delta`` is DERIVED gross realized PnL (price pairing — the venue's
+    per-fill realized_pnl is always 0 and must never be trusted); fees and
+    volume accumulate separately so the rail can judge NET of fees.
+    """
+    execute(
+        """UPDATE copy_mirrors
+           SET cumulative_pnl = cumulative_pnl + %s,
+               cumulative_fees_usd = COALESCE(cumulative_fees_usd, 0) + %s,
+               cumulative_volume_usd = COALESCE(cumulative_volume_usd, 0) + %s
+           WHERE id = %s""",
+        (float(pnl_delta), float(fees_delta), float(volume_delta), int(mirror_id)),
+    )
+
+
+def set_mirror_unrealized(mirror_id: int, upnl_usd: float) -> None:
+    execute(
+        """UPDATE copy_mirrors
+           SET last_unrealized_pnl_usd = %s, last_rail_checked_at = NOW()
+           WHERE id = %s""",
+        (float(upnl_usd), int(mirror_id)),
+    )
+
+
+def set_mirror_session(mirror_id: int, session_id: int) -> None:
+    execute(
+        "UPDATE copy_mirrors SET strategy_session_id = %s WHERE id = %s",
+        (int(session_id), int(mirror_id)),
+    )
+
+
 def reduce_copy_position(
     position_id: int, new_size: float, new_leader_size: float, pnl_delta: float = 0.0
 ) -> None:
