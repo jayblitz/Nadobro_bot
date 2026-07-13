@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 from src.nadobro.utils.env import env_float
 import time

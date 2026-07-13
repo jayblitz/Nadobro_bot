@@ -13,22 +13,12 @@ scheduler and the strategy runtime can import it without an import cycle.
 
 from __future__ import annotations
 
-import os
+from src.nadobro.utils.env import env_float as _env_float
 
 # Strategies whose cadence Option 1 accelerates. Grid/dgrid/dn stay on the
 # default cadence; vol joined 2026-07-11 — its v3 requote/cross deadlines are
 # timer-driven and a 20s tick made every reaction lag two buckets.
 FAST_CADENCE_STRATEGIES = frozenset({"rgrid", "mid", "vol"})
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        raw = os.environ.get(name)
-        if raw is None or str(raw).strip() == "":
-            return float(default)
-        return float(str(raw).strip())
-    except (TypeError, ValueError):
-        return float(default)
 
 
 def effective_interval_seconds(strategy: str, raw_interval_seconds: object) -> float:

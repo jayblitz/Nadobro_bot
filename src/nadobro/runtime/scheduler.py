@@ -1,6 +1,5 @@
 import logging
 import asyncio
-import os
 from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.nadobro.utils.env import env_float, env_int

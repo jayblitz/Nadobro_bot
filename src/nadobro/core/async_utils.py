@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import os
 
 from src.nadobro.utils.env import env_float, env_int
 from concurrent.futures import ThreadPoolExecutor

@@ -17,6 +17,7 @@ right, add it below with a one-line justification.
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -45,13 +46,6 @@ ALLOWED_EDGES = {
     ("handlers", "utils"),
     ("handlers", "vault"),
     ("handlers", "venue"),
-    ("handlers", "market_data"),
-    ("handlers", "portfolio"),
-    ("handlers", "quant"),
-    ("handlers", "engine"),
-    ("handlers", "models"),
-    ("handlers", "connectors"),
-    ("handlers", "runtime"),
     ("llm", "config"),
     ("llm", "connectors"),
     ("llm", "db"),
@@ -61,18 +55,11 @@ ALLOWED_EDGES = {
     ("llm", "trading"),
     ("llm", "users"),
     ("llm", "utils"),
-    ("llm", "core"),
-    ("llm", "venue"),
-    ("llm", "market_data"),
-    ("llm", "quant"),
     ("market_data", "config"),
     ("market_data", "connectors"),
     ("market_data", "core"),
     ("market_data", "utils"),
     ("models", "db"),
-    ("models", "quant"),
-    ("models", "utils"),
-    ("models", "core"),
     ("notify", "config"),
     ("notify", "core"),
     ("notify", "i18n"),
@@ -84,10 +71,6 @@ ALLOWED_EDGES = {
     ("portfolio", "trading"),
     ("portfolio", "users"),
     ("portfolio", "utils"),
-    ("portfolio", "core"),
-    ("portfolio", "models"),
-    ("portfolio", "venue"),
-    ("portfolio", "quant"),
     ("quant", "utils"),
     ("runtime", "core"),
     ("runtime", "notify"),
@@ -95,15 +78,6 @@ ALLOWED_EDGES = {
     ("runtime", "users"),
     ("runtime", "utils"),
     ("runtime", "venue"),
-    ("runtime", "config"),
-    ("runtime", "db"),
-    ("runtime", "models"),
-    ("runtime", "i18n"),
-    ("runtime", "llm"),           # scheduler wires analyst jobs (howl/brief/edge)
-    ("runtime", "strategy"),
-    ("runtime", "market_data"),
-    ("runtime", "portfolio"),
-    ("runtime", "vault"),
     ("strategy", "config"),
     ("strategy", "core"),
     ("strategy", "db"),
@@ -115,9 +89,6 @@ ALLOWED_EDGES = {
     ("strategy", "users"),
     ("strategy", "utils"),
     ("strategy", "venue"),
-    ("strategy", "i18n"),
-    ("strategy", "notify"),
-    ("strategy", "market_data"),
     ("trading", "config"),
     ("trading", "core"),
     ("trading", "db"),
@@ -126,11 +97,6 @@ ALLOWED_EDGES = {
     ("trading", "users"),
     ("trading", "utils"),
     ("trading", "venue"),
-    ("trading", "i18n"),
-    ("trading", "notify"),
-    ("trading", "llm"),           # desk parser uses the LLM gateway
-    ("trading", "quant"),
-    ("trading", "market_data"),
     ("users", "config"),
     ("users", "core"),
     ("users", "db"),
@@ -151,8 +117,6 @@ ALLOWED_EDGES = {
     ("venue", "trading"),         # nado_tooling reports execution-queue diagnostics
     ("venue", "users"),
     ("venue", "utils"),
-    ("venue", "models"),
-    ("venue", "connectors"),
 }
 
 # Packages that must never be imported from outside themselves.
@@ -185,6 +149,7 @@ def _module_level_imports(tree: ast.Module):
             yield node.module
 
 
+@functools.cache  # ~1s walk+parse of the whole tree; every test here shares one pass
 def _edges() -> dict[tuple[str, str], list[str]]:
     found: dict[tuple[str, str], list[str]] = {}
     for path in SRC.rglob("*.py"):

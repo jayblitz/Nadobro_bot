@@ -2,7 +2,7 @@ import logging
 import os
 from typing import Optional
 
-from src.nadobro.utils.env import env_bool
+from src.nadobro.utils.env import clean_env_value, env_bool
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -37,7 +37,22 @@ PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "nadobro")
 X_API_BEARER_TOKEN = os.environ.get("X_API_BEARER_TOKEN")
 CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY", "")
-ADMIN_USER_IDS = [int(uid.strip()) for uid in os.environ.get("ADMIN_USER_IDS", "").split(",") if uid.strip()]
+def _parse_admin_user_ids(raw: str) -> list[int]:
+    ids: list[int] = []
+    for token in clean_env_value(raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            ids.append(int(token))
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "ADMIN_USER_IDS entry %r is not an integer; skipping", token
+            )
+    return ids
+
+
+ADMIN_USER_IDS = _parse_admin_user_ids(os.environ.get("ADMIN_USER_IDS", ""))
 
 NADO_TESTNET_REST = "https://gateway.test.nado.xyz/v1"
 NADO_MAINNET_REST = "https://gateway.prod.nado.xyz/v1"

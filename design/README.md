@@ -21,9 +21,9 @@ casual replies with *"Anytime, bro."*
   - `src/nadobro/handlers/formatters.py` — chat-card markup, headers, rules
   - `src/nadobro/handlers/keyboards.py` — inline + reply keyboard layouts
   - `src/nadobro/handlers/home_card.py` — Home command-center card
-  - `src/nadobro/services/knowledge_service.py` — persona + tone prompts
+  - `src/nadobro/llm/knowledge_service.py` — persona + tone prompts
     (`CASUAL_SYSTEM_PROMPT`, `SYNTHESIZER_SYSTEM_PROMPT`)
-  - `src/nadobro/services/pnl_card.py` — exact pixel coords + colour
+  - `src/nadobro/portfolio/pnl_card.py` — exact pixel coords + colour
     constants for the share card. Most of the brand colour tokens in
     `colors_and_type.css` come from this file.
 - **Brand assets** (copied into `assets/`): the canonical NB glyph

@@ -419,8 +419,7 @@ async def run_bot():
 
     webhook_listen = env_str("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0")
     # Prefer TELEGRAM_WEBHOOK_PORT when set so a reverse proxy can own PORT (e.g. nginx on 8080, PTB on 8082).
-    _wh = env_str("TELEGRAM_WEBHOOK_PORT")
-    webhook_port = int(_wh) if _wh else env_int("PORT", 8080)
+    webhook_port = env_int("TELEGRAM_WEBHOOK_PORT", env_int("PORT", 8080))
     bootstrap_health_server = None
     async def _start_polling_mode():
         # Ensure Telegram stops sending updates to webhook before polling starts.

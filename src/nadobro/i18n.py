@@ -3783,18 +3783,42 @@ def localize_payload(text: str | None = None, reply_markup=None, lang: str | Non
     return localized_text, localized_markup
 
 
-def _build_reverse_label_map() -> dict[str, str]:
-    reverse: dict[str, str] = {}
+def _build_reverse_label_map() -> dict[str, tuple[str, ...]]:
+    """translated label -> ALL English siblings that produce it.
+
+    Some locales translate two distinct English labels identically (ko renders
+    both "⚙️ Settings" and "⚙️ Configure" as "⚙️ 설정"). Keeping every sibling
+    lets the caller disambiguate; a single-winner map silently misroutes the
+    losing sibling (that exact failure shipped for ko Settings and ru Back).
+    """
+    reverse: dict[str, tuple[str, ...]] = {}
     for en_label, translations in _LABELS.items():
         for _lang_code, translated in translations.items():
             if translated != en_label:
-                reverse[translated] = en_label
+                siblings = reverse.get(translated, ())
+                if en_label not in siblings:
+                    reverse[translated] = siblings + (en_label,)
     return reverse
 
 
 _REVERSE_LABEL_MAP = _build_reverse_label_map()
 
 
-def resolve_reply_button_text(text: str) -> str:
-    return _REVERSE_LABEL_MAP.get(text, text)
+def resolve_reply_button_text(text: str, prefer=None) -> str:
+    """Map a (possibly translated) reply-button label back to English.
+
+    ``prefer`` is an optional ``str -> bool`` predicate for picking among
+    colliding English siblings — reply routing passes
+    ``REPLY_BUTTON_MAP.__contains__`` so the routable sibling always wins
+    (i18n cannot import handlers, hence injection). Falls back to the first
+    sibling, then to the text itself.
+    """
+    siblings = _REVERSE_LABEL_MAP.get(text)
+    if not siblings:
+        return text
+    if prefer is not None:
+        for sibling in siblings:
+            if prefer(sibling):
+                return sibling
+    return siblings[0]
 

@@ -1,5 +1,4 @@
 import logging
-import os
 
 from src.nadobro.utils.env import env_float, env_int
 import threading

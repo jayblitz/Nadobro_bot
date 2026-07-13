@@ -52,16 +52,17 @@ def test_only_adapter_may_import_connectors_nado() -> None:
 
 
 # --- Engine-scoped guard ---------------------------------------------------
-# ``connectors/nado`` does not exist in this repo; the live venue client is
-# ``services/nado_client``. Legacy code across the repo imports it freely, so
-# this guard is scoped to ``src/nadobro/engine`` only: within the engine, just
-# ``adapter/nado.py`` may touch the venue client (single source of truth for
-# the 1CT Linked Signer path).
+# The live venue client is ``venue/nado_client``. Code across the repo imports
+# it freely, so this guard is scoped to ``src/nadobro/engine`` only: within the
+# engine, just ``adapter/nado.py`` may touch the venue client (single source of
+# truth for the 1CT Linked Signer path). All three spellings matter — a
+# RELATIVE import (``from ...venue.nado_client import X``) shows up in the AST
+# as the bare ``venue.nado_client``, without the ``src.`` prefix.
 ENGINE_ROOT = SRC_ROOT / "engine"
 ENGINE_VENUE_FORBIDDEN = (
-    "nadobro.services.nado_client",
     "src.nadobro.venue.nado_client",
-    "services.nado_client",
+    "nadobro.venue.nado_client",
+    "venue.nado_client",
 )
 
 

@@ -36,7 +36,6 @@ Design constraints baked in:
 from __future__ import annotations
 
 import logging
-import os
 
 from src.nadobro.utils.env import env_int
 import threading

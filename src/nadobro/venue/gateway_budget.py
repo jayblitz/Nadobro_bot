@@ -38,7 +38,6 @@ and serve cached data — never fan out to per-product fallbacks.
 from __future__ import annotations
 
 import logging
-import os
 
 from src.nadobro.utils.env import env_float, env_int
 import threading

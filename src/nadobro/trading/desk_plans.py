@@ -7,7 +7,6 @@ without importing services. This module re-exports it for the service layer
 """
 from __future__ import annotations
 
-import os
 
 from src.nadobro.utils.env import env_int
 from src.nadobro.engine.desk_plan import (  # noqa: F401 - re-exports

@@ -6,7 +6,6 @@ serve cached snapshots and only reconcile on a longer interval.
 """
 from __future__ import annotations
 
-import os
 
 from src.nadobro.utils.env import env_float
 import threading

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-import os
+from src.nadobro.utils.env import env_float, env_int
 import time
 from typing import Any
 
@@ -14,18 +14,12 @@ logger = logging.getLogger(__name__)
 
 def provider_timeout_seconds(provider: str, default: float) -> float:
     key = f"{provider.upper()}_TIMEOUT_SECONDS"
-    try:
-        return max(1.0, float((os.environ.get(key) or "").strip() or default))
-    except (TypeError, ValueError):
-        return float(default)
+    return max(1.0, env_float(key, float(default)))
 
 
 def provider_retry_count(provider: str, default: int = 1) -> int:
     key = f"{provider.upper()}_RETRY_COUNT"
-    try:
-        return max(0, min(5, int((os.environ.get(key) or "").strip() or default)))
-    except (TypeError, ValueError):
-        return int(default)
+    return max(0, min(5, env_int(key, int(default))))
 
 
 def record_provider_degraded(
