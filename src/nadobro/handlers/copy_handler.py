@@ -48,7 +48,7 @@ async def _handle_copy(query, data, context, telegram_id):
             for t in traders:
                 curated = " ⭐" if t.get("is_curated") else ""
                 wallet_snip = t["wallet"][:6] + "\\.\\.\\." + t["wallet"][-4:]
-                stats = await run_blocking(get_trader_stats, t["id"])
+                stats = await run_blocking(get_trader_stats, t["id"], telegram_id)
                 vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "\\-"
                 wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "\\-"
                 pnl = stats["pnl_usd"]
@@ -183,7 +183,7 @@ async def _handle_copy(query, data, context, telegram_id):
         curated = " ⭐ Curated" if trader.get("is_curated") else ""
         open_count = int(preview.get("open_positions") or 0)
 
-        stats = await run_blocking(get_trader_stats, trader_id)
+        stats = await run_blocking(get_trader_stats, trader_id, telegram_id)
         vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "N/A"
         wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "N/A"
         pnl_preview = stats["pnl_usd"]

@@ -77,11 +77,11 @@ def set_copy_bot_app(app):
     _bot_app = app
 
 
-async def _notify_user(telegram_id: int, text: str):
+async def _notify_user(telegram_id: int, text: str, reply_markup=None):
     if not _bot_app:
         return
     try:
-        await _bot_app.bot.send_message(chat_id=telegram_id, text=text)
+        await _bot_app.bot.send_message(chat_id=telegram_id, text=text, reply_markup=reply_markup)
     except Exception as e:
         logger.warning("Copy notify failed for %s: %s", telegram_id, e)
 
@@ -408,13 +408,17 @@ def get_available_traders(user_id: int | None = None) -> list[dict]:
     ]
 
 
-def get_trader_stats(trader_id: int) -> dict:
+def get_trader_stats(trader_id: int, user_id: int | None = None) -> dict:
     """Aggregate display metrics for a copy trader across active mirrors.
 
-    This keeps callback handlers resilient even when richer analytics sources
-    are unavailable, and preserves the expected response shape.
+    ``user_id`` scopes the aggregation to THAT user's mirrors — the hub and
+    preview must show each viewer their own results with a trader, never a
+    pool of every follower's PnL (curated traders are shared; results are
+    not). ``None`` keeps the global aggregate for admin/ops callers.
     """
     mirrors = get_mirrors_for_trader(trader_id) or []
+    if user_id is not None:
+        mirrors = [m for m in mirrors if int(m.get("user_id") or 0) == int(user_id)]
     stats = {
         "pnl_usd": 0.0,
         "volume_usd": 0.0,
@@ -479,7 +483,10 @@ def get_trader_preview(trader_id: int, network: str = "mainnet", requester_user_
     for pos in positions:
         try:
             size = abs(float(pos.get("amount", 0) or 0.0))
-            entry = float(pos.get("entry_price", 0) or pos.get("avg_entry_price", 0) or 0.0)
+            entry = float(
+                pos.get("entry_price") or pos.get("avg_entry_price")
+                or pos.get("price") or 0.0
+            )
             total_notional += size * entry
         except Exception:  # policy: degrade-ok(malformed position row; preview tolerates undercount)
             continue
@@ -526,6 +533,59 @@ def get_copy_polling_diagnostics() -> dict:
         "interval_seconds": int(POLL_INTERVAL_SECONDS),
         "task_name": str(task.get_name()) if task else "",
     }
+
+
+async def boot_stand_down_mirrors() -> int:
+    """Redeploy rule: boot NEVER auto-resumes trading — pause every active,
+    unpaused mirror so nothing mirrors until its owner taps Resume.
+
+    Paused mirrors are excluded from polling entirely, which also means any
+    still-open copied positions are unmonitored (no leader-close mirroring,
+    no rail) until resumed — the notification says so explicitly and carries
+    the same Resume/Stop controls as the copy dashboard. Returns the number
+    of mirrors paused.
+    """
+    mirrors = await run_blocking(get_all_active_mirrors_v2)
+    if not mirrors:
+        return 0
+
+    by_user: dict[int, list[dict]] = {}
+    for m in mirrors:
+        by_user.setdefault(int(m["user_id"]), []).append(m)
+
+    paused = 0
+    for user_id, user_mirrors in by_user.items():
+        for m in user_mirrors:
+            try:
+                await run_blocking(pause_copy_mirror, int(m["id"]))
+                paused += 1
+            except Exception:  # noqa: BLE001 - one bad row must not block the boot
+                logger.warning("boot stand-down: pause failed for mirror %s", m.get("id"), exc_info=True)
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            lines = [
+                "⏸ Copy trading paused (bot redeploy)",
+                "Redeploys never auto-resume trading. Your copy mirror(s) are "
+                "paused until you resume them:",
+            ]
+            rows = []
+            for m in user_mirrors:
+                wallet = str(m.get("wallet_address") or "")
+                label = m.get("label") or (f"{wallet[:6]}...{wallet[-4:]}" if len(wallet) >= 10 else wallet)
+                open_rows = await run_blocking(get_open_copy_positions, int(m["id"])) or []
+                lines.append(
+                    f"• {label} ({str(m.get('network', 'mainnet')).upper()})"
+                    + (f" — ⚠️ {len(open_rows)} open position(s) NOT monitored while paused" if open_rows else "")
+                )
+                rows.append([
+                    InlineKeyboardButton(f"▶ Resume {label}"[:60], callback_data=f"copy:resume:{m['id']}"),
+                    InlineKeyboardButton("🛑 Stop", callback_data=f"copy:stop:{m['id']}"),
+                ])
+            await _notify_user(user_id, "\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
+        except Exception:  # noqa: BLE001 - notify is best-effort; the stand-down already happened
+            logger.warning("boot stand-down: notify failed for user %s", user_id, exc_info=True)
+    return paused
 
 
 async def _poll_loop():
@@ -592,7 +652,11 @@ def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict
             "product_id": pid,
             "side": side,
             "size": abs(amount),
-            "entry_price": float(pos.get("entry_price", 0) or 0),
+            # The venue client publishes the average entry under "price"
+            # ("entry_price" is a newer alias) — read both. Every open is
+            # gated on entry > 0, so missing this key silently killed all
+            # copy opens.
+            "entry_price": float(pos.get("entry_price") or pos.get("price") or 0),
             "unrealized_pnl": float(pos.get("unrealized_pnl", 0) or 0),
             # COPY-LEVERAGE fix: capture the leader's leverage so the follower can
             # mirror the leader's risk profile instead of always using its own
@@ -600,6 +664,12 @@ def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict
             "leverage": float(pos.get("leverage", 0) or 0),
         }
         try:
+            # Venue open orders currently expose no order type (rows carry
+            # digest/amount/price/side only) and trigger orders don't appear
+            # in the book at all, so leader TP/SL is undetectable today —
+            # this scan engages only if the venue starts publishing a type.
+            # Followers stay protected by close/partial mirroring + the
+            # cumulative rail regardless.
             orders = leader_client.get_open_orders(pid) or []
             tp_price = None
             sl_price = None
@@ -1491,7 +1561,10 @@ def _update_tp_sl_if_changed(
     if force and not (new_tp or new_sl or old_tp or old_sl):
         return  # nothing bracketed — nothing to resize
 
-    # Update the copy_positions record
+    # Update the copy_positions record. On a pure force-resize (partial close
+    # with unchanged bracket prices) there are no price columns to update —
+    # skip the UPDATE entirely (an empty SET is a SQL syntax error) and go
+    # straight to cancel + re-place for the new size.
     from src.nadobro.db import execute as db_execute
     updates = []
     params = []
@@ -1501,8 +1574,9 @@ def _update_tp_sl_if_changed(
     if sl_changed:
         updates.append("sl_price = %s")
         params.append(new_sl)
-    params.append(existing_cp["id"])
-    db_execute(f"UPDATE copy_positions SET {', '.join(updates)} WHERE id = %s", params)
+    if updates:
+        params.append(existing_cp["id"])
+        db_execute(f"UPDATE copy_positions SET {', '.join(updates)} WHERE id = %s", params)
 
     # Cancel only the TP/SL orders this copy position created.
     product_name = existing_cp.get("product_name", "")
