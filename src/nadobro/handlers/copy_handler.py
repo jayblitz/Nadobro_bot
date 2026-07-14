@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from src.nadobro.handlers.formatters import escape_md
-from src.nadobro.handlers.keyboards import back_kb, copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb, copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb
+from src.nadobro.handlers.keyboards import back_kb, copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb, copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb, copy_leaderboard_kb, copy_lb_trader_kb
 from src.nadobro.i18n import localize_text, get_active_language
 from src.nadobro.users.admin_service import is_admin
 from src.nadobro.core.async_utils import run_blocking
@@ -64,6 +64,104 @@ async def _handle_copy(query, data, context, telegram_id):
             "\n".join(lines),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=copy_hub_kb(traders, is_admin_user=admin_flag),
+        )
+
+    elif action == "lb" and len(parts) >= 3 and parts[2] == "view":
+        # copy:lb:view:{wallet} — NadoExplorer trader card
+        wallet = parts[3] if len(parts) >= 4 else ""
+        if not wallet.startswith("0x"):
+            await _edit_loc(query, "⚠️ Trader not found\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+        from src.nadobro.trading.copy_discovery import trader_card
+
+        card = await run_blocking(trader_card, wallet)
+        row = (context.user_data.get("copy_lb_rows") or {}).get(wallet) or {}
+        s = card.get("summary_30d") or {}
+        wallet_snip = wallet[:6] + "..." + wallet[-4:]
+        pnl30 = float(s.get("pnlUsd") or row.get("pnl_usd") or 0.0)
+        pnl_str = f"+${pnl30:,.0f}" if pnl30 >= 0 else f"-${abs(pnl30):,.0f}"
+        equity = float(row.get("equity_usd") or 0.0)
+        wr = float(row.get("win_rate") or 0.0) * 100.0
+        pf = float(row.get("profit_factor") or 0.0)
+        mdd = float(row.get("max_drawdown_pct") or 0.0) * 100.0
+        vol30 = float(s.get("volumeUsd") or row.get("volume_usd") or 0.0)
+        best = float(s.get("bestDayPnlUsd") or 0.0)
+        worst = float(s.get("worstDayPnlUsd") or 0.0)
+        await _edit_loc(query,
+            "🏆 *Top Trader*\n\nWallet: `{wallet}`\n"
+            "Equity: *{equity}*\n30d PnL: *{pnl}* \\| 30d Volume: {vol}\n"
+            "Win Rate: *{wr}* \\| Profit Factor: {pf} \\| Max DD: {mdd}\n"
+            "Best day: {best} \\| Worst day: {worst}\n"
+            "Open Positions: *{positions}* \\(\\~{notional} notional\\)\n\n"
+            "Copying mirrors this trader's opens and closes proportionally to "
+            "your margin \\(min \\$100\\)\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_lb_trader_kb(wallet),
+            wallet=escape_md(wallet_snip),
+            equity=escape_md(f"${equity:,.0f}" if equity else "N/A"),
+            pnl=escape_md(pnl_str),
+            vol=escape_md(f"${vol30:,.0f}" if vol30 else "N/A"),
+            wr=escape_md(f"{wr:.0f}%" if wr else "N/A"),
+            pf=escape_md(f"{pf:.2f}" if pf else "N/A"),
+            mdd=escape_md(f"{mdd:.1f}%" if mdd else "N/A"),
+            best=escape_md(f"${best:+,.0f}" if best else "N/A"),
+            worst=escape_md(f"${worst:+,.0f}" if worst else "N/A"),
+            positions=int(card.get("open_position_count") or 0),
+            notional=escape_md(f"${float(card.get('open_notional_usd') or 0.0):,.0f}"),
+        )
+
+    elif action == "lb" and len(parts) >= 3 and parts[2] == "follow":
+        # copy:lb:follow:{wallet} — create the private trader row, seed wizard
+        wallet = parts[3] if len(parts) >= 4 else ""
+        if not wallet.startswith("0x"):
+            await _edit_loc(query, "⚠️ Trader not found\\.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
+            return
+        from src.nadobro.trading.copy_discovery import follow_from_leaderboard
+
+        row = (context.user_data.get("copy_lb_rows") or {}).get(wallet)
+        ok, msg, trader_id = await run_blocking(
+            follow_from_leaderboard, telegram_id, wallet, row
+        )
+        if not ok or not trader_id:
+            await _edit_loc(query, "⚠️ {msg}", parse_mode=ParseMode.MARKDOWN_V2,
+                            reply_markup=back_kb(), msg=escape_md(msg))
+            return
+        context.user_data["copy_setup"] = {"trader_id": trader_id, "step": "budget"}
+        await _edit_loc(query,
+            "💰 *Set Copy Margin*\n\nHow much USD to allocate for copying this "
+            "trader? \\(minimum \\$100\\)",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_budget_kb(),
+        )
+
+    elif action == "lb":
+        # copy:lb:{page}[:{sort}] — NadoExplorer leaderboard page
+        from src.nadobro.trading.copy_discovery import leaderboard_page
+
+        try:
+            page = int(parts[2]) if len(parts) >= 3 else 0
+        except ValueError:
+            page = 0
+        sort = parts[3] if len(parts) >= 4 and parts[3] in ("pnl", "roi") else "pnl"
+        rows = await run_blocking(leaderboard_page, page, sort=sort)
+        if not rows:
+            await _edit_loc(query,
+                "🏆 *Top Traders*\n\nLeaderboard is unavailable right now\\. "
+                "You can still add a wallet manually from the Copy Trading hub\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb("copy:hub"),
+            )
+            return
+        # Cache rows for the view/follow screens (stat stamping + card fields).
+        context.user_data["copy_lb_rows"] = {r["wallet_address"]: r for r in rows}
+        lines = [
+            "🏆 *Top Traders* \\(30d, by {sort}\\)\n".format(sort=sort.upper()),
+            "Live rankings from NadoExplorer\\. Tap a trader for details\\.",
+        ]
+        await _edit_loc(query,
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_leaderboard_kb(rows, page, sort),
         )
 
     elif action == "trader" and len(parts) >= 3:

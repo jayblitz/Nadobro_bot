@@ -34,6 +34,14 @@ from src.nadobro.models.database import (
     get_open_copy_positions,
     get_open_copy_position_for_product,
     close_copy_position,
+    reduce_copy_position,
+    update_mirror_accounting,
+    set_mirror_unrealized,
+    set_mirror_session,
+    insert_strategy_session,
+    update_strategy_session,
+    rollup_session_from_trades,
+    rollup_engine_session_pnl_funding,
     save_copy_snapshot,
     get_latest_copy_snapshot,
     get_copy_trades_by_mirror,
@@ -43,13 +51,23 @@ from src.nadobro.trading.trade_service import execute_market_order, execute_limi
 from src.nadobro.venue.nado_client import NadoClient
 from src.nadobro.venue.nado_archive import query_order_by_digest
 from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.utils.env import env_bool, env_float
 
 logger = logging.getLogger(__name__)
 
 MAX_MIRRORS_PER_USER = 5
-MIN_MARGIN_PER_TRADE = 5.0
+# Product floor: copy trading requires at least $100 margin per trade so the
+# proportional mirror of a serious leader position clears venue minimums.
+MIN_MARGIN_PER_TRADE = 100.0
 MAX_MARGIN_PER_TRADE = 5000.0
 POLL_INTERVAL_SECONDS = 30
+# Partial-close mirroring: when the leader trims a position below the baseline
+# we copied by more than this fraction, the same fraction of the copy is
+# closed reduce-only. Kill switch: NADO_COPY_PARTIAL_CLOSES=false.
+PARTIAL_CLOSES_ENABLED = env_bool("NADO_COPY_PARTIAL_CLOSES", True)
+PARTIAL_CLOSE_MIN_DELTA_PCT = env_float("NADO_COPY_PARTIAL_MIN_DELTA_PCT", 5.0)
+# Below this remaining fraction a partial becomes a full close (avoids dust).
+PARTIAL_CLOSE_DUST_FRACTION = 0.05
 _bot_app = None
 _poll_task: Optional[asyncio.Task] = None
 
@@ -121,6 +139,7 @@ def remove_trader(trader_id: int, requester_user_id: int | None = None, is_admin
     for m in mirrors:
         _flatten_mirror_positions(int(m["id"]), int(m["user_id"]), str(m.get("network", "mainnet")), reason="trader_removed")
         stop_copy_mirror(m["id"])
+        _finalize_mirror_session(m, "trader_removed")
     deactivate_copy_trader(trader_id)
     label = trader.get("label") or trader["wallet_address"][:10]
     return True, f"Trader {label} removed. {len(mirrors)} mirror(s) stopped."
@@ -171,6 +190,32 @@ def start_copy(
         return False, "Failed to create copy mirror."
 
     label = trader.get("label") or trader["wallet_address"][:10]
+    # COPY-SESSION: every mirror run is a strategy_sessions row (strategy=
+    # 'copy') so Performance history, PnL cards, and the venue-authoritative
+    # rollup (volume/fees/funding from trades tagged strategy_session_id)
+    # work exactly like any other session. Best-effort: copying still starts
+    # if the session insert fails — accounting then degrades to mirror rows.
+    try:
+        session_id = insert_strategy_session({
+            "user_id": telegram_id,
+            "strategy": "copy",
+            "product_name": label,
+            "network": network,
+            "config_snapshot": json.dumps({
+                "trader_id": trader_id,
+                "wallet": trader["wallet_address"],
+                "margin_per_trade": margin_per_trade,
+                "max_leverage": max_leverage,
+                "cumulative_stop_loss_pct": cumulative_stop_loss_pct,
+                "cumulative_take_profit_pct": cumulative_take_profit_pct,
+                "total_allocated_usd": total_allocated_usd,
+            }),
+        })
+        if session_id:
+            set_mirror_session(mirror_id, int(session_id))
+    except Exception:  # noqa: BLE001 - session row is reporting infra, not the mirror
+        logger.warning("copy session row create failed for mirror %s", mirror_id, exc_info=True)
+
     return True, (
         f"🔗 Now copying {label}\n"
         f"💰 Margin/Trade: ${margin_per_trade:.0f}\n"
@@ -178,6 +223,27 @@ def start_copy(
         f"🛑 Stop Loss: {cumulative_stop_loss_pct}% of ${total_allocated_usd:.0f}\n"
         f"🎯 Take Profit: {cumulative_take_profit_pct}% of ${total_allocated_usd:.0f}"
     )
+
+
+def _finalize_mirror_session(mirror: dict, stop_reason: str) -> None:
+    """Finalize the mirror's strategy_sessions row: venue-authoritative rollup
+    (volume/fees from x18-enriched trades tagged with the session id, funding
+    window-summed like engine sessions), then mark it stopped. Best-effort —
+    a rollup failure never blocks the stop itself."""
+    session_id = mirror.get("strategy_session_id")
+    if not session_id:
+        return
+    network = str(mirror.get("network", "mainnet"))
+    try:
+        rollup_session_from_trades(int(session_id), network)
+        rollup_engine_session_pnl_funding(int(session_id), network)
+        update_strategy_session(int(session_id), {
+            "status": "stopped",
+            "stopped_at": datetime.utcnow().isoformat(),
+            "stop_reason": stop_reason,
+        })
+    except Exception:  # noqa: BLE001 - reporting must not block the stop
+        logger.warning("copy session finalize failed for session %s", session_id, exc_info=True)
 
 
 def stop_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
@@ -190,6 +256,7 @@ def stop_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
         return False, "Mirror already stopped."
     closed_count, _, _, errors = _flatten_mirror_positions(mirror_id, telegram_id, str(mirror.get("network", "mainnet")), reason="user_stop")
     stop_copy_mirror(mirror_id)
+    _finalize_mirror_session(mirror, "user_stop")
     suffix = f" Flattened {closed_count} copied position(s)." if closed_count > 0 else ""
     if errors:
         suffix += f" Some closes failed: {'; '.join(errors[:2])}"
@@ -233,6 +300,7 @@ def stop_all_copies(telegram_id: int) -> tuple[bool, str]:
         closed_count, _, _, _ = _flatten_mirror_positions(int(m["id"]), telegram_id, str(m.get("network", "mainnet")), reason="user_stop_all")
         total_closed += closed_count
         stop_copy_mirror(m["id"])
+        _finalize_mirror_session(m, "user_stop_all")
     suffix = f" Flattened {total_closed} copied position(s)." if total_closed > 0 else ""
     return True, f"Stopped {len(mirrors)} copy mirror(s).{suffix}"
 
@@ -255,6 +323,17 @@ def get_user_copies(telegram_id: int, network: str = None) -> list[dict]:
             "cumulative_take_profit_pct": m.get("cumulative_take_profit_pct", 100.0),
             "total_allocated_usd": m.get("total_allocated_usd", 500.0),
             "cumulative_pnl": float(m.get("cumulative_pnl", 0)),
+            "cumulative_fees_usd": float(m.get("cumulative_fees_usd") or 0.0),
+            "cumulative_volume_usd": float(m.get("cumulative_volume_usd") or 0.0),
+            "unrealized_pnl": float(m.get("last_unrealized_pnl_usd") or 0.0),
+            # Rail-consistent net: realized (gross, derived) + last unrealized
+            # snapshot - fees. This is exactly the number the SL/TP rail judges.
+            "net_pnl": (
+                float(m.get("cumulative_pnl", 0))
+                + float(m.get("last_unrealized_pnl_usd") or 0.0)
+                - float(m.get("cumulative_fees_usd") or 0.0)
+            ),
+            "strategy_session_id": m.get("strategy_session_id"),
             "open_positions": len(open_positions),
             "paused": bool(m.get("paused")),
             "network": m.get("network", "mainnet"),
@@ -268,6 +347,8 @@ def get_user_mirrors(telegram_id: int) -> list[dict]:
 
 
 def _flatten_mirror_positions(mirror_id: int, user_id: int, network: str, reason: str = "user_stop") -> tuple[int, float, float, list[str]]:
+    mirror = get_copy_mirror(mirror_id) or {}
+    session_id = mirror.get("strategy_session_id")
     open_positions = get_open_copy_positions(mirror_id) or []
     closed = 0
     total_pnl = 0.0
@@ -291,18 +372,16 @@ def _flatten_mirror_positions(mirror_id: int, user_id: int, network: str, reason
                 reduce_only=True,
                 source="copy",
                 network=network,
+                strategy_session_id=session_id,
             )
             if not result.get("success"):
                 errors.append(f"{product_name}: {result.get('error', 'close failed')}")
                 continue
-            close_digest = str(result.get("digest") or "")
-            fill_data = query_order_by_digest(network, close_digest, 2.0, 0.25) if close_digest else None
-            pnl = float((fill_data or {}).get("realized_pnl", result.get("pnl", 0)) or 0.0)
+            pnl, _fee, close_price = _settle_copy_close(mirror_id, cp, result, network, size)
             close_copy_position(cp["id"], pnl=pnl, reason=reason)
-            update_mirror_cumulative_pnl(mirror_id, pnl)
             closed += 1
             total_pnl += pnl
-            total_notional += size * float(result.get("price") or cp.get("entry_price") or 0.0)
+            total_notional += size * float(close_price or cp.get("entry_price") or 0.0)
         except Exception as e:
             errors.append(f"{product_name}: {e}")
     return closed, total_pnl, total_notional, errors
@@ -347,39 +426,37 @@ def get_trader_stats(trader_id: int) -> dict:
     if not mirrors:
         return stats
 
+    # v2 accounting: the legacy copy_trades table (Hyperliquid-era) is never
+    # written by this path, so aggregate from what the mirrors actually track —
+    # derived realized PnL net of fees, execution volume, and closed copy
+    # positions (win = positive derived PnL on the closed row).
+    from src.nadobro.db import query_all as _query_all
+
     for mirror in mirrors:
         mirror_id = int(mirror.get("id") or 0)
         if mirror_id <= 0:
             continue
-
-        # Mirror-level cumulative PnL is the most reliable value currently tracked.
-        stats["pnl_usd"] += float(mirror.get("cumulative_pnl") or 0.0)
-
-        trades = get_copy_trades_by_mirror(mirror_id, limit=500) or []
-        for t in trades:
-            status = str(t.get("status") or "").lower()
+        stats["pnl_usd"] += (
+            float(mirror.get("cumulative_pnl") or 0.0)
+            - float(mirror.get("cumulative_fees_usd") or 0.0)
+        )
+        stats["volume_usd"] += float(mirror.get("cumulative_volume_usd") or 0.0)
+        try:
+            rows = _query_all(
+                """SELECT pnl FROM copy_positions
+                   WHERE mirror_id = %s AND status = 'closed'""",
+                (mirror_id,),
+            ) or []
+        except Exception:  # policy: degrade-ok(stats query; dashboard tolerates undercount)
+            rows = []
+        for r in rows:
             stats["total_trades"] += 1
-            if status == "failed":
-                stats["failed"] += 1
-                continue
-            if status != "filled":
-                continue
-
             stats["filled"] += 1
-            try:
-                nado_sz = float(t.get("nado_size") or 0.0)
-                nado_px = float(t.get("nado_price") or 0.0)
-                hl_sz = float(t.get("hl_size") or 0.0)
-                hl_px = float(t.get("hl_price") or 0.0)
-                notional = abs(nado_sz * nado_px) if nado_sz and nado_px else abs(hl_sz * hl_px)
-                stats["volume_usd"] += float(notional or 0.0)
-            except Exception:  # policy: degrade-ok(stats row malformed; dashboard tolerates undercount)
-                pass
+            if float(r.get("pnl") or 0.0) > 0:
+                stats["wins"] = stats.get("wins", 0) + 1
 
-    # We currently don't persist per-trade realized PnL in copy_trades, so
-    # represent win-rate as execution success ratio for now.
     if stats["total_trades"] > 0:
-        stats["win_rate"] = (stats["filled"] / stats["total_trades"]) * 100.0
+        stats["win_rate"] = (stats.get("wins", 0) / stats["total_trades"]) * 100.0
     return stats
 
 
@@ -644,6 +721,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             mirror_id,
             f"User network switched to {user_network}; mirror requires {network}.",
         )
+        await run_blocking(_finalize_mirror_session, mirror, "network_mismatch")
         await _notify_user(
             user_id,
             (
@@ -656,63 +734,22 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         )
         return
 
-    # Check cumulative P&L limits
-    if total_allocated > 0:
-        pnl_pct = (cumulative_pnl / total_allocated) * 100
-        if cumulative_stop_loss_pct > 0 and cumulative_pnl < 0 and abs(pnl_pct) >= cumulative_stop_loss_pct:
-            closed_count, total_pnl, _, errors = await run_blocking(
-                _flatten_mirror_positions,
-                mirror_id,
-                user_id,
-                str(network),
-                "auto_stop_loss",
-            )
-            await run_blocking(auto_stop_mirror, mirror_id, f"Cumulative stop loss hit: {pnl_pct:.1f}%")
-            await _notify_user(
-                user_id,
-                (
-                    f"🛑 Copy Trading Auto-Stopped\n"
-                    f"Cumulative loss hit {abs(pnl_pct):.1f}% (limit: {cumulative_stop_loss_pct}%)\n"
-                    f"P&L: ${cumulative_pnl:,.2f} / ${total_allocated:,.0f} allocated\n"
-                    + (f"Closed {closed_count} copied position(s) for ${total_pnl:+,.2f}.\n" if closed_count > 0 else "")
-                    + (f"Cleanup errors: {'; '.join(errors[:2])}" if errors else "")
-                )
-            )
-            return
-        if cumulative_take_profit_pct > 0 and cumulative_pnl > 0 and pnl_pct >= cumulative_take_profit_pct:
-            closed_count, total_pnl, _, errors = await run_blocking(
-                _flatten_mirror_positions,
-                mirror_id,
-                user_id,
-                str(network),
-                "auto_take_profit",
-            )
-            await run_blocking(auto_stop_mirror, mirror_id, f"Cumulative take profit hit: {pnl_pct:.1f}%")
-            await _notify_user(
-                user_id,
-                (
-                    f"🎯 Copy Trading Auto-Stopped — Target Hit!\n"
-                    f"Cumulative profit hit {pnl_pct:.1f}% (target: {cumulative_take_profit_pct}%)\n"
-                    f"P&L: +${cumulative_pnl:,.2f} / ${total_allocated:,.0f} allocated\n"
-                    + (f"Closed {closed_count} copied position(s) for ${total_pnl:+,.2f}.\n" if closed_count > 0 else "")
-                    + (f"Cleanup errors: {'; '.join(errors[:2])}" if errors else "")
-                )
-            )
-            return
+    session_id = mirror.get("strategy_session_id")
 
-    # Get current copy positions for this mirror
+    # Load tracked rows and the follower's REAL on-venue positions FIRST — the
+    # bracket-fill sweep and the rail's unrealized PnL both need them (the old
+    # code evaluated the rail before any live data was loaded).
     open_copy_positions = await run_blocking(get_open_copy_positions, mirror_id)
     copy_pos_by_product = {}
     for cp in open_copy_positions:
         copy_pos_by_product[cp["product_id"]] = cp
 
-    # COPY-VENUE-RECONCILE: read the follower's REAL on-venue positions once so we
-    # can avoid opening a duplicate when the wallet already holds the product
-    # (e.g. a prior copy that filled on-chain but failed to record, or a manual
-    # trade). Best-effort — if the client/price is unavailable we degrade to the
-    # prior DB-only behavior rather than block copying.
+    # COPY-VENUE-RECONCILE: best-effort — if the client/read is unavailable we
+    # degrade to DB-only behavior (no sweep, realized-only rail) rather than
+    # block copying.
     max_entry_deviation_pct = float(mirror.get("max_entry_deviation_pct", 1.5) or 1.5)
     venue_pos_by_product: dict = {}
+    venue_read_ok = False
     try:
         follower_client = await run_blocking(get_user_nado_client, user_id)
     except Exception as e:  # noqa: BLE001 - reconcile is best-effort; degrade to DB-only
@@ -726,8 +763,72 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                         venue_pos_by_product[int(vp.get("product_id", -1))] = vp
                 except (TypeError, ValueError):
                     continue
+            venue_read_ok = True
         except Exception as e:  # noqa: BLE001 - reconcile is best-effort
             logger.debug("copy venue-position reconcile read failed: %s", e)
+
+    # COPY-BRACKET-SWEEP: book venue-side closes nobody reported — a TP/SL
+    # bracket that FILLED on the venue, a manual close, or a liquidation.
+    # Without this, a filled stop-loss left a phantom open row, zero booked
+    # PnL, and a rail that never saw the loss.
+    if venue_read_ok:
+        swept_pnl, swept_fees = await _sweep_external_closes(
+            mirror, copy_pos_by_product, venue_pos_by_product, follower_client
+        )
+        cumulative_pnl += swept_pnl
+
+    # Unrealized PnL of the surviving open copy rows — venue uPnL scaled to
+    # the copy's share of the venue position, mid-price fallback.
+    upnl = await _compute_open_upnl(
+        copy_pos_by_product, venue_pos_by_product, follower_client
+    )
+    try:
+        await run_blocking(set_mirror_unrealized, mirror_id, upnl)
+    except Exception:  # noqa: BLE001 - display cache only
+        logger.debug("copy set_mirror_unrealized failed", exc_info=True)
+
+    # COPY-RAIL: judged like every session rail in this product — live PnL
+    # INCLUDING unrealized, NET of fees, as % of the allocated amount.
+    cumulative_fees = float(mirror.get("cumulative_fees_usd") or 0.0)
+    net_pnl = cumulative_pnl + upnl - cumulative_fees
+    if total_allocated > 0:
+        pnl_pct = (net_pnl / total_allocated) * 100
+        reason = _rail_decision(
+            net_pnl, total_allocated, cumulative_stop_loss_pct, cumulative_take_profit_pct
+        )
+        if reason is not None:
+            if reason == "auto_stop_loss":
+                title = "🛑 Copy Trading Auto-Stopped"
+                detail = f"Cumulative loss hit {abs(pnl_pct):.1f}% (limit: {cumulative_stop_loss_pct}%)"
+            else:
+                title = "🎯 Copy Trading Auto-Stopped — Target Hit!"
+                detail = f"Cumulative profit hit {pnl_pct:.1f}% (target: {cumulative_take_profit_pct}%)"
+            closed_count, total_pnl, _, errors = await run_blocking(
+                _flatten_mirror_positions, mirror_id, user_id, str(network), reason,
+            )
+            if errors:
+                # A rail fired but the flatten is incomplete: keep the mirror
+                # ACTIVE so the next poll retries the flatten (stopping now
+                # would orphan live positions with no monitor).
+                logger.error(
+                    "copy rail %s flatten incomplete for mirror %s (%s) — retrying next poll",
+                    reason, mirror_id, "; ".join(errors[:3]),
+                )
+            else:
+                await run_blocking(auto_stop_mirror, mirror_id, detail)
+                await run_blocking(_finalize_mirror_session, mirror, reason)
+            await _notify_user(
+                user_id,
+                (
+                    f"{title}\n{detail}\n"
+                    f"Net P&L: ${net_pnl:+,.2f} (realized ${cumulative_pnl:+,.2f}, "
+                    f"unrealized ${upnl:+,.2f}, fees ${cumulative_fees:,.2f}) "
+                    f"/ ${total_allocated:,.0f} allocated\n"
+                    + (f"Closed {closed_count} copied position(s) for ${total_pnl:+,.2f}.\n" if closed_count > 0 else "")
+                    + (f"⚠️ Some closes failed and will be retried: {'; '.join(errors[:2])}" if errors else "")
+                )
+            )
+            return
 
     # 1. Close positions that leader has closed
     for pid, cp in list(copy_pos_by_product.items()):
@@ -750,20 +851,20 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     reduce_only=True,
                     source="copy",
                     network=network,
+                    strategy_session_id=session_id,
                 )
                 if not result.get("success"):
                     logger.warning("Failed to close copy position %s: %s", cp["id"], result.get("error", "close failed"))
                     continue
-                close_digest = str(result.get("digest") or "")
-                fill_data = await run_blocking(query_order_by_digest, network, close_digest, 2.0, 0.25) if close_digest else None
-                pnl = float((fill_data or {}).get("realized_pnl", result.get("pnl", 0)) or 0.0)
+                pnl, fee, _price = await run_blocking(
+                    _settle_copy_close, mirror_id, cp, result, network, float(cp.get("size", 0))
+                )
                 await run_blocking(close_copy_position, cp["id"], pnl=pnl, reason="leader_closed")
-                await run_blocking(update_mirror_cumulative_pnl, mirror_id, pnl)
                 await _notify_user(
                     user_id,
                     f"📋 Copy Position Closed\n"
                     f"{product_name}: Leader closed → Your position closed\n"
-                    f"P&L: ${pnl:+,.2f}"
+                    f"P&L: ${pnl:+,.2f}" + (f" (fees ${fee:,.2f})" if fee else "")
                 )
             except Exception as e:
                 logger.error("Failed to close copy position %s: %s", cp["id"], e)
@@ -789,21 +890,32 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                         reduce_only=True,
                         source="copy",
                         network=network,
+                        strategy_session_id=session_id,
                     )
                     if not close_res.get("success"):
                         logger.error("Failed to flip copy position %s: %s", existing["id"], close_res.get("error", "close failed"))
                         continue
-                    close_digest = str(close_res.get("digest") or "")
-                    fill_data = await run_blocking(query_order_by_digest, network, close_digest, 2.0, 0.25) if close_digest else None
-                    pnl = float((fill_data or {}).get("realized_pnl", close_res.get("pnl", 0)) or 0.0)
+                    pnl, _fee, _price = await run_blocking(
+                        _settle_copy_close, mirror_id, existing, close_res, network,
+                        float(existing.get("size", 0)),
+                    )
                     await run_blocking(close_copy_position, existing["id"], pnl=pnl, reason="leader_flipped_side")
-                    await run_blocking(update_mirror_cumulative_pnl, mirror_id, pnl)
                 except Exception as e:
                     logger.error("Failed to flip copy position %s: %s", existing["id"], e)
                     continue
                 copy_pos_by_product.pop(pid, None)
             else:
-                await run_blocking(_update_tp_sl_if_changed, existing, leader_pos, user_id, network)
+                resized = await _mirror_partial_close_if_needed(
+                    existing, leader_pos, user_id, mirror_id, network,
+                    session_id=session_id,
+                )
+                if resized == "closed":
+                    copy_pos_by_product.pop(pid, None)
+                    continue
+                await run_blocking(
+                    _update_tp_sl_if_changed, existing, leader_pos, user_id, network,
+                    force=(resized == "reduced"), session_id=session_id,
+                )
                 continue
 
         # New position from leader — open a copy
@@ -872,10 +984,18 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                 enforce_rate_limit=False,
                 source="copy",
                 network=network,
+                strategy_session_id=session_id,
             )
 
             if result.get("success"):
                 fill_price = float(result.get("price", leader_entry) or leader_entry)
+                # Open-side accounting: fee (when the archive resolved inline)
+                # and entry notional as volume.
+                await run_blocking(
+                    update_mirror_accounting, mirror_id,
+                    fees_delta=float(result.get("fee") or 0.0),
+                    volume_delta=fill_price * copy_size,
+                )
                 # Record the copy position
                 copy_position_id = await run_blocking(
                     insert_copy_position,
@@ -901,12 +1021,13 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     user_id,
                     product_key,
                     pid,
-                    copy_size,
-                    is_long,
-                    leverage,
-                    leader_pos.get("tp_price"),
-                    leader_pos.get("sl_price"),
-                    network,
+                    session_id=session_id,
+                    size=copy_size,
+                    is_long=is_long,
+                    leverage=leverage,
+                    tp_price=leader_pos.get("tp_price"),
+                    sl_price=leader_pos.get("sl_price"),
+                    network=network,
                 )
                 if copy_position_id and bracket_digests:
                     from src.nadobro.db import execute as db_execute
@@ -950,7 +1071,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
 def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                         size: float, is_long: bool, leverage: float,
                         tp_price: Optional[float], sl_price: Optional[float],
-                        network: str):
+                        network: str, session_id=None):
     """Place TP and SL orders for a copy position."""
     digests = {}
     if tp_price and tp_price > 0:
@@ -967,6 +1088,7 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                 order_type_override="TAKE_PROFIT",
                 source="copy",
                 network=network,
+                strategy_session_id=session_id,
             )
             if result.get("success") and result.get("digest"):
                 digests["tp_order_digest"] = result.get("digest")
@@ -987,6 +1109,7 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
                 order_type_override="STOP_LOSS",
                 source="copy",
                 network=network,
+                strategy_session_id=session_id,
             )
             if result.get("success") and result.get("digest"):
                 digests["sl_order_digest"] = result.get("digest")
@@ -995,8 +1118,365 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
     return digests
 
 
-def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, network: str):
-    """Check if leader's TP/SL changed and update the copy position's orders."""
+def _rail_decision(
+    net_pnl: float, total_allocated: float, stop_loss_pct: float, take_profit_pct: float
+) -> Optional[str]:
+    """The cumulative rail, as a pure decision: "auto_stop_loss",
+    "auto_take_profit", or None. ``net_pnl`` is realized (derived gross)
+    + unrealized - fees — the same net-of-fees, uPnL-inclusive basis every
+    session rail in this product uses."""
+    if total_allocated <= 0:
+        return None
+    pnl_pct = (net_pnl / total_allocated) * 100.0
+    if stop_loss_pct > 0 and net_pnl < 0 and abs(pnl_pct) >= stop_loss_pct:
+        return "auto_stop_loss"
+    if take_profit_pct > 0 and net_pnl > 0 and pnl_pct >= take_profit_pct:
+        return "auto_take_profit"
+    return None
+
+
+def _classify_external_change(cp: dict, venue_pos: Optional[dict]) -> tuple[str, float]:
+    """How does the venue's reality compare to a tracked open copy row?
+
+    Returns ("closed", 0.0) when the venue no longer holds the product on the
+    copy's side; ("reduced", venue_size) when the venue holds the same side
+    but LESS than the copy size (externally reduced — bracket partial, manual
+    trim); ("ok", venue_size) otherwise. A 2% tolerance absorbs venue rounding.
+    """
+    copy_size = float(cp.get("size") or 0.0)
+    if venue_pos is None:
+        return "closed", 0.0
+    try:
+        venue_size = abs(float(venue_pos.get("signed_amount") or venue_pos.get("amount") or 0.0))
+        venue_side = str(venue_pos.get("side") or "").upper()
+    except (TypeError, ValueError):
+        return "ok", copy_size
+    if venue_size <= 0 or (venue_side and venue_side != str(cp.get("side", "")).upper()):
+        return "closed", 0.0
+    if venue_size < copy_size * 0.98:
+        return "reduced", venue_size
+    return "ok", venue_size
+
+
+def _resolve_bracket_fill(cp: dict, network: str) -> tuple[float, float, str]:
+    """(close_price, fee, reason) for an externally-vanished copy position.
+
+    Checks the position's own TP/SL bracket digests in the archive — a filled
+    bracket gives the exact fill price and fee; otherwise the close happened
+    outside our orders (manual/liquidation) and the caller falls back to mid.
+    """
+    for digest, reason in (
+        (str(cp.get("tp_order_digest") or "").strip(), "bracket_take_profit"),
+        (str(cp.get("sl_order_digest") or "").strip(), "bracket_stop_loss"),
+    ):
+        if not digest:
+            continue
+        try:
+            parsed = query_order_by_digest(network, digest, 1.0, 0.25)
+        except Exception:  # noqa: BLE001 - archive lookup best-effort
+            parsed = None
+        if parsed and parsed.get("is_filled"):
+            price = float(parsed.get("fill_price") or 0.0)
+            fee = float(parsed.get("fee") or 0.0) + float(parsed.get("builder_fee") or 0.0)
+            if price > 0:
+                return price, fee, reason
+    return 0.0, 0.0, "external_close"
+
+
+async def _sweep_external_closes(
+    mirror: dict,
+    copy_pos_by_product: dict,
+    venue_pos_by_product: dict,
+    follower_client,
+) -> tuple[float, float]:
+    """Book copy closes that happened ON the venue without us placing them:
+    filled TP/SL brackets, manual closes, liquidations. Returns
+    (pnl_booked, fees_booked) so the caller's rail sees them this poll."""
+    mirror_id = mirror["id"]
+    user_id = mirror["user_id"]
+    network = str(mirror.get("network", "mainnet"))
+    pnl_total = 0.0
+    fees_total = 0.0
+    for pid, cp in list(copy_pos_by_product.items()):
+        kind, venue_size = _classify_external_change(cp, venue_pos_by_product.get(pid))
+        if kind == "ok":
+            continue
+        copy_size = float(cp.get("size") or 0.0)
+        closed_qty = copy_size if kind == "closed" else max(0.0, copy_size - venue_size)
+        if closed_qty <= 0:
+            continue
+        close_price, fee, reason = await run_blocking(_resolve_bracket_fill, cp, network)
+        if close_price <= 0 and follower_client is not None:
+            try:
+                mp = await run_blocking(follower_client.get_market_price, pid)
+                close_price = float((mp or {}).get("mid") or 0.0)
+            except Exception:  # noqa: BLE001 - price best-effort
+                close_price = 0.0
+        pnl = _close_pnl_gross(cp.get("entry_price"), close_price, closed_qty, cp.get("side", ""))
+        await run_blocking(
+            update_mirror_accounting, mirror_id,
+            pnl_delta=pnl, fees_delta=fee, volume_delta=close_price * closed_qty,
+        )
+        pnl_total += pnl
+        fees_total += fee
+        product_name = cp.get("product_name") or get_product_name(pid, network=network)
+        if kind == "closed":
+            await run_blocking(close_copy_position, cp["id"], pnl=pnl, reason=reason)
+            copy_pos_by_product.pop(pid, None)
+            # Cancel the surviving sibling bracket so it can't fire on a
+            # position that no longer exists (reduce-only protects funds, but
+            # a stale resting order confuses the venue reconcile).
+            if follower_client is not None:
+                for digest in {
+                    str(cp.get("tp_order_digest") or "").strip(),
+                    str(cp.get("sl_order_digest") or "").strip(),
+                }:
+                    if digest:
+                        try:
+                            await run_blocking(follower_client.cancel_order, pid, digest)
+                        except Exception:  # policy: degrade-ok(sibling bracket usually already gone with the position; reduce-only means a stale survivor cannot open exposure)
+                            pass
+            label = {
+                "bracket_take_profit": "Take-profit filled on venue",
+                "bracket_stop_loss": "Stop-loss filled on venue",
+            }.get(reason, "Position closed on venue")
+            await _notify_user(
+                user_id,
+                f"📋 Copy Position Closed\n{product_name}: {label}\nP&L: ${pnl:+,.2f}",
+            )
+        else:
+            await run_blocking(
+                reduce_copy_position, cp["id"], venue_size,
+                float(cp.get("leader_size") or 0.0), pnl,
+            )
+            cp["size"] = venue_size
+            await _notify_user(
+                user_id,
+                f"📋 Copy Position Reduced on venue\n"
+                f"{product_name}: now {venue_size:g}\nRealized P&L: ${pnl:+,.2f}",
+            )
+    return pnl_total, fees_total
+
+
+async def _compute_open_upnl(
+    copy_pos_by_product: dict, venue_pos_by_product: dict, follower_client
+) -> float:
+    """Unrealized PnL of the open copy rows.
+
+    Prefers the venue's own uPnL scaled to the copy's share of the venue
+    position (exact when only the copy holds the product); falls back to
+    (mid - entry) x size pairing when the venue omits uPnL.
+    """
+    total = 0.0
+    for pid, cp in copy_pos_by_product.items():
+        copy_size = float(cp.get("size") or 0.0)
+        if copy_size <= 0:
+            continue
+        vp = venue_pos_by_product.get(pid)
+        if vp is not None and vp.get("unrealized_pnl") is not None:
+            try:
+                venue_size = abs(float(vp.get("signed_amount") or vp.get("amount") or 0.0))
+                if venue_size > 0:
+                    share = min(1.0, copy_size / venue_size)
+                    total += float(vp["unrealized_pnl"]) * share
+                    continue
+            except (TypeError, ValueError):
+                pass
+        if follower_client is not None:
+            try:
+                mp = await run_blocking(follower_client.get_market_price, pid)
+                mid = float((mp or {}).get("mid") or 0.0)
+            except Exception:  # noqa: BLE001 - price best-effort
+                mid = 0.0
+            if mid > 0:
+                total += _close_pnl_gross(cp.get("entry_price"), mid, copy_size, cp.get("side", ""))
+    return total
+
+
+def _close_pnl_gross(entry_price: float, close_price: float, size: float, side: str) -> float:
+    """Derived realized PnL for a close, GROSS of fees.
+
+    The venue reports NO per-fill realized PnL (realized_pnl_x18 is always 0),
+    so copy accounting pairs the close fill price against the recorded entry —
+    the same derivation discipline as quant/portfolio_calculator. Fees are
+    tracked separately (cumulative_fees_usd) so rails judge NET.
+    """
+    entry = float(entry_price or 0.0)
+    close = float(close_price or 0.0)
+    qty = float(size or 0.0)
+    if entry <= 0 or close <= 0 or qty <= 0:
+        return 0.0
+    direction = 1.0 if str(side).upper() == "LONG" else -1.0
+    return (close - entry) * qty * direction
+
+
+def _resolve_close_fill(result: Optional[dict], network: str) -> tuple[float, float]:
+    """(close_price, fee) for a close order — result payload first (price is
+    fill→post-fill→mid; fee present when the archive resolved inline), then
+    one archive lookup by digest. A zero price means 'unknown' and the caller
+    must fall back rather than book a bogus 0-PnL pairing."""
+    result = result or {}
+    close_price = float(result.get("price") or 0.0)
+    fee = float(result.get("fee") or 0.0)
+    if close_price > 0 and fee > 0:
+        return close_price, fee
+    digest = str(result.get("digest") or "").strip()
+    if digest:
+        try:
+            parsed = query_order_by_digest(network, digest, 2.0, 0.25)
+        except Exception:  # noqa: BLE001 - archive lookup is best-effort
+            parsed = None
+        if parsed:
+            if close_price <= 0:
+                close_price = float(parsed.get("fill_price") or 0.0)
+            if fee <= 0:
+                fee = float(parsed.get("fee") or 0.0) + float(parsed.get("builder_fee") or 0.0)
+    return close_price, fee
+
+
+def _settle_copy_close(
+    mirror_id: int, cp: dict, result: Optional[dict], network: str, closed_size: float
+) -> tuple[float, float, float]:
+    """Book one copy close into the mirror accounting.
+
+    Returns (pnl_gross, fee, close_price). Books derived gross PnL + fee +
+    close-side volume additively onto copy_mirrors. When the close price is
+    unresolvable (archive miss AND no payload price) books fee/volume=0 and
+    pnl=0 with a loud log — never a silently wrong pairing.
+    """
+    close_price, fee = _resolve_close_fill(result, network)
+    if close_price <= 0:
+        logger.warning(
+            "copy close for position %s has no resolvable fill price — "
+            "booked 0 PnL; session rollup will correct totals at stop",
+            cp.get("id"),
+        )
+        return 0.0, 0.0, 0.0
+    pnl = _close_pnl_gross(cp.get("entry_price"), close_price, closed_size, cp.get("side", ""))
+    update_mirror_accounting(
+        mirror_id,
+        pnl_delta=pnl,
+        fees_delta=fee,
+        volume_delta=close_price * float(closed_size or 0.0),
+    )
+    return pnl, fee, close_price
+
+
+def _partial_close_fraction(baseline_leader_size: float, new_leader_size: float) -> float:
+    """Fraction of the copy to close when the leader trims below our baseline.
+
+    Baseline is the leader size we last mirrored (at open, or after the last
+    partial). A leader ADD does not move the baseline — so add-then-trim back
+    to the baseline correctly mirrors nothing, and only a trim BELOW the
+    baseline reduces the copy. Returns 0.0 when the delta is under the
+    PARTIAL_CLOSE_MIN_DELTA_PCT noise threshold, 1.0 for a dust remainder.
+    """
+    baseline = float(baseline_leader_size or 0.0)
+    new = float(new_leader_size or 0.0)
+    if baseline <= 0 or new >= baseline:
+        return 0.0
+    fraction = (baseline - new) / baseline
+    if fraction * 100.0 < PARTIAL_CLOSE_MIN_DELTA_PCT:
+        return 0.0
+    if (1.0 - fraction) <= PARTIAL_CLOSE_DUST_FRACTION:
+        return 1.0
+    return fraction
+
+
+async def _mirror_partial_close_if_needed(
+    existing_cp: dict, leader_pos: dict, user_id: int, mirror_id: int, network: str,
+    session_id=None,
+) -> str:
+    """Mirror a leader's partial close onto the copy position.
+
+    Returns "reduced" (copy shrunk; caller re-places TP/SL for the new size),
+    "closed" (dust remainder -> fully closed), or "" (no action).
+    """
+    if not PARTIAL_CLOSES_ENABLED:
+        return ""
+    baseline = float(existing_cp.get("leader_size") or 0.0)
+    new_leader = float(leader_pos.get("size") or 0.0)
+    fraction = _partial_close_fraction(baseline, new_leader)
+    if fraction <= 0.0:
+        return ""
+
+    copy_size = float(existing_cp.get("size") or 0.0)
+    if copy_size <= 0:
+        return ""
+    product_name = existing_cp.get("product_name") or get_product_name(
+        existing_cp["product_id"], network=network
+    )
+    product_key = product_name.replace("-PERP", "")
+    is_close_long = existing_cp["side"].upper() != "LONG"
+    close_size = copy_size if fraction >= 1.0 else copy_size * fraction
+
+    try:
+        result = await run_blocking(
+            execute_market_order,
+            telegram_id=user_id,
+            product=product_key,
+            size=close_size,
+            is_long=is_close_long,
+            leverage=float(existing_cp.get("leverage", 1.0)),
+            slippage_pct=1.5,
+            enforce_rate_limit=False,
+            reduce_only=True,
+            source="copy",
+            network=network,
+            strategy_session_id=session_id,
+        )
+        if not result.get("success"):
+            logger.warning(
+                "copy partial close failed for position %s: %s",
+                existing_cp["id"], result.get("error", "close failed"),
+            )
+            return ""
+        pnl, _fee, _price = await run_blocking(
+            _settle_copy_close, mirror_id, existing_cp, result, network, close_size
+        )
+
+        if fraction >= 1.0:
+            await run_blocking(
+                close_copy_position, existing_cp["id"], pnl=pnl, reason="leader_partial_dust"
+            )
+            await _notify_user(
+                user_id,
+                f"📋 Copy Position Closed\n"
+                f"{product_name}: Leader trimmed to dust → Your position closed\n"
+                f"P&L: ${pnl:+,.2f}",
+            )
+            return "closed"
+
+        remaining = copy_size - close_size
+        await run_blocking(
+            reduce_copy_position, existing_cp["id"], remaining, new_leader, pnl
+        )
+        # Keep the in-memory row consistent for the TP/SL resize that follows.
+        existing_cp["size"] = remaining
+        existing_cp["leader_size"] = new_leader
+        await _notify_user(
+            user_id,
+            f"📋 Copy Position Reduced\n"
+            f"{product_name}: Leader closed {fraction * 100.0:.0f}% → "
+            f"Your position reduced to {remaining:g}\n"
+            f"Realized P&L: ${pnl:+,.2f}",
+        )
+        return "reduced"
+    except Exception as e:  # noqa: BLE001 - one mirror's failure must not stall the poll
+        logger.error("copy partial close error for position %s: %s", existing_cp["id"], e)
+        return ""
+
+
+def _update_tp_sl_if_changed(
+    existing_cp: dict, leader_pos: dict, user_id: int, network: str, force: bool = False,
+    session_id=None,
+):
+    """Check if leader's TP/SL changed and update the copy position's orders.
+
+    ``force`` re-places the bracket even at unchanged prices — used after a
+    partial close so the resting reduce-only orders match the shrunken size
+    (they were placed for the pre-reduction size).
+    """
     new_tp = leader_pos.get("tp_price")
     new_sl = leader_pos.get("sl_price")
     old_tp = existing_cp.get("tp_price")
@@ -1006,8 +1486,10 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
     tp_changed = (new_tp or 0) != (old_tp or 0)
     sl_changed = (new_sl or 0) != (old_sl or 0)
 
-    if not tp_changed and not sl_changed:
+    if not tp_changed and not sl_changed and not force:
         return
+    if force and not (new_tp or new_sl or old_tp or old_sl):
+        return  # nothing bracketed — nothing to resize
 
     # Update the copy_positions record
     from src.nadobro.db import execute as db_execute
@@ -1051,7 +1533,11 @@ def _update_tp_sl_if_changed(existing_cp: dict, leader_pos: dict, user_id: int, 
         logger.debug("Failed to cancel old TP/SL: %s", e)
 
     # Place updated TP/SL
-    bracket_digests = _place_tp_sl_orders(user_id, product_key, pid, size, is_long, leverage, new_tp, new_sl, network)
+    bracket_digests = _place_tp_sl_orders(
+        user_id, product_key, pid, session_id=session_id, size=size,
+        is_long=is_long, leverage=leverage, tp_price=new_tp, sl_price=new_sl,
+        network=network,
+    )
     db_execute(
         """
         UPDATE copy_positions
