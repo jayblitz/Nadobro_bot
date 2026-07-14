@@ -4,6 +4,10 @@
 # [project.dependencies] in pyproject.toml, then run:
 #   uv lock && uv export --format requirements-txt -o requirements.lock.txt
 APScheduler==3.11.2
+# Brotli decoder: the shared HTTP session advertises Accept-Encoding derived
+# from what urllib3 can decode; installing brotli turns "br" support on
+# (nadoexplorer's edge serves brotli-compressed JSON — 2026-07-14 incident).
+Brotli==1.1.0
 cryptography==48.0.1
 eth-account>=0.8.0,<0.9.0
 # Direct dependency (lowiq_relay_client, hl_client); also pulled in by openai.

@@ -88,6 +88,25 @@ _HTTP_BUCKET_MAX_WAIT_SECONDS = env_float("NADO_HTTP_BUCKET_MAX_WAIT_SECONDS", 2
 # ---------------------------------------------------------------------------
 # Shared session.
 # ---------------------------------------------------------------------------
+def _supported_accept_encoding() -> str:
+    """Advertise ONLY content-encodings this environment can decode.
+
+    urllib3 transparently decodes br/zstd only when brotli(-cffi)/zstandard
+    are importable, and its ACCEPT_ENCODING constant is computed from exactly
+    those imports. The old hard-coded "gzip, deflate, br" promised brotli
+    without a decoder installed, so every brotli-capable edge (nadoexplorer,
+    2026-07-14 leaderboard incident) returned bytes resp.json() could not
+    parse. Deriving the header from urllib3's own constant makes it
+    impossible for the two to disagree again.
+    """
+    try:
+        from urllib3.util.request import ACCEPT_ENCODING
+        parts = [p.strip() for p in ACCEPT_ENCODING.split(",") if p.strip()]
+    except Exception:  # pragma: no cover - constant exists in urllib3 1.x and 2.x
+        parts = ["gzip", "deflate"]
+    return ", ".join(parts)
+
+
 def _build_session() -> requests.Session:
     sess = requests.Session()
     # Look like a real desktop Chrome request. Cloudflare's lightweight bot
@@ -102,7 +121,7 @@ def _build_session() -> requests.Session:
             ),
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": _supported_accept_encoding(),
             "Sec-Fetch-Site": "same-site",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Dest": "empty",
