@@ -399,11 +399,6 @@ async def run_bot():
         except Exception as e:
             logger.warning("Could not start portfolio history worker: %s", e)
 
-    copy_enabled = env_bool("NADO_COPY_TRADING", True)
-    if copy_enabled:
-        await start_copy_polling()
-        logger.info("Copy trading polling started")
-
     transport_mode, webhook_url, webhook_path = _resolve_transport_settings()
     webhook_secret = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
     if transport_mode == "webhook" and not webhook_secret:
@@ -452,6 +447,27 @@ async def run_bot():
         rehydrate_lowiqpts_pending_state(bot_app)
     except Exception as e:
         logger.warning("LOWIQPTS pending-state rehydration failed (non-fatal): %s", e)
+
+    # Copy trading boots AFTER bot_app.initialize()/start() — the stand-down
+    # prompt and poll-loop notifications need a working bot API.
+    copy_enabled = env_bool("NADO_COPY_TRADING", True)
+    if copy_enabled:
+        # Redeploy rule: boot = stand-down. Active mirrors are paused (owners
+        # get a Resume/Stop prompt) unless auto-resume is explicitly enabled.
+        if not env_bool("NADO_COPY_AUTO_RESUME", False):
+            from src.nadobro.trading.copy_service import boot_stand_down_mirrors
+
+            try:
+                stood_down = await boot_stand_down_mirrors()
+                if stood_down:
+                    logger.info(
+                        "Copy boot stand-down: paused %d mirror(s); resume is user-initiated",
+                        stood_down,
+                    )
+            except Exception:
+                logger.warning("Copy boot stand-down failed", exc_info=True)
+        await start_copy_polling()
+        logger.info("Copy trading polling started")
 
     from telegram import BotCommand
     await bot_app.bot.set_my_commands([

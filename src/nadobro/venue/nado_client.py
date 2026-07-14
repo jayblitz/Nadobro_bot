@@ -1797,6 +1797,10 @@ class NadoClient:
                     "amount": abs_amount,
                     "signed_amount": signed_amount,
                     "price": float(price),
+                    # Alias: "price" here IS the average entry (sourced from
+                    # entry_price_x18/avg_entry_price_x18). Consumers like
+                    # copy_service read "entry_price" — publish both keys.
+                    "entry_price": float(price),
                     "side": side_hint,
                 }
                 if v_quote_val is not None:
@@ -1927,6 +1931,10 @@ class NadoClient:
                     "amount": abs_amount,
                     "signed_amount": signed_amount,
                     "price": float(price),
+                    # Alias: "price" here IS the average entry (sourced from
+                    # entry_price_x18/avg_entry_price_x18). Consumers like
+                    # copy_service read "entry_price" — publish both keys.
+                    "entry_price": float(price),
                     "side": side_hint,
                 }
                 if v_quote_val is not None:

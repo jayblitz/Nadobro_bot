@@ -669,9 +669,16 @@ def create_copy_mirror_v2(user_id: int, trader_id: int, network: str,
                           cumulative_stop_loss_pct: float = 50.0,
                           cumulative_take_profit_pct: float = 100.0,
                           total_allocated_usd: float = 500.0) -> Optional[int]:
+    # UNIQUE(user_id, trader_id, network) routes every restart through this
+    # upsert, so the DO UPDATE must reset the WHOLE accounting spine — a
+    # restart that kept the previous run's cumulative_fees_usd started the
+    # new run at net = -fees and could trip the stop-loss rail with zero
+    # trades. strategy_session_id is cleared too: start_copy assigns a fresh
+    # session right after, and a failure there must degrade to "no session",
+    # never to tagging new fills onto the old stopped session.
     row = execute_returning(
-        """INSERT INTO copy_mirrors 
-           (user_id, trader_id, network, margin_per_trade, max_leverage, 
+        """INSERT INTO copy_mirrors
+           (user_id, trader_id, network, margin_per_trade, max_leverage,
             cumulative_stop_loss_pct, cumulative_take_profit_pct, total_allocated_usd, active)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true)
            ON CONFLICT (user_id, trader_id, network) DO UPDATE
@@ -684,6 +691,12 @@ def create_copy_mirror_v2(user_id: int, trader_id: int, network: str,
                    paused = false,
                    auto_stopped_reason = NULL,
                    cumulative_pnl = 0.0,
+                   cumulative_fees_usd = 0.0,
+                   cumulative_volume_usd = 0.0,
+                   last_unrealized_pnl_usd = 0.0,
+                   last_rail_checked_at = NULL,
+                   strategy_session_id = NULL,
+                   created_at = now(),
                    stopped_at = NULL
            RETURNING id""",
         (user_id, trader_id, network, margin_per_trade, max_leverage,
