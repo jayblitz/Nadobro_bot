@@ -417,6 +417,11 @@ def _apply_mid_controller_config(controller: Controller, configs: Dict[str, obje
     # Live edits to Mid Mode directional bias take effect on the next tick.
     from src.nadobro.engine.controllers.market_making import _safe_bias
     controller.directional_bias = _safe_bias(configs.get("directional_bias", "0"))  # type: ignore[attr-defined]
+    # AUDIT-MM-2026-07-14 #5: Turbo tapped on a RUNNING mid must apply touch
+    # quoting too — quote_mode was cached at __init__ only, so the live-apply
+    # path delivered a half-applied preset (10x sizing at mid±spread pricing)
+    # until a full stop/start.
+    controller.quote_mode = str(configs.get("quote_mode", "mid") or "mid").lower()  # type: ignore[attr-defined]
 
 
 def _apply_orchestrator_risk_limits(orch: ExecutorOrchestrator, limits: RiskLimits) -> None:
@@ -771,6 +776,14 @@ def map_strategy_config(
         # therefore needs ~20% more margin headroom); scale the cap linearly with
         # |bias| so the lean is effective but still bounded.
         _bias_exposure_mult = 1.0 + 0.20 * abs(_mid_bias)
+        # Inventory ceiling: an explicit positive value is honored as-is; <= 0
+        # means AUTO = the deployed size, so the cap stays coherent with the
+        # order size at any leverage (a $60 cap under a $1,000 quote suppressed
+        # the bid after every single fill). The registry default is unchanged —
+        # the Turbo Volume preset writes 0 to opt in.
+        _inv_cap = _f(settings, "inventory_soft_limit_usd", deployed)
+        if _inv_cap <= 0:
+            _inv_cap = deployed
         return {
             "trading_pair": product,
             "spread_bid_pct": spread_frac,
@@ -784,7 +797,12 @@ def map_strategy_config(
             # the quote here (it would just silently shrink the size). With a
             # participation preset, the per-cycle chunk replaces the full size.
             "order_amount_quote": _chunk_dec or Decimal(str(deployed)),
-            "max_base_quote": Decimal(str(_f(settings, "inventory_soft_limit_usd", deployed))),
+            "max_base_quote": Decimal(str(_inv_cap)),
+            # Quote mode: "mid" (default, mid ± spread) or "touch" (join the
+            # best bid/ask — Turbo Volume). Unknown values fall back to "mid".
+            # POLICY (2026-07-15): mid is MAKER-ONLY — the cross-on-deadline
+            # taker flatten was removed (fees + Nado wash-trading policy).
+            "quote_mode": str(settings.get("mm_quote_mode") or "mid"),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": int(eff_lev),
             # Regime gate + inventory cap + ATR auto-spread (2026-06 upgrade).

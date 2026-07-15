@@ -320,6 +320,18 @@ async def run_bot():
     set_runtime_app(bot_app)
     set_copy_bot_app(bot_app)
     set_vault_watch_bot_app(bot_app)
+    # P2 fill-nudge: venue WS fill events wake the strategy runtime so MM
+    # controllers re-quote within ~a second of a fill instead of next tick.
+    # Kill switch: NADO_FILL_NUDGE=false reverts to pure interval ticking.
+    if env_bool("NADO_FILL_NUDGE", True):
+        try:
+            from src.nadobro.venue.nado_ws import register_fill_listener
+            from src.nadobro.strategy.bot_runtime import nudge_strategy_cycle
+
+            register_fill_listener(nudge_strategy_cycle)
+            logger.info("Fill-nudge listener registered (WS fills trigger immediate cycles)")
+        except Exception:
+            logger.warning("Fill-nudge listener registration failed", exc_info=True)
     register_handlers(handle_strategy_job, handle_alert_job)
     _sw_raw = env_str("NADO_STRATEGY_WORKERS")
     _sw = int(_sw_raw) if _sw_raw else None
