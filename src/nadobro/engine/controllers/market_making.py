@@ -71,6 +71,13 @@ class MarketMakingController(Controller):
         # user's directional_bias setting only changed the preview math and was
         # never applied to live quoting — this wires it into the controller.
         self.directional_bias = _safe_bias(self.cfg("directional_bias", "0"))
+        # Quote mode (Turbo Volume): "mid" (default) prices mid ± spread as
+        # always; "touch" joins the best bid/ask (improving by one tick when
+        # the spread leaves room) — the same maker geometry as volume_bot v3.
+        # POLICY (2026-07-15): this controller is MAKER-ONLY — every order is
+        # post-only; no taker leg exists (fees + Nado wash-trading policy; the
+        # full rationale lives in docs/mm_volume_tuning.md).
+        self.quote_mode = str(self.cfg("quote_mode", "mid") or "mid").lower()
         self._bid_id: Optional[str] = None
         self._bid_price: Optional[Decimal] = None
         self._ask_id: Optional[str] = None
@@ -85,6 +92,39 @@ class MarketMakingController(Controller):
         hold = self.inventory.get(self.user_id, self.trading_pair, self.id)
         return hold.net_amount_base * mid
 
+    async def _touch_targets(self) -> Optional[tuple[Decimal, Decimal, Decimal]]:
+        """(target_bid, target_ask, book_mid) glued to the touch, or None when
+        the book has no live two-sided touch (dead/one-sided book -> caller
+        falls back to mid ± spread pricing). Same join/improve geometry as
+        volume_bot v3: join the best bid/ask, improve by one tick when the
+        spread leaves at least two ticks of room (price-time priority puts the
+        improver first). ``book_mid`` rides along so touch mode needs ONE
+        market-data call per tick — mid_price() is itself an order_book fetch,
+        and fetching both doubled the per-tick hit on the shared IP budget."""
+        try:
+            book = await self.adapter.order_book(self.trading_pair)
+            bid, ask = book.best_bid, book.best_ask
+        except Exception:  # noqa: BLE001 - a dead feed falls back to mid pricing
+            return None
+        if bid is None or ask is None or bid <= 0 or ask <= 0:
+            return None
+        # AUDIT-MM-2026-07-14 #7: a degraded feed substitutes bid = ask = mid
+        # (and a crossed venue book inverts them) — neither is a real touch to
+        # join. Fall back to mid ± spread pricing instead of quoting AT mid.
+        if bid >= ask:
+            return None
+        try:
+            tick = self.adapter.tick_size(self.trading_pair)
+        except Exception:  # noqa: BLE001
+            tick = Decimal(0)
+        target_bid, target_ask = bid, ask
+        if tick and tick > 0 and (ask - bid) >= tick * 2:
+            target_bid = bid + tick
+            target_ask = ask - tick
+        if target_bid >= target_ask:  # one-tick book after improve — join only
+            target_bid, target_ask = bid, ask
+        return target_bid, target_ask, (bid + ask) / Decimal(2)
+
     def _unrealized(self, mid: Decimal) -> Decimal:
         if self.inventory is None:
             return Decimal(0)
@@ -98,7 +138,12 @@ class MarketMakingController(Controller):
         for ex in self.my_executors(active_only=True):
             await self.orchestrator.tick(ex.id)
 
-        mid = await self.adapter.mid_price(self.trading_pair)
+        # ONE market-data call per tick: in touch mode the order-book snapshot
+        # provides both the touch targets and the mid (mid_price() is itself an
+        # order_book fetch — calling both doubled the per-tick hit on the
+        # shared per-IP query budget). Dead/degraded book -> classic mid fetch.
+        touch = await self._touch_targets() if self.quote_mode == "touch" else None
+        mid = touch[2] if touch is not None else await self.adapter.mid_price(self.trading_pair)
         base_value = self._base_value(mid)
         at_max = self.max_base_quote is not None and base_value >= self.max_base_quote
         at_min = self.min_base_quote is not None and base_value <= self.min_base_quote
@@ -144,6 +189,14 @@ class MarketMakingController(Controller):
 
         target_bid = mid * (Decimal(1) - eff_bid_pct)
         target_ask = mid * (Decimal(1) + eff_ask_pct)
+        # Touch mode (Turbo Volume): glue quotes to the live touch instead of
+        # mid ± spread (targets computed once at the top of the tick).
+        # Bias/auto-spread math above still ran — it provides the fallback
+        # targets when the book has no two-sided touch. The fee-floor spread
+        # does NOT apply here by design: volume mode deliberately trades
+        # per-fill edge for fill rate, bounded by the session SL rail.
+        if touch is not None:
+            target_bid, target_ask = touch[0], touch[1]
         await self._reconcile(TradeType.BUY, target_bid, allow_buy)
         await self._reconcile(TradeType.SELL, target_ask, allow_sell)
 
@@ -170,7 +223,7 @@ class MarketMakingController(Controller):
         if cur_id is not None and cur_price is not None:
             ex = self.orchestrator.get(cur_id)
             if ex is not None and not ex.is_terminated:
-                if cur_price > 0 and abs(target - cur_price) / cur_price <= self.price_distance_tolerance:
+                if self._within_tolerance(target, cur_price):
                     return  # within tolerance — leave the resting quote
                 await self.orchestrator.stop(cur_id)
                 self._set_quote(is_bid, None, None)
@@ -192,6 +245,29 @@ class MarketMakingController(Controller):
         )
         if ok:
             self._set_quote(is_bid, ex.id, target)
+
+    def _within_tolerance(self, target: Decimal, cur_price: Decimal) -> bool:
+        """Is the resting quote close enough to the new target to leave alone?
+
+        Mid mode keeps the relative ``price_distance_tolerance`` (half-spread).
+        Touch mode must TRACK the touch: half a spread behind the best bid is
+        no longer at the touch at all, so staleness there is ONE venue tick —
+        inclusive. AUDIT-MM-2026-07-14 #6: the venue BBO includes our own
+        resting quote; once we ARE the touch, the improve rule computes
+        target = our_price + tick every tick. A strict (< tick) tolerance
+        cancelled and re-improved on our own reflection endlessly, walking
+        both quotes inward until they sat 1-2 ticks apart. Inclusive (<= tick)
+        parks the quote once it is at-or-one-tick-inside the touch."""
+        if cur_price <= 0:
+            return False
+        if self.quote_mode == "touch":
+            try:
+                tick = self.adapter.tick_size(self.trading_pair)
+            except Exception:  # noqa: BLE001
+                tick = Decimal(0)
+            if tick and tick > 0:
+                return abs(target - cur_price) <= tick
+        return abs(target - cur_price) / cur_price <= self.price_distance_tolerance
 
     def _set_quote(self, is_bid: bool, ex_id: Optional[str], price: Optional[Decimal]) -> None:
         if is_bid:

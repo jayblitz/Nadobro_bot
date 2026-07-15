@@ -67,7 +67,7 @@ from src.nadobro.users.user_service import (
 )
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.core.perf import timed_metric, record_metric
-from src.nadobro.utils.env import env_bool, env_tristate
+from src.nadobro.utils.env import env_bool, env_float, env_tristate
 from src.nadobro.core.cadence import FAST_CADENCE_STRATEGIES, effective_interval_seconds
 from src.nadobro.trading.execution_queue import enqueue_strategy
 from src.nadobro.core.feature_flags import legacy_bro_autoloop_enabled
@@ -1136,6 +1136,19 @@ def start_user_bot(
     )
     if session_id:
         state["strategy_session_id"] = session_id
+    else:
+        # AUDIT-MM-2026-07-14 #3: fail CLOSED. The session SL/TP rail resolves
+        # the running strategy_sessions row every cycle and silently no-ops
+        # without one — a session started through a DB hiccup would trade with
+        # NO loss bound (the engine itself has no per-strategy PnL floor).
+        # Volume/fee reporting also keys off this row. Refuse to arm.
+        state["running"] = False
+        state["last_error"] = "strategy session record could not be created"
+        _save_state(telegram_id, network, state)
+        return False, (
+            "Could not create the strategy session record (database hiccup). "
+            "Not starting without the SL/TP safety rail — please try again."
+        )
     # Persist network on state so _finalize_session can rollup against the
     # correct trades_<network> table after stop.
     state["network"] = "testnet" if str(network).lower() == "testnet" else "mainnet"
@@ -1338,7 +1351,9 @@ def run_cycle_job_sync(payload: dict) -> dict:
                 "elapsed_ms": (time.perf_counter() - started) * 1000.0,
                 "completed_at": time.time(),
             }
-        ok, error_msg = asyncio.run(_run_cycle(telegram_id, network, state))
+        ok, error_msg = asyncio.run(
+            _run_cycle(telegram_id, network, state, nudge=bool(payload.get("nudge")))
+        )
         return {
             "ok": bool(ok),
             "error": error_msg,
@@ -1952,18 +1967,91 @@ async def _bot_loop(telegram_id: int, network: str):
                 logger.error("Cycle failure for user %s: %s", telegram_id, cycle_error, exc_info=True)
                 state["last_error"] = str(cycle_error)
                 _save_state(telegram_id, network, state)
-            # Option 1: only the accelerated strategies (rgrid/mid) cap the poll
-            # sleep to their effective interval so they actually tick fast in this
-            # legacy path too; every other strategy keeps the exact original poll
-            # tick (no cadence change outside rgrid/mid).
-            if _strat in FAST_CADENCE_STRATEGIES:
-                await asyncio.sleep(max(0.5, min(float(RUNTIME_TICK_SECONDS), float(interval))))
-            else:
-                await asyncio.sleep(RUNTIME_TICK_SECONDS)
+            # Poll cadence: honor a configured interval FASTER than the base
+            # runtime tick for ANY strategy (Turbo Volume writes 5s grid/dgrid
+            # intervals; previously only the FAST_CADENCE set got this, so a
+            # fast grid interval silently polled at the 20s base tick). Slower
+            # intervals keep the original base poll tick unchanged.
+            await asyncio.sleep(max(0.5, min(float(RUNTIME_TICK_SECONDS), float(interval))))
     except asyncio.CancelledError:
         logger.info("Strategy loop cancelled for user %s", telegram_id)
     finally:
         _tasks.pop(_task_key(telegram_id, network), None)
+
+
+# --- P2 fill-nudge ------------------------------------------------------------
+# A venue WS ``fill`` event wakes the strategy runtime immediately, so an MM
+# controller re-quotes within seconds of a fill instead of waiting out its
+# tick interval. Registered as a nado_ws fill listener at boot (main.py).
+# Monotonic clocks throughout (wall time jumps on NTP corrections and would
+# stall or burst the debounce). Both dicts are size-bounded — user churn over
+# a long-lived process must not grow them forever.
+_NUDGE_MIN_SECONDS = env_float("NADO_FILL_NUDGE_MIN_SECONDS", 2.0)
+# Fills also arrive for users with NO running engine strategy (manual traders,
+# copy fills). Remember the negative for a window so those users don't cost a
+# Postgres state read per fill-burst; a user who starts a strategy inside the
+# window just misses nudges briefly (the scheduler still ticks normally).
+_NUDGE_NEG_CACHE_SECONDS = 30.0
+_NUDGE_DICT_MAX = 4096
+_last_nudge_ts: dict[str, float] = {}
+_nudge_skip_until: dict[str, float] = {}
+
+
+def _nudge_prune(store: dict[str, float]) -> None:
+    if len(store) > _NUDGE_DICT_MAX:
+        for k in sorted(store, key=store.get)[: len(store) // 2]:
+            store.pop(k, None)
+
+
+def nudge_strategy_cycle(telegram_id: int, network: str) -> bool:
+    """Schedule an immediate strategy cycle for this user (WS fill nudge).
+
+    Deliberately bypasses the interval gate — a fill means the book changed
+    and the controller should react NOW. Safe to fire liberally: cycles are
+    serialized per user by ``_job_locks`` (overlaps coalesce, never double-run),
+    and the in-memory debounce absorbs fill bursts. This function runs on
+    the WS event loop, so it does no IO — all checks happen in the async
+    task it schedules.
+    """
+    key = _task_key(telegram_id, network)
+    now = time.monotonic()
+    if now < _nudge_skip_until.get(key, 0.0):
+        return False
+    if now - _last_nudge_ts.get(key, 0.0) < _NUDGE_MIN_SECONDS:
+        return False
+    _last_nudge_ts[key] = now
+    _nudge_prune(_last_nudge_ts)
+    coro = _nudge_async(telegram_id, network, key)
+    try:
+        asyncio.get_running_loop().create_task(coro)
+        return True
+    except RuntimeError:
+        if _runtime_loop and _runtime_loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, _runtime_loop)
+            return True
+    coro.close()
+    return False
+
+
+async def _nudge_async(telegram_id: int, network: str, key: str) -> None:
+    try:
+        state = await run_blocking(_load_state, telegram_id, network)
+        strategy = str(state.get("strategy") or "").lower().strip()
+        from src.nadobro.strategy.engine_runtime import ENGINE_MAPPED_STRATEGIES
+
+        if not state.get("running") or strategy not in ENGINE_MAPPED_STRATEGIES:
+            _nudge_skip_until[key] = time.monotonic() + _NUDGE_NEG_CACHE_SECONDS
+            _nudge_prune(_nudge_skip_until)
+            return
+        _nudge_skip_until.pop(key, None)
+        await enqueue_strategy(
+            {"telegram_id": telegram_id, "network": network, "strategy": strategy,
+             "nudge": True},
+            dedupe_key=f"{key}:fillnudge:{int(time.time())}",
+        )
+        _job_stats["fill_nudges"] = int(_job_stats.get("fill_nudges", 0)) + 1
+    except Exception:  # noqa: BLE001 - a nudge is opportunistic; the scheduler is the backstop
+        logger.debug("fill nudge failed user=%s network=%s", telegram_id, network, exc_info=True)
 
 
 async def handle_strategy_job(payload: dict):
@@ -2064,6 +2152,9 @@ async def handle_strategy_job(payload: dict):
                                     "network": network,
                                     "strategy": strategy,
                                     "worker_group": worker_group,
+                                    # AUDIT-MM-2026-07-14 #4: nudged cycles keep
+                                    # their gate bypass in the worker too.
+                                    "nudge": bool(payload.get("nudge")),
                                 }
                             ),
                             timeout=timeout_sec,
@@ -2107,14 +2198,15 @@ async def handle_strategy_job(payload: dict):
                     strategy = str(state.get("strategy") or "").lower().strip()
                     if timeout_sec and strategy == "vol":
                         timeout_sec = min(timeout_sec, 45.0)
+                    _nudged = bool(payload.get("nudge"))
                     try:
                         if timeout_sec:
                             ok, error_msg = await asyncio.wait_for(
-                                _run_cycle(telegram_id, network, state),
+                                _run_cycle(telegram_id, network, state, nudge=_nudged),
                                 timeout=timeout_sec,
                             )
                         else:
-                            ok, error_msg = await _run_cycle(telegram_id, network, state)
+                            ok, error_msg = await _run_cycle(telegram_id, network, state, nudge=_nudged)
                     except asyncio.TimeoutError:
                         _job_stats["cycle_timeouts"] += 1
                         tsec = timeout_sec or 180.0
@@ -2631,7 +2723,9 @@ async def _evaluate_session_pnl_rail(
     return True, None
 
 
-async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool, str | None]:
+async def _run_cycle(
+    telegram_id: int, network: str, state: dict, *, nudge: bool = False
+) -> tuple[bool, str | None]:
     try:
         from src.nadobro.strategy.strategy_fsm import PHASE_SCANNING, apply_phase
 
@@ -2713,8 +2807,14 @@ async def _run_cycle(telegram_id: int, network: str, state: dict) -> tuple[bool,
     # Option 1: honour the per-strategy effective cadence (fast for rgrid/mid).
     # This in-cycle guard would otherwise skip every accelerated cycle back to
     # the raw 60s interval and silently defeat the faster scheduler cadence.
+    # AUDIT-MM-2026-07-14 #4: a fill-NUDGED cycle uses a 1s minimum gap instead
+    # of the full interval — reacting before the next scheduled tick is the
+    # nudge's entire purpose, and this gate was silently discarding every
+    # nudged cycle as "skipped_interval". Overlap safety is unchanged (the
+    # per-user job lock upstream serializes cycles).
     interval = effective_interval_seconds(strategy, int(state.get("interval_seconds") or 60))
-    if last_run > 0 and time.time() - last_run < interval:
+    gate_seconds = 1.0 if nudge else interval
+    if last_run > 0 and time.time() - last_run < gate_seconds:
         return True, "skipped_interval"
 
     product = state.get("product", "BTC")

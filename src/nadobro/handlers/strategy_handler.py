@@ -35,6 +35,57 @@ from src.nadobro.handlers.callbacks import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+# Turbo Volume preset: one tap writes the COHERENT setting trio (leverage,
+# inventory allowance, session SL) plus fast cadence and tight/touch quoting.
+# These knobs interact — leverage scales uPnL as % of margin linearly, so the
+# session rail must widen with it, and the inventory/net-exposure caps must fit
+# at least one full-size fill or the book goes one-sided after every fill.
+# Values are written per strategy; the user can still tune any field after.
+_TURBO_LEVERAGE_DEFAULT = 10.0
+_TURBO_SESSION_SL_PCT = 10.0  # % of margin; at 10x = a 1% adverse price move
+
+
+def _turbo_preset_settings(strategy_id: str, product_max_leverage: float) -> dict:
+    """Settings the Turbo Volume preset writes for ``strategy_id``.
+
+    Pure (unit-tested): leverage = min(10x, product max). Only ``mid`` gets
+    touch quoting, the auto inventory cap (0 = deployed), a 100% net-exposure
+    allowance (one full-size fill), and tp_pct=0 (no session profit-stop —
+    mid's exits are purely rail-driven, so this only removes an auto-stop).
+    grid/rgrid/dgrid keep their TP and level mechanics untouched — their
+    position exits flow through barriers this preset must not disturb.
+    """
+    lev = max(1.0, min(_TURBO_LEVERAGE_DEFAULT, float(product_max_leverage or 1.0)))
+    base = {
+        "mm_leverage_override": int(lev),
+        "interval_seconds": 5,
+        "mm_preset": "turbo",
+    }
+    sid = str(strategy_id or "").lower()
+    if sid == "mid":
+        base.update({
+            "spread_bp": 2.0,
+            "mm_quote_mode": "touch",
+            "inventory_soft_limit_usd": 0.0,   # 0 = auto (deployed size)
+            "max_net_exposure_pct": 100.0,     # allow one full-size fill
+            "sl_pct": _TURBO_SESSION_SL_PCT,
+            "tp_pct": 0.0,
+        })
+    elif sid == "grid":
+        base.update({"spread_bp": 3.0, "sl_pct": _TURBO_SESSION_SL_PCT})
+    elif sid == "rgrid":
+        base.update({
+            "spread_bp": 3.0, "rgrid_spread_bp": 3.0,
+            "rgrid_stop_loss_pct": _TURBO_SESSION_SL_PCT,
+        })
+    elif sid == "dgrid":
+        base.update({
+            "spread_bp": 3.0, "dgrid_spread_bp": 3.0,
+            "rgrid_stop_loss_pct": _TURBO_SESSION_SL_PCT,
+        })
+    return base
+
+
 def _strategy_available_products(strategy_id: str, network: str, vol_market: str | None = None) -> tuple[str, ...]:
     sid = str(strategy_id or "").lower().strip()
     if sid == "dn":
@@ -412,7 +463,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         # with the legacy safety cushion.
         strategy_id = parts[2]
         preset_name = parts[3]
-        if strategy_id not in {"grid", "rgrid", "dgrid", "mid"} or preset_name not in {"tiny", "standard"}:
+        if strategy_id not in {"grid", "rgrid", "dgrid", "mid"} or preset_name not in {"tiny", "standard", "turbo"}:
             return
         network, settings = get_user_settings(telegram_id)
         cfg_now = settings.get("strategies", {}).get(strategy_id, {}) or {}
@@ -420,6 +471,49 @@ async def _handle_strategy(query, data, context, telegram_id):
         selected_product = str(
             context.user_data.get(f"strategy_pair:{strategy_id}", "BTC") or "BTC"
         ).upper()
+        if preset_name == "turbo":
+            # Turbo Volume: coherent high-throughput quoting. Leverage capped
+            # at the pair max; margin is whatever the user configured.
+            try:
+                lev_cap_t = float(get_product_max_leverage(selected_product, network=network))
+            except Exception:  # noqa: BLE001 - unknown pair -> conservative 1x cap
+                lev_cap_t = 1.0
+            turbo_cfg = _turbo_preset_settings(strategy_id, lev_cap_t)
+
+            def _mutate_turbo(s):
+                strategies = s.setdefault("strategies", {})
+                cfg = strategies.setdefault(strategy_id, {})
+                cfg.update(turbo_cfg)
+
+            network, settings = update_user_settings(telegram_id, _mutate_turbo)
+            conf = settings.get("strategies", {}).get(strategy_id, {})
+            section = "setup"
+            context.user_data[f"strategy_config_section:{strategy_id}"] = section
+            margin_t = float(conf.get("notional_usd", 100.0) or 0.0)
+            lev_t = int(turbo_cfg["mm_leverage_override"])
+            deployed_t = margin_t * lev_t
+            mode_note = (
+                "touch\\-joined quotes \\(fills at organic flow\\)" if strategy_id == "mid"
+                else "tight 3bp quoting"
+            )
+            turbo_note = (
+                f"*🚀 Turbo Volume preset applied for {escape_md(selected_product)}*\n"
+                f"⚡ {lev_t}x leverage: \\${escape_md(f'{margin_t:,.0f}')} margin quotes "
+                f"*\\${escape_md(f'{deployed_t:,.0f}')}* per side, {mode_note}, 5s cycles\\.\n"
+                f"🛡 Session stop\\-loss set to *{escape_md(f'{_TURBO_SESSION_SL_PCT:.0f}%')} of margin* "
+                f"\\(at {lev_t}x that is a \\~{escape_md(f'{_TURBO_SESSION_SL_PCT / max(lev_t, 1):.1f}%')} "
+                f"adverse price move\\)\\.\n"
+                f"⚠️ Volume mode trades per\\-fill edge for turnover — expect fees "
+                f"\\(\\~\\$180\\+ per \\$1M net of maker rebates\\) and watch Cost/\\$1M in Performance\\."
+            )
+            body_t = _strategy_config_section_text(strategy_id, conf, network, section)
+            await _edit_loc(
+                query,
+                f"{body_t}\n\n{turbo_note}",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=_strategy_config_section_kb(strategy_id, section),
+            )
+            return
         if preset_name == "standard":
             def _mutate_std(s):
                 strategies = s.setdefault("strategies", {})
@@ -427,6 +521,17 @@ async def _handle_strategy(query, data, context, telegram_id):
                 cfg.pop("mm_leverage_override", None)
                 cfg.pop("min_order_notional_usd", None)
                 cfg.pop("mm_collateral_safety_factor", None)
+                # AUDIT-MM-2026-07-14 #9: Standard after Turbo must also undo
+                # the Turbo trio — otherwise "reverting" keeps fee-floor-
+                # bypassing touch quotes with the profit-stop off. Only when
+                # the active preset IS turbo (a manual spread/SL set by the
+                # user outside any preset stays untouched, as before). The
+                # revert set is DERIVED from what Turbo writes, so the two can
+                # never drift (the lev cap argument doesn't affect the keys).
+                if str(cfg.get("mm_preset") or "") == "turbo":
+                    for _turbo_key in _turbo_preset_settings(strategy_id, 1.0):
+                        if _turbo_key != "mm_preset":
+                            cfg.pop(_turbo_key, None)
                 cfg["mm_preset"] = "standard"
 
             network, settings = update_user_settings(telegram_id, _mutate_std)
@@ -584,7 +689,9 @@ async def _handle_strategy(query, data, context, telegram_id):
             "notional_usd": (1, 1000000),
             "spread_bp": (spread_lo, spread_hi),
             "directional_bias": (-1.0, 1.0),
-            "interval_seconds": (10, 3600),
+            # Floor 5 so Turbo's 5s cadence can be re-entered manually
+            # (effective_interval_seconds hard-floors everything at 3s anyway).
+            "interval_seconds": (5, 3600),
             "tp_pct": (0.05, 100),
             "sl_pct": (0.05, 100),
             "session_margin_usd": (100, 1000000),
@@ -630,7 +737,13 @@ async def _handle_strategy(query, data, context, telegram_id):
             "mm_duration_minutes": (1, 14400),   # 1 min .. 240h (POV upper bound)
             "twap_pause_move_bp": (0, 5000),     # 0 = off .. 50% per-cycle move
         }
-        lo, hi = limits[field]
+        # A whitelisted field with no limits entry is a wiring bug — reject
+        # loudly in logs instead of crashing the callback with a KeyError.
+        _bounds = limits.get(field)
+        if _bounds is None:
+            logger.error("strategy set: field %r whitelisted but has no limits entry", field)
+            return
+        lo, hi = _bounds
         if value < lo or value > hi:
             return
         int_fields = {
@@ -1411,6 +1524,9 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Standard", callback_data="strategy:preset:grid:standard"),
                 ],
                 [
+                    InlineKeyboardButton("🚀 Turbo Volume", callback_data="strategy:preset:grid:turbo"),
+                ],
+                [
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:grid:notional_usd:50"),
                     InlineKeyboardButton("Margin $100", callback_data="strategy:set:grid:notional_usd:100"),
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:grid:notional_usd:250"),
@@ -1515,6 +1631,9 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Standard", callback_data="strategy:preset:dgrid:standard"),
                 ],
                 [
+                    InlineKeyboardButton("🚀 Turbo Volume", callback_data="strategy:preset:dgrid:turbo"),
+                ],
+                [
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:dgrid:notional_usd:50"),
                     InlineKeyboardButton("Margin $100", callback_data="strategy:set:dgrid:notional_usd:100"),
                     InlineKeyboardButton("Margin $250", callback_data="strategy:set:dgrid:notional_usd:250"),
@@ -1601,6 +1720,9 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("🎯 Tiny Budget Preset", callback_data="strategy:preset:rgrid:tiny"),
                     InlineKeyboardButton("Standard", callback_data="strategy:preset:rgrid:standard"),
+                ],
+                [
+                    InlineKeyboardButton("🚀 Turbo Volume", callback_data="strategy:preset:rgrid:turbo"),
                 ],
                 [
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:rgrid:notional_usd:50"),
@@ -1708,6 +1830,9 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 [
                     InlineKeyboardButton("🎯 Tiny Budget Preset", callback_data="strategy:preset:mid:tiny"),
                     InlineKeyboardButton("Standard", callback_data="strategy:preset:mid:standard"),
+                ],
+                [
+                    InlineKeyboardButton("🚀 Turbo Volume", callback_data="strategy:preset:mid:turbo"),
                 ],
                 [
                     InlineKeyboardButton("Margin $50", callback_data="strategy:set:mid:notional_usd:50"),

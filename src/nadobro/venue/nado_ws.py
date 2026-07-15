@@ -41,6 +41,29 @@ _PORTFOLIO_STREAMS = (
 # is now stale and should be refreshed.
 _INVALIDATING_EVENTS = {"order_update", "fill", "position_change", "funding_payment"}
 
+# Fill listeners (P2 fill-nudge): callbacks invoked on every ``fill`` stream
+# event, registered by the runtime at boot (dependency inversion — venue never
+# imports strategy/). Used to trigger an immediate engine cycle so an MM
+# strategy re-quotes within ~a second of a fill instead of waiting out its
+# tick interval. Listeners must be cheap and non-blocking (they run on the
+# WS event loop); exceptions are swallowed so a bad listener can never kill
+# the portfolio stream.
+_fill_listeners: list = []
+
+
+def register_fill_listener(callback) -> None:
+    """Register ``callback(user_id: int, network: str)`` for fill events."""
+    if callback not in _fill_listeners:
+        _fill_listeners.append(callback)
+
+
+def _notify_fill_listeners(user_id: int, network: str) -> None:
+    for cb in list(_fill_listeners):
+        try:
+            cb(int(user_id), str(network))
+        except Exception:  # noqa: BLE001 - a listener bug must not kill the stream
+            logger.debug("fill listener failed user=%s", user_id, exc_info=True)
+
 
 def subscribe_url_for_network(network: str) -> str:
     """Subscriptions (streams) websocket endpoint.
@@ -188,6 +211,11 @@ class NadoPortfolioWs:
                 # Phase C: drive the per-order lifecycle store off the stream so
                 # the engine can stop polling order_status on every tick.
                 _route_lifecycle(event)
+                # P2 fill-nudge: fills (only — order_update also fires on every
+                # placement ack and would storm) wake the strategy runtime so
+                # the controller re-quotes immediately instead of next tick.
+                if _event_type(event) == "fill":
+                    _notify_fill_listeners(sub.user_id, sub.network)
                 if _should_invalidate(event):
                     await self._schedule_sync(
                         sub.user_id,

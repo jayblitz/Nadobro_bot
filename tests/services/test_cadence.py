@@ -51,3 +51,20 @@ def test_env_overrides_fast_value(monkeypatch):
 def test_bad_interval_defaults_to_60_for_other_strategy():
     assert effective_interval_seconds("grid", None) == 60.0
     assert effective_interval_seconds("grid", "notanumber") == 60.0
+
+
+# --- Universal floor (Turbo Volume, 2026-07) --------------------------------
+
+def test_universal_floor_applies_to_non_fast_strategies(monkeypatch):
+    """grid/dgrid now accept fast configured intervals (Turbo writes 5s), so
+    the rate-limit floor must clamp EVERY strategy — a hand-typed 1s interval
+    previously ran unfloored on the non-fast set."""
+    monkeypatch.setenv("NADO_FAST_CADENCE_FLOOR_SECONDS", "3")
+    assert effective_interval_seconds("grid", 1) == 3.0
+    assert effective_interval_seconds("dgrid", 0.5) == 3.0
+    assert effective_interval_seconds("dn", 1) == 3.0
+
+
+def test_turbo_interval_five_seconds_passes_for_all_mm_strategies():
+    for strategy in ("grid", "rgrid", "dgrid", "mid"):
+        assert effective_interval_seconds(strategy, 5) == 5.0

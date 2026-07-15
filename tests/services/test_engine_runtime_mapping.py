@@ -811,3 +811,62 @@ def test_apply_live_grid_config_requotes_without_controller_stop():
     assert executor.recentered
     assert orch.stopped == []
     assert orch.risk.limits.max_single_order_quote == Decimal("100.0")
+
+
+# --- Turbo Volume additions (2026-07) ----------------------------------------
+
+def test_map_mid_quote_mode_defaults_to_mid_and_maps_touch():
+    base = {"notional_usd": 100.0, "spread_bp": 5.0, "levels": 2,
+            "inventory_soft_limit_usd": 60.0}
+    cfg = er.map_strategy_config("mid", dict(base), Decimal(100), product="BTC-USDC")
+    assert cfg["quote_mode"] == "mid"
+    cfg_t = er.map_strategy_config(
+        "mid", {**base, "mm_quote_mode": "touch"}, Decimal(100), product="BTC-USDC",
+    )
+    assert cfg_t["quote_mode"] == "touch"
+
+
+def test_map_mid_inventory_cap_zero_means_auto_deployed():
+    """inventory_soft_limit_usd <= 0 -> cap = deployed (margin x leverage), so
+    the cap always fits one full-size fill; an explicit positive value (the
+    registry default 60) is honored unchanged."""
+    cfg = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "spread_bp": 5.0,
+                "inventory_soft_limit_usd": 0.0, "mm_leverage_override": 10},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert cfg["order_amount_quote"] == Decimal("1000")   # 100 x 10
+    assert cfg["max_base_quote"] == Decimal("1000")       # auto = deployed
+    cfg_explicit = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "spread_bp": 5.0,
+                "inventory_soft_limit_usd": 60.0},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert cfg_explicit["max_base_quote"] == Decimal("60")
+
+
+def test_apply_mid_controller_config_syncs_quote_mode():
+    """AUDIT-MM-2026-07-14 #5: Turbo tapped on a RUNNING mid must live-apply
+    quote_mode, not just sizing/spread — the old sync delivered a
+    half-applied preset until a full stop/start."""
+    from src.nadobro.engine.controllers.market_making import MarketMakingController
+    from src.nadobro.engine.orchestrator import ExecutorOrchestrator
+    from src.nadobro.engine.inventory import InventoryRepository
+
+    controller = MarketMakingController(
+        user_id=1, orchestrator=ExecutorOrchestrator(), adapter=None,
+        inventory=InventoryRepository(),
+        configs={"trading_pair": "P", "spread_bid_pct": "0.001",
+                 "spread_ask_pct": "0.001", "order_amount_quote": "10"},
+    )
+    assert controller.quote_mode == "mid"
+
+    new_cfg = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "spread_bp": 2.0,
+                "mm_quote_mode": "touch", "inventory_soft_limit_usd": 0.0},
+        Decimal(100), product="P",
+    )
+    er._apply_mid_controller_config(controller, new_cfg)
+    assert controller.quote_mode == "touch"
+    # POLICY 2026-07-15: maker-only — no cross knobs exist on the controller.
+    assert not hasattr(controller, "cross_close_after_seconds")
