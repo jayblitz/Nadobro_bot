@@ -3702,7 +3702,7 @@ class NadoClient:
         try:
             pid = int(product_id) if product_id is not None else self.resolve_nlp_product_id()
             if pid is None:
-                return {"max_mintable_usdt0": 0.0, "raw": {}}
+                return {"ok": False, "max_mintable_usdt0": 0.0, "raw": {}}
             payload = self._query_rest(
                 "max_nlp_mintable",
                 {
@@ -3710,16 +3710,27 @@ class NadoClient:
                     "product_id": int(pid),
                     "spot_leverage": "true" if spot_leverage else "false",
                 },
-            ) or {}
+            )
+            if payload is None:
+                # Gateway-budget throttle or transport failure. This MUST NOT
+                # read as "mintable = 0": the vault card once conflated a
+                # throttled first query with $0 and told a depositable user
+                # their margin was in use (2026-07-18 incident — the query
+                # costs weight 20 against an 8 rps / 24 burst user budget, so
+                # the snapshot's own call burst throttled it).
+                return {"ok": False, "max_mintable_usdt0": 0.0, "raw": {}}
             data = payload.get("data") or payload
-            amount_x18 = data.get("max_quote_amount") or 0
+            amount_x18 = data.get("max_quote_amount")
+            if amount_x18 is None:
+                return {"ok": False, "max_mintable_usdt0": 0.0, "raw": data}
             return {
+                "ok": True,
                 "max_mintable_usdt0": self._x18_to_float(amount_x18),
                 "raw": data,
             }
         except Exception as e:
             logger.debug("max_nlp_mintable failed user=%s err=%s", _mask_address(self.address or ""), e)
-            return {"max_mintable_usdt0": 0.0, "raw": {}}
+            return {"ok": False, "max_mintable_usdt0": 0.0, "raw": {}}
 
     def get_nlp_position(self) -> dict:
         """Return the user's NLP position (LP balance + USDT0 NAV).

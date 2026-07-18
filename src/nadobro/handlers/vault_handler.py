@@ -10,6 +10,7 @@ from telegram.ext import CallbackContext
 
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.vault.nlp_vault_service import (
+    VAULT_DEPOSIT_MAX_PCT,
     deposit_to_vault,
     estimate_withdraw_fee_usdt0,
     get_user_vault_snapshot,
@@ -101,15 +102,33 @@ def _vault_home_card(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
         # margin-locked explainer directly below it and sent users hunting for
         # a phantom deposit blocker.
         f"USDT0 balance: `{_fmt_usd(usdt0)}`",
-        f"Free to deposit (no borrow): `{_fmt_usd(max_mintable)}`",
+    ]
+    mintable_known = bool(snapshot.get("mintable_known", True))
+    deposit_max = float(snapshot.get("deposit_max_usdt0") or 0.0)
+    if mintable_known:
+        lines.append(f"Free to deposit (no borrow): `{_fmt_usd(max_mintable)}`")
+    else:
+        # A throttled/failed capacity query is UNKNOWN, not $0 — rendering it
+        # as $0 once flipped this card to 🔒 Margin in use for a depositable
+        # user. Deposits stay enabled; the mint itself is no-borrow-guarded.
+        lines.append("Free to deposit: `checking…` (tap 🔄 Refresh in a moment)")
+    lines.extend([
         f"Deposit room: `{_fmt_usd(room)}`",
         f"Lockup: `{_fmt_lockup(lockup)}`",
-    ]
-    margin_locked = snapshot.get("deposit_blocked_reason") == "margin_locked"
-    if max_mintable <= 1.0:
+    ])
+    blocked_reason = snapshot.get("deposit_blocked_reason")
+    margin_locked = blocked_reason == "margin_locked"
+    blocked = mintable_known and max_mintable <= 1.0
+    if blocked:
         borrow_mintable = float(snapshot.get("mintable_with_borrow_usdt0") or 0.0)
         lines.append("")
-        if margin_locked:
+        if blocked_reason == "wallet_cap_reached":
+            lines.append(
+                f"Your vault position has reached the Private Alpha cap of "
+                f"`{_fmt_usd(float(snapshot.get('private_alpha_cap_usdt0') or 0.0))}` "
+                "per account — withdraw first to deposit more."
+            )
+        elif margin_locked:
             lines.append(
                 f"Deposits are *open*, but your `{_fmt_usd(usdt0)}` USDT0 is "
                 "currently backing open positions or resting orders (margin), "
@@ -130,12 +149,13 @@ def _vault_home_card(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
     text = "\n".join(lines)
 
     deposit_btn = InlineKeyboardButton("⬇️ Deposit", callback_data="vault:deposit")
-    if max_mintable <= 1.0:
-        deposit_btn = (
-            InlineKeyboardButton("🔒 Margin in use", callback_data="vault:home")
-            if margin_locked
-            else InlineKeyboardButton("⛔ Deposits closed", callback_data="vault:home")
-        )
+    if blocked:
+        if blocked_reason == "wallet_cap_reached":
+            deposit_btn = InlineKeyboardButton("🧢 Cap reached", callback_data="vault:home")
+        elif margin_locked:
+            deposit_btn = InlineKeyboardButton("🔒 Margin in use", callback_data="vault:home")
+        else:
+            deposit_btn = InlineKeyboardButton("⛔ Deposits closed", callback_data="vault:home")
 
     watch_label = "🔕 Stop deposit alerts" if watch_enabled else "🔔 Notify when deposits open"
     watch_cb = "vault:watch:off" if watch_enabled else "vault:watch:on"
@@ -152,12 +172,18 @@ def _vault_home_card(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
 def _deposit_picker(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
     usdt0 = float(snapshot.get("usdt0_balance") or 0.0)
     room = float(snapshot.get("deposit_room_usdt0") or 0.0)
-    max_deposit = min(usdt0, room)
+    # 70%-of-balance ceiling (margin buffer) already folded in by the snapshot;
+    # falls back to the venue-known bound when the field is absent.
+    if "deposit_max_usdt0" in snapshot:
+        max_deposit = float(snapshot.get("deposit_max_usdt0") or 0.0)
+    else:
+        max_deposit = min(usdt0, room)
     text = (
         "⬇️ *Deposit USDT0 → NLP*\n\n"
         f"USDT0 balance: `{_fmt_usd(usdt0)}`\n"
         f"Deposit room: `{_fmt_usd(room)}`\n"
-        f"Max you can deposit now: `{_fmt_usd(max_deposit)}`\n\n"
+        f"Max you can deposit now: `{_fmt_usd(max_deposit)}`\n"
+        f"(capped at {VAULT_DEPOSIT_MAX_PCT:.0f}% of your USDT0 so trading keeps a margin buffer)\n\n"
         "Choose an amount:"
     )
     rows = []

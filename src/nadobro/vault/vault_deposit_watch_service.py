@@ -124,12 +124,13 @@ def _check_watch_sync(row: dict, network: str) -> tuple[int, float, float] | Non
     # and the watch would never fire (the same bug that showed "deposits
     # closed" in the UI).
     nlp_pid = pos.get("nlp_product_id") or client.resolve_nlp_product_id()
-    mintable = float(
-        (client.get_max_nlp_mintable(spot_leverage=False, product_id=nlp_pid) or {}).get(
-            "max_mintable_usdt0"
-        )
-        or 0.0
-    )
+    result = client.get_max_nlp_mintable(spot_leverage=False, product_id=nlp_pid) or {}
+    if not result.get("ok"):
+        # Throttled/failed capacity read: skip this row this tick. Writing a
+        # fake 0 to last_seen would fire a false "capacity opened!" ping on
+        # the next successful read.
+        return None
+    mintable = float(result.get("max_mintable_usdt0") or 0.0)
     return telegram_id, mintable, lp_value
 
 
