@@ -204,7 +204,7 @@ def setup_bot():
     from src.nadobro.config import BOT_USERNAME
     from src.nadobro.handlers.commands import (
         cmd_start, cmd_help, cmd_status, cmd_ops, cmd_stop_all, cmd_revoke,
-        cmd_mm_status, cmd_mm_fills,
+        cmd_mm_status, cmd_mm_fills, cmd_airdrop,
     )
     from src.nadobro.handlers.managed_agent import cmd_agent_on, cmd_agent_off, cmd_agent_status
     from src.nadobro.handlers.brief_commands import cmd_market_news, cmd_morning_brief, cmd_night_howl
@@ -273,6 +273,7 @@ def setup_bot():
     app.add_handler(CommandHandler("brief", with_user_serialized(cmd_morning_brief)))
     app.add_handler(CommandHandler("howl", with_user_serialized(cmd_night_howl)))
     app.add_handler(CommandHandler("news", with_user_serialized(cmd_market_news)))
+    app.add_handler(CommandHandler("airdrop", with_user_serialized(cmd_airdrop)))
     # Phase 3: Tread-style live MM dashboard.
     app.add_handler(CommandHandler("mm_status", with_user_serialized(cmd_mm_status)))
     app.add_handler(CommandHandler("mm_fills", with_user_serialized(cmd_mm_fills)))
@@ -493,6 +494,7 @@ async def run_bot():
         BotCommand("brief", "Your morning market brief"),
         BotCommand("howl", "Your Night HOWL trade reports"),
         BotCommand("news", "Latest market news"),
+        BotCommand("airdrop", "Check your Ink airdrop allocation"),
         BotCommand("mm_status", "Live market-making dashboard"),
         BotCommand("mm_fills", "Recent MM fills"),
         BotCommand("stop_all", "Stop strategies and flatten bot exposure"),

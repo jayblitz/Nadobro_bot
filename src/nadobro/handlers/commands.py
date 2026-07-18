@@ -12,6 +12,7 @@ INTRO_VIDEO_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "intro_
 from src.nadobro.handlers.formatters import (
     fmt_dashboard_home,
     fmt_help,
+    fmt_ink_airdrop_card,
     fmt_ops_overview,
     fmt_revoke_card,
     fmt_status_overview,
@@ -298,6 +299,61 @@ async def cmd_revoke(update: Update, context: CallbackContext):
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=localize_markup(persistent_menu_kb(), lang),
         )
+
+
+async def cmd_airdrop(update: Update, context: CallbackContext):
+    """/airdrop [address] — Ink airdrop allocation from the Nado archive.
+
+    Without an argument, checks the user's linked main wallet. The airdrop is
+    a mainnet program, so the mainnet archive is queried regardless of the
+    bot's selected network — testnet mode must never show a false 0.
+    """
+    from src.nadobro.venue.nado_archive import normalize_evm_address, query_ink_airdrop
+
+    telegram_id = update.effective_user.id
+    with language_context(get_user_language(telegram_id)):
+        lang = get_active_language()
+
+        raw_arg = ""
+        if getattr(context, "args", None):
+            raw_arg = str(context.args[0] or "").strip()
+        address = normalize_evm_address(raw_arg) if raw_arg else ""
+        if raw_arg and not address:
+            await update.message.reply_text(
+                localize_text(
+                    "That doesn't look like a wallet address. Send /airdrop 0x… with a 40-hex-character address.",
+                    lang,
+                )
+            )
+            return
+        if not address:
+            user = await run_blocking(get_user, telegram_id)
+            address = normalize_evm_address(getattr(user, "main_address", "") or "")
+            if not address:
+                await update.message.reply_text(
+                    localize_text(
+                        "No wallet linked yet. Link one via /start, or check any address with /airdrop 0x…",
+                        lang,
+                    )
+                )
+                return
+
+        amount = await run_blocking(query_ink_airdrop, "mainnet", address)
+        if amount is None:
+            # Archive unreachable / rate-limited — never claim "0" here.
+            await update.message.reply_text(
+                localize_text(
+                    "Couldn't reach the Nado archive to check the allocation. Try again in a minute.",
+                    lang,
+                )
+            )
+            return
+
+        localized = localize_text(fmt_ink_airdrop_card(address, amount), lang)
+        try:
+            await update.message.reply_text(localized, parse_mode=ParseMode.MARKDOWN_V2)
+        except Exception:
+            await update.message.reply_text(plain_text_fallback(localized))
 
 
 # ---------------------------------------------------------------------------
