@@ -13,6 +13,7 @@ from src.nadobro.utils.env import env_float
 from src.nadobro.db import execute, query_all, query_one
 from src.nadobro.config import NADO_MAINNET_REST, NADO_TESTNET_REST
 from src.nadobro.core.feature_flags import (
+    fill_nudge_enabled,
     portfolio_heavy_sync_seconds,
     portfolio_poll_cache_seconds,
     portfolio_sync_interval_seconds,
@@ -356,13 +357,31 @@ async def sync_user(
             if not client:
                 raise RuntimeError("Nado client unavailable")
             client.acting_user_id = int(user_id)
-            if portfolio_ws_enabled() and not str(reason).startswith("ws"):
+            # Fill-nudge is on by default, while the broader portfolio-WS
+            # rollout remains independently gated. When only fill-nudge is
+            # enabled, subscribe to the fill stream without activating WS
+            # portfolio invalidation/cache semantics.
+            portfolio_streams_on = portfolio_ws_enabled()
+            fill_stream_on = False
+            if fill_nudge_enabled():
+                try:
+                    from src.nadobro.venue.nado_ws import has_fill_listeners
+
+                    fill_stream_on = has_fill_listeners()
+                except Exception:
+                    fill_stream_on = False
+            if (portfolio_streams_on or fill_stream_on) and not str(reason).startswith("ws"):
                 try:
                     from src.nadobro.venue.nado_ws import PortfolioWsSubscription, portfolio_ws
 
                     subaccount = getattr(client, "subaccount_hex", None)
                     if subaccount:
-                        portfolio_ws.subscribe(PortfolioWsSubscription(int(user_id), network, str(subaccount)))
+                        portfolio_ws.subscribe(
+                            PortfolioWsSubscription(
+                                int(user_id), network, str(subaccount),
+                                sync_portfolio=portfolio_streams_on,
+                            )
+                        )
                 except Exception:
                     logger.debug("portfolio ws subscribe failed user=%s network=%s", user_id, network, exc_info=True)
 

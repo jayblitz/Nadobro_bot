@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from src.nadobro.handlers.formatters import escape_md
-from src.nadobro.handlers.keyboards import back_kb, copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb, copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb, copy_leaderboard_kb, copy_lb_trader_kb
+from src.nadobro.handlers.keyboards import back_kb, copy_hub_kb, copy_trader_preview_kb, copy_budget_kb, copy_risk_kb, copy_leverage_kb, copy_confirm_kb, copy_dashboard_kb, copy_admin_menu_kb, copy_leaderboard_kb, copy_lb_trader_kb, copy_clear_selections_kb
 from src.nadobro.i18n import localize_text, get_active_language
 from src.nadobro.users.admin_service import is_admin
 from src.nadobro.core.async_utils import run_blocking
@@ -23,10 +23,61 @@ from src.nadobro.handlers.callbacks import _edit_loc  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+def _number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _leader_snapshot_line(trader: dict) -> str | None:
+    """Render public leader metrics separately from the viewer's copy PnL.
+
+    A saved target can legitimately have no copy mirror yet. Showing that
+    user's zero PnL as the leader's performance was the misleading state in
+    the Copy Trading hub screenshot.
+    """
+    roi = _number(trader.get("leader_roi"))
+    active_days = trader.get("leader_active_days")
+    period_days = trader.get("leader_period_days") or 30
+    closed_trades = trader.get("leader_closed_trades")
+    parts: list[str] = []
+    if roi is not None:
+        parts.append(f"ROI {escape_md(f'{roi * 100:+.1f}%')}")
+    if active_days is not None:
+        try:
+            parts.append(f"Active {int(active_days)}/{int(period_days)}d")
+        except (TypeError, ValueError):
+            pass
+    if closed_trades is not None:
+        try:
+            parts.append(f"Trades {int(closed_trades):,}")
+        except (TypeError, ValueError):
+            pass
+    if parts:
+        return "  Leader 30d: " + " \\| ".join(parts)
+
+    # Existing saved selections predate the activity columns but already have
+    # a public PnL/volume/WR snapshot. Display that rather than a false $0.
+    pnl = _number(trader.get("leader_pnl_usd"))
+    volume = _number(trader.get("leader_volume_usd"))
+    win_rate = _number(trader.get("leader_win_rate"))
+    if not any(value not in (None, 0.0) for value in (pnl, volume, win_rate)):
+        return None
+    if pnl is not None:
+        parts.append(f"PnL {escape_md(f'${pnl:+,.0f}')}")
+    if volume:
+        parts.append(f"Vol {escape_md(f'${volume:,.0f}')}")
+    if win_rate:
+        parts.append(f"WR {escape_md(f'{win_rate * 100:.0f}%')}")
+    return "  Leader 30d: " + " \\| ".join(parts)
+
+
 async def _handle_copy(query, data, context, telegram_id):
     from src.nadobro.trading.copy_service import (
         get_available_traders, get_user_copies, start_copy, stop_copy,
         pause_copy, resume_copy, get_trader_stats, get_trader_preview,
+        clear_saved_copy_traders,
     )
     from src.nadobro.users.admin_service import (
         add_copy_trader, remove_copy_trader, list_copy_traders,
@@ -36,6 +87,11 @@ async def _handle_copy(query, data, context, telegram_id):
     action = parts[1] if len(parts) > 1 else ""
 
     if action == "hub":
+        # All wizard cancel buttons land here. Drop transient state so a later
+        # free-text message cannot be consumed as a stale wallet/setup step.
+        context.user_data.pop("copy_setup", None)
+        context.user_data.pop("pending_copy_wallet", None)
+        context.user_data.pop("pending_admin_copy_wallet", None)
         traders = await run_blocking(get_available_traders, telegram_id)
         admin_flag = is_admin(telegram_id)
         if traders:
@@ -48,20 +104,66 @@ async def _handle_copy(query, data, context, telegram_id):
             for t in traders:
                 curated = " ⭐" if t.get("is_curated") else ""
                 wallet_snip = t["wallet"][:6] + "\\.\\.\\." + t["wallet"][-4:]
+                leader_line = _leader_snapshot_line(t)
                 stats = await run_blocking(get_trader_stats, t["id"], telegram_id)
-                vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "\\-"
-                wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "\\-"
-                pnl = stats["pnl_usd"]
-                pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
                 lines.append(
-                    f"• *{escape_md(t['label'])}*{curated} · `{wallet_snip}`\n"
-                    f"  {l_pnl}: *{escape_md(pnl_str)}* \\| {l_vol}: {escape_md(vol_str)} \\| {l_wr}: {escape_md(wr_str)} \\| {l_trades}: {stats['total_trades']}"
+                    f"• *{escape_md(t['label'])}*{curated} · `{wallet_snip}`"
                 )
+                if leader_line:
+                    lines.append(leader_line)
+                # Viewer-copy results are private and are useful only after a
+                # copied trade actually exists. Do not present an unstarted
+                # selection as the leader having $0 PnL / zero trades.
+                if (
+                    stats["total_trades"] > 0
+                    or float(stats["pnl_usd"] or 0.0) != 0.0
+                    or float(stats["volume_usd"] or 0.0) != 0.0
+                ):
+                    vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "\\-"
+                    wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "\\-"
+                    pnl = stats["pnl_usd"]
+                    pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+                    lines.append(
+                        f"  Your copy: {l_pnl} *{escape_md(pnl_str)}* \\| "
+                        f"{l_vol}: {escape_md(vol_str)} \\| {l_wr}: {escape_md(wr_str)} "
+                        f"\\| {l_trades}: {stats['total_trades']}"
+                    )
             lines.append("\n" + localize_text("Select a trader to view details and start copying\\.", lang))
         else:
             lines = ["🔁 *Copy Trading*\n", "No traders available yet\\. Add a custom wallet or ask an admin to add traders\\."]
         await _edit_loc(query,
             "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=copy_hub_kb(traders, is_admin_user=admin_flag),
+        )
+
+    elif action == "clear":
+        confirmed = len(parts) >= 3 and parts[2] == "confirm"
+        if not confirmed:
+            await _edit_loc(query,
+                "🧹 *Clear Saved Traders?*\n\nThis removes dormant personal selections only\\. "
+                "Active copy mirrors and tracked open positions remain untouched\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=copy_clear_selections_kb(),
+            )
+            return
+        cleared, protected = await run_blocking(clear_saved_copy_traders, telegram_id)
+        context.user_data.pop("copy_setup", None)
+        context.user_data.pop("pending_copy_wallet", None)
+        context.user_data.pop("pending_admin_copy_wallet", None)
+        traders = await run_blocking(get_available_traders, telegram_id)
+        admin_flag = is_admin(telegram_id)
+        if cleared:
+            result = f"✅ Cleared *{cleared}* saved trader selection\\(s\\)\\."
+        else:
+            result = "ℹ️ No dormant saved traders to clear\\."
+        if protected:
+            result += (
+                f"\n\nKept *{protected}* trader selection\\(s\\) with an active copy or tracked open position\\. "
+                "Stop or recover those positions from My Copies first\\."
+            )
+        await _edit_loc(query,
+            result,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=copy_hub_kb(traders, is_admin_user=admin_flag),
         )
@@ -85,11 +187,16 @@ async def _handle_copy(query, data, context, telegram_id):
         pf = float(row.get("profit_factor") or 0.0)
         mdd = float(row.get("max_drawdown_pct") or 0.0) * 100.0
         vol30 = float(s.get("volumeUsd") or row.get("volume_usd") or 0.0)
+        roi = _number(row.get("roi"))
+        active_days = row.get("active_days")
+        period_days = row.get("period_days") or 30
+        closed_trades = row.get("closed_trades")
         best = float(s.get("bestDayPnlUsd") or 0.0)
         worst = float(s.get("worstDayPnlUsd") or 0.0)
         await _edit_loc(query,
             "🏆 *Top Trader*\n\nWallet: `{wallet}`\n"
             "Equity: *{equity}*\n30d PnL: *{pnl}* \\| 30d Volume: {vol}\n"
+            "30d ROI: *{roi}* \\| Active: {activity} \\| Closed trades: {trades}\n"
             "Win Rate: *{wr}* \\| Profit Factor: {pf} \\| Max DD: {mdd}\n"
             "Best day: {best} \\| Worst day: {worst}\n"
             "Open Positions: *{positions}* \\(\\~{notional} notional\\)\n\n"
@@ -101,6 +208,11 @@ async def _handle_copy(query, data, context, telegram_id):
             equity=escape_md(f"${equity:,.0f}" if equity else "N/A"),
             pnl=escape_md(pnl_str),
             vol=escape_md(f"${vol30:,.0f}" if vol30 else "N/A"),
+            roi=escape_md(f"{roi * 100:+.1f}%" if roi is not None else "N/A"),
+            activity=escape_md(
+                f"{int(active_days)}/{int(period_days)}d" if active_days is not None else "N/A"
+            ),
+            trades=escape_md(f"{int(closed_trades):,}" if closed_trades is not None else "N/A"),
             wr=escape_md(f"{wr:.0f}%" if wr else "N/A"),
             pf=escape_md(f"{pf:.2f}" if pf else "N/A"),
             mdd=escape_md(f"{mdd:.1f}%" if mdd else "N/A"),
@@ -142,9 +254,9 @@ async def _handle_copy(query, data, context, telegram_id):
             page = int(parts[2]) if len(parts) >= 3 else 0
         except ValueError:
             page = 0
-        sort = parts[3] if len(parts) >= 4 and parts[3] in ("pnl", "roi") else "pnl"
-        rows = await run_blocking(leaderboard_page, page, sort=sort)
-        if not rows:
+        sort = parts[3] if len(parts) >= 4 and parts[3] in ("quality", "pnl", "roi") else "quality"
+        result = await run_blocking(leaderboard_page, page, sort=sort)
+        if not result.available:
             await _edit_loc(query,
                 "🏆 *Top Traders*\n\nLeaderboard is unavailable right now\\. "
                 "You can still add a wallet manually from the Copy Trading hub\\.",
@@ -152,16 +264,29 @@ async def _handle_copy(query, data, context, telegram_id):
                 reply_markup=back_kb("copy:hub"),
             )
             return
+        if not result.rows:
+            await _edit_loc(query,
+                "🏆 *Top Traders*\n\nNo traders currently meet the active, repeatable performance criteria\\. "
+                "Try again later or add a wallet manually from the Copy Trading hub\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=back_kb("copy:hub"),
+            )
+            return
         # Cache rows for the view/follow screens (stat stamping + card fields).
-        context.user_data["copy_lb_rows"] = {r["wallet_address"]: r for r in rows}
+        context.user_data["copy_lb_rows"] = {r["wallet_address"]: r for r in result.rows}
+        title = {
+            "quality": "active \\+ ROI weighted",
+            "roi": "ROI",
+            "pnl": "PnL",
+        }[sort]
         lines = [
-            "🏆 *Top Traders* \\(30d, by {sort}\\)\n".format(sort=sort.upper()),
-            "Live rankings from NadoExplorer\\. Tap a trader for details\\.",
+            "🏆 *Top Traders* \\(30d, {title}\\)\n".format(title=title),
+            "Ranked from live NadoExplorer data\\. Tap a trader for details\\.",
         ]
         await _edit_loc(query,
             "\n".join(lines),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=copy_leaderboard_kb(rows, page, sort),
+            reply_markup=copy_leaderboard_kb(result.rows, page, sort, has_more=result.has_more),
         )
 
     elif action == "trader" and len(parts) >= 3:
@@ -184,22 +309,35 @@ async def _handle_copy(query, data, context, telegram_id):
         open_count = int(preview.get("open_positions") or 0)
 
         stats = await run_blocking(get_trader_stats, trader_id, telegram_id)
-        vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "N/A"
-        wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "N/A"
-        pnl_preview = stats["pnl_usd"]
-        pnl_preview_str = f"+${pnl_preview:,.2f}" if pnl_preview >= 0 else f"-${abs(pnl_preview):,.2f}"
+        leader_snapshot = _leader_snapshot_line(trader) or "  Leader 30d: unavailable"
+        if (
+            stats["total_trades"] > 0
+            or float(stats["pnl_usd"] or 0.0) != 0.0
+            or float(stats["volume_usd"] or 0.0) != 0.0
+        ):
+            vol_str = f"${stats['volume_usd']:,.0f}" if stats["volume_usd"] else "\\-"
+            wr_str = f"{stats['win_rate']:.0f}%" if stats["total_trades"] > 0 else "\\-"
+            pnl_preview = stats["pnl_usd"]
+            pnl_preview_str = f"+${pnl_preview:,.2f}" if pnl_preview >= 0 else f"-${abs(pnl_preview):,.2f}"
+            copy_snapshot = (
+                f"  Your copy: PnL *{escape_md(pnl_preview_str)}* \\| "
+                f"Vol {escape_md(vol_str)} \\| WR {escape_md(wr_str)} \\| "
+                f"Trades {stats['total_trades']}"
+            )
+        else:
+            copy_snapshot = "  Your copy: not started"
 
         wallet_snip = trader["wallet"][:6] + "..." + trader["wallet"][-4:]
 
         await _edit_loc(query,
-            "🔁 *Trader Preview*{curated}\n\nLabel: *{label}*\nWallet: `{wallet}`\nEquity: *{equity}*\nOpen Positions: *{positions}*\nPnL: *{pnl}*\nVolume: *{volume}*\nWin Rate: *{winrate}* \\({filled} filled / {total} total\\)\n\nTap Start Copying to set your budget and risk parameters\\.",
+            "🔁 *Trader Preview*{curated}\n\nLabel: *{label}*\nWallet: `{wallet}`\nEquity: *{equity}*\nOpen Positions: *{positions}*\n{leader_snapshot}\n{copy_snapshot}\n\nTap Start Copying to set your budget and risk parameters\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=copy_trader_preview_kb(trader_id),
             curated=escape_md(curated), label=escape_md(trader['label']),
             wallet=escape_md(wallet_snip), equity=escape_md(equity_str),
-            positions=open_count, pnl=escape_md(pnl_preview_str),
-            volume=escape_md(vol_str), winrate=escape_md(wr_str),
-            filled=stats['filled'], total=stats['total_trades'],
+            positions=open_count,
+            leader_snapshot=leader_snapshot,
+            copy_snapshot=copy_snapshot,
         )
 
     elif action == "start" and len(parts) >= 3:
@@ -388,8 +526,11 @@ async def _handle_copy(query, data, context, telegram_id):
             l_pnl = localize_text("PnL", lang)
             lines = [localize_text("📋 *My Copy Trades*\n", lang)]
             for m in mirrors:
-                status_label = localize_text("PAUSED", lang) if m.get("paused") else localize_text("ACTIVE", lang)
-                status_icon = f"⏸ {status_label}" if m.get("paused") else f"🟢 {status_label}"
+                if m.get("stop_requested"):
+                    status_icon = "🟠 STOPPING — retrying closes"
+                else:
+                    status_label = localize_text("PAUSED", lang) if m.get("paused") else localize_text("ACTIVE", lang)
+                    status_icon = f"⏸ {status_label}" if m.get("paused") else f"🟢 {status_label}"
                 # Mirrors keep running on their own network across a mode
                 # switch — tag each row so testnet and mainnet mirrors are
                 # never mistaken for one another on this shared dashboard.
@@ -429,6 +570,9 @@ async def _handle_copy(query, data, context, telegram_id):
 
         sub = parts[2]
         if sub == "menu":
+            # The Cancel button for the free-text admin add flow returns here.
+            # Do not let its next unrelated message become a curated trader.
+            context.user_data.pop("pending_admin_copy_wallet", None)
             traders = await run_blocking(list_copy_traders)
             await _edit_loc(query,
                 "⚙️ *Manage Copy Traders*\n\nAdd or remove traders from the copy trading pool\\.",

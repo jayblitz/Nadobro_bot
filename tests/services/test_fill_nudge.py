@@ -153,3 +153,101 @@ def test_nudge_dicts_are_size_bounded():
     assert f"k{bot_runtime._NUDGE_DICT_MAX + 9}" in bot_runtime._last_nudge_ts
     assert "k0" not in bot_runtime._last_nudge_ts
     _reset_debounce()
+
+
+def test_legacy_dedupe_bucket_honors_supported_turbo_cadence():
+    """With the central scheduler disabled, 5s Turbo ticks need distinct queue
+    keys; the old fixed 20s bucket deduped all four attempts into one."""
+    at_100 = bot_runtime._legacy_strategy_dedupe_bucket(100.0, 5.0)
+    at_105 = bot_runtime._legacy_strategy_dedupe_bucket(105.0, 5.0)
+    assert at_100 != at_105
+    assert int(100.0 / bot_runtime.RUNTIME_TICK_SECONDS) == int(
+        105.0 / bot_runtime.RUNTIME_TICK_SECONDS
+    )
+
+
+def _install_coalescing_fakes(monkeypatch, strategy):
+    """Return (calls, started, release) for handle_strategy_job overlap tests."""
+    import src.nadobro.core.user_circuit as user_circuit
+    import src.nadobro.runtime.runtime_supervisor as runtime_supervisor
+
+    calls = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+    state = {"running": True, "strategy": strategy}
+
+    monkeypatch.setattr(bot_runtime, "_load_state", lambda _uid, _net: dict(state))
+    monkeypatch.setattr(bot_runtime, "_save_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_supervisor, "is_multiprocess_enabled", lambda: False)
+    monkeypatch.setattr(user_circuit, "is_open", lambda *_args: False)
+    monkeypatch.setattr(user_circuit, "record_success", lambda *_args: None)
+
+    async def _fake_run(_uid, _net, _state, *, nudge=False):
+        calls.append(bool(nudge))
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+        return True, None
+
+    monkeypatch.setattr(bot_runtime, "_run_cycle", _fake_run)
+    bot_runtime._job_locks.clear()
+    bot_runtime._job_pending_payloads.clear()
+    bot_runtime._job_coalesce_counts.clear()
+    return calls, started, release
+
+
+def test_coalesced_fill_keeps_nudge_flag_for_deferred_cycle(monkeypatch):
+    """A fill arriving during a normal tick must bypass the interval gate on
+    the deferred tick; the original implementation re-used the first payload."""
+
+    async def body():
+        calls, started, release = _install_coalescing_fakes(monkeypatch, "mid")
+        first = asyncio.create_task(
+            bot_runtime.handle_strategy_job(
+                {"telegram_id": 42, "network": "mainnet", "strategy": "mid"}
+            )
+        )
+        await started.wait()
+        await bot_runtime.handle_strategy_job(
+            {"telegram_id": 42, "network": "mainnet", "strategy": "mid", "nudge": True}
+        )
+        release.set()
+        await first
+        assert calls == [False, True]
+
+    try:
+        asyncio.run(body())
+    finally:
+        bot_runtime._job_locks.clear()
+        bot_runtime._job_pending_payloads.clear()
+        bot_runtime._job_coalesce_counts.clear()
+
+
+def test_volume_fill_upgrades_an_already_pending_normal_tick(monkeypatch):
+    """Volume drops extra overlaps by design, but a fill must still upgrade
+    the one pending payload to nudge=True instead of being discarded."""
+
+    async def body():
+        calls, started, release = _install_coalescing_fakes(monkeypatch, "vol")
+        first = asyncio.create_task(
+            bot_runtime.handle_strategy_job(
+                {"telegram_id": 42, "network": "mainnet", "strategy": "vol"}
+            )
+        )
+        await started.wait()
+        await bot_runtime.handle_strategy_job(
+            {"telegram_id": 42, "network": "mainnet", "strategy": "vol"}
+        )
+        await bot_runtime.handle_strategy_job(
+            {"telegram_id": 42, "network": "mainnet", "strategy": "vol", "nudge": True}
+        )
+        release.set()
+        await first
+        assert calls == [False, True]
+
+    try:
+        asyncio.run(body())
+    finally:
+        bot_runtime._job_locks.clear()
+        bot_runtime._job_pending_payloads.clear()
+        bot_runtime._job_coalesce_counts.clear()

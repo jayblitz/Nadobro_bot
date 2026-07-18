@@ -55,6 +55,23 @@ def test_overlay_signals_migration_and_startup_ddl():
     assert "CREATE TABLE IF NOT EXISTS overlay_signals" in ddl
 
 
+def test_copy_quality_and_safe_stop_migration_matches_startup_ddl():
+    sql = Path("src/nadobro/migrations/0018_copy_discovery_quality_and_safe_stops.sql").read_text()
+    for column in (
+        "leader_roi",
+        "leader_active_days",
+        "leader_period_days",
+        "leader_last_activity_at",
+        "leader_closed_trades",
+        "leader_max_drawdown_pct",
+        "stop_requested",
+    ):
+        assert column in sql
+    ddl = Path("src/nadobro/db.py").read_text()
+    assert "ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS leader_roi" in ddl
+    assert "ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS stop_requested" in ddl
+
+
 def test_retag_leaked_copy_fills_migration_and_startup_ddl():
     sql = Path("src/nadobro/migrations/0016_retag_leaked_copy_fills.sql").read_text()
     for net in ("testnet", "mainnet"):

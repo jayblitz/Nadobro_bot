@@ -2,6 +2,9 @@
 the rate-limit soft floor. Fixture payloads are verbatim-shaped captures from
 the live API (2026-07-13, API version 2026-06-22)."""
 
+import copy
+import time
+
 import pytest
 
 from src.nadobro.market_data import nadoexplorer_client as explorer
@@ -25,8 +28,10 @@ LEADERBOARD_PAYLOAD = {
             "winRate": 0.5432078728772297,
             "closedTrades": 67790,
             "activeDays": 30,
+            "lastActivityAt": "2026-07-15T15:30:00.000Z",
             "equityUsd": 605984.130121351,
-            "roi": 0.454237036477484,
+            # Explorer returns ROI in percentage points, not decimal form.
+            "roi": 45.4237036477484,
             "profitFactor": 1.4413267930373195,
             "maxDrawdownPct": 0.0913114524256434,
             "nadoPoints": 34411.620185,
@@ -73,9 +78,11 @@ class _FakeSession:
         self.status = status
         self.remaining = remaining
         self.calls = 0
+        self.params = None
 
     def get(self, url, params=None, timeout=None):
         self.calls += 1
+        self.params = params
         return _FakeResponse(self.payload, self.status, self.remaining)
 
 
@@ -83,6 +90,7 @@ class _FakeSession:
 def _fresh_client_state(monkeypatch):
     explorer._cache.clear()
     monkeypatch.setattr(explorer, "_ratelimit_remaining", 120)
+    monkeypatch.setattr(explorer, "_ratelimit_observed_at", 0.0)
     yield
     explorer._cache.clear()
 
@@ -95,10 +103,46 @@ def test_leaderboard_parses_real_shape(monkeypatch):
     row = rows[0]
     assert row["wallet_address"] == WALLET
     assert row["pnl_usd"] == pytest.approx(229856.747340536)
+    assert row["roi"] == pytest.approx(0.454237036477484)
     assert row["win_rate"] == pytest.approx(0.5432078728772297)
     assert row["equity_usd"] == pytest.approx(605984.130121351)
     assert row["profit_factor"] == pytest.approx(1.4413267930373195)
+    assert row["active_days"] == 30
+    assert row["last_activity_at"] == "2026-07-15T15:30:00.000Z"
     assert "Mega flow" in row["badges"]
+
+
+def test_leaderboard_result_preserves_pagination_and_activity_filter(monkeypatch):
+    fake = _FakeSession(LEADERBOARD_PAYLOAD)
+    monkeypatch.setattr(explorer, "SESSION", fake)
+
+    result = explorer.get_leaderboard_result(min_active_days=10, limit=3)
+
+    assert result is not None
+    assert result["has_more"] is True
+    assert result["rows"][0]["active_days"] == 30
+    assert fake.params["minActiveDays"] == 10
+
+
+def test_leaderboard_preserves_unknown_quality_metrics_as_none(monkeypatch):
+    missing = copy.deepcopy(LEADERBOARD_PAYLOAD["rows"][0])
+    missing["walletAddress"] = "0x1111111111111111111111111111111111111111"
+    missing.pop("winRate")
+    missing.pop("maxDrawdownPct")
+    nonnumeric = copy.deepcopy(LEADERBOARD_PAYLOAD["rows"][0])
+    nonnumeric["walletAddress"] = "0x2222222222222222222222222222222222222222"
+    nonnumeric["winRate"] = "unknown"
+    nonnumeric["maxDrawdownPct"] = "unknown"
+    fake = _FakeSession(
+        {"hasMore": False, "rows": [missing, nonnumeric]}
+    )
+    monkeypatch.setattr(explorer, "SESSION", fake)
+
+    rows = explorer.get_leaderboard(limit=2)
+
+    assert len(rows) == 2
+    assert all(row["win_rate"] is None for row in rows)
+    assert all(row["max_drawdown_pct"] is None for row in rows)
 
 
 def test_leaderboard_caches_within_ttl(monkeypatch):
@@ -137,6 +181,18 @@ def test_rate_floor_serves_stale_instead_of_refreshing(monkeypatch):
     rows = explorer.get_leaderboard()
     assert fake.calls == 1
     assert rows and rows[0]["wallet_address"] == WALLET
+
+
+def test_rate_floor_skips_an_uncached_page(monkeypatch):
+    fake = _FakeSession(LEADERBOARD_PAYLOAD)
+    monkeypatch.setattr(explorer, "SESSION", fake)
+    monkeypatch.setattr(explorer, "_ratelimit_remaining", 3)
+    monkeypatch.setattr(explorer, "_ratelimit_observed_at", time.time())
+
+    result = explorer.get_leaderboard_result(offset=50, limit=50)
+
+    assert result is None
+    assert fake.calls == 0
 
 
 def test_invalid_enum_params_fall_back():

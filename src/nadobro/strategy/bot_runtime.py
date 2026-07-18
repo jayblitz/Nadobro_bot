@@ -1517,10 +1517,19 @@ def stop_all_automation_for_user(telegram_id: int) -> tuple[bool, str]:
 
     ok_copy, msg_copy = stop_all_copies(telegram_id)
     parts = [msg_bot]
-    if ok_copy:
+    no_active_copies = not ok_copy and msg_copy.strip() == "No active copy mirrors."
+    copy_stop_failed = not ok_copy and not no_active_copies
+    if ok_copy or copy_stop_failed:
         parts.append(msg_copy)
     combined = " ".join(parts)
-    return bool(ok_bot or ok_copy), combined
+    overall_ok = bool(ok_bot or ok_copy)
+    if copy_stop_failed:
+        # A strategy loop may have stopped successfully, but /stop_all is not
+        # complete while a copy mirror is still retrying failed closes.
+        overall_ok = False
+    return overall_ok, combined
+
+
 def get_user_bot_state(telegram_id: int, network: str | None = None) -> dict:
     """Public accessor for the persisted strategy state dict.
 
@@ -1951,7 +1960,10 @@ async def _bot_loop(telegram_id: int, network: str):
                     )
                     await asyncio.sleep(min(float(RUNTIME_TICK_SECONDS), max(1.0, interval / 2.0)))
                     continue
-                now_bucket = int(time.time() / max(1, RUNTIME_TICK_SECONDS))
+                # Dedupe at the strategy's effective cadence. A fixed 20s
+                # bucket silently discarded the supported 5s Turbo ticks when
+                # the central scheduler was disabled.
+                now_bucket = _legacy_strategy_dedupe_bucket(time.time(), interval)
                 enqueued = await enqueue_strategy(
                     {"telegram_id": telegram_id, "network": network, "strategy": strategy},
                     dedupe_key=f"{telegram_id}:{network}:{now_bucket}",
@@ -1977,6 +1989,11 @@ async def _bot_loop(telegram_id: int, network: str):
         logger.info("Strategy loop cancelled for user %s", telegram_id)
     finally:
         _tasks.pop(_task_key(telegram_id, network), None)
+
+
+def _legacy_strategy_dedupe_bucket(now: float, interval: float) -> int:
+    """Stable queue-dedupe bucket for the legacy per-user scheduler path."""
+    return int(float(now) / max(1.0, float(interval)))
 
 
 # --- P2 fill-nudge ------------------------------------------------------------
@@ -2085,6 +2102,10 @@ async def handle_strategy_job(payload: dict):
     if lock.locked():
         payload_strategy = str(payload.get("strategy") or "").lower().strip()
         if payload_strategy == "vol" and key in _job_pending_payloads:
+            # A fill nudge upgrades the already-pending Volume cycle even
+            # though further overlap is otherwise dropped for load control.
+            if payload.get("nudge"):
+                _job_pending_payloads[key]["nudge"] = True
             _job_stats["vol_overlap_skips"] += 1
             logger.info(
                 "Dropping extra overlapping vol tick user=%s network=%s pending_already_set",
@@ -2092,7 +2113,13 @@ async def handle_strategy_job(payload: dict):
                 network,
             )
             return
-        _job_pending_payloads[key] = payload
+        pending_payload = dict(payload)
+        # Coalescing is last-payload-wins for ordinary ticks, but a fill nudge
+        # must be sticky: a later scheduler tick must not erase its interval
+        # bypass before the deferred cycle runs.
+        if (_job_pending_payloads.get(key) or {}).get("nudge"):
+            pending_payload["nudge"] = True
+        _job_pending_payloads[key] = pending_payload
         _job_coalesce_counts[key] = int(_job_coalesce_counts.get(key, 0)) + 1
         _job_stats["coalesced_ticks"] += 1
         if payload_strategy == "vol":
@@ -2287,6 +2314,11 @@ async def handle_strategy_job(payload: dict):
             strategy_for_pending = str((pending_payload or {}).get("strategy") or state.get("strategy") or "").lower().strip()
             if strategy_for_pending == "vol":
                 _job_stats["vol_deferred_cycles"] += 1
+            # Carry the coalesced job's metadata into the next loop iteration.
+            # Without this assignment the loop re-ran the original payload, so
+            # a pending fill nudge silently lost nudge=True and hit the normal
+            # interval gate.
+            payload = pending_payload
             logger.info(
                 "Running deferred coalesced strategy cycle for user %s on %s (%s coalesced tick(s))",
                 telegram_id,

@@ -1,8 +1,10 @@
 import json
 
 from src.nadobro.venue.nado_ws import (
+    PortfolioWsSubscription,
     _PORTFOLIO_STREAMS,
     _is_auth_or_error,
+    _subscription_streams,
     _should_invalidate,
     subscribe_url_for_network,
     ws_url_for_network,
@@ -54,6 +56,18 @@ def test_portfolio_streams_are_documented_types():
     assert flags["funding_payment"] == (False, False)
     auth_required = {name for name, auth, _per_sub in _PORTFOLIO_STREAMS if auth}
     assert auth_required == {"order_update"}
+
+
+def test_fill_nudge_subscription_is_fill_only_without_portfolio_ws():
+    sub = PortfolioWsSubscription(
+        user_id=7,
+        network="mainnet",
+        subaccount="0x" + "ab" * 32,
+        sync_portfolio=False,
+    )
+    streams = _subscription_streams(sub)
+    assert streams == (("fill", False, True),)
+    assert not any(requires_auth for _name, requires_auth, _per_subaccount in streams)
 
 
 def test_subscribe_message_schema_matches_docs():

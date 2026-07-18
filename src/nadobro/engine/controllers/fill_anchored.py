@@ -369,8 +369,10 @@ class FillAnchoredQuotingController(MarketMakingController):
             if self._last_buy_px is not None:
                 target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + self.spread_ask_pct))
 
-        await self._reconcile(TradeType.BUY, target_bid, allow_buy)
-        await self._reconcile(TradeType.SELL, target_ask, allow_sell)
+        # Forward the same mark used for exposure decisions. The inherited
+        # reconciler projects the next quote against the exposure cap.
+        await self._reconcile(TradeType.BUY, target_bid, allow_buy, mid)
+        await self._reconcile(TradeType.SELL, target_ask, allow_sell, mid)
 
         # Step 2 of the stall escalation: if the soft-reset's maker concession
         # can't rebalance, escalate to a bounded reduce-only taker before SL.

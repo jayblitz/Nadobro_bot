@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, TypeAlias
 
 from psycopg2 import sql as pgsql
-from src.nadobro.db import query_one, query_all, execute, execute_returning, query_count
+from src.nadobro.db import query_one, query_all, execute, execute_returning, query_count, run_transaction
 
 # JSON-compatible values for bot_state (serialized with json.dumps unless value is str).
 JsonSerializable: TypeAlias = (
@@ -477,6 +477,12 @@ def update_copy_trader_stats(
     total_volume_usd: float = 0.0,
     nado_points: float = 0.0,
     win_rate: Optional[float] = None,
+    leader_roi: Optional[float] = None,
+    leader_active_days: Optional[int] = None,
+    leader_period_days: Optional[int] = None,
+    leader_last_activity_at: Optional[object] = None,
+    leader_closed_trades: Optional[int] = None,
+    leader_max_drawdown_pct: Optional[float] = None,
 ) -> None:
     """Stamp leaderboard performance stats onto a copy_traders row.
 
@@ -487,13 +493,22 @@ def update_copy_trader_stats(
     execute(
         """UPDATE copy_traders
            SET total_pnl_usd = %s, total_volume_usd = %s, nado_points = %s,
-               win_rate = %s, last_updated_at = NOW()
+               win_rate = %s, leader_roi = %s, leader_active_days = %s,
+               leader_period_days = %s, leader_last_activity_at = %s,
+               leader_closed_trades = %s, leader_max_drawdown_pct = %s,
+               last_updated_at = NOW()
            WHERE id = %s""",
         (
             float(total_pnl_usd),
             float(total_volume_usd),
             float(nado_points),
             None if win_rate is None else float(win_rate),
+            None if leader_roi is None else float(leader_roi),
+            None if leader_active_days is None else int(leader_active_days),
+            None if leader_period_days is None else int(leader_period_days),
+            leader_last_activity_at,
+            None if leader_closed_trades is None else int(leader_closed_trades),
+            None if leader_max_drawdown_pct is None else float(leader_max_drawdown_pct),
             int(trader_id),
         ),
     )
@@ -501,6 +516,61 @@ def update_copy_trader_stats(
 
 def deactivate_copy_trader(trader_id: int):
     execute("UPDATE copy_traders SET active = false WHERE id = %s", (trader_id,))
+
+
+def clear_saved_copy_trader_selections(user_id: int) -> tuple[int, int]:
+    """Hide only safe-to-clear personal trader selections for one user.
+
+    A selection is intentionally distinct from an active copy mirror. The
+    statement is ownership-scoped and protects every network plus any tracked
+    open position, so a stale/crafted callback cannot deactivate a row whose
+    exposure is still being monitored. Rows are soft-deactivated rather than
+    deleted because mirrors, snapshots, and trade history reference them.
+    """
+    def _clear(cur):
+        # Lock selection rows before checking mirrors. ``create_copy_mirror_v2``
+        # takes the same lock, so Clear cannot deactivate a trader between a
+        # start's validation and its mirror insert.
+        cur.execute(
+            """SELECT t.id FROM copy_traders t
+               WHERE t.owner_user_id = %s
+                 AND t.is_curated = false
+                 AND t.active = true
+               FOR UPDATE""",
+            (int(user_id),),
+        )
+        owned = cur.fetchall() or []
+        cleared = 0
+        protected = 0
+        for selection in owned:
+            trader_id = int(selection["id"])
+            cur.execute(
+                """SELECT (
+                       EXISTS (
+                         SELECT 1 FROM copy_mirrors m
+                         WHERE m.trader_id = %s AND m.active = true
+                       )
+                       OR EXISTS (
+                         SELECT 1
+                         FROM copy_positions p
+                         JOIN copy_mirrors m ON m.id = p.mirror_id
+                         WHERE m.trader_id = %s AND p.status = 'open'
+                       )
+                     ) AS protected""",
+                (trader_id, trader_id),
+            )
+            state = cur.fetchone() or {}
+            if state.get("protected"):
+                protected += 1
+                continue
+            cur.execute(
+                "UPDATE copy_traders SET active = false WHERE id = %s AND active = true",
+                (trader_id,),
+            )
+            cleared += max(0, int(cur.rowcount or 0))
+        return cleared, protected
+
+    return run_transaction(_clear)
 
 
 def create_copy_mirror(user_id: int, trader_id: int, budget_usd: float = 100.0,
@@ -536,7 +606,15 @@ def get_user_active_mirrors(user_id: int) -> list:
 
 def get_mirrors_for_trader(trader_id: int) -> list:
     return query_all(
-        "SELECT * FROM copy_mirrors WHERE trader_id = %s AND active = true",
+        """SELECT m.* FROM copy_mirrors m
+           WHERE m.trader_id = %s
+             AND (
+               m.active = true
+               OR EXISTS (
+                 SELECT 1 FROM copy_positions p
+                 WHERE p.mirror_id = m.id AND p.status = 'open'
+               )
+             )""",
         (trader_id,),
     )
 
@@ -551,14 +629,30 @@ def get_all_active_mirrors() -> list:
 
 def stop_copy_mirror(mirror_id: int):
     execute(
-        "UPDATE copy_mirrors SET active = false, stopped_at = %s WHERE id = %s",
+        "UPDATE copy_mirrors SET active = false, stop_requested = false, stopped_at = %s WHERE id = %s",
         (datetime.now(timezone.utc).isoformat(), mirror_id),
+    )
+
+
+def request_copy_mirror_stop(mirror_id: int):
+    """Keep a mirror monitored while its requested flatten is retried.
+
+    A paused mirror is normally excluded from the poller. Clearing that flag,
+    and reactivating a legacy inactive mirror with tracked exposure, is safe
+    because ``stop_requested`` makes the sync path flatten-only; it cannot
+    resume copying new leader positions.
+    """
+    execute(
+        """UPDATE copy_mirrors
+           SET active = true, stop_requested = true, paused = false, stopped_at = NULL
+           WHERE id = %s""",
+        (int(mirror_id),),
     )
 
 
 def pause_copy_mirror(mirror_id: int):
     execute(
-        "UPDATE copy_mirrors SET paused = true WHERE id = %s AND active = true",
+        "UPDATE copy_mirrors SET paused = true WHERE id = %s AND active = true AND NOT stop_requested",
         (mirror_id,),
     )
 
@@ -676,33 +770,77 @@ def create_copy_mirror_v2(user_id: int, trader_id: int, network: str,
     # trades. strategy_session_id is cleared too: start_copy assigns a fresh
     # session right after, and a failure there must degrade to "no session",
     # never to tagging new fills onto the old stopped session.
-    row = execute_returning(
-        """INSERT INTO copy_mirrors
-           (user_id, trader_id, network, margin_per_trade, max_leverage,
-            cumulative_stop_loss_pct, cumulative_take_profit_pct, total_allocated_usd, active)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true)
-           ON CONFLICT (user_id, trader_id, network) DO UPDATE
-               SET margin_per_trade = EXCLUDED.margin_per_trade,
-                   max_leverage = EXCLUDED.max_leverage,
-                   cumulative_stop_loss_pct = EXCLUDED.cumulative_stop_loss_pct,
-                   cumulative_take_profit_pct = EXCLUDED.cumulative_take_profit_pct,
-                   total_allocated_usd = EXCLUDED.total_allocated_usd,
-                   active = true,
-                   paused = false,
-                   auto_stopped_reason = NULL,
-                   cumulative_pnl = 0.0,
-                   cumulative_fees_usd = 0.0,
-                   cumulative_volume_usd = 0.0,
-                   last_unrealized_pnl_usd = 0.0,
-                   last_rail_checked_at = NULL,
-                   strategy_session_id = NULL,
-                   created_at = now(),
-                   stopped_at = NULL
-           RETURNING id""",
-        (user_id, trader_id, network, margin_per_trade, max_leverage,
-         cumulative_stop_loss_pct, cumulative_take_profit_pct, total_allocated_usd),
-    )
-    return row["id"] if row else None
+    def _create(cur):
+        # Serialize against Clear on this selection. The active predicate is
+        # deliberately read under the lock rather than trusting start_copy's
+        # earlier display/permission read.
+        cur.execute(
+            "SELECT id FROM copy_traders WHERE id = %s AND active = true FOR UPDATE",
+            (int(trader_id),),
+        )
+        if not cur.fetchone():
+            return None
+
+        # A failed stop — including the pre-upgrade inactive orphan shape —
+        # owns this mirror until it has flattened. A restart must never reset
+        # accounting and resume new opens over a tracked copy position.
+        cur.execute(
+            """SELECT id FROM copy_mirrors
+               WHERE user_id = %s AND trader_id = %s AND network = %s
+                 AND (
+                   stop_requested = true
+                   OR EXISTS (
+                     SELECT 1 FROM copy_positions p
+                     WHERE p.mirror_id = copy_mirrors.id AND p.status = 'open'
+                   )
+                 )
+               FOR UPDATE""",
+            (int(user_id), int(trader_id), network),
+        )
+        pending = cur.fetchone()
+        if pending:
+            # Rehydrate a legacy inactive orphan into the same flatten-only
+            # retry path as a current failed stop. This query is under the
+            # trader lock, so Clear cannot hide the selection meanwhile.
+            cur.execute(
+                """UPDATE copy_mirrors
+                   SET active = true, stop_requested = true, paused = false, stopped_at = NULL
+                   WHERE id = %s""",
+                (int(pending["id"]),),
+            )
+            return None
+
+        cur.execute(
+            """INSERT INTO copy_mirrors
+               (user_id, trader_id, network, margin_per_trade, max_leverage,
+                cumulative_stop_loss_pct, cumulative_take_profit_pct, total_allocated_usd, active)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true)
+               ON CONFLICT (user_id, trader_id, network) DO UPDATE
+                   SET margin_per_trade = EXCLUDED.margin_per_trade,
+                       max_leverage = EXCLUDED.max_leverage,
+                       cumulative_stop_loss_pct = EXCLUDED.cumulative_stop_loss_pct,
+                       cumulative_take_profit_pct = EXCLUDED.cumulative_take_profit_pct,
+                       total_allocated_usd = EXCLUDED.total_allocated_usd,
+                       active = true,
+                       paused = false,
+                       auto_stopped_reason = NULL,
+                       cumulative_pnl = 0.0,
+                       cumulative_fees_usd = 0.0,
+                       cumulative_volume_usd = 0.0,
+                       last_unrealized_pnl_usd = 0.0,
+                       last_rail_checked_at = NULL,
+                       strategy_session_id = NULL,
+                       stop_requested = false,
+                       created_at = now(),
+                       stopped_at = NULL
+               RETURNING id""",
+            (user_id, trader_id, network, margin_per_trade, max_leverage,
+             cumulative_stop_loss_pct, cumulative_take_profit_pct, total_allocated_usd),
+        )
+        row = cur.fetchone()
+        return row["id"] if row else None
+
+    return run_transaction(_create)
 
 
 def get_user_active_mirrors_v2(user_id: int, network: str = None) -> list:
@@ -728,13 +866,15 @@ def get_all_active_mirrors_v2(network: str = None) -> list:
         return query_all(
             """SELECT m.*, t.wallet_address, t.label
                FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
-               WHERE m.active = true AND NOT m.paused AND t.active = true AND m.network = %s""",
+               WHERE m.active = true AND (NOT m.paused OR m.stop_requested = true)
+                 AND t.active = true AND m.network = %s""",
             (network,),
         )
     return query_all(
         """SELECT m.*, t.wallet_address, t.label
            FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
-           WHERE m.active = true AND NOT m.paused AND t.active = true"""
+           WHERE m.active = true AND (NOT m.paused OR m.stop_requested = true)
+             AND t.active = true"""
     )
 
 
@@ -747,7 +887,7 @@ def update_mirror_cumulative_pnl(mirror_id: int, pnl_delta: float):
 
 def auto_stop_mirror(mirror_id: int, reason: str):
     execute(
-        "UPDATE copy_mirrors SET active = false, paused = false, auto_stopped_reason = %s, stopped_at = %s WHERE id = %s",
+        "UPDATE copy_mirrors SET active = false, paused = false, stop_requested = false, auto_stopped_reason = %s, stopped_at = %s WHERE id = %s",
         (reason, datetime.now(timezone.utc).isoformat(), mirror_id),
     )
 
@@ -1980,4 +2120,3 @@ def get_vault_lp_events(telegram_id: int, network: str = "mainnet", limit: int =
             LIMIT %s""",
         (telegram_id, limit),
     )
-

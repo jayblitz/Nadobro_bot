@@ -81,6 +81,43 @@ class NadoSyncTests(unittest.IsolatedAsyncioTestCase):
         assert client.summary_calls == 1
         assert execute_calls
 
+    async def test_fill_nudge_subscribes_without_enabling_portfolio_ws(self):
+        from src.nadobro.venue import nado_ws
+
+        client = _Client()
+        client.subaccount_hex = "0x" + "ab" * 32
+        captured = []
+
+        def _listener(_uid, _network):
+            return None
+
+        nado_ws._fill_listeners.clear()
+        nado_ws.register_fill_listener(_listener)
+        try:
+            with patch.object(
+                nado_sync, "get_user",
+                return_value=SimpleNamespace(network_mode=SimpleNamespace(value="testnet")),
+            ), patch.object(
+                nado_sync, "get_user_nado_client", return_value=client,
+            ), patch.object(
+                nado_sync, "execute",
+            ), patch.object(
+                nado_sync, "query_one", return_value=None,
+            ), patch.object(
+                nado_sync, "portfolio_ws_enabled", return_value=False,
+            ), patch.object(
+                nado_sync, "fill_nudge_enabled", return_value=True,
+            ), patch.object(
+                nado_ws.portfolio_ws, "subscribe", side_effect=captured.append,
+            ):
+                await nado_sync.sync_user(42, network="testnet", force=True)
+        finally:
+            nado_ws._fill_listeners.clear()
+
+        assert len(captured) == 1
+        assert captured[0].user_id == 42
+        assert captured[0].sync_portfolio is False
+
     async def test_sync_failure_marks_cached_snapshot_stale(self):
         cached = {"user_id": 42, "network": "testnet", "last_sync": datetime.now(timezone.utc), "positions": []}
         nado_sync.set_cached_snapshot(42, "testnet", cached)

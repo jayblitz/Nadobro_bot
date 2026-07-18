@@ -197,13 +197,53 @@ class MarketMakingController(Controller):
         # per-fill edge for fill rate, bounded by the session SL rail.
         if touch is not None:
             target_bid, target_ask = touch[0], touch[1]
-        await self._reconcile(TradeType.BUY, target_bid, allow_buy)
-        await self._reconcile(TradeType.SELL, target_ask, allow_sell)
+        await self._reconcile(TradeType.BUY, target_bid, allow_buy, mid)
+        await self._reconcile(TradeType.SELL, target_ask, allow_sell, mid)
 
-    async def _reconcile(self, side: TradeType, target: Decimal, allowed: bool) -> None:
+    def _projected_order_within_exposure(
+        self, side: TradeType, mid: Decimal
+    ) -> bool:
+        """Whether another full quote fits the margin-relative exposure cap.
+
+        The existing gate observes filled inventory only. Turbo Mid quotes one
+        full deployed notional per side, so inventory just below the cap after
+        an adverse mark could otherwise admit a second full-size order and jump
+        to almost 2x the promised limit. Reducing orders are always allowed,
+        even when they cannot bring an already-oversized position below the cap
+        in one fill.
+        """
+        if self.inventory is None or mid <= 0:
+            return True
+        cap_pct = self.cfg("max_net_exposure_pct")
+        margin = self.cfg("margin_quote")
+        if cap_pct is None or margin is None:
+            return True
+        try:
+            cap_quote = _dec(margin) * _dec(cap_pct) / Decimal(100)
+        except Exception:  # noqa: BLE001 - malformed/unset cap keeps legacy behavior
+            return True
+        if cap_quote <= 0:
+            return True
+        current_quote = self._base_value(mid)
+        delta_quote = self.order_amount_quote if side is TradeType.BUY else -self.order_amount_quote
+        projected_quote = current_quote + delta_quote
+        # Never block an order that reduces absolute exposure. For a worsening
+        # order, equality is allowed so a flat Turbo session can place its first
+        # full-size quote exactly at the configured cap.
+        worsens = abs(projected_quote) > abs(current_quote)
+        return not (worsens and abs(projected_quote) > cap_quote)
+
+    async def _reconcile(
+        self, side: TradeType, target: Decimal, allowed: bool, mid: Decimal
+    ) -> None:
         is_bid = side is TradeType.BUY
         cur_id = self._bid_id if is_bid else self._ask_id
         cur_price = self._bid_price if is_bid else self._ask_price
+
+        # Include the next order in the exposure decision, not only inventory
+        # that has already filled. This also cancels a partially filled resting
+        # quote once its remaining direction would breach the cap.
+        allowed = allowed and self._projected_order_within_exposure(side, mid)
 
         # BUG-MM-2 fix: if the recorded quote already terminated (filled or
         # cancelled by the venue), forget it so we don't skip re-spawning a

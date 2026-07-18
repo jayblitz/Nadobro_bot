@@ -525,6 +525,42 @@ class RuntimeAndLeverageTests(unittest.TestCase):
         self.assertIn("No running strategy", msg)
         self.assertIn("copy mirror", msg)
 
+    def test_stop_all_pending_copy_failure_reaches_result_formatter(self):
+        pending = (
+            "Stopped 1 copy mirror(s). "
+            "1 mirror(s) remain monitored while failed closes retry."
+        )
+        with patch.object(
+            bot_runtime,
+            "stop_all_user_bots",
+            return_value=(True, "Stopped 1 running strategy loop(s)."),
+        ), patch(
+            "src.nadobro.trading.copy_service.stop_all_copies",
+            return_value=(False, pending),
+        ):
+            ok, msg = bot_runtime.stop_all_automation_for_user(42)
+
+        rendered = formatters.fmt_stop_all_result(ok, msg, "Check Positions if exposure remains.")
+        self.assertFalse(ok)
+        self.assertIn("strategy loop", msg)
+        self.assertIn("failed closes retry", msg)
+        self.assertIn("⚠️", rendered)
+        self.assertIn("failed closes retry", rendered)
+
+    def test_stop_all_ignores_ordinary_no_active_copy_message(self):
+        with patch.object(
+            bot_runtime,
+            "stop_all_user_bots",
+            return_value=(True, "Stopped 1 running strategy loop(s)."),
+        ), patch(
+            "src.nadobro.trading.copy_service.stop_all_copies",
+            return_value=(False, "No active copy mirrors."),
+        ):
+            ok, msg = bot_runtime.stop_all_automation_for_user(42)
+
+        self.assertTrue(ok)
+        self.assertNotIn("No active copy mirrors", msg)
+
     def test_stop_all_user_bots_defaults_cancel_orders_true(self):
         telegram_id = 42
         rows = [
