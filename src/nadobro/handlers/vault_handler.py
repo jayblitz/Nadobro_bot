@@ -95,19 +95,35 @@ def _vault_home_card(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
         f"All-time Earned: `{_fmt_signed_usd(all_time)}`",
         f"Unrealized PnL: `{_fmt_signed_usd(unrealized)}`",
         "",
-        f"Idle USDT0: `{_fmt_usd(usdt0)}`",
+        # "USDT0 balance", NOT "Idle": this is the raw spot balance from
+        # subaccount_info, and on a cross-margin venue it simultaneously backs
+        # open positions/orders. Labeling it "Idle" contradicted the
+        # margin-locked explainer directly below it and sent users hunting for
+        # a phantom deposit blocker.
+        f"USDT0 balance: `{_fmt_usd(usdt0)}`",
+        f"Free to deposit (no borrow): `{_fmt_usd(max_mintable)}`",
         f"Deposit room: `{_fmt_usd(room)}`",
-        f"Max mintable now: `{_fmt_usd(max_mintable)}`",
         f"Lockup: `{_fmt_lockup(lockup)}`",
     ]
     margin_locked = snapshot.get("deposit_blocked_reason") == "margin_locked"
     if max_mintable <= 1.0:
+        borrow_mintable = float(snapshot.get("mintable_with_borrow_usdt0") or 0.0)
         lines.append("")
         if margin_locked:
             lines.append(
-                "Deposits are *open*, but your USDT0 is currently backing open "
-                "positions (a vault mint never borrows against your trading "
-                "account). Close/reduce positions or deposit more USDT0 to mint."
+                f"Deposits are *open*, but your `{_fmt_usd(usdt0)}` USDT0 is "
+                "currently backing open positions or resting orders (margin), "
+                "so none of it can enter the vault without borrowing — and a "
+                "vault mint never borrows against your trading account."
+            )
+            if borrow_mintable > 1.0:
+                lines.append(
+                    f"(Nado would allow `{_fmt_usd(borrow_mintable)}` *with* "
+                    "borrowing — the bot keeps this off deliberately.)"
+                )
+            lines.append(
+                "Close/reduce positions, cancel resting orders, or deposit "
+                "more USDT0 to free margin for minting."
             )
         else:
             lines.append("Vault capacity is currently *closed* for new deposits.")
@@ -139,7 +155,7 @@ def _deposit_picker(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
     max_deposit = min(usdt0, room)
     text = (
         "⬇️ *Deposit USDT0 → NLP*\n\n"
-        f"Idle USDT0: `{_fmt_usd(usdt0)}`\n"
+        f"USDT0 balance: `{_fmt_usd(usdt0)}`\n"
         f"Deposit room: `{_fmt_usd(room)}`\n"
         f"Max you can deposit now: `{_fmt_usd(max_deposit)}`\n\n"
         "Choose an amount:"

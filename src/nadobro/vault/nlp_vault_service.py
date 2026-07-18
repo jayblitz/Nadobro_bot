@@ -189,6 +189,7 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
     # "Deposits closed" even while the vault itself was open. Distinguish
     # the two so the card tells the truth.
     snapshot["deposit_blocked_reason"] = None
+    snapshot["mintable_with_borrow_usdt0"] = 0.0
     if max_mintable <= 1.0:
         try:
             lev = client.get_max_nlp_mintable(
@@ -197,6 +198,9 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
             lev_mintable = float(lev.get("max_mintable_usdt0") or 0.0)
         except Exception:  # policy: degrade-ok(diagnostic only; gate stays strict)
             lev_mintable = 0.0
+        # Keep the diagnostic: the card shows it so "margin in use" is
+        # self-evidencing (venue WOULD mint $X by borrowing; we never borrow).
+        snapshot["mintable_with_borrow_usdt0"] = lev_mintable
         snapshot["deposit_blocked_reason"] = (
             "margin_locked" if lev_mintable > 1.0 else "vault_full"
         )
