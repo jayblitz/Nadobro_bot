@@ -3767,6 +3767,9 @@ class NadoClient:
                 "lp_value_usdt0": lp_value,
                 "last_mint_ts_ms": last_mint_ts_ms,
                 "nlp_product_id": nlp_pid,
+                # Oracle NAV per NLP token — lets the UI estimate mint/burn
+                # proceeds even when the user holds zero NLP.
+                "nav_usdt0": float(oracle or 0.0),
             })
         except Exception as e:
             logger.debug("get_nlp_position failed user=%s err=%s", _mask_address(self.address or ""), e)

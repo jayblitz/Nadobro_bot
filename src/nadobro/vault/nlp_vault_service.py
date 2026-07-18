@@ -139,6 +139,9 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
         "unrealized_pnl_usdt0": 0.0,
         "max_mintable_usdt0": 0.0,
         "deposit_room_usdt0": 0.0,
+        "deposit_max_usdt0": 0.0,
+        "mintable_known": False,
+        "nlp_nav_usdt0": 0.0,
         "lockup_seconds_remaining": 0,
         "last_mint_ts_ms": None,
         "pool": {"tvl_usdt0": 0.0, "apr_pct": None, "apr_source": "unavailable"},
@@ -183,6 +186,7 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
 
     pos = client.get_nlp_position() or {}
     snapshot["lp_balance"] = float(pos.get("lp_balance") or 0.0)
+    snapshot["nlp_nav_usdt0"] = float(pos.get("nav_usdt0") or 0.0)
     snapshot["lp_value_usdt0"] = float(pos.get("lp_value_usdt0") or 0.0)
     snapshot["position_usdt0"] = snapshot["lp_value_usdt0"]
     snapshot["last_mint_ts_ms"] = pos.get("last_mint_ts_ms")

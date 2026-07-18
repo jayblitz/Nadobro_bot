@@ -10,6 +10,7 @@ from telegram.ext import CallbackContext
 
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.vault.nlp_vault_service import (
+    SEQUENCER_FEE_USDT0,
     VAULT_DEPOSIT_MAX_PCT,
     deposit_to_vault,
     estimate_withdraw_fee_usdt0,
@@ -25,6 +26,10 @@ from src.nadobro.vault.vault_deposit_watch_service import (
 logger = logging.getLogger(__name__)
 
 _DEPOSIT_PENDING_KEY = "vault_pending_amount"
+# Set while a mint/burn is round-tripping to the venue; a second Confirm tap
+# (or a Telegram callback redelivery) during that window is ignored instead of
+# double-executing a money movement.
+_OP_INFLIGHT_KEY = "vault_op_inflight"
 
 DEPOSIT_PRESETS_USDT0 = (100.0, 500.0, 1_000.0, 5_000.0)
 WITHDRAW_PRESETS_PCT = (25, 50, 75, 100)
@@ -237,10 +242,20 @@ def _withdraw_picker(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
     return text, InlineKeyboardMarkup(rows)
 
 
-def _deposit_confirm_card(amount_usdt0: float) -> tuple[str, InlineKeyboardMarkup]:
+def _deposit_confirm_card(amount_usdt0: float, snapshot: dict | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    # Parity with the Nado UI's deposit modal: show the $1 sequencer fee and
+    # the estimated NLP received at the current NAV (final amount settles at
+    # mint-time NAV — same disclaimer the venue shows).
+    est_lines = f"Gas fee: `{_fmt_usd(SEQUENCER_FEE_USDT0)}`\n"
+    nav = float((snapshot or {}).get("nlp_nav_usdt0") or 0.0)
+    if nav > 0:
+        est_nlp = max(0.0, (amount_usdt0 - SEQUENCER_FEE_USDT0)) / nav
+        est_lines += f"Estimated NLP received: `{est_nlp:.6f}` (at current NAV)\n"
     text = (
         "⬇️ *Confirm Deposit*\n\n"
         f"Mint NLP using `{_fmt_usd(amount_usdt0)}` USDT0.\n"
+        + est_lines +
+        "Lock-up period: `4 days` (burns unlock after).\n"
         "Borrow protection is on (`spot_leverage=false`) so this will be rejected "
         "if it would force a margin borrow.\n\n"
         "Proceed?"
@@ -273,12 +288,22 @@ def _withdraw_confirm_card(nlp_amount: float, usdt0_estimate: float, fee_estimat
     return text, kb
 
 
+async def _edit_markdown_safe(query, text: str, kb) -> None:
+    """Render with legacy Markdown; if the venue/user text breaks the parse
+    (unbalanced backticks/underscores in an error string), fall back to plain
+    text instead of letting the tap die on a Telegram 400."""
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    except Exception:  # policy: degrade-ok(render fallback; plain text always displays)
+        await query.edit_message_text(text, reply_markup=kb)
+
+
 async def _show_home(query, telegram_id: int, *, flash: str | None = None) -> None:
     snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
     text, kb = _vault_home_card(snapshot)
     if flash:
         text = f"{flash}\n\n{text}"
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    await _edit_markdown_safe(query, text, kb)
 
 
 async def handle_vault_callback(query, context: CallbackContext) -> bool:
@@ -291,6 +316,10 @@ async def handle_vault_callback(query, context: CallbackContext) -> bool:
     action = parts[1] if len(parts) > 1 else "home"
 
     if action in ("home", "refresh"):
+        # Universal cancel: leaving a custom-amount prompt via ❌/◀ must also
+        # forget it, or the next number typed in ordinary chat would summon a
+        # deposit/withdraw confirm card out of nowhere.
+        context.user_data.pop(_DEPOSIT_PENDING_KEY, None)
         await _show_home(query, telegram_id)
         return True
 
@@ -308,27 +337,40 @@ async def handle_vault_callback(query, context: CallbackContext) -> bool:
         snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
         sub = parts[2] if len(parts) > 2 else ""
         if sub == "":
-            if float(snapshot.get("max_mintable_usdt0") or 0.0) <= 1.0:
-                if snapshot.get("deposit_blocked_reason") == "margin_locked":
+            # Mirror the home card's semantics exactly: block only on a
+            # SUCCESSFUL capacity read of ~0. Unknown capacity (throttled
+            # query) proceeds — the picker is balance-ceiling bounded and the
+            # mint itself is venue-guarded (spot_leverage=false).
+            blocked = bool(snapshot.get("mintable_known", True)) and (
+                float(snapshot.get("max_mintable_usdt0") or 0.0) <= 1.0
+            )
+            if blocked:
+                reason = snapshot.get("deposit_blocked_reason")
+                if reason == "margin_locked":
                     flash = (
                         "🔒 Your USDT0 is backing open positions — a vault mint never "
                         "borrows against your trading account. Close/reduce positions "
                         "or deposit more USDT0, then try again."
+                    )
+                elif reason == "wallet_cap_reached":
+                    flash = (
+                        "🧢 You've reached the Private Alpha per-account cap — "
+                        "withdraw first to deposit more."
                     )
                 else:
                     flash = "⚠️ Vault deposit capacity is closed right now."
                 await _show_home(query, telegram_id, flash=flash)
                 return True
             text, kb = _deposit_picker(snapshot)
-            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            await _edit_markdown_safe(query, text, kb)
             return True
         if sub == "preset" and len(parts) >= 4:
             try:
                 amount = float(parts[3])
             except ValueError:
                 amount = 0.0
-            text, kb = _deposit_confirm_card(amount)
-            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            text, kb = _deposit_confirm_card(amount, snapshot)
+            await _edit_markdown_safe(query, text, kb)
             return True
         if sub == "custom":
             context.user_data[_DEPOSIT_PENDING_KEY] = "deposit"
@@ -345,8 +387,23 @@ async def handle_vault_callback(query, context: CallbackContext) -> bool:
                 amount = float(parts[3])
             except ValueError:
                 amount = 0.0
-            result = await run_blocking(deposit_to_vault, telegram_id, amount)
-            await _show_result(query, telegram_id, result, default_success=f"Deposited ${amount:,.2f} USDT0.")
+            # In-flight guard: a double-tap (or Telegram redelivering the
+            # callback) during the mint's round-trip must not mint twice.
+            if context.user_data.get(_OP_INFLIGHT_KEY):
+                await query.answer("⏳ Still processing your previous vault action…")
+                return True
+            context.user_data[_OP_INFLIGHT_KEY] = "deposit"
+            try:
+                result = await run_blocking(deposit_to_vault, telegram_id, amount)
+            finally:
+                context.user_data.pop(_OP_INFLIGHT_KEY, None)
+            await _show_result(
+                query, telegram_id, result,
+                default_success=(
+                    f"Deposited ${amount:,.2f} USDT0. Note: burns unlock after "
+                    "the 4-day post-mint lockup."
+                ),
+            )
             return True
 
     if action == "withdraw":
@@ -384,8 +441,21 @@ async def handle_vault_callback(query, context: CallbackContext) -> bool:
                 nlp_amount = float(parts[3])
             except ValueError:
                 nlp_amount = 0.0
-            result = await run_blocking(withdraw_from_vault, telegram_id, nlp_amount)
-            await _show_result(query, telegram_id, result, default_success=f"Burned {nlp_amount:.6f} NLP.")
+            if context.user_data.get(_OP_INFLIGHT_KEY):
+                await query.answer("⏳ Still processing your previous vault action…")
+                return True
+            context.user_data[_OP_INFLIGHT_KEY] = "withdraw"
+            try:
+                result = await run_blocking(withdraw_from_vault, telegram_id, nlp_amount)
+            finally:
+                context.user_data.pop(_OP_INFLIGHT_KEY, None)
+            await _show_result(
+                query, telegram_id, result,
+                default_success=(
+                    f"Burned {nlp_amount:.6f} NLP. USDT0 settles at the vault's "
+                    "NAV and lands in your trading balance."
+                ),
+            )
             return True
 
     await _show_home(query, telegram_id)
@@ -421,7 +491,8 @@ async def handle_vault_text(update: Update, context: CallbackContext) -> bool:
     context.user_data.pop(_DEPOSIT_PENDING_KEY, None)
     telegram_id = int(update.effective_user.id)
     if pending == "deposit":
-        text, kb = _deposit_confirm_card(amount)
+        snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
+        text, kb = _deposit_confirm_card(amount, snapshot)
     else:
         snapshot = await run_blocking(get_user_vault_snapshot, telegram_id)
         lp_balance = float(snapshot.get("lp_balance") or 0.0)
