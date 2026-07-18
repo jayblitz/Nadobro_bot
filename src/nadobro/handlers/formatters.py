@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, localcontext
 from typing import Optional
 from src.nadobro.config import get_product_name, PRODUCTS
 from src.nadobro.i18n import get_active_language, localize_text
@@ -1426,6 +1427,49 @@ def fmt_wallet_revoke_steps_card() -> str:
     )
 
 
+def _fmt_ink_amount(amount: Decimal) -> str:
+    """Display an INK amount: thousands separators, up to 4 decimals
+    (rounded DOWN — never overstate an allocation), trailing zeros trimmed.
+    Dust below the 4-decimal cut renders at full precision instead of a
+    misleading "0"."""
+    if amount == 0:
+        return "0"
+    try:
+        with localcontext() as ctx:
+            ctx.prec = 50
+            q = amount.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+    except InvalidOperation:
+        q = amount
+    shown = q if q != 0 else amount
+    text = format(shown, ",f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def fmt_ink_airdrop_card(address: str, amount: Decimal) -> str:
+    """MarkdownV2 card for /airdrop. ``amount`` is whole INK; zero means the
+    archive answered and the address has no allocation (the archive-down case
+    never reaches here)."""
+    short = f"{address[:6]}…{address[-4:]}" if len(address) >= 12 else address
+    lines = [
+        "🪂 *Ink Airdrop*",
+        escape_md(f"Address: {short}"),
+    ]
+    if amount > 0:
+        lines.append("Allocation: *" + escape_md(f"{_fmt_ink_amount(amount)} INK") + "*")
+    else:
+        # "yet", deliberately: the venue table only holds allocations recorded
+        # so far. Nado points convert to INK at TGE, so an active trader can
+        # legitimately read 0 here until Nado loads that distribution.
+        lines.append(escape_md("No Ink airdrop allocation recorded for this address yet."))
+        lines.append(escape_md(
+            "Nado points convert to INK at TGE — distributions that haven't "
+            "been loaded by Nado won't show here."
+        ))
+    return "\n".join(lines)
+
+
 def fmt_help():
     _HELP_TEXT = (
         "📖 *Nadobro Guide*\n"
@@ -1440,6 +1484,7 @@ def fmt_help():
         "/desk \\- Talk a trade out loud, preview it, then confirm\n"
         "/brief \\- Your full morning market brief\n"
         "/news \\- Latest market news \\(add a category to filter\\)\n"
+        "/airdrop \\- Ink airdrop allocation for your wallet \\(or any 0x address\\)\n"
         "/howl \\- Your saved Night HOWL reports \\(`list` or a date to browse\\)\n"
         "/mm\\_status \\- Live market\\-making dashboard \\(GRID / RGRID / DGRID / Mid\\)\n"
         "/mm\\_fills \\- Recent fills on your active MM strategy\n"

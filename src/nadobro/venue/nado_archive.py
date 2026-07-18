@@ -7,9 +7,11 @@ after trades are placed via the Nado SDK (which only returns a digest).
 Archive docs: https://docs.nado.xyz/developer-resources/api/archive-indexer
 """
 import logging
+import re
 import threading
 import time
 import requests
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from src.nadobro.utils.env import env_float, env_int
@@ -849,6 +851,82 @@ def query_nlp_snapshots(
         return []
     snapshots = result.get("snapshots") or []
     return [s for s in snapshots if isinstance(s, dict)]
+
+
+# ---------------------------------------------------------------------------
+# Ink airdrop allocation.
+# ---------------------------------------------------------------------------
+
+_EVM_ADDRESS_RE = re.compile(r"(0[xX])?[0-9a-fA-F]{40}")
+
+# (network, address) -> (timestamp, amount in whole INK). Allocations are
+# snapshot-static, so a long TTL keeps repeat checks free against the shared
+# archive weight budget.
+_AIRDROP_CACHE: dict[tuple[str, str], tuple[float, Decimal]] = {}
+_AIRDROP_CACHE_TTL_SECONDS = 3600.0
+
+_INK_X18 = Decimal(10) ** 18
+
+
+def normalize_evm_address(value) -> str:
+    """Return the 0x-prefixed lowercase 20-byte address, or "" if invalid."""
+    text = str(value or "").strip()
+    if not _EVM_ADDRESS_RE.fullmatch(text):
+        return ""
+    if not text.lower().startswith("0x"):
+        text = "0x" + text
+    return text.lower()
+
+
+def query_ink_airdrop(
+    network: str,
+    address: str,
+    *,
+    refresh: bool = False,
+) -> Optional[Decimal]:
+    """Ink token airdrop allocation for a wallet address, in whole INK.
+
+    ``POST [ARCHIVE] {"ink_airdrop": {"address": ...}}`` returns
+    ``{"amount": "<x18 string>"}`` (documented IP weight = 2). The venue keys
+    the airdrop off the plain 20-byte wallet address, not a subaccount.
+
+    Returns ``None`` when the archive is unreachable / rate-limited or the
+    response is malformed — callers must not render that as "0 INK"; only
+    ``Decimal("0")`` means the address has no allocation *recorded so far*.
+    The table reflects distributions Nado has loaded to date; pending
+    points-to-INK conversions (TGE) do not appear until the venue loads them,
+    so an active trader can legitimately read 0 here (verified live
+    2026-07-18: nonzero allocations exist only for a sparse set of wallets,
+    none registered after early Feb 2026).
+
+    https://docs.nado.xyz/developer-resources/api/archive-indexer/ink-airdrop
+    """
+    addr = normalize_evm_address(address)
+    if not addr:
+        return None
+    network = network or "mainnet"
+    key = (network, addr)
+    now = time.time()
+    if not refresh:
+        cached = _AIRDROP_CACHE.get(key)
+        if cached and (now - cached[0] < _AIRDROP_CACHE_TTL_SECONDS):
+            return cached[1]
+
+    url = archive_url_for_network(network)
+    result = _post(url, {"ink_airdrop": {"address": addr}})
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("amount")
+    if not isinstance(raw, (str, int)):
+        return None
+    try:
+        amount = Decimal(str(raw).strip()) / _INK_X18
+    except (InvalidOperation, ValueError):
+        return None
+    if amount < 0:
+        return None
+    _AIRDROP_CACHE[key] = (now, amount)
+    return amount
 
 
 def query_nlp_lp_events(

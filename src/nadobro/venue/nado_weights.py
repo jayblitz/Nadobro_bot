@@ -58,6 +58,7 @@ _ARCHIVE_WEIGHTS: dict[str, int] = {
     "linked_signers": 2,
     "linked_signer_rate_limit": 2,
     "isolated_subaccounts": 2,
+    "ink_airdrop": 2,
     "liquidation_feed": 2,
     "sequencer_backlog": 1,
     "quote_price": 2,
