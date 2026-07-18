@@ -16,6 +16,7 @@ from src.nadobro.engine.adapter.base import OrderBookLevel, OrderBookSnapshot
 from src.nadobro.engine.controllers.market_making import MarketMakingController
 from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
+from src.nadobro.engine.types import TradeType
 
 
 class BookAdapter(MockNadoAdapter):
@@ -179,3 +180,59 @@ def test_degraded_feed_bid_equals_ask_falls_back_to_mid_pricing():
         assert prices == [Decimal(99), Decimal(101)]  # classic mid ± 1%
 
     asyncio.run(body())
+
+
+def test_turbo_projected_exposure_blocks_a_second_full_size_bid():
+    """A slight adverse mark leaves the first fill just below the current-value
+    cap. The next full quote must be projected before placement or inventory can
+    jump from ~1x to ~2x the configured Turbo exposure allowance."""
+
+    async def body():
+        cfg = dict(TOUCH_CFG)
+        cfg.update({
+            "order_amount_quote": "1000",
+            "max_base_quote": "1000",
+            "margin_quote": "1000",
+            "max_net_exposure_pct": 100,
+        })
+        adapter = BookAdapter(bid="100.00", ask="100.10", mid=Decimal(100), tick="0.01")
+        orch, c = _mm(adapter, cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+
+        # Flat inventory can place the first full-size quote exactly at cap.
+        assert len([o for o in adapter.placed if o.side is TradeType.BUY]) == 1
+        bid = orch.get(c._bid_id)
+        adapter.fill_order(bid.order.id)
+
+        # Mark the fill slightly lower: current exposure is $999.40 (< $1,000),
+        # but another $1,000 buy would project to ~$1,999.40 and must be blocked.
+        adapter.set_book("99.90", "100.00")
+        await orch.tick_controller(c.id)
+
+        assert c._base_value(Decimal("99.95")) < Decimal("1000")
+        assert len([o for o in adapter.placed if o.side is TradeType.BUY]) == 1
+        assert c._bid_id is None
+        assert c._ask_id is not None  # reducing side remains live
+
+    asyncio.run(body())
+
+
+def test_projected_cap_keeps_reducing_side_open_above_cap():
+    cfg = dict(TOUCH_CFG)
+    cfg.update({
+        "order_amount_quote": "1000",
+        "margin_quote": "1000",
+        "max_net_exposure_pct": 100,
+    })
+    adapter = BookAdapter(bid="100.00", ask="100.10", mid=Decimal(100), tick="0.01")
+    _, c = _mm(adapter, cfg)
+    c.inventory.apply_fill(
+        c.user_id, c.trading_pair, c.id,
+        TradeType.BUY, Decimal("25"), Decimal("2500"),
+    )
+
+    assert not c._projected_order_within_exposure(TradeType.BUY, Decimal("100"))
+    # Selling $1,000 reduces $2,500 long exposure to $1,500. It remains above
+    # cap, but must stay allowed so the controller can work inventory down.
+    assert c._projected_order_within_exposure(TradeType.SELL, Decimal("100"))

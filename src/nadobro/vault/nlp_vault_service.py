@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.nadobro.utils.env import env_int
+from src.nadobro.utils.env import env_float, env_int
 from src.nadobro.models.database import (
     get_bot_state,
     get_vault_deposit_watch,
@@ -27,6 +27,9 @@ from src.nadobro.vault.vault_metrics_service import (
 logger = logging.getLogger(__name__)
 
 PRIVATE_ALPHA_CAP_USDT0 = 20_000.0
+# Ceiling on how much of the user's USDT0 balance a vault deposit may consume
+# (margin buffer for their trading account). Product default: 70%.
+VAULT_DEPOSIT_MAX_PCT = min(100.0, max(1.0, env_float("NADO_VAULT_DEPOSIT_MAX_PCT", 70.0)))
 LOCKUP_SECONDS = 4 * 24 * 60 * 60
 SEQUENCER_FEE_USDT0 = 1.0
 WITHDRAW_FEE_BPS = 10
@@ -136,6 +139,9 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
         "unrealized_pnl_usdt0": 0.0,
         "max_mintable_usdt0": 0.0,
         "deposit_room_usdt0": 0.0,
+        "deposit_max_usdt0": 0.0,
+        "mintable_known": False,
+        "nlp_nav_usdt0": 0.0,
         "lockup_seconds_remaining": 0,
         "last_mint_ts_ms": None,
         "pool": {"tvl_usdt0": 0.0, "apr_pct": None, "apr_source": "unavailable"},
@@ -167,39 +173,70 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
     except Exception as e:
         logger.debug("vault snapshot: usdt0 balance failed user=%s err=%s", telegram_id, e)
 
+    # Query mintable BEFORE the display-only NLP reads. Every NLP query costs
+    # gateway weight 20 against the per-user budget (8 rps, burst 24): when
+    # this load-bearing query ran after nlp_locked_balances it landed on a
+    # drained bucket, throttled, and the old code booked the failure as
+    # "mintable = $0" → a depositable user saw 🔒 Margin in use (2026-07-18).
+    nlp_product_id = int(client.resolve_nlp_product_id() or (11 if network == "mainnet" else 1))
+    mintable = client.get_max_nlp_mintable(spot_leverage=False, product_id=nlp_product_id) or {}
+    mintable_ok = bool(mintable.get("ok"))
+    max_mintable = float(mintable.get("max_mintable_usdt0") or 0.0) if mintable_ok else 0.0
+    snapshot["mintable_known"] = mintable_ok
+
     pos = client.get_nlp_position() or {}
-    nlp_product_id = int(pos.get("nlp_product_id") or client.resolve_nlp_product_id() or 11)
     snapshot["lp_balance"] = float(pos.get("lp_balance") or 0.0)
+    snapshot["nlp_nav_usdt0"] = float(pos.get("nav_usdt0") or 0.0)
     snapshot["lp_value_usdt0"] = float(pos.get("lp_value_usdt0") or 0.0)
     snapshot["position_usdt0"] = snapshot["lp_value_usdt0"]
     snapshot["last_mint_ts_ms"] = pos.get("last_mint_ts_ms")
     snapshot["lockup_seconds_remaining"] = lockup_remaining_seconds(snapshot["last_mint_ts_ms"])
 
-    mintable = client.get_max_nlp_mintable(spot_leverage=False, product_id=nlp_product_id) or {}
-    max_mintable = float(mintable.get("max_mintable_usdt0") or 0.0)
     snapshot["max_mintable_usdt0"] = max_mintable
     snapshot["deposit_room_usdt0"] = deposit_room_usdt0(
         snapshot["lp_value_usdt0"], max_mintable, PRIVATE_ALPHA_CAP_USDT0,
     )
-    snapshot["deposit_capacity_open"] = max_mintable >= 100.0
-    # The bot mints with spot_leverage=false (a vault deposit must never
-    # borrow against the trading account), so its gate is STRICTER than the
-    # Nado UI default (spot_leverage=true). A trader whose USDT0 is backing
-    # open positions gets no-borrow max ≈ 0 and used to see a blanket
-    # "Deposits closed" even while the vault itself was open. Distinguish
-    # the two so the card tells the truth.
-    snapshot["deposit_blocked_reason"] = None
-    if max_mintable <= 1.0:
-        try:
-            lev = client.get_max_nlp_mintable(
-                spot_leverage=True, product_id=nlp_product_id
-            ) or {}
-            lev_mintable = float(lev.get("max_mintable_usdt0") or 0.0)
-        except Exception:  # policy: degrade-ok(diagnostic only; gate stays strict)
-            lev_mintable = 0.0
-        snapshot["deposit_blocked_reason"] = (
-            "margin_locked" if lev_mintable > 1.0 else "vault_full"
+    snapshot["deposit_capacity_open"] = mintable_ok and max_mintable >= 100.0
+    # Deposit ceiling: never commit more than NADO_VAULT_DEPOSIT_MAX_PCT
+    # (default 70%) of the user's USDT0 into the vault, so trading margin
+    # keeps a buffer. The venue's own no-borrow check remains the final
+    # arbiter at mint time.
+    balance_ceiling = snapshot["usdt0_balance"] * (VAULT_DEPOSIT_MAX_PCT / 100.0)
+    if mintable_ok:
+        snapshot["deposit_max_usdt0"] = max(
+            0.0, min(max_mintable, balance_ceiling, snapshot["deposit_room_usdt0"])
         )
+    else:
+        # Capacity unknown (throttle/transport): offer the balance-derived
+        # ceiling and let the venue's spot_leverage=false mint self-guard —
+        # per the docs it "fails if the transaction causes a borrow".
+        snapshot["deposit_max_usdt0"] = max(0.0, balance_ceiling)
+
+    # Classification. Semantics verified against the live gateway
+    # (2026-07-18): max_nlp_mintable ≈ min(per-wallet vault cap remainder,
+    # spendable USDT0), where spot_leverage only affects the spendable term.
+    # A SUCCESSFUL 0 therefore means cap-consumed, vault closed, or margin —
+    # and a FAILED query means nothing at all.
+    snapshot["deposit_blocked_reason"] = None
+    snapshot["mintable_with_borrow_usdt0"] = 0.0
+    if mintable_ok and max_mintable <= 1.0:
+        if snapshot["lp_value_usdt0"] >= PRIVATE_ALPHA_CAP_USDT0 - 1.0:
+            snapshot["deposit_blocked_reason"] = "wallet_cap_reached"
+        else:
+            try:
+                lev = client.get_max_nlp_mintable(
+                    spot_leverage=True, product_id=nlp_product_id
+                ) or {}
+                lev_ok = bool(lev.get("ok"))
+                lev_mintable = float(lev.get("max_mintable_usdt0") or 0.0) if lev_ok else 0.0
+            except Exception:  # policy: degrade-ok(diagnostic only; gate stays strict)
+                lev_ok, lev_mintable = False, 0.0
+            snapshot["mintable_with_borrow_usdt0"] = lev_mintable
+            if lev_ok and lev_mintable > 1.0:
+                snapshot["deposit_blocked_reason"] = "margin_locked"
+            elif lev_ok:
+                snapshot["deposit_blocked_reason"] = "vault_full"
+            # lev not ok → leave None: we know nothing, so we blame nothing.
 
     pool = get_pool_metrics(network, client=client)
     snapshot["pool"] = pool
@@ -265,16 +302,31 @@ def deposit_to_vault(telegram_id: int, usdt0_amount: float) -> dict:
         return {"success": False, "error": "Nado SDK unavailable. Try again shortly."}
 
     snap = get_user_vault_snapshot(telegram_id)
-    if snap.get("usdt0_balance", 0.0) + 1e-9 < usdt0_amount:
+    balance = float(snap.get("usdt0_balance", 0.0) or 0.0)
+    if balance + 1e-9 < usdt0_amount:
         return {
             "success": False,
             "error": (
                 f"Insufficient USDT0 balance "
-                f"(have ${snap.get('usdt0_balance', 0.0):,.2f}). "
+                f"(have ${balance:,.2f}). "
                 "Deposit USDT0 into your Nado account first."
             ),
         }
-    if usdt0_amount > float(snap.get("deposit_room_usdt0") or 0.0) + 1e-9:
+    balance_ceiling = balance * (VAULT_DEPOSIT_MAX_PCT / 100.0)
+    if usdt0_amount > balance_ceiling + 1e-9:
+        return {
+            "success": False,
+            "error": (
+                f"Vault deposits are capped at {VAULT_DEPOSIT_MAX_PCT:.0f}% of your "
+                f"USDT0 balance (${balance_ceiling:,.2f} right now) so your trading "
+                "account keeps a margin buffer."
+            ),
+        }
+    # Only enforce the venue-derived room when the capacity query actually
+    # succeeded — a throttled query must not block a legitimate deposit. The
+    # mint itself runs with spot_leverage=false, which the gateway rejects if
+    # it would cause a borrow, so the venue stays the final arbiter either way.
+    if snap.get("mintable_known") and usdt0_amount > float(snap.get("deposit_room_usdt0") or 0.0) + 1e-9:
         room = float(snap.get("deposit_room_usdt0") or 0.0)
         return {
             "success": False,

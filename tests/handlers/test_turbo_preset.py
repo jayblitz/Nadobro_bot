@@ -13,6 +13,7 @@ install_test_stubs()
 from src.nadobro.handlers.strategy_handler import (  # noqa: E402
     _TURBO_LEVERAGE_DEFAULT,
     _TURBO_SESSION_SL_PCT,
+    _replace_mm_preset,
     _turbo_preset_settings,
 )
 
@@ -65,3 +66,59 @@ def test_session_sl_survives_typical_noise_at_turbo_leverage():
     volume collapses (a stopped bot prints zero fills)."""
     tolerated_price_move_pct = _TURBO_SESSION_SL_PCT / _TURBO_LEVERAGE_DEFAULT
     assert tolerated_price_move_pct >= 0.5
+
+
+def test_tiny_after_turbo_removes_turbo_only_settings():
+    cfg = {"notional_usd": 250.0}
+    _replace_mm_preset(cfg, "mid", "turbo", _turbo_preset_settings("mid", 50.0))
+    _replace_mm_preset(
+        cfg,
+        "mid",
+        "tiny",
+        {
+            "mm_leverage_override": 3,
+            "min_order_notional_usd": 20.0,
+            "mm_collateral_safety_factor": 1.10,
+        },
+    )
+
+    assert cfg["mm_preset"] == "tiny"
+    assert cfg["mm_leverage_override"] == 3
+    assert cfg["min_order_notional_usd"] == 20.0
+    for key in (
+        "mm_quote_mode",
+        "inventory_soft_limit_usd",
+        "max_net_exposure_pct",
+        "tp_pct",
+        "sl_pct",
+        "spread_bp",
+        "interval_seconds",
+    ):
+        assert key not in cfg
+    assert cfg["notional_usd"] == 250.0
+
+
+def test_turbo_after_tiny_removes_tiny_only_settings():
+    cfg = {
+        "mm_preset": "tiny",
+        "mm_leverage_override": 3,
+        "min_order_notional_usd": 20.0,
+        "mm_collateral_safety_factor": 1.10,
+        "notional_usd": 250.0,
+    }
+    _replace_mm_preset(cfg, "mid", "turbo", _turbo_preset_settings("mid", 50.0))
+
+    assert cfg["mm_preset"] == "turbo"
+    assert cfg["mm_leverage_override"] == 10
+    assert "min_order_notional_usd" not in cfg
+    assert "mm_collateral_safety_factor" not in cfg
+    assert cfg["mm_quote_mode"] == "touch"
+    assert cfg["notional_usd"] == 250.0
+
+
+def test_standard_clears_active_preset_but_keeps_unrelated_settings():
+    cfg = {"notional_usd": 250.0}
+    _replace_mm_preset(cfg, "mid", "turbo", _turbo_preset_settings("mid", 50.0))
+    _replace_mm_preset(cfg, "mid", "standard")
+
+    assert cfg == {"notional_usd": 250.0, "mm_preset": "standard"}

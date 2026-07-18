@@ -210,6 +210,39 @@ def execute_returning(sql, params=None):
     )
 
 
+def run_transaction(work):
+    """Run related read/write statements in one short database transaction.
+
+    This is intentionally not retried: callers use it for state transitions
+    where replaying after a disconnect could duplicate a write. The cursor is
+    dictionary-shaped like ``query_one``/``execute_returning`` so model code
+    can make locking decisions without a second connection or stale snapshot.
+    """
+    conn = get_db()
+    broken = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            result = work(cur)
+        conn.commit()
+        return result
+    except _DISCONNECT_ERRORS:
+        broken = True
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception as rb_exc:
+            broken = True
+            logger.warning("rollback failed on transactional operation: %s", rb_exc)
+        raise
+    finally:
+        put_db(conn, close=broken)
+
+
 def query_count(sql, params=None):
     def _consume(cur):
         row = cur.fetchone()
@@ -571,6 +604,17 @@ def init_db():
                 label TEXT NOT NULL DEFAULT '',
                 is_curated BOOLEAN DEFAULT false,
                 active BOOLEAN DEFAULT true,
+                total_pnl_usd NUMERIC(20, 8) DEFAULT 0,
+                total_volume_usd NUMERIC(20, 8) DEFAULT 0,
+                nado_points NUMERIC(20, 8) DEFAULT 0,
+                win_rate NUMERIC(8, 4),
+                leader_roi NUMERIC(20, 8),
+                leader_active_days INTEGER,
+                leader_period_days INTEGER,
+                leader_last_activity_at TIMESTAMPTZ,
+                leader_closed_trades INTEGER,
+                leader_max_drawdown_pct NUMERIC(20, 8),
+                last_updated_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT now()
             );
             CREATE INDEX IF NOT EXISTS idx_copy_traders_active ON copy_traders (active);
@@ -616,6 +660,7 @@ def init_db():
                 cumulative_pnl DOUBLE PRECISION NOT NULL DEFAULT 0.0,
                 active BOOLEAN DEFAULT true,
                 paused BOOLEAN DEFAULT false,
+                stop_requested BOOLEAN NOT NULL DEFAULT false,
                 auto_stopped_reason TEXT,
                 created_at TIMESTAMPTZ DEFAULT now(),
                 stopped_at TIMESTAMPTZ,
@@ -1244,6 +1289,12 @@ def init_db():
                 ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS total_volume_usd NUMERIC(20, 8) DEFAULT 0;
                 ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS nado_points NUMERIC(20, 8) DEFAULT 0;
                 ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS win_rate NUMERIC(8, 4);
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS leader_roi NUMERIC(20, 8);
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS leader_active_days INTEGER;
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS leader_period_days INTEGER;
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS leader_last_activity_at TIMESTAMPTZ;
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS leader_closed_trades INTEGER;
+                ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS leader_max_drawdown_pct NUMERIC(20, 8);
                 ALTER TABLE copy_traders ADD COLUMN IF NOT EXISTS last_updated_at TIMESTAMPTZ;
                 CREATE INDEX IF NOT EXISTS idx_copy_traders_leaderboard
                     ON copy_traders (active, total_pnl_usd DESC, total_volume_usd DESC);
@@ -1254,6 +1305,7 @@ def init_db():
                 ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION;
                 ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS risk_factor DOUBLE PRECISION DEFAULT 1.0;
                 ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS last_synced_fill_tid BIGINT;
+                ALTER TABLE copy_mirrors ADD COLUMN IF NOT EXISTS stop_requested BOOLEAN NOT NULL DEFAULT false;
                 -- copy_service reads this per-mirror open gate (COPY-NO-SLIPPAGE), but the
                 -- column never existed, so it silently always used the 1.5 default.
                 -- Materialize it so the gate is real (and per-mirror configurable).

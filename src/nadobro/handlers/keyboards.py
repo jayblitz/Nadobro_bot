@@ -1166,34 +1166,48 @@ def copy_hub_kb(traders: list, is_admin_user: bool = False):
     rows.append([InlineKeyboardButton("🏆 Top Traders", callback_data="copy:lb:0")])
     rows.append([InlineKeyboardButton("📋 My Copies", callback_data="copy:dashboard")])
     rows.append([InlineKeyboardButton("➕ Add Custom Wallet", callback_data="copy:add_custom")])
+    if any(t.get("owner_user_id") is not None and not t.get("is_curated") for t in traders):
+        rows.append([InlineKeyboardButton("🧹 Clear Saved Traders", callback_data="copy:clear")])
     if is_admin_user:
         rows.append([InlineKeyboardButton("⚙️ Manage Traders", callback_data="copy:admin:menu")])
     rows.append([InlineKeyboardButton("◀ Back", callback_data="nav:strategy_hub")])
     return InlineKeyboardMarkup(rows)
 
 
-def copy_leaderboard_kb(rows_data: list, page: int, sort: str):
-    """NadoExplorer leaderboard page: one button per ranked trader, pager, and
-    a PnL/ROI sort toggle. Wallets ride in callback_data (fits the 64-byte
+def copy_leaderboard_kb(rows_data: list, page: int, sort: str, *, has_more: bool = False):
+    """NadoExplorer leaderboard page: one button per ranked trader and pager.
+
+    The recommended order is activity + risk-adjusted ROI; raw PnL remains an
+    optional inspection order rather than the default. Wallets ride in callback_data (fits the 64-byte
     Telegram limit: 'copy:lb:view:' + 42-char address = 55 bytes)."""
     rows = []
     for r in rows_data:
         wallet = r["wallet_address"]
-        pnl = r.get("pnl_usd", 0.0)
-        wr = r.get("win_rate", 0.0) * 100.0
-        label = f"#{r.get('rank', '?')} {wallet[:6]}…{wallet[-4:]} · ${pnl:+,.0f} · {wr:.0f}%"
+        roi = float(r.get("roi") or 0.0) * 100.0
+        active_days = r.get("active_days")
+        period_days = r.get("period_days") or 30
+        activity = f"{int(active_days)}/{int(period_days)}d" if active_days is not None else "activity ?"
+        if sort == "pnl":
+            pnl = float(r.get("pnl_usd") or 0.0)
+            metric = f"PnL ${pnl:+,.0f}"
+        else:
+            metric = f"ROI {roi:+.1f}%"
+        label = f"#{r.get('rank', '?')} {wallet[:6]}…{wallet[-4:]} · {metric} · {activity}"
         rows.append([InlineKeyboardButton(label, callback_data=f"copy:lb:view:{wallet}")])
     pager = []
     if page > 0:
         pager.append(InlineKeyboardButton("◀ Prev", callback_data=f"copy:lb:{page - 1}:{sort}"))
-    if len(rows_data) >= 5:
+    if has_more:
         pager.append(InlineKeyboardButton("Next ▶", callback_data=f"copy:lb:{page + 1}:{sort}"))
     if pager:
         rows.append(pager)
-    other_sort = "roi" if sort == "pnl" else "pnl"
-    rows.append([InlineKeyboardButton(
-        f"↕️ Sort by {other_sort.upper()}", callback_data=f"copy:lb:0:{other_sort}"
-    )])
+    if sort == "quality":
+        rows.append([
+            InlineKeyboardButton("View ROI", callback_data="copy:lb:0:roi"),
+            InlineKeyboardButton("View PnL", callback_data="copy:lb:0:pnl"),
+        ])
+    else:
+        rows.append([InlineKeyboardButton("⭐ Recommended ranking", callback_data="copy:lb:0:quality")])
     rows.append([InlineKeyboardButton("◀ Back", callback_data="copy:hub")])
     return InlineKeyboardMarkup(rows)
 
@@ -1202,6 +1216,13 @@ def copy_lb_trader_kb(wallet: str):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("▶ Copy This Trader", callback_data=f"copy:lb:follow:{wallet}")],
         [InlineKeyboardButton("◀ Back to Leaderboard", callback_data="copy:lb:0")],
+    ])
+
+
+def copy_clear_selections_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧹 Clear Saved Traders", callback_data="copy:clear:confirm")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="copy:hub")],
     ])
 
 
@@ -1301,6 +1322,11 @@ def copy_dashboard_kb(mirrors: list, lang: str = "en"):
     rows = []
     for m in mirrors:
         label = m.get("trader_label", "???")[:16]
+        if m.get("stop_requested"):
+            rows.append([
+                InlineKeyboardButton(f"🛑 Retry close {label}", callback_data=f"copy:stop:{m['mirror_id']}"),
+            ])
+            continue
         is_paused = m.get("paused", False)
         if is_paused:
             rows.append([
@@ -1332,5 +1358,3 @@ def copy_admin_menu_kb(traders: list, lang: str = "en"):
     rows.append([InlineKeyboardButton(localize_label("➕ Add Trader", lang), callback_data="copy:admin:add")])
     rows.append([InlineKeyboardButton(localize_label("◀ Back", lang), callback_data="copy:hub")])
     return InlineKeyboardMarkup(rows)
-
-

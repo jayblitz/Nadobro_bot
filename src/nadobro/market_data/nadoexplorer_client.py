@@ -4,7 +4,8 @@ Read-only JSON endpoints on https://nadoexplorer.com (API version 2026-06-22,
 no auth, 120 requests/minute/IP with ``x-ratelimit-remaining`` response
 headers). Used to rank and preview traders for copy trading:
 
-  GET /api/traders/leaderboard   ranked rows (pnlUsd, roi, winRate 0-1,
+  GET /api/traders/leaderboard   ranked rows (pnlUsd, roi percentage points,
+                                 winRate 0-1,
                                  profitFactor, equityUsd, maxDrawdownPct,
                                  closedTrades, badges, ...)      cache 60s
   GET /api/traders/{id}/daily    per-trader performance summary  cache 60s
@@ -25,6 +26,7 @@ plane does not share, but other bot features might).
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from typing import Any, Optional
@@ -38,6 +40,7 @@ BASE_URL = env_str("NADOEXPLORER_BASE_URL", "https://nadoexplorer.com").rstrip("
 _TIMEOUT_SECONDS = env_float("NADOEXPLORER_TIMEOUT_SECONDS", 8.0)
 # Stop issuing optional refreshes when the shared per-IP budget runs low.
 _RL_SOFT_FLOOR = env_int("NADOEXPLORER_RL_SOFT_FLOOR", 20)
+_RL_WINDOW_SECONDS = 60.0
 
 # TTLs mirror the API's own cache windows — refreshing faster buys nothing.
 _LEADERBOARD_TTL = 60.0
@@ -49,6 +52,7 @@ _CACHE_MAX_ENTRIES = 256
 _lock = threading.RLock()
 _cache: dict[str, tuple[float, Any]] = {}
 _ratelimit_remaining: int = 120
+_ratelimit_observed_at: float = 0.0
 _last_error_at: float = 0.0
 
 
@@ -68,15 +72,21 @@ def _get(path: str, params: dict | None = None, *, ttl: float) -> Any:
     """Cached GET. Returns parsed JSON, or the stale cached value (or None)
     when the budget is exhausted or the request fails — discovery is a UI
     feature and must degrade, never raise into a handler."""
-    global _ratelimit_remaining, _last_error_at
+    global _ratelimit_remaining, _ratelimit_observed_at, _last_error_at
     key = f"{path}?{sorted((params or {}).items())}"
     now = time.time()
     with _lock:
         hit = _cache.get(key)
         if hit and now - hit[0] < ttl:
             return hit[1]
-        if _ratelimit_remaining < _RL_SOFT_FLOOR and hit:
-            return hit[1]  # stale-but-served: protect the shared IP budget
+        if _ratelimit_remaining < _RL_SOFT_FLOOR:
+            # Protect the remaining shared-IP budget even on a cache miss.
+            # After the documented one-minute rate window, reserve exactly one
+            # probe so the client can observe a reset instead of staying
+            # permanently pinned to the last low header value.
+            if now - _ratelimit_observed_at < _RL_WINDOW_SECONDS:
+                return hit[1] if hit else None
+            _ratelimit_observed_at = now
 
     try:
         resp = SESSION.get(
@@ -87,6 +97,7 @@ def _get(path: str, params: dict | None = None, *, ttl: float) -> Any:
             try:
                 with _lock:
                     _ratelimit_remaining = int(remaining)
+                    _ratelimit_observed_at = now
             except ValueError:
                 pass
         if resp.status_code != 200:
@@ -112,6 +123,23 @@ VALID_PERIODS = ("all", "1", "7", "30", "90")
 VALID_SORTS = ("pnl", "roi", "points")
 
 
+def _optional_finite_float(value: object) -> float | None:
+    """Parse an optional metric without manufacturing a perfect zero."""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _roi_decimal(value: object) -> float:
+    """Normalize Explorer ROI percentage points to the internal decimal form."""
+    parsed = _optional_finite_float(value)
+    return 0.0 if parsed is None else parsed / 100.0
+
+
 def get_leaderboard(
     *,
     period: str = "30",
@@ -120,10 +148,44 @@ def get_leaderboard(
     offset: int = 0,
     min_equity: float | None = None,
     min_win_rate: float | None = None,
+    min_active_days: int | None = None,
 ) -> list[dict]:
     """Ranked traders. Pinned to entity=wallet — the API returns the same
     trader as both a wallet row and a subaccount row, and copy_traders keys
     leaders by main wallet address."""
+    if period not in VALID_PERIODS:
+        period = "30"
+    if sort not in VALID_SORTS:
+        sort = "pnl"
+    result = get_leaderboard_result(
+        period=period,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+        min_equity=min_equity,
+        min_win_rate=min_win_rate,
+        min_active_days=min_active_days,
+    )
+    return list((result or {}).get("rows") or [])
+
+
+def get_leaderboard_result(
+    *,
+    period: str = "30",
+    sort: str = "pnl",
+    limit: int = 10,
+    offset: int = 0,
+    min_equity: float | None = None,
+    min_win_rate: float | None = None,
+    min_active_days: int | None = None,
+) -> Optional[dict]:
+    """Leaderboard rows plus the API's pagination signal.
+
+    ``None`` means the request was unavailable (including a rate-limit-safe
+    cache miss); an empty ``rows`` list is a successful query with no matching
+    traders. Callers that page the UI need that distinction so they do not
+    report an empty final page as an outage.
+    """
     if period not in VALID_PERIODS:
         period = "30"
     if sort not in VALID_SORTS:
@@ -139,30 +201,55 @@ def get_leaderboard(
         params["minEquity"] = float(min_equity)
     if min_win_rate is not None:
         params["minWinRate"] = float(min_win_rate)
+    if min_active_days is not None:
+        params["minActiveDays"] = max(0, int(min_active_days))
     data = _get("/api/traders/leaderboard", params, ttl=_LEADERBOARD_TTL)
-    rows = (data or {}).get("rows") or []
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        logger.warning("nadoexplorer leaderboard returned a non-object payload")
+        return None
+    rows = data.get("rows") or []
     out = []
     for row in rows:
         wallet = row.get("walletAddress")
         if not wallet:
             continue
+        try:
+            active_days = int(row["activeDays"]) if row.get("activeDays") is not None else None
+        except (TypeError, ValueError):
+            active_days = None
+        try:
+            period_days = int(row["periodDays"]) if row.get("periodDays") is not None else None
+        except (TypeError, ValueError):
+            period_days = None
         out.append(
             {
                 "wallet_address": str(wallet),
                 "pnl_usd": float(row.get("pnlUsd") or 0.0),
-                "roi": float(row.get("roi") or 0.0),
-                "win_rate": float(row.get("winRate") or 0.0),
+                "roi": _roi_decimal(row.get("roi")),
+                "win_rate": _optional_finite_float(row.get("winRate")),
                 "profit_factor": float(row.get("profitFactor") or 0.0),
                 "equity_usd": float(row.get("equityUsd") or 0.0),
                 "volume_usd": float(row.get("volumeUsd") or 0.0),
                 "closed_trades": int(row.get("closedTrades") or 0),
-                "max_drawdown_pct": float(row.get("maxDrawdownPct") or 0.0),
+                "max_drawdown_pct": _optional_finite_float(
+                    row.get("maxDrawdownPct")
+                ),
                 "nado_points": float(row.get("nadoPoints") or 0.0),
                 "badges": list(row.get("badges") or []),
-                "period_days": row.get("periodDays"),
+                "period_days": period_days,
+                # Activity and recency are discovery-only fields. Keep missing
+                # values as None rather than manufacturing a zero — quality
+                # ranking must not mistake an unknown field for inactivity.
+                "active_days": active_days,
+                "last_activity_at": row.get("lastActivityAt"),
             }
         )
-    return out
+    return {
+        "rows": out,
+        "has_more": bool(data.get("hasMore")),
+    }
 
 
 def get_trader_daily_summary(wallet: str, *, range_: str = "30d") -> Optional[dict]:

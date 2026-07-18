@@ -323,7 +323,9 @@ async def run_bot():
     # P2 fill-nudge: venue WS fill events wake the strategy runtime so MM
     # controllers re-quote within ~a second of a fill instead of next tick.
     # Kill switch: NADO_FILL_NUDGE=false reverts to pure interval ticking.
-    if env_bool("NADO_FILL_NUDGE", True):
+    from src.nadobro.core.feature_flags import fill_nudge_enabled
+
+    if fill_nudge_enabled():
         try:
             from src.nadobro.venue.nado_ws import register_fill_listener
             from src.nadobro.strategy.bot_runtime import nudge_strategy_cycle

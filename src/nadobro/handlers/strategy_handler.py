@@ -86,6 +86,43 @@ def _turbo_preset_settings(strategy_id: str, product_max_leverage: float) -> dic
     return base
 
 
+_TINY_PRESET_KEYS = frozenset({
+    "mm_leverage_override",
+    "min_order_notional_usd",
+    "mm_collateral_safety_factor",
+})
+
+
+def _replace_mm_preset(
+    cfg: dict, strategy_id: str, preset_name: str, values: dict | None = None
+) -> None:
+    """Replace one MM preset atomically, removing the prior preset's keys.
+
+    Presets share a settings dict and are user-switchable. Leaving the previous
+    preset's owned keys behind creates hybrid modes (for example Tiny leverage
+    with Turbo touch quotes and TP disabled), so transitions must be explicit.
+    Unrelated/manual settings remain untouched.
+    """
+    current = str(cfg.get("mm_preset") or "").lower()
+    if current == "turbo":
+        for key in _turbo_preset_settings(strategy_id, 1.0):
+            if key != "mm_preset":
+                cfg.pop(key, None)
+    elif current == "tiny":
+        for key in _TINY_PRESET_KEYS:
+            cfg.pop(key, None)
+    cfg.pop("mm_preset", None)
+
+    if preset_name == "standard":
+        # Preserve Standard's historical behavior: it clears Tiny overrides
+        # even for old rows that predate the mm_preset marker.
+        for key in _TINY_PRESET_KEYS:
+            cfg.pop(key, None)
+    else:
+        cfg.update(values or {})
+    cfg["mm_preset"] = preset_name
+
+
 def _strategy_available_products(strategy_id: str, network: str, vol_market: str | None = None) -> tuple[str, ...]:
     sid = str(strategy_id or "").lower().strip()
     if sid == "dn":
@@ -483,7 +520,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             def _mutate_turbo(s):
                 strategies = s.setdefault("strategies", {})
                 cfg = strategies.setdefault(strategy_id, {})
-                cfg.update(turbo_cfg)
+                _replace_mm_preset(cfg, strategy_id, "turbo", turbo_cfg)
 
             network, settings = update_user_settings(telegram_id, _mutate_turbo)
             conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -518,21 +555,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             def _mutate_std(s):
                 strategies = s.setdefault("strategies", {})
                 cfg = strategies.setdefault(strategy_id, {})
-                cfg.pop("mm_leverage_override", None)
-                cfg.pop("min_order_notional_usd", None)
-                cfg.pop("mm_collateral_safety_factor", None)
-                # AUDIT-MM-2026-07-14 #9: Standard after Turbo must also undo
-                # the Turbo trio — otherwise "reverting" keeps fee-floor-
-                # bypassing touch quotes with the profit-stop off. Only when
-                # the active preset IS turbo (a manual spread/SL set by the
-                # user outside any preset stays untouched, as before). The
-                # revert set is DERIVED from what Turbo writes, so the two can
-                # never drift (the lev cap argument doesn't affect the keys).
-                if str(cfg.get("mm_preset") or "") == "turbo":
-                    for _turbo_key in _turbo_preset_settings(strategy_id, 1.0):
-                        if _turbo_key != "mm_preset":
-                            cfg.pop(_turbo_key, None)
-                cfg["mm_preset"] = "standard"
+                _replace_mm_preset(cfg, strategy_id, "standard")
 
             network, settings = update_user_settings(telegram_id, _mutate_std)
             conf = settings.get("strategies", {}).get(strategy_id, {})
@@ -600,10 +623,16 @@ async def _handle_strategy(query, data, context, telegram_id):
         def _mutate_tiny(s):
             strategies = s.setdefault("strategies", {})
             cfg = strategies.setdefault(strategy_id, {})
-            cfg["mm_leverage_override"] = int(target_lev)
-            cfg["min_order_notional_usd"] = float(venue_min)
-            cfg["mm_collateral_safety_factor"] = 1.10
-            cfg["mm_preset"] = "tiny"
+            _replace_mm_preset(
+                cfg,
+                strategy_id,
+                "tiny",
+                {
+                    "mm_leverage_override": int(target_lev),
+                    "min_order_notional_usd": float(venue_min),
+                    "mm_collateral_safety_factor": 1.10,
+                },
+            )
 
         network, settings = update_user_settings(telegram_id, _mutate_tiny)
         conf = settings.get("strategies", {}).get(strategy_id, {})

@@ -36,6 +36,16 @@ def portfolio_ws_enabled() -> bool:
     return env_flag("NADO_PORTFOLIO_WS", False)
 
 
+def fill_nudge_enabled() -> bool:
+    """Whether venue fills should wake engine strategy cycles immediately.
+
+    This is intentionally independent from the broader portfolio-WS rollout:
+    the runtime can subscribe to the fill stream only while portfolio cache
+    invalidation remains disabled.
+    """
+    return env_flag("NADO_FILL_NUDGE", True)
+
+
 def strategy_scheduler_enabled() -> bool:
     return env_flag("NADO_STRATEGY_SCHEDULER", True)
 

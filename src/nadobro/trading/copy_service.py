@@ -19,8 +19,10 @@ from src.nadobro.models.database import (
     get_active_copy_traders,
     get_curated_copy_traders,
     deactivate_copy_trader,
+    clear_saved_copy_trader_selections,
     get_copy_mirror,
     stop_copy_mirror,
+    request_copy_mirror_stop,
     pause_copy_mirror,
     resume_copy_mirror,
     count_user_active_mirrors,
@@ -136,13 +138,43 @@ def remove_trader(trader_id: int, requester_user_id: int | None = None, is_admin
         if requester_user_id is None or int(owner_id) != int(requester_user_id):
             return False, "Trader not found."
     mirrors = get_mirrors_for_trader(trader_id)
+    pending = 0
+    stopped = 0
     for m in mirrors:
-        _flatten_mirror_positions(int(m["id"]), int(m["user_id"]), str(m.get("network", "mainnet")), reason="trader_removed")
+        _closed, _pnl, _volume, errors = _flatten_mirror_positions(
+            int(m["id"]),
+            int(m["user_id"]),
+            str(m.get("network", "mainnet")),
+            reason="trader_removed",
+        )
+        if errors:
+            # Never hide a trader/mirror while a copied position still needs a
+            # close. ``stop_requested`` switches the poller to flatten-only.
+            request_copy_mirror_stop(int(m["id"]))
+            pending += 1
+            continue
         stop_copy_mirror(m["id"])
         _finalize_mirror_session(m, "trader_removed")
-    deactivate_copy_trader(trader_id)
+        stopped += 1
     label = trader.get("label") or trader["wallet_address"][:10]
-    return True, f"Trader {label} removed. {len(mirrors)} mirror(s) stopped."
+    if pending:
+        return (
+            False,
+            f"Trader {label} remains active while {pending} mirror(s) retry failed position closes. "
+            "Remove it again after they are flat.",
+        )
+    deactivate_copy_trader(trader_id)
+    return True, f"Trader {label} removed. {stopped} mirror(s) stopped."
+
+
+def clear_saved_copy_traders(telegram_id: int) -> tuple[int, int]:
+    """Clear only dormant personal selections, never active copy exposure.
+
+    This is intentionally separate from ``remove_trader``: removing a trader
+    stops and flattens mirrors, while the user-facing clear button is a safe
+    housekeeping action for abandoned selections.
+    """
+    return clear_saved_copy_trader_selections(int(telegram_id))
 
 
 def start_copy(
@@ -169,6 +201,13 @@ def start_copy(
     if owner_id is not None and int(owner_id) != int(telegram_id):
         return False, "Trader not found or inactive."
 
+    existing = get_user_active_mirrors_v2(telegram_id, network)
+    if any(
+        int(m.get("trader_id") or 0) == int(trader_id) and m.get("stop_requested")
+        for m in existing
+    ):
+        return False, "Your earlier copy is still closing positions. Wait for it to finish before restarting."
+
     if margin_per_trade < MIN_MARGIN_PER_TRADE or margin_per_trade > MAX_MARGIN_PER_TRADE:
         return False, f"Margin per trade must be between ${MIN_MARGIN_PER_TRADE} and ${MAX_MARGIN_PER_TRADE}."
 
@@ -187,7 +226,7 @@ def start_copy(
         total_allocated_usd=total_allocated_usd,
     )
     if not mirror_id:
-        return False, "Failed to create copy mirror."
+        return False, "Trader is no longer available, or an earlier copy is still closing."
 
     label = trader.get("label") or trader["wallet_address"][:10]
     # COPY-SESSION: every mirror run is a strategy_sessions row (strategy=
@@ -255,11 +294,19 @@ def stop_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
     if not mirror.get("active"):
         return False, "Mirror already stopped."
     closed_count, _, _, errors = _flatten_mirror_positions(mirror_id, telegram_id, str(mirror.get("network", "mainnet")), reason="user_stop")
+    if errors:
+        # Do not hide a failed close by marking this mirror inactive. The poller
+        # keeps a stop-requested mirror alive solely to retry its flatten; it
+        # will not mirror new leader opens while that intent is set.
+        request_copy_mirror_stop(mirror_id)
+        return False, (
+            "Copy stop is pending because some copied positions could not be closed. "
+            "The mirror remains monitored and will retry the close automatically. "
+            + "; ".join(errors[:2])
+        )
     stop_copy_mirror(mirror_id)
     _finalize_mirror_session(mirror, "user_stop")
     suffix = f" Flattened {closed_count} copied position(s)." if closed_count > 0 else ""
-    if errors:
-        suffix += f" Some closes failed: {'; '.join(errors[:2])}"
     return True, f"Copy trading stopped for this trader.{suffix}"
 
 
@@ -271,6 +318,8 @@ def pause_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
         return False, "Not your mirror."
     if not mirror.get("active"):
         return False, "Mirror is stopped."
+    if mirror.get("stop_requested"):
+        return False, "Copy trading is stopping while existing positions are closed."
     if mirror.get("paused"):
         return False, "Mirror is already paused."
     pause_copy_mirror(mirror_id)
@@ -285,6 +334,8 @@ def resume_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
         return False, "Not your mirror."
     if not mirror.get("active"):
         return False, "Mirror is stopped."
+    if mirror.get("stop_requested"):
+        return False, "Copy trading is stopping while existing positions are closed."
     if not mirror.get("paused"):
         return False, "Mirror is not paused."
     resume_copy_mirror(mirror_id)
@@ -296,13 +347,26 @@ def stop_all_copies(telegram_id: int) -> tuple[bool, str]:
     if not mirrors:
         return False, "No active copy mirrors."
     total_closed = 0
+    stopped = 0
+    pending = 0
     for m in mirrors:
-        closed_count, _, _, _ = _flatten_mirror_positions(int(m["id"]), telegram_id, str(m.get("network", "mainnet")), reason="user_stop_all")
+        closed_count, _, _, errors = _flatten_mirror_positions(int(m["id"]), telegram_id, str(m.get("network", "mainnet")), reason="user_stop_all")
         total_closed += closed_count
+        if errors:
+            request_copy_mirror_stop(int(m["id"]))
+            pending += 1
+            continue
         stop_copy_mirror(m["id"])
         _finalize_mirror_session(m, "user_stop_all")
+        stopped += 1
     suffix = f" Flattened {total_closed} copied position(s)." if total_closed > 0 else ""
-    return True, f"Stopped {len(mirrors)} copy mirror(s).{suffix}"
+    if pending:
+        suffix += f" {pending} mirror(s) remain monitored while failed closes retry."
+        # The stop request is retry-safe, but it is not complete. Propagate a
+        # non-success result so /stop_all cannot render an all-clear while any
+        # copied exposure is still waiting to close.
+        return False, f"Stopped {stopped} copy mirror(s).{suffix}"
+    return True, f"Stopped {stopped} copy mirror(s).{suffix}"
 
 
 def get_user_copies(telegram_id: int, network: str = None) -> list[dict]:
@@ -336,6 +400,7 @@ def get_user_copies(telegram_id: int, network: str = None) -> list[dict]:
             "strategy_session_id": m.get("strategy_session_id"),
             "open_positions": len(open_positions),
             "paused": bool(m.get("paused")),
+            "stop_requested": bool(m.get("stop_requested")),
             "network": m.get("network", "mainnet"),
             "created_at": m.get("created_at"),
         })
@@ -403,6 +468,18 @@ def get_available_traders(user_id: int | None = None) -> list[dict]:
             "label": t.get("label") or t["wallet_address"][:10],
             "is_curated": t.get("is_curated", False),
             "owner_user_id": t.get("owner_user_id"),
+            # Snapshot of public leader performance at selection time. It is
+            # deliberately separate from get_trader_stats(), which is the
+            # viewer's own copy result and must stay private.
+            "leader_pnl_usd": t.get("total_pnl_usd"),
+            "leader_volume_usd": t.get("total_volume_usd"),
+            "leader_win_rate": t.get("win_rate"),
+            "leader_roi": t.get("leader_roi"),
+            "leader_active_days": t.get("leader_active_days"),
+            "leader_period_days": t.get("leader_period_days"),
+            "leader_last_activity_at": t.get("leader_last_activity_at"),
+            "leader_closed_trades": t.get("leader_closed_trades"),
+            "leader_max_drawdown_pct": t.get("leader_max_drawdown_pct"),
         }
         for t in traders
     ]
@@ -546,6 +623,10 @@ async def boot_stand_down_mirrors() -> int:
     of mirrors paused.
     """
     mirrors = await run_blocking(get_all_active_mirrors_v2)
+    # A failed user stop is intentionally included in the poller even if it
+    # used to be paused. It must never be paused again on redeploy: its
+    # flatten-only retry path is the remaining safety mechanism.
+    mirrors = [m for m in mirrors if not m.get("stop_requested")]
     if not mirrors:
         return 0
 
@@ -617,11 +698,28 @@ async def _poll_all_mirrors():
         network = group_mirrors[0].get("network", "mainnet")
         wallet = group_mirrors[0].get("wallet_address", "")
 
+        # A requested stop does not need the leader's current portfolio. Run
+        # its flatten-only retry first so a leader-read outage cannot strand
+        # the follower's open exposure.
+        stopping_mirrors = [m for m in group_mirrors if m.get("stop_requested")]
+        for mirror in stopping_mirrors:
+            try:
+                await _sync_mirror_positions(mirror, {})
+            except Exception as e:
+                logger.error(
+                    "Copy stop retry failed for mirror %s user %s: %s",
+                    mirror["id"], mirror["user_id"], e, exc_info=True,
+                )
+
+        copying_mirrors = [m for m in group_mirrors if not m.get("stop_requested")]
+        if not copying_mirrors:
+            continue
+
         try:
             leader_pos_map = await run_blocking(_load_leader_position_map, trader_id, wallet, network)
 
             # Process each mirror
-            for mirror in group_mirrors:
+            for mirror in copying_mirrors:
                 try:
                     await _sync_mirror_positions(mirror, leader_pos_map)
                 except Exception as e:
@@ -776,31 +874,28 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     cumulative_take_profit_pct = float(mirror.get("cumulative_take_profit_pct", 100.0))
     total_allocated = float(mirror.get("total_allocated_usd", 500.0))
     cumulative_pnl = float(mirror.get("cumulative_pnl", 0.0))
-    user = await run_blocking(get_user, user_id)
-    user_network = user.network_mode.value if user else network
-    if user_network != network:
+
+    if mirror.get("stop_requested"):
         closed_count, total_pnl, _, errors = await run_blocking(
             _flatten_mirror_positions,
             mirror_id,
             user_id,
             str(network),
-            "network_mismatch",
+            "user_stop",
         )
-        await run_blocking(
-            auto_stop_mirror,
-            mirror_id,
-            f"User network switched to {user_network}; mirror requires {network}.",
-        )
-        await run_blocking(_finalize_mirror_session, mirror, "network_mismatch")
+        if errors:
+            logger.error(
+                "copy stop retry incomplete for mirror %s (%s)",
+                mirror_id,
+                "; ".join(errors[:3]),
+            )
+            return
+        await run_blocking(stop_copy_mirror, mirror_id)
+        await run_blocking(_finalize_mirror_session, mirror, "user_stop")
         await _notify_user(
             user_id,
-            (
-                f"⚠️ Copy mirror stopped\n"
-                f"Your active mode changed to {user_network.upper()}, but this mirror was configured for {network.upper()}.\n"
-                + (f"Closed {closed_count} copied position(s) for ${total_pnl:+,.2f}.\n" if closed_count > 0 else "")
-                + (f"Cleanup errors: {'; '.join(errors[:2])}\n" if errors else "")
-                + "Restart the mirror on the active network if needed."
-            )
+            "✅ Copy trading stopped after closing "
+            f"{closed_count} copied position(s) for ${total_pnl:+,.2f}.",
         )
         return
 
@@ -821,7 +916,10 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     venue_pos_by_product: dict = {}
     venue_read_ok = False
     try:
-        follower_client = await run_blocking(get_user_nado_client, user_id)
+        # A mirror is explicitly network-scoped. A user changing the app's
+        # current network must not disable another mirror; use the mirror's
+        # persisted network for its read/reconcile client as well as orders.
+        follower_client = await run_blocking(get_user_nado_client, user_id, network=network)
     except Exception as e:  # noqa: BLE001 - reconcile is best-effort; degrade to DB-only
         logger.debug("copy follower client unavailable for reconcile: %s", e)
         follower_client = None

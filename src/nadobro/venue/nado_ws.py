@@ -36,6 +36,7 @@ _PORTFOLIO_STREAMS = (
     ("position_change", False, True),
     ("funding_payment", False, False),
 )
+_FILL_NUDGE_STREAMS = tuple(stream for stream in _PORTFOLIO_STREAMS if stream[0] == "fill")
 
 # Event ``type`` (or ``reason``) values that mean our cached portfolio snapshot
 # is now stale and should be refreshed.
@@ -55,6 +56,11 @@ def register_fill_listener(callback) -> None:
     """Register ``callback(user_id: int, network: str)`` for fill events."""
     if callback not in _fill_listeners:
         _fill_listeners.append(callback)
+
+
+def has_fill_listeners() -> bool:
+    """Return whether a runtime fill consumer is currently registered."""
+    return bool(_fill_listeners)
 
 
 def _notify_fill_listeners(user_id: int, network: str) -> None:
@@ -88,6 +94,13 @@ class PortfolioWsSubscription:
     user_id: int
     network: str
     subaccount: str
+    # False creates a narrow fill-only socket for strategy nudges. It must not
+    # opt the user into portfolio cache invalidation or WS-health fast paths.
+    sync_portfolio: bool = True
+
+
+def _subscription_streams(sub: PortfolioWsSubscription):
+    return _PORTFOLIO_STREAMS if sub.sync_portfolio else _FILL_NUDGE_STREAMS
 
 
 class NadoPortfolioWs:
@@ -132,11 +145,15 @@ class NadoPortfolioWs:
                 mark_disconnected(sub.user_id, sub.network)
                 raise
             except Exception as exc:
-                mark_disconnected(sub.user_id, sub.network)
+                if sub.sync_portfolio:
+                    mark_disconnected(sub.user_id, sub.network)
                 logger.warning("portfolio ws disconnected user=%s network=%s: %s", sub.user_id, sub.network, exc)
                 await asyncio.sleep(backoff + random.uniform(0, backoff * 0.2))
                 backoff = min(60.0, backoff * 2)
-                await self._schedule_sync(sub.user_id, sub.network, force=True, reason="ws_reconnect")
+                if sub.sync_portfolio:
+                    await self._schedule_sync(
+                        sub.user_id, sub.network, force=True, reason="ws_reconnect"
+                    )
 
     def _build_auth_message(self, sub: PortfolioWsSubscription) -> dict[str, Any] | None:
         """Sign the per-connection ``authenticate`` message using the user's
@@ -160,6 +177,7 @@ class NadoPortfolioWs:
     async def _connect_once(self, sub: PortfolioWsSubscription) -> None:
         import websockets
 
+        streams = _subscription_streams(sub)
         # ``compression="deflate"`` makes the client advertise the required
         # ``Sec-WebSocket-Extensions: permessage-deflate`` in the handshake.
         async with websockets.connect(
@@ -171,15 +189,16 @@ class NadoPortfolioWs:
         ) as ws:
             # 1) Authenticate. Only ``order_update`` requires auth; we send
             #    authenticate once up-front so it is in place before subscribe.
-            auth_msg = await asyncio.to_thread(self._build_auth_message, sub)
-            if auth_msg is not None:
-                await ws.send(json.dumps(auth_msg))
+            if any(requires_auth for _name, requires_auth, _per_subaccount in streams):
+                auth_msg = await asyncio.to_thread(self._build_auth_message, sub)
+                if auth_msg is not None:
+                    await ws.send(json.dumps(auth_msg))
 
             # 2) Subscribe to each portfolio stream as its own message. The
             #    subscriptions API takes ONE ``stream`` per ``subscribe`` (not a
             #    ``channels`` array) and echoes the ``id`` back in the response.
             for idx, (stream_type, _auth, per_subaccount) in enumerate(
-                _PORTFOLIO_STREAMS, start=1
+                streams, start=1
             ):
                 stream: dict[str, Any] = {
                     "type": stream_type,
@@ -196,15 +215,17 @@ class NadoPortfolioWs:
                     "id": idx,
                 }))
 
-            mark_connected(sub.user_id, sub.network)
-            await self._schedule_sync(sub.user_id, sub.network, force=True, reason="ws_connect")
+            if sub.sync_portfolio:
+                mark_connected(sub.user_id, sub.network)
+                await self._schedule_sync(sub.user_id, sub.network, force=True, reason="ws_connect")
 
             async for raw in ws:
                 event = _json(raw)
                 # Any inbound frame (event, subscribe ack, heartbeat) proves the
                 # socket is alive — keep health fresh so sync_user keeps skipping
                 # the REST poll.
-                touch(sub.user_id, sub.network)
+                if sub.sync_portfolio:
+                    touch(sub.user_id, sub.network)
                 if _is_auth_or_error(event):
                     _log_control_frame(sub, event)
                     continue
@@ -216,7 +237,7 @@ class NadoPortfolioWs:
                 # the controller re-quotes immediately instead of next tick.
                 if _event_type(event) == "fill":
                     _notify_fill_listeners(sub.user_id, sub.network)
-                if _should_invalidate(event):
+                if sub.sync_portfolio and _should_invalidate(event):
                     await self._schedule_sync(
                         sub.user_id,
                         sub.network,

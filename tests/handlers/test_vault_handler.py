@@ -66,3 +66,121 @@ def test_vault_home_card_error_path():
     callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
     assert "vault:refresh" in callbacks
     assert "nav:main" in callbacks
+
+
+def test_vault_home_card_margin_locked_explains_itself():
+    """The exact production confusion (2026-07-18): a user with a positive
+    USDT0 balance saw 'Idle USDT0: $144.93' one line above 'Max mintable: $0'
+    and a 🔒 Margin in use button. Per the Nado docs, spot_leverage=false means
+    'the mint fails if the transaction causes a borrow' — a balance backing
+    open positions/orders truthfully yields 0 no-borrow mintable. The card
+    must (a) never call that balance 'Idle', (b) show the no-borrow free
+    amount, and (c) show the with-borrow diagnostic so the lock is
+    self-evidencing."""
+    snapshot = {
+        "ready": True,
+        "usdt0_balance": 144.93,
+        "lp_balance": 0.0,
+        "lp_value_usdt0": 0.0,
+        "position_usdt0": 0.0,
+        "all_time_earned_usdt0": -0.62,
+        "unrealized_pnl_usdt0": 0.0,
+        "deposit_room_usdt0": 0.0,
+        "max_mintable_usdt0": 0.0,
+        "mintable_with_borrow_usdt0": 120.0,
+        "deposit_blocked_reason": "margin_locked",
+        "lockup_seconds_remaining": 0,
+        "pool": {"tvl_usdt0": 9_099_631.40, "apr_pct": 7.59, "apr_source": "snapshots"},
+        "deposit_watch_enabled": False,
+    }
+    text, kb = _vault_home_card(snapshot)
+    assert "Idle USDT0" not in text
+    assert "USDT0 balance: `$144.93`" in text
+    assert "Free to deposit (no borrow): `$0.00`" in text
+    assert "backing open positions" in text
+    assert "$120.00" in text  # with-borrow diagnostic shown
+    assert "never borrows" in text
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert "vault:deposit" not in callbacks  # 🔒 Margin in use collapse
+    labels = [btn.text for row in kb.inline_keyboard for btn in row]
+    assert any("Margin in use" in l for l in labels)
+
+
+def test_vault_home_card_vault_full_still_says_closed():
+    snapshot = {
+        "ready": True,
+        "usdt0_balance": 500.0,
+        "lp_balance": 0.0,
+        "lp_value_usdt0": 0.0,
+        "position_usdt0": 0.0,
+        "all_time_earned_usdt0": 0.0,
+        "unrealized_pnl_usdt0": 0.0,
+        "deposit_room_usdt0": 0.0,
+        "max_mintable_usdt0": 0.0,
+        "mintable_with_borrow_usdt0": 0.0,
+        "deposit_blocked_reason": "vault_full",
+        "lockup_seconds_remaining": 0,
+        "pool": {"tvl_usdt0": 10_000_000.0, "apr_pct": None, "apr_source": "unavailable"},
+        "deposit_watch_enabled": False,
+    }
+    text, kb = _vault_home_card(snapshot)
+    assert "Vault capacity is currently" in text
+    assert "backing open positions" not in text
+    labels = [btn.text for row in kb.inline_keyboard for btn in row]
+    assert any("Deposits closed" in l for l in labels)
+
+
+def test_vault_home_card_unknown_capacity_never_blames_margin():
+    """2026-07-18 root cause: a gateway-budget throttle on the weight-20
+    max_nlp_mintable query returned None, the client booked it as $0, and the
+    card flipped to 🔒 Margin in use for a user with zero positions and a
+    depositable balance. Unknown capacity must render as unknown and keep the
+    Deposit button live (the mint itself is no-borrow-guarded venue-side)."""
+    snapshot = {
+        "ready": True,
+        "usdt0_balance": 144.93,
+        "lp_balance": 0.0,
+        "lp_value_usdt0": 0.0,
+        "position_usdt0": 0.0,
+        "all_time_earned_usdt0": -0.62,
+        "unrealized_pnl_usdt0": 0.0,
+        "deposit_room_usdt0": 0.0,
+        "max_mintable_usdt0": 0.0,
+        "mintable_known": False,
+        "deposit_max_usdt0": 101.45,  # 70% of balance
+        "deposit_blocked_reason": None,
+        "lockup_seconds_remaining": 0,
+        "pool": {"tvl_usdt0": 9_099_631.40, "apr_pct": 7.59, "apr_source": "snapshots"},
+        "deposit_watch_enabled": False,
+    }
+    text, kb = _vault_home_card(snapshot)
+    assert "checking" in text
+    assert "Margin in use" not in text
+    assert "backing open positions" not in text
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert "vault:deposit" in callbacks  # stays enabled
+
+
+def test_vault_home_card_wallet_cap_reached():
+    snapshot = {
+        "ready": True,
+        "usdt0_balance": 500.0,
+        "lp_balance": 19_990.0,
+        "lp_value_usdt0": 19_999.5,
+        "position_usdt0": 19_999.5,
+        "all_time_earned_usdt0": 120.0,
+        "unrealized_pnl_usdt0": 3.2,
+        "deposit_room_usdt0": 0.0,
+        "max_mintable_usdt0": 0.0,
+        "mintable_known": True,
+        "deposit_max_usdt0": 0.0,
+        "deposit_blocked_reason": "wallet_cap_reached",
+        "private_alpha_cap_usdt0": 20_000.0,
+        "lockup_seconds_remaining": 0,
+        "pool": {"tvl_usdt0": 9_000_000.0, "apr_pct": 8.0, "apr_source": "snapshots"},
+        "deposit_watch_enabled": False,
+    }
+    text, kb = _vault_home_card(snapshot)
+    assert "Private Alpha cap" in text
+    labels = [btn.text for row in kb.inline_keyboard for btn in row]
+    assert any("Cap reached" in l for l in labels)
