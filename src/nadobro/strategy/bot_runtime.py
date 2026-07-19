@@ -3355,13 +3355,21 @@ async def _run_cycle(
     # run is pinpointable from the same log stream as the cycle messages.
     _diag = result.get("engine_diag") if isinstance(result, dict) else None
     if _diag:
+        # Render controller-specific telemetry as "n/a" when the controller
+        # doesn't expose it (Momentum/taker & Mid have no candle/mid/phase/vr),
+        # and always name the controller — so a "no orders" line is read
+        # against the RIGHT controller instead of misdiagnosed as a starved
+        # grid from getattr defaults.
+        def _dv(key):
+            return _diag[key] if key in _diag else "n/a"
         logger.info(
-            "engine_diag user=%s strategy=%s active=%s gate=%s/%s candles=%s mid=%s "
-            "phase=%s vr=%.2f spawn_refused=%s",
-            telegram_id, strategy, _diag.get("active_executors"),
+            "engine_diag user=%s strategy=%s controller=%s active=%s gate=%s/%s "
+            "candles=%s mid=%s phase=%s vr=%s spawn_refused=%s",
+            telegram_id, strategy, _diag.get("controller") or "?",
+            _diag.get("active_executors"),
             _diag.get("gate_verdict"), _diag.get("gate_reason") or "-",
-            _diag.get("candle_count"), _diag.get("mid"), _diag.get("phase"),
-            float(_diag.get("variance_ratio") or 0.0), _diag.get("spawn_refused") or "-",
+            _dv("candle_count"), _dv("mid"), _dv("phase"),
+            _dv("variance_ratio"), _diag.get("spawn_refused") or "-",
         )
 
     # Increment strategy session metrics from cycle result

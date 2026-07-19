@@ -1123,9 +1123,16 @@ def map_strategy_config(
         # earlier (0.15%) so it turns with the trend sooner.
         cfg["dgrid_trend_drift_pct"] = _f(settings, "dgrid_trend_drift_pct", 0.15 if _rg else 0.30)
         # Tiered profit-booking: scale out reduce-only as the run's uPnL climbs
-        # past these tiers (% of margin), closing dgrid_tp_fraction each time.
+        # past these tiers, closing dgrid_tp_fraction each time. The tiers are
+        # ANCHORED to the user's TP in the controller (top tier == tp_pct), so
+        # the ladder completes exactly AT the user's setting and never before —
+        # the shape below only sets the RELATIVE spacing of the scale-out.
         cfg["dgrid_tp_tiers_pct"] = settings.get("dgrid_tp_tiers_pct") or [2.0, 4.0, 6.0]
         cfg["dgrid_tp_fraction"] = _f(settings, "dgrid_tp_fraction", 0.33)
+        # The user's allocated MARGIN (= notional), so the controller measures
+        # the tier % against the SAME basis as the session TP rail — NOT the
+        # deployed notional (margin x leverage) that margin_quote carries.
+        cfg["tp_margin_basis"] = Decimal(str(notional))
         # Confirm-ticks debounce a flip. rgrid flips on the first confirmed change
         # (trend follower); dgrid waits an extra tick to avoid whipsaw.
         cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 1 if _rg else 2)))
@@ -2004,16 +2011,30 @@ async def run_engine_cycle(
             active_n = len(orch.list(controller.id, active_only=True)) if orch is not None else None
             spawn_reason = orch.last_spawn_reason(controller.id) if orch is not None else None
             engine_diag = {
+                # Controller identity FIRST: the candle/mid/phase/vr telemetry
+                # below exists ONLY on the DynamicGrid family. For FillAnchored
+                # (Momentum/taker), MarketMaking (mid) and the classic Grid
+                # ladder those attributes are absent, and emitting their
+                # getattr defaults (candles=0 mid=None phase=None) falsely reads
+                # as a starved grid — the exact misdiagnosis this identity + the
+                # conditional fields below prevent.
+                "controller": type(controller).__name__,
                 "active_executors": active_n,
                 "gate_verdict": getattr(controller, "gate_verdict", None),
                 "gate_reason": getattr(controller, "gate_reason", None) or "",
                 "gate_paused": bool(getattr(controller, "gate_paused", False)),
-                "candle_count": int(getattr(controller, "_last_candle_count", 0) or 0),
-                "mid": str(getattr(controller, "_last_mid", None)),
-                "phase": getattr(controller, "current_phase", None),
-                "variance_ratio": float(getattr(controller, "variance_ratio", 0.0) or 0.0),
                 "spawn_refused": spawn_reason,
             }
+            # Only report regime/candle telemetry the controller actually has,
+            # so an absent field prints as "n/a" (not a misleading 0/None).
+            if hasattr(controller, "_last_candle_count"):
+                engine_diag["candle_count"] = int(getattr(controller, "_last_candle_count", 0) or 0)
+            if hasattr(controller, "_last_mid"):
+                engine_diag["mid"] = str(getattr(controller, "_last_mid", None))
+            if hasattr(controller, "current_phase"):
+                engine_diag["phase"] = getattr(controller, "current_phase", None)
+            if hasattr(controller, "variance_ratio"):
+                engine_diag["variance_ratio"] = float(getattr(controller, "variance_ratio", 0.0) or 0.0)
             logger.debug(
                 "engine_ticked user=%s strategy=%s active_executors=%s",
                 telegram_id, strategy, active_n,

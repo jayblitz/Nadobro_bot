@@ -445,15 +445,57 @@ class DynamicGridController(Controller):
                 self.current_phase, mid, start, end, self.reset_threshold_bp, self.id,
             )
 
+    def _tp_margin_basis(self) -> Decimal:
+        """The user's allocated MARGIN — the basis their take-profit % is
+        measured against, and the same basis the session TP rail uses
+        (``_resolve_margin`` -> ``notional_usd``). This is NOT ``margin_quote``,
+        which is the *deployed* notional (= margin x leverage) used for the
+        exposure cap. Prefer the value mapped in from the strategy config
+        (``tp_margin_basis`` = notional); fall back to deriving it from the
+        deployed notional / leverage so a missing key can't silently revert to
+        the leveraged basis."""
+        basis = _dec(self.cfg("tp_margin_basis") or 0)
+        if basis > 0:
+            return basis
+        deployed = _dec(self.cfg("margin_quote") or 0)
+        lev = _dec(self.cfg("leverage", 1) or 1)
+        if deployed > 0 and lev > 0:
+            return deployed / lev
+        return deployed
+
+    def _tp_tier_ladder(self) -> tuple[list[float], Decimal]:
+        """``(tier thresholds %, denominator)`` for the tiered scale-out.
+
+        When the user has a take-profit set, the tiers are rescaled so their TOP
+        tier equals the user's TP and are measured against the user's ALLOCATED
+        MARGIN — so the scale-out ladders UP TO the user's setting and its final
+        portion books exactly AT the TP, never before it. E.g. TP=50% with the
+        default [2,4,6] tiers -> [16.67, 33.33, 50.0] % of margin; TP=200% ->
+        [66.67, 133.33, 200.0]. A run with NO TP set keeps the legacy fixed
+        tiers on the deployed-notional basis (unchanged, so TP-disarmed runs
+        are not affected)."""
+        raw = [float(t) for t in (self.tp_tiers_pct or [])]
+        tp = float(self.cfg("tp_pct", 0) or 0)
+        if tp > 0 and raw:
+            top = max(raw)
+            if top > 0:
+                return [t / top * tp for t in raw], self._tp_margin_basis()
+        # Legacy: fixed tiers vs deployed notional (TP-disarmed runs unchanged).
+        return raw, _dec(self.cfg("margin_quote") or 0)
+
     async def _maybe_book_profit(self, mid: Optional[Decimal]) -> None:
-        """Scale out reduce-only as the run's unrealized PnL crosses rising tiers
-        (% of margin), locking in gains so PnL stays near-positive on a reversal.
-        Each tier books once per run; the ladder resets on a fresh spawn/flip."""
+        """Scale out reduce-only as the run's unrealized PnL climbs, booking a
+        fraction at each rising tier to lock in gains. The tier ladder is
+        ANCHORED to the user's take-profit (see ``_tp_tier_ladder``): the top
+        tier lands exactly at the user's TP %, measured against allocated margin
+        — so the scale-out completes at the user's setting and never fires past
+        it. Each tier books once per run; the ladder resets on a fresh
+        spawn/flip."""
         if (not self.tp_tiers_pct or self.tp_fraction <= 0 or self.inventory is None
                 or mid is None or mid <= 0):
             return
-        margin = _dec(self.cfg("margin_quote") or 0)
-        if margin <= 0:
+        tiers, margin = self._tp_tier_ladder()
+        if not tiers or margin <= 0:
             return
         hold = self.inventory.get(self.user_id, self.trading_pair, self.id)
         net = hold.net_amount_base
@@ -462,7 +504,7 @@ class DynamicGridController(Controller):
         upnl_pct = float(hold.unrealized_pnl(mid) / margin * Decimal(100))
         # Newly crossed, not-yet-booked tiers.
         to_book = [
-            i for i, t in enumerate(self.tp_tiers_pct)
+            i for i, t in enumerate(tiers)
             if upnl_pct >= t and i not in self._booked_tiers
         ]
         if not to_book:
@@ -527,7 +569,7 @@ class DynamicGridController(Controller):
         logger.info(
             "dgrid book_profit pair=%s side=%s base=%s uPnL=%.2f%% tiers=%s (controller=%s)",
             self.trading_pair, close_side.name, booked, upnl_pct,
-            [self.tp_tiers_pct[i] for i in to_book], self.id,
+            [round(tiers[i], 2) for i in to_book], self.id,
         )
 
     async def _spawn_phase(self, phase: str, mid: Optional[Decimal]) -> bool:

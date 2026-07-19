@@ -123,12 +123,28 @@ def test_rail_barriers_sl_is_tighten_only():
     sig = Signal(bias=0.7, regime="trend_up", sl_pct=0.65, tp_pct=1.6)
     sl, tp = oa.rail_barriers(0.5, 1.0, sig)
     assert sl == 0.5
-    assert tp == 1.6            # TP may follow the regime both ways
+    assert tp == 1.6            # trend widens TP (let winners run)
     # Chop tightened the SL below the user's stop — the tighter value governs.
     sig = Signal(bias=0.0, regime="chop", sl_pct=0.4, tp_pct=0.8)
     sl, tp = oa.rail_barriers(0.5, 1.0, sig)
     assert sl == 0.4
-    assert tp == 0.8
+
+
+def test_rail_barriers_tp_is_widen_only_never_fires_early():
+    # OVERLAY-TP-NO-FLOOR: the chop regime scales the signal TP to 0.8x, which
+    # used to LOWER the user's TP and fire the session rail ~20% early. The
+    # user's TP is now a floor — the overlay may only widen it.
+    chop = Signal(bias=0.0, regime="chop", sl_pct=0.4, tp_pct=0.8)
+    _sl, tp = oa.rail_barriers(0.5, 1.0, chop)
+    assert tp == 1.0           # floored at the user's TP, NOT lowered to 0.8
+    # A trend still lets a winner run past the user's target.
+    trend = Signal(bias=0.7, regime="trend_up", sl_pct=0.65, tp_pct=1.6)
+    _sl, tp = oa.rail_barriers(0.5, 1.0, trend)
+    assert tp == 1.6
+    # Range leaves the user's TP exactly as configured.
+    rng = Signal(bias=0.1, regime="range", sl_pct=0.5, tp_pct=1.0)
+    _sl, tp = oa.rail_barriers(0.5, 1.0, rng)
+    assert tp == 1.0
 
 
 def test_rail_barriers_disarmed_stays_disarmed():

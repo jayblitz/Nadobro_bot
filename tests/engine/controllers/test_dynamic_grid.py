@@ -238,6 +238,34 @@ def test_tick_records_diagnostics_for_services_log():
     asyncio.run(body())
 
 
+def test_diag_telemetry_attrs_are_dynamic_grid_only():
+    """NO_ORDERS-DIAG: engine_diag reports candle_count/mid/phase/vr ONLY when
+    the controller exposes them. DynamicGrid does; MarketMaking (Mid) — and by
+    inheritance FillAnchored (Momentum/taker) — do NOT. Reporting the getattr
+    defaults for those falsely reads as a starved grid (the misdiagnosis that
+    sent us chasing a phantom candle-feed bug). This pins the attribute
+    asymmetry the controller-aware diag relies on."""
+    from src.nadobro.engine.controllers.market_making import MarketMakingController
+
+    dg = DynamicGridController(
+        user_id=1, orchestrator=ExecutorOrchestrator(),
+        adapter=MockNadoAdapter(mid=Decimal(100)), inventory=InventoryRepository(),
+        configs=dict(CFG, candle_provider=lambda p: _range()),
+    )
+    for attr in ("_last_candle_count", "_last_mid", "current_phase", "variance_ratio"):
+        assert hasattr(dg, attr), f"DynamicGrid must expose {attr} for the diag"
+
+    mm = MarketMakingController(
+        user_id=1, orchestrator=ExecutorOrchestrator(),
+        adapter=MockNadoAdapter(mid=Decimal(100)), inventory=InventoryRepository(),
+        configs=dict(CFG),
+    )
+    for attr in ("_last_candle_count", "_last_mid", "current_phase", "variance_ratio"):
+        assert not hasattr(mm, attr), (
+            f"MarketMaking unexpectedly exposes {attr} — the diag would mislabel it"
+        )
+
+
 def test_profit_booking_scales_out_on_tier_cross():
     """Tiered profit-booking: as the run's uPnL crosses rising tiers (% of
     margin), a fraction of the position is closed reduce-only; each tier books
@@ -374,5 +402,112 @@ def test_profit_booking_skips_when_below_tier():
         await c._maybe_book_profit(Decimal("101"))
         assert [o for o in adapter.placed if o.side == TradeType.SELL] == []
         assert c._booked_tiers == set()
+
+    asyncio.run(body())
+
+
+# --- DGRID-TP-TIER-ANCHOR: the tiered scale-out is anchored to the user's TP,
+# measured against ALLOCATED MARGIN (not the deployed = margin x leverage
+# basis the old code used), so the ladder completes AT the user's setting and
+# never books far below it. ------------------------------------------------
+
+def _anchored_cfg(tp_pct, **over):
+    # margin (notional) = 100, deployed = 500 (5x). tp_margin_basis is the
+    # user's margin — the SAME basis the session TP rail measures against.
+    return dict(
+        CFG, candle_provider=lambda p: _range(),
+        margin_quote="500", tp_margin_basis=Decimal("100"), leverage=5,
+        tp_pct=tp_pct, dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33,
+        **over,
+    )
+
+
+def test_tiered_tp_anchors_to_user_tp_not_deployed_basis():
+    """A user TP of 50% anchors the ladder to 50% of MARGIN. The old code booked
+    the first tier at 2% of the DEPLOYED $500 (= $10 uPnL, i.e. 10% of margin);
+    the anchored first tier is 16.67% of the $100 margin, so at +$10 uPnL
+    NOTHING books — TP no longer fires early."""
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(110))
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=_anchored_cfg(50.0))
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+
+        # +$10 uPnL = 10% of margin: the OLD deployed-basis code booked here
+        # (10/500 = 2% >= tier1); the anchored ladder does NOT (10% < 16.67%).
+        await c._maybe_book_profit(Decimal("110"))
+        assert [o for o in adapter.placed if o.side == TradeType.SELL] == []
+        assert c._booked_tiers == set()
+
+        # +$16.8 uPnL = 16.8% of margin >= first anchored tier (16.67%).
+        await c._maybe_book_profit(Decimal("116.8"))
+        assert len([o for o in adapter.placed if o.side == TradeType.SELL]) == 1
+        assert c._booked_tiers == {0}
+
+    asyncio.run(body())
+
+
+def test_tiered_tp_top_tier_lands_exactly_at_user_tp():
+    """The final tier books at the user's TP (50% of margin), so the scale-out
+    completes AT the user's setting."""
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(150))
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=_anchored_cfg(50.0))
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        # +$50 uPnL = 50% of margin = the user's TP -> all three anchored tiers
+        # (16.67 / 33.33 / 50) cross at once.
+        await c._maybe_book_profit(Decimal("150"))
+        assert c._booked_tiers == {0, 1, 2}
+
+    asyncio.run(body())
+
+
+def test_tiered_tp_scales_up_with_a_higher_user_tp():
+    """TP=200% pushes the whole ladder up: at +50% of margin (the OLD top tier)
+    NOTHING books; the first anchored tier is now 66.67%."""
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(150))
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=_anchored_cfg(200.0))
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        await c._maybe_book_profit(Decimal("150"))    # +50% < 66.67% first tier
+        assert c._booked_tiers == set()
+        await c._maybe_book_profit(Decimal("166.8"))  # +66.8% >= first tier
+        assert c._booked_tiers == {0}
+
+    asyncio.run(body())
+
+
+def test_tiered_tp_falls_back_to_legacy_when_no_tp_set():
+    """With no user TP, behavior is unchanged: fixed [2,4,6] tiers on the
+    deployed (margin_quote) basis."""
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(110))
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        # No tp_pct, no tp_margin_basis: margin_quote=100 is the legacy basis.
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=inv, configs=cfg)
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        # +$2 uPnL = 2% of the $100 legacy basis -> first fixed tier books.
+        await c._maybe_book_profit(Decimal("102"))
+        assert c._booked_tiers == {0}
 
     asyncio.run(body())

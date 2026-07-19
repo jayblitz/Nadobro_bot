@@ -101,17 +101,24 @@ def rail_barriers(
     base_sl_pct: float, base_tp_pct: float, signal: Signal
 ) -> Tuple[Optional[float], Optional[float]]:
     """Session-rail barriers derived from the signal, bounded by the user's own
-    config. The user's session SL is the kill-switch contract, so the overlay
-    may only TIGHTEN it (chop ×0.8), never widen it past the configured stop;
-    TP follows the regime scaling both ways (let winners run in a trend). A
-    barrier the user disarmed (``<= 0``) stays disarmed — the 10% overlay
+    config. Both barriers respect the user's setting as the binding contract:
+
+    * SL is TIGHTEN-ONLY (chop ×0.8): the overlay may pull the stop closer but
+      never widen it past the configured stop.
+    * TP is WIDEN-ONLY: the overlay may let a winner run PAST the user's target
+      in a trend (×1.6), but must never take profit BEFORE it — the chop-regime
+      ×0.8 tightening used to lower the user's TP silently and fire the session
+      rail early (OVERLAY-TP-NO-FLOOR). The user's TP is the floor.
+
+    A barrier the user disarmed (``<= 0``) stays disarmed — the 10% overlay
     drawdown cap is the backstop either way."""
     sl: Optional[float] = None
     tp: Optional[float] = None
     if base_sl_pct > 0 and signal.sl_pct is not None:
         sl = min(float(signal.sl_pct), float(base_sl_pct))
     if base_tp_pct > 0 and signal.tp_pct is not None:
-        tp = float(signal.tp_pct)
+        # Floor at the user's configured TP: the overlay only widens it.
+        tp = max(float(signal.tp_pct), float(base_tp_pct))
     return sl, tp
 
 
