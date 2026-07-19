@@ -10,14 +10,26 @@ import logging
 
 from src.nadobro.handlers.formatters import escape_md, fmt_wallet_balance_card, fmt_wallet_balance_error, fmt_wallet_connect_card, fmt_wallet_info, fmt_wallet_revoke_steps_card
 from src.nadobro.handlers.keyboards import wallet_kb, wallet_kb_not_linked, wallet_revoke_confirm_kb
-from src.nadobro.handlers.wallet_view import build_wallet_view_payload
-from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk_capped
 from src.nadobro.users.user_service import get_user_readonly_client, get_user_wallet_info, switch_network, get_user, remove_user_private_key
 from telegram.constants import ParseMode
 
 from src.nadobro.handlers.callbacks import _edit_loc  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# CLICK-PATH-BLOCKING fix: wallet:view and wallet:balance used to run their
+# venue reads (get_user_wallet_info / get_balance) BARE on the event-loop
+# thread — one hung gateway read froze every user's taps and the APScheduler
+# jobs for the full SDK timeout (~12-30s), the documented "sync get_balance
+# hung taps" incident on the inline-button path the earlier home-card fix never
+# reached. These reads now go through run_blocking_sdk_capped (SDK pool + a
+# short wall-clock cap): the tap returns a placeholder instead of blocking the
+# loop, and the orphaned thread warms the cache for the next render.
+_WALLET_VIEW_CEILING_SECONDS = 6.0
+_TIMED_OUT = object()
+_WALLET_REFRESHING = "⏳ Refreshing wallet… tap again in a sec\\."
+_BALANCE_REFRESHING = "⏳ Refreshing balance… tap again in a sec\\."
 
 
 async def _handle_wallet(query, data, telegram_id, context):
@@ -26,19 +38,30 @@ async def _handle_wallet(query, data, telegram_id, context):
 
     if action == "view":
         show_connect = False
+        # The verify_signer read hits the venue — offload + cap so a slow
+        # gateway can't freeze the loop. On timeout show a refreshing
+        # placeholder (the orphaned thread warms the cache for the retry).
         try:
-            info = get_user_wallet_info(telegram_id, verify_signer=True)
-            is_linked = bool(info and info.get("is_linked"))
-            if not is_linked and context is not None:
-                from src.nadobro.handlers.wallet_view import _ensure_pending_wallet_signer
-
-                pk_hex, _ = _ensure_pending_wallet_signer(context, telegram_id)
-                msg, kb = fmt_wallet_connect_card(pk_hex), wallet_kb_not_linked()
-                show_connect = True
-            else:
-                msg, kb = fmt_wallet_info(info), (wallet_kb() if is_linked else wallet_kb_not_linked())
+            info = await run_blocking_sdk_capped(
+                get_user_wallet_info, telegram_id, verify_signer=True,
+                timeout_seconds=_WALLET_VIEW_CEILING_SECONDS, default=_TIMED_OUT,
+            )
         except Exception:
-            msg, kb = build_wallet_view_payload(telegram_id, context=context, verify_signer=True)
+            info = _TIMED_OUT
+        if info is _TIMED_OUT:
+            await _edit_loc(query, _WALLET_REFRESHING,
+                            parse_mode=ParseMode.MARKDOWN_V2, reply_markup=wallet_kb())
+            return
+        is_linked = bool(info and info.get("is_linked"))
+        if not is_linked and context is not None:
+            # Local key generation — fast, no venue read, safe on the loop.
+            from src.nadobro.handlers.wallet_view import _ensure_pending_wallet_signer
+
+            pk_hex, _ = _ensure_pending_wallet_signer(context, telegram_id)
+            msg, kb = fmt_wallet_connect_card(pk_hex), wallet_kb_not_linked()
+            show_connect = True
+        else:
+            msg, kb = fmt_wallet_info(info), (wallet_kb() if is_linked else wallet_kb_not_linked())
         await _edit_loc(query,
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -53,16 +76,29 @@ async def _handle_wallet(query, data, telegram_id, context):
                 "message_id": query.message.message_id,
             }
     elif action == "balance":
-        client = get_user_readonly_client(telegram_id)
+        # Client construction + get_balance() both hit the venue — offload +
+        # cap so a throttled gateway can't freeze the loop (the documented
+        # "sync get_balance hung taps 30-60s" incident).
+        client = await run_blocking_sdk_capped(
+            get_user_readonly_client, telegram_id,
+            timeout_seconds=_WALLET_VIEW_CEILING_SECONDS, default=None,
+        )
         if not client:
-            await _edit_loc(query, 
+            await _edit_loc(query,
                 fmt_wallet_balance_error(),
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=wallet_kb(),
             )
             return
+        bal = await run_blocking_sdk_capped(
+            client.get_balance,
+            timeout_seconds=_WALLET_VIEW_CEILING_SECONDS, default=_TIMED_OUT,
+        )
+        if bal is _TIMED_OUT:
+            await _edit_loc(query, _BALANCE_REFRESHING,
+                            parse_mode=ParseMode.MARKDOWN_V2, reply_markup=wallet_kb())
+            return
         try:
-            bal = client.get_balance()
             usdt = (bal.get("balances") or {}).get(0, 0) or (bal.get("balances") or {}).get("0", 0)
             msg = fmt_wallet_balance_card(float(usdt or 0))
         except Exception:
