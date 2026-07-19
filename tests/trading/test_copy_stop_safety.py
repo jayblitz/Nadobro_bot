@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.nadobro.models import database as database_model
 from src.nadobro.trading import copy_service
@@ -79,7 +79,13 @@ def test_stop_all_reports_failure_for_mixed_stopped_and_pending_copies():
     assert "1 mirror(s) remain monitored" in message
     stop.assert_called_once_with(7)
     finalize.assert_called_once_with(mirrors[0], "user_stop_all")
-    request_stop.assert_called_once_with(8)
+    # COPY-STOP-RACE: the stop intent is now set for EVERY mirror BEFORE its
+    # flatten runs (not only after a failure), so a concurrent poll cycle can
+    # never re-open positions mid-stop. The clean stop of mirror 7 clears the
+    # flag again via stop_copy_mirror.
+    assert request_stop.call_count == 2
+    request_stop.assert_any_call(7)
+    request_stop.assert_any_call(8)
 
 
 def test_stop_request_unpauses_a_mirror_so_the_retry_poller_can_see_it():
@@ -239,6 +245,143 @@ def test_stop_requested_mirror_retries_flatten_without_mirroring_new_opens():
         stop.assert_called_once_with(7)
         finalize.assert_called_once_with(mirror, "user_stop")
         notify.assert_awaited_once()
+
+    asyncio.run(_case())
+
+
+def test_stop_copy_sets_the_intent_before_the_flatten_starts():
+    """COPY-STOP-RACE: the poller must see stop_requested BEFORE the flatten
+    begins, or a concurrent poll cycle re-opens the positions being closed."""
+    order: list[str] = []
+    mirror = {"id": 7, "user_id": 4242, "active": True, "network": "mainnet"}
+    with patch.object(copy_service, "get_copy_mirror", return_value=mirror), \
+         patch.object(copy_service, "request_copy_mirror_stop",
+                      side_effect=lambda _mid: order.append("intent")), \
+         patch.object(copy_service, "_flatten_mirror_positions",
+                      side_effect=lambda *a, **k: order.append("flatten") or (1, 2.0, 50.0, [])), \
+         patch.object(copy_service, "stop_copy_mirror",
+                      side_effect=lambda _mid: order.append("stop")), \
+         patch.object(copy_service, "_finalize_mirror_session"):
+        ok, _ = copy_service.stop_copy(4242, 7)
+
+    assert ok
+    assert order == ["intent", "flatten", "stop"]
+
+
+def test_open_loop_aborts_when_the_mirror_was_stopped_mid_sync():
+    """The mirror snapshot driving a sync can be many seconds stale; the
+    re-read right before an open must win over the snapshot."""
+    async def _case():
+        mirror = {
+            "id": 7, "user_id": 4242, "network": "mainnet", "active": True,
+            "margin_per_trade": 100.0, "max_leverage": 3.0,
+            "total_allocated_usd": 500.0,
+        }
+
+        async def _inline(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        stopped_live = dict(mirror, stop_requested=True)
+        with patch.object(copy_service, "run_blocking", side_effect=_inline), \
+             patch.object(copy_service, "get_open_copy_positions", return_value=[]), \
+             patch.object(copy_service, "get_user_nado_client", return_value=None), \
+             patch.object(copy_service, "set_mirror_unrealized"), \
+             patch.object(copy_service, "get_product_name", return_value="BTC-PERP"), \
+             patch.object(copy_service, "get_product_max_leverage", return_value=5.0), \
+             patch.object(copy_service, "get_copy_mirror", return_value=stopped_live), \
+             patch.object(copy_service, "_execute_maker_open") as maker, \
+             patch.object(copy_service, "execute_market_order") as market, \
+             patch.object(copy_service, "insert_copy_position") as insert:
+            await copy_service._sync_mirror_positions(
+                mirror, {1: {"side": "LONG", "entry_price": 100.0, "size": 1.0}},
+            )
+
+        maker.assert_not_called()
+        market.assert_not_called()
+        insert.assert_not_called()
+
+    asyncio.run(_case())
+
+
+def test_stop_landing_during_the_open_unwinds_the_just_opened_position():
+    """COPY-STOP-RACE (post-open): a stop whose flatten ran before the new
+    row existed must not leave the fill orphaned behind an inactive mirror."""
+    async def _case():
+        mirror = {
+            "id": 7, "user_id": 4242, "network": "mainnet", "active": True,
+            "margin_per_trade": 100.0, "max_leverage": 3.0,
+            "total_allocated_usd": 500.0, "wallet_address": "0xleader00ff",
+        }
+
+        async def _inline(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        live_then_stopped = [
+            dict(mirror, active=True, stop_requested=False, paused=False),  # pre-open
+            dict(mirror, active=False, stop_requested=False, paused=False),  # post-open
+        ]
+        closes = {}
+
+        def _capture_market(**kwargs):
+            closes.update(kwargs)
+            return {"success": True, "digest": "0xclose", "price": 101.0, "fee": 0.01}
+
+        # Trustworthy venue read (empty, present) so the F-4 suspect-read guard
+        # permits the open whose stop-race unwind this test exercises. Mid at
+        # the leader entry so the entry-deviation gate lets the open through.
+        follower = MagicMock()
+        follower.get_all_positions.return_value = []
+        follower.get_market_price.return_value = {"mid": 100.0}
+
+        with patch.object(copy_service, "run_blocking", side_effect=_inline), \
+             patch.object(copy_service, "get_open_copy_positions", return_value=[]), \
+             patch.object(copy_service, "get_user_nado_client", return_value=follower), \
+             patch.object(copy_service, "_archive_reads_unreliable", return_value=False), \
+             patch.object(copy_service, "set_mirror_unrealized"), \
+             patch.object(copy_service, "get_product_name", return_value="BTC-PERP"), \
+             patch.object(copy_service, "get_product_max_leverage", return_value=5.0), \
+             patch.object(copy_service, "get_copy_mirror", side_effect=live_then_stopped), \
+             patch.object(copy_service, "_execute_maker_open",
+                          return_value={"success": True, "digest": "0xopen", "price": 100.0,
+                                        "fee": 0.0, "filled_size": 1.0}), \
+             patch.object(copy_service, "update_mirror_accounting"), \
+             patch.object(copy_service, "insert_copy_position", return_value=88), \
+             patch.object(copy_service, "execute_market_order", side_effect=_capture_market), \
+             patch.object(copy_service, "_settle_copy_close", return_value=(1.0, 0.01, 101.0)), \
+             patch.object(copy_service, "close_copy_position") as close_row, \
+             patch.object(copy_service, "_place_tp_sl_orders") as brackets, \
+             patch.object(copy_service, "_notify_user", new_callable=AsyncMock):
+            await copy_service._sync_mirror_positions(
+                mirror, {1: {"side": "LONG", "entry_price": 100.0, "size": 1.0}},
+            )
+
+        assert closes.get("reduce_only") is True
+        assert closes.get("size") == 1.0
+        assert closes.get("is_long") is False  # closes the long
+        close_row.assert_called_once_with(88, pnl=1.0, reason="stop_race_unwind")
+        brackets.assert_not_called()
+
+    asyncio.run(_case())
+
+
+def test_failed_unwind_rearms_the_stop_retry_poller():
+    async def _case():
+        mirror = {"id": 7, "user_id": 4242, "network": "mainnet"}
+        cp = {"id": 88, "entry_price": 100.0, "side": "long", "product_name": "BTC-PERP"}
+
+        async def _inline(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with patch.object(copy_service, "run_blocking", side_effect=_inline), \
+             patch.object(copy_service, "execute_market_order",
+                          return_value={"success": False, "error": "venue down"}), \
+             patch.object(copy_service, "request_copy_mirror_stop") as rearm, \
+             patch.object(copy_service, "_notify_user", new_callable=AsyncMock):
+            await copy_service._unwind_stop_raced_open(
+                mirror, cp, "BTC", 1.0, True, 3.0, "mainnet", None,
+            )
+
+        rearm.assert_called_once_with(7)
 
     asyncio.run(_case())
 

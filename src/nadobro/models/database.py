@@ -862,19 +862,25 @@ def get_user_active_mirrors_v2(user_id: int, network: str = None) -> list:
 
 
 def get_all_active_mirrors_v2(network: str = None) -> list:
+    # A stop_requested mirror is flatten-only and MUST stay pollable even when
+    # its trader was deactivated (remove_trader): a failed stop-race unwind
+    # re-arms stop_requested on a mirror whose trader is now inactive, and the
+    # old `t.active = true` filter hid it forever with the position still open.
+    # Copying mirrors still require an active trader (no new opens off a
+    # removed trader).
     if network:
         return query_all(
             """SELECT m.*, t.wallet_address, t.label
                FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
                WHERE m.active = true AND (NOT m.paused OR m.stop_requested = true)
-                 AND t.active = true AND m.network = %s""",
+                 AND (t.active = true OR m.stop_requested = true) AND m.network = %s""",
             (network,),
         )
     return query_all(
         """SELECT m.*, t.wallet_address, t.label
            FROM copy_mirrors m JOIN copy_traders t ON m.trader_id = t.id
            WHERE m.active = true AND (NOT m.paused OR m.stop_requested = true)
-             AND t.active = true"""
+             AND (t.active = true OR m.stop_requested = true)"""
     )
 
 

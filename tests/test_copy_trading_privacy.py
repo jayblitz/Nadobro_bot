@@ -10,7 +10,7 @@ These tests pin the SQL contracts so the regression cannot return.
 """
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from _stubs import install_test_stubs
 
@@ -279,17 +279,35 @@ class CopyServiceNetworkTests(unittest.IsolatedAsyncioTestCase):
         async def _inline_run_blocking(func, *args, **kwargs):
             return func(*args, **kwargs)
 
-        def _capture_market(**kwargs):
+        def _capture_maker(**kwargs):
             captured.update(kwargs)
-            return {"success": True, "digest": "0xopen", "price": 100.0}
+            return {"success": True, "digest": "0xopen", "price": 100.0, "fee": 0.0, "filled_size": 1.0}
 
+        live_mirror = dict(mirror, active=True, stop_requested=False, paused=False)
+        # A trustworthy (present, non-empty-OK) venue read so the F-4
+        # suspect-read guard permits the open. Empty positions is a valid
+        # trustworthy state for a first-ever open.
+        follower = MagicMock()
+        follower.get_all_positions.return_value = []
+        # Mid at the leader's entry so the entry-deviation gate lets the open
+        # through (a bare MagicMock's __float__ is 1.0, which reads as a 99%
+        # deviation from a $100 entry and would skip).
+        follower.get_market_price.return_value = {"mid": 100.0}
         with patch.object(copy_service, "run_blocking", side_effect=_inline_run_blocking), patch.object(
             copy_service, "get_user", return_value=SimpleNamespace(network_mode=SimpleNamespace(value="testnet"))
         ), patch.object(copy_service, "get_open_copy_positions", return_value=[]), patch.object(
+            copy_service, "get_copy_mirror", return_value=live_mirror
+        ), patch.object(
+            copy_service, "get_user_nado_client", return_value=follower
+        ), patch.object(
+            copy_service, "_archive_reads_unreliable", return_value=False
+        ), patch.object(
             copy_service, "get_product_name", return_value="BTC-PERP"
         ) as product_name_spy, patch.object(
             copy_service, "get_product_max_leverage", return_value=5.0
-        ), patch.object(copy_service, "execute_market_order", side_effect=_capture_market), patch.object(
+        ), patch.object(copy_service, "_execute_maker_open", side_effect=_capture_maker), patch.object(
+            copy_service, "update_mirror_accounting"
+        ), patch.object(
             copy_service, "insert_copy_position", return_value=123
         ), patch.object(copy_service, "_place_tp_sl_orders", return_value={}), patch.object(
             copy_service, "_notify_user", new_callable=AsyncMock
