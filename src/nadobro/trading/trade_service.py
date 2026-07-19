@@ -864,6 +864,28 @@ def execute_market_order(
             }, network=network)
         except Exception as e:
             logger.error("Failed to update trade %s status to FAILED: %s", trade_id, e)
+        # AUDIT COPY-DUP-SETTLE: release the intent on a DEFINITE venue reject
+        # (this branch is only reached when place_market_order returned
+        # success=False — unknown outcomes were handled and returned earlier).
+        # The limit path already does this; without it the intent stays
+        # 'recorded' for 120s and a legitimate retry gets a duplicate-success
+        # carrying no digest, which callers could mistake for a real fill.
+        if intent_id:
+            try:
+                from src.nadobro.trading.order_intents import update_order_intent
+
+                update_order_intent(
+                    intent_id,
+                    status="failed",
+                    error=result.get("error", "Unknown error"),
+                    trade_id=trade_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "order-intent %s not released after definite reject — retries "
+                    "will be duplicate-blocked for up to 120s: %s",
+                    intent_id, e,
+                )
 
     if result["success"]:
         try:

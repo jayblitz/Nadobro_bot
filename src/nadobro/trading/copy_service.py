@@ -30,7 +30,6 @@ from src.nadobro.models.database import (
     create_copy_mirror_v2,
     get_user_active_mirrors_v2,
     get_all_active_mirrors_v2,
-    update_mirror_cumulative_pnl,
     auto_stop_mirror,
     insert_copy_position,
     get_open_copy_positions,
@@ -47,11 +46,13 @@ from src.nadobro.models.database import (
     save_copy_snapshot,
     get_latest_copy_snapshot,
     get_copy_trades_by_mirror,
+    get_bot_state,
+    set_bot_state,
 )
 from src.nadobro.users.user_service import get_user, get_user_nado_client
 from src.nadobro.trading.trade_service import execute_market_order, execute_limit_order
 from src.nadobro.venue.nado_client import NadoClient
-from src.nadobro.venue.nado_archive import query_order_by_digest
+from src.nadobro.venue.nado_archive import query_order_by_digest, query_orders_by_digests
 from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.utils.env import env_bool, env_float
 
@@ -70,8 +71,130 @@ PARTIAL_CLOSES_ENABLED = env_bool("NADO_COPY_PARTIAL_CLOSES", True)
 PARTIAL_CLOSE_MIN_DELTA_PCT = env_float("NADO_COPY_PARTIAL_MIN_DELTA_PCT", 5.0)
 # Below this remaining fraction a partial becomes a full close (avoids dust).
 PARTIAL_CLOSE_DUST_FRACTION = 0.05
+# COPY-MAKER: opens are maker-first post-only limit orders joined at the touch
+# (market opens paid taker fees + up to 1.5% slippage on every mirrored
+# entry). Closes stay reduce-only market on purpose: a close that doesn't
+# fill leaves exposure the leader no longer has. Kill switch reverts opens to
+# the old market path.
+MAKER_OPENS_ENABLED = env_bool("NADO_COPY_MAKER_OPENS", True)
+MAKER_FILL_WAIT_SECONDS = max(2.0, env_float("NADO_COPY_MAKER_WAIT_SECONDS", 20.0))
+# How long a maker order with unknown fate (cancel failed / archive silent)
+# may stay pending before a confirmed-cancel is declared unfilled anyway.
+MAKER_PENDING_GIVE_UP_SECONDS = max(60.0, env_float("NADO_COPY_MAKER_PENDING_GIVE_UP_SECONDS", 600.0))
+# COPY-SWEEP-CONFIRM: an external close with no bracket-fill evidence must be
+# observed on two polls at least this far apart before it books. A transient
+# venue/archive read flap (isolated-subaccount discovery returns [] whenever
+# the archive is rate-limited) must not fabricate closes — the phantom close
+# both corrupts cumulative PnL and lets the open loop re-open a duplicate.
+EXTERNAL_CLOSE_CONFIRM_SECONDS = max(
+    5.0, env_float("NADO_COPY_EXTERNAL_CLOSE_CONFIRM_SECONDS", POLL_INTERVAL_SECONDS * 0.7)
+)
+# COPY-TP-CONFIRM: the profit-side rail must see the target breached on two
+# polls at least this far apart before it flattens (SL is deliberately
+# immediate — cutting a loss late is worse than cutting it early).
+TP_CONFIRM_GAP_SECONDS = max(5.0, env_float("NADO_COPY_TP_CONFIRM_SECONDS", POLL_INTERVAL_SECONDS * 0.5))
+# COPY-MASS-VANISH (audit F-4): when EVERY tracked position of a mirror
+# disappears from the venue read at once with no bracket-fill evidence, that
+# is far more likely a read outage (engine cross-margin read failed, host
+# token bucket starved — sources that don't trip the archive rate-limit flag)
+# than the leader/user closing everything simultaneously. Require such an
+# unproven whole-book vanish to persist this much longer before booking, so a
+# transient outage self-heals without fabricating realized PnL. A real event
+# (liquidation cascade, manual mass-close) simply books after the delay.
+MASS_VANISH_CONFIRM_SECONDS = max(
+    EXTERNAL_CLOSE_CONFIRM_SECONDS,
+    env_float("NADO_COPY_MASS_VANISH_CONFIRM_SECONDS", POLL_INTERVAL_SECONDS * 3.0),
+)
+
+# (mirror_id, product_id) -> first-seen ts of an unverified external close.
+_EXTERNAL_CLOSE_SUSPECTS: dict[tuple[int, int], float] = {}
+# mirror_id -> first ts the TP target was breached (cleared on any non-breach).
+_TP_BREACH_FIRST_SEEN: dict[int, float] = {}
+# (mirror_id, product_id) -> maker open whose fate is unresolved. While a
+# product has an entry here the open loop must never place another order on
+# it (a live resting order + a fresh order = double exposure).
+_PENDING_MAKER_OPENS: dict[tuple[int, int], dict] = {}
 _bot_app = None
 _poll_task: Optional[asyncio.Task] = None
+
+
+# AUDIT F3 (copy auditor): pendings guard live-order exposure, so unlike the
+# TP marker they must survive a redeploy — a forgotten pending means a resting
+# order that can fill behind a stopped/paused mirror with nobody watching.
+_PENDING_STATE_KEY = "copy_pending_maker_opens"
+
+
+def _persist_pending_maker_opens() -> None:
+    try:
+        set_bot_state(
+            _PENDING_STATE_KEY,
+            {f"{k[0]}:{k[1]}": v for k, v in _PENDING_MAKER_OPENS.items()},
+        )
+    except Exception:  # noqa: BLE001 - persistence is best-effort; memory stays authoritative
+        logger.warning("copy pending-maker persist failed", exc_info=True)
+
+
+def _register_pending_maker_open(mirror_id: int, pid: int, pending: dict) -> None:
+    _PENDING_MAKER_OPENS[(int(mirror_id), int(pid))] = pending
+    _persist_pending_maker_opens()
+
+
+def _pop_pending_maker_open(mirror_id: int, pid: int) -> None:
+    if _PENDING_MAKER_OPENS.pop((int(mirror_id), int(pid)), None) is not None:
+        _persist_pending_maker_opens()
+
+
+def _load_pending_maker_opens() -> None:
+    """Restore unresolved maker opens across a restart. This is stand-down
+    hygiene (reconcile/cancel orders whose fate was unknown), NOT a strategy
+    resume — booking a fill that already happened is accounting, not trading."""
+    try:
+        data = get_bot_state(_PENDING_STATE_KEY) or {}
+        if isinstance(data, str):
+            data = json.loads(data)
+        for key, value in (data or {}).items():
+            try:
+                m, p = str(key).split(":", 1)
+                _PENDING_MAKER_OPENS.setdefault((int(m), int(p)), dict(value))
+            except (TypeError, ValueError):
+                continue
+        if _PENDING_MAKER_OPENS:
+            logger.warning(
+                "copy pending-maker opens restored after restart: %s",
+                sorted(_PENDING_MAKER_OPENS),
+            )
+    except Exception:  # noqa: BLE001 - a failed restore must not block polling
+        logger.warning("copy pending-maker restore failed", exc_info=True)
+
+
+def _close_result_ok(result: Optional[dict]) -> tuple[bool, str]:
+    """Did THIS submit actually close anything?
+
+    AUDIT COPY-DUP-SETTLE (copy auditor F-1): a duplicate-suppressed submit
+    comes back ``success=True`` carrying ANOTHER submit's digest (or none).
+    Settling it books a phantom 0-PnL close — the row closes while the venue
+    position stays open — or double-books the winner's fill. A duplicate is a
+    retryable failure here, never a fill.
+    """
+    result = result or {}
+    if result.get("duplicate"):
+        return False, "duplicate order intent suppressed — close will retry"
+    if not result.get("success"):
+        return False, str(result.get("error", "close failed"))
+    return True, ""
+
+
+def _clear_mirror_runtime_state(mirror_id: int) -> None:
+    """Drop in-memory poller state when a mirror stops (any reason)."""
+    _TP_BREACH_FIRST_SEEN.pop(int(mirror_id), None)
+    for key in [k for k in _EXTERNAL_CLOSE_SUSPECTS if k[0] == int(mirror_id)]:
+        _EXTERNAL_CLOSE_SUSPECTS.pop(key, None)
+    popped = False
+    for key in [k for k in _PENDING_MAKER_OPENS if k[0] == int(mirror_id)]:
+        _PENDING_MAKER_OPENS.pop(key, None)
+        popped = True
+    if popped:
+        _persist_pending_maker_opens()
 
 
 def set_copy_bot_app(app):
@@ -141,6 +264,9 @@ def remove_trader(trader_id: int, requester_user_id: int | None = None, is_admin
     pending = 0
     stopped = 0
     for m in mirrors:
+        # COPY-STOP-RACE: intent first (see stop_copy). Also reactivates a
+        # legacy inactive mirror with tracked exposure into flatten-only mode.
+        request_copy_mirror_stop(int(m["id"]))
         _closed, _pnl, _volume, errors = _flatten_mirror_positions(
             int(m["id"]),
             int(m["user_id"]),
@@ -149,11 +275,11 @@ def remove_trader(trader_id: int, requester_user_id: int | None = None, is_admin
         )
         if errors:
             # Never hide a trader/mirror while a copied position still needs a
-            # close. ``stop_requested`` switches the poller to flatten-only.
-            request_copy_mirror_stop(int(m["id"]))
+            # close. ``stop_requested`` keeps the poller retrying flatten-only.
             pending += 1
             continue
         stop_copy_mirror(m["id"])
+        _clear_mirror_runtime_state(int(m["id"]))
         _finalize_mirror_session(m, "trader_removed")
         stopped += 1
     label = trader.get("label") or trader["wallet_address"][:10]
@@ -293,18 +419,26 @@ def stop_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
         return False, "Not your mirror."
     if not mirror.get("active"):
         return False, "Mirror already stopped."
+    # COPY-STOP-RACE: make the stop intent visible to the poller BEFORE the
+    # flatten starts. The flatten takes seconds (market closes + archive
+    # lookups); without the intent a concurrent poll cycle still sees an
+    # active, copyable mirror and can re-open the very positions this stop is
+    # closing — orphaned the moment stop_copy_mirror() lands below.
+    # stop_requested switches the sync path to flatten-only, and the clean
+    # stop_copy_mirror() clears it again.
+    request_copy_mirror_stop(mirror_id)
     closed_count, _, _, errors = _flatten_mirror_positions(mirror_id, telegram_id, str(mirror.get("network", "mainnet")), reason="user_stop")
     if errors:
         # Do not hide a failed close by marking this mirror inactive. The poller
         # keeps a stop-requested mirror alive solely to retry its flatten; it
         # will not mirror new leader opens while that intent is set.
-        request_copy_mirror_stop(mirror_id)
         return False, (
             "Copy stop is pending because some copied positions could not be closed. "
             "The mirror remains monitored and will retry the close automatically. "
             + "; ".join(errors[:2])
         )
     stop_copy_mirror(mirror_id)
+    _clear_mirror_runtime_state(mirror_id)
     _finalize_mirror_session(mirror, "user_stop")
     suffix = f" Flattened {closed_count} copied position(s)." if closed_count > 0 else ""
     return True, f"Copy trading stopped for this trader.{suffix}"
@@ -323,6 +457,19 @@ def pause_copy(telegram_id: int, mirror_id: int) -> tuple[bool, str]:
     if mirror.get("paused"):
         return False, "Mirror is already paused."
     pause_copy_mirror(mirror_id)
+    # AUDIT F1 disclosure: a paused mirror is excluded from polling entirely —
+    # no leader-close mirroring and NO SL/TP rail. The redeploy stand-down
+    # message already says so; the user-initiated pause must too.
+    try:
+        open_rows = get_open_copy_positions(mirror_id) or []
+    except Exception:  # noqa: BLE001 - disclosure is best-effort
+        open_rows = []
+    if open_rows:
+        return True, (
+            f"Copy trading paused. ⚠️ {len(open_rows)} open copied position(s) are NOT "
+            "monitored while paused — no stop-loss/take-profit and no leader-close "
+            "mirroring until you resume or stop."
+        )
     return True, "Copy trading paused. New trades will not be mirrored until resumed."
 
 
@@ -350,13 +497,16 @@ def stop_all_copies(telegram_id: int) -> tuple[bool, str]:
     stopped = 0
     pending = 0
     for m in mirrors:
+        # COPY-STOP-RACE: intent first (see stop_copy) — a concurrent poll
+        # cycle must never re-open positions while this flatten runs.
+        request_copy_mirror_stop(int(m["id"]))
         closed_count, _, _, errors = _flatten_mirror_positions(int(m["id"]), telegram_id, str(m.get("network", "mainnet")), reason="user_stop_all")
         total_closed += closed_count
         if errors:
-            request_copy_mirror_stop(int(m["id"]))
             pending += 1
             continue
         stop_copy_mirror(m["id"])
+        _clear_mirror_runtime_state(int(m["id"]))
         _finalize_mirror_session(m, "user_stop_all")
         stopped += 1
     suffix = f" Flattened {total_closed} copied position(s)." if total_closed > 0 else ""
@@ -391,7 +541,8 @@ def get_user_copies(telegram_id: int, network: str = None) -> list[dict]:
             "cumulative_volume_usd": float(m.get("cumulative_volume_usd") or 0.0),
             "unrealized_pnl": float(m.get("last_unrealized_pnl_usd") or 0.0),
             # Rail-consistent net: realized (gross, derived) + last unrealized
-            # snapshot - fees. This is exactly the number the SL/TP rail judges.
+            # snapshot - fees. This is exactly the number the SL rail judges
+            # (TP judges a conservative uPnL variant and needs two polls).
             "net_pnl": (
                 float(m.get("cumulative_pnl", 0))
                 + float(m.get("last_unrealized_pnl_usd") or 0.0)
@@ -419,6 +570,16 @@ def _flatten_mirror_positions(mirror_id: int, user_id: int, network: str, reason
     total_pnl = 0.0
     total_notional = 0.0
     errors: list[str] = []
+    # A maker open whose fate is unknown (cancel failed / archive silent) is
+    # exposure this flatten cannot see. Refuse to report a clean flatten —
+    # every stop path treats errors as "keep retrying via stop_requested",
+    # and the poller resolves pendings at the top of each sync.
+    for key in list(_PENDING_MAKER_OPENS):
+        if key[0] == int(mirror_id):
+            errors.append(
+                f"product {key[1]}: a maker open is still unresolved "
+                "(order fate unknown) — stop will retry"
+            )
     for cp in open_positions:
         product_name = cp.get("product_name", "")
         product_key = product_name.replace("-PERP", "")
@@ -439,8 +600,9 @@ def _flatten_mirror_positions(mirror_id: int, user_id: int, network: str, reason
                 network=network,
                 strategy_session_id=session_id,
             )
-            if not result.get("success"):
-                errors.append(f"{product_name}: {result.get('error', 'close failed')}")
+            ok, close_err = _close_result_ok(result)
+            if not ok:
+                errors.append(f"{product_name}: {close_err}")
                 continue
             pnl, _fee, close_price = _settle_copy_close(mirror_id, cp, result, network, size)
             close_copy_position(cp["id"], pnl=pnl, reason=reason)
@@ -622,11 +784,27 @@ async def boot_stand_down_mirrors() -> int:
     the same Resume/Stop controls as the copy dashboard. Returns the number
     of mirrors paused.
     """
+    # F-3: restore maker opens whose fate was unknown at the last shutdown into
+    # the in-memory set. A restored pending is a possibly-resting live order;
+    # the poll loop's pending-resolution pass (_poll_all_mirrors) cancels it or
+    # books its fill regardless of whether the mirror ends up paused here — so
+    # pausing below is safe and does NOT strand the order (the earlier boot
+    # re-arm only covered mirrors the active-query returned, missing paused
+    # ones — audit F3-1).
+    await run_blocking(_load_pending_maker_opens)
+    if _PENDING_MAKER_OPENS:
+        logger.warning(
+            "boot: %d mirror(s) carry restored pending maker opens — the poller "
+            "will resolve them: %s",
+            len({k[0] for k in _PENDING_MAKER_OPENS}), sorted(_PENDING_MAKER_OPENS),
+        )
+
     mirrors = await run_blocking(get_all_active_mirrors_v2)
     # A failed user stop is intentionally included in the poller even if it
     # used to be paused. It must never be paused again on redeploy: its
     # flatten-only retry path is the remaining safety mechanism.
-    mirrors = [m for m in mirrors if not m.get("stop_requested")]
+    mirrors = [m for m in (mirrors or []) if not m.get("stop_requested")]
+
     if not mirrors:
         return 0
 
@@ -683,13 +861,12 @@ async def _poll_loop():
 
 async def _poll_all_mirrors():
     """Poll all active mirrors and process position changes."""
+    synced_ids: set[int] = set()
     mirrors = await run_blocking(get_all_active_mirrors_v2)
-    if not mirrors:
-        return
 
     # Group mirrors by trader+network for efficient polling
     trader_groups: dict[str, list[dict]] = {}
-    for m in mirrors:
+    for m in mirrors or []:
         key = f"{m['trader_id']}:{m.get('network', 'mainnet')}"
         trader_groups.setdefault(key, []).append(m)
 
@@ -703,6 +880,7 @@ async def _poll_all_mirrors():
         # the follower's open exposure.
         stopping_mirrors = [m for m in group_mirrors if m.get("stop_requested")]
         for mirror in stopping_mirrors:
+            synced_ids.add(int(mirror["id"]))
             try:
                 await _sync_mirror_positions(mirror, {})
             except Exception as e:
@@ -720,6 +898,7 @@ async def _poll_all_mirrors():
 
             # Process each mirror
             for mirror in copying_mirrors:
+                synced_ids.add(int(mirror["id"]))
                 try:
                     await _sync_mirror_positions(mirror, leader_pos_map)
                 except Exception as e:
@@ -730,6 +909,29 @@ async def _poll_all_mirrors():
 
         except Exception as e:
             logger.error("Failed to poll trader %s on %s: %s", wallet[:10], network, e)
+
+    # AUDIT F3-1 / F2-PAUSE-PENDING-ORPHAN: resolve pending maker opens for any
+    # mirror that carries one but was NOT synced above — a PAUSED mirror (the
+    # active-mirror query excludes it) or one whose trader was removed. A
+    # pending is a possibly-resting live order; leaving it unresolved because
+    # the mirror is paused is the exact naked-fill risk the persistence exists
+    # to prevent. Resolution cancels the order or books its fill; it never
+    # mirrors new leader opens, so it respects pause semantics.
+    orphan_pending_ids = {k[0] for k in _PENDING_MAKER_OPENS} - synced_ids
+    for mirror_id in orphan_pending_ids:
+        try:
+            mirror = await run_blocking(get_copy_mirror, mirror_id)
+            if not mirror:
+                # No mirror row at all — drop the dangling pending so it can't
+                # block forever. (A real orphan is still flagged by reconcile.)
+                await run_blocking(_clear_mirror_runtime_state, mirror_id)
+                continue
+            await _resolve_pending_maker_opens_for_mirror(mirror)
+        except Exception as e:
+            logger.error(
+                "Copy pending-only resolution failed for mirror %s: %s",
+                mirror_id, e, exc_info=True,
+            )
 
 
 def _load_leader_position_map(trader_id: int, wallet: str, network: str) -> dict:
@@ -876,6 +1078,10 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
     cumulative_pnl = float(mirror.get("cumulative_pnl", 0.0))
 
     if mirror.get("stop_requested"):
+        # A maker open with an unknown fate must resolve (booking any fill as
+        # a tracked row) BEFORE the flatten reads open positions — otherwise
+        # the stop completes while an order/fill is still out there.
+        await _resolve_pending_maker_opens_for_mirror(mirror)
         closed_count, total_pnl, _, errors = await run_blocking(
             _flatten_mirror_positions,
             mirror_id,
@@ -891,6 +1097,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             )
             return
         await run_blocking(stop_copy_mirror, mirror_id)
+        await run_blocking(_clear_mirror_runtime_state, mirror_id)
         await run_blocking(_finalize_mirror_session, mirror, "user_stop")
         await _notify_user(
             user_id,
@@ -900,6 +1107,11 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         return
 
     session_id = mirror.get("strategy_session_id")
+
+    # Resolve maker opens with an unknown fate FIRST: a fill that landed after
+    # the wait window books here as a tracked row, so the sweep, the uPnL and
+    # the rail below all see it this same poll.
+    await _resolve_pending_maker_opens_for_mirror(mirror)
 
     # Load tracked rows and the follower's REAL on-venue positions FIRST — the
     # bracket-fill sweep and the rail's unrealized PnL both need them (the old
@@ -935,10 +1147,29 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         except Exception as e:  # noqa: BLE001 - reconcile is best-effort
             logger.debug("copy venue-position reconcile read failed: %s", e)
 
+    # F-4: is this venue read trustworthy enough to OPEN against? The
+    # duplicate-open guard below keys off ``venue_pos_by_product``; a silent
+    # empty read (client missing, read raised, or every tracked position
+    # absent when we believe we hold them) defeats it and would stack a
+    # duplicate. Opening is the only irreversible action gated on the read, so
+    # it gets the strict test; the sweep/rail have their own guards.
+    # F4-1: an archive rate-limit/circuit-open also makes ISOLATED positions
+    # silently vanish from get_all_positions (isolated-subaccount discovery
+    # returns [] then), so the follower could already hold the product we're
+    # about to open on an isolated child — the read is untrustworthy for opens
+    # regardless of how many cross-margin rows came back.
+    venue_read_suspect = (
+        follower_client is None
+        or not venue_read_ok
+        or _archive_reads_unreliable(str(network))
+        or (bool(copy_pos_by_product) and not venue_pos_by_product)
+    )
+
     # COPY-BRACKET-SWEEP: book venue-side closes nobody reported — a TP/SL
     # bracket that FILLED on the venue, a manual close, or a liquidation.
     # Without this, a filled stop-loss left a phantom open row, zero booked
     # PnL, and a rail that never saw the loss.
+    swept_fees = 0.0
     if venue_read_ok:
         swept_pnl, swept_fees = await _sweep_external_closes(
             mirror, copy_pos_by_product, venue_pos_by_product, follower_client
@@ -946,9 +1177,11 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         cumulative_pnl += swept_pnl
 
     # Unrealized PnL of the surviving open copy rows — venue uPnL scaled to
-    # the copy's share of the venue position, mid-price fallback.
-    upnl = await _compute_open_upnl(
-        copy_pos_by_product, venue_pos_by_product, follower_client
+    # the copy's share of the venue position, mid-price fallback. The
+    # conservative estimate is only computed when a TP rail can consume it.
+    upnl, upnl_conservative = await _compute_open_upnl(
+        copy_pos_by_product, venue_pos_by_product, follower_client,
+        conservative=cumulative_take_profit_pct > 0,
     )
     try:
         await run_blocking(set_mirror_unrealized, mirror_id, upnl)
@@ -957,13 +1190,42 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
 
     # COPY-RAIL: judged like every session rail in this product — live PnL
     # INCLUDING unrealized, NET of fees, as % of the allocated amount.
-    cumulative_fees = float(mirror.get("cumulative_fees_usd") or 0.0)
+    # AUDIT F3: swept closes booked THIS poll already added their pnl to
+    # cumulative_pnl above; their fees must land in the same poll's basis too,
+    # or net is overstated by exactly one close's fee until the next poll.
+    cumulative_fees = float(mirror.get("cumulative_fees_usd") or 0.0) + swept_fees
     net_pnl = cumulative_pnl + upnl - cumulative_fees
     if total_allocated > 0:
-        pnl_pct = (net_pnl / total_allocated) * 100
-        reason = _rail_decision(
-            net_pnl, total_allocated, cumulative_stop_loss_pct, cumulative_take_profit_pct
-        )
+        # SL: unchanged — immediate, on the primary estimator. Firing a stop
+        # early costs opportunity; firing it late costs money.
+        reason = _rail_decision(net_pnl, total_allocated, cumulative_stop_loss_pct, 0.0)
+        rail_net = net_pnl
+        rail_upnl = upnl
+        if reason is None and cumulative_take_profit_pct > 0:
+            # COPY-TP-CONFIRM: taking profit is IRREVERSIBLE and the numerator
+            # rests on venue reads that can spike or misparse for one poll
+            # (x18 heuristics, alias probing, mark blips). Judge TP on the
+            # conservative numerator (per-position min of venue-scaled and
+            # mid-derived uPnL) and require the breach to survive two polls.
+            # A real +50% doesn't vanish in 30 seconds; a phantom one does.
+            net_conservative = cumulative_pnl + upnl_conservative - cumulative_fees
+            tp_hit = _rail_decision(
+                net_conservative, total_allocated, 0.0, cumulative_take_profit_pct
+            ) == "auto_take_profit"
+            if _tp_breach_confirmed(mirror_id, tp_hit):
+                reason = "auto_take_profit"
+                rail_net = net_conservative
+                rail_upnl = upnl_conservative
+            elif tp_hit:
+                logger.info(
+                    "copy TP breach pending confirmation for mirror %s "
+                    "(net $%.2f conservative, $%.2f primary, target %.1f%% of $%.0f)",
+                    mirror_id, net_conservative, net_pnl,
+                    cumulative_take_profit_pct, total_allocated,
+                )
+        else:
+            _tp_breach_confirmed(mirror_id, False)
+        pnl_pct = (rail_net / total_allocated) * 100
         if reason is not None:
             if reason == "auto_stop_loss":
                 title = "🛑 Copy Trading Auto-Stopped"
@@ -984,13 +1246,14 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                 )
             else:
                 await run_blocking(auto_stop_mirror, mirror_id, detail)
+                await run_blocking(_clear_mirror_runtime_state, mirror_id)
                 await run_blocking(_finalize_mirror_session, mirror, reason)
             await _notify_user(
                 user_id,
                 (
                     f"{title}\n{detail}\n"
-                    f"Net P&L: ${net_pnl:+,.2f} (realized ${cumulative_pnl:+,.2f}, "
-                    f"unrealized ${upnl:+,.2f}, fees ${cumulative_fees:,.2f}) "
+                    f"Net P&L: ${rail_net:+,.2f} (realized ${cumulative_pnl:+,.2f}, "
+                    f"unrealized ${rail_upnl:+,.2f}, fees ${cumulative_fees:,.2f}) "
                     f"/ ${total_allocated:,.0f} allocated\n"
                     + (f"Closed {closed_count} copied position(s) for ${total_pnl:+,.2f}.\n" if closed_count > 0 else "")
                     + (f"⚠️ Some closes failed and will be retried: {'; '.join(errors[:2])}" if errors else "")
@@ -1021,8 +1284,12 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     network=network,
                     strategy_session_id=session_id,
                 )
-                if not result.get("success"):
-                    logger.warning("Failed to close copy position %s: %s", cp["id"], result.get("error", "close failed"))
+                ok, close_err = _close_result_ok(result)
+                if not ok:
+                    # A duplicate-suppressed result must NOT be settled (it
+                    # closed nothing / carries another submit's fill). Leave
+                    # the row open; next poll retries once the intent frees.
+                    logger.warning("Failed to close copy position %s: %s", cp["id"], close_err)
                     continue
                 pnl, fee, _price = await run_blocking(
                     _settle_copy_close, mirror_id, cp, result, network, float(cp.get("size", 0))
@@ -1060,8 +1327,9 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                         network=network,
                         strategy_session_id=session_id,
                     )
-                    if not close_res.get("success"):
-                        logger.error("Failed to flip copy position %s: %s", existing["id"], close_res.get("error", "close failed"))
+                    ok, close_err = _close_result_ok(close_res)
+                    if not ok:
+                        logger.error("Failed to flip copy position %s: %s", existing["id"], close_err)
                         continue
                     pnl, _fee, _price = await run_blocking(
                         _settle_copy_close, mirror_id, existing, close_res, network,
@@ -1093,6 +1361,17 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         leader_entry = leader_pos.get("entry_price", 0)
 
         if leader_entry <= 0:
+            continue
+
+        # F-4: never open against a venue read we can't trust — the
+        # duplicate-open guard below relies on it, so a silent empty read would
+        # let us stack a duplicate on a product we may already hold.
+        if venue_read_suspect:
+            logger.warning(
+                "copy skip open: venue position read unavailable/suspect for mirror "
+                "%s — refusing to open %s blind (duplicate risk); retry next poll",
+                mirror_id, product_key,
+            )
             continue
 
         # COPY-VENUE-RECONCILE: the follower already holds this product on-venue
@@ -1140,29 +1419,118 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
         if copy_size <= 0:
             continue
 
+        # COPY-PENDING-MAKER: a previous maker order on this product has an
+        # unresolved fate (cancel failed / archive silent). Never place a new
+        # order while it exists — a live resting order plus a fresh order is
+        # double exposure. Resolution already ran earlier this sync.
+        if (int(mirror_id), int(pid)) in _PENDING_MAKER_OPENS:
+            continue
+
         try:
-            result = await run_blocking(
-                execute_market_order,
-                telegram_id=user_id,
-                product=product_key,
-                size=copy_size,
-                is_long=is_long,
-                leverage=leverage,
-                slippage_pct=1.5,
-                enforce_rate_limit=False,
-                source="copy",
-                network=network,
-                strategy_session_id=session_id,
-            )
+            # COPY-STOP-RACE: the mirror snapshot driving this sync can be many
+            # seconds stale by now (venue reads above). Re-read immediately
+            # before committing an open — a stop/pause that landed mid-sync
+            # must win, or the stop's flatten races the very order we place.
+            live = await run_blocking(get_copy_mirror, mirror_id) or {}
+            if not live.get("active") or live.get("stop_requested") or live.get("paused"):
+                logger.info(
+                    "copy opens aborted: mirror %s stopped/paused mid-sync", mirror_id
+                )
+                return
+
+            if MAKER_OPENS_ENABLED:
+                result = await run_blocking(
+                    _execute_maker_open,
+                    user_id=user_id,
+                    product_key=product_key,
+                    pid=pid,
+                    size=copy_size,
+                    is_long=is_long,
+                    leverage=leverage,
+                    network=str(network),
+                    session_id=session_id,
+                )
+                if result.get("pending"):
+                    await run_blocking(_register_pending_maker_open, mirror_id, pid, {
+                        "digest": str(result.get("digest") or ""),
+                        "user_id": user_id,
+                        "product_key": product_key,
+                        "product_name": product_name,
+                        "is_long": is_long,
+                        "leverage": leverage,
+                        "leader_entry": float(leader_entry or 0.0),
+                        "leader_size": float(leader_pos.get("size") or 0.0),
+                        "created_ts": time.time(),
+                        "cancel_confirmed": bool(result.get("cancel_confirmed")),
+                    })
+                    logger.warning(
+                        "copy maker open PENDING for mirror %s product %s digest %s — "
+                        "fate unresolved (%s); no new orders on this product until resolved",
+                        mirror_id, pid, str(result.get("digest") or "")[:16],
+                        result.get("error"),
+                    )
+                    # COPY-STOP-RACE (F-2): the maker open ran for up to ~25s;
+                    # a stop that landed in that window already flattened (it
+                    # saw no row and no pending yet) and marked the mirror
+                    # inactive — which would exclude it from polling forever
+                    # while this order may still be resting. Re-arm so the
+                    # flatten-retry poller owns the pending until it resolves.
+                    live = await run_blocking(get_copy_mirror, mirror_id) or {}
+                    if not live.get("active") or live.get("stop_requested"):
+                        await run_blocking(request_copy_mirror_stop, mirror_id)
+                        logger.warning(
+                            "copy maker open PENDING re-armed stop for mirror %s "
+                            "product %s — a stop landed during the open",
+                            mirror_id, pid,
+                        )
+                    continue
+                if not result.get("success"):
+                    if result.get("error") == "maker_unfilled":
+                        logger.info(
+                            "copy maker open unfilled for %s (mirror %s) — retrying next poll",
+                            product_key, mirror_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Copy maker open failed for user %s: %s",
+                            user_id, result.get("error", "Unknown error"),
+                        )
+                    continue
+            else:
+                result = await run_blocking(
+                    execute_market_order,
+                    telegram_id=user_id,
+                    product=product_key,
+                    size=copy_size,
+                    is_long=is_long,
+                    leverage=leverage,
+                    slippage_pct=1.5,
+                    enforce_rate_limit=False,
+                    source="copy",
+                    network=network,
+                    strategy_session_id=session_id,
+                )
 
             if result.get("success"):
-                fill_price = float(result.get("price", leader_entry) or leader_entry)
-                # Open-side accounting: fee (when the archive resolved inline)
-                # and entry notional as volume.
+                # Maker fills report the exact filled base (partials keep what
+                # filled); the market path fills the whole request.
+                open_size = float(result.get("filled_size") or copy_size)
+                fill_price = float(result.get("price") or 0.0)
+                if fill_price <= 0:
+                    # Last resort. Booking the LEADER's entry as ours corrupts
+                    # PnL pairing quietly — make it loud when it happens.
+                    logger.warning(
+                        "copy open for mirror %s product %s has no resolvable fill "
+                        "price — falling back to leader entry %.6f for pairing",
+                        mirror_id, pid, float(leader_entry),
+                    )
+                    fill_price = float(leader_entry)
+                # Open-side accounting: fee (exact from the archive on the
+                # maker path) and entry notional as volume.
                 await run_blocking(
                     update_mirror_accounting, mirror_id,
                     fees_delta=float(result.get("fee") or 0.0),
-                    volume_delta=fill_price * copy_size,
+                    volume_delta=fill_price * open_size,
                 )
                 # Record the copy position
                 copy_position_id = await run_blocking(
@@ -1174,7 +1542,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                         "product_name": product_name,
                         "side": "long" if is_long else "short",
                         "entry_price": fill_price,
-                        "size": copy_size,
+                        "size": open_size,
                         "leverage": leverage,
                         "tp_price": leader_pos.get("tp_price"),
                         "sl_price": leader_pos.get("sl_price"),
@@ -1183,6 +1551,24 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     },
                 )
 
+                # COPY-STOP-RACE (post-open): a stop that landed while the
+                # order was in flight ran its flatten before this row existed.
+                # Unwind immediately — the user asked to be flat.
+                live = await run_blocking(get_copy_mirror, mirror_id) or {}
+                if not live.get("active") or live.get("stop_requested"):
+                    await _unwind_stop_raced_open(
+                        mirror,
+                        {
+                            "id": copy_position_id,
+                            "entry_price": fill_price,
+                            "side": "long" if is_long else "short",
+                            "product_name": product_name,
+                        },
+                        product_key, open_size, is_long, leverage,
+                        str(network), session_id,
+                    )
+                    continue
+
                 # Place TP/SL orders if leader has them
                 bracket_digests = await run_blocking(
                     _place_tp_sl_orders,
@@ -1190,7 +1576,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     product_key,
                     pid,
                     session_id=session_id,
-                    size=copy_size,
+                    size=open_size,
                     is_long=is_long,
                     leverage=leverage,
                     tp_price=leader_pos.get("tp_price"),
@@ -1223,7 +1609,7 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     f"📋 Copy Trade Opened\n"
                     f"Trader: {mirror.get('label') or wallet_snip}\n"
                     f"{side_emoji} {product_name}\n"
-                    f"Size: {copy_size:.6f} @ ${fill_price:,.2f}\n"
+                    f"Size: {open_size:.6f} @ ${fill_price:,.2f}\n"
                     f"Leverage: {leverage}x"
                     + (f"\nTP: ${leader_pos['tp_price']:,.2f}" if leader_pos.get("tp_price") else "")
                     + (f"\nSL: ${leader_pos['sl_price']:,.2f}" if leader_pos.get("sl_price") else "")
@@ -1286,6 +1672,417 @@ def _place_tp_sl_orders(user_id: int, product_key: str, product_id: int,
     return digests
 
 
+# ─── Maker-first opens ─────────────────────────────────────────
+
+
+def _archive_reads_unreliable(network: str) -> bool:
+    """True while the archive is rate-limited or circuit-broken.
+
+    Isolated-subaccount discovery silently returns [] in that state, so a
+    venue positions read may be missing every isolated position. An absence
+    observed then is NOT evidence that a position closed or that an order
+    didn't fill.
+    """
+    try:
+        from src.nadobro.venue.nado_archive import (
+            archive_url_for_network,
+            is_archive_rate_limited,
+        )
+
+        if is_archive_rate_limited():
+            return True
+        from src.nadobro.core.http_session import is_circuit_open
+
+        return bool(is_circuit_open(archive_url_for_network(network)))
+    except Exception:  # noqa: BLE001 - health probe must never break the poll
+        return False
+
+
+def _follower_flat_on_product(client, pid: int) -> Optional[bool]:
+    """True when the follower holds no position in ``pid``; None when the
+    read itself failed (unknown). Engine state — no archive indexing lag."""
+    if client is None:
+        return None
+    try:
+        for vp in client.get_all_positions() or []:
+            try:
+                if int(vp.get("product_id", -1)) == int(pid) and abs(
+                    float(vp.get("amount", 0) or 0)
+                ) > 0:
+                    return False
+            except (TypeError, ValueError):
+                continue
+        return True
+    except Exception:  # noqa: BLE001 - unknown, caller keeps the order pending
+        return None
+
+
+def _maker_fee_from_parsed(parsed: dict) -> float:
+    return float(parsed.get("fee") or 0.0) + float(parsed.get("builder_fee") or 0.0)
+
+
+def _maker_result_from_parsed(parsed: dict, digest: str, fallback_price: float = 0.0) -> dict:
+    fill_size = float(parsed.get("fill_size") or 0.0)
+    return {
+        "success": True,
+        "digest": digest,
+        "price": float(parsed.get("fill_price") or fallback_price or 0.0),
+        "fee": _maker_fee_from_parsed(parsed),
+        "filled_size": fill_size,
+    }
+
+
+def _execute_maker_open(
+    *,
+    user_id: int,
+    product_key: str,
+    pid: int,
+    size: float,
+    is_long: bool,
+    leverage: float,
+    network: str,
+    session_id=None,
+) -> dict:
+    """Maker-first copy open: post-only limit joined at the touch, short fill
+    wait, cancel the remainder. Never pays taker fees or crosses the spread —
+    the market path paid taker fees plus up to 1.5% slippage on every entry.
+
+    The touch (best bid for a long, best ask for a short) is an
+    exchange-quoted, tick-valid price, and post-only guarantees the order
+    can only rest. Fills resolve from the archive by digest, so the booked
+    entry price and fee are EXACT (the market path guessed the leader's entry
+    when the payload price was missing, and usually missed the open fee).
+
+    Returns an execute_market_order-shaped dict plus:
+      filled_size      — base actually filled (a partial keeps what filled)
+      pending=True     — the order's fate could not be confirmed (cancel
+                         failed and/or archive silent). The CALLER MUST
+                         register the digest in _PENDING_MAKER_OPENS and must
+                         not place another order on this product until it
+                         resolves.
+      cancel_confirmed — whether the venue acknowledged the cancel.
+    error == "maker_unfilled" means confirmed zero fill: retry next poll (the
+    entry-deviation gate decides whether the entry is still worth taking).
+    """
+    client = get_user_nado_client(user_id, network=network)
+    if not client:
+        return {"success": False, "error": "Wallet not initialized."}
+    try:
+        mp = client.get_market_price(pid) or {}
+    except Exception as e:  # noqa: BLE001 - no touch price = no maker order
+        return {"success": False, "error": f"price read failed: {e}"}
+    touch = float((mp.get("bid") if is_long else mp.get("ask")) or 0.0)
+    if touch <= 0:
+        return {"success": False, "error": "no touch price"}
+
+    res = execute_limit_order(
+        telegram_id=user_id,
+        product=product_key,
+        size=size,
+        price=touch,
+        is_long=is_long,
+        leverage=leverage,
+        enforce_rate_limit=False,
+        post_only=True,
+        source="copy",
+        strategy_session_id=session_id,
+        network=network,
+    )
+    if not res.get("success"):
+        # Includes post-only would-cross rejections when the touch moved —
+        # a clean no-op; the next poll re-quotes.
+        return {"success": False, "error": res.get("error", "limit order failed")}
+    digest = str(res.get("digest") or "").strip()
+    if not digest:
+        # Cannot track an order without its digest. The venue-reconcile guard
+        # ("already holds on-venue") will surface any untracked fill.
+        logger.error(
+            "copy maker open for user %s product %s returned success without a "
+            "digest — order untrackable",
+            user_id, pid,
+        )
+        return {"success": False, "error": "order digest missing"}
+
+    # Fill wait: poll the archive; break early only on a full fill so a
+    # partial keeps collecting maker fills until the deadline.
+    deadline = time.time() + MAKER_FILL_WAIT_SECONDS
+    parsed: Optional[dict] = None
+    while True:
+        rows = query_orders_by_digests(network, [digest])
+        row = rows.get(digest)
+        if row is not None:
+            parsed = row
+            filled = float(row.get("fill_size") or 0.0)
+            wanted = abs(float(row.get("original_amount") or 0.0)) or float(size)
+            if filled > 0 and filled >= wanted * 0.999:
+                return _maker_result_from_parsed(row, digest, touch)
+        if time.time() >= deadline:
+            break
+        time.sleep(2.0)
+
+    # Deadline passed with the order (at best) partially filled: cancel the
+    # remainder, then read the archive once more for fills that landed while
+    # the cancel was in flight.
+    cancel_confirmed = False
+    try:
+        cancel_res = client.cancel_order(pid, digest) or {}
+        cancel_confirmed = bool(cancel_res.get("success"))
+        if not cancel_confirmed:
+            err = str(cancel_res.get("error") or "").lower()
+            # An already-gone order (fully filled or venue-pruned) is a
+            # confirmed-dead order for our purposes.
+            cancel_confirmed = "not found" in err or "filled" in err or "expired" in err
+    except Exception as e:  # noqa: BLE001 - unresolved cancel handled below
+        logger.warning("copy maker cancel failed for digest %s: %s", digest[:16], e)
+
+    rows = query_orders_by_digests(network, [digest])
+    row = rows.get(digest) or parsed
+    if row is not None and float(row.get("fill_size") or 0.0) > 0:
+        return _maker_result_from_parsed(row, digest, touch)
+    # The archive does NOT index zero-fill orders (verified live 2026-07-18:
+    # an active trader's order history contains no base_filled=0 rows), so a
+    # missing row can't distinguish "never filled" from "fill not indexed
+    # yet". Engine state can: the open loop only places when the follower is
+    # FLAT on this product, so cancel-acked + still flat ⇒ nothing filled.
+    if cancel_confirmed and not _archive_reads_unreliable(network):
+        if _follower_flat_on_product(client, pid) is True:
+            return {"success": False, "error": "maker_unfilled"}
+    return {
+        "success": False,
+        "pending": True,
+        "digest": digest,
+        "cancel_confirmed": cancel_confirmed,
+        "error": "maker order fate unknown (cancel/archive/positions unavailable)",
+    }
+
+
+def _resolve_pending_maker_open(network: str, pid: int, pending: dict) -> tuple[str, Optional[dict]]:
+    """Resolve a maker open whose fate was unknown.
+
+    Returns ("filled", result_dict) when the archive shows fills (the caller
+    books the position), ("gone", None) when the order is confirmed dead with
+    zero fill, ("unknown", None) when it still cannot be confirmed — the
+    product stays locked against new orders and the mirror cannot finish a
+    stop while this state persists.
+    """
+    digest = str(pending.get("digest") or "")
+    if not digest:
+        return "gone", None
+    user_id = int(pending.get("user_id") or 0)
+    rows = query_orders_by_digests(network, [digest])
+    row = rows.get(digest)
+    if row is not None and float(row.get("fill_size") or 0.0) > 0:
+        if not pending.get("cancel_confirmed") and float(row.get("fill_size") or 0.0) < abs(
+            float(row.get("original_amount") or 0.0)
+        ) * 0.999:
+            # Partially filled and possibly still resting — kill the rest
+            # before booking, else the position keeps growing untracked.
+            try:
+                client = get_user_nado_client(user_id, network=network)
+                if client:
+                    cancel_res = client.cancel_order(int(pid), digest) or {}
+                    if not cancel_res.get("success"):
+                        err = str(cancel_res.get("error") or "").lower()
+                        if not ("not found" in err or "filled" in err or "expired" in err):
+                            return "unknown", None
+                    pending["cancel_confirmed"] = True
+            except Exception as e:  # noqa: BLE001 - retry next poll
+                logger.warning("pending maker cancel retry failed for %s: %s", digest[:16], e)
+                return "unknown", None
+        return "filled", _maker_result_from_parsed(row, digest)
+    if not pending.get("cancel_confirmed"):
+        try:
+            client = get_user_nado_client(user_id, network=network)
+            cancel_res = (client.cancel_order(int(pid), digest) if client else {}) or {}
+            if cancel_res.get("success"):
+                pending["cancel_confirmed"] = True
+            else:
+                err = str(cancel_res.get("error") or "").lower()
+                if "not found" in err or "filled" in err or "expired" in err:
+                    pending["cancel_confirmed"] = True
+        except Exception as e:  # noqa: BLE001 - retry next poll
+            logger.warning("pending maker cancel retry failed for %s: %s", digest[:16], e)
+    age = time.time() - float(pending.get("created_ts") or 0.0)
+    if not pending.get("cancel_confirmed"):
+        # F-10: a cancel that NEVER acks would otherwise keep the stop pending
+        # forever (a stuck stop is a definite harm — the user can't get flat).
+        # Hard backstop: past 2× the give-up window, declare it gone CRITICALLY
+        # regardless. A post-only order resting that long is almost certainly
+        # venue-reaped, and any real fill keeps being flagged by the
+        # venue-reconcile guard every poll.
+        if age >= (MAKER_PENDING_GIVE_UP_SECONDS * 2):
+            logger.critical(
+                "copy pending maker open HARD GIVE-UP for product %s digest %s after "
+                "%.0fs — cancel never acked; unblocking the stop. VERIFY no untracked "
+                "resting order/fill on the venue.",
+                pid, digest[:16], age,
+            )
+            return "gone", None
+        return "unknown", None
+    # Cancel is acked, archive shows no fills. Flat-on-venue is the decisive
+    # signal (the archive never indexes zero-fill orders): the open loop only
+    # placed this order while the follower was flat on the product, so still
+    # flat ⇒ confirmed zero fill.
+    if not _archive_reads_unreliable(network):
+        client = get_user_nado_client(user_id, network=network) if user_id else None
+        if _follower_flat_on_product(client, pid) is True:
+            return "gone", None
+    if age >= MAKER_PENDING_GIVE_UP_SECONDS:
+        # Cancel confirmed long ago; archive and/or position reads have stayed
+        # inconclusive (or a manual position in the same product masks the
+        # flat check). Declare it gone LOUDLY — an unbooked fill, if any,
+        # keeps being flagged by the venue-reconcile guard on every poll.
+        logger.error(
+            "copy pending maker open GIVEN UP for product %s digest %s after %.0fs — "
+            "cancel confirmed, fills unconfirmable; verify no untracked fill",
+            pid, digest[:16], MAKER_PENDING_GIVE_UP_SECONDS,
+        )
+        return "gone", None
+    return "unknown", None
+
+
+async def _resolve_pending_maker_opens_for_mirror(mirror: dict) -> bool:
+    """Resolve every pending maker open for this mirror, booking filled ones
+    as tracked positions. Returns True when nothing is left pending."""
+    mirror_id = int(mirror["id"])
+    user_id = mirror["user_id"]
+    network = str(mirror.get("network", "mainnet"))
+    session_id = mirror.get("strategy_session_id")
+    all_resolved = True
+    for key in [k for k in _PENDING_MAKER_OPENS if k[0] == mirror_id]:
+        pending = _PENDING_MAKER_OPENS.get(key)
+        if pending is None:
+            continue
+        pid = key[1]
+        try:
+            state, result = await run_blocking(_resolve_pending_maker_open, network, pid, pending)
+        except Exception as e:  # noqa: BLE001 - keep the lock until resolved
+            logger.error("pending maker resolution failed for %s: %s", key, e)
+            all_resolved = False
+            continue
+        if state == "unknown":
+            all_resolved = False
+            continue
+        await run_blocking(_pop_pending_maker_open, mirror_id, pid)
+        if state != "filled" or not result:
+            continue
+        fill_price = float(result.get("price") or 0.0)
+        open_size = float(result.get("filled_size") or 0.0)
+        if fill_price <= 0 or open_size <= 0:
+            # A fill with an unparsable price would silently vanish here. Keep
+            # it pending so the venue-reconcile guard / next resolution retries
+            # rather than dropping a real position.
+            await run_blocking(_register_pending_maker_open, mirror_id, pid, pending)
+            all_resolved = False
+            logger.error(
+                "copy pending maker fill for mirror %s product %s has no usable "
+                "price/size (%.6f @ %.6f) — kept pending for retry",
+                mirror_id, pid, open_size, fill_price,
+            )
+            continue
+        await run_blocking(
+            update_mirror_accounting, mirror_id,
+            fees_delta=float(result.get("fee") or 0.0),
+            volume_delta=fill_price * open_size,
+        )
+        await run_blocking(
+            insert_copy_position,
+            {
+                "mirror_id": mirror_id,
+                "user_id": user_id,
+                "product_id": pid,
+                "product_name": pending.get("product_name")
+                or get_product_name(pid, network=network),
+                "side": "long" if pending.get("is_long") else "short",
+                "entry_price": fill_price,
+                "size": open_size,
+                "leverage": float(pending.get("leverage") or 1.0),
+                "leader_entry_price": float(pending.get("leader_entry") or 0.0) or None,
+                "leader_size": float(pending.get("leader_size") or 0.0) or None,
+            },
+        )
+        logger.info(
+            "copy pending maker open RESOLVED as filled for mirror %s product %s: "
+            "%.6f @ %.6f",
+            mirror_id, pid, open_size, fill_price,
+        )
+        # COPY-STOP-RACE (F-2, second window): a stop that landed while this
+        # pending was unresolved already flattened (there was no row yet) and
+        # marked the mirror inactive. We just booked a real tracked row — the
+        # user asked to be flat, so re-arm; the flatten-retry poller now sees
+        # the row and closes it.
+        live = await run_blocking(get_copy_mirror, mirror_id) or {}
+        if not live.get("active") or live.get("stop_requested"):
+            await run_blocking(request_copy_mirror_stop, mirror_id)
+            logger.warning(
+                "copy late maker fill booked under a stopped mirror %s product %s "
+                "— re-armed stop to flatten it",
+                mirror_id, pid,
+            )
+        await _notify_user(
+            user_id,
+            f"📋 Copy Trade Opened (late fill)\n"
+            f"{pending.get('product_name') or pid}: {open_size:.6f} @ ${fill_price:,.2f}",
+        )
+    return all_resolved
+
+
+async def _unwind_stop_raced_open(
+    mirror: dict, cp: dict, product_key: str, open_size: float, is_long: bool,
+    leverage: float, network: str, session_id,
+) -> None:
+    """A stop landed while an open was in flight, so the stop's flatten ran
+    before this row existed. Close it immediately — the user asked to be
+    flat. If the close fails, re-arm stop_requested so the flatten-retry
+    poller owns the position instead of it orphaning behind an inactive
+    mirror (get_user_copies only shows active mirrors)."""
+    mirror_id = mirror["id"]
+    user_id = mirror["user_id"]
+    product_name = cp.get("product_name") or product_key
+    try:
+        result = await run_blocking(
+            execute_market_order,
+            telegram_id=user_id,
+            product=product_key,
+            size=open_size,
+            is_long=not is_long,
+            leverage=leverage,
+            slippage_pct=1.5,
+            enforce_rate_limit=False,
+            reduce_only=True,
+            source="copy",
+            network=network,
+            strategy_session_id=session_id,
+        )
+    except Exception as e:  # noqa: BLE001 - handled as a failed close below
+        result = {"success": False, "error": str(e)}
+    ok, close_err = _close_result_ok(result)
+    if ok:
+        pnl, _fee, _price = await run_blocking(
+            _settle_copy_close, mirror_id, cp, result, network, open_size
+        )
+        if cp.get("id"):
+            await run_blocking(close_copy_position, cp["id"], pnl=pnl, reason="stop_race_unwind")
+        await _notify_user(
+            user_id,
+            f"📋 Copy Entry Unwound\n"
+            f"{product_name}: an entry filled while you were stopping — "
+            f"closed immediately.\nP&L: ${pnl:+,.2f}",
+        )
+        return
+    logger.error(
+        "copy stop-race unwind close FAILED for mirror %s position %s: %s — "
+        "re-arming stop retry",
+        mirror_id, cp.get("id"), close_err,
+    )
+    await run_blocking(request_copy_mirror_stop, mirror_id)
+    await _notify_user(
+        user_id,
+        f"⚠️ {product_name}: a copy entry filled while you were stopping and "
+        "could not be closed yet. The stop will keep retrying automatically.",
+    )
+
+
 def _rail_decision(
     net_pnl: float, total_allocated: float, stop_loss_pct: float, take_profit_pct: float
 ) -> Optional[str]:
@@ -1301,6 +2098,29 @@ def _rail_decision(
     if take_profit_pct > 0 and net_pnl > 0 and pnl_pct >= take_profit_pct:
         return "auto_take_profit"
     return None
+
+
+def _tp_breach_confirmed(mirror_id: int, breached: bool, now: Optional[float] = None) -> bool:
+    """Two-poll confirmation for the profit-side rail (SL never comes here).
+
+    First breached poll arms the marker and returns False; a later poll still
+    breached and at least TP_CONFIRM_GAP_SECONDS after the first returns True.
+    Any non-breached evaluation disarms. The marker survives a confirmed fire
+    (it is only cleared by _clear_mirror_runtime_state when the mirror stops)
+    so a failed flatten retries next poll without re-waiting the gap.
+    In-memory on purpose: a restart merely costs one extra confirmation poll.
+    """
+    key = int(mirror_id)
+    if now is None:
+        now = time.time()
+    if not breached:
+        _TP_BREACH_FIRST_SEEN.pop(key, None)
+        return False
+    first = _TP_BREACH_FIRST_SEEN.get(key)
+    if first is None:
+        _TP_BREACH_FIRST_SEEN[key] = now
+        return False
+    return (now - first) >= TP_CONFIRM_GAP_SECONDS
 
 
 def _classify_external_change(cp: dict, venue_pos: Optional[dict]) -> tuple[str, float]:
@@ -1365,15 +2185,68 @@ async def _sweep_external_closes(
     network = str(mirror.get("network", "mainnet"))
     pnl_total = 0.0
     fees_total = 0.0
+    if _archive_reads_unreliable(network):
+        # Isolated positions are invisible while the archive is limited — any
+        # "missing position" observed now is likely a read artifact, and a
+        # bracket-fill lookup can't run either. Booking waits; delay ≠ loss.
+        logger.warning(
+            "copy sweep skipped for mirror %s: archive rate-limited/circuit open — "
+            "venue read may be missing isolated positions",
+            mirror_id,
+        )
+        return 0.0, 0.0
+    # F-4: whole-book vanish signature. If every tracked position is missing
+    # from the venue read, treat unproven (no-bracket) closes with a much
+    # longer confirmation window — a read outage that doesn't trip the archive
+    # flag (engine cross-margin read fail, host starvation) looks exactly like
+    # this and would otherwise fabricate closes on every position at once.
+    tracked = [cp for cp in copy_pos_by_product.values() if float(cp.get("size") or 0.0) > 0]
+    vanished = [
+        cp for cp in tracked
+        if _classify_external_change(cp, venue_pos_by_product.get(cp["product_id"]))[0] == "closed"
+    ]
+    mass_vanish = len(tracked) >= 2 and len(vanished) == len(tracked)
+    if mass_vanish:
+        logger.warning(
+            "copy mass-vanish for mirror %s: all %d tracked positions missing from "
+            "the venue read at once — likely a read outage; unproven closes need "
+            "%.0fs confirmation before booking",
+            mirror_id, len(tracked), MASS_VANISH_CONFIRM_SECONDS,
+        )
     for pid, cp in list(copy_pos_by_product.items()):
         kind, venue_size = _classify_external_change(cp, venue_pos_by_product.get(pid))
+        suspect_key = (int(mirror_id), int(pid))
         if kind == "ok":
+            _EXTERNAL_CLOSE_SUSPECTS.pop(suspect_key, None)
             continue
         copy_size = float(cp.get("size") or 0.0)
         closed_qty = copy_size if kind == "closed" else max(0.0, copy_size - venue_size)
         if closed_qty <= 0:
             continue
         close_price, fee, reason = await run_blocking(_resolve_bracket_fill, cp, network)
+        if kind == "closed" and reason == "external_close":
+            # COPY-SWEEP-CONFIRM: no bracket fill proves this close happened.
+            # "Position missing from the venue read" is also what a transient
+            # read flap looks like — isolated-subaccount discovery silently
+            # returns [] whenever the archive is rate-limited, vanishing every
+            # isolated position for a poll. Booking that would fabricate
+            # realized PnL AND let the open loop re-open a duplicate. Require
+            # the same observation on a later poll before booking — longer when
+            # the whole book vanished at once (F-4 outage signature).
+            confirm_window = MASS_VANISH_CONFIRM_SECONDS if mass_vanish else EXTERNAL_CLOSE_CONFIRM_SECONDS
+            now = time.time()
+            first_seen = _EXTERNAL_CLOSE_SUSPECTS.get(suspect_key)
+            if first_seen is None:
+                _EXTERNAL_CLOSE_SUSPECTS[suspect_key] = now
+                logger.warning(
+                    "copy external close SUSPECTED for mirror %s product %s — "
+                    "no bracket fill; awaiting confirmation next poll",
+                    mirror_id, pid,
+                )
+                continue
+            if (now - first_seen) < confirm_window:
+                continue
+        _EXTERNAL_CLOSE_SUSPECTS.pop(suspect_key, None)
         if close_price <= 0 and follower_client is not None:
             try:
                 mp = await run_blocking(follower_client.get_market_price, pid)
@@ -1427,38 +2300,57 @@ async def _sweep_external_closes(
 
 
 async def _compute_open_upnl(
-    copy_pos_by_product: dict, venue_pos_by_product: dict, follower_client
-) -> float:
-    """Unrealized PnL of the open copy rows.
+    copy_pos_by_product: dict,
+    venue_pos_by_product: dict,
+    follower_client,
+    *,
+    conservative: bool = False,
+) -> tuple[float, float]:
+    """Unrealized PnL of the open copy rows, as ``(primary, conservative)``.
 
-    Prefers the venue's own uPnL scaled to the copy's share of the venue
-    position (exact when only the copy holds the product); falls back to
-    (mid - entry) x size pairing when the venue omits uPnL.
+    ``primary`` — the venue's own uPnL scaled to the copy's share of the venue
+    position (exact when only the copy holds the product), mid-price pairing
+    fallback. This is the dashboard number and the SL rail basis — unchanged.
+
+    ``conservative`` — per-position ``min(venue-scaled, mid-derived)`` when
+    both exist (COPY-TP-CONFIRM: never take profit off a number that a plain
+    mid-vs-entry pairing can't reproduce; the venue field goes through x18
+    heuristics and alias probing and can misparse for a poll). Equal to
+    ``primary`` when ``conservative=False`` — the extra mid reads are skipped
+    entirely so a mirror with no TP keeps today's IO profile.
     """
-    total = 0.0
+    primary = 0.0
+    conservative_total = 0.0
     for pid, cp in copy_pos_by_product.items():
         copy_size = float(cp.get("size") or 0.0)
         if copy_size <= 0:
             continue
+        venue_est: Optional[float] = None
         vp = venue_pos_by_product.get(pid)
         if vp is not None and vp.get("unrealized_pnl") is not None:
             try:
                 venue_size = abs(float(vp.get("signed_amount") or vp.get("amount") or 0.0))
                 if venue_size > 0:
                     share = min(1.0, copy_size / venue_size)
-                    total += float(vp["unrealized_pnl"]) * share
-                    continue
+                    venue_est = float(vp["unrealized_pnl"]) * share
             except (TypeError, ValueError):
-                pass
-        if follower_client is not None:
+                venue_est = None
+        mid_est: Optional[float] = None
+        if follower_client is not None and (venue_est is None or conservative):
             try:
                 mp = await run_blocking(follower_client.get_market_price, pid)
                 mid = float((mp or {}).get("mid") or 0.0)
             except Exception:  # noqa: BLE001 - price best-effort
                 mid = 0.0
             if mid > 0:
-                total += _close_pnl_gross(cp.get("entry_price"), mid, copy_size, cp.get("side", ""))
-    return total
+                mid_est = _close_pnl_gross(cp.get("entry_price"), mid, copy_size, cp.get("side", ""))
+        p = venue_est if venue_est is not None else (mid_est or 0.0)
+        primary += p
+        if venue_est is not None and mid_est is not None:
+            conservative_total += min(venue_est, mid_est)
+        else:
+            conservative_total += p
+    return primary, conservative_total
 
 
 def _close_pnl_gross(entry_price: float, close_price: float, size: float, side: str) -> float:
@@ -1593,10 +2485,11 @@ async def _mirror_partial_close_if_needed(
             network=network,
             strategy_session_id=session_id,
         )
-        if not result.get("success"):
+        ok, close_err = _close_result_ok(result)
+        if not ok:
             logger.warning(
                 "copy partial close failed for position %s: %s",
-                existing_cp["id"], result.get("error", "close failed"),
+                existing_cp["id"], close_err,
             )
             return ""
         pnl, _fee, _price = await run_blocking(
