@@ -388,17 +388,17 @@ async def _handle_portfolio(query, data, telegram_id):
         return
 
     if action == "share_pnl":
-        # Type A (per-trade) cards render the miner/trophy design:
+        # Per-trade cards (Type A, miner/trophy design):
         #   ``portfolio:share_pnl:rt:{trip_key}``   — desk/agent/manual round-trip
         #   ``portfolio:share_pnl:copy:{position_id}`` — a closed copy position
-        # The session card (``portfolio:share_pnl:{sid}``) is Type B and still
-        # uses the legacy renderer (rework pending).
+        # Strategy-session cards (Type B):
+        #   ``portfolio:share_pnl:{sid}``           — a strategy session
         import io as _io
 
-        from src.nadobro.portfolio.pnl_card import generate_pnl_card
         from src.nadobro.portfolio.pnl_card_type_a import generate_type_a_card
+        from src.nadobro.portfolio.pnl_card_type_b import generate_type_b_card
         from src.nadobro.portfolio.pnl_card_builder import (
-            build_pnl_card_data,
+            build_type_b_card_data,
             build_round_trip_card_data,
             build_copy_trade_card_data,
         )
@@ -442,9 +442,9 @@ async def _handle_portfolio(query, data, telegram_id):
                 return
             if data is not None:  # Type A per-trade card
                 png_bytes = await run_blocking(generate_type_a_card, data)
-            else:  # Type B session card (legacy)
-                data = await run_blocking(build_pnl_card_data, telegram_id, network, session_id)
-                png_bytes = await run_blocking(generate_pnl_card, data)
+            else:  # Type B strategy-session card
+                data = await run_blocking(build_type_b_card_data, telegram_id, network, session_id)
+                png_bytes = await run_blocking(generate_type_b_card, data)
         except Exception as e:
             logger.warning("portfolio_share_pnl_failed user=%s err=%s", telegram_id, e)
             await query.answer("Could not generate PnL card.", show_alert=True)
