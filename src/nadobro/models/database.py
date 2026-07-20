@@ -928,6 +928,32 @@ def get_open_copy_positions(mirror_id: int) -> list:
     )
 
 
+def get_closed_copy_position(position_id: int) -> Optional[dict]:
+    """A single CLOSED copy position by id (Type A PnL card source)."""
+    return query_one(
+        "SELECT * FROM copy_positions WHERE id = %s AND status = 'closed'",
+        (int(position_id),),
+    )
+
+
+def get_closed_copy_positions(user_id: int, network: str, limit: int = 100) -> list:
+    """Closed copy positions for a user on a network, newest close first.
+
+    Display-only source for the History tab (Type A copy cards). Joins
+    copy_mirrors for the network scope; these rows are NEVER fed into the
+    manual round-trip PnL/volume aggregation — copy stays tracked solely in
+    copy accounting, so History shows them without double-counting.
+    """
+    return query_all(
+        """SELECT p.* FROM copy_positions p
+           JOIN copy_mirrors m ON p.mirror_id = m.id
+           WHERE p.user_id = %s AND p.status = 'closed' AND m.network = %s
+           ORDER BY p.closed_at DESC NULLS LAST, p.id DESC
+           LIMIT %s""",
+        (int(user_id), network, int(limit)),
+    )
+
+
 def get_open_copy_position_for_product(mirror_id: int, product_id: int) -> Optional[dict]:
     return query_one(
         "SELECT * FROM copy_positions WHERE mirror_id = %s AND product_id = %s AND status = 'open' ORDER BY opened_at DESC LIMIT 1",

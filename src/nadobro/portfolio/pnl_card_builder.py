@@ -235,41 +235,94 @@ def build_pnl_card_data(
     }
 
 
+def _type_a_product(product_name: Optional[str]) -> tuple[str, str, bool]:
+    """``(base_symbol, display_product, is_perp)`` for the Type A card.
+
+    ``BTC-PERP`` -> ``("BTC", "BTC:PERP-USDC", True)``. A spot pair (no PERP
+    marker) returns ``is_perp=False`` so the caller can gate it out (Type A is
+    perps-only for now)."""
+    raw = (product_name or "").strip().upper()
+    is_perp = "PERP" in raw
+    base = (
+        raw.replace(":PERP-USDC", "").replace("-PERP", "").split(":")[0].split("-")[0]
+    )
+    if not base:
+        base = "BTC"
+    return base, f"{base}:PERP-USDC", is_perp
+
+
 def build_round_trip_card_data(
     telegram_id: int,
     network: str,
     round_trip_key: str,
 ) -> dict:
-    """PnL card data for a History round-trip (manual / non-strategy).
+    """Type A card data for a History round-trip (desk/agent/manual trade).
 
     ``round_trip_key`` is the stable id minted by
-    :func:`trade_service.compute_round_trips` (typically the close trade
-    id). The card uses ``strategy="manual"`` so the renderer picks the
-    neutral history skin.
+    :func:`trade_service.compute_round_trips` (the close trade id). Returns the
+    Type A contract consumed by ``pnl_card_type_a.generate_type_a_card``. A
+    spot round-trip returns ``{"unsupported": "spot"}`` — Type A is perps-only
+    for now.
     """
     from src.nadobro.trading.trade_service import find_round_trip
 
     rt = find_round_trip(int(telegram_id), network, str(round_trip_key))
     if not rt:
-        return {
-            "symbol": "MANUAL",
-            "strategy": "manual",
-            "volume": _fmt_dollar(Decimal("0")),
-            "net_fees": _fmt_negative_dollar(Decimal("0")),
-            "pnl": _fmt_signed_dollar(Decimal("0")),
-            "referral_code": _fetch_active_referral_code(telegram_id, network) or "",
-        }
+        return {"unsupported": "not_found"}
 
-    volume = _to_decimal(rt.get("volume_usd"))
-    pnl = _to_decimal(rt.get("realized_pnl"))
-    fees = _to_decimal(rt.get("fees"))
     product_name = rt.get("product_name") or rt.get("pair")
-    referral_code = _fetch_active_referral_code(telegram_id, network)
+    base, display, is_perp = _type_a_product(product_name)
+    if not is_perp:
+        return {"unsupported": "spot"}
+
     return {
-        "symbol": _format_symbol(product_name, None),
-        "strategy": "manual",
-        "volume": _fmt_dollar(volume),
-        "net_fees": _fmt_negative_dollar(fees),
-        "pnl": _fmt_signed_dollar(pnl),
-        "referral_code": referral_code or "",
+        "badge": "DESK TRADE",
+        "product": display,
+        "base_symbol": base,
+        "side": "LONG" if str(rt.get("side") or "").lower() in ("long", "buy") else "SHORT",
+        "leverage": float(rt.get("leverage") or 0.0),
+        "pnl": float(_to_decimal(rt.get("realized_pnl"))),
+        "entry_price": float(_to_decimal(rt.get("avg_open_price"))),
+        "exit_price": float(_to_decimal(rt.get("avg_close_price"))),
+        "size": float(_to_decimal(rt.get("size"))),
+        "referral_code": _fetch_active_referral_code(telegram_id, network) or "",
+    }
+
+
+def build_copy_trade_card_data(
+    telegram_id: int,
+    network: str,
+    position_id: int,
+) -> dict:
+    """Type A card data for a CLOSED copy position (badge ``COPY TRADE``).
+
+    Exit price is not persisted on ``copy_positions`` but the stored ``pnl`` is
+    the gross ``(exit-entry)*size*dir``, so ``exit = entry + pnl/(size*dir)``
+    recovers the exact effective exit (a size-weighted average across partial
+    closes) — Entry/Exit/Size therefore always reconcile with the shown PnL.
+    """
+    from src.nadobro.models.database import get_closed_copy_position
+
+    pos = get_closed_copy_position(int(position_id))
+    if not pos or int(pos.get("user_id") or 0) != int(telegram_id):
+        return {"unsupported": "not_found"}
+
+    base, display, _is_perp = _type_a_product(pos.get("product_name"))
+    entry = float(_to_decimal(pos.get("entry_price")))
+    size = float(_to_decimal(pos.get("size")))
+    pnl = float(_to_decimal(pos.get("pnl")))
+    is_long = str(pos.get("side") or "").lower() in ("long", "buy")
+    direction = 1.0 if is_long else -1.0
+    exit_price = entry + (pnl / (size * direction)) if size > 0 else entry
+    return {
+        "badge": "COPY TRADE",
+        "product": display,
+        "base_symbol": base,
+        "side": "LONG" if is_long else "SHORT",
+        "leverage": float(pos.get("leverage") or 0.0),
+        "pnl": pnl,
+        "entry_price": entry,
+        "exit_price": exit_price,
+        "size": size,
+        "referral_code": _fetch_active_referral_code(telegram_id, network) or "",
     }
