@@ -85,7 +85,7 @@ from src.nadobro.config import (
     list_volume_spot_product_names,
     normalize_volume_spot_symbol,
 )
-from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
+from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk, run_blocking_sdk_capped
 from src.nadobro.core.perf import timed_metric, log_slow
 from src.nadobro.trading.trading_readiness import check_trading_readiness
 
@@ -765,9 +765,18 @@ async def _handle_positions(query, data, telegram_id, context):
     action = parts[1] if len(parts) > 1 else "view"
 
     if action == "view":
+        # CLICK-PATH-BLOCKING fix: build_positions_view makes two venue reads
+        # (get_all_positions + get_all_market_prices). Route it to the SDK pool
+        # with a wall-clock cap (matching the reply-keyboard path's
+        # resolve_home_view) so it never queues behind strategy-cycle reads on
+        # the shared 8-worker MISC pool and never makes a tap wait ~30s.
         with timed_metric("cb.positions.view"):
-            msg, reply_markup = await run_blocking(build_positions_view, telegram_id)
-        await _edit_loc(query, 
+            msg, reply_markup = await run_blocking_sdk_capped(
+                build_positions_view, telegram_id,
+                timeout_seconds=6.0,
+                default=("⏳ Refreshing positions… tap again in a sec\\.", back_kb()),
+            )
+        await _edit_loc(query,
             msg,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup,

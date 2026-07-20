@@ -65,7 +65,7 @@ from src.nadobro.users.user_service import (
     get_user,
     run_strategy_start_preflight,
 )
-from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
 from src.nadobro.core.perf import timed_metric, record_metric
 from src.nadobro.utils.env import env_bool, env_float, env_tristate
 from src.nadobro.core.cadence import FAST_CADENCE_STRATEGIES, effective_interval_seconds
@@ -2959,9 +2959,14 @@ async def _run_cycle(
 
     # Use signing client so strategies can cancel orders and perform writes.
     # Falls back to readonly if signing client isn't available (read-only mode).
-    client = await run_blocking(get_user_nado_client, telegram_id)
+    # LOOP-STARVATION fix: these per-cycle VENUE reads go on the SDK pool, NOT
+    # the 8-worker MISC pool. The MISC pool is the interactive click path's pool
+    # (get_user, render helpers); a fleet of concurrent strategy cycles holding
+    # MISC workers for the ~30s SDK timeout chain was queueing button taps
+    # behind them (FIFO) — the ~100s tap latency in the callback.total SLO.
+    client = await run_blocking_sdk(get_user_nado_client, telegram_id)
     if not client:
-        client = await run_blocking(get_user_readonly_client, telegram_id)
+        client = await run_blocking_sdk(get_user_readonly_client, telegram_id)
     if not client:
         raise RuntimeError("Wallet client unavailable")
 
@@ -2975,13 +2980,13 @@ async def _run_cycle(
             if strategy == "vol":
                 try:
                     _mp = await asyncio.wait_for(
-                        run_blocking(client.get_market_price, product_id),
+                        run_blocking_sdk(client.get_market_price, product_id),
                         timeout=_vol_call_timeout_seconds(),
                     )
                 except asyncio.TimeoutError:
                     raise RuntimeError("VOL market price call timed out")
             else:
-                _mp = await run_blocking(client.get_market_price, product_id)
+                _mp = await run_blocking_sdk(client.get_market_price, product_id)
         return float(_mp.get("mid") or 0.0)
 
     async def _fetch_open_orders():
@@ -2989,12 +2994,12 @@ async def _run_cycle(
             if strategy == "vol":
                 try:
                     return await asyncio.wait_for(
-                        run_blocking(client.get_open_orders, product_id),
+                        run_blocking_sdk(client.get_open_orders, product_id),
                         timeout=_vol_call_timeout_seconds(),
                     )
                 except asyncio.TimeoutError:
                     raise RuntimeError("VOL open-orders call timed out")
-            return await run_blocking(client.get_open_orders, product_id)
+            return await run_blocking_sdk(client.get_open_orders, product_id)
 
     _engine_cycle = strategy in ("grid", "rgrid", "dgrid", "mid", "dn", "vol")
     open_orders = None
