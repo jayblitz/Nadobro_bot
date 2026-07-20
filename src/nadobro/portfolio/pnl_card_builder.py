@@ -1,12 +1,18 @@
-"""Builds the per-user data dict consumed by ``services.pnl_card.generate_pnl_card``.
+"""Builds the per-user data dicts consumed by the share-card renderers.
 
-This module is the **only** place that reads strategy/referral data from the
-DB for the share card. Keeping it separate from the pure renderer means:
+This module is the **only** place that reads strategy/trade/referral data from
+the DB for the share cards. Keeping it separate from the pure renderers means:
 
-  * ``services.pnl_card`` stays a pure ``dict -> PNG`` function (easy to test,
-    no DB dependency)
+  * the renderers stay pure ``dict -> PNG`` functions (easy to test, no DB
+    dependency)
   * Per-user scoping lives in one auditable place — every query filters by
     ``telegram_id`` so users can never see another user's stats
+
+Card types:
+  * Type A (``pnl_card_type_a``) — per-trade desk/agent + copy cards
+    (:func:`build_round_trip_card_data`, :func:`build_copy_trade_card_data`)
+  * Type B (``pnl_card_type_b``) — strategy-session cards
+    (:func:`build_type_b_card_data`)
 
 Inputs come from:
   * ``strategy_sessions`` (filtered by ``user_id`` + ``network``) — volume,
@@ -37,59 +43,6 @@ def _to_decimal(value: Any) -> Decimal:
         return Decimal(str(value))
     except (ValueError, ArithmeticError):
         return Decimal("0")
-
-
-def _fmt_dollar(amount: Decimal) -> str:
-    """Unsigned dollar amount with M/K shorthand above $1M / $1K.
-
-    Matches the master card: e.g. ``$1.23M``, ``$1,234.50``, ``$0.00``.
-    """
-    abs_amt = abs(amount)
-    if abs_amt >= Decimal("1000000"):
-        return f"${(amount / Decimal('1000000')):,.2f}M"
-    if abs_amt >= Decimal("1000"):
-        return f"${amount:,.2f}"
-    return f"${amount:,.2f}"
-
-
-def _fmt_signed_dollar(amount: Decimal) -> str:
-    """Always-signed dollar amount, e.g. ``+$234.56`` / ``-$12.34`` / ``+$0.00``.
-
-    The renderer color-codes the value based on the leading sign char, so the
-    sign must always be present.
-    """
-    if amount < 0:
-        return f"-${abs(amount):,.2f}"
-    return f"+${amount:,.2f}"
-
-
-def _fmt_negative_dollar(amount: Decimal) -> str:
-    """Fees are always shown as a negative cost on the card, even when the
-    underlying value is stored as a positive number in the DB.
-    """
-    abs_amt = abs(amount)
-    if abs_amt == 0:
-        return "$0.00"
-    return f"-${abs_amt:,.2f}"
-
-
-# ---------------------------------------------------------------------------
-# Symbol normalisation
-# ---------------------------------------------------------------------------
-def _format_symbol(product_name: Optional[str], strategy: Optional[str]) -> str:
-    """``BTC`` / ``ETH`` → ``BTC-PERP``. ``MULTI`` → ``MULTI``. Falls through
-    to ``BTC-PERP`` when nothing usable is set."""
-    raw = (product_name or "").strip().upper()
-    if not raw:
-        return "BTC-PERP"
-    if raw == "MULTI":
-        return "MULTI"
-    if "-" in raw:
-        return raw  # already symbolised (e.g. BTC-PERP, ETH-USDC)
-    # Volume Spot ships as KBTC/WETH/USDC — render as-is.
-    if raw in {"KBTC", "WETH", "USDC", "USDT"}:
-        return raw
-    return f"{raw}-PERP"
 
 
 # ---------------------------------------------------------------------------
@@ -180,58 +133,91 @@ def _fetch_active_referral_code(telegram_id: int, network: str) -> Optional[str]
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Type B (strategy-session) card
 # ---------------------------------------------------------------------------
-def build_pnl_card_data(
+# Spot ticker → perp-icon key (so the KBTC/WETH volume-spot cards still show
+# the right coin icon).
+_ICON_ALIASES = {
+    "WETH": "ETH", "KBTC": "BTC", "XBT": "BTC", "USDT0": "USDT",
+    "NLP": "NADO", "WBTC": "BTC", "XAUT0": "XAUT",
+}
+# Real spot symbols (Volume-Bot spot) shown verbatim, never perp-qualified.
+_SPOT_SYMBOLS = {"KBTC", "WETH", "USDC", "USDT", "USDT0", "XAUT", "XAUT0", "NLP", "WBTC"}
+
+
+def _type_b_product(product_name: Optional[str]) -> tuple[str, str]:
+    """``(icon_key, display_product)`` for the Type B session card.
+
+    Strategy sessions store the product as a bare ticker (``BTC``), a perp
+    marker (``BTC-PERP`` / ``BTC:PERP-USDC``), or — for Volume-Bot spot — a spot
+    symbol/pair (``KBTC``, ``ETH-USDC``). Grid/RGrid/DGrid/Mid/DN trade perps,
+    so a bare ticker means the PERP. ``MULTI`` (multi-product volume runs) shows
+    ``MULTI`` with no token icon.
+
+    ``BTC-PERP`` -> ``("BTC", "BTC:PERP-USDC")``; ``ETH`` -> ``("ETH",
+    "ETH:PERP-USDC")``; ``KBTC`` -> ``("BTC", "KBTC")``; ``ETH-USDC`` ->
+    ``("ETH", "ETH-USDC")``.
+    """
+    raw = (product_name or "").strip().upper()
+    if not raw:
+        return "BTC", "BTC:PERP-USDC"
+    if raw == "MULTI":
+        return "", "MULTI"
+    base = raw.replace(":PERP-USDC", "").replace("-PERP", "").split(":")[0].split("-")[0]
+    icon_key = _ICON_ALIASES.get(base, base)
+    if "PERP" in raw:
+        return icon_key, f"{base}:PERP-USDC"
+    # A spot symbol or a spot pair (has a quote separator, no PERP) shows as-is.
+    if raw in _SPOT_SYMBOLS or any(sep in raw for sep in ("-", ":", "/")):
+        return icon_key, raw
+    # Bare ticker on a perp strategy → the perp market.
+    return icon_key, f"{base}:PERP-USDC"
+
+
+def build_type_b_card_data(
     telegram_id: int,
     network: str,
     session_id: Optional[int] = None,
 ) -> dict:
-    """Return a dict ready for ``generate_pnl_card``.
+    """Type B card data for a strategy session (badge = friendly strategy name).
 
     All numeric fields are derived from ``strategy_sessions`` rows owned by
-    ``telegram_id`` on ``network``. The referral code comes from the user's
-    own ``invite_codes`` row. If no session is found, the dict still renders
-    a valid card with $0 values so the user gets a clear empty state instead
-    of an error.
+    ``telegram_id`` on ``network``. The referral code comes from the user's own
+    ``invite_codes`` row. If no session is found the dict still renders a valid
+    card with $0 values (clear empty state instead of an error). Returned as
+    raw floats — ``pnl_card_type_b.generate_type_b_card`` formats them.
 
     Args:
         telegram_id: Owner of the card. **Must** be the requesting user —
-            callers are responsible for not accepting this from untrusted
-            input (e.g. URL params).
+            callers are responsible for not accepting this from untrusted input.
         network: ``"mainnet"`` / ``"testnet"`` — scopes the session lookup.
-        session_id: Optional specific session. When omitted, uses the user's
-            latest session.
+        session_id: Optional specific session; when omitted uses the latest.
     """
     session = _fetch_session(telegram_id, network, session_id)
 
     volume = _to_decimal(session.get("total_volume_usd"))
     pnl = _to_decimal(session.get("realized_pnl"))
     fees = _to_decimal(session.get("total_fees_paid"))
-    product_name = session.get("product_name")
     strategy = session.get("strategy")
+    icon_key, display = _type_b_product(session.get("product_name"))
 
     # Delta Neutral profit IS the funding: price PnL nets ~0 across the hedged
     # legs, so fold net funding received into the displayed PnL. Scoped to DN so
     # other strategies (whose realized_pnl already reflects their economics)
-    # aren't double-counted.
+    # aren't double-counted. DN-PNL-FEES fix: DN fires four taker MARKET legs
+    # per cycle, so fees can equal/exceed funding — the headline must be NET of
+    # fees (``realized + funding - fees``).
     if str(strategy or "").lower() in ("dn", "delta_neutral"):
-        # DN-PNL-FEES fix: DN profit IS the funding captured, but DN fires four
-        # taker MARKET legs per cycle, so fees can equal or exceed the funding.
-        # The headline must be NET of fees — ``realized + funding - fees``.
-        # Previously fees were shown only on a separate line, overstating DN
-        # profit and sometimes flipping a true net loss into a displayed gain.
         pnl = pnl + _net_funding_usd(session, network) - fees
 
-    referral_code = _fetch_active_referral_code(telegram_id, network)
-
     return {
-        "symbol": _format_symbol(product_name, strategy),
-        "strategy": str(strategy or "bro"),
-        "volume": _fmt_dollar(volume),
-        "net_fees": _fmt_negative_dollar(fees),
-        "pnl": _fmt_signed_dollar(pnl),
-        "referral_code": referral_code or "",
+        "strategy": str(strategy or "grid"),
+        "product": display,
+        "base_symbol": icon_key,
+        "volume": float(volume),
+        "net_fees": float(abs(fees)),
+        "pnl": float(pnl),
+        "referral_code": _fetch_active_referral_code(telegram_id, network) or "",
     }
 
 
