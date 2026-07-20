@@ -11,6 +11,16 @@ from src.nadobro.portfolio import pnl_card as pc
 
 PNG_HEADER = b"\x89PNG\r\n\x1a\n"
 
+# Type B (strategy-session) renderer backgrounds were intentionally removed
+# (2026-07-20) pending the Type B rework; its tests skip until they're back.
+# They auto-reactivate the moment assets/cards/pnl_v2/positive.png returns.
+_TYPE_B_BG = Path(__file__).resolve().parents[2] / "assets" / "cards" / "pnl_v2" / "positive.png"
+_needs_type_b_bg = pytest.mark.skipif(
+    not _TYPE_B_BG.exists(),
+    reason="Type B pnl_v2 backgrounds removed pending rework; restore "
+           "assets/cards/pnl_v2/*.png to re-enable.",
+)
+
 
 def _sample_data(**overrides) -> dict:
     base = {
@@ -29,6 +39,7 @@ def _open_png(data: bytes) -> Image.Image:
     return Image.open(io.BytesIO(data)).convert("RGB")
 
 
+@_needs_type_b_bg
 def test_generate_pnl_card_returns_png_1600x900():
     out = pc.generate_pnl_card(_sample_data())
     assert out.startswith(PNG_HEADER)
@@ -47,6 +58,7 @@ def test_missing_background_raises(monkeypatch, tmp_path):
         pc.generate_pnl_card(_sample_data())
 
 
+@_needs_type_b_bg
 def test_referral_omitted_when_empty():
     out_with = pc.generate_pnl_card(_sample_data(referral_code="NADO123"))
     out_without = pc.generate_pnl_card(_sample_data(referral_code=""))
@@ -56,6 +68,7 @@ def test_referral_omitted_when_empty():
     assert out_with != out_without
 
 
+@_needs_type_b_bg
 def test_positive_vs_negative_pnl_changes_output():
     pos = pc.generate_pnl_card(_sample_data(pnl="+$999.00"))
     neg = pc.generate_pnl_card(_sample_data(pnl="-$999.00"))
@@ -63,6 +76,7 @@ def test_positive_vs_negative_pnl_changes_output():
     assert pos != neg
 
 
+@_needs_type_b_bg
 def test_strategy_key_changes_output():
     a = pc.generate_pnl_card(_sample_data(strategy="grid"))
     b = pc.generate_pnl_card(_sample_data(strategy="volume_bot"))
@@ -136,6 +150,7 @@ def test_parse_float(raw, expected):
     assert pc._parse_float(raw) == expected
 
 
+@_needs_type_b_bg
 def test_canvas_dimensions_match_v2_backgrounds():
     for name in pc._V2_BG_NAMES.values():
         bg = pc.PNL_V2_DIR / name
@@ -144,6 +159,7 @@ def test_canvas_dimensions_match_v2_backgrounds():
             assert im.size == (pc.CANVAS_W, pc.CANVAS_H)
 
 
+@_needs_type_b_bg
 def test_v2_backgrounds_record_matching_master_sources():
     expected_sources = {
         "positive": "PnL positive master.png",
@@ -214,6 +230,7 @@ def test_loaded_font_is_truetype_when_system_fonts_available():
     assert getattr(font, "size", None) is not None or font.__class__.__name__ == "FreeTypeFont"
 
 
+@_needs_type_b_bg
 def test_generate_dev_preview_cards_writes_four_samples(tmp_path):
     written = pc.generate_dev_preview_cards(tmp_path)
     assert set(written) == {"positive_grid", "negative_dgrid", "bullish_volume_bot", "bearish_dn"}

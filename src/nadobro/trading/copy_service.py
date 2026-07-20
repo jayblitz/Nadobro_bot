@@ -211,6 +211,40 @@ async def _notify_user(telegram_id: int, text: str, reply_markup=None):
         logger.warning("Copy notify failed for %s: %s", telegram_id, e)
 
 
+async def _post_copy_close_card(
+    telegram_id: int, network: str, position_id: int, caption: str
+) -> bool:
+    """Auto-post the Type A PnL card for a just-closed copy position, with a
+    Share button. Returns True if the card was sent, False to fall back to a
+    plain text notification. Best-effort — the position must already be marked
+    closed (this runs after ``close_copy_position``)."""
+    if not _bot_app or not position_id:
+        return False
+    try:
+        import io as _io
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from src.nadobro.portfolio.pnl_card_builder import build_copy_trade_card_data
+        from src.nadobro.portfolio.pnl_card_type_a import generate_type_a_card
+
+        data = await run_blocking(
+            build_copy_trade_card_data, telegram_id, str(network), int(position_id)
+        )
+        if not data or data.get("unsupported"):
+            return False
+        png = await run_blocking(generate_type_a_card, data)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "📤 Share", callback_data=f"portfolio:share_pnl:copy:{int(position_id)}"
+        )]])
+        await _bot_app.bot.send_photo(
+            chat_id=telegram_id, photo=_io.BytesIO(png), caption=caption, reply_markup=kb
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 - card is best-effort; caller falls back to text
+        logger.warning("copy close card failed for user %s pos %s: %s", telegram_id, position_id, e)
+        return False
+
+
 # ─── Public API ────────────────────────────────────────────────
 
 def add_trader(
@@ -1295,12 +1329,19 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                     _settle_copy_close, mirror_id, cp, result, network, float(cp.get("size", 0))
                 )
                 await run_blocking(close_copy_position, cp["id"], pnl=pnl, reason="leader_closed")
-                await _notify_user(
-                    user_id,
-                    f"📋 Copy Position Closed\n"
-                    f"{product_name}: Leader closed → Your position closed\n"
+                # Auto-post the Type A PnL card (+ Share button); fall back to
+                # the plain text notification if the card can't render.
+                _caption = (
+                    f"📋 Copy trade closed — {product_name}\n"
                     f"P&L: ${pnl:+,.2f}" + (f" (fees ${fee:,.2f})" if fee else "")
                 )
+                if not await _post_copy_close_card(user_id, network, cp["id"], _caption):
+                    await _notify_user(
+                        user_id,
+                        f"📋 Copy Position Closed\n"
+                        f"{product_name}: Leader closed → Your position closed\n"
+                        f"P&L: ${pnl:+,.2f}" + (f" (fees ${fee:,.2f})" if fee else "")
+                    )
             except Exception as e:
                 logger.error("Failed to close copy position %s: %s", cp["id"], e)
 
@@ -2281,10 +2322,12 @@ async def _sweep_external_closes(
                 "bracket_take_profit": "Take-profit filled on venue",
                 "bracket_stop_loss": "Stop-loss filled on venue",
             }.get(reason, "Position closed on venue")
-            await _notify_user(
-                user_id,
-                f"📋 Copy Position Closed\n{product_name}: {label}\nP&L: ${pnl:+,.2f}",
-            )
+            _caption = f"📋 Copy trade closed — {product_name}\n{label}\nP&L: ${pnl:+,.2f}"
+            if not await _post_copy_close_card(user_id, network, cp["id"], _caption):
+                await _notify_user(
+                    user_id,
+                    f"📋 Copy Position Closed\n{product_name}: {label}\nP&L: ${pnl:+,.2f}",
+                )
         else:
             await run_blocking(
                 reduce_copy_position, cp["id"], venue_size,

@@ -35,17 +35,21 @@ def render_history_view(
         round_trips = compute_round_trips(user_id, network, limit=200) if user_id else []
     except Exception:
         round_trips = []
-    total_pages = max(1, (len(round_trips) + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    visible = round_trips[page * page_size:(page + 1) * page_size]
+    # Closed copy positions are single trades too — surface them in History
+    # (DISPLAY ONLY). They are never fed into compute_round_trips (source='copy'
+    # + a session id exclude them), so there is no double-count with the manual
+    # stream and no aggregate total to distort — copy stays tracked solely in
+    # copy accounting.
+    try:
+        from src.nadobro.models.database import get_closed_copy_positions
 
-    lines = [
-        f"📜 <b>Trade History</b> · {esc(network.upper())} · page {page + 1}/{total_pages}",
-        "Manual trades only. Strategy sessions live under Performance",
-        divider(),
-    ]
-    rows: list[list[InlineKeyboardButton]] = []
-    for idx, trip in enumerate(visible, start=page * page_size + 1):
+        closed_copies = get_closed_copy_positions(user_id, network, limit=200) if user_id else []
+    except Exception:
+        closed_copies = []
+
+    # Unified chronological entries: (sort_ts, lines[], share_callback_data).
+    entries: list[tuple[str, list[str], str]] = []
+    for trip in round_trips:
         pair = _resolve_pair_name(
             trip.get("product_id"),
             str(trip.get("pair") or trip.get("product_name") or ""),
@@ -62,21 +66,59 @@ def render_history_view(
         hold = _hold_duration(trip.get("open_ts"), trip.get("close_ts"))
         margin = "iso" if bool(trip.get("isolated")) else "cross"
         closed_at = _fmt_ts(trip.get("close_ts"))
-        lines.extend([
-            f"{idx}. {b(pair)}  {side} · {margin}" + (f" · {closed_at}" if closed_at else ""),
-            f"    {_fmt_size(abs(size))} @ {money(open_px)} → {money(close_px)} · held {hold}",
-            f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Fees -{money(abs(fees))} · "
-            f"Funding {signed_money(-funding)} · Vol {money(volume)}",  # funding_paid > 0 is a cost
-            "",
-        ])
-        rows.append(
-            [InlineKeyboardButton(
-                f"📤 Share PnL · #{idx}",
-                callback_data=f"portfolio:share_pnl:rt:{trip.get('trip_key')}",
-            )]
+        entries.append((
+            str(trip.get("close_ts") or ""),
+            [
+                f"{b(pair)}  {side} · {margin}" + (f" · {closed_at}" if closed_at else ""),
+                f"    {_fmt_size(abs(size))} @ {money(open_px)} → {money(close_px)} · held {hold}",
+                f"    Realized {pnl_dot(pnl)} {signed_money(pnl)} · Fees -{money(abs(fees))} · "
+                f"Funding {signed_money(-funding)} · Vol {money(volume)}",
+            ],
+            f"portfolio:share_pnl:rt:{trip.get('trip_key')}",
+        ))
+    for pos in closed_copies:
+        pair = _resolve_pair_name(
+            pos.get("product_id"),
+            str(pos.get("product_name") or ""),
+            network,
         )
+        is_long = str(pos.get("side") or "").lower() in ("long", "buy")
+        side = "📈 long" if is_long else "📉 short"
+        size = _dec(pos.get("size"))
+        entry = _dec(pos.get("entry_price"))
+        pnl = _dec(pos.get("pnl"))
+        # Recover the effective exit from the gross pnl (see build_copy_trade_card_data).
+        direction = Decimal(1) if is_long else Decimal(-1)
+        exit_px = entry + (pnl / (size * direction)) if size > 0 else entry
+        closed_at = _fmt_ts(pos.get("closed_at"))
+        entries.append((
+            str(pos.get("closed_at") or ""),
+            [
+                f"{b(pair)}  {side} · copy" + (f" · {closed_at}" if closed_at else ""),
+                f"    {_fmt_size(abs(size))} @ {money(entry)} → {money(exit_px)}",
+                f"    Realized {pnl_dot(pnl)} {signed_money(pnl)}",
+            ],
+            f"portfolio:share_pnl:copy:{pos.get('id')}",
+        ))
+
+    entries.sort(key=lambda e: e[0], reverse=True)
+    total_pages = max(1, (len(entries) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    visible = entries[page * page_size:(page + 1) * page_size]
+
+    lines = [
+        f"📜 <b>Trade History</b> · {esc(network.upper())} · page {page + 1}/{total_pages}",
+        "Single trades (desk + copy). Strategy sessions live under Performance",
+        divider(),
+    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, (_ts, body_lines, share_cb) in enumerate(visible, start=page * page_size + 1):
+        lines.append(f"{idx}. {body_lines[0]}")
+        lines.extend(body_lines[1:])
+        lines.append("")
+        rows.append([InlineKeyboardButton(f"📤 Share PnL · #{idx}", callback_data=share_cb)])
     if not visible:
-        lines.append("No manual trades yet")
+        lines.append("No trades yet")
 
     nav: list[InlineKeyboardButton] = []
     if page > 0:

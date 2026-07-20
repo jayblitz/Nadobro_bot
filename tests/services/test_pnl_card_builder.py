@@ -12,11 +12,20 @@ consumes. These tests lock in two contracts:
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from src.nadobro.portfolio import pnl_card_builder as builder
+
+# The Type B session renderer's backgrounds were removed pending rework — its
+# end-to-end render test skips until they're restored (auto-reactivates).
+_TYPE_B_BG = Path(__file__).resolve().parents[2] / "assets" / "cards" / "pnl_v2" / "positive.png"
+_needs_type_b_bg = pytest.mark.skipif(
+    not _TYPE_B_BG.exists(),
+    reason="Type B pnl_v2 backgrounds removed pending rework.",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +281,7 @@ class TestBuildPnLCardDataShape:
 # End-to-end: builder output is consumable by the renderer without errors.
 # ---------------------------------------------------------------------------
 class TestBuilderFeedsRenderer:
+    @_needs_type_b_bg
     def test_renderer_accepts_builder_output(self):
         from src.nadobro.portfolio import pnl_card
 

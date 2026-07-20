@@ -3135,6 +3135,7 @@ def compute_round_trips(
                    COALESCE(realized_pnl, pnl, 0) AS realized_pnl,
                    COALESCE(funding_paid, 0) AS funding_paid,
                    COALESCE(isolated, false) AS isolated,
+                   COALESCE(leverage, 0) AS leverage,
                    order_type,
                    COALESCE(filled_at, created_at) AS ts
             FROM {table}
@@ -3188,6 +3189,7 @@ def compute_round_trips(
             continue
         fee = float(row.get("fee") or 0)
         funding = float(row.get("funding_paid") or 0)
+        leverage = float(row.get("leverage") or 0)
         ts = row.get("ts")
         product_name = str(row.get("product_name") or "")
         # Reduce-only closes (close orders) always pop the FIFO regardless
@@ -3212,6 +3214,7 @@ def compute_round_trips(
                     "ts": lot["ts"],
                     "fees": lot["fees"] * lot_share,
                     "funding": lot["funding"] * lot_share,
+                    "leverage": lot.get("leverage") or 0.0,
                 })
                 lot["size"] -= take
                 lot["fees"] -= lot["fees"] * lot_share
@@ -3247,6 +3250,7 @@ def compute_round_trips(
                     "isolated": isolated,
                     "side": "long" if existing_side in ("long", "buy") else "short",
                     "size": min(total_open_qty, size),
+                    "leverage": open_lots[0].get("leverage") or 0.0,
                     "avg_open_price": avg_open,
                     "avg_close_price": price,
                     "open_ts": open_lots[0]["ts"],
@@ -3266,6 +3270,7 @@ def compute_round_trips(
                     "price": price,
                     "fees": fee * (remaining / size),
                     "funding": funding * (remaining / size),
+                    "leverage": leverage,
                     "ts": ts,
                 })
         else:
@@ -3276,6 +3281,7 @@ def compute_round_trips(
                 "price": price,
                 "fees": fee,
                 "funding": funding,
+                "leverage": leverage,
                 "ts": ts,
             })
 
