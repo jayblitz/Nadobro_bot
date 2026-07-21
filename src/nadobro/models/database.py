@@ -205,6 +205,7 @@ def get_trades_by_user(
     network: str = "mainnet",
     strategy_session_id: int | None = None,
     since_created_at=None,
+    since_filled_at=None,
 ) -> list:
     table = _trades_table(network)
     where = ["user_id = %s"]
@@ -215,6 +216,12 @@ def get_trades_by_user(
     if since_created_at is not None:
         where.append("created_at >= %s")
         params.append(since_created_at)
+    # Window on the actual FILL time (not sync/record time) so surfaces that pair
+    # this with the fill-time-bucketed realized PnL replay describe the SAME 24h
+    # set (Night HOWL). ``created_at`` for venue-only fills is the sync time.
+    if since_filled_at is not None:
+        where.append("COALESCE(filled_at, created_at) >= %s")
+        params.append(since_filled_at)
     where_sql = " AND ".join(where)
     if limit is None or int(limit) <= 0:
         return query_all(
@@ -1299,7 +1306,7 @@ def _derive_session_realized_pnl(
           COALESCE(NULLIF(product_id, 0), (
             SELECT product_id FROM strategy_sessions WHERE id = %s
           )) AS product_id,
-          side, fill_size, size, fill_price, price,
+          side, fill_size, size, fill_price, price, isolated,
           base_filled_x18, quote_filled_x18,
           COALESCE(filled_at, created_at) AS filled_at
         FROM {table}
@@ -1477,7 +1484,7 @@ def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> di
         rows = query_all(
             f"""
             SELECT DISTINCT ON (submission_idx)
-                   product_id, side, fill_size, size, fill_price, price,
+                   product_id, side, fill_size, size, fill_price, price, isolated,
                    base_filled_x18, quote_filled_x18,
                    COALESCE(filled_at, created_at) AS filled_at
             FROM {table}

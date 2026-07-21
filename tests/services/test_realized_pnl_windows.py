@@ -14,12 +14,13 @@ from src.nadobro.quant.portfolio_calculator import realized_pnl_windows_from_row
 NOW = datetime(2026, 6, 21, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _fill(side, base, price, *, pid=2, ago_seconds=0):
+def _fill(side, base, price, *, pid=2, ago_seconds=0, isolated=False):
     return {
         "product_id": pid,
         "side": side,
         "fill_size": str(base),
         "fill_price": str(price),
+        "isolated": isolated,
         "filled_at": NOW - timedelta(seconds=ago_seconds),
     }
 
@@ -102,6 +103,47 @@ def test_win_rate():
     r = _pnl(rows)
     assert r["wins"] == 2 and r["losses"] == 1
     assert r["win_rate"] == Decimal(2) / Decimal(3) * Decimal(100)
+
+
+def test_partial_closes_are_one_round_trip_win():
+    # ONE long position closed in 3 partial fills is ONE winning round-trip, not
+    # three. (The old per-reducing-fill counter booked 3 wins — grid/MM chop.)
+    rows = [
+        _fill("long", 3, 100),
+        _fill("short", 1, 110), _fill("short", 1, 111), _fill("short", 1, 112),
+    ]
+    r = _pnl(rows)
+    assert r["total_pnl"] == Decimal("33")           # 10 + 11 + 12 (per-fill PnL exact)
+    assert r["wins"] == 1 and r["losses"] == 0       # but ONE decisive round-trip
+    assert r["win_pnl_windows"]["all"] == Decimal("33")
+
+
+def test_scratch_round_trip_is_neither_win_nor_loss():
+    # Open and close at the same price: 0 realized -> not counted as win or loss.
+    r = _pnl([_fill("long", 1, 100), _fill("short", 1, 100)])
+    assert r["total_pnl"] == Decimal("0")
+    assert r["wins"] == 0 and r["losses"] == 0
+
+
+def test_isolated_and_cross_legs_do_not_pair():
+    # Same product, but an ISOLATED leg (copy/DN) and a CROSS leg (manual) are
+    # SEPARATE venue positions — they must NOT close each other. Keyed by
+    # (product_id, isolated), both stay open -> no realized PnL, no W/L.
+    rows = [
+        _fill("long", 1, 100, isolated=True),    # isolated long, still open
+        _fill("short", 1, 110, isolated=False),  # cross short, still open
+    ]
+    r = _pnl(rows)
+    assert r["total_pnl"] == Decimal("0")
+    assert r["wins"] == 0 and r["losses"] == 0
+    # Each margin bucket round-trips independently.
+    rows2 = rows + [
+        _fill("short", 1, 108, isolated=True),   # closes the isolated long: +8
+        _fill("long", 1, 112, isolated=False),   # closes the cross short: -2
+    ]
+    r2 = _pnl(rows2)
+    assert r2["total_pnl"] == Decimal("6")       # +8 - 2
+    assert r2["wins"] == 1 and r2["losses"] == 1
 
 
 def test_x18_columns_preferred_for_price():

@@ -49,8 +49,11 @@ def _f(value: Any, default: float = 0.0) -> float:
 
 
 def _trade_ts(trade: Dict[str, Any]) -> Optional[float]:
-    """Epoch seconds for a trade's created_at (datetime / ISO string / epoch)."""
-    raw = trade.get("created_at") or trade.get("filled_at")
+    """Epoch seconds for a fill's time (datetime / ISO string / epoch). Prefers
+    ``filled_at`` (the venue fill time) over ``created_at`` (which for venue-only
+    synced fills is the SYNC time, not when the user traded) so the recent-fill
+    window and busiest-hour align with the fill-time-bucketed realized-PnL replay."""
+    raw = trade.get("filled_at") or trade.get("created_at")
     if raw is None:
         return None
     if isinstance(raw, datetime):
@@ -68,7 +71,13 @@ def _trade_ts(trade: Dict[str, Any]) -> Optional[float]:
 
 
 def _trade_fees(trade: Dict[str, Any]) -> float:
-    return _f(trade.get("fees")) + _f(trade.get("fill_fee")) + _f(trade.get("builder_fee"))
+    """Total fee for a fill via the SINGLE canonical reader (venue ``fee_x18``
+    preferred, else ``fill_fee``/``fees`` + ``builder_fee``). NOT a sum of the
+    overlapping columns: the recorder stores ``fill_fee == fees == fee+builder``,
+    so ``fees + fill_fee + builder_fee`` over-counted every fill ~2.2x."""
+    from src.nadobro.quant.portfolio_calculator import _fill_fee
+
+    return float(_fill_fee(trade))
 
 
 def _trade_realized(trade: Dict[str, Any]) -> Optional[float]:
@@ -126,8 +135,13 @@ def compute_user_pattern(
         ts = _trade_ts(t)
         if ts is None or ts < cutoff:
             continue
+        # Match the realized-PnL universe exactly (get_account_realized_pnl_windows):
+        # only FINAL venue-confirmed fills on a real product, so trade-count /
+        # volume / fees describe the SAME set as realized / wins / losses.
         status = str(t.get("status") or "").lower()
-        if status in ("failed", "cancelled", "rejected"):
+        if status not in ("filled", "closed", "partially_filled"):
+            continue
+        if int(_f(t.get("product_id"))) <= 0:
             continue
         sub_idx = t.get("submission_idx")
         if sub_idx is None:
@@ -168,6 +182,18 @@ def compute_user_pattern(
     losses = int((account_pnl.get("losses_windows") or {}).get(wkey) or 0)
     decisive = wins + losses
     win_rate = (wins / decisive) if decisive else None
+    # Expectancy inputs from the round-trip PnL sums: avg win, avg loss (<= 0),
+    # payoff ratio (avg win / |avg loss|), and per-trade expectancy. These power
+    # the quant recommendations (a 43% win rate can still be +EV if wins are big).
+    win_pnl = _f((account_pnl.get("win_pnl_windows") or {}).get(wkey))
+    loss_pnl = _f((account_pnl.get("loss_pnl_windows") or {}).get(wkey))
+    avg_win = (win_pnl / wins) if wins else 0.0
+    avg_loss = (loss_pnl / losses) if losses else 0.0
+    payoff_ratio = (avg_win / abs(avg_loss)) if avg_loss else None
+    expectancy = (
+        win_rate * avg_win + (1.0 - win_rate) * avg_loss
+        if win_rate is not None else None
+    )
 
     n = len(recent)
     if n == 0 and realized == 0.0:
@@ -176,6 +202,8 @@ def compute_user_pattern(
             "realized_pnl_usd": 0.0, "net_pnl_usd": 0.0, "win_rate": None,
             "wins": 0, "losses": 0, "top_pairs": [], "by_source": {},
             "busiest_hour_utc": None, "avg_trade_usd": 0.0,
+            "avg_win_usd": 0.0, "avg_loss_usd": 0.0,
+            "payoff_ratio": None, "expectancy_usd": None,
         }
 
     volume = fees = funding = 0.0
@@ -213,10 +241,16 @@ def compute_user_pattern(
         "fees_usd": round(fees, 4),
         "funding_usd": round(funding, 4),
         "realized_pnl_usd": round(realized, 4),
-        "net_pnl_usd": round(realized - fees + funding, 4),
+        # funding_paid is PAID-POSITIVE (a cost), so net SUBTRACTS it (matches
+        # live_session: realized + unrealized - funding).
+        "net_pnl_usd": round(realized - fees - funding, 4),
         "win_rate": round(win_rate, 4) if win_rate is not None else None,
         "wins": wins,
         "losses": losses,
+        "avg_win_usd": round(avg_win, 4),
+        "avg_loss_usd": round(avg_loss, 4),
+        "payoff_ratio": round(payoff_ratio, 3) if payoff_ratio is not None else None,
+        "expectancy_usd": round(expectancy, 4) if expectancy is not None else None,
         "top_pairs": top_pairs,
         "by_source": dict(source_counter),
         "busiest_hour_utc": busiest_hour,
@@ -265,8 +299,11 @@ def derive_recommendations(
     pattern: Dict[str, Any],
     backtests: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
-    """Turn metrics + backtest comparisons into concrete, plain-English advice.
-    Pure and deterministic so the same data always yields the same guidance."""
+    """Turn the session's metrics into concrete, QUANT, educational advice —
+    grounded in the user's own numbers and framed to teach a repeatable lesson
+    (expectancy, payoff vs break-even, fee bps, concentration). Pure and
+    deterministic. Always returns something substantive: a losing OR a winning
+    session both get real feedback, never a hollow "no changes recommended"."""
     recs: List[str] = []
     n = int(pattern.get("trades") or 0)
     if n == 0:
@@ -274,44 +311,83 @@ def derive_recommendations(
                 "grid or volume session on a liquid pair to start gathering data."]
 
     fees = _f(pattern.get("fees_usd"))
+    funding = _f(pattern.get("funding_usd"))
     realized = _f(pattern.get("realized_pnl_usd"))
     net = _f(pattern.get("net_pnl_usd"))
     volume = _f(pattern.get("volume_usd"))
     win_rate = pattern.get("win_rate")
+    wins = int(pattern.get("wins") or 0)
+    losses = int(pattern.get("losses") or 0)
+    avg_win = _f(pattern.get("avg_win_usd"))
+    avg_loss = _f(pattern.get("avg_loss_usd"))          # <= 0
+    payoff = pattern.get("payoff_ratio")
+    expectancy = pattern.get("expectancy_usd")
 
-    # Fee drag.
-    if volume > 0 and fees / volume > 0.0015:
+    # 1) Net-outcome framing — ALWAYS first, teaching gross-vs-cost.
+    cost_bits = f"${fees:,.2f} fees" + (f" + ${funding:,.2f} funding" if funding else "")
+    if net < 0 <= realized:
         recs.append(
-            f"Fees ate {fees/volume*100:.2f}% of your ${volume:,.0f} volume. "
-            "Lean on maker (resting) orders and a wider spread/step to cut taker fees."
+            f"Up ${realized:,.2f} gross but −${abs(net):,.2f} net — {cost_bits} erased "
+            "the edge. The trades worked; the cost structure didn't. Rest maker orders "
+            "and trade less often so the same edge survives fees."
         )
-    if realized > 0 and net <= 0:
+    elif net < 0:
         recs.append(
-            f"Your gross PnL was +${realized:,.2f} but fees/funding turned the net "
-            f"to ${net:,.2f}. The edge is there — the costs are eating it; widen "
-            "spreads or trade less often."
+            f"Net −${abs(net):,.2f} on ${volume:,.0f} volume: the positions themselves "
+            f"lost ${abs(realized):,.2f} gross, before {cost_bits}. The leak is entry/"
+            "exit quality, not costs — fix the setup before touching size."
         )
-    # Win rate.
-    if isinstance(win_rate, (int, float)):
-        if win_rate < 0.4:
+    else:
+        recs.append(
+            f"Net +${net:,.2f} on ${volume:,.0f} volume after {cost_bits}. Profitable "
+            "session — the notes below are about making it repeatable, not luck."
+        )
+
+    # 2) Expectancy + payoff vs break-even — the core lesson a win rate alone hides.
+    if wins + losses >= 4 and isinstance(win_rate, (int, float)) and avg_loss < 0:
+        pay_txt = f"{payoff:.2f}x" if isinstance(payoff, (int, float)) else "—"
+        breakeven = (1.0 - win_rate) / win_rate if win_rate > 0 else None
+        line = (
+            f"Win rate {win_rate*100:.0f}% · avg win ${avg_win:,.2f} vs avg loss "
+            f"${abs(avg_loss):,.2f} (payoff {pay_txt})."
+        )
+        if breakeven is not None and isinstance(payoff, (int, float)):
+            if payoff >= breakeven:
+                line += (f" That clears the ~{breakeven:.2f}x payoff a {win_rate*100:.0f}% "
+                         "win rate needs to break even — the edge is real; guard your avg loss.")
+            else:
+                line += (f" You need ~{breakeven:.2f}x payoff to break even at this win rate — "
+                         "cut losers sooner or let winners run to raise it.")
+        if isinstance(expectancy, (int, float)):
+            line += f" Expectancy ≈ ${expectancy:,.2f}/trade."
+        recs.append(line)
+    elif isinstance(win_rate, (int, float)) and win_rate < 0.4:
+        recs.append(
+            f"Win rate {win_rate*100:.0f}% (below 40%) — only viable if winners dwarf "
+            "losers. With few decisive trades the sample is thin; tighten entries and "
+            "let the edge prove itself over more round-trips."
+        )
+
+    # 3) Fee efficiency, in basis points (concrete + comparable across days).
+    if volume > 0:
+        bps = fees / volume * 10000.0
+        if bps > 8.0:  # heavier than ~0.08% ⇒ taker-dominated
             recs.append(
-                f"Win rate was {win_rate*100:.0f}%. Tighten entries or raise SL/TP "
-                "discipline — you're closing too many losers."
+                f"Fees were {bps:.1f} bps of volume (${fees:,.2f} on ${volume:,.0f}). "
+                "Resting (maker) orders and a wider step move you toward the maker tier "
+                "and cut this materially."
             )
-        elif win_rate > 0.65 and net > 0:
-            recs.append(
-                f"Strong {win_rate*100:.0f}% win rate — consider sizing up modestly "
-                "on your best pair while it holds."
-            )
-    # Concentration.
+
+    # 4) Concentration / single-pair risk.
     top = pattern.get("top_pairs") or []
     if top and volume > 0 and _f(top[0].get("volume_usd")) / volume > 0.7:
         recs.append(
             f"{top[0]['pair']} was {_f(top[0]['volume_usd'])/volume*100:.0f}% of your "
-            "volume — you're concentrated. A second uncorrelated pair would spread risk."
+            "volume — one bad print there dominates the day. A second uncorrelated pair "
+            "spreads that risk."
         )
 
-    # Backtest-backed: did a variant beat the live config over the last 24h?
+    # 5) Backtest-backed: did a variant beat the live config over the last 24h?
     if backtests:
         cur = next((b for b in backtests if b["name"] == "current"), None)
         best = backtests[0] if backtests else None
@@ -329,9 +405,13 @@ def derive_recommendations(
             )
 
     if not recs:
-        recs.append("Solid, balanced session — no changes recommended. Keep doing "
-                    "what's working and watch fees as volume grows.")
-    return recs
+        # Reached only if the outcome framing above somehow produced nothing.
+        recs.append(
+            f"{n} trades, {'+' if net >= 0 else '−'}${abs(net):,.2f} net on "
+            f"${volume:,.0f} volume. Log what setup drove today's result so tomorrow's "
+            "report can measure whether it repeats."
+        )
+    return recs[:5]
 
 
 # --------------------------------------------------------------------------- #
@@ -544,11 +624,14 @@ def build_report(
         local_date = (now_utc + timedelta(hours=tz_offset)).strftime("%Y-%m-%d")
 
         cutoff = now_utc - timedelta(hours=24)
+        # Window on FILL time (not sync/record time) so the recent-fill set
+        # (volume / trades / fees / busiest-hour) covers the SAME 24h as the
+        # fill-time-bucketed realized-PnL replay — the two halves reconcile.
         trades = get_trades_by_user(
             telegram_id,
             limit=None,
             network=network,
-            since_created_at=cutoff,
+            since_filled_at=cutoff,
         ) or []
         # Realized PnL / win-rate must be DERIVED from the COMPLETE fill history
         # (position-aware, needs entry basis older than the 24h window), not the

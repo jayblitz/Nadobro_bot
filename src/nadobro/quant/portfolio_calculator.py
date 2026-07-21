@@ -324,6 +324,13 @@ def realized_pnl_windows_from_rows(
     Accuracy depends on ``rows`` being the FULL per-product history — a truncated
     feed misses earlier entry basis. Callers should pass complete
     ``trades_<network>`` fills (see ``get_account_realized_pnl_windows``).
+
+    Positions are keyed by ``(product_id, isolated)`` — the venue tracks a
+    separate position per margin bucket, so an isolated leg (copy / DN) and a
+    cross leg (manual / strategy) on the SAME product must NOT be paired against
+    each other. Win/loss is counted per ROUND-TRIP (one decision per open→flat
+    cycle, bucketed by the closing fill's time), not per reducing fill — so a
+    grid/MM position closed in many partial fills is one outcome, not many.
     """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -331,22 +338,52 @@ def realized_pnl_windows_from_rows(
     thresholds = {"24h": Decimal(24 * 3600), "7d": Decimal(7 * 24 * 3600), "30d": Decimal(30 * 24 * 3600)}
     keys = ("24h", "7d", "30d", "all")
     pnl_windows = {k: ZERO for k in keys}
-    wins = 0
-    losses = 0
-    # Per-window win/loss counters so window-scoped surfaces (Night HOWL's
-    # "your last 24h") can report a win rate over the SAME closes as the
-    # window's PnL, not the account's whole history.
+    # Per-window round-trip win/loss counts + the summed win/loss PnL (so callers
+    # can derive avg win, avg loss, payoff ratio and expectancy).
     wins_windows = {k: 0 for k in keys}
     losses_windows = {k: 0 for k in keys}
+    win_pnl_windows = {k: ZERO for k in keys}
+    loss_pnl_windows = {k: ZERO for k in keys}
 
-    norm = [c for c in (_fill_signed_base_price_ts(r) for r in (rows or [])) if c is not None]
-    # Chronological replay; ts-less rows (shouldn't happen for DB rows) sort oldest.
+    def _windows_for(ts: datetime | None) -> list[str]:
+        wk = ["all"]
+        if ts is not None:
+            age = Decimal(max(0, int((now - ts.astimezone(timezone.utc)).total_seconds())))
+            wk.extend(k for k, thr in thresholds.items() if age <= thr)
+        return wk
+
+    # (product_id, isolated) -> signed fill legs, in chronological order.
+    norm: list[tuple[tuple[int, bool], Decimal, Decimal, datetime | None]] = []
+    for r in (rows or []):
+        c = _fill_signed_base_price_ts(r)
+        if c is None:
+            continue
+        pid, signed_qty, price, ts = c
+        norm.append(((pid, bool(r.get("isolated"))), signed_qty, price, ts))
     norm.sort(key=lambda c: c[3] or _EPOCH0)
 
-    state: dict[int, tuple[Decimal, Decimal]] = {}  # product_id -> (signed_pos, avg_entry)
-    for pid, signed_qty, price, ts in norm:
-        pos, entry = state.get(pid, (ZERO, ZERO))
+    state: dict[tuple[int, bool], tuple[Decimal, Decimal]] = {}  # key -> (signed_pos, avg_entry)
+    cycle: dict[tuple[int, bool], Decimal] = {}                  # key -> realized in the open cycle
+
+    def _finalize(key: tuple[int, bool], ts: datetime | None) -> None:
+        """A round-trip just closed (flat, or the leg before a flip): count ONE
+        win/loss on the cycle's net realized, bucketed by the close time."""
+        cyc = cycle.get(key, ZERO)
+        cycle[key] = ZERO
+        if cyc == ZERO:
+            return  # scratch (breakeven) round-trip: neither a win nor a loss
+        for wk in _windows_for(ts):
+            if cyc > ZERO:
+                wins_windows[wk] += 1
+                win_pnl_windows[wk] += cyc
+            else:
+                losses_windows[wk] += 1
+                loss_pnl_windows[wk] += cyc
+
+    for key, signed_qty, price, ts in norm:
+        pos, entry = state.get(key, (ZERO, ZERO))
         realized = ZERO
+        reduced = flipped = False
         if pos == ZERO or (pos > ZERO) == (signed_qty > ZERO):
             # Opening or adding in the same direction: update the average entry.
             new_abs = abs(pos) + abs(signed_qty)
@@ -354,6 +391,7 @@ def realized_pnl_windows_from_rows(
             pos = pos + signed_qty
         else:
             # Reducing / closing / flipping: realize PnL on the closed portion.
+            reduced = True
             closing = min(abs(pos), abs(signed_qty))
             realized = (price - entry) * closing if pos > ZERO else (entry - price) * closing
             if abs(signed_qty) < abs(pos):
@@ -364,26 +402,21 @@ def realized_pnl_windows_from_rows(
                 remaining = abs(signed_qty) - abs(pos)  # flip: open the remainder
                 pos = remaining if signed_qty > ZERO else -remaining
                 entry = price
-        state[pid] = (pos, entry)
+                flipped = True
+        state[key] = (pos, entry)
 
+        # Per-FILL realized bucketing keeps the PnL total exact at fill granularity.
         if realized != ZERO:
-            pnl_windows["all"] += realized
-            if realized > ZERO:
-                wins += 1
-                wins_windows["all"] += 1
-            elif realized < ZERO:
-                losses += 1
-                losses_windows["all"] += 1
-            if ts is not None:
-                age = Decimal(max(0, int((now - ts.astimezone(timezone.utc)).total_seconds())))
-                for wk, thr in thresholds.items():
-                    if age <= thr:
-                        pnl_windows[wk] += realized
-                        if realized > ZERO:
-                            wins_windows[wk] += 1
-                        else:
-                            losses_windows[wk] += 1
+            cycle[key] = cycle.get(key, ZERO) + realized
+            for wk in _windows_for(ts):
+                pnl_windows[wk] += realized
 
+        # Round-trip win/loss: decide once, when the cycle goes flat or flips.
+        if reduced and (pos == ZERO or flipped):
+            _finalize(key, ts)
+
+    wins = wins_windows["all"]
+    losses = losses_windows["all"]
     decisive = wins + losses
     return {
         "pnl_windows": pnl_windows,
@@ -393,6 +426,8 @@ def realized_pnl_windows_from_rows(
         "win_rate": (Decimal(wins) / Decimal(decisive) * Decimal(100)) if decisive else ZERO,
         "wins_windows": wins_windows,
         "losses_windows": losses_windows,
+        "win_pnl_windows": win_pnl_windows,
+        "loss_pnl_windows": loss_pnl_windows,
     }
 
 

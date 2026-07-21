@@ -115,6 +115,54 @@ def test_pattern_accepts_iso_and_epoch_timestamps():
 # recommendations                                                             #
 # --------------------------------------------------------------------------- #
 
+def test_fees_are_not_double_counted():
+    # The recorder stores fill_fee == fees == (fee + builder), so summing
+    # fees + fill_fee + builder over-counted ~2.2x. The canonical reader picks
+    # ONE (fee_x18 when present) — here fee_x18 = $1.20 for the whole fill.
+    trades = [{
+        "created_at": NOW - 600, "filled_at": NOW - 600,
+        "product_id": 2, "product_name": "BTC-PERP", "side": "long",
+        "fill_size": 0.1, "fill_price": 60000, "submission_idx": 1, "status": "filled",
+        "fee_x18": str(12 * 10**17),          # $1.20 (authoritative venue fee)
+        "fill_fee": 1.20, "fees": 1.20, "builder_fee": 0.20,   # overlapping human cols
+    }]
+    p = nh.compute_user_pattern(trades, now_ts=NOW)
+    assert abs(p["fees_usd"] - 1.20) < 1e-6   # once, from fee_x18 — not 2.60
+
+
+def test_funding_paid_is_subtracted_from_net():
+    # funding_paid is PAID-POSITIVE (a cost); net must SUBTRACT it.
+    account_pnl = {
+        "pnl_windows": {"24h": 20.0, "7d": 20.0, "30d": 20.0, "all": 20.0},
+        "wins_windows": {"24h": 1, "all": 1}, "losses_windows": {"24h": 0, "all": 0},
+    }
+    trades = [{
+        "created_at": NOW - 600, "filled_at": NOW - 600,
+        "product_id": 2, "product_name": "BTC-PERP", "side": "long",
+        "fill_size": 0.1, "fill_price": 60000, "fill_fee": 2.0, "funding_paid": 5.0,
+        "submission_idx": 1, "status": "filled",
+    }]
+    p = nh.compute_user_pattern(trades, now_ts=NOW, account_pnl=account_pnl)
+    # 20 realized - 2 fees - 5 funding = 13 (funding is a cost, subtracted).
+    assert abs(p["net_pnl_usd"] - 13.0) < 1e-6
+    assert abs(p["funding_usd"] - 5.0) < 1e-6
+
+
+def test_recommendations_losing_session_is_actionable_not_generic():
+    # A losing session must NEVER get the hollow "no changes recommended" line —
+    # it gets concrete, quant feedback.
+    p = {"trades": 30, "volume_usd": 17955.0, "fees_usd": 4.2, "funding_usd": 0.0,
+         "realized_pnl_usd": -30.41, "net_pnl_usd": -34.61, "win_rate": 0.43,
+         "wins": 9, "losses": 12, "avg_win_usd": 3.0, "avg_loss_usd": -5.0,
+         "payoff_ratio": 0.6, "expectancy_usd": -1.56,
+         "top_pairs": [{"pair": "BTC-PERP", "volume_usd": 15000.0}]}
+    recs = nh.derive_recommendations(p, None)
+    blob = " ".join(recs).lower()
+    assert "no changes recommended" not in blob
+    assert "expectancy" in blob or "payoff" in blob or "break even" in blob
+    assert any("net" in r.lower() for r in recs)
+
+
 def test_recommendations_flag_fee_drag_turning_net_negative():
     p = {"trades": 50, "volume_usd": 100000.0, "fees_usd": 300.0, "funding_usd": 0.0,
          "realized_pnl_usd": 120.0, "net_pnl_usd": -180.0, "win_rate": 0.55,
@@ -222,11 +270,13 @@ def test_build_report_bounds_trade_query_to_last_24h(monkeypatch, memstore):
 
     captured = {}
 
-    def _trades(telegram_id, *, limit, network, since_created_at=None, **_kwargs):
+    def _trades(telegram_id, *, limit, network, since_created_at=None,
+                since_filled_at=None, **_kwargs):
         captured["telegram_id"] = telegram_id
         captured["limit"] = limit
         captured["network"] = network
         captured["since_created_at"] = since_created_at
+        captured["since_filled_at"] = since_filled_at
         return []
 
     now = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
@@ -239,11 +289,14 @@ def test_build_report_bounds_trade_query_to_last_24h(monkeypatch, memstore):
     report = nh.build_report(7, "mainnet", now_utc=now)
 
     assert report is not None
+    # Windows on FILL time (not sync/record time) so the recent-fill set matches
+    # the fill-time-bucketed realized-PnL replay.
     assert captured == {
         "telegram_id": 7,
         "limit": None,
         "network": "mainnet",
-        "since_created_at": now - timedelta(hours=24),
+        "since_created_at": None,
+        "since_filled_at": now - timedelta(hours=24),
     }
 
 
