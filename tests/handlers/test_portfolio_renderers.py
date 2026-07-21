@@ -212,6 +212,38 @@ def test_session_card_template_and_card_generation(tmp_path):
     assert Path(out).stat().st_size > 0
 
 
+def test_session_card_shows_cost_per_million_not_net():
+    """Cost/$1M is the trading cost per $1M of volume ((fees+funding)/vol×1M) —
+    a positive cost, INDEPENDENT of PnL, labelled 'Cost/$1M' (not 'Net/$1M')."""
+    from decimal import Decimal
+
+    from src.nadobro.handlers.performance_view import _render_session_card
+    from src.nadobro.utils.visual import money
+
+    # A LOSING copy session (mirrors the reported screenshot: Net −$6.55).
+    losing = {
+        "id": 6, "strategy": "copy", "product_name": "Top trader 0x31b1…02e4",
+        "status": "ended", "total_volume_usd": 6070.52, "total_fees_paid": 2.61,
+        "total_funding_paid": 0.0, "realized_pnl": -3.94,
+    }
+    lines: list = []
+    _render_session_card(lines, losing, 6)
+    text = "\n".join(lines)
+    expected = money(Decimal("2.61") / Decimal("6070.52") * Decimal("1000000"))
+    assert f"Cost/$1M {expected}" in text          # ~$430 — the fee rate per $1M
+    assert "Net/$1M" not in text                    # NOT the net-PnL-per-$1M we reverted
+    # It is a cost, so a losing session must NOT show the (large, negative) net.
+    assert "-$1,078" not in text and "−$1,078" not in text
+
+    # A WINNING session keeps a positive cost (cost is PnL-independent).
+    winning = {**losing, "total_volume_usd": 11850.97, "total_fees_paid": 5.10,
+               "realized_pnl": 16.62}
+    lines2: list = []
+    _render_session_card(lines2, winning, 7)
+    exp2 = money(Decimal("5.10") / Decimal("11850.97") * Decimal("1000000"))
+    assert f"Cost/$1M {exp2}" in "\n".join(lines2)
+
+
 def test_deck_upnl_dot_matches_sign():
     # Screenshot bug 2026-06-10: a green dot rendered next to uPnL -19.19.
     snapshot = _snapshot()
