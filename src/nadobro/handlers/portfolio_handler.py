@@ -395,7 +395,7 @@ async def _handle_portfolio(query, data, telegram_id):
         #   ``portfolio:share_pnl:{sid}``           — a strategy session
         import io as _io
 
-        from src.nadobro.portfolio.pnl_card_type_a import generate_type_a_card
+        from src.nadobro.portfolio.pnl_card_type_a import generate_type_a_card, png_to_jpeg
         from src.nadobro.portfolio.pnl_card_type_b import generate_type_b_card
         from src.nadobro.portfolio.pnl_card_builder import (
             build_type_b_card_data,
@@ -445,23 +445,40 @@ async def _handle_portfolio(query, data, telegram_id):
             else:  # Type B strategy-session card
                 data = await run_blocking(build_type_b_card_data, telegram_id, network, session_id)
                 png_bytes = await run_blocking(generate_type_b_card, data)
+            # Ship a compact JPEG, not the ~1.5MB PNG: the big photo upload was
+            # tripping the default 5s write timeout (err=Timed out), so the tap
+            # appeared to do nothing.
+            photo_bytes = await run_blocking(png_to_jpeg, png_bytes)
         except Exception as e:
             logger.warning("portfolio_share_pnl_failed user=%s err=%s", telegram_id, e)
             await query.answer("Could not generate PnL card.", show_alert=True)
             return
+        # Acknowledge the tap immediately so it never looks like nothing happened,
+        # then upload the photo with timeouts sized for a media upload.
+        try:
+            await query.answer()
+        except Exception:  # noqa: BLE001 - the send below is what matters
+            pass
         try:
             await query.message.reply_photo(
-                photo=_io.BytesIO(png_bytes),
+                photo=_io.BytesIO(photo_bytes),
                 caption=(
                     "📊 *Your PnL Card*\n"
                     "Share your performance on Nado."
                 ),
                 parse_mode="Markdown",
+                read_timeout=30,
+                write_timeout=60,
+                connect_timeout=20,
             )
-            await query.answer()
         except Exception as e:
             logger.warning("portfolio_share_pnl_send_failed user=%s err=%s", telegram_id, e)
-            await query.answer("Could not send PnL card image.", show_alert=True)
+            try:
+                await query.message.reply_text(
+                    "⚠ Couldn't send your PnL card just now — please try again."
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return
 
     # Default: portfolio overview (single shared 24h / 7d / 30d / All toggle).

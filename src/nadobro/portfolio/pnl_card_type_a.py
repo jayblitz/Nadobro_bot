@@ -302,6 +302,22 @@ def generate_type_a_card(data: dict) -> bytes:
     return out.getvalue()
 
 
+def png_to_jpeg(png_bytes: bytes, quality: int = 92) -> bytes:
+    """Re-encode a rendered card PNG as a compact JPEG for fast, reliable
+    Telegram upload. The card backgrounds are photographic, so the PNG is ~1.5MB
+    and its upload trips the default write timeout; a q92 JPEG is ~5-8x smaller
+    and Telegram serves photos as JPEG anyway (no user-visible quality loss).
+    Falls back to the original bytes on any error."""
+    try:
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=int(quality), optimize=True)
+        return out.getvalue()
+    except Exception:
+        logger.debug("png_to_jpeg failed; sending original bytes", exc_info=True)
+        return png_bytes
+
+
 if __name__ == "__main__":  # pragma: no cover - manual visual check
     sample = {
         "badge": "COPY TRADE", "product": "ETH:PERP-USDC", "base_symbol": "ETH",

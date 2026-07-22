@@ -44,6 +44,24 @@ def test_renderer_tolerates_unknown_icon_and_zero_leverage():
     assert _png_ok(generate_type_a_card(data))  # no WIF icon, no leverage, no referral → still renders
 
 
+def test_png_to_jpeg_shrinks_payload_for_upload():
+    """The card PNG is ~1.5MB; uploading it tripped Telegram's default write
+    timeout. png_to_jpeg must produce a much smaller, valid JPEG so the photo
+    send is fast/reliable."""
+    from src.nadobro.portfolio.pnl_card_type_a import png_to_jpeg
+
+    png = generate_type_a_card({
+        "badge": "DESK TRADE", "product": "BTC:PERP-USDC", "base_symbol": "BTC",
+        "side": "LONG", "leverage": 10, "pnl": 52.0, "entry_price": 60000,
+        "exit_price": 60500, "size": 0.1, "referral_code": "ABC123",
+    })
+    jpg = png_to_jpeg(png)
+    assert jpg[:3] == b"\xff\xd8\xff"          # valid JPEG (SOI marker)
+    assert len(jpg) < len(png) // 2            # materially smaller than the PNG
+    # Garbage in → falls back to the original bytes (never raises on the send path).
+    assert png_to_jpeg(b"not-an-image") == b"not-an-image"
+
+
 # ── copy builder ────────────────────────────────────────────────
 
 def test_copy_builder_maps_and_recovers_exact_exit():
