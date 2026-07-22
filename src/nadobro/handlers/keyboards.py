@@ -192,7 +192,7 @@ def home_card_kb():
             InlineKeyboardButton("⚙️ Settings", callback_data="settings:view"),
         ],
         [
-            InlineKeyboardButton("📚 Resources", callback_data="resources:home"),
+            InlineKeyboardButton("🔗 Official Links", callback_data="resources:home"),
             InlineKeyboardButton("🌐 Execution Mode", callback_data="home:mode"),
         ],
     ]
@@ -200,16 +200,12 @@ def home_card_kb():
 
 
 def resources_kb() -> InlineKeyboardMarkup:
+    # Official NadoBro links — the canonical set (see resources_handler card).
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📘 Nado Docs", url="https://docs.nado.xyz/")],
-        [InlineKeyboardButton("🛒 Nado Products", url="https://docs.nado.xyz/products")],
-        [InlineKeyboardButton("💧 NLP Vault Docs", url="https://docs.nado.xyz/nlp")],
-        [InlineKeyboardButton("🛠 Dev · Get Started", url="https://docs.nado.xyz/developer-resources/get-started")],
-        [InlineKeyboardButton("🔌 Dev · API", url="https://docs.nado.xyz/developer-resources/api")],
-        [InlineKeyboardButton("💻 Dev · CLI & MCP", url="https://docs.nado.xyz/developer-resources/cli-and-mcp-server")],
-        [InlineKeyboardButton("📦 Nado TS SDK", url="https://docs.nado.xyz/developer-resources/typescript-sdk")],
-        [InlineKeyboardButton("📖 NadoBro Docs", url="https://nadobro.gitbook.io/docs")],
-        [InlineKeyboardButton("𝕏  NadoBro on X", url="https://x.com/NBdotbot")],
+        [InlineKeyboardButton("🤖 Bot", url="https://t.me/Nadbro_bot")],
+        [InlineKeyboardButton("𝕏  Twitter", url="https://x.com/Nadobro_")],
+        [InlineKeyboardButton("📖 Docs", url="https://nadobro.gitbook.io/docs")],
+        [InlineKeyboardButton("💬 Community", url="https://t.me/nadobro1")],
         [InlineKeyboardButton("◀ Back", callback_data="nav:main")],
     ])
 
