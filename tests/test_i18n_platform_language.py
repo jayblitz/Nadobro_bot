@@ -51,7 +51,7 @@ CORE_NAV_LABELS = [
     "🔔 Alerts",
     "🎁 Referrals",
     "⚙️ Settings",
-    "📚 Resources",
+    "🔗 Official Links",
 ]
 
 
