@@ -1692,10 +1692,10 @@ def fmt_status_overview(status: dict, onboarding: dict):
     elif strategy == "BRO":
         session_pnl = float((status.get("bro_state") or {}).get("total_pnl") or session_pnl)
 
-    # Net result per $1M of volume — signed by outcome (profit = +, loss = −),
-    # net of fees + funding. Was a pure fee cost that ignored PnL entirely.
-    net_per_million = (
-        (session_pnl - session_fees - session_funding) / session_volume * 1_000_000.0
+    # Cost/$1M — net-of-fees result per $1M of volume: (realized PnL − fees) /
+    # volume × 1,000,000. Signed by outcome (profit after fees → +, loss → −).
+    cost_per_million = (
+        (session_pnl - session_fees) / session_volume * 1_000_000.0
         if session_volume > 0 else 0.0
     )
     state_label = "PAUSED" if (global_pause_active or locally_paused) else "LIVE"
@@ -1740,7 +1740,7 @@ def fmt_status_overview(status: dict, onboarding: dict):
         f"{_loc('Filled')}: *{escape_md(f'{fill_pct:.0f}%')}*"
     )
     lines.append(
-        f"{_loc('Net / $1M')}: *{escape_md(_fmt_signed_usd(net_per_million))}* \\| "
+        f"{_loc('Cost / $1M')}: *{escape_md(_fmt_signed_usd(cost_per_million))}* \\| "
         f"{_loc('Spread')}: *{escape_md(f'{spread_bp:.0f}bp')}*"
     )
     if session_funding:

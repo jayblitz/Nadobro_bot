@@ -87,18 +87,17 @@ def _render_session_card(
     state = str(session.get("status") or "stopped").lower()
     badge = "🟢 running" if state == "running" else "⏹ ended"
     net = pnl - fees - funding
-    # Net result per $1M of volume — signed by outcome: POSITIVE when the session
-    # made money net of fees+funding, NEGATIVE when it lost. (Was a pure cost that
-    # stayed positive regardless of PnL.)
-    net_per_million = (
-        (net / volume * Decimal("1000000")) if volume > 0 else Decimal("0")
+    # Cost/$1M — net-of-fees result per $1M of volume: (realized PnL − fees) /
+    # volume × 1,000,000. Signed by outcome (profit after fees → +, loss → −).
+    cost_per_million = (
+        ((pnl - fees) / volume * Decimal("1000000")) if volume > 0 else Decimal("0")
     )
     lines.extend([
         f"{display_idx}. {b(strategy.upper())} · {b(pair)}  {badge}",
         f"    {_fmt_dt(session.get('started_at'))} · ran {_duration(session)}",
         f"    Net {pnl_dot(net)} {signed_money(net)}  (gross {signed_money(pnl)} − fees {money(fees)}"
         f" {'−' if funding >= 0 else '+'} funding {money(abs(funding))})",
-        f"    Vol {money(volume)} · Net/$1M {signed_money(net_per_million)}",
+        f"    Vol {money(volume)} · Cost/$1M {signed_money(cost_per_million)}",
         "",
     ])
     return [[
@@ -134,8 +133,8 @@ def generate_session_card(session: dict[str, Any], network: str, output_path: Pa
     fees = abs(_dec(session.get("fees") or session.get("total_fees_paid") or 0))
     funding = _dec(session.get("funding") or session.get("total_funding_paid") or 0)
     volume = _dec(session.get("volume") or session.get("total_volume_usd") or 0)
-    net_per_million = (((pnl - fees - funding) / volume * Decimal("1000000"))
-                       if volume else Decimal("0"))
+    cost_per_million = (((pnl - fees) / volume * Decimal("1000000"))
+                        if volume else Decimal("0"))
     wins = int(session.get("win_count") or 0)
     losses = int(session.get("loss_count") or 0)
     win_rate = Decimal(wins) / Decimal(max(1, wins + losses)) * Decimal(100) if wins + losses else Decimal("0")
@@ -144,7 +143,7 @@ def generate_session_card(session: dict[str, Any], network: str, output_path: Pa
     draw.text((72, 260), "VOLUME", fill="#94a3b8", font=_font(26))
     draw.text((72, 300), money(volume), fill="#f8fafc", font=_font(70))
     draw.text((720, 250), f"PNL {signed(pnl)}", fill="#22c55e" if pnl >= 0 else "#ef4444", font=_font(48))
-    draw.text((720, 330), f"NET/$1M {signed(net_per_million)}", fill="#f8fafc", font=_font(36))
+    draw.text((720, 330), f"COST/$1M {signed(cost_per_million)}", fill="#f8fafc", font=_font(36))
     draw.text(
         (72, 650),
         f"Fees -{money(fees)} · Funding {signed(funding)} · Win {win_rate:.1f}% ({wins}/{losses}) · {network.upper()}",
