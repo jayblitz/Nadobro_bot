@@ -471,13 +471,9 @@ async def _handle_portfolio(query, data, telegram_id):
                 pool_timeout=30,
             )
         except Exception as e:
+            # No text fallback: the user is already looking at their stats and
+            # just wanted the card — a text message would be noise. Log only.
             logger.warning("portfolio_share_pnl_send_failed user=%s err=%s", telegram_id, e)
-            try:
-                await query.message.reply_text(
-                    "⚠ Couldn't send your PnL card just now — please try again."
-                )
-            except Exception:  # noqa: BLE001
-                pass
         return
 
     # Default: portfolio overview (single shared 24h / 7d / 30d / All toggle).
