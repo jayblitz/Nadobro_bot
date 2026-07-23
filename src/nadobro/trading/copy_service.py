@@ -225,7 +225,7 @@ async def _post_copy_close_card(
 
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         from src.nadobro.portfolio.pnl_card_builder import build_copy_trade_card_data
-        from src.nadobro.portfolio.pnl_card_type_a import generate_type_a_card, png_to_jpeg
+        from src.nadobro.portfolio.pnl_card_type_a import generate_type_a_card
 
         data = await run_blocking(
             build_copy_trade_card_data, telegram_id, str(network), int(position_id)
@@ -233,15 +233,14 @@ async def _post_copy_close_card(
         if not data or data.get("unsupported"):
             return False
         png = await run_blocking(generate_type_a_card, data)
-        # Compact JPEG + media-sized timeouts: the ~1.5MB PNG upload was tripping
-        # the default 5s write timeout.
-        photo = await run_blocking(png_to_jpeg, png)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(
             "📤 Share", callback_data=f"portfolio:share_pnl:copy:{int(position_id)}"
         )]])
+        # Full-quality PNG upload — media-sized timeouts (the ~1.5MB card was
+        # tripping the default 5s write timeout).
         await _bot_app.bot.send_photo(
-            chat_id=telegram_id, photo=_io.BytesIO(photo), caption=caption, reply_markup=kb,
-            read_timeout=30, write_timeout=60, connect_timeout=20,
+            chat_id=telegram_id, photo=_io.BytesIO(png), caption=caption, reply_markup=kb,
+            read_timeout=60, write_timeout=120, connect_timeout=30, pool_timeout=30,
         )
         return True
     except Exception as e:  # noqa: BLE001 - card is best-effort; caller falls back to text
