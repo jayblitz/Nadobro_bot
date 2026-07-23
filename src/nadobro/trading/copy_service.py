@@ -236,8 +236,11 @@ async def _post_copy_close_card(
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(
             "📤 Share", callback_data=f"portfolio:share_pnl:copy:{int(position_id)}"
         )]])
+        # Full-quality PNG upload — media-sized timeouts (the ~1.5MB card was
+        # tripping the default 5s write timeout).
         await _bot_app.bot.send_photo(
-            chat_id=telegram_id, photo=_io.BytesIO(png), caption=caption, reply_markup=kb
+            chat_id=telegram_id, photo=_io.BytesIO(png), caption=caption, reply_markup=kb,
+            read_timeout=60, write_timeout=120, connect_timeout=30, pool_timeout=30,
         )
         return True
     except Exception as e:  # noqa: BLE001 - card is best-effort; caller falls back to text

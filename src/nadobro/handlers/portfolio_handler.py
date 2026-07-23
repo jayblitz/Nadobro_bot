@@ -449,6 +449,14 @@ async def _handle_portfolio(query, data, telegram_id):
             logger.warning("portfolio_share_pnl_failed user=%s err=%s", telegram_id, e)
             await query.answer("Could not generate PnL card.", show_alert=True)
             return
+        # Acknowledge the tap immediately so it never looks like nothing happened,
+        # then upload the full-quality PNG. The ~1.5MB card upload was tripping
+        # the default 5s write timeout (err=Timed out) — give it media-sized
+        # timeouts instead of downscaling the image.
+        try:
+            await query.answer()
+        except Exception:  # noqa: BLE001 - the send below is what matters
+            pass
         try:
             await query.message.reply_photo(
                 photo=_io.BytesIO(png_bytes),
@@ -457,11 +465,15 @@ async def _handle_portfolio(query, data, telegram_id):
                     "Share your performance on Nado."
                 ),
                 parse_mode="Markdown",
+                read_timeout=60,
+                write_timeout=120,
+                connect_timeout=30,
+                pool_timeout=30,
             )
-            await query.answer()
         except Exception as e:
+            # No text fallback: the user is already looking at their stats and
+            # just wanted the card — a text message would be noise. Log only.
             logger.warning("portfolio_share_pnl_send_failed user=%s err=%s", telegram_id, e)
-            await query.answer("Could not send PnL card image.", show_alert=True)
         return
 
     # Default: portfolio overview (single shared 24h / 7d / 30d / All toggle).
