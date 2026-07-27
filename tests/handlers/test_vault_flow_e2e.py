@@ -39,6 +39,7 @@ class FakeVaultClient:
         mintable_with_borrow=None,
         lockup_ms=None,
         reject_mint=None,
+        locked_query_ok=True,
     ):
         self.usdt0 = usdt0
         self.lp_balance = lp_balance
@@ -50,8 +51,10 @@ class FakeVaultClient:
         )
         self.lockup_ms = lockup_ms
         self.reject_mint = reject_mint
+        self.locked_query_ok = locked_query_ok
         self.mints = []
         self.burns = []
+        self.burn_x18 = []
 
     def initialize(self):
         return True
@@ -68,7 +71,37 @@ class FakeVaultClient:
         amount = self.mintable_with_borrow if spot_leverage else self.mintable_no_borrow
         return {"ok": True, "max_mintable_usdt0": float(amount), "raw": {}}
 
+    def _locked_split(self):
+        """Mirror the venue: NLP minted within the 4-day lockup is locked, the
+        rest is unlocked (and only the unlocked part is burnable)."""
+        import time as _t
+
+        locked = self.lp_balance if (
+            self.lockup_ms and (_t.time() - self.lockup_ms / 1000.0) < 4 * 24 * 3600
+        ) else 0.0
+        return locked, self.lp_balance - locked
+
+    def get_nlp_locked_balances(self):
+        if self.locked_query_ok is False:      # simulate a throttled weight-20 query
+            return {"ok": False, "balance_locked": 0.0, "balance_unlocked": 0.0,
+                    "balance_unlocked_x18": 0, "locked_entries": []}
+        locked, unlocked = self._locked_split()
+        import time as _t
+
+        return {
+            "ok": True,
+            "balance_locked": locked,
+            "balance_unlocked": unlocked,
+            "balance_unlocked_x18": int(round(unlocked * 1e18)),
+            "locked_entries": (
+                [{"amount": locked, "unlocked_at": int(self.lockup_ms / 1000.0) + 4 * 24 * 3600}]
+                if locked > 0 and self.lockup_ms else []
+            ),
+        }
+
     def get_nlp_position(self):
+        locked, unlocked = self._locked_split()
+        known = self.locked_query_ok is not False
         return {
             "exists": self.lp_balance > 0,
             "lp_balance": self.lp_balance,
@@ -76,6 +109,10 @@ class FakeVaultClient:
             "last_mint_ts_ms": self.lockup_ms,
             "nlp_product_id": 11,
             "nav_usdt0": self.nav,
+            "unlocked_known": known,
+            "lp_unlocked": unlocked if known else 0.0,
+            "lp_unlocked_x18": int(round(unlocked * 1e18)) if known else 0,
+            "lp_locked": locked if known else 0.0,
         }
 
     def mint_nlp(self, amount, *, spot_leverage=False):
@@ -84,7 +121,8 @@ class FakeVaultClient:
         self.mints.append((float(amount), bool(spot_leverage)))
         return {"success": True, "digest": "0x" + "1" * 64, "quote_amount_usdt0": amount}
 
-    def burn_nlp(self, amount):
+    def burn_nlp(self, amount, *, amount_x18=None):
+        self.burn_x18.append(amount_x18)
         self.burns.append(float(amount))
         return {"success": True, "digest": "0x" + "2" * 64, "nlp_amount": amount}
 
@@ -377,3 +415,46 @@ def test_snapshot_vault_full_when_borrow_probe_also_zero(env):
     env["client"] = FakeVaultClient(mintable_no_borrow=0.0, mintable_with_borrow=0.0)
     snap = svc.get_user_vault_snapshot(7)
     assert snap["deposit_blocked_reason"] == "vault_full"
+
+
+def test_withdraw_picker_hides_presets_when_unlocked_balance_is_unknown(env):
+    """2026-07-25 bug: the weight-20 nlp_locked_balances query lost the gateway
+    budget race, the old code read that as "0 locked / 0 unlocked", the card
+    showed the full spot balance as Unlocked, and every withdraw came back
+    2096. Unknown must render as 'checking…' with NO burn buttons."""
+    env["client"] = FakeVaultClient(lp_balance=2.777688, nav=1.0638, locked_query_ok=False)
+    ctx = FakeContext()
+
+    q = FakeQuery("vault:home")
+    _drive(vh.handle_vault_callback(q, ctx))
+    assert "Withdrawable: `checking…`" in q.edits[-1]["text"]
+    assert "Lockup: `Unlocked`" not in q.edits[-1]["text"]   # never claim unlocked
+
+    q = FakeQuery("vault:withdraw")
+    _drive(vh.handle_vault_callback(q, ctx))
+    picker = q.edits[-1]
+    assert not any(cb.startswith("vault:withdraw:pct:") for cb in _callbacks(picker))
+    assert "Refresh" in picker["text"]
+
+
+def test_withdraw_100pct_burns_only_the_unlocked_tranche(env):
+    """Half the position is inside the 4-day lock: 100% must burn the unlocked
+    half (with the venue's exact wei), not the total."""
+    import time as _t
+
+    # Minted 2 days ago -> still locked; plus we model a partially unlocked book
+    client = FakeVaultClient(lp_balance=2.0, nav=1.0)
+    client.lockup_ms = int((_t.time() - 2 * 24 * 3600) * 1000)
+    env["client"] = client
+    ctx = FakeContext()
+
+    q = FakeQuery("vault:withdraw")
+    _drive(vh.handle_vault_callback(q, ctx))
+    picker = q.edits[-1]
+    # Entire balance is locked -> no presets, and the lockup is explained.
+    assert not any(cb.startswith("vault:withdraw:pct:") for cb in _callbacks(picker))
+    assert "locked" in picker["text"].lower()
+    # And a stale-keyboard confirm cannot sneak a burn through.
+    q = FakeQuery("vault:withdraw:confirm:2.0")
+    _drive(vh.handle_vault_callback(q, ctx))
+    assert client.burns == []

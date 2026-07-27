@@ -3509,23 +3509,32 @@ class NadoClient:
             logger.error("mint_nlp failed user=%s err=%s", _mask_address(self.address or ""), e)
             return {"success": False, "error": self._friendly_error(str(e))}
 
-    def burn_nlp(self, nlp_amount: float) -> dict:
+    def burn_nlp(self, nlp_amount: float, *, amount_x18: int | None = None) -> dict:
         """Burn NLP tokens to withdraw USDT0 from the vault.
 
         Args:
             nlp_amount: Amount of NLP tokens to redeem (UI-friendly float).
                 Converted to integer x10^18 per gateway contract.
+            amount_x18: EXACT on-chain amount in wei. When supplied it wins over
+                ``nlp_amount``: a "burn everything" must send the venue's own
+                integer, because ``int(round(float(U)/1e18 * 1e18))`` can round
+                a few wei ABOVE the real balance and the venue rejects that with
+                error 2096 ("Do not have enough unlocked NLP").
         """
         if not self._initialized or not self.client:
             return {"success": False, "error": "Client not initialized. Please try /start again."}
-        if nlp_amount is None or float(nlp_amount) <= 0:
+        if amount_x18 is None and (nlp_amount is None or float(nlp_amount) <= 0):
             return {"success": False, "error": "Withdraw amount must be positive."}
         sender_hex = self.subaccount_hex or ""
         if not sender_hex:
             return {"success": False, "error": "Subaccount unavailable. Re-link your wallet via /start."}
         try:
             from nado_protocol.engine_client.types.execute import BurnNlpParams
-            nlp_amount_x18 = int(round(float(nlp_amount) * 1e18))
+            if amount_x18 is not None:
+                nlp_amount_x18 = int(amount_x18)
+                nlp_amount = nlp_amount_x18 / 1e18
+            else:
+                nlp_amount_x18 = int(round(float(nlp_amount) * 1e18))
             if nlp_amount_x18 <= 0:
                 return {"success": False, "error": "Withdraw amount rounds to zero. Try a larger amount."}
             params = BurnNlpParams(sender=sender_hex, nlpAmount=nlp_amount_x18)
@@ -3660,17 +3669,38 @@ class NadoClient:
         return 1.0
 
     def get_nlp_locked_balances(self) -> dict:
-        """Return locked/unlocked NLP balances and per-lock unlock timestamps."""
+        """Return locked/unlocked NLP balances and per-lock unlock timestamps.
+
+        ``ok`` distinguishes "the venue says you have nothing locked" from "we
+        could not find out". This query costs gateway weight 20 against an
+        8 rps / 24 burst per-user budget, so a throttled call returns None from
+        ``_query_rest`` — booking that as ``unlocked = 0`` (the old behaviour)
+        made the vault card fall back to the raw spot balance and label the
+        WHOLE position "Unlocked", so a 100% withdraw tried to burn locked
+        tokens and the venue rejected it with error 2096.
+
+        ``balance_unlocked_x18`` is the EXACT on-chain integer (wei). Burning
+        the max must use it directly: the float round-trip
+        (``int(round(float(U)/1e18 * 1e18))``) can land a few wei ABOVE ``U``,
+        which the venue also rejects with 2096.
+        """
         empty = {
+            "ok": False,
             "balance_locked": 0.0,
             "balance_unlocked": 0.0,
+            "balance_unlocked_x18": 0,
             "locked_entries": [],
         }
         try:
             payload = self._query_rest(
                 "nlp_locked_balances", {"subaccount": self.subaccount_hex},
-            ) or {}
+            )
+            if not payload:
+                # Throttled / transport failure — UNKNOWN, never "zero".
+                return empty
             data = payload.get("data") or payload
+            if not isinstance(data, dict):
+                return empty
             locked = data.get("balance_locked") or {}
             unlocked = data.get("balance_unlocked") or {}
             entries = []
@@ -3682,9 +3712,16 @@ class NadoClient:
                     "amount": self._x18_to_float(bal.get("amount")),
                     "unlocked_at": int(row.get("unlocked_at") or 0),
                 })
+            unlocked_raw = (unlocked.get("balance") or {}).get("amount")
+            try:
+                unlocked_x18 = int(unlocked_raw) if unlocked_raw is not None else 0
+            except (TypeError, ValueError):
+                unlocked_x18 = 0
             return {
+                "ok": True,
                 "balance_locked": self._x18_to_float((locked.get("balance") or {}).get("amount")),
-                "balance_unlocked": self._x18_to_float((unlocked.get("balance") or {}).get("amount")),
+                "balance_unlocked": self._x18_to_float(unlocked_raw),
+                "balance_unlocked_x18": unlocked_x18,
                 "locked_entries": entries,
             }
         except Exception as e:
@@ -3744,15 +3781,35 @@ class NadoClient:
             "lp_value_usdt0": 0.0,
             "last_mint_ts_ms": None,
             "nlp_product_id": None,
+            # Burnable truth. ``unlocked_known`` False means the locked-balance
+            # query did not answer — callers must NOT treat lp_balance as
+            # burnable (that is what produced venue error 2096).
+            "unlocked_known": False,
+            "lp_unlocked": 0.0,
+            "lp_unlocked_x18": 0,
+            "lp_locked": 0.0,
         }
         try:
             nlp_pid = self.resolve_nlp_product_id()
             if nlp_pid is None:
                 return result
             locked_info = self.get_nlp_locked_balances()
+            unlocked_known = bool(locked_info.get("ok"))
             lp_balance = locked_info["balance_locked"] + locked_info["balance_unlocked"]
             if lp_balance <= 0:
-                lp_balance = self._spot_balance_amount(nlp_pid)
+                # Either the query failed (unknown) or the venue reports no
+                # lock rows for a balance the spot ledger still shows. Display
+                # the spot balance, but do NOT claim any of it is burnable.
+                spot_balance = self._spot_balance_amount(nlp_pid)
+                if spot_balance > 0:
+                    unlocked_known = False
+                lp_balance = spot_balance
+            result.update({
+                "unlocked_known": unlocked_known,
+                "lp_unlocked": float(locked_info["balance_unlocked"]) if unlocked_known else 0.0,
+                "lp_unlocked_x18": int(locked_info.get("balance_unlocked_x18") or 0) if unlocked_known else 0,
+                "lp_locked": float(locked_info["balance_locked"]) if unlocked_known else 0.0,
+            })
             oracle = self._nlp_oracle_price(nlp_pid)
             lp_value = max(0.0, lp_balance * oracle)
             last_mint_ts_ms = None

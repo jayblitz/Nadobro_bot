@@ -51,6 +51,28 @@ def lockup_remaining_seconds(last_mint_ts_ms: Optional[int]) -> int:
     return max(0, remaining)
 
 
+def _next_unlock_hint(locked_info: dict) -> str:
+    """" — unlocks in ~Xh" for the soonest still-locked tranche, else ""."""
+    now = time.time()
+    future = [
+        int(e.get("unlocked_at") or 0)
+        for e in (locked_info.get("locked_entries") or [])
+        if int(e.get("unlocked_at") or 0) > now
+    ]
+    if not future:
+        return ""
+    hours = (min(future) - now) / 3600.0
+    if hours < 1:
+        return f" — next tranche unlocks in ~{max(1, int(hours * 60))}m"
+    return f" — next tranche unlocks in ~{hours:.1f}h"
+
+
+def _is_insufficient_unlocked_error(error: object) -> bool:
+    """True for the venue's 'not enough unlocked NLP' rejection (code 2096)."""
+    text = str(error or "").lower()
+    return "2096" in text or "unlocked nlp" in text
+
+
 def estimate_withdraw_fee_usdt0(usdt0_out: float) -> float:
     if usdt0_out <= 0:
         return SEQUENCER_FEE_USDT0 + WITHDRAW_FEE_FLOOR_USDT0
@@ -144,6 +166,12 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
         "nlp_nav_usdt0": 0.0,
         "lockup_seconds_remaining": 0,
         "last_mint_ts_ms": None,
+        # Burnable truth (see nado_client.get_nlp_locked_balances). When
+        # ``unlocked_known`` is False the locked-balance query did not answer,
+        # so lp_balance must NOT be presented as withdrawable.
+        "unlocked_known": False,
+        "lp_unlocked": 0.0,
+        "lp_locked": 0.0,
         "pool": {"tvl_usdt0": 0.0, "apr_pct": None, "apr_source": "unavailable"},
         "private_alpha_cap_usdt0": PRIVATE_ALPHA_CAP_USDT0,
         "deposit_watch_enabled": False,
@@ -191,6 +219,9 @@ def get_user_vault_snapshot(telegram_id: int) -> dict:
     snapshot["position_usdt0"] = snapshot["lp_value_usdt0"]
     snapshot["last_mint_ts_ms"] = pos.get("last_mint_ts_ms")
     snapshot["lockup_seconds_remaining"] = lockup_remaining_seconds(snapshot["last_mint_ts_ms"])
+    snapshot["unlocked_known"] = bool(pos.get("unlocked_known"))
+    snapshot["lp_unlocked"] = float(pos.get("lp_unlocked") or 0.0)
+    snapshot["lp_locked"] = float(pos.get("lp_locked") or 0.0)
 
     snapshot["max_mintable_usdt0"] = max_mintable
     snapshot["deposit_room_usdt0"] = deposit_room_usdt0(
@@ -392,10 +423,53 @@ def withdraw_from_vault(telegram_id: int, nlp_amount: float) -> dict:
                 "(4-day post-mint lock from docs.nado.xyz/nlp)."
             ),
         }
+    # Burnable amount = the venue's UNLOCKED balance, never the total. Re-read it
+    # here (fresh, not from the snapshot) because this weight-20 query is the one
+    # that loses the gateway-budget race during a snapshot burst — a throttled
+    # read previously degraded to "0 locked / 0 unlocked", the card showed the
+    # whole spot balance as "Unlocked", and the burn came back 2096.
+    locked_info = client.get_nlp_locked_balances() or {}
+    unlocked_known = bool(locked_info.get("ok"))
+    unlocked = float(locked_info.get("balance_unlocked") or 0.0)
+    unlocked_x18 = int(locked_info.get("balance_unlocked_x18") or 0)
+    amount_x18: Optional[int] = None
+    if unlocked_known:
+        if unlocked_x18 <= 0:
+            still_locked = float(locked_info.get("balance_locked") or 0.0)
+            when = _next_unlock_hint(locked_info)
+            return {
+                "success": False,
+                "error": (
+                    f"None of your {still_locked:.6f} NLP is unlocked yet{when}. "
+                    "NLP unlocks 4 days after each mint (docs.nado.xyz/nlp)."
+                ),
+            }
+        if nlp_amount > unlocked + 1e-12:
+            when = _next_unlock_hint(locked_info)
+            return {
+                "success": False,
+                "error": (
+                    f"Only {unlocked:.6f} of your {float(snap.get('lp_balance') or 0.0):.6f} NLP "
+                    f"is unlocked right now{when}. Withdraw up to {unlocked:.6f} NLP, "
+                    "or wait for the rest to unlock."
+                ),
+            }
+        # Burning (effectively) everything unlocked: send the venue's own exact
+        # integer. The float round-trip can land a few wei high -> 2096.
+        if nlp_amount >= unlocked - 1e-12:
+            amount_x18 = unlocked_x18
     lp_value = float(snap.get("lp_value_usdt0") or 0.0)
     lp_balance = float(snap.get("lp_balance") or 0.0)
     est_usdt0 = lp_value * (nlp_amount / lp_balance) if lp_balance > 0 else 0.0
-    result = client.burn_nlp(nlp_amount)
+    result = client.burn_nlp(nlp_amount, amount_x18=amount_x18)
+    if not result.get("success") and _is_insufficient_unlocked_error(result.get("error")):
+        result = {
+            "success": False,
+            "error": (
+                "Nado says that amount is not unlocked yet. NLP unlocks 4 days "
+                "after each mint — tap Refresh and try a smaller amount."
+            ),
+        }
     if result.get("success"):
         _log_vault_event(
             telegram_id, network,
