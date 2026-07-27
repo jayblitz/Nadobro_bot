@@ -1,10 +1,13 @@
 import enum
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional, TypeAlias
 
 from psycopg2 import sql as pgsql
 from src.nadobro.db import query_one, query_all, execute, execute_returning, query_count, run_transaction
+
+logger = logging.getLogger(__name__)
 
 # JSON-compatible values for bot_state (serialized with json.dumps unless value is str).
 JsonSerializable: TypeAlias = (
@@ -1317,7 +1320,20 @@ def _derive_session_realized_pnl(
     params: list,
     session_id: int,
 ) -> float | None:
-    """Replay this session's fills to realize closed legs while residual inventory remains."""
+    """Replay this session's fills to realize closed legs while residual inventory remains.
+
+    SESSION-PNL-CONTAMINATION (2026-07-27): a run reported realized +$205.72 when
+    its own fills were worth ~$1.56. The replay had closed 0.03256 BTC against a
+    blended entry of $58,912.60 — 1.7x the session's own closed size (0.01910),
+    at a price from long before the run started. Fills that PREDATE the session
+    had been tagged into it, so the replay built its entry basis from another
+    era's inventory and the inflated PnL tripped the take-profit rail, stopping
+    a bot that was actually ~$1 up.
+
+    A session's own fills can never predate ``started_at``, so the window is
+    pinned here. This is the same class of leak the product+time-window fallback
+    caused (see ``_session_match_where``), from the opposite direction.
+    """
     from src.nadobro.quant.portfolio_calculator import realized_pnl_windows_from_rows
 
     rows = query_all(
@@ -1326,17 +1342,73 @@ def _derive_session_realized_pnl(
           COALESCE(NULLIF(product_id, 0), (
             SELECT product_id FROM strategy_sessions WHERE id = %s
           )) AS product_id,
-          side, fill_size, size, fill_price, price, isolated,
-          base_filled_x18, quote_filled_x18,
+          side, fill_size, size, fill_price, price, isolated, source,
+          submission_idx, base_filled_x18, quote_filled_x18,
           COALESCE(filled_at, created_at) AS filled_at
         FROM {table}
         WHERE {where}
           AND status IN ('filled', 'closed', 'partially_filled')
+          -- A session's fills cannot predate the run. Without this, fills
+          -- tagged in from an earlier era set the entry basis and inflated
+          -- realized PnL ~130x, firing the TP rail on a ~$1 run.
+          AND COALESCE(filled_at, created_at) >= COALESCE(
+                (SELECT started_at FROM strategy_sessions WHERE id = %s),
+                '-infinity'::timestamptz)
         ORDER BY COALESCE(filled_at, created_at), id
         """,
-        (int(session_id), *tuple(params)),
+        (int(session_id), *tuple(params), int(session_id)),
     )
-    return float(realized_pnl_windows_from_rows(rows).get("total_pnl") or 0)
+    realized = float(realized_pnl_windows_from_rows(rows).get("total_pnl") or 0)
+    _log_session_replay_diagnostics(session_id, rows, realized)
+    return realized
+
+
+# Realized PnL beyond this multiple of the session's own price range x traded
+# base is mathematically impossible from its own fills — it means foreign rows
+# are in the replay. Logged (never silently swallowed) so the contaminating row
+# is identifiable in production.
+_SESSION_PNL_SANITY_SLACK = 1.5
+
+
+def _log_session_replay_diagnostics(session_id: int, rows: list, realized: float) -> None:
+    """Dump the exact rows a session replay consumed when its realized PnL is
+    not achievable from those rows' own price range.
+
+    Upper bound: |realized| <= (max_price - min_price) * total_base_traded.
+    Exceeding it proves the entry basis came from outside this row set.
+    """
+    try:
+        if not rows:
+            return
+        prices, base = [], 0.0
+        for r in rows:
+            px = float(r.get("fill_price") or r.get("price") or 0)
+            sz = abs(float(r.get("fill_size") or r.get("size") or 0))
+            if px > 0:
+                prices.append(px)
+            base += sz
+        if len(prices) < 2 or base <= 0:
+            return
+        bound = (max(prices) - min(prices)) * base * _SESSION_PNL_SANITY_SLACK
+        if abs(realized) <= bound + 1e-9:
+            return
+        logger.error(
+            "SESSION-PNL-CONTAMINATION session=%s realized=%.4f exceeds bound=%.4f "
+            "(price range %.2f-%.2f, base %.6f over %d fills) — dumping rows",
+            session_id, realized, bound, min(prices), max(prices), base, len(rows),
+        )
+        for r in rows:
+            logger.error(
+                "  session=%s fill side=%s size=%s price=%s source=%s isolated=%s "
+                "submission_idx=%s filled_at=%s",
+                session_id, r.get("side"),
+                r.get("fill_size") or r.get("size"),
+                r.get("fill_price") or r.get("price"),
+                r.get("source"), r.get("isolated"),
+                r.get("submission_idx"), r.get("filled_at"),
+            )
+    except Exception:  # noqa: BLE001 - diagnostics must never break the read path
+        logger.debug("session replay diagnostics failed session=%s", session_id, exc_info=True)
 
 
 def get_session_live_metrics(
