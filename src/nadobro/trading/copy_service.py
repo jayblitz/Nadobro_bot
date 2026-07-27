@@ -36,6 +36,7 @@ from src.nadobro.models.database import (
     get_open_copy_position_for_product,
     close_copy_position,
     reduce_copy_position,
+    grow_copy_position,
     update_mirror_accounting,
     set_mirror_unrealized,
     set_mirror_session,
@@ -71,6 +72,20 @@ PARTIAL_CLOSES_ENABLED = env_bool("NADO_COPY_PARTIAL_CLOSES", True)
 PARTIAL_CLOSE_MIN_DELTA_PCT = env_float("NADO_COPY_PARTIAL_MIN_DELTA_PCT", 5.0)
 # Below this remaining fraction a partial becomes a full close (avoids dust).
 PARTIAL_CLOSE_DUST_FRACTION = 0.05
+
+# COPY-NO-SCALE-UP fix: mirror a leader's ADD to an existing position. Without
+# this the bot copied only the leader's FIRST entry — a leader going 16.6 -> 36.6
+# HYPE was never mirrored, so the follower silently under-tracked the trade.
+SCALE_UPS_ENABLED = env_bool("NADO_COPY_SCALE_UPS", True)
+# Ignore adds smaller than this % of the tracked baseline (noise / dust adds).
+SCALE_UP_MIN_DELTA_PCT = env_float("NADO_COPY_SCALE_UP_MIN_DELTA_PCT", 5.0)
+# Share of margin_per_trade committed on the FIRST entry. The rest is HEADROOM
+# for mirroring the leader scaling in. Without it the conviction weight pinned
+# the follower at 100% of budget on the leader's first fill, so a later add had
+# no room to be mirrored and the copy silently stopped tracking the trade.
+# margin_per_trade remains a HARD cap: scaling in can reach it, never exceed it.
+COPY_INITIAL_ENTRY_FRACTION = min(1.0, max(0.05, env_float(
+    "NADO_COPY_INITIAL_ENTRY_FRACTION", 0.5)))
 # COPY-MAKER: opens are maker-first post-only limit orders joined at the touch
 # (market opens paid taker fees + up to 1.5% slippage on every mirrored
 # entry). Closes stay reduce-only market on purpose: a close that doesn't
@@ -1039,6 +1054,7 @@ def _compute_copy_sizing(
     margin_per_trade: float,
     max_leverage: float,
     product_max_leverage: float,
+    entry_fraction: float = 1.0,
 ) -> tuple[float, float]:
     """Return ``(copy_size_base, leverage)`` for a mirrored position.
 
@@ -1065,7 +1081,9 @@ def _compute_copy_sizing(
         weight = min(1.0, leader_notional / leader_max_notional)
     else:
         weight = 1.0
-    copy_margin = max(0.0, float(margin_per_trade) * weight)
+    # ``entry_fraction`` < 1.0 holds budget back for mirroring leader adds
+    # (COPY-NO-SCALE-UP). The full-budget ceiling is entry_fraction=1.0.
+    copy_margin = max(0.0, float(margin_per_trade) * weight * float(entry_fraction))
     copy_size = (copy_margin * lev) / leader_entry
     return copy_size, lev
 
@@ -1392,9 +1410,20 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
                 if resized == "closed":
                     copy_pos_by_product.pop(pid, None)
                     continue
+                if not resized:
+                    # COPY-NO-SCALE-UP: the leader may have ADDED. Nothing else
+                    # in this loop reacted to a growing leader position, so the
+                    # bot mirrored only their first entry.
+                    resized = await _mirror_leader_add_if_needed(
+                        existing, leader_pos, user_id, mirror_id, network,
+                        margin_per_trade=margin_per_trade,
+                        max_leverage=max_leverage,
+                        leader_max_notional=_leader_max_notional(leader_pos_map),
+                        session_id=session_id,
+                    )
                 await run_blocking(
                     _update_tp_sl_if_changed, existing, leader_pos, user_id, network,
-                    force=(resized == "reduced"), session_id=session_id,
+                    force=(resized in ("reduced", "added")), session_id=session_id,
                 )
                 continue
 
@@ -1458,6 +1487,8 @@ async def _sync_mirror_positions(mirror: dict, leader_pos_map: dict):
             margin_per_trade=margin_per_trade,
             max_leverage=max_leverage,
             product_max_leverage=product_max_lev,
+            # Hold budget back so a leader scaling in can actually be mirrored.
+            entry_fraction=COPY_INITIAL_ENTRY_FRACTION,
         )
 
         if copy_size <= 0:
@@ -2487,6 +2518,137 @@ def _partial_close_fraction(baseline_leader_size: float, new_leader_size: float)
     if (1.0 - fraction) <= PARTIAL_CLOSE_DUST_FRACTION:
         return 1.0
     return fraction
+
+
+async def _mirror_leader_add_if_needed(
+    existing_cp: dict, leader_pos: dict, user_id: int, mirror_id: int, network: str,
+    *, margin_per_trade: float, max_leverage: float, leader_max_notional: float,
+    session_id=None,
+) -> str:
+    """Mirror a leader ADDING to a position we already copy.
+
+    COPY-NO-SCALE-UP: ``_partial_close_fraction`` returns 0.0 whenever
+    ``new >= baseline``, and nothing else in ``_sync_mirror_positions`` reacts to
+    a growing leader position — so the bot mirrored a leader's FIRST entry and
+    then ignored every subsequent add. A leader going 16.6 -> 36.6 HYPE left the
+    follower stuck at the original size.
+
+    Sizing reuses ``_compute_copy_sizing`` with the leader's NEW size, so the
+    copy is re-derived from the same conviction model that sized the open and
+    stays bounded by ``margin_per_trade`` (the weight term is capped at 1.0).
+    That means a leader who doubles down cannot push the follower past their
+    per-trade budget.
+
+    Returns "added" when the copy grew, else "".
+    """
+    if not SCALE_UPS_ENABLED:
+        return ""
+    baseline = float(existing_cp.get("leader_size") or 0.0)
+    new_leader = float(leader_pos.get("size") or 0.0)
+    if baseline <= 0 or new_leader <= baseline:
+        return ""
+    growth_pct = (new_leader - baseline) / baseline * 100.0
+    if growth_pct < SCALE_UP_MIN_DELTA_PCT:
+        return ""
+
+    current_size = float(existing_cp.get("size") or 0.0)
+    if current_size <= 0:
+        return ""
+    pid = int(existing_cp["product_id"])
+    product_name = existing_cp.get("product_name") or get_product_name(pid, network=network)
+    product_key = product_name.replace("-PERP", "")
+    is_long = str(existing_cp["side"]).upper() == "LONG"
+
+    # Leader's CURRENT average entry after the add (their notional moved).
+    leader_entry = float(leader_pos.get("entry_price") or 0.0)
+    if leader_entry <= 0:
+        return ""
+
+    # Mirror the leader's growth RATIO, capped by the full per-trade budget.
+    # full_size is the budget ceiling (entry_fraction=1.0); the open committed
+    # only COPY_INITIAL_ENTRY_FRACTION of it, and that reserve is what lets a
+    # leader add be mirrored at all.
+    full_size, leverage = _compute_copy_sizing(
+        leader_size=new_leader,
+        leader_entry=leader_entry,
+        leader_leverage=float(leader_pos.get("leverage", 0) or 0),
+        leader_max_notional=leader_max_notional,
+        margin_per_trade=margin_per_trade,
+        max_leverage=max_leverage,
+        product_max_leverage=get_product_max_leverage(product_key, network=network),
+        entry_fraction=1.0,
+    )
+    target_size = min(full_size, current_size * (new_leader / baseline))
+    add_size = target_size - current_size
+    if add_size <= 0 or (add_size / current_size) * 100.0 < SCALE_UP_MIN_DELTA_PCT:
+        # Already at (or above) the budget-capped target — the leader grew but
+        # our conviction weight is pinned at margin_per_trade. Move the baseline
+        # so a later trim measures from the leader's real size instead of
+        # re-triggering this branch every poll.
+        existing_cp["leader_size"] = new_leader
+        await run_blocking(
+            grow_copy_position, existing_cp["id"], current_size,
+            float(existing_cp.get("entry_price") or 0.0), new_leader,
+        )
+        return ""
+
+    # Never stack an order while a maker open on this product is unresolved.
+    if (int(mirror_id), pid) in _PENDING_MAKER_OPENS:
+        return ""
+
+    try:
+        # A stop/pause landing mid-sync must win over a new order.
+        live = await run_blocking(get_copy_mirror, mirror_id) or {}
+        if not live.get("active") or live.get("stop_requested") or live.get("paused"):
+            return ""
+
+        result = await run_blocking(
+            execute_market_order,
+            telegram_id=user_id,
+            product=product_key,
+            size=add_size,
+            is_long=is_long,
+            leverage=leverage,
+            slippage_pct=1.5,
+            enforce_rate_limit=False,
+            source="copy",
+            network=network,
+            strategy_session_id=session_id,
+        )
+        if not (result or {}).get("success"):
+            logger.warning(
+                "copy scale-up failed for position %s: %s",
+                existing_cp["id"], (result or {}).get("error"),
+            )
+            return ""
+
+        fill_price = float(
+            (result or {}).get("fill_price")
+            or (result or {}).get("price")
+            or leader_entry
+        )
+        filled = float((result or {}).get("fill_size") or add_size)
+        new_size = current_size + filled
+        prev_entry = float(existing_cp.get("entry_price") or fill_price)
+        # Size-weighted average entry so the position's PnL stays correct.
+        new_entry = ((prev_entry * current_size) + (fill_price * filled)) / new_size
+
+        await run_blocking(
+            grow_copy_position, existing_cp["id"], new_size, new_entry, new_leader
+        )
+        existing_cp["size"] = new_size
+        existing_cp["entry_price"] = new_entry
+        existing_cp["leader_size"] = new_leader
+        await _notify_user(
+            user_id,
+            f"📋 Copy Position Increased\n"
+            f"{product_name}: Leader added {growth_pct:.0f}% → "
+            f"Your position grew to {new_size:g} @ {new_entry:,.4f}",
+        )
+        return "added"
+    except Exception as e:  # noqa: BLE001 - one mirror's failure must not stall the poll
+        logger.error("copy scale-up error for position %s: %s", existing_cp["id"], e)
+        return ""
 
 
 async def _mirror_partial_close_if_needed(

@@ -1026,6 +1026,26 @@ def reduce_copy_position(
     )
 
 
+def grow_copy_position(
+    position_id: int, new_size: float, new_entry_price: float, new_leader_size: float
+) -> None:
+    """Scale an open copy position UP after mirroring a leader's add.
+
+    Counterpart to :func:`reduce_copy_position`. ``size`` becomes the
+    follower's new total base size, ``entry_price`` the size-weighted average
+    across the original entry and the add (so PnL stays correct), and
+    ``leader_size`` the new baseline the next partial-close comparison measures
+    against — without moving that baseline, a later trim would be computed off
+    the pre-add size and close far too little.
+    """
+    execute(
+        """UPDATE copy_positions
+           SET size = %s, entry_price = %s, leader_size = %s
+           WHERE id = %s AND status = 'open'""",
+        (float(new_size), float(new_entry_price), float(new_leader_size), int(position_id)),
+    )
+
+
 def close_copy_position(position_id: int, pnl: float = 0.0, reason: str = "leader_closed"):
     execute(
         "UPDATE copy_positions SET status = 'closed', pnl = %s, closed_at = %s, close_reason = %s WHERE id = %s",
