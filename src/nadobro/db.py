@@ -779,6 +779,12 @@ def init_db():
             ("base_filled_x18", "NUMERIC(78,0)"),
             ("quote_filled_x18", "NUMERIC(78,0)"),
             ("filled_at", "TIMESTAMPTZ"),
+            # Analytics attribution: TRUE when the order behind this fill
+            # was placed BY Nadobro (an order_intents digest match). NULL /
+            # FALSE = the user traded on the Nado UI. `source` cannot carry
+            # this: unlinked venue fills default to source='manual', which
+            # conflates bot manual trades with external ones.
+            ("via_nadobro", "BOOLEAN"),
         ]
         with conn.cursor() as cur:
             for net in ("testnet", "mainnet"):

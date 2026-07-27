@@ -9,6 +9,9 @@ from src.nadobro.utils.x18 import from_x18
 
 
 ZERO = Decimal("0")
+# USDT0 — the USD quote product. Every other spot product in
+# ``get_balance().balances`` is a TOKEN amount and must not be summed as USD.
+USD_QUOTE_PRODUCT_ID = 0
 
 
 @dataclass(frozen=True)
@@ -569,55 +572,96 @@ def compute_total_equity(
     summary: dict[str, Any] | None,
     spot_balances: dict[Any, Any] | None = None,
 ) -> dict[str, Decimal]:
-    """Compute the Total Balance breakdown for the Overview deck.
+    """Account net worth (Total Balance) plus a NON-overlapping breakdown.
 
-    ``Total = Spot + Cross + Isolated`` per the workflow plan (Q1: full
-    account net worth, excluding locked NLP).
+    Nado is a cross-margin venue: your spot balances ARE your margin collateral.
+    The old formula ``total = spot + cross + isolated`` therefore counted the
+    same dollars two-to-three times — and because none of the equity key names
+    it looked for exist on Nado's summary, ``cross`` fell through to
+    ``initial_health``, a margin-WEIGHTED health figure that is not equity at
+    all. Measured against a live mainnet account (2026-07-26):
 
-    - ``spot``: USDC + USDT0 (and any other USD-anchored quote) free
-      balances from ``client.get_balance().balances``.
-    - ``cross``: sum of cross-position equity from ``calculate_account_summary``.
-      Falls back to ``initial_health`` -> ``unweighted_health`` -> the
-      account's reported ``equity``/``net_value``/``total_value`` field.
-    - ``isolated``: sum of margin_used + est_pnl across isolated positions.
+        USDC spot deposits  = 2562.70
+        unweighted_health   = 2566.74   <- true net worth
+        old total           = 6773.44   <- 2.6x overstated
+
+    ``unweighted_health`` is the venue's own net account value (every balance at
+    oracle price, no margin weights, position PnL included), so it is the
+    authoritative Total Balance. The breakdown is then derived so the parts
+    always SUM to the total instead of inflating it:
+
+    - ``spot``      net spot collateral (deposits - borrows).
+    - ``positions`` everything the total carries beyond spot: perp position
+      equity (entry margin + unrealized) across cross AND isolated.
+    - ``isolated``  informational subset of ``positions`` (isolated margin+PnL);
+      it is NOT added again into the total.
     """
     summary = summary or {}
     spot_balances = spot_balances or {}
 
-    spot = ZERO
-    for key, val in spot_balances.items():
-        if val is None or val == "":
-            continue
-        # USDC product id is 0; treat unknown stables as spot too.
-        try:
-            spot += abs(decimal_value(val))
-        except Exception:
-            continue
-
-    cross = ZERO
-    cross_keys = ("cross_equity", "cross_value", "equity", "net_value", "total_value", "initial_health", "unweighted_health")
-    for key in cross_keys:
+    # ``portfolio_value`` IS the venue's Total Equity:
+    #   portfolio_value = unweighted_health + total_iso_net_margin
+    # (nado_protocol/utils/margin_manager.py:329, printed as "Total Equity"
+    # at :807). unweighted_health alone omits isolated margin, which is
+    # segregated collateral the user still owns.
+    total: Decimal | None = None
+    for key in ("portfolio_value", "account_value", "net_value", "equity"):
         if key in summary and summary[key] not in (None, ""):
             try:
-                cross = decimal_value(summary[key])
+                total = decimal_value(summary[key])
                 break
             except Exception:
                 continue
 
+    # Net spot collateral in USD. The venue already prices these
+    # (amount * oracle_price, margin_manager.py:352-364). The raw
+    # ``get_balance().balances`` map is TOKEN AMOUNTS keyed by product_id, so
+    # summing it as dollars valued 0.5 spot BTC at $0.50 and counted borrows
+    # (negative amounts) as assets via abs(). Only fall back to it when the
+    # summary is unavailable, and then only for the USD quote product.
+    spot: Decimal | None = None
+    if summary.get("total_spot_deposits") not in (None, ""):
+        try:
+            spot = decimal_value(summary["total_spot_deposits"]) - abs(
+                decimal_value(summary.get("total_spot_borrows") or 0)
+            )
+        except Exception:
+            spot = None
+    if spot is None:
+        spot = ZERO
+        for key, val in spot_balances.items():
+            if val in (None, ""):
+                continue
+            try:
+                if int(key) != USD_QUOTE_PRODUCT_ID:
+                    continue  # non-USD token amount — cannot be summed as USD
+                spot += decimal_value(val)   # signed: borrows reduce equity
+            except Exception:
+                continue
+
+    # Isolated equity = segregated net margin (position PnL is already inside
+    # net_margin; IsolatedPositionMetrics carries no separate PnL field).
     isolated = ZERO
     for row in summary.get("isolated_positions") or []:
         if not isinstance(row, dict):
             continue
-        margin = optional_decimal(_pick(row, "margin_used", "net_margin")) or ZERO
-        pnl = optional_decimal(_pick(row, "est_pnl", "unrealized_pnl")) or ZERO
-        isolated += margin + pnl
+        margin = optional_decimal(_pick(row, "net_margin", "margin_used")) or ZERO
+        isolated += margin
 
-    total = spot + cross + isolated
+    if total is None:
+        # No equity field at all: fall back to the additive estimate, correct
+        # when spot and isolated genuinely do not overlap.
+        unweighted = optional_decimal(summary.get("unweighted_health"))
+        total = (unweighted if unweighted is not None else spot) + isolated
+
+    # Decompose the total without double counting:
+    #   total = spot + cross + isolated   (cross = the remainder)
+    cross = total - spot - isolated
     return {
+        "total": total,
         "spot": spot,
         "cross": cross,
         "isolated": isolated,
-        "total": total,
     }
 
 

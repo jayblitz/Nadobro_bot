@@ -478,7 +478,11 @@ def _write_snapshot(snapshot: dict[str, Any], duration_ms: int) -> None:
     # ``stats`` so the portfolio deck's Realized line reflects real round trips.
     # Volume/fees windows stay as computed from the venue x18 columns.
     try:
-        from src.nadobro.models.database import get_account_realized_pnl_windows
+        from src.nadobro.models.database import (
+            get_account_realized_pnl_windows,
+            get_analytics_fills,
+        )
+        from src.nadobro.quant.user_analytics import aggregate_user_analytics
 
         realized = get_account_realized_pnl_windows(user_id, network)
         stats = snapshot.get("stats")
@@ -488,8 +492,32 @@ def _write_snapshot(snapshot: dict[str, Any], duration_ms: int) -> None:
             stats["wins"] = realized["wins"]
             stats["losses"] = realized["losses"]
             stats["win_rate"] = realized["win_rate"]
+
+        # Volume / fees / funding must come from the SAME complete ledger as
+        # realized PnL. They used to be aggregated from the transient
+        # get_matches(limit=200) list, which produced "Volume $0.00" next to
+        # "Realized +$16.73" and capped the All-time window at 200 fills.
+        if isinstance(stats, dict):
+            ledger = get_analytics_fills(user_id, network)
+            if ledger:
+                analytics = aggregate_user_analytics(ledger, funding)
+                stats["analytics"] = analytics
+                stats["volume_windows"] = {
+                    w: v["total_usd"] for w, v in analytics["nado_volume"].items()
+                }
+                stats["fees_windows"] = analytics["fees"]
+                stats["funding_windows"] = analytics["funding"]
+                stats["total_volume"] = analytics["nado_volume"]["all"]["total_usd"]
+            else:
+                # No ledger rows (fresh account, or the read failed): KEEP the
+                # in-memory match aggregate rather than overwriting real volume
+                # with $0.00 — zeroing it is the bug this replaced.
+                logger.debug(
+                    "analytics ledger empty user=%s network=%s — keeping match-derived stats",
+                    user_id, network,
+                )
     except Exception as exc:  # display-only; never fail the snapshot write
-        logger.warning("realized-pnl recompute failed user=%s network=%s: %s", user_id, network, exc)
+        logger.warning("analytics recompute failed user=%s network=%s: %s", user_id, network, exc)
     execute(
         """
         INSERT INTO sync_log (
@@ -917,10 +945,10 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
               user_id, product_id, product_name, order_type, side, size,
               fill_size, price, fill_price, fill_fee, status,
               submission_idx, isolated, realized_pnl_x18, fee_x18, base_filled_x18, quote_filled_x18,
-              order_digest, strategy_session_id, source,
+              order_digest, strategy_session_id, source, via_nadobro,
               filled_at, created_at
             )
-            VALUES (%s, %s, %s, 'match', %s, %s, %s, %s, %s, %s, 'filled', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (%s, %s, %s, 'match', %s, %s, %s, %s, %s, %s, 'filled', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             """,
             (
                 user_id,
@@ -944,6 +972,11 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                 digest or None,
                 session_id,
                 source,
+                # Analytics attribution: this fill came from an order Nadobro
+                # placed iff its digest is registered in order_intents.
+                # `source` cannot carry this — unlinked venue fills default to
+                # 'manual', conflating bot trades with Nado-UI trades.
+                bool(intent_found),
                 _timestamp_or_now(match.get("timestamp")),
             ),
         )

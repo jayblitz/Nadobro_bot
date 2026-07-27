@@ -104,7 +104,7 @@ _TRADE_INSERT_ALLOWED_COLS = frozenset({
     "close_price", "closed_at",
     "fill_price", "fill_size", "fill_fee", "builder_fee", "slippage_bps",
     "source", "strategy_session_id", "open_trade_id", "realized_pnl", "is_taker",
-    "funding_paid",
+    "funding_paid", "via_nadobro",
 })
 
 
@@ -130,7 +130,7 @@ _TRADE_UPDATE_ALLOWED_COLS = frozenset({
     "pnl", "fees", "close_price", "closed_at",
     "fill_price", "fill_size", "fill_fee", "builder_fee", "slippage_bps",
     "source", "strategy_session_id", "open_trade_id", "realized_pnl", "is_taker",
-    "funding_paid",
+    "funding_paid", "via_nadobro",
 })
 
 
@@ -1499,6 +1499,74 @@ def get_account_realized_pnl_windows(user_id: int, network: str, now=None) -> di
     except Exception:
         return {}
     return realized_pnl_windows_from_rows(rows, now=now)
+
+
+def get_analytics_fills(user_id: int, network: str) -> list[dict]:
+    """Every venue-confirmed fill for a user — the COMPLETE ledger behind the
+    portfolio analytics (volume / fees / realized PnL).
+
+    The card previously aggregated volume from a transient
+    ``client.get_matches(limit=200)`` list while PnL came from this table, so
+    the two disagreed (Volume $0.00 next to Realized +$16.73) and "All" volume
+    was capped at 200 fills. One source now feeds both.
+
+    Deduped per ``submission_idx`` (unique per match — verified on mainnet), so
+    the bot's synthetic close rows and duplicate recorder rows never
+    double-count. ``[]`` on any error so the deck never raises.
+    """
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    try:
+        return query_all(
+            f"""
+            SELECT DISTINCT ON (submission_idx)
+                   product_id, product_name, side,
+                   fill_size, size, fill_price, price,
+                   base_filled_x18, quote_filled_x18, fee_x18,
+                   fill_fee, fees, builder_fee, via_nadobro,
+                   COALESCE(filled_at, created_at) AS filled_at
+            FROM {table}
+            WHERE user_id = %s
+              AND submission_idx IS NOT NULL
+              AND COALESCE(product_id, 0) <> 0
+              AND status IN ('filled', 'closed', 'partially_filled')
+            ORDER BY submission_idx, COALESCE(filled_at, created_at), id
+            """,
+            (int(user_id),),
+        )
+    except Exception:
+        return []
+
+
+def backfill_via_nadobro(network: str, limit: int = 5000) -> int:
+    """Stamp ``via_nadobro`` on historical fills by matching their
+    ``order_digest`` against ``order_intents`` (the registry every bot-placed
+    order writes). Rows with no intent are stamped FALSE = traded on the Nado
+    UI. Idempotent; returns the number of rows updated."""
+    table = "trades_testnet" if str(network).lower() == "testnet" else "trades_mainnet"
+    try:
+        row = execute_returning(
+            f"""
+            WITH target AS (
+                SELECT id FROM {table}
+                WHERE via_nadobro IS NULL
+                  AND submission_idx IS NOT NULL
+                LIMIT %s
+            )
+            UPDATE {table} t
+               SET via_nadobro = (
+                     t.order_digest IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM order_intents oi
+                                  WHERE oi.order_digest = t.order_digest)
+                   )
+              FROM target
+             WHERE t.id = target.id
+            RETURNING (SELECT COUNT(*) FROM target) AS n
+            """,
+            (int(limit),),
+        )
+        return int((row or {}).get("n") or 0)
+    except Exception:
+        return 0
 
 
 def get_paired_trades(
