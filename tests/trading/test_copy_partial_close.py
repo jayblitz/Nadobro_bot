@@ -1,9 +1,11 @@
 """Partial-close mirroring math + the $100 minimum copy margin.
 
 The baseline rule matters: ``leader_size`` on the copy row is the leader size
-we LAST mirrored (at open, or after the previous partial). A leader ADD does
-not raise the baseline, so add-then-trim-back mirrors nothing; only trims
-BELOW the baseline reduce the copy, by the same fraction.
+we LAST mirrored. ``_partial_close_fraction`` only ever reports REDUCTIONS —
+it returns 0.0 for an add. Scaling UP is mirrored separately by
+``_mirror_leader_add_if_needed`` (COPY-NO-SCALE-UP, 2026-07-27), which also
+raises the baseline, so an add followed by a trim back now mirrors BOTH legs
+instead of silently ignoring the add.
 """
 
 import pytest
@@ -24,9 +26,9 @@ def test_no_action_when_leader_unchanged():
     assert _partial_close_fraction(10.0, 10.0) == 0.0
 
 
-def test_no_action_when_leader_adds():
-    # Baseline 10, leader scales in to 15 — we never scale in, and the
-    # baseline must not move (caller keeps stored leader_size at 10).
+def test_close_fraction_reports_no_reduction_when_leader_adds():
+    # This helper only measures REDUCTIONS. An add is 0.0 here and is mirrored
+    # by _mirror_leader_add_if_needed instead (see test_copy_scale_up.py).
     assert _partial_close_fraction(10.0, 15.0) == 0.0
 
 
@@ -55,9 +57,10 @@ def test_zero_or_unknown_baseline_is_inert():
     assert _partial_close_fraction(-1.0, 5.0) == 0.0
 
 
-def test_add_then_trim_back_to_baseline_is_inert():
-    # Leader: 10 -> 15 (ignored, baseline stays 10) -> back to 10.
-    # The comparison is always against the stored baseline of 10.
+def test_trim_is_measured_against_the_current_baseline():
+    # After a mirrored add the baseline moves to 15, so a trim back to 10 is a
+    # real 1/3 reduction (previously the add was ignored, the baseline stayed
+    # 10, and the trim mirrored nothing).
+    assert _partial_close_fraction(15.0, 10.0) == pytest.approx(1.0 / 3.0)
     assert _partial_close_fraction(10.0, 10.0) == 0.0
-    # ...and a trim below the original baseline still mirrors correctly.
     assert _partial_close_fraction(10.0, 7.0) == pytest.approx(0.3)
