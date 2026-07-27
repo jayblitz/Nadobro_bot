@@ -117,10 +117,21 @@ def _vault_home_card(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
         # as $0 once flipped this card to 🔒 Margin in use for a depositable
         # user. Deposits stay enabled; the mint itself is no-borrow-guarded.
         lines.append("Free to deposit: `checking…` (tap 🔄 Refresh in a moment)")
-    lines.extend([
-        f"Deposit room: `{_fmt_usd(room)}`",
-        f"Lockup: `{_fmt_lockup(lockup)}`",
-    ])
+    lines.append(f"Deposit room: `{_fmt_usd(room)}`")
+    # Lockup / withdrawable. Only claim "Unlocked" when the venue's
+    # locked-balance query actually answered: a throttled read used to degrade
+    # to zeros, which rendered the whole position as unlocked and made a 100%
+    # withdraw fail at the venue with "Do not have enough unlocked NLP".
+    if lp_balance > 0 and not bool(snapshot.get("unlocked_known")):
+        lines.append("Withdrawable: `checking…` (tap 🔄 Refresh in a moment)")
+    elif lp_balance > 0:
+        lp_unlocked = float(snapshot.get("lp_unlocked") or 0.0)
+        lp_locked = float(snapshot.get("lp_locked") or 0.0)
+        lines.append(f"Withdrawable now: `{lp_unlocked:.6f}` NLP")
+        if lp_locked > 0:
+            lines.append(f"Still locked: `{lp_locked:.6f}` NLP · `{_fmt_lockup(lockup)}`")
+    else:
+        lines.append(f"Lockup: `{_fmt_lockup(lockup)}`")
     blocked_reason = snapshot.get("deposit_blocked_reason")
     margin_locked = blocked_reason == "margin_locked"
     blocked = mintable_known and max_mintable <= 1.0
@@ -212,23 +223,37 @@ def _deposit_picker(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
 def _withdraw_picker(snapshot: dict) -> tuple[str, InlineKeyboardMarkup]:
     lp_balance = float(snapshot.get("lp_balance") or 0.0)
     lockup = int(snapshot.get("lockup_seconds_remaining") or 0)
+    unlocked_known = bool(snapshot.get("unlocked_known"))
+    lp_unlocked = float(snapshot.get("lp_unlocked") or 0.0)
+    lp_locked = float(snapshot.get("lp_locked") or 0.0)
     lines = [
         "⬆️ *Withdraw NLP → USDT0*",
         "",
         f"NLP balance: `{lp_balance:.6f}`",
-        f"Lockup: `{_fmt_lockup(lockup)}`",
     ]
-    if lockup > 0:
+    # Percentages are of the WITHDRAWABLE (unlocked) balance, not the total —
+    # burning the total when part is still locked is exactly what the venue
+    # rejects with "Do not have enough unlocked NLP".
+    if lp_balance > 0 and not unlocked_known:
+        lines.append("Withdrawable: `checking…`")
+        lines.append("")
+        lines.append("⏳ Couldn't confirm your unlocked balance just now. Tap 🔄 Refresh.")
+    elif lp_locked > 0:
+        lines.append(f"Withdrawable now: `{lp_unlocked:.6f}` NLP")
+        lines.append(f"Still locked: `{lp_locked:.6f}` NLP · `{_fmt_lockup(lockup)}`")
+    else:
+        lines.append(f"Withdrawable now: `{lp_unlocked:.6f}` NLP")
+    if lockup > 0 and lp_unlocked <= 0:
         lines.append("")
         lines.append("⏳ Burns are blocked until the 4-day post-mint lockup ends.")
-    else:
+    elif unlocked_known and lp_unlocked > 0:
         lines.append("")
         lines.append("Fees on burn: $1 sequencer + max($1, 10 bps of withdrawn).")
-        lines.append("Choose a percentage:")
+        lines.append("Choose a percentage of your *withdrawable* balance:")
     text = "\n".join(lines)
 
     rows: list[list[InlineKeyboardButton]] = []
-    if lockup <= 0 and lp_balance > 0:
+    if unlocked_known and lp_unlocked > 0:
         row = []
         for pct in WITHDRAW_PRESETS_PCT:
             row.append(InlineKeyboardButton(f"{pct}%", callback_data=f"vault:withdraw:pct:{pct}"))
@@ -420,8 +445,15 @@ async def handle_vault_callback(query, context: CallbackContext) -> bool:
                 pct = 0
             lp_balance = float(snapshot.get("lp_balance") or 0.0)
             lp_value = float(snapshot.get("lp_value_usdt0") or 0.0)
-            nlp_amount = lp_balance * (pct / 100.0)
-            est_usdt0 = lp_value * (pct / 100.0)
+            # % of the WITHDRAWABLE balance. Using the total (locked+unlocked)
+            # is what produced venue error 2096 on a 100% withdraw.
+            withdrawable = (
+                float(snapshot.get("lp_unlocked") or 0.0)
+                if snapshot.get("unlocked_known") else lp_balance
+            )
+            nlp_amount = withdrawable * (pct / 100.0)
+            nav_per_nlp = (lp_value / lp_balance) if lp_balance > 0 else 0.0
+            est_usdt0 = nlp_amount * nav_per_nlp
             est_fee = estimate_withdraw_fee_usdt0(est_usdt0)
             text, kb = _withdraw_confirm_card(nlp_amount, est_usdt0, est_fee)
             await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)

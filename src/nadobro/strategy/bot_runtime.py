@@ -86,6 +86,18 @@ STATE_PREFIX = "strategy_bot:"
 RUNTIME_TICK_SECONDS = 20
 BRO_MIGRATION_NOTICE = "Legacy Alpha Agent has been retired. Pick a strategy from the Strategy hub or use the Nado Vault."
 
+# User-facing strategy names for runtime notifications. Several strategies share
+# one controller (rgrid + dgrid both run DynamicGridController), so messages must
+# name the mode the USER started, not the controller behind it.
+_STRATEGY_DISPLAY_NAMES = {
+    "grid": "GRID",
+    "rgrid": "Reverse GRID",
+    "dgrid": "Dynamic GRID",
+    "mid": "Mid Mode",
+    "vol": "Volume Bot",
+    "dn": "Delta Neutral",
+}
+
 
 def _strategy_cycle_timeout_seconds() -> float | None:
     """Wall-clock cap for one strategy cycle (single-process path). 0 or unset disables."""
@@ -3142,11 +3154,16 @@ async def _run_cycle(
         # side armed. One message per flip.
         dgrid_event = result.get("dgrid_event") if isinstance(result, dict) else None
         if dgrid_event:
+            # rgrid and dgrid share DynamicGridController (see engine_runtime
+            # CONTROLLERS), so this flip fires for BOTH. Name the strategy the
+            # user actually started — an R-Grid user was being told "Dynamic
+            # GRID switched…" for a mode they never picked.
             await _notify(
                 telegram_id,
-                "🔄 Dynamic GRID switched {frm} → {to} on {product} ({network}) — "
+                "🔄 {mode} switched {frm} → {to} on {product} ({network}) — "
                 "{why} (variance ratio {vr}). Previous position closed; "
                 "{to} now quoting.",
+                mode=_STRATEGY_DISPLAY_NAMES.get(str(strategy).lower(), str(strategy).upper()),
                 frm=str(dgrid_event.get("from", "")).upper(),
                 to=str(dgrid_event.get("to", "")).upper(),
                 product=product, network=network,

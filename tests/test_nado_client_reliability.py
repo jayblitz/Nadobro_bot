@@ -835,3 +835,53 @@ def test_align_price_post_only_never_rounds_into_the_book():
     assert NadoClient._align_price_to_increment(100.3, 0.5, False, "ioc") == 100.0
     # default orders keep HALF_UP
     assert NadoClient._align_price_to_increment(100.3, 0.5, True, "default") == 100.5
+
+
+def test_nlp_locked_balances_distinguishes_throttled_from_zero():
+    """A throttled weight-20 query returns None from _query_rest. Booking that
+    as "0 locked / 0 unlocked" made get_nlp_position fall back to the raw spot
+    NLP balance and label ALL of it unlocked, so a 100% withdraw asked the venue
+    to burn locked tokens -> error 2096. Failure must be UNKNOWN (ok=False)."""
+    from unittest.mock import patch
+
+    from src.nadobro.venue.nado_client import NadoClient
+
+    client = NadoClient.from_address("0x" + "1" * 40, "mainnet")
+
+    with patch.object(NadoClient, "_query_rest", return_value=None):
+        throttled = client.get_nlp_locked_balances()
+    assert throttled["ok"] is False
+
+    payload = {
+        "status": "success",
+        "data": {
+            "balance_locked": {"balance": {"amount": "2000000000000000000"}},
+            "balance_unlocked": {"balance": {"amount": "777688000000000000"}},
+            "locked_balances": [],
+        },
+    }
+    with patch.object(NadoClient, "_query_rest", return_value=payload):
+        answered = client.get_nlp_locked_balances()
+    assert answered["ok"] is True
+    assert answered["balance_unlocked"] == 0.777688
+    # Exact wei preserved: a max burn must not go through float.
+    assert answered["balance_unlocked_x18"] == 777688000000000000
+
+
+def test_get_nlp_position_never_claims_unknown_balance_is_unlocked():
+    """Spot-balance fallback is display-only: with no authoritative locked
+    read, nothing may be reported as withdrawable."""
+    from unittest.mock import patch
+
+    from src.nadobro.venue.nado_client import NadoClient
+
+    client = NadoClient.from_address("0x" + "1" * 40, "mainnet")
+    with patch.object(NadoClient, "_query_rest", return_value=None), \
+         patch.object(NadoClient, "resolve_nlp_product_id", return_value=11), \
+         patch.object(NadoClient, "_spot_balance_amount", return_value=2.777688), \
+         patch.object(NadoClient, "_nlp_oracle_price", return_value=1.0):
+        pos = client.get_nlp_position()
+    assert pos["lp_balance"] == 2.777688      # still displayed
+    assert pos["unlocked_known"] is False     # but NOT presented as burnable
+    assert pos["lp_unlocked"] == 0.0
+    assert pos["lp_unlocked_x18"] == 0
