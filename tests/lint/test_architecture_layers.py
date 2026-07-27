@@ -32,6 +32,11 @@ ALLOWED_EDGES = {
     ("core", "utils"),
     ("db", "utils"),
     ("engine", "quant"),
+    # quant/ is a pure-math LEAF (see docs/ARCHITECTURE.md). live_session
+    # derives isolated-position uPnL with quant.derive_unrealized_pnl —
+    # the venue omits est_pnl for isolated positions, which left the
+    # session SL/TP rail blind to open DN / copy-trade losses.
+    ("trading", "quant"),
     ("engine", "utils"),
     ("engine", "venue"),          # adapter wraps the venue client
     ("handlers", "config"),

@@ -63,6 +63,71 @@ def _position_amount(row: dict[str, Any]) -> Decimal:
     return decimal_value(_pick(row, "position_size", "amount", "signed_amount", default=0))
 
 
+def signed_position_size(row: dict[str, Any]) -> Decimal:
+    """Signed base size for a position row: +long / -short."""
+    explicit = optional_decimal(_pick(row, "signed_amount", "size_signed"))
+    if explicit is not None and explicit != ZERO:
+        return explicit
+    size = abs(decimal_value(_pick(row, "amount", "size", "position_size", default=0)))
+    side = str(_pick(row, "side", default="")).strip().lower()
+    if side in ("short", "sell"):
+        return -size
+    if side in ("long", "buy"):
+        return size
+    # No side field: position_size is already signed on the venue payloads.
+    return decimal_value(_pick(row, "position_size", "amount", "size", default=0))
+
+
+def derive_unrealized_pnl(
+    row: dict[str, Any], *, mark_price: Any = None
+) -> Decimal | None:
+    """Unrealized PnL for a position row, DERIVED when the venue omits it.
+
+    Nado's ``IsolatedPositionMetrics`` carries no ``est_pnl`` and no
+    ``avg_entry_price`` (nado_protocol/utils/margin_manager.py:97-110) — only
+    cross positions get them. Every isolated position therefore reported uPnL
+    ``None`` -> 0.0, and Delta Neutral + copy trading both run isolated, so the
+    session SL/TP rail (live_session -> _evaluate_session_pnl_rail) could not
+    see an open position's loss at all.
+
+    Uses the venue's own identity (``calculate_perp_balance_value``,
+    margin_manager.py:352-374)::
+
+        uPnL = signed_size * mark + v_quote_balance
+
+    and falls back to ``(mark - entry) * signed_size``. Returns ``None`` when
+    neither can be evaluated, so callers can tell "no data" from "zero PnL".
+    """
+    explicit = optional_decimal(_pick(row, "est_pnl", "unrealized_pnl", "unrealized_pnl_usd"))
+    if explicit is not None:
+        return explicit
+
+    signed = signed_position_size(row)
+    if signed == ZERO:
+        return ZERO
+
+    mark = optional_decimal(mark_price)
+    if mark is None:
+        mark = optional_decimal(_pick(row, "mark_price", "mark"))
+    if mark is None:
+        # The venue prices isolated notional at the oracle:
+        # notional_value = |size| * oracle_price (margin_manager.py:362-364).
+        notional = optional_decimal(_pick(row, "notional_value", "value"))
+        if notional is not None and signed != ZERO:
+            mark = abs(notional) / abs(signed)
+    if mark is None or mark <= ZERO:
+        return None
+
+    v_quote = optional_decimal(_pick(row, "v_quote_balance", "v_quote", "unsettled"))
+    if v_quote is not None:
+        return signed * mark + v_quote
+
+    entry = optional_decimal(_pick(row, "avg_entry_price", "entry_price"))
+    if entry is not None and entry > ZERO:
+        return (mark - entry) * signed
+    return None
+
+
 def normalize_position(row: dict[str, Any], *, isolated: bool) -> PortfolioPosition:
     amount = _position_amount(row)
     notional = decimal_value(_pick(row, "notional_value", "value", default=0))
