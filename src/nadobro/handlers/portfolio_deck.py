@@ -155,13 +155,28 @@ def render_portfolio_deck(
         f"{len(orders)} open order{'' if len(orders) == 1 else 's'}",
         divider(),
         f"<b>Activity</b> · {_window_label(window)}",
-        f"Volume    {money(vol_window)}",
+    ]
+    # Volume, split the way the product needs it: total Nado turnover (every
+    # fill on the account, including trades made on the Nado UI) vs the share
+    # routed through Nadobro, each broken into perp and spot.
+    analytics = stats.get("analytics") or {}
+    nado_vol = ((analytics.get("nado_volume") or {}).get(window)) or {}
+    bot_vol = ((analytics.get("nadobro_volume") or {}).get(window)) or {}
+    if nado_vol:
+        perp_usd = _dec(nado_vol.get("perp_usd"))
+        spot_usd = _dec(nado_vol.get("spot_usd"))
+        lines.append(f"Nado Vol     {money(_dec(nado_vol.get('total_usd')))}")
+        lines.append(f"  perp {money(perp_usd)} · spot {money(spot_usd)}")
+        lines.append(f"Nadobro Vol  {money(_dec(bot_vol.get('total_usd')))}")
+    else:
+        lines.append(f"Volume    {money(vol_window)}")
+    lines.extend([
         f"Realized  {signed_money(pnl_window)}",
         f"Fees      -{money(abs(fees_window))}",
         funding_line,
         divider(),
         "<b>Top Positions</b>",
-    ]
+    ])
     for pos in sorted(positions, key=lambda p: abs(_dec(p.get("est_pnl"))), reverse=True)[:5]:
         est_pnl = _dec(pos.get("est_pnl"))
         direction = "long" if bool(pos.get("is_long", True)) else "short"

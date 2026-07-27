@@ -203,27 +203,52 @@ def test_aggregate_trading_stats_emits_per_window_pnl_fees_and_funding():
     assert stats["funding_windows"]["all"] == Decimal("0.5")
 
 
-def test_compute_total_equity_sums_spot_cross_and_isolated_buckets():
-    """User confirmed Q1: Total Balance = spot + cross + ALL isolated."""
+def test_compute_total_equity_uses_venue_total_equity_and_never_double_counts():
+    """Total Balance = the venue's own Total Equity.
+
+    2026-07-26: the old formula was ``spot + cross + isolated`` over an
+    INVENTED payload (``cross_equity``/``net_value`` — keys Nado never emits),
+    so the suite stayed green while production reported ~2.6x the real balance:
+    a live mainnet account with 2562.70 USDT0 showed a 6773.44 "Total".
+
+    Nado's SDK computes it directly —
+    ``portfolio_value = unweighted_health + total_iso_net_margin``
+    (nado_protocol/utils/margin_manager.py:329), printed as "Total Equity"
+    at :807 — and spot collateral is already USD-priced there
+    (``amount * oracle_price``, :352-364). The breakdown must therefore
+    DECOMPOSE that number, not add to it.
+    """
     equity = compute_total_equity(
         {
-            "cross_equity": "1000",
+            "portfolio_value": "1858.25",
+            "unweighted_health": "1513.25",
+            "total_spot_deposits": "500.50",
+            "total_spot_borrows": "0",
             "isolated_positions": [
-                {"margin_used": "250", "est_pnl": "5"},
-                {"net_margin": "100", "unrealized_pnl": "-10"},
+                {"net_margin": "250"},
+                {"net_margin": "95"},
             ],
         },
-        spot_balances={0: "500.50", 1: "12.75"},
+        spot_balances={0: "500.50", 1: "12.75"},   # product 1 = spot BTC (tokens!)
     )
-    assert equity["spot"] == Decimal("513.25")
-    assert equity["cross"] == Decimal("1000")
+    assert equity["total"] == Decimal("1858.25")          # the venue's figure
+    assert equity["spot"] == Decimal("500.50")            # USD, not 513.25
     assert equity["isolated"] == Decimal("345")
-    assert equity["total"] == Decimal("1858.25")
+    # The parts reconcile to the total instead of inflating it.
+    assert equity["spot"] + equity["cross"] + equity["isolated"] == equity["total"]
 
 
-def test_compute_total_equity_falls_back_when_summary_missing_cross_field():
-    """compute_total_equity probes a list of cross-equity keys in priority
-    order. Older Nado payloads only carry ``net_value`` — verify that path."""
-    equity = compute_total_equity({"net_value": "742.5"}, spot_balances={})
-    assert equity["cross"] == Decimal("742.5")
-    assert equity["total"] == Decimal("742.5")
+def test_compute_total_equity_never_prices_token_balances_as_dollars():
+    """``get_balance().balances`` holds TOKEN amounts keyed by product_id, so
+    summing them as USD valued 0.5 spot BTC at $0.50. Without a summary, only
+    the USD quote product may be counted."""
+    equity = compute_total_equity({}, spot_balances={0: "1000", 1: "0.5"})
+    assert equity["spot"] == Decimal("1000")
+
+
+def test_compute_total_equity_treats_borrows_as_a_liability():
+    """The old code did ``spot += abs(val)``, booking a borrow as an asset."""
+    equity = compute_total_equity(
+        {"total_spot_deposits": "1000", "total_spot_borrows": "200"}, spot_balances={}
+    )
+    assert equity["spot"] == Decimal("800")
