@@ -149,3 +149,58 @@ def test_dn_is_an_engine_mapped_strategy_so_a_rail_can_target_it():
     integration test to add alongside the fix.
     """
     assert "dn" in ENGINE_MAPPED_STRATEGIES
+
+
+# ── ISO-UPNL-BLIND (VERIFIED 2026-07-26, fixed in this PR) ──────────────
+# Nado's IsolatedPositionMetrics carries no est_pnl and no avg_entry_price
+# (nado_protocol/utils/margin_manager.py:97-110) — only CROSS positions get
+# them. live_session summed `est_pnl`, so every isolated position contributed
+# 0.0 and the session SL/TP rail could not see an open isolated loss at all.
+# Delta Neutral and copy trading BOTH run isolated, so their stop-loss was
+# effectively disarmed against unrealized moves.
+#
+# The live fallback was worse: get_all_positions() rows have no
+# `unrealized_pnl` key at all (they carry amount / signed_amount /
+# entry_price / v_quote_balance), so that path returned 0.0 for CROSS
+# positions too whenever the DB row was stale.
+
+def test_isolated_position_upnl_is_derived_not_dropped():
+    """An isolated position with no venue est_pnl must still yield real uPnL."""
+    from src.nadobro.quant.portfolio_calculator import derive_unrealized_pnl
+
+    # Venue identity: uPnL = signed_size * mark + v_quote_balance.
+    # Short 0.3062 BTC opened at 65475.7, mark 65485.5 -> a LOSS.
+    iso = {
+        "product_id": 2, "side": "short", "amount": "0.3062",
+        "signed_amount": "-0.3062", "entry_price": "65475.7",
+        "v_quote_balance": "20048.659340000002",
+        # no est_pnl — exactly what the venue returns for isolated
+    }
+    upnl = derive_unrealized_pnl(iso, mark_price="65485.5")
+    assert upnl is not None, "isolated uPnL must not be dropped"
+    assert float(upnl) < 0, "a short below entry must report a LOSS, not 0.0"
+    assert abs(float(upnl) - (-3.0)) < 0.01
+
+
+def test_isolated_upnl_reaches_the_session_rail():
+    """The rail reads live_session._aggregate_position_rows; an isolated row
+    must contribute its loss so SL can fire."""
+    from src.nadobro.trading.live_session import _aggregate_position_rows
+
+    rows = [{
+        "product_id": 2, "side": "short", "size": "1", "signed_amount": "-1",
+        "entry_price": "100", "mark_price": "110",   # short at 100, now 110
+        "est_pnl": None, "isolated": True, "synced_ts": 0,
+    }]
+    view = _aggregate_position_rows(rows)
+    assert view["upnl"] < 0, "isolated loss must reach the rail (was 0.0)"
+    assert abs(view["upnl"] - (-10.0)) < 1e-6
+
+
+def test_cross_position_with_explicit_est_pnl_is_unchanged():
+    """Regression guard: the venue's own cross est_pnl still wins."""
+    from src.nadobro.quant.portfolio_calculator import derive_unrealized_pnl
+
+    cross = {"side": "short", "amount": "10", "signed_amount": "-10",
+             "avg_entry_price": "1933.9", "est_pnl": "-315.55"}
+    assert float(derive_unrealized_pnl(cross)) == -315.55

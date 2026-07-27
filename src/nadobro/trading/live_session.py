@@ -37,6 +37,8 @@ import logging
 import time
 from typing import Any, Optional
 
+from src.nadobro.quant.portfolio_calculator import derive_unrealized_pnl
+
 logger = logging.getLogger(__name__)
 
 # A positions row older than this (vs its ``synced_at``) is treated as stale and
@@ -100,7 +102,11 @@ def _aggregate_position_rows(rows: list) -> dict:
         side = str(r.get("side") or "").lower()
         signed = size if side == "long" else -size
         net_signed += signed
-        upnl += _f(r.get("est_pnl"))
+        # Isolated rows carry est_pnl NULL (the venue's IsolatedPositionMetrics
+        # has no PnL field), so this used to add 0.0 and the SL/TP rail was
+        # blind to open isolated losses — DN and copy trading both run isolated.
+        row_upnl = derive_unrealized_pnl(r)
+        upnl += float(row_upnl) if row_upnl is not None else 0.0
         margin_used += _f(r.get("margin_used"))
         newest_sync = max(newest_sync, _f(r.get("synced_ts")))
         if size > dominant_abs:
@@ -131,6 +137,17 @@ def _live_position_from_client(client, product_id: int) -> Optional[dict]:
     dominant = None
     dominant_abs = -1.0
     matched = False
+    # get_all_positions() rows carry NO ``unrealized_pnl`` key (they hold
+    # amount / signed_amount / entry_price / v_quote_balance), so reading it
+    # yielded 0.0 for EVERY position — cross included — whenever the DB row was
+    # stale and this fallback drove the SL/TP rail. Derive it from the venue
+    # identity instead, pricing at the live mark.
+    mark = None
+    try:
+        quote = client.get_market_price(int(product_id)) or {}
+        mark = quote.get("mid") or quote.get("mark") or quote.get("price")
+    except Exception:  # noqa: BLE001 - guard path must never raise
+        logger.debug("mark price read failed pid=%s", product_id, exc_info=True)
     for p in positions:
         if int(p.get("product_id") or 0) != int(product_id):
             continue
@@ -138,7 +155,8 @@ def _live_position_from_client(client, product_id: int) -> Optional[dict]:
         size = abs(_f(p.get("amount")))
         signed = _f(p.get("signed_amount"), size if str(p.get("side")).upper() == "LONG" else -size)
         net_signed += signed
-        upnl += _f(p.get("unrealized_pnl"))
+        row_upnl = derive_unrealized_pnl(p, mark_price=mark)
+        upnl += float(row_upnl) if row_upnl is not None else 0.0
         if size > dominant_abs:
             dominant_abs = size
             dominant = p
