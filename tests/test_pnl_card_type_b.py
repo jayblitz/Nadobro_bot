@@ -73,7 +73,7 @@ def test_renderer_all_strategies_and_labels():
     # Friendly badge + short Mode word are distinct per strategy.
     assert _BADGE_LABEL["dgrid"] == "DGrid Strategy" and _MODE_LABEL["dgrid"] == "DGrid"
     assert _BADGE_LABEL["mid"] == "Mid Mode" and _MODE_LABEL["mid"] == "Mid"
-    assert _BADGE_LABEL["vol"] == "Volume Bot" and _MODE_LABEL["vol"] == "Volume"
+    assert _BADGE_LABEL["vol"] == "Vol Bot" and _MODE_LABEL["vol"] == "Volume"
     assert _BADGE_LABEL["dn"] == "Delta Neutral"
 
 
