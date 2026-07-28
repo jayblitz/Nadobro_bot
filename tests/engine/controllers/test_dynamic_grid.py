@@ -171,13 +171,17 @@ def test_reset_recenters_in_place_on_large_move():
         await orch.tick_controller(c.id)
         first = orch.list(c.id, active_only=True)[0]
         opens0 = [lv.open_price for lv in first.levels]
-        # Small move (50bp) — below threshold, no re-center.
-        adapter.set_mid(Decimal("100.5"))
+        # RGRID-STALE-LADDER: 200bp is capped to the 40bp ladder band
+        # (step 20bp x 2). A threshold wider than the grid it steers can never
+        # fire before price has left the band entirely.
+        assert c.reset_threshold_bp == 40.0
+        # Small move (20bp) — half a band, still in range: no re-center.
+        adapter.set_mid(Decimal("100.2"))
         await orch.tick_controller(c.id)
         active = orch.list(c.id, active_only=True)
         assert active[0] is first and [lv.open_price for lv in first.levels] == opens0, \
-            "small move must not re-center"
-        # Large move (3%) — past the floored 200bp threshold: re-center in place.
+            "an in-band move must not re-center"
+        # Large move (3%) — past the band threshold: re-center in place.
         adapter.set_mid(Decimal("103"))
         await orch.tick_controller(c.id)
         active = orch.list(c.id, active_only=True)

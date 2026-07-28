@@ -159,12 +159,15 @@ def test_grid_controller_recenters_in_place_and_reports_telemetry():
         assert m["grid_reset_side"] == "SELL" and m["grid_reset_active"] is True
         assert float(m["grid_anchor_price"]) > 0
 
-        # Small move: no re-center.
-        adapter.set_mid(Decimal("100.5"))
+        # RGRID-STALE-LADDER: 200bp is capped to the 40bp band (step 20bp x 2).
+        assert c.reset_threshold_bp == 40.0
+
+        # Small in-band move (20bp): no re-center.
+        adapter.set_mid(Decimal("100.2"))
         await orch.tick_controller(c.id)
         assert orch.list(c.id, active_only=True)[0] is first
 
-        # Large move past the floored 200bp threshold: re-center the SAME executor.
+        # Large move past the band threshold: re-center the SAME executor.
         adapter.set_mid(Decimal("103"))
         await orch.tick_controller(c.id)
         active = orch.list(c.id, active_only=True)
