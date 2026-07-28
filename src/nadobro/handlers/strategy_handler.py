@@ -1725,7 +1725,18 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 ],
                 [
                     InlineKeyboardButton("Custom Trend", callback_data="strategy:input:dgrid:dgrid_trend_on_variance_ratio"),
+                    InlineKeyboardButton("Custom Range", callback_data="strategy:input:dgrid:dgrid_range_on_variance_ratio"),
+                ],
+                [
                     InlineKeyboardButton("✍️ Custom Spread", callback_data="strategy:input:dgrid:dgrid_spread_bp"),
+                ],
+                # The min/max spread band had FIXED presets only (Min 2bp / Max
+                # 30bp / 50bp), so there was no way to set a custom DGRID minimum
+                # spread even though the prompt and the (0-50 / 1-200) validation
+                # already existed — the prompt was unreachable dead code.
+                [
+                    InlineKeyboardButton("✍️ Custom Min Spread", callback_data="strategy:input:dgrid:dgrid_min_spread_bp"),
+                    InlineKeyboardButton("✍️ Custom Max Spread", callback_data="strategy:input:dgrid:dgrid_max_spread_bp"),
                 ],
             ]
         else:
