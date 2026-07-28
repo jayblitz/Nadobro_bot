@@ -105,6 +105,7 @@ class DynamicGridController(Controller):
         self.trail_giveback_pct = float(self.cfg("dgrid_trail_giveback_pct", 0.5) or 0.0)
         self.reversal_flip_pct = float(self.cfg("dgrid_reversal_flip_pct", 0.4) or 0.0)
         self._run_extreme: Optional[Decimal] = None  # favorable price extreme since spawn
+        self._run_anchor_mid: Optional[Decimal] = None  # run entry ref (NOT the grid anchor)
         self._run_armed: bool = False                # peak favorable move cleared arm_pct
         self._reversal_streak: int = 0
         # Tiered profit-booking: as the run's unrealized PnL climbs past rising
@@ -232,7 +233,14 @@ class DynamicGridController(Controller):
         # Back-compat telemetry string for /status — a trend is EITHER a VR at/
         # above the threshold OR a sustained directional drift (the slow-grind
         # case the VR misses), matching the phase decision below.
-        is_trend = (self.variance_ratio >= self.trend_on_vr) or bool(info.get("trend_by_drift"))
+        # ``holding_trend`` counts too: while the drift release holds a
+        # directional ladder open, /status must not report "RANGING" at the user
+        # when the bot is deliberately still short.
+        is_trend = (
+            self.variance_ratio >= self.trend_on_vr
+            or bool(info.get("trend_by_drift"))
+            or bool(info.get("holding_trend"))
+        )
         if is_trend and self.last_direction == variance_regime.DOWN:
             self.last_regime = "TRENDING_DOWN"
         elif is_trend and self.last_direction == variance_regime.UP:
@@ -270,6 +278,14 @@ class DynamicGridController(Controller):
         """Re-seed the favorable-extreme / arm state for a fresh run (called on
         every spawn and flip so each leg trails from its own anchor)."""
         self._run_extreme = _dec(mid) if (mid and mid > 0) else None
+        # The run's OWN anchor. Deliberately separate from ``_grid_anchor_mid``:
+        # that one is the geometry reference for re-centering and MOVES WITH
+        # PRICE, while this one must stay at the entry for the whole run or the
+        # trailing arm can never measure a favorable move. Sharing the field
+        # meant that once the re-center actually started firing (6946ee5), the
+        # anchor chased price, ``fav`` read ~0, and the trailing take-profit
+        # silently stopped arming.
+        self._run_anchor_mid = _dec(mid) if (mid and mid > 0) else None
         self._run_armed = False
         self._reversal_streak = 0
 
@@ -280,8 +296,12 @@ class DynamicGridController(Controller):
         """Track the most-favorable price reached this run and arm the trailing
         reversal once the favorable move from the spawn anchor clears
         ``trail_arm_pct`` (so we only ever 'lock & flip' a run that went green)."""
-        if mid is None or mid <= 0 or not self._grid_anchor_mid or self._grid_anchor_mid <= 0:
+        if mid is None or mid <= 0:
             return
+        if not self._run_anchor_mid or self._run_anchor_mid <= 0:
+            # Seed lazily so a spawn that happened without a mid can still arm
+            # once prices arrive (previously such a run could never trail).
+            self._run_anchor_mid = mid
         long = self._is_long_phase()
         if self._run_extreme is None:
             self._run_extreme = mid
@@ -289,7 +309,7 @@ class DynamicGridController(Controller):
             self._run_extreme = max(self._run_extreme, mid)
         else:
             self._run_extreme = min(self._run_extreme, mid)
-        anchor = self._grid_anchor_mid
+        anchor = self._run_anchor_mid
         fav = ((self._run_extreme - anchor) / anchor) if long else ((anchor - self._run_extreme) / anchor)
         if self.trail_arm_pct > 0 and float(fav) * 100.0 >= self.trail_arm_pct:
             self._run_armed = True

@@ -151,6 +151,9 @@ async def run(
             "variance_ratio": 0.0,
             "direction": FLAT,
             "drift_pct": 0.0,
+            "trend_by_drift": False,
+            "trend_release_pct": 0.0,
+            "holding_trend": False,
             "insufficient_history": True,
             "required_candles": required,
         }
@@ -162,6 +165,9 @@ async def run(
             "variance_ratio": 0.0,
             "direction": FLAT,
             "drift_pct": 0.0,
+            "trend_by_drift": False,
+            "trend_release_pct": 0.0,
+            "holding_trend": False,
             "insufficient_history": True,
             "required_candles": required,
         }
