@@ -136,3 +136,110 @@ def test_flat_range_does_not_false_trigger_drift_trend():
     r = asyncio.run(vr.run(PAIR, candles, trend_drift_pct=0.30))
     assert r["trend_by_drift"] is False
     assert r["phase"] == vr.GRID
+
+
+# ── RGRID-FLIPFLOP ──────────────────────────────────────────────
+# Reported 2026-07-28 with a Telegram screenshot of six consecutive flip
+# notifications on BTC (mainnet), forty minutes apart end to end:
+#
+#   9:15  GRID  -> RGRID   "downtrend detected (variance ratio 0.91)"
+#   9:17  RGRID -> GRID    "downtrend detected (variance ratio 0.89)"
+#   9:27  GRID  -> RGRID   "downtrend detected (variance ratio 0.84)"
+#   9:29  RGRID -> GRID    "downtrend detected (variance ratio 0.83)"
+#   9:54  GRID  -> RGRID   "downtrend detected (variance ratio 0.91)"
+#   9:55  RGRID -> GRID    "downtrend detected (variance ratio 0.85)"
+#
+# EVERY message reads "downtrend detected" — the direction was right every time
+# — yet three of them armed the LONG grid. Every variance ratio is below 1.0,
+# under rgrid's range_on of 1.05, so the only path that can return RGRID is the
+# drift branch and the only path that can return GRID is `elif vr <= range_on`,
+# which ignored direction entirely. So a decline that merely EASED handed the
+# short ladder back to the long grid. Each flip flattens the position
+# reduce-only ("Previous position closed"), so the bot paid a round trip to land
+# on the wrong side of the move it had just named, over and over.
+
+# rgrid's live defaults (engine_runtime.map_strategy_config).
+_RG = dict(short_window=3, long_window=8, trend_on=1.10, range_on=1.05,
+           trend_drift_pct=0.15)
+
+
+def _choppy(start: float, drop_per_candle: float, amp: float = 120.0,
+            n: int = 24, period: int = 6):
+    """Deterministic choppy trend: a linear drift plus a sawtooth swing.
+
+    The swing dominates the SHORT horizon and averages out over the LONG one, so
+    the variance ratio sits BELOW 1 exactly as production logged (0.83-0.97)
+    while price still goes decisively one way.
+    """
+    out = []
+    for i in range(n):
+        p = (i % period) / period
+        out.append({"close": start - drop_per_candle * i
+                    + amp * (1.0 - 2.0 * abs(2.0 * p - 1.0))})
+    return out
+
+
+def test_easing_decline_keeps_the_short_ladder():
+    """THE BUG: -0.13%/window is still falling. It must not re-arm long."""
+    r = asyncio.run(vr.run(PAIR, _choppy(63500, 14.0), current_phase=vr.RGRID, **_RG))
+    assert r["direction"] == vr.DOWN
+    assert float(r["variance_ratio"]) <= _RG["range_on"], "must be in the range branch"
+    assert r["trend_by_drift"] is False, "drift is UNDER the trend threshold"
+    assert r["holding_trend"] is True
+    assert r["phase"] == vr.RGRID, (
+        "a decline that merely eased handed the short ladder back to the long "
+        "grid — the reported GRID<->RGRID flip-flop"
+    )
+
+
+def test_a_downtrend_still_arms_the_short():
+    r = asyncio.run(vr.run(PAIR, _choppy(63500, 16.0), current_phase=vr.GRID, **_RG))
+    assert r["direction"] == vr.DOWN and r["trend_by_drift"] is True
+    assert r["phase"] == vr.RGRID
+
+
+def test_the_short_is_released_once_the_decline_stalls():
+    """Hysteresis must not become a one-way trap."""
+    r = asyncio.run(vr.run(PAIR, _choppy(63500, 1.0), current_phase=vr.RGRID, **_RG))
+    assert abs(float(r["drift_pct"])) < float(r["trend_release_pct"])
+    assert r["holding_trend"] is False
+    assert r["phase"] == vr.GRID
+
+
+def test_a_turn_upward_releases_the_short_immediately():
+    r = asyncio.run(vr.run(PAIR, _choppy(63500, -14.0), current_phase=vr.RGRID, **_RG))
+    assert r["direction"] == vr.UP
+    assert r["phase"] == vr.GRID
+
+
+def test_the_release_never_holds_a_phase_we_are_not_in():
+    """A long GRID must never be dragged short by the release branch."""
+    r = asyncio.run(vr.run(PAIR, _choppy(63500, 14.0), current_phase=vr.GRID, **_RG))
+    assert r["holding_trend"] is False
+    assert r["phase"] == vr.GRID
+
+
+def test_no_flipflop_across_a_realistic_downtrend():
+    """The reported sequence: 6 flips before, 1 after.
+
+    Rates of decline wobbling either side of the 0.15% trend threshold while
+    price falls throughout, then a genuine stall.
+    """
+    rates = [16.0, 14.0, 18.0, 14.0, 17.0, 13.5, 16.5, 14.0]
+    phase, flips = vr.GRID, 0
+    for rate in rates:
+        r = asyncio.run(vr.run(PAIR, _choppy(63500, rate), current_phase=phase, **_RG))
+        if r["phase"] != phase:
+            flips += 1
+        phase = str(r["phase"])
+    assert phase == vr.RGRID, "must end the downtrend still short"
+    assert flips == 1, f"expected one flip into the trend, churned {flips}"
+
+
+def test_drift_release_is_disabled_when_the_drift_filter_is_off():
+    """trend_drift_pct=0 opts out of the drift trend — and of its release."""
+    r = asyncio.run(vr.run(PAIR, _choppy(63500, 14.0), current_phase=vr.RGRID,
+                           **dict(_RG, trend_drift_pct=0.0)))
+    assert float(r["trend_release_pct"]) == 0.0
+    assert r["holding_trend"] is False
+    assert r["phase"] == vr.GRID

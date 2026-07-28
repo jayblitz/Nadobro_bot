@@ -3158,14 +3158,20 @@ async def _run_cycle(
             # CONTROLLERS), so this flip fires for BOTH. Name the strategy the
             # user actually started — an R-Grid user was being told "Dynamic
             # GRID switched…" for a mode they never picked.
+            # Name the SIDE, not just the phase label. "downtrend detected …
+            # GRID now quoting" read as a contradiction to users (it was one —
+            # see the RGRID-FLIPFLOP fix in variance_regime), and even when
+            # correct, GRID/RGRID does not tell anyone which way the bot is now
+            # leaning.
             await _notify(
                 telegram_id,
                 "🔄 {mode} switched {frm} → {to} on {product} ({network}) — "
                 "{why} (variance ratio {vr}). Previous position closed; "
-                "{to} now quoting.",
+                "now quoting the {side} ladder.",
                 mode=_STRATEGY_DISPLAY_NAMES.get(str(strategy).lower(), str(strategy).upper()),
                 frm=str(dgrid_event.get("from", "")).upper(),
                 to=str(dgrid_event.get("to", "")).upper(),
+                side=("SHORT" if str(dgrid_event.get("to", "")).lower() == "rgrid" else "LONG"),
                 product=product, network=network,
                 why=("reversal — locked profit, flipping" if dgrid_event.get("reason") == "reversal"
                      else "downtrend detected" if dgrid_event.get("direction") == "down"
