@@ -132,14 +132,14 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "inventory_soft_limit_usd": 45.0,
         "cycle_notional_usd": 75.0,
         "session_notional_cap_usd": 0.0,
-        "grid_reset_threshold_pct": 0.8,
+        "grid_reset_threshold_pct": 0.2,
         "grid_reset_timeout_seconds": 120,
     },
     "rgrid": {
         "notional_usd": 100.0, "spread_bp": 10.0, "rgrid_spread_bp": 10.0, "interval_seconds": 60,
         "tp_pct": 1.2, "sl_pct": 0.8, "rgrid_stop_loss_pct": 0.8, "rgrid_take_profit_pct": 1.2,
         "levels": 4, "rgrid_discretion": 0.06,
-        "rgrid_reset_threshold_pct": 1.0, "rgrid_reset_timeout_seconds": 120,
+        "rgrid_reset_threshold_pct": 0.2, "rgrid_reset_timeout_seconds": 120,
         # Legacy keys kept for one migration cycle.
         "min_range_pct": 1.0, "max_range_pct": 1.0,
     },
@@ -244,7 +244,7 @@ RUNTIME_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "rgrid_stop_loss_pct": 0.8,
         "rgrid_take_profit_pct": 1.2,
         "rgrid_discretion": 0.06,
-        "rgrid_reset_threshold_pct": 1.0,
+        "rgrid_reset_threshold_pct": 0.2,
         "rgrid_reset_timeout_seconds": 120,
         # Legacy fallback (read-only compatibility).
         "min_range_pct": 1.0,
