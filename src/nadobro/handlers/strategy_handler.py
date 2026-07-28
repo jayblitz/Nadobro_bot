@@ -1153,7 +1153,7 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         grid_sl = float(conf.get("rgrid_stop_loss_pct", conf.get("grid_stop_loss_pct", sl_pct)))
         grid_tp = float(conf.get("rgrid_take_profit_pct", conf.get("grid_take_profit_pct", tp_pct)))
         grid_discretion = float(conf.get("rgrid_discretion", conf.get("grid_discretion", 0.06)))
-        reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 1.0)))
+        reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 0.2)))
         reset_timeout = int(conf.get("rgrid_reset_timeout_seconds", conf.get("grid_reset_timeout_seconds", 120)))
         spread_hint = "Reverse breakout width"
         extra = (
@@ -1397,7 +1397,7 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 "Set when the strategy should cut or lock gains based on realized/open PnL, not raw market drift\\."
             )
         if section == "reset":
-            reset_threshold = f"{float(conf.get('rgrid_reset_threshold_pct', 1.0)):.2f}%"
+            reset_threshold = f"{float(conf.get('rgrid_reset_threshold_pct', 0.2)):.2f}%"
             reset_timeout = f"{int(conf.get('rgrid_reset_timeout_seconds', 120))}s"
             discretion = f"{float(conf.get('rgrid_discretion', 0.06)):.2f}"
             return (
@@ -1725,7 +1725,18 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 ],
                 [
                     InlineKeyboardButton("Custom Trend", callback_data="strategy:input:dgrid:dgrid_trend_on_variance_ratio"),
+                    InlineKeyboardButton("Custom Range", callback_data="strategy:input:dgrid:dgrid_range_on_variance_ratio"),
+                ],
+                [
                     InlineKeyboardButton("✍️ Custom Spread", callback_data="strategy:input:dgrid:dgrid_spread_bp"),
+                ],
+                # The min/max spread band had FIXED presets only (Min 2bp / Max
+                # 30bp / 50bp), so there was no way to set a custom DGRID minimum
+                # spread even though the prompt and the (0-50 / 1-200) validation
+                # already existed — the prompt was unreachable dead code.
+                [
+                    InlineKeyboardButton("✍️ Custom Min Spread", callback_data="strategy:input:dgrid:dgrid_min_spread_bp"),
+                    InlineKeyboardButton("✍️ Custom Max Spread", callback_data="strategy:input:dgrid:dgrid_max_spread_bp"),
                 ],
             ]
         else:
@@ -1823,8 +1834,13 @@ def _strategy_config_section_kb(strategy: str, section: str):
         else:
             rows = [
                 [
-                    InlineKeyboardButton("Reset 0.8%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:0.8"),
-                    InlineKeyboardButton("1.5%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:1.5"),
+                    # RGRID-STALE-LADDER: presets must sit INSIDE the ladder band
+                    # (spread x (levels-1) — 30bp on the defaults). 0.8% / 1.5%
+                    # were 3-5x wider than the grid, so the ladder never
+                    # re-centered and quotes went stale. The engine now caps any
+                    # value to the band; these keep the card honest.
+                    InlineKeyboardButton("Reset 0.2%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:0.2"),
+                    InlineKeyboardButton("0.4%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:0.4"),
                 ],
                 [
                     InlineKeyboardButton("Disc 0.06", callback_data="strategy:set:rgrid:rgrid_discretion:0.06"),
@@ -2444,7 +2460,7 @@ def _build_strategy_preview_text(
         grid_tp = float(conf.get("rgrid_take_profit_pct", conf.get("grid_take_profit_pct", tp_pct)))
         max_loss_pct = float(conf.get("rgrid_stop_loss_pct", conf.get("grid_stop_loss_pct", sl_pct)))
         discretion = float(conf.get("rgrid_discretion", conf.get("grid_discretion", 0.06)))
-        reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 1.0)))
+        reset_threshold = float(conf.get("rgrid_reset_threshold_pct", conf.get("grid_reset_threshold_pct", 0.2)))
         reset_timeout = int(conf.get("rgrid_reset_timeout_seconds", conf.get("grid_reset_timeout_seconds", 120)))
         if _stats_owner and not _snapshot_applied:
             session_volume = float(bot_status.get("session_notional_done_usd") or session_volume)

@@ -44,6 +44,15 @@ never churns a flip:
   ranging -> long **GRID** (the classic short-vol grid).
 - In between -> hold the current phase.
 
+DIRECTIONAL RELEASE (``TREND_RELEASE_FRACTION``)
+-----------------------------------------------
+Leaving a short **RGRID** needs the decline to actually STALL, not merely ease.
+The trend trigger is ``|drift| >= trend_drift_pct``; the release is only half
+that. Without it the range branch was direction-blind — a low variance ratio
+says "no volatility burst", it does NOT say "price is rising" — so the moment a
+decline slowed a little, ``VR <= range_on`` handed the short ladder straight
+back to the long grid while price was still falling.
+
 Deterministic: no LLM, no state beyond the inputs + the caller's current phase.
 """
 from __future__ import annotations
@@ -61,6 +70,13 @@ RGRID = "rgrid"      # short reverse grid (downtrend)
 UP = "up"
 DOWN = "down"
 FLAT = "flat"
+
+# Hysteresis for LEAVING a directional phase. Enter a trend at
+# ``|drift| >= trend_drift_pct``; release it only once |drift| has decayed below
+# this fraction of that threshold. Halving gives a wide enough dead band that
+# ordinary variation in the rate of a decline cannot churn the side, while a
+# genuine stall (or a turn) still returns the ladder to the long grid promptly.
+TREND_RELEASE_FRACTION = 0.5
 
 
 def _log_returns(closes: Sequence[float], horizon: int) -> List[float]:
@@ -135,6 +151,9 @@ async def run(
             "variance_ratio": 0.0,
             "direction": FLAT,
             "drift_pct": 0.0,
+            "trend_by_drift": False,
+            "trend_release_pct": 0.0,
+            "holding_trend": False,
             "insufficient_history": True,
             "required_candles": required,
         }
@@ -146,6 +165,9 @@ async def run(
             "variance_ratio": 0.0,
             "direction": FLAT,
             "drift_pct": 0.0,
+            "trend_by_drift": False,
+            "trend_release_pct": 0.0,
+            "holding_trend": False,
             "insufficient_history": True,
             "required_candles": required,
         }
@@ -170,8 +192,13 @@ async def run(
     trend_by_drift = drift_threshold > 0 and abs(drift) >= drift_threshold
     trend_by_vr = vr >= trend_on
 
+    # RGRID-FLIPFLOP: releasing a directional phase needs the move to STALL, not
+    # merely ease. See TREND_RELEASE_FRACTION.
+    release = drift_threshold * TREND_RELEASE_FRACTION
+
     current_phase = RGRID if str(current_phase) == RGRID else GRID
     phase = current_phase
+    holding_trend = False
     if trend_by_vr or trend_by_drift:
         # Trending (by burst OR by sustained drift): trade the direction. Down ->
         # short reverse grid; up keeps the long grid (a reverse grid bleeds in an
@@ -180,6 +207,20 @@ async def run(
             phase = RGRID
         elif direction == UP:
             phase = GRID
+    elif current_phase == RGRID and release > 0 and drift <= -release:
+        # Short ladder armed and price is STILL falling — just not fast enough to
+        # re-trip the trend threshold. Hold the short.
+        #
+        # This branch is the fix for the reported bug (2026-07-28): the code fell
+        # straight through to ``vr <= range_on -> GRID`` here, which ignores
+        # direction entirely. rgrid/dgrid therefore flipped GRID<->RGRID every
+        # couple of minutes in a downtrend — six flips in forty minutes on BTC,
+        # every notification correctly reading "downtrend detected" while half of
+        # them armed the LONG grid. Each flip flattens the position reduce-only,
+        # so the bot paid a round trip to end up on the wrong side of the move it
+        # had just identified, and never held a trend long enough to catch it.
+        phase = RGRID
+        holding_trend = True
     elif vr <= range_on:
         # Ranging AND no strong drift: classic long grid.
         phase = GRID
@@ -191,5 +232,7 @@ async def run(
         "direction": direction,
         "drift_pct": float(drift * 100.0),
         "trend_by_drift": bool(trend_by_drift),
+        "trend_release_pct": float(release * 100.0),
+        "holding_trend": bool(holding_trend),
         "insufficient_history": False,
     }

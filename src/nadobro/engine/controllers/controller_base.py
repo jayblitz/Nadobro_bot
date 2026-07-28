@@ -33,6 +33,55 @@ class ControllerState(Enum):
     FAILED = "FAILED"
 
 
+# ── ladder re-center geometry (shared by GridController + DynamicGridController) ──
+# A ladder grid only follows price through the executor's in-place re-center,
+# which re-quotes UNFILLED maker opens (no flatten, no realized loss). The
+# trigger is therefore a POSITIONING question, not a risk question, and it is
+# bounded by the ladder's own geometry — not by a free-form percent.
+LADDER_RECENTER_FLOOR_BP = 12.0
+LADDER_RECENTER_MIN_INTERVAL_S = 5.0
+
+
+def ladder_recenter_threshold_bp(
+    step_bp: float,
+    levels: int,
+    user_bp: float,
+    *,
+    floor_bp: float = LADDER_RECENTER_FLOOR_BP,
+) -> tuple[float, bool]:
+    """Effective drift (bp) that must accrue before a ladder re-centers.
+
+    RGRID-STALE-LADDER (prod session 165, 2026-07-28): the user-facing knob is a
+    percent of PRICE (``rgrid_reset_threshold_pct`` — registry default 1.0%, UI
+    presets 0.8% / 1.5%) while the ladder it steers is only ``step x (levels-1)``
+    wide. On BTC at 10bp x 3 levels that is a 20bp band asked to wait for 80bp of
+    drift, so price left the band and the grid never re-quoted: 2063 of 2080
+    cycles placed zero orders and the same maker price sat on the book for 3.5h.
+
+    Bounds, both derived from the ladder itself:
+
+    * lower — one level ``step``: re-centering for less than the spacing between
+      two levels just churns cancel/replace without moving the ladder anywhere.
+    * upper — one ``band`` width: once price has drifted the full width of the
+      ladder, every level is either filled or unreachable. Waiting longer cannot
+      earn anything, it only strands the quotes.
+
+    Returns ``(threshold_bp, clamped)``; ``clamped`` is True when the caller's
+    value had to be cut down to the geometry so it can be logged once.
+    """
+    step_bp = max(float(step_bp or 0.0), 0.0)
+    band_bp = step_bp * float(max(int(levels or 0) - 1, 1))
+    lo = max(float(floor_bp), step_bp)
+    hi = max(lo, band_bp)
+    user_bp = max(float(user_bp or 0.0), 0.0)
+    if user_bp <= 0:
+        # Auto-follow: one band width of drift (unchanged default behaviour).
+        return hi, False
+    if user_bp > hi:
+        return hi, True
+    return max(user_bp, lo), False
+
+
 class Controller(abc.ABC):
     def __init__(
         self,

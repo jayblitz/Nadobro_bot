@@ -307,11 +307,25 @@ class GridExecutor(Executor):
                 # Cancel the stale resting open, then re-poll to capture any
                 # partial fill that landed before the cancel (BUG-GR-1 pattern).
                 oid = lv.open_order_id
+                cancelled = False
                 try:
                     await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_recenter_cancel")
                     self.orders_cancelled += 1
+                    cancelled = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("grid %s: recenter cancel failed for %s: %s", self.id, oid, exc)
+                if not cancelled:
+                    # RECENTER-ORPHAN (fail closed). ``cancel_order`` only returns
+                    # after verifying the order really is off the book, so an
+                    # exception here means it is STILL LIVE on the venue. Freeing
+                    # the slot would re-quote on top of it AND drop its id, so
+                    # nothing could ever cancel it again — the ladder would run at
+                    # double the intended exposure. Keep the level bound to its
+                    # live order and let the next re-center retry.
+                    # Latent while the re-center almost never fired; routine once
+                    # the threshold was capped to the band (6946ee5).
+                    kept.append(lv)
+                    continue
                 try:
                     refreshed = await self._guard(
                         lambda: self.adapter.order_status(oid), label="grid_recenter_status")

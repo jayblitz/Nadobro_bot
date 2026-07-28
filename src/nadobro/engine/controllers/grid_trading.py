@@ -10,20 +10,24 @@ import time
 from decimal import Decimal
 from typing import Dict, Optional
 
-from src.nadobro.engine.controllers.controller_base import Controller
+from src.nadobro.engine.controllers.controller_base import (
+    LADDER_RECENTER_FLOOR_BP,
+    LADDER_RECENTER_MIN_INTERVAL_S,
+    Controller,
+    ladder_recenter_threshold_bp,
+)
 from src.nadobro.engine.executors.grid_executor import GridExecutor, GridExecutorConfig
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import TradeType, TripleBarrierConfig, _dec
 
 logger = logging.getLogger(__name__)
 
-# Re-center geometry (shared semantics with dgrid). The executor re-center only
-# re-quotes UNFILLED maker opens — no flatten, no realized loss — so following
-# price closely is cheap; the real cost is venue request load, bounded by the
-# per-tick min-interval. Default trigger = ~one band width of drift, floored so a
-# tiny step can't churn every tick.
-_GRID_AUTO_RESET_FLOOR_BP = 12.0
-_GRID_RECENTER_MIN_INTERVAL_S = 5.0
+# Re-center geometry (shared with dgrid via controller_base). The executor
+# re-center only re-quotes UNFILLED maker opens — no flatten, no realized loss —
+# so following price closely is cheap; the real cost is venue request load,
+# bounded by the per-tick min-interval.
+_GRID_AUTO_RESET_FLOOR_BP = LADDER_RECENTER_FLOOR_BP
+_GRID_RECENTER_MIN_INTERVAL_S = LADDER_RECENTER_MIN_INTERVAL_S
 
 
 def build_grid_config(configs: dict, side: TradeType) -> GridExecutorConfig:
@@ -59,18 +63,24 @@ class GridController(Controller):
         self.trading_pair = str(self.cfg("trading_pair"))
         # In-place re-center ("reset and continue"): re-quote the resting ladder
         # around a fresh mid as price drifts, WITHOUT closing the position
-        # (GridExecutor.recenter). Opt-in via reset_threshold_bp; floored so it
-        # never fires on normal in-band oscillation.
-        # Re-center ON by default so the ladder FOLLOWS price (re-quoting free /
-        # recycled slots around a fresh mid) instead of resting a stale band.
-        # Explicit user value wins (small half-band floor); else auto = one band.
+        # (GridExecutor.recenter). ON by default so the ladder FOLLOWS price
+        # (re-quoting free / recycled slots around a fresh mid) instead of
+        # resting a stale band.
+        # RGRID-STALE-LADDER: the threshold is now bounded BOTH ways by the
+        # ladder's own geometry. It used to be `max(user, floor, band/2)` — a
+        # one-sided floor — so a percent-of-price user knob (default 1.0%) could
+        # sit at several times the band width and the grid could never re-center.
         step_bp = float(_dec(self.cfg("step_pct", 0) or 0) * Decimal(10000))
-        band_bp = step_bp * float(max(int(self.cfg("levels_count", 0) or 0) - 1, 1))
-        _reset = float(self.cfg("reset_threshold_bp", 0.0) or 0.0)
-        if _reset > 0:
-            _reset = max(_reset, _GRID_AUTO_RESET_FLOOR_BP, band_bp * 0.5)
-        else:
-            _reset = max(_GRID_AUTO_RESET_FLOOR_BP, band_bp)
+        levels_count = int(self.cfg("levels_count", 0) or 0)
+        _user_reset = float(self.cfg("reset_threshold_bp", 0.0) or 0.0)
+        _reset, _clamped = ladder_recenter_threshold_bp(step_bp, levels_count, _user_reset)
+        if _clamped:
+            logger.info(
+                "grid %s: reset threshold %.1fbp exceeds the ladder band "
+                "(step=%.1fbp x %s levels) — capped to %.1fbp so the grid can "
+                "still follow price",
+                self.id, _user_reset, step_bp, levels_count, _reset,
+            )
         self.reset_threshold_bp = _reset
         self._anchor_mid: Optional[Decimal] = None
         self.realized_move_bp: float = 0.0

@@ -3158,14 +3158,20 @@ async def _run_cycle(
             # CONTROLLERS), so this flip fires for BOTH. Name the strategy the
             # user actually started — an R-Grid user was being told "Dynamic
             # GRID switched…" for a mode they never picked.
+            # Name the SIDE, not just the phase label. "downtrend detected …
+            # GRID now quoting" read as a contradiction to users (it was one —
+            # see the RGRID-FLIPFLOP fix in variance_regime), and even when
+            # correct, GRID/RGRID does not tell anyone which way the bot is now
+            # leaning.
             await _notify(
                 telegram_id,
                 "🔄 {mode} switched {frm} → {to} on {product} ({network}) — "
                 "{why} (variance ratio {vr}). Previous position closed; "
-                "{to} now quoting.",
+                "now quoting the {side} ladder.",
                 mode=_STRATEGY_DISPLAY_NAMES.get(str(strategy).lower(), str(strategy).upper()),
                 frm=str(dgrid_event.get("from", "")).upper(),
                 to=str(dgrid_event.get("to", "")).upper(),
+                side=("SHORT" if str(dgrid_event.get("to", "")).lower() == "rgrid" else "LONG"),
                 product=product, network=network,
                 why=("reversal — locked profit, flipping" if dgrid_event.get("reason") == "reversal"
                      else "downtrend detected" if dgrid_event.get("direction") == "down"
@@ -3386,12 +3392,14 @@ async def _run_cycle(
             return _diag[key] if key in _diag else "n/a"
         logger.info(
             "engine_diag user=%s strategy=%s controller=%s active=%s gate=%s/%s "
-            "candles=%s mid=%s phase=%s vr=%s spawn_refused=%s",
+            "candles=%s mid=%s phase=%s vr=%s spawn_refused=%s "
+            "move_bp=%s reset_bp=%s anchor=%s",
             telegram_id, strategy, _diag.get("controller") or "?",
             _diag.get("active_executors"),
             _diag.get("gate_verdict"), _diag.get("gate_reason") or "-",
             _dv("candle_count"), _dv("mid"), _dv("phase"),
             _dv("variance_ratio"), _diag.get("spawn_refused") or "-",
+            _dv("move_bp"), _dv("reset_bp"), _dv("anchor"),
         )
 
     # Increment strategy session metrics from cycle result

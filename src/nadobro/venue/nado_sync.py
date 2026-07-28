@@ -872,13 +872,29 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         # submission_idx and pollutes the ledger.
         if digest:
             recorder_row = query_one(
-                f"SELECT id FROM {table} "
+                f"SELECT id, fill_size FROM {table} "
                 f"WHERE order_digest = %s "
                 f"AND submission_idx IS NULL AND COALESCE(order_type, '') NOT ILIKE '%%close%%' "
                 f"ORDER BY id ASC LIMIT 1",
                 (digest,),
             )
             if recorder_row:
+                # FILL-PRICE-CONSISTENCY: the venue quote is authoritative. If the
+                # recorder's own size/price disagree materially with it, that row
+                # was priced off a requested/partial size — log it so the source
+                # is visible instead of silently shipping a phantom price.
+                _rec_size = abs(float(recorder_row.get("fill_size") or 0) or 0.0)
+                if _rec_size > 0 and float(base_h) > 0:
+                    _skew = abs(_rec_size - float(base_h)) / float(base_h)
+                    if _skew > 0.02:
+                        logger.warning(
+                            "FILL-PRICE-CONSISTENCY user=%s pid=%s submission_idx=%s "
+                            "recorder fill_size=%.8f vs venue base=%.8f (%.1f%% skew) "
+                            "— human columns resynced to the venue quote "
+                            "(price %.2f)",
+                            user_id, product_id, submission_idx, _rec_size,
+                            float(base_h), _skew * 100.0, float(price_h),
+                        )
                 execute(
                     f"""
                     UPDATE {table} SET
@@ -889,21 +905,30 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                       quote_filled_x18 = %s,
                       isolated = %s,
                       strategy_session_id = COALESCE(strategy_session_id, %s),
-                      -- Backfill the HUMAN columns from the authoritative venue
-                      -- quote when the submit-time fill resolve missed (indexer
-                      -- lag) and the retry queue expired. Rollups + History read
-                      -- fill_size * fill_price, so a row stamped with a
-                      -- submission_idx but price 0 counted as $0 volume and
-                      -- rendered as an "entry @ $0.00" round trip whose PnL was
-                      -- the full exit notional.
-                      fill_size = CASE WHEN COALESCE(fill_size, 0) = 0 AND %s > 0
-                                       THEN %s ELSE fill_size END,
-                      fill_price = CASE WHEN COALESCE(fill_price, 0) = 0 AND %s > 0
-                                        THEN %s ELSE fill_price END,
-                      price = CASE WHEN COALESCE(price, 0) = 0 AND %s > 0
-                                   THEN %s ELSE price END,
-                      fill_fee = CASE WHEN COALESCE(fill_fee, 0) = 0 AND %s > 0
-                                      THEN %s ELSE fill_fee END
+                      -- Sync the HUMAN columns to the authoritative venue quote.
+                      -- These MUST track the x18 columns being overwritten just
+                      -- above: the old code only backfilled them when they were
+                      -- ZERO, so a recorder row that already carried its
+                      -- REQUESTED/partial size kept it while base/quote_x18
+                      -- became the venue's real (larger) fill. The row then
+                      -- disagreed with itself and fill_price stayed at
+                      -- quote / requested_size — e.g. 250.18 / 0.00265 = 94,408
+                      -- while BTC was 63.6k (~1.49x). That phantom price made a
+                      -- grid session book a huge fake profit and the session
+                      -- take-profit rail stopped the bot at a real $0.68
+                      -- (sessions 164 + 159, 2026-07-28).
+                      -- fill_fee follows for the SAME reason (audit follow-up):
+                      -- fee_x18 above is overwritten unconditionally, so leaving
+                      -- fill_fee at a submit-time estimate for the FULL requested
+                      -- size left the row contradicting itself again, and every
+                      -- later match inserted its own fee row on top — an
+                      -- over-counted fee. Fees are netted into the session SL/TP
+                      -- rail, so an inflated fee stops a run early: the same
+                      -- failure mode as the phantom price.
+                      fill_size = CASE WHEN %s > 0 THEN %s ELSE fill_size END,
+                      fill_price = CASE WHEN %s > 0 THEN %s ELSE fill_price END,
+                      price = CASE WHEN %s > 0 THEN %s ELSE price END,
+                      fill_fee = CASE WHEN %s > 0 THEN %s ELSE fill_fee END
                     WHERE id = %s
                     """,
                     (
