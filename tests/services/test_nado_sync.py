@@ -702,3 +702,87 @@ class AttributionRegression20260709Tests(unittest.TestCase):
         assert params[2] == "BTC-PERP"
         assert params[16] is None             # manual close: no session
         assert params[17] == "manual"
+
+
+class PhantomFillPriceTests(unittest.TestCase):
+    """FILL-PRICE-CONSISTENCY — a recorder row must never contradict itself.
+
+    Production sessions 164 + 159 (2026-07-28, BTC ~63.6k): the enrich always
+    overwrote base/quote/fee_x18 with the venue's real match but only backfilled
+    the HUMAN columns when they were ZERO. A recorder row that already carried
+    its REQUESTED size kept it:
+
+        fill_size 0.00265 (requested)  vs  base_x18 -> 0.00395 (venue)
+        fill_price = 250.18 / 0.00265 = 94,408   <- phantom, 1.49x
+                     250.18 / 0.00395 = 63,337   <- truth
+
+    Every price-reading surface got the phantom, the session take-profit rail
+    booked a huge fake profit, and a run was stopped at a real $0.68 with TP set
+    to 50%. The human columns must track the x18 columns they sit beside.
+    """
+
+    def _enrich(self, *, recorder_size, venue_base, venue_quote, venue_fee):
+        calls = []
+
+        def _q(sql, *params):
+            if "NOT ILIKE" in sql:
+                return {"id": 99, "fill_size": recorder_size}
+            return None
+
+        with patch.object(nado_sync, "query_one", side_effect=_q), patch.object(
+            nado_sync, "execute", side_effect=lambda *a, **k: calls.append(a)
+        ):
+            nado_sync._write_matches(42, "mainnet", [{
+                "submission_idx": "7", "digest": "0xdead", "product_id": 2,
+                "base_filled": str(to_x18(venue_base)),
+                "quote_filled": str(to_x18(venue_quote)),
+                "fee": str(to_x18(venue_fee)),
+            }])
+        self.assertIn("UPDATE", calls[0][0])
+        return calls[0][0], calls[0][1]
+
+    def test_the_reported_phantom_price_row_is_resynced(self):
+        sql, params = self._enrich(recorder_size="0.00265", venue_base="0.00395",
+                                   venue_quote="-250.18", venue_fee="0.05")
+        # 250.18 / 0.00395 = 63,336.7… — NOT 250.18 / 0.00265 = 94,407.5
+        # params: 0 idx, 1 pnl_x18, 2 fee_x18, 3 base_x18, 4 quote_x18,
+        # 5 isolated, 6 session, 7/8 base_h, 9-12 price_h, 13/14 fee_h, 15 row id
+        self.assertAlmostEqual(float(params[9]), 250.18 / 0.00395, places=2)
+        self.assertNotAlmostEqual(float(params[9]), 250.18 / 0.00265, places=0)
+        self.assertAlmostEqual(float(params[7]), 0.00395, places=8)
+
+    def test_human_columns_are_no_longer_gated_on_being_zero(self):
+        """The exact code shape that caused it must not come back."""
+        sql, _ = self._enrich(recorder_size="0.00265", venue_base="0.00395",
+                              venue_quote="-250.18", venue_fee="0.05")
+        for col in ("fill_size", "fill_price", "price", "fill_fee"):
+            self.assertNotIn(
+                f"COALESCE({col}, 0) = 0", sql,
+                f"{col} is gated on being zero again — it can drift out of sync "
+                f"with the x18 columns overwritten in the same statement",
+            )
+
+    def test_fee_follows_the_venue_too(self):
+        """fee_x18 is overwritten unconditionally, so fill_fee must be as well.
+
+        Fees are netted into the session SL/TP rail, so a stale submit-time fee
+        estimate for the FULL requested size stops a run early — the same
+        failure mode as the phantom price.
+        """
+        _sql, params = self._enrich(recorder_size="0.00265", venue_base="0.00395",
+                                    venue_quote="-250.18", venue_fee="0.0271")
+        self.assertAlmostEqual(float(params[13]), 0.0271, places=6)   # fee_h
+        self.assertEqual(params[2], str(to_x18("0.0271")))            # fee_x18
+
+    def test_a_zero_venue_quote_never_wipes_a_good_row(self):
+        """No base/quote from the indexer must leave the human columns alone."""
+        _sql, params = self._enrich(recorder_size="0.00265", venue_base="0",
+                                    venue_quote="0", venue_fee="0")
+        self.assertEqual(float(params[7]), 0.0)   # the CASE guard keeps the old value
+        self.assertEqual(float(params[9]), 0.0)
+
+    def test_matching_sizes_are_left_untouched_in_value(self):
+        _sql, params = self._enrich(recorder_size="0.00395", venue_base="0.00395",
+                                    venue_quote="-250.29", venue_fee="0.05")
+        self.assertAlmostEqual(float(params[7]), 0.00395, places=8)
+        self.assertAlmostEqual(float(params[9]), 250.29 / 0.00395, places=2)

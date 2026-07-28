@@ -209,3 +209,179 @@ def test_classic_grid_shares_the_same_cap():
         assert c.reset_threshold_bp == 20.0
 
     asyncio.run(body())
+
+
+# ── audit follow-up: the re-center must not eat the trailing exit ──
+# Found while auditing 6946ee5. Making the re-center actually fire exposed a
+# latent coupling: ``_update_run_extremes`` measured the run's favorable move
+# from ``_grid_anchor_mid``, and ``_recenter`` re-seeds that same field. While
+# the re-center was effectively dead (the 4x-too-wide threshold) the anchor
+# stayed at spawn and the trailing arm worked. Once it fired every band width,
+# the anchor chased price, the favorable move read ~0, ``_run_armed`` never went
+# True and ``_maybe_reversal_flip`` — the exit that closes a winning run in
+# profit — was silently disabled. Two different jobs, two anchors.
+
+_TRAIL_CFG = {
+    "trading_pair": "P", "start_price": "98", "end_price": "102", "limit_price": "0",
+    "total_amount_quote": "100", "min_spread_between_orders": "0.002",
+    "max_open_orders": 4, "step_pct": "0.002", "levels_count": 3,
+    "dgrid_trail_arm_pct": 0.5, "dgrid_reversal_flip_pct": 0.3,
+    "regime_gate_enabled": 0.0,
+}
+
+
+def _flat_range(n=60, base=100.0, amp=1.0, period=7.0):
+    import math
+    return [{"high": base + amp * math.sin(2 * math.pi * i / period) + 1,
+             "low": base + amp * math.sin(2 * math.pi * i / period) - 1,
+             "close": base + amp * math.sin(2 * math.pi * i / period)} for i in range(n)]
+
+
+def test_recenter_does_not_reset_the_trailing_arm_anchor():
+    """A +0.6% run must arm a 0.5% trail even though it re-centered on the way."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("100"))
+        orch = ExecutorOrchestrator()
+        c = DynamicGridController(
+            user_id=1, orchestrator=orch, adapter=adapter,
+            inventory=InventoryRepository(),
+            configs=dict(_TRAIL_CFG, candle_provider=lambda p: _flat_range()),
+        )
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        spawn_anchor = c._grid_anchor_mid
+
+        for px in ("100.15", "100.30", "100.45", "100.60"):
+            adapter.set_mid(Decimal(px))
+            await orch.tick_controller(c.id)
+
+        assert c._grid_anchor_mid != spawn_anchor, (
+            "precondition: the ladder must have re-centered during the run"
+        )
+        assert c._run_armed is True, (
+            "the re-center moved the trail's reference with it, so a 0.6% "
+            "favorable run never cleared the 0.5% arm — the trailing take-profit "
+            "was silently disabled"
+        )
+
+    asyncio.run(body())
+
+
+def test_trail_anchor_survives_many_recenters():
+    """The geometry anchor tracks price; the run anchor stays at the entry."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("100"))
+        orch = ExecutorOrchestrator()
+        c = DynamicGridController(
+            user_id=1, orchestrator=orch, adapter=adapter,
+            inventory=InventoryRepository(),
+            configs=dict(_TRAIL_CFG, candle_provider=lambda p: _flat_range()),
+        )
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        run_anchor = c._run_anchor_mid
+        assert run_anchor is not None
+
+        for px in ("100.5", "101.0", "101.5", "102.0"):
+            adapter.set_mid(Decimal(px))
+            await orch.tick_controller(c.id)
+            if c.current_phase != "grid":
+                return          # a flip legitimately re-seeds the run
+            assert c._run_anchor_mid == run_anchor, (
+                "the run anchor must only move on spawn / flip, never on a re-center"
+            )
+
+    asyncio.run(body())
+
+
+# ── audit follow-up: a failed cancel must not orphan a live order ──
+# Found while auditing 6946ee5. ``recenter`` cancelled each stale maker, then
+# freed the slot and re-quoted REGARDLESS of whether the cancel succeeded.
+# ``NadoAdapter.cancel_order`` only returns after verifying the order is off the
+# book, so a raised error means it is still LIVE — and the executor had just
+# dropped its id, so nothing could ever cancel it again. The ladder then ran at
+# double the intended exposure. Dormant while the re-center never fired; routine
+# once the threshold was capped to the band.
+
+def _recenter_cfg():
+    from src.nadobro.engine.executors.grid_executor import GridExecutorConfig
+    from src.nadobro.engine.types import TradeType
+    return GridExecutorConfig(
+        trading_pair="BTC-PERP", side=TradeType.BUY,
+        start_price=Decimal("99"), end_price=Decimal("100"), limit_price=Decimal(0),
+        total_amount_quote=Decimal(100),
+        min_spread_between_orders=Decimal("0.002"), max_open_orders=3,
+    )
+
+
+def test_failed_recenter_cancel_never_orphans_a_live_order():
+    from src.nadobro.engine.executors.grid_executor import GridExecutor, GridLevelState
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+        before = {lv.open_order_id for lv in ex.levels
+                  if lv.state is GridLevelState.OPEN_ORDER_PLACED}
+        assert before
+
+        # Every cancel fails — a throttled gateway or a venue reject.
+        adapter.fail_on = {"cancel_order"}
+        adapter.fail_remaining = 99
+        await ex.recenter(Decimal("109"), Decimal("110"))
+
+        live = {oid for oid, o in adapter._orders.items() if not o.state.is_terminal}
+        tracked = {lv.open_order_id for lv in ex.levels if lv.open_order_id}
+        assert not (live - tracked), (
+            f"orphaned live order(s) {sorted(live - tracked)}: the level was freed "
+            f"and re-quoted while the order stayed on the book — double exposure "
+            f"with no id left to cancel it"
+        )
+        assert before <= tracked, "the un-cancelled orders must stay owned by a level"
+
+    asyncio.run(body())
+
+
+def test_a_failed_cancel_does_not_double_the_quote_count():
+    from src.nadobro.engine.executors.grid_executor import GridExecutor
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+        placed_before = len(adapter.placed)
+
+        adapter.fail_on = {"cancel_order"}
+        adapter.fail_remaining = 99
+        await ex.recenter(Decimal("109"), Decimal("110"))
+
+        assert len(adapter.placed) == placed_before, (
+            "nothing new may be quoted while the old orders are still resting"
+        )
+        assert len(ex.levels) <= ex.config.max_open_orders
+
+    asyncio.run(body())
+
+
+def test_a_successful_recenter_still_requotes():
+    """The fail-closed guard must not block the normal path."""
+    from src.nadobro.engine.executors.grid_executor import GridExecutor
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+        placed_before = len(adapter.placed)
+
+        await ex.recenter(Decimal("109"), Decimal("110"))
+
+        assert len(adapter.placed) > placed_before, "a clean re-center must re-quote"
+        assert min(lv.open_price for lv in ex.levels) >= Decimal("109")
+
+    asyncio.run(body())

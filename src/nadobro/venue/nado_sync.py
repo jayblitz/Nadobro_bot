@@ -917,11 +917,18 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
                       -- grid session book a huge fake profit and the session
                       -- take-profit rail stopped the bot at a real $0.68
                       -- (sessions 164 + 159, 2026-07-28).
+                      -- fill_fee follows for the SAME reason (audit follow-up):
+                      -- fee_x18 above is overwritten unconditionally, so leaving
+                      -- fill_fee at a submit-time estimate for the FULL requested
+                      -- size left the row contradicting itself again, and every
+                      -- later match inserted its own fee row on top — an
+                      -- over-counted fee. Fees are netted into the session SL/TP
+                      -- rail, so an inflated fee stops a run early: the same
+                      -- failure mode as the phantom price.
                       fill_size = CASE WHEN %s > 0 THEN %s ELSE fill_size END,
                       fill_price = CASE WHEN %s > 0 THEN %s ELSE fill_price END,
                       price = CASE WHEN %s > 0 THEN %s ELSE price END,
-                      fill_fee = CASE WHEN COALESCE(fill_fee, 0) = 0 AND %s > 0
-                                      THEN %s ELSE fill_fee END
+                      fill_fee = CASE WHEN %s > 0 THEN %s ELSE fill_fee END
                     WHERE id = %s
                     """,
                     (
