@@ -1331,13 +1331,13 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         sl_pct = float(conf.get("sl_pct", 1.0))
         if section == "direction":
             return (
-                "⚙️ *Volume Bot · Direction*\n\n"
+                "⚙️ *Vol Bot · Direction*\n\n"
                 f"Mode: *{escape_md(network.upper())}*\n"
                 f"Current direction: *{escape_md(direction)}*\n\n"
                 "Pick the side you want the volume loop to favor\\."
             )
         return (
-            "⚙️ *Volume Bot · TP / SL*\n\n"
+            "⚙️ *Vol Bot · TP / SL*\n\n"
             f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n\n"
             "Choose quick presets or set custom values\\."
         )
@@ -1505,6 +1505,25 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
 
 def _strategy_config_section_kb(strategy: str, section: str):
     if strategy == "vol":
+        # VOL-DIRECTION-TAB: this branch used to IGNORE `section` and return the
+        # margin/TP/SL/target keyboard for BOTH tabs. Tapping "🎯 Direction"
+        # showed the Direction *heading* over the TP/SL *controls*, and
+        # vol_direction had no button anywhere in the codebase — the value was
+        # validated ({"long","short"}) and consumed by bot_runtime, but nothing
+        # could ever set it from the UI. Reported 2026-07-28.
+        if section == "direction":
+            return InlineKeyboardMarkup([
+                [
+                    # set_text, not set: `set` only accepts numeric fields and
+                    # explicitly rejects any vol field outside
+                    # {tp_pct, sl_pct, session_margin_usd, target_volume_usd}.
+                    InlineKeyboardButton(
+                        "📈 LONG", callback_data="strategy:set_text:vol:vol_direction:long"),
+                    InlineKeyboardButton(
+                        "📉 SHORT", callback_data="strategy:set_text:vol:vol_direction:short"),
+                ],
+                [InlineKeyboardButton("◀ Back", callback_data="strategy:config:vol")],
+            ])
         # Volume is spot-only as of 2026-05. The user-tunable params are:
         # session margin (per-cycle notional), stop loss %, target volume.
         rows = [

@@ -70,7 +70,7 @@ _STRATEGY_ALIASES = {
 # Badge pill wording (friendly names) and the short Mode word.
 _BADGE_LABEL = {
     "grid": "Grid Strategy", "rgrid": "RGrid Strategy", "dgrid": "DGrid Strategy",
-    "mid": "Mid Mode", "vol": "Volume Bot", "dn": "Delta Neutral",
+    "mid": "Mid Mode", "vol": "Vol Bot", "dn": "Delta Neutral",
 }
 _MODE_LABEL = {
     "grid": "Grid", "rgrid": "RGrid", "dgrid": "DGrid",

@@ -466,11 +466,11 @@ _LABELS = {
         "ru": "⚖️ Delta Neutral",
         "ko": "⚖️ 델타 뉴트럴",
     },
-    "🔁 Volume Engine": {
+    "🔁 Vol Bot": {
         "zh": "🔁 成交量引擎",
         "fr": "🔁 Moteur Volume",
         "ar": "🔁 محرك الحجم",
-        "ru": "🔁 Volume Engine",
+        "ru": "🔁 Vol Bot",
         "ko": "🔁 볼륨 엔진",
     },
     "🧩 Edit Parameters": {
