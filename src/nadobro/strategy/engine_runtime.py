@@ -2035,6 +2035,21 @@ async def run_engine_cycle(
                 engine_diag["phase"] = getattr(controller, "current_phase", None)
             if hasattr(controller, "variance_ratio"):
                 engine_diag["variance_ratio"] = float(getattr(controller, "variance_ratio", 0.0) or 0.0)
+            # RE-QUOTE DIAGNOSTIC: why the ladder did (not) follow price this
+            # cycle. A grid that stops moving while the market trends loses its
+            # edge, and the gate is invisible without these three numbers:
+            # drift from the anchor, the threshold it must clear, and the anchor
+            # itself. (Fly retains only ~100 log lines, so this must be on the
+            # per-cycle line to be catchable in a real trending window.)
+            if hasattr(controller, "realized_move_bp"):
+                engine_diag["move_bp"] = round(
+                    float(getattr(controller, "realized_move_bp", 0.0) or 0.0), 1)
+            if hasattr(controller, "reset_threshold_bp"):
+                engine_diag["reset_bp"] = round(
+                    float(getattr(controller, "reset_threshold_bp", 0.0) or 0.0), 1)
+            _anchor = getattr(controller, "_grid_anchor_mid", None)
+            if _anchor is not None:
+                engine_diag["anchor"] = str(_anchor)
             logger.debug(
                 "engine_ticked user=%s strategy=%s active_executors=%s",
                 telegram_id, strategy, active_n,

@@ -3386,12 +3386,14 @@ async def _run_cycle(
             return _diag[key] if key in _diag else "n/a"
         logger.info(
             "engine_diag user=%s strategy=%s controller=%s active=%s gate=%s/%s "
-            "candles=%s mid=%s phase=%s vr=%s spawn_refused=%s",
+            "candles=%s mid=%s phase=%s vr=%s spawn_refused=%s "
+            "move_bp=%s reset_bp=%s anchor=%s",
             telegram_id, strategy, _diag.get("controller") or "?",
             _diag.get("active_executors"),
             _diag.get("gate_verdict"), _diag.get("gate_reason") or "-",
             _dv("candle_count"), _dv("mid"), _dv("phase"),
             _dv("variance_ratio"), _diag.get("spawn_refused") or "-",
+            _dv("move_bp"), _dv("reset_bp"), _dv("anchor"),
         )
 
     # Increment strategy session metrics from cycle result
