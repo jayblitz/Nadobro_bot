@@ -861,7 +861,7 @@ def strategy_hub_kb():
         ],
         [
             InlineKeyboardButton("⚖️ Delta Neutral", callback_data="strategy:preview:dn"),
-            InlineKeyboardButton("🔁 Volume Engine", callback_data="strategy:preview:vol"),
+            InlineKeyboardButton("🔁 Vol Bot", callback_data="strategy:preview:vol"),
         ],
         [
             InlineKeyboardButton("🔁 Copy Trading", callback_data="copy:hub"),

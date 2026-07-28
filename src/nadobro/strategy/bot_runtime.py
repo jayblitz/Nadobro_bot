@@ -94,7 +94,7 @@ _STRATEGY_DISPLAY_NAMES = {
     "rgrid": "Reverse GRID",
     "dgrid": "Dynamic GRID",
     "mid": "Mid Mode",
-    "vol": "Volume Bot",
+    "vol": "Vol Bot",
     "dn": "Delta Neutral",
 }
 
