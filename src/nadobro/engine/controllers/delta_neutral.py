@@ -258,6 +258,44 @@ class DeltaNeutralController(Controller):
         per-leg quote/mid sizing let the spot and perp legs diverge enough to
         trip the drift gate on the first tick). Rolls the long back if the short
         can't spawn."""
+        # DN-DOUBLE-OPEN (prod session 167, 2026-07-28): a hedged strategy must
+        # NEVER stack a second pair on top of a live one. Two concurrent
+        # on_start calls (eager kickoff racing the scheduled cycle) each ran
+        # _open_cycle; the second overwrote long_id/short_id and orphaned the
+        # first pair's legs, leaving the user holding unhedged spot.
+        # The engine-level fix is the per-user cycle lock in
+        # engine_runtime.run_engine_cycle; this is the invariant that must hold
+        # even if a duplicate start arrives by any other route (worker handoff,
+        # FAILED-recovery rebuild, restart). Refuse to open onto a non-flat
+        # book — go CLOSING so the residual sweep flattens what is there first.
+        _existing = {
+            pair: self._net_base(pair)
+            for pair in (self.long_pair, self.short_pair)
+            if self._net_base(pair) != 0
+        }
+        if _existing:
+            logger.warning(
+                "delta_neutral: refusing to open a second pair — inventory is "
+                "already non-flat (%s). Flattening the residue first "
+                "(controller=%s)",
+                ", ".join(f"{p} {n}" for p, n in _existing.items()), self.id,
+            )
+            self._emit_dn(
+                "duplicate_open_blocked",
+                "a hedge was already open; flattening leftover exposure instead "
+                "of stacking a second position",
+            )
+            await self._close_both_now(CloseType.EARLY_STOP)
+            return
+        for _leg_id in (self.long_id, self.short_id):
+            _live = self._ex(_leg_id)
+            if _live is not None and not _live.is_terminated:
+                logger.warning(
+                    "delta_neutral: refusing to open — leg %s is still live "
+                    "(controller=%s)", _leg_id, self.id,
+                )
+                return
+
         self.hedge_broken = False
         self.opened_at = None
 

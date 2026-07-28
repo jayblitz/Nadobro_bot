@@ -1639,7 +1639,54 @@ async def _maybe_apply_overlay(
         logger.warning("overlay apply failed user=%s strategy=%s", telegram_id, strategy, exc_info=True)
 
 
+_CYCLE_LOCKS: Dict[str, "asyncio.Lock"] = {}
+
+
+def _cycle_lock(telegram_id: int, network: str, strategy: str) -> "asyncio.Lock":
+    """One lock per (user, network, strategy) so a build+start is atomic."""
+    import asyncio as _aio
+
+    key = f"{telegram_id}:{network}:{strategy}"
+    lock = _CYCLE_LOCKS.get(key)
+    if lock is None:
+        lock = _aio.Lock()
+        _CYCLE_LOCKS[key] = lock
+    return lock
+
+
 async def run_engine_cycle(
+    telegram_id: int,
+    network: str,
+    state: Dict[str, Any],
+    client: object,
+    mid: float,
+    product: str,
+    product_id: int,
+) -> dict:
+    """Serialized entry point for one engine cycle.
+
+    DN-DOUBLE-OPEN (prod session 167, 2026-07-28). ``_should_build_controller``
+    is a read-then-act check with NO mutual exclusion, and bot_runtime's eager
+    kickoff calls this function DIRECTLY — outside the ``_job_locks`` that
+    serialize scheduled cycles. Those two raced 0.4s apart on a Delta Neutral
+    start: both saw ``is_running`` False, both built a controller, both ran
+    ``on_start``, and the hedge opened TWICE (``engine_started ...
+    active_executors=2`` logged twice, 1.65s apart). One orphaned spot leg was
+    left behind and the user ended up holding ~$99 of UNHEDGED spot BTC.
+
+    A per-user lock makes build+start atomic, so the second caller sees the
+    first's controller and ticks it instead of opening a second position. This
+    guards every engine-mapped strategy, not just DN — any of them can be
+    double-started by the same race.
+    """
+    strategy = str(state.get("strategy") or "")
+    async with _cycle_lock(telegram_id, network, strategy):
+        return await _run_engine_cycle_locked(
+            telegram_id, network, state, client, mid, product, product_id,
+        )
+
+
+async def _run_engine_cycle_locked(
     telegram_id: int,
     network: str,
     state: Dict[str, Any],
@@ -1650,7 +1697,9 @@ async def run_engine_cycle(
 ) -> dict:
     """Gated per-cycle driver called from bot_runtime's async loop. Starts the
     controller on first cycle, ticks it thereafter. Returns a dispatch-style
-    result dict. Live execution validated on testnet."""
+    result dict. Live execution validated on testnet.
+
+    Always call via ``run_engine_cycle`` — this body is NOT re-entrant."""
     from src.nadobro.trading.engine_persistence import DbInventoryRepository
 
     strategy = str(state.get("strategy") or "")
