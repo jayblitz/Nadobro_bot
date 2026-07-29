@@ -288,6 +288,14 @@ class NadoAdapter(NadoAdapterBase):
         # what broke the Delta Neutral spot leg's close/rollback. Strip it for
         # spot; the DN close sells exactly the held base, so it flattens cleanly
         # without the flag.
+        # SPOT-CLOSE-BUMP: capture the REDUCING intent before the flag is
+        # stripped. The venue's min-notional retry in NadoClient.place_order used
+        # to grow ANY rejected order (`max(size, target)`), so a spot close sized
+        # to exactly the held base — a $99 leg against KBTC's $100 minimum — was
+        # bumped ABOVE the balance and could never fill, stranding the leg naked.
+        # ``never_grow`` is the flag that survives the strip; reduce_only cannot,
+        # and for spot there is nothing else that says "this is an exit".
+        never_grow = bool(reduce_only)
         if reduce_only and not bool(meta.is_perp):
             reduce_only = False
 
@@ -351,7 +359,7 @@ class NadoAdapter(NadoAdapterBase):
                 resp = await asyncio.to_thread(
                     self._client.place_market_order, meta.product_id, amount, is_buy,
                     isolated_only=isolated_only, isolated_margin=isolated_margin,
-                    reduce_only=reduce_only, client_id=tag,
+                    reduce_only=reduce_only, never_grow=never_grow, client_id=tag,
                 )
             else:
                 if price is None:
@@ -360,7 +368,7 @@ class NadoAdapter(NadoAdapterBase):
                     self._client.place_limit_order, meta.product_id, amount, float(price), is_buy,
                     isolated_only=isolated_only, isolated_margin=isolated_margin,
                     post_only=order_type is OrderType.LIMIT_MAKER, reduce_only=reduce_only,
-                    client_id=tag,
+                    never_grow=never_grow, client_id=tag,
                 )
         except AdapterError:
             order_tags.forget(tag=tag)

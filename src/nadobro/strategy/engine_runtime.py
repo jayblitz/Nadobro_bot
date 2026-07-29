@@ -929,7 +929,7 @@ def map_strategy_config(
             # Maker-first deadline: a leg unfilled this long is finished with
             # a marketable LIMIT priced vol_cross_slippage_bp through the
             # touch (still price-bounded; fills as taker). 0 = pure maker.
-            "vol_cross_after_seconds": _f(settings, "vol_cross_after_seconds", 75.0),
+            "vol_cross_after_seconds": _f(settings, "vol_cross_after_seconds", 25.0),
             "vol_cross_slippage_bp": _f(settings, "vol_cross_slippage_bp", 15.0),
         }
     # grid / rgrid / dgrid family.

@@ -2661,8 +2661,21 @@ class NadoClient:
         reduce_only: bool = False,
         sender: Optional[str] = None,
         client_id: Optional[int] = None,
+        never_grow: bool = False,
         _retry_count: int = 0,
     ) -> dict:
+        """``never_grow``: this order REDUCES exposure (a close / flatten / sweep),
+        so its size must never be increased by a retry.
+
+        SPOT-CLOSE-BUMP (2026-07-28): the min-notional retry below did
+        ``retry_size = max(size, target)`` for EVERY order — side-blind,
+        reduce_only-blind, balance-blind. A spot close sized to exactly the held
+        base (KBTC min notional is $100; a $99 DN/vol leg lands just under it) was
+        grown ABOVE the balance, the retry could not fill, and the spot leg was
+        left naked. On a perp, growing a close past the position size flips the
+        side outright. A close must shrink or fail, never grow.
+        Note reduce_only cannot carry this: the engine adapter STRIPS it for spot
+        because the venue rejects reduce-only spot orders (error_code 5000)."""
         if not self._initialized or not self.client:
             return {"success": False, "error": "Client not initialized. Please try /start again."}
 
@@ -2955,6 +2968,7 @@ class NadoClient:
                             reduce_only=reduce_only,
                             sender=sender,
                             client_id=client_id,
+                            never_grow=never_grow,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -2962,7 +2976,18 @@ class NadoClient:
                         return {"success": False, "error": self._friendly_error(str(retry_e))}
 
             # Retry with bumped size when exchange enforces min notional.
-            if _retry_count < 3 and self._is_min_notional_error(err_str):
+            # SPOT-CLOSE-BUMP: never for a reducing order — see never_grow.
+            if never_grow and self._is_min_notional_error(err_str):
+                logger.warning(
+                    "place_order min-notional REJECT not bumped (reducing order) "
+                    "product_id=%s size=%s is_buy=%s — a close must never grow; "
+                    "the remainder is below the venue minimum and needs a "
+                    "marketable/aggregated exit instead",
+                    product_id, size, is_buy,
+                )
+                return {"success": False, "error": self._friendly_error(err_str),
+                        "min_notional_block": True}
+            if _retry_count < 3 and not never_grow and self._is_min_notional_error(err_str):
                 required_min_x18 = _min_size_x18_cache.get((self.network, product_id)) or min_size_x18
                 if required_min_x18 and required_min_x18 > 0 and price > 0:
                     required_notional = float(required_min_x18) / 1e18
@@ -2991,6 +3016,7 @@ class NadoClient:
                                 reduce_only=reduce_only,
                                 sender=sender,
                                 client_id=client_id,
+                                never_grow=never_grow,
                                 _retry_count=_retry_count + 1,
                             )
                         except Exception as retry_e:
@@ -3021,6 +3047,7 @@ class NadoClient:
                             reduce_only=reduce_only,
                             sender=sender,
                             client_id=client_id,
+                            never_grow=never_grow,
                             _retry_count=_retry_count + 1,
                         )
                         if retry_result.get("success"):
@@ -3052,6 +3079,7 @@ class NadoClient:
                             reduce_only=reduce_only,
                             sender=sender,
                             client_id=client_id,
+                            never_grow=never_grow,
                             _retry_count=_retry_count + 1,
                         )
                     except Exception as retry_e:
@@ -3070,6 +3098,7 @@ class NadoClient:
         isolated_only: bool = False,
         isolated_margin: Optional[float] = None,
         reduce_only: bool = False,
+        never_grow: bool = False,
         sender: Optional[str] = None,
         client_id: Optional[int] = None,
     ) -> dict:
@@ -3103,6 +3132,7 @@ class NadoClient:
             reduce_only=reduce_only,
             sender=sender,
             client_id=client_id,
+            never_grow=never_grow,
         )
 
     def place_limit_order(
@@ -3114,6 +3144,7 @@ class NadoClient:
         isolated_only: bool = False,
         isolated_margin: Optional[float] = None,
         reduce_only: bool = False,
+        never_grow: bool = False,
         post_only: bool = False,
         sender: Optional[str] = None,
         client_id: Optional[int] = None,
@@ -3129,6 +3160,7 @@ class NadoClient:
             reduce_only=reduce_only,
             sender=sender,
             client_id=client_id,
+            never_grow=never_grow,
         )
 
     @staticmethod

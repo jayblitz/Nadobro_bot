@@ -312,3 +312,83 @@ def test_mid_price_from_market_price():
         assert await a.mid_price(PAIR) == Decimal(100)
 
     asyncio.run(body())
+
+
+# ── SPOT-CLOSE-BUMP (reported 2026-07-28) ───────────────────────
+# "Whether DN or Vol bot, the bot is having issues selling Spot balances."
+#
+# NadoClient.place_order's min-notional retry did, for EVERY rejected order:
+#     retry_size = max(size, target_size)   # side-blind, reduce_only-blind
+# KBTC's min notional is $100 (min_size_x18 = 100e18) and its size increment is
+# 0.00005. A ~$99 DN / Vol leg therefore lands just UNDER the floor, so a close
+# sized to exactly the held base (0.00155) was grown to 0.0016 — MORE than the
+# balance. It could not fill, and the spot leg was left naked. On a perp the same
+# growth pushes a close past the position size and flips the side outright.
+#
+# reduce_only cannot carry "this is an exit" to the client, because the adapter
+# must STRIP it for spot (the venue rejects reduce-only spot with error_code
+# 5000 — see test_reduce_only_stripped_on_spot_orders). Hence `never_grow`.
+
+def test_never_grow_is_set_for_a_spot_close_even_though_reduce_only_is_stripped():
+    spot = {"S": ProductMeta(2, Decimal("0.01"), Decimal("0.001"), Decimal(1),
+                             is_perp=False, isolated_only=False)}
+
+    async def body():
+        c = _CapturingClient()
+        await NadoAdapter(c, spot).place_order(
+            "S", TradeType.SELL, OrderType.MARKET, Decimal("0.00155"),
+            reduce_only=True)
+        call = c.market_calls[0]
+        assert call["reduce_only"] is False, "still stripped for spot (venue 5000)"
+        assert call.get("never_grow") is True, (
+            "the reducing intent was lost — the client may grow this close above "
+            "the held balance and strand the spot leg"
+        )
+
+    asyncio.run(body())
+
+
+def test_never_grow_is_set_for_a_perp_close():
+    perp = {"P": ProductMeta(7, Decimal("0.01"), Decimal("0.001"), Decimal(1),
+                             is_perp=True, isolated_only=True)}
+
+    async def body():
+        c = _CapturingClient()
+        await NadoAdapter(c, perp).place_order(
+            "P", TradeType.SELL, OrderType.MARKET, Decimal("0.5"), reduce_only=True)
+        assert c.market_calls[0].get("never_grow") is True, (
+            "growing a perp close past the position size FLIPS the side"
+        )
+
+    asyncio.run(body())
+
+
+def test_an_opening_order_may_still_be_bumped():
+    """Opens must keep the min-notional bump — that is how a sub-minimum entry
+    gets to the venue floor at all."""
+    spot = {"S": ProductMeta(2, Decimal("0.01"), Decimal("0.001"), Decimal(1),
+                             is_perp=False, isolated_only=False)}
+
+    async def body():
+        c = _CapturingClient()
+        await NadoAdapter(c, spot).place_order(
+            "S", TradeType.BUY, OrderType.MARKET, Decimal("0.00155"))
+        assert c.market_calls[0].get("never_grow") is False
+
+    asyncio.run(body())
+
+
+def test_client_refuses_to_bump_a_never_grow_order():
+    """The guard itself: a min-notional reject on a reducing order must NOT retry
+    with a larger size — it must surface as a blocked close."""
+    import inspect
+    from src.nadobro.venue.nado_client import NadoClient
+
+    src = inspect.getsource(NadoClient.place_order)
+    # The bump branch must be gated on never_grow.
+    assert "not never_grow and self._is_min_notional_error" in src, (
+        "the min-notional bump is no longer gated on never_grow"
+    )
+    assert "min_notional_block" in src
+    for m in ("place_order", "place_market_order", "place_limit_order"):
+        assert "never_grow" in inspect.signature(getattr(NadoClient, m)).parameters, m
