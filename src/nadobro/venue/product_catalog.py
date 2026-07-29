@@ -1171,3 +1171,37 @@ def is_product_id_isolated_only(
         return False
     row = (catalog.get("perps") or {}).get(key) or {}
     return _as_bool(row.get("isolated_only"))
+
+
+def spot_min_notional_cached(base: str, network: str = "mainnet") -> Optional[float]:
+    """Venue min NOTIONAL (USD) for a spot base — CACHE ONLY, never fetches.
+
+    Deliberately non-blocking: this feeds a tap-driven strategy card, and the
+    click-path rule is serve-cached-or-nothing (a sync venue read on a button
+    render is what hung taps for 30-60s once already). Returns None on a cache
+    miss so the caller can omit the figure rather than show a guess.
+    """
+    key = str(network or "mainnet").lower()
+    cached = _spot_catalog_cache.get(key)
+    if not cached:
+        return None
+    want = str(base or "").upper().strip()
+    if not want:
+        return None
+    for name, row in ((cached.get("data") or {}).get("spots") or {}).items():
+        candidates = {
+            str(name).upper(),
+            str(row.get("base") or "").upper(),
+            str(row.get("symbol") or "").upper(),
+            str(row.get("underlying_key") or "").upper(),
+        }
+        if want not in candidates:
+            continue
+        raw = row.get("min_size_x18")
+        if raw in (None, ""):
+            return None
+        try:
+            return float(int(raw)) / 1e18
+        except (TypeError, ValueError):
+            return None
+    return None

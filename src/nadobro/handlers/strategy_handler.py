@@ -1200,7 +1200,7 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         drift_pct = float(conf.get("dn_max_drift_pct", 5.0) or 5.0)
         extra = (
             "Hedge model: *Spot long \\+ 1x perp short* \\(BTC, ETH, QQQ, SPY…\\)\n"
-            f"Size \\(per leg\\): *{escape_md(f'${leg_size:,.0f}')}* · "
+            f"Size \\(per leg\\): {_leg_size_display(leg_size, str(conf.get('product') or ''), network)} · "
             f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* · Cycles: *{escape_md(str(cycles))}*\n"
             f"Hedge drift gate: *{escape_md(f'{drift_pct:.1f}%')}*\n"
             f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
@@ -1324,11 +1324,43 @@ def _mm_sizing_line(conf: dict) -> str:
     )
 
 
+def _leg_size_display(user_leg_usd: float, spot_base: str | None, network: str) -> str:
+    """Render the leg size, showing the EFFECTIVE size when the venue's exit
+    floor raises it.
+
+    SPOT-EXIT-GUARANTEE: a venue min NOTIONAL applies to the EXIT as well as the
+    entry, so a leg sized at the floor cannot be closed by a resting limit — fees
+    plus any adverse tick put the exit under it and the leg strands naked (kBTC's
+    $100 minimum against a ~$99 leg, prod 2026-07-28). engine_runtime raises such
+    a leg to min_notional x 1.15, so the card must not keep claiming the smaller
+    number the user typed. Cache-only lookup: a miss falls back to the plain
+    value rather than blocking the tap on a venue read.
+    """
+    plain = f"${user_leg_usd:,.0f}"
+    if not spot_base or user_leg_usd <= 0:
+        return escape_md(plain)
+    try:
+        from src.nadobro.venue.product_catalog import spot_min_notional_cached
+        from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+
+        floor = spot_min_notional_cached(spot_base, network)
+        effective = min_closeable_entry_notional(floor or 0.0)
+    except Exception:  # noqa: BLE001 - display only, never break the card
+        return escape_md(plain)
+    if effective <= user_leg_usd:
+        return escape_md(plain)
+    return (
+        f"{escape_md(plain)} → *{escape_md(f'${effective:,.0f}')}*"
+        f" {escape_md(f'(venue exit floor ${floor:,.0f})')}"
+    )
+
+
 def _strategy_config_section_text(strategy: str, conf: dict, network: str, section: str) -> str:
     if strategy == "vol":
         direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
         tp_pct = float(conf.get("tp_pct", 1.0))
         sl_pct = float(conf.get("sl_pct", 1.0))
+        _vol_margin = float(conf.get("session_margin_usd", conf.get("notional_usd", 100.0)) or 100.0)
         if section == "direction":
             return (
                 "⚙️ *Vol Bot · Direction*\n\n"
@@ -1338,7 +1370,8 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             )
         return (
             "⚙️ *Vol Bot · TP / SL*\n\n"
-            f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n\n"
+            f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n"
+            f"Margin per cycle: {_leg_size_display(_vol_margin, str(conf.get('product') or ''), network)}\n\n"
             "Choose quick presets or set custom values\\."
         )
 
@@ -1495,7 +1528,8 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             )
         return (
             "⚙️ *Delta Neutral · Core*\n\n"
-            f"Size \\(per leg\\): *{escape_md(f'${leg_size:,.0f}')}* \\| Short: *1x*\n"
+            f"Size \\(per leg\\): {_leg_size_display(leg_size, str(conf.get('product') or ''), network)}"
+            f" \\| Short: *1x*\n"
             f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* \\| Cycles: *{escape_md(str(cycles))}*\n\n"
             "Buys spot \\+ 1x\\-shorts the perp, holds, then exits both legs together, repeated per cycle\\."
         )
@@ -2622,7 +2656,10 @@ def _build_strategy_preview_text(
         f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
         "⚙️ *Current Settings*\n"
         f"• Market: *{escape_md(dn_market_label)}*\n"
-        f"• Size \\(per leg\\): *{escape_md(_fmt_usd(dn_leg_size))}*\n"
+        # Last screen before capital is committed — it must show the size that
+        # will ACTUALLY be deployed, not the one the user typed. See
+        # _leg_size_display / SPOT-EXIT-GUARANTEE.
+        f"• Size \\(per leg\\): {_leg_size_display(dn_leg_size, dn_spot_symbol, network)}\n"
         f"• Short Leverage: *1x* \\(fixed\\)\n"
         f"• Min hold: *{escape_md(dn_hold_label)}*\n"
         f"• Cycles: *{escape_md(dn_cycles_label)}*\n"

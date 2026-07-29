@@ -116,3 +116,92 @@ def test_vol_direction_value_is_in_the_allowed_text_set():
     for cb in _callbacks(_vol_kb("direction")):
         if "vol_direction" in cb:
             assert f'"{cb.rsplit(":", 1)[1]}"' in allowed
+
+
+# ── SPOT-EXIT-GUARANTEE on the UI ───────────────────────────────
+# engine_runtime raises a DN/Vol spot leg to min_notional x 1.15 so its EXIT can
+# still clear the venue floor (kBTC $100 vs a ~$99 leg, prod 2026-07-28). The
+# cards must not keep claiming the smaller number the user typed — that is real
+# capital they did not ask for.
+
+_KBTC_ROW = {"id": 1, "base": "KBTC", "symbol": "KBTC", "underlying_key": "BTC",
+             "min_size_x18": "100000000000000000000"}     # $100, the live value
+
+
+def _warm_spot_cache(monkeypatch):
+    from src.nadobro.venue import product_catalog as pc
+    monkeypatch.setitem(pc._spot_catalog_cache, "mainnet",
+                        {"ts": 9e18, "data": {"spots": {"KBTC": _KBTC_ROW}}})
+
+
+def test_leg_size_shows_the_effective_size_when_the_floor_raises_it(monkeypatch):
+    _warm_spot_cache(monkeypatch)
+    from src.nadobro.handlers.strategy_handler import _leg_size_display
+    out = _leg_size_display(100.0, "BTC", "mainnet")
+    assert "$100" in out and "$115" in out, out
+    assert "floor" in out
+
+
+def test_leg_size_is_plain_when_the_user_is_already_above_the_floor(monkeypatch):
+    _warm_spot_cache(monkeypatch)
+    from src.nadobro.handlers.strategy_handler import _leg_size_display
+    assert _leg_size_display(500.0, "BTC", "mainnet") == "$500"
+
+
+def test_leg_size_never_blocks_the_tap_on_a_cache_miss(monkeypatch):
+    """Click-path rule: serve cached or nothing. A cold catalog must NOT fetch."""
+    from src.nadobro.venue import product_catalog as pc
+    from src.nadobro.handlers.strategy_handler import _leg_size_display
+    monkeypatch.setattr(pc, "_spot_catalog_cache", {})
+
+    def _boom(*a, **k):
+        raise AssertionError("the card fetched the catalog — this hangs the tap")
+
+    monkeypatch.setattr(pc, "_build_dynamic_spot_catalog", _boom)
+    monkeypatch.setattr(pc, "get_spot_catalog", _boom)
+    assert _leg_size_display(100.0, "BTC", "mainnet") == "$100"
+
+
+def test_leg_size_is_plain_without_a_product(monkeypatch):
+    _warm_spot_cache(monkeypatch)
+    from src.nadobro.handlers.strategy_handler import _leg_size_display
+    assert _leg_size_display(100.0, "", "mainnet") == "$100"
+    assert _leg_size_display(100.0, None, "mainnet") == "$100"
+
+
+def test_leg_size_survives_a_broken_catalog_row(monkeypatch):
+    from src.nadobro.venue import product_catalog as pc
+    from src.nadobro.handlers.strategy_handler import _leg_size_display
+    monkeypatch.setitem(pc._spot_catalog_cache, "mainnet",
+                        {"ts": 9e18, "data": {"spots": {"KBTC": {
+                            "base": "KBTC", "min_size_x18": "not-a-number"}}}})
+    assert _leg_size_display(100.0, "BTC", "mainnet") == "$100"
+
+
+def test_the_dn_core_card_shows_the_effective_leg(monkeypatch):
+    _warm_spot_cache(monkeypatch)
+    from src.nadobro.handlers.strategy_handler import _strategy_config_section_text
+    line = [l for l in _strategy_config_section_text(
+        "dn", {"product": "BTC", "fixed_margin_usd": 100.0}, "mainnet", "setup"
+    ).split("\n") if "per leg" in l][0]
+    assert "$115" in line, line
+
+
+def test_the_vol_card_shows_the_effective_margin(monkeypatch):
+    _warm_spot_cache(monkeypatch)
+    from src.nadobro.handlers.strategy_handler import _strategy_config_section_text
+    line = [l for l in _strategy_config_section_text(
+        "vol", {"product": "BTC", "session_margin_usd": 100.0}, "mainnet", "risk"
+    ).split("\n") if "Margin per cycle" in l][0]
+    assert "$115" in line, line
+
+
+def test_the_effective_size_string_is_markdownv2_safe(monkeypatch):
+    """Unescaped ( ) or . in MarkdownV2 makes Telegram reject the whole message."""
+    _warm_spot_cache(monkeypatch)
+    from src.nadobro.handlers.strategy_handler import _leg_size_display
+    out = _leg_size_display(100.0, "BTC", "mainnet")
+    # every literal paren must be backslash-escaped
+    for i, ch in enumerate(out):
+        if ch in "()":
+            assert i > 0 and out[i - 1] == "\\", f"unescaped {ch!r} in {out!r}"
