@@ -858,7 +858,12 @@ class NadoAdapter(NadoAdapterBase):
                         return _mag if _side == "LONG" else -_mag
                     return _to_dec(raw)
                 return Decimal(0)
-            data = await asyncio.to_thread(self._client.get_balance)
+            # force=True: get_balance is read-through cached (30s, no invalidation on
+            # a fill) and bot_runtime warms it on the START path — i.e. PRE-BUY. A
+            # stale map lacking this product read as Decimal(0) and the clamp then
+            # REFUSED a legitimate exit. Audit round 3. Cost is bounded: this runs
+            # once per close, not per tick.
+            data = await asyncio.to_thread(lambda: self._client.get_balance(force=True))
             # get_balance does NOT raise on failure: a gateway-budget throttle or a
             # total SDK+REST failure both return {"exists": False, "balances": {}}.
             # Treating that as "flat" broke the documented None-on-failure contract

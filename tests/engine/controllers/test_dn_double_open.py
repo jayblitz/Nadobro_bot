@@ -340,3 +340,59 @@ def test_the_cap_limits_a_partial_orphan_to_our_own_buys():
         assert await c._venue_net_base("BTC-USDT0") == Decimal("0.00155")
 
     asyncio.run(body())
+
+
+# ── audit round 3 ───────────────────────────────────────────────
+# Round 2's guard checked the VENUE before the live-leg case. A live hedge is
+# non-flat by definition, so a duplicate start always took the flatten branch and
+# MARKET-closed a healthy pair seconds after entry — the original double-open had
+# been turned into a healthy-hedge teardown. And _tick_closing counts a cycle
+# unconditionally, so a refused open burned the run at the default cycles=1.
+
+def test_a_duplicate_start_leaves_a_healthy_hedge_completely_alone():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True)
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch)
+        await orch.spawn_controller(c)
+        assert c.phase is DNPhase.HOLDING
+        placed_before = len(adapter.placed)
+
+        await c.on_start()                       # the racing duplicate
+
+        assert c.phase is DNPhase.HOLDING, (
+            f"a duplicate start moved the controller to {c.phase} — it flattened a "
+            f"working hedge instead of ignoring the duplicate"
+        )
+        assert len(adapter.placed) == placed_before, (
+            "a duplicate start placed orders against a healthy hedge"
+        )
+        assert c.hedge_broken is False
+
+    asyncio.run(body())
+
+
+def test_a_refused_open_does_not_burn_a_cycle():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.00155")})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch, inventory=_session_167_inventory())
+        assert c.cycles_completed == 0
+
+        await c._open_cycle()                    # refused: residue on the book
+        assert "duplicate_open_blocked" in [e["kind"] for e in c.consume_dn_events()]
+        assert c._cycle_counts is False
+
+        # Drive CLOSING to completion; the refused pass must not count.
+        adapter.venue_held["BTC-USDT0"] = Decimal(0)
+        for _ in range(6):
+            if await c._residuals_flat():
+                break
+        await c._tick_closing() if hasattr(c, "_tick_closing") else None
+        assert c.cycles_completed == 0, (
+            "a refused open counted as a completed cycle — at the default cycles=1 "
+            "that ends the run without ever hedging"
+        )
+
+    asyncio.run(body())

@@ -1209,12 +1209,18 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
 
 
 def _strategy_config_default_section(strategy: str) -> str:
-    return "direction" if strategy == "vol" else "setup"
+    return "risk" if strategy == "vol" else "setup"
 
 
 def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
     if strategy == "vol":
-        return [("direction", "🎯 Direction"), ("risk", "🛡 TP / SL")]
+        # NO Direction tab. Vol is spot-only, and bot_runtime FORCE-SETS
+        # vol_direction="long" for a spot market (bot_runtime.py:1089), so a
+        # SHORT the user picked could never be honoured — the card would have
+        # claimed SHORT while every run bought spot. Audit round 3: an
+        # unhonourable control is worse than no control. Re-add this tab only
+        # together with a vol market that can actually run short.
+        return [("risk", "🛡 TP / SL")]
     if strategy == "grid":
         return [("setup", "⚙️ Core"), ("execution", "📐 Spread"), ("risk", "🛡 Risk")]
     if strategy == "rgrid":
@@ -1232,7 +1238,7 @@ def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
 
 def _strategy_section_for_field(strategy: str, field: str) -> str:
     if strategy == "vol":
-        return "direction" if field == "vol_direction" else "risk"
+        return "risk"
     if strategy == "grid":
         if field in {"min_spread_bp", "max_spread_bp"}:
             return "execution"
@@ -1361,13 +1367,6 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         tp_pct = float(conf.get("tp_pct", 1.0))
         sl_pct = float(conf.get("sl_pct", 1.0))
         _vol_margin = float(conf.get("session_margin_usd", conf.get("notional_usd", 100.0)) or 100.0)
-        if section == "direction":
-            return (
-                "⚙️ *Vol Bot · Direction*\n\n"
-                f"Mode: *{escape_md(network.upper())}*\n"
-                f"Current direction: *{escape_md(direction)}*\n\n"
-                "Pick the side you want the volume loop to favor\\."
-            )
         return (
             "⚙️ *Vol Bot · TP / SL*\n\n"
             f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n"
@@ -1545,19 +1544,6 @@ def _strategy_config_section_kb(strategy: str, section: str):
         # vol_direction had no button anywhere in the codebase — the value was
         # validated ({"long","short"}) and consumed by bot_runtime, but nothing
         # could ever set it from the UI. Reported 2026-07-28.
-        if section == "direction":
-            return InlineKeyboardMarkup([
-                [
-                    # set_text, not set: `set` only accepts numeric fields and
-                    # explicitly rejects any vol field outside
-                    # {tp_pct, sl_pct, session_margin_usd, target_volume_usd}.
-                    InlineKeyboardButton(
-                        "📈 LONG", callback_data="strategy:set_text:vol:vol_direction:long"),
-                    InlineKeyboardButton(
-                        "📉 SHORT", callback_data="strategy:set_text:vol:vol_direction:short"),
-                ],
-                [InlineKeyboardButton("◀ Back", callback_data="strategy:config:vol")],
-            ])
         # Volume is spot-only as of 2026-05. The user-tunable params are:
         # session margin (per-cycle notional), stop loss %, target volume.
         rows = [

@@ -157,6 +157,8 @@ class DeltaNeutralController(Controller):
         self._residual_ids: list[str] = []
         self._residual_attempts = 0
         self._residual_alerted = False
+        # False only while a CLOSING pass that never opened anything is in flight.
+        self._cycle_counts = True
         # User-facing execution events, drained by engine_runtime each tick
         # (same transport as the regime gate's pause/resume notifications).
         self._dn_events: list[dict] = []
@@ -331,6 +333,24 @@ class DeltaNeutralController(Controller):
         # even if a duplicate start arrives by any other route (worker handoff,
         # FAILED-recovery rebuild, restart). Refuse to open onto a non-flat
         # book — go CLOSING so the residual sweep flattens what is there first.
+        # ORDER MATTERS (audit round 3). A LIVE hedge is non-flat BY DEFINITION,
+        # so the venue check below always tripped first and MARKET-flattened a
+        # perfectly healthy pair on any duplicate start — turning the original
+        # double-open into a healthy-hedge teardown seconds after entry. The
+        # live-leg case must be a pure no-op, and it must restore HOLDING:
+        # _tick_waiting sets phase=OPENING before calling, and on_tick handles
+        # neither OPENING nor DONE, so a bare return would strand the controller.
+        for _leg_id in (self.long_id, self.short_id):
+            _live = self._ex(_leg_id)
+            if _live is not None and not _live.is_terminated:
+                logger.warning(
+                    "delta_neutral: duplicate open ignored — leg %s is still live; "
+                    "the existing hedge is left ALONE (controller=%s)",
+                    _leg_id, self.id,
+                )
+                self.phase = DNPhase.HOLDING
+                return
+
         # Venue truth, not inventory: a leg stranded by an earlier run shows up
         # in the balance/position feed even when the controller's book says flat.
         _existing = {}
@@ -350,17 +370,12 @@ class DeltaNeutralController(Controller):
                 "a hedge was already open; flattening leftover exposure instead "
                 "of stacking a second position",
             )
+            # A refused open never traded, so it must not count as a completed
+            # cycle — _tick_closing increments unconditionally, which at the
+            # default cycles=1 ended the whole run without ever hedging.
+            self._cycle_counts = False
             await self._close_both_now(CloseType.EARLY_STOP)
             return
-        for _leg_id in (self.long_id, self.short_id):
-            _live = self._ex(_leg_id)
-            if _live is not None and not _live.is_terminated:
-                logger.warning(
-                    "delta_neutral: refusing to open — leg %s is still live "
-                    "(controller=%s)", _leg_id, self.id,
-                )
-                return
-
         self.hedge_broken = False
         self.opened_at = None
 
@@ -769,7 +784,14 @@ class DeltaNeutralController(Controller):
         #    reduce-only MARKET orders before the cycle may count as done.
         if not await self._residuals_flat():
             return
-        self.cycles_completed += 1
+        if self._cycle_counts:
+            self.cycles_completed += 1
+        else:
+            logger.info(
+                "delta_neutral: CLOSING entered without an open (duplicate blocked) "
+                "— not counting a cycle (controller=%s)", self.id,
+            )
+        self._cycle_counts = True
         # Settle funding earned so far before clearing the cycle. Funding is
         # indexed with a lag, so this may lag the true total until the venue
         # settles; the PnL card also reads the synced funding feed independently.

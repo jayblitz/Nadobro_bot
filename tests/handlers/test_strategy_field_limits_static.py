@@ -63,13 +63,12 @@ def test_every_custom_input_field_is_numeric_whitelisted():
 
 
 
-# ── VOL-DIRECTION-TAB (reported 2026-07-28) ─────────────────────
-# "When users click on Direction in Volume bot, it just shows the TP/SL
-# interface rather." _strategy_config_section_kb's vol branch IGNORED the
-# `section` argument and returned the margin/TP/SL/target keyboard for BOTH
-# tabs, so the Direction *heading* rendered over the TP/SL *controls*. And
-# vol_direction had no button anywhere: the value was validated
-# ({"long","short"}) and consumed by bot_runtime, but the UI could never set it.
+# ── VOL-DIRECTION-TAB (reported 2026-07-28, resolved round 3) ───
+# The Direction tab originally rendered the TP/SL keyboard (it ignored `section`).
+# Wiring it up exposed the deeper problem: vol is spot-only and bot_runtime
+# FORCE-SETS vol_direction="long" for a spot market, so a SHORT the user picked
+# could never be honoured — the card would have claimed SHORT while every run
+# bought spot. The tab is removed until a vol market exists that can run short.
 
 def _vol_kb(section):
     from src.nadobro.handlers.strategy_handler import _strategy_config_section_kb
@@ -80,42 +79,42 @@ def _callbacks(markup):
     return [b.callback_data for row in markup.inline_keyboard for b in row]
 
 
-def test_vol_direction_tab_offers_long_and_short():
-    cbs = _callbacks(_vol_kb("direction"))
-    assert "strategy:set_text:vol:vol_direction:long" in cbs
-    assert "strategy:set_text:vol:vol_direction:short" in cbs
+def test_vol_offers_no_direction_tab():
+    from src.nadobro.handlers.strategy_handler import _strategy_config_sections
+    keys = [k for k, _label in _strategy_config_sections("vol")]
+    assert "direction" not in keys, (
+        "the Direction tab is back, but bot_runtime still forces spot vol to long "
+        "— the card would claim a side the engine ignores"
+    )
+    assert "risk" in keys
 
 
-def test_vol_direction_tab_is_not_the_tp_sl_keyboard():
-    cbs = _callbacks(_vol_kb("direction"))
-    leaked = [c for c in cbs if any(f in c for f in
-              ("tp_pct", "sl_pct", "session_margin_usd", "target_volume_usd"))]
-    assert not leaked, f"the Direction tab is still showing TP/SL controls: {leaked}"
+def test_vol_exposes_no_direction_control_anywhere():
+    from src.nadobro.handlers.strategy_handler import _strategy_config_sections
+    for section, _label in _strategy_config_sections("vol"):
+        for cb in _callbacks(_vol_kb(section)):
+            assert "vol_direction" not in cb, cb
 
 
-def test_vol_risk_tab_still_has_tp_sl_margin_and_target():
-    cbs = " ".join(_callbacks(_vol_kb("risk")))
+def test_vol_default_section_is_reachable_and_has_the_real_controls():
+    from src.nadobro.handlers.strategy_handler import (
+        _strategy_config_default_section, _strategy_config_sections)
+    default = _strategy_config_default_section("vol")
+    assert default in [k for k, _l in _strategy_config_sections("vol")], (
+        "vol opens on a tab that is not in its own section list"
+    )
+    cbs = " ".join(_callbacks(_vol_kb(default)))
     for field in ("tp_pct", "sl_pct", "session_margin_usd", "target_volume_usd"):
-        assert field in cbs, f"{field} disappeared from the TP/SL tab"
+        assert field in cbs, f"{field} unreachable from the default vol tab"
 
 
-def test_vol_direction_uses_set_text_not_set():
-    """`set` rejects every vol field outside the numeric four, so a `set:`
-    callback here would be silently dropped."""
-    for cb in _callbacks(_vol_kb("direction")):
-        if "vol_direction" in cb:
-            assert cb.startswith("strategy:set_text:"), cb
-
-
-def test_vol_direction_value_is_in_the_allowed_text_set():
-    """The button value must survive the handler's allow-list."""
-    import re
-    from pathlib import Path
-    src = Path("src/nadobro/handlers/strategy_handler.py").read_text()
-    allowed = re.search(r'"vol_direction":\s*\{([^}]*)\}', src).group(1)
-    for cb in _callbacks(_vol_kb("direction")):
-        if "vol_direction" in cb:
-            assert f'"{cb.rsplit(":", 1)[1]}"' in allowed
+def test_every_vol_field_routes_to_an_existing_section():
+    from src.nadobro.handlers.strategy_handler import (
+        _strategy_section_for_field, _strategy_config_sections)
+    keys = [k for k, _l in _strategy_config_sections("vol")]
+    for field in ("tp_pct", "sl_pct", "session_margin_usd", "target_volume_usd",
+                  "vol_direction"):
+        assert _strategy_section_for_field("vol", field) in keys, field
 
 
 # ── SPOT-EXIT-GUARANTEE on the UI ───────────────────────────────

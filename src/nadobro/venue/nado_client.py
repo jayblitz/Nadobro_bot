@@ -2753,7 +2753,15 @@ class NadoClient:
             # shrink or fail, never grow, on EVERY path.
             pre_bump_size = float(size)
             size_bumped = False
-            if never_grow and min_size_x18 and min_size_x18 > 0 and price_x18 > 0:
+            # Only a RESTING order is subject to the venue's minimum. place_market_order
+            # calls in with order_type="ioc" AND a real (slippage-bounded) price, so
+            # gating on never_grow alone refused the marketable exit that the adapter
+            # converts to precisely because market orders are exempt — the spot leg
+            # could then never be sold and DN parked in CLOSING forever. Audit round 3.
+            _marketable = str(order_type or "").lower() in ("ioc", "fok", "market")
+            if (never_grow and not _marketable
+                    and min_size_x18 and min_size_x18 > 0 and price_x18 > 0
+                    and amount_x18 != 0):
                 _notional_x36 = abs(int(amount_x18)) * int(price_x18)
                 if _notional_x36 < int(min_size_x18) * (10 ** 18):
                     logger.warning(
