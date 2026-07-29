@@ -197,15 +197,45 @@ class DeltaNeutralController(Controller):
             return book
         if venue is None:
             return book
-        if abs(venue) > abs(book):
-            if book == 0 and venue != 0:
+        if abs(venue) <= abs(book):
+            return book
+
+        # AUDIT 2026-07-29 — NEVER SELL WHAT THIS CONTROLLER DID NOT BUY.
+        # For a SPOT pair held_base() returns the subaccount's ENTIRE balance of
+        # that token; there is no per-controller attribution on a spot balance.
+        # Preferring it outright meant a user's unrelated kBTC — bought manually or
+        # by another strategy — read as DN "residue" and would have been
+        # MARKET-SOLD. Cap the venue-derived figure at the gross base this
+        # controller has actually BOUGHT, so it can correct an under-reporting
+        # book (the session-167 failure: sells double-counted, net read 0) without
+        # ever reaching someone else's coins. Perp positions are position-scoped
+        # and net out, so they need no cap.
+        if pair == self.long_pair and self.inventory is not None:
+            hold = self.inventory.get(self.user_id, pair, self.id)
+            cap = abs(_dec(getattr(hold, "buy_amount_base", 0) or 0))
+            if cap <= 0:
                 logger.warning(
-                    "delta_neutral: VENUE shows %s on %s while engine inventory "
-                    "says flat — sweeping the venue's number (controller=%s)",
+                    "delta_neutral: venue shows %s on spot %s but this controller "
+                    "has bought nothing — NOT claiming it as residue (controller=%s)",
                     venue, pair, self.id,
                 )
-            return venue
-        return book
+                return book
+            if abs(venue) > cap:
+                sign = Decimal(1) if venue > 0 else Decimal(-1)
+                logger.warning(
+                    "delta_neutral: venue spot balance %s on %s exceeds this "
+                    "controller's gross buys %s — capping the sweep to its own "
+                    "exposure (controller=%s)",
+                    venue, pair, cap, self.id,
+                )
+                return sign * cap
+        if book == 0 and venue != 0:
+            logger.warning(
+                "delta_neutral: VENUE shows %s on %s while engine inventory "
+                "says flat — sweeping the venue's number (controller=%s)",
+                venue, pair, self.id,
+            )
+        return venue
 
     async def _safe_stop(self, executor_id: Optional[str], close_type: CloseType) -> bool:
         """Stop a leg without letting a venue hiccup strand the OTHER leg.

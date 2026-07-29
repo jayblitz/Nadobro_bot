@@ -2745,9 +2745,28 @@ class NadoClient:
                 price_x18 = self._align_x18_to_increment(price_x18, int(price_increment_x18))
 
             # Proactively enforce exchange minimum notional before submission.
+            # AUDIT 2026-07-29: this block must honour never_grow too. Gating only
+            # the POST-rejection retry (below) left THIS one growing a reducing
+            # order above the held balance BEFORE the order was ever signed — so
+            # the adapter's balance clamp was discarded one call later and the
+            # stranded-spot-leg incident was fully reproducible. A close must
+            # shrink or fail, never grow, on EVERY path.
             pre_bump_size = float(size)
             size_bumped = False
-            if min_size_x18 and min_size_x18 > 0 and price_x18 > 0 and amount_x18 != 0:
+            if never_grow and min_size_x18 and min_size_x18 > 0 and price_x18 > 0:
+                _notional_x36 = abs(int(amount_x18)) * int(price_x18)
+                if _notional_x36 < int(min_size_x18) * (10 ** 18):
+                    logger.warning(
+                        "place_order: reducing order on product_id=%s is below the "
+                        "venue min notional and must NOT be grown (size=%s) — "
+                        "caller needs a marketable/aggregated exit",
+                        product_id, size,
+                    )
+                    return {"success": False,
+                            "error": "Order is below the venue minimum notional and "
+                                     "cannot be increased because it reduces exposure.",
+                            "min_notional_block": True}
+            if (not never_grow) and min_size_x18 and min_size_x18 > 0 and price_x18 > 0 and amount_x18 != 0:
                 min_notional_x36 = int(min_size_x18) * (10 ** 18)
                 current_notional_x36 = abs(int(amount_x18)) * int(price_x18)
                 if current_notional_x36 < min_notional_x36:

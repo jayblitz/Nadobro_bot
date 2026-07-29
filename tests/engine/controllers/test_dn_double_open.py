@@ -218,6 +218,24 @@ def test_a_clean_start_still_opens_both_legs():
 # spot. `_residuals_flat` trusted that hold, so it swept the perp (whose hold
 # happened to be right) and never saw the spot leg at all.
 
+
+def _session_167_inventory():
+    """The REAL engine_position_hold row from prod session 167:
+
+        BTC-USDT0  buy_amount_base 0.00155   sell_amount_base 0.00155
+
+    Net reads FLAT (which is why the sweep was blind) but the gross BUY is
+    recorded — so the venue-vs-book correction is allowed to act on it without
+    ever reaching coins this controller did not buy.
+    """
+    inv = InventoryRepository()
+    inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                   Decimal("0.00155"), Decimal("63890"), Decimal(0))
+    inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.SELL,
+                   Decimal("0.00155"), Decimal("63890"), Decimal(0))
+    return inv
+
+
 def test_venue_exposure_is_swept_even_when_inventory_says_flat():
     """THE reported damage: inventory flat, venue long, nothing swept."""
     async def body():
@@ -225,8 +243,8 @@ def test_venue_exposure_is_swept_even_when_inventory_says_flat():
                                   venue_held={"BTC-USDT0": Decimal("0.00155"),
                                               "BTC-PERP": Decimal(0)})
         orch = ExecutorOrchestrator()
-        c = _controller(adapter, orch)          # engine inventory is empty/flat
-        assert c._net_base("BTC-USDT0") == 0, "precondition: the book says flat"
+        c = _controller(adapter, orch, inventory=_session_167_inventory())
+        assert c._net_base("BTC-USDT0") == 0, "precondition: the book NETS to flat"
 
         assert await c._residuals_flat() is False, (
             "the venue holds 0.00155 spot — this must not read as flat"
@@ -264,9 +282,11 @@ def test_the_larger_magnitude_wins_when_venue_and_book_disagree():
         orch = ExecutorOrchestrator()
         inv = InventoryRepository()
         inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.0031"), Decimal("63890"), Decimal(0))
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.SELL,
                        Decimal("0.00155"), Decimal("63890"), Decimal(0))
         c = _controller(adapter, orch, inventory=inv)
-        # Exactly session 167: book 0.00155, venue 0.0031.
+        # book nets 0.00155, venue says 0.0031, gross buys 0.0031 -> venue wins.
         assert await c._venue_net_base("BTC-USDT0") == Decimal("0.0031")
 
     asyncio.run(body())
@@ -279,8 +299,44 @@ def test_a_venue_stranded_leg_blocks_a_fresh_open():
         adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
                                   venue_held={"BTC-USDT0": Decimal("0.00155")})
         orch = ExecutorOrchestrator()
-        c = _controller(adapter, orch)
+        c = _controller(adapter, orch, inventory=_session_167_inventory())
         await c._open_cycle()
         assert "duplicate_open_blocked" in [e["kind"] for e in c.consume_dn_events()]
+
+    asyncio.run(body())
+
+
+def test_a_spot_balance_this_controller_never_bought_is_NEVER_sold():
+    """AUDIT 2026-07-29 — the worst possible outcome of a venue-truth sweep.
+
+    held_base() returns the subaccount's ENTIRE spot balance; there is no
+    per-controller attribution on a spot balance. If the user holds kBTC bought
+    manually or by another strategy, DN must not read it as its own residue and
+    MARKET-SELL it. The venue figure is capped at this controller's gross buys.
+    """
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.5")})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch)          # this controller bought NOTHING
+        assert await c._venue_net_base("BTC-USDT0") == 0, (
+            "claimed 0.5 BTC of someone else's spot as its own residue"
+        )
+        assert await c._residuals_flat() is True
+        assert not [o for o in adapter.placed if o.side is TradeType.SELL], (
+            "market-sold a balance this controller never bought"
+        )
+
+    asyncio.run(body())
+
+
+def test_the_cap_limits_a_partial_orphan_to_our_own_buys():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.5")})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch, inventory=_session_167_inventory())
+        # We bought 0.00155 gross; the venue shows 0.5 (mostly the user's own).
+        assert await c._venue_net_base("BTC-USDT0") == Decimal("0.00155")
 
     asyncio.run(body())

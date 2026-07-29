@@ -835,12 +835,42 @@ class NadoAdapter(NadoAdapterBase):
                         continue
                     if int(row.get("product_id") or row.get("productId") or -1) != int(meta.product_id):
                         continue
-                    raw = _first(row, ("size", "amount", "base_amount", "net_amount"))
-                    return _to_dec(raw) if raw is not None else Decimal(0)
+                    # SIGN MATTERS. get_all_positions rows carry "amount" as the
+                    # ABSOLUTE magnitude and the signed value under
+                    # "signed_amount" (nado_client.py:1784-1797). Reading "amount"
+                    # made a SHORT look positive, and DN derives the sweep SIDE
+                    # from this sign — it would have SOLD MORE to "close" a short,
+                    # doubling the position. Prefer the signed keys, and never
+                    # fall back to an unsigned one.
+                    raw = _first(row, ("signed_amount", "net_amount", "size"))
+                    if raw is None:
+                        _abs = _first(row, ("amount", "base_amount"))
+                        if _abs is None:
+                            return Decimal(0)
+                        _side = str(row.get("side") or row.get("side_hint") or "").upper()
+                        if _side not in ("LONG", "SHORT"):
+                            logger.warning(
+                                "held_base: perp row for %s has no signed amount and "
+                                "no usable side — refusing to guess the sign", trading_pair,
+                            )
+                            return None
+                        _mag = abs(_to_dec(_abs))
+                        return _mag if _side == "LONG" else -_mag
+                    return _to_dec(raw)
                 return Decimal(0)
             data = await asyncio.to_thread(self._client.get_balance)
-            balances = (data or {}).get("balances")
-            if not isinstance(balances, dict):
+            # get_balance does NOT raise on failure: a gateway-budget throttle or a
+            # total SDK+REST failure both return {"exists": False, "balances": {}}.
+            # Treating that as "flat" broke the documented None-on-failure contract
+            # and made the clamp REFUSE a legitimate exit (avail <= 0 -> raise).
+            if not data or data.get("exists") is False:
+                logger.warning(
+                    "held_base: balance read for %s returned no account data — "
+                    "reporting UNKNOWN, not flat", trading_pair,
+                )
+                return None
+            balances = data.get("balances")
+            if not isinstance(balances, dict) or not balances:
                 return None
             for key, amount in balances.items():
                 try:
