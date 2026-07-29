@@ -1435,12 +1435,38 @@ def _materialize_dn_leg_meta(
     spot_pid = dn.get("spot_product_id")
     perp_pid = dn.get("perp_product_id")
 
+    # AUDIT round 3: these legs used to be built with LITERAL
+    # tick/lot/min_notional (0.01 / 0.001 / 1). On kBTC the real values are
+    # 1.0 / 0.00005 / 100, so the spot-exit clamp floored a 0.00155 balance to
+    # 0.001 and STRANDED ~35% of the leg, and the sub-min MARKET fallback could
+    # never fire ($99 > a fake $1 minimum). Reuse the catalog's real meta for the
+    # leg's product_id and keep the literals only as a last resort.
+    _by_pid = {}
+    for _m in meta.values():
+        try:
+            _by_pid[int(getattr(_m, "product_id"))] = _m
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+    def _leg_meta(pid: int, *, is_perp: bool, iso: bool) -> object:
+        src = _by_pid.get(int(pid))
+        if src is not None:
+            return ProductMeta(
+                int(pid), _dec(getattr(src, "tick_size", "0.01")),
+                _dec(getattr(src, "lot_size", "0.001")),
+                _dec(getattr(src, "min_notional", "1")),
+                is_perp=is_perp, isolated_only=iso,
+            )
+        logger.warning(
+            "dn: no catalog meta for product_id=%s — falling back to placeholder "
+            "tick/lot/min_notional, which can strand part of a leg on exit", pid,
+        )
+        return ProductMeta(int(pid), _dec("0.01"), _dec("0.001"), _dec("1"),
+                           is_perp=is_perp, isolated_only=iso)
+
     if long_sym:
         if spot_pid is not None:
-            meta[long_sym] = ProductMeta(
-                int(spot_pid), _dec("0.01"), _dec("0.001"), _dec("1"),
-                is_perp=False, isolated_only=False,
-            )
+            meta[long_sym] = _leg_meta(int(spot_pid), is_perp=False, iso=False)
         else:
             logger.error(
                 "dn: could not resolve SPOT product_id for %s (long leg %s); "
@@ -1450,10 +1476,7 @@ def _materialize_dn_leg_meta(
 
     if short_sym:
         if perp_pid is not None:
-            meta[short_sym] = ProductMeta(
-                int(perp_pid), _dec("0.01"), _dec("0.001"), _dec("1"),
-                is_perp=True, isolated_only=iso,
-            )
+            meta[short_sym] = _leg_meta(int(perp_pid), is_perp=True, iso=iso)
         else:
             logger.error(
                 "dn: could not resolve PERP product_id for %s (short leg %s); "
@@ -1639,19 +1662,75 @@ async def _maybe_apply_overlay(
         logger.warning("overlay apply failed user=%s strategy=%s", telegram_id, strategy, exc_info=True)
 
 
-_CYCLE_LOCKS: Dict[str, "asyncio.Lock"] = {}
+# (loop, lock) per (user, network, strategy). An asyncio.Lock is bound to the loop
+# that first awaits it, so the loop is part of the identity — see _cycle_lock.
+_CYCLE_LOCKS: Dict[str, tuple] = {}
+_warned_mp_cycle_lock = False
 
 
 def _cycle_lock(telegram_id: int, network: str, strategy: str) -> "asyncio.Lock":
-    """One lock per (user, network, strategy) so a build+start is atomic."""
+    """One lock per (user, network, strategy) so build+start is atomic.
+
+    AUDIT round 3 — two hazards this deliberately handles:
+
+    1. LOOP BINDING. An asyncio.Lock belongs to the loop that first awaits it.
+       bot_runtime normally runs every cycle on the latched ``_runtime_loop``, but
+       ``_run_engine_start_sync`` can fall through to ``asyncio.run()`` when no
+       loop is latched — which would cache a lock bound to a loop that is closed
+       moments later, and every later cycle for that key would raise
+       "got Future attached to a different loop". The loop is therefore part of the
+       cache identity: a different (or dead) loop gets a fresh lock. Exclusion
+       within a loop is all an asyncio primitive can offer, and that is the case
+       the DN double-open race actually lives in.
+
+    2. CROSS-PROCESS. If NADO_RUNTIME_MODE is ever switched to multiprocess, cycles
+       run in worker PROCESSES and a module-level dict in the parent excludes
+       nothing — the double-open would come back SILENTLY. Production is
+       RUNTIME_MODE=single / NADO_USE_MULTIPROCESS_STRATEGIES=false today (verified
+       on Fly), so this warns loudly rather than pretending to protect.
+    """
     import asyncio as _aio
 
+    global _warned_mp_cycle_lock
+    if not _warned_mp_cycle_lock:
+        try:
+            from src.nadobro.runtime.runtime_supervisor import is_multiprocess_enabled
+
+            if is_multiprocess_enabled():
+                _warned_mp_cycle_lock = True
+                logger.error(
+                    "CYCLE-LOCK is in-process only, but the runtime is in "
+                    "MULTIPROCESS mode — build+start is NOT serialized across "
+                    "workers and a duplicate open (e.g. a Delta Neutral double "
+                    "hedge) can recur. Use single mode or add a cross-process lock."
+                )
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(multiprocess probe is a diagnostic; a failed import loses the warning, never the lock)
+            pass
+
+    try:
+        loop = _aio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
     key = f"{telegram_id}:{network}:{strategy}"
-    lock = _CYCLE_LOCKS.get(key)
-    if lock is None:
-        lock = _aio.Lock()
-        _CYCLE_LOCKS[key] = lock
+    cached = _CYCLE_LOCKS.get(key)
+    if cached is not None:
+        cached_loop, cached_lock = cached
+        if cached_loop is loop and (loop is None or not loop.is_closed()):
+            return cached_lock
+        logger.warning(
+            "CYCLE-LOCK rebound for %s: the cached lock belongs to a different or "
+            "closed event loop. Serialization holds WITHIN a loop only.", key,
+        )
+    lock = _aio.Lock()
+    _CYCLE_LOCKS[key] = (loop, lock)
     return lock
+
+
+def release_cycle_lock(telegram_id: int, network: str, strategy: str) -> None:
+    """Drop a cached lock when a strategy stops, so _CYCLE_LOCKS cannot grow
+    without bound across long-lived processes."""
+    _CYCLE_LOCKS.pop(f"{telegram_id}:{network}:{strategy}", None)
 
 
 async def run_engine_cycle(
@@ -1812,7 +1891,17 @@ async def _run_engine_cycle_locked(
                         )
             except Exception:  # noqa: BLE001 - cap is best-effort, never block start
                 logger.debug("grid min-notional level cap skipped", exc_info=True)
-        # SPOT-EXIT-GUARANTEE: a leg sized AT the venue minimum cannot be closed
+        # NO_ORDERS_AUDIT-FIX-R1: DN needs metadata for BOTH legs (spot long +
+        # perp short), each with its OWN product_id. The old fallback keyed both
+        # legs to the SAME ``product_id`` — which would have traded the perp
+        # twice instead of spot+perp. Resolve real per-leg ids (and the perp's
+        # isolated-only flag) from the DN pair catalog.
+        if strategy == "dn":
+            _materialize_dn_leg_meta(meta, configs, client, network, product)
+        # SPOT-EXIT-GUARANTEE (moved AFTER _materialize_dn_leg_meta, audit round
+        # 3: it used to run BEFORE the DN legs were registered, so
+        # meta.get("BASE-USDT0") was always None and the floor was DEAD for DN).
+        # A leg sized AT the venue minimum cannot be closed
         # by a resting limit — fees plus any adverse tick put the exit notional
         # under the floor, the venue rejects it, and the leg strands naked (kBTC
         # minimum $100 vs a ~$99 DN leg, 2026-07-28). Floor the ENTRY so the EXIT
@@ -1837,13 +1926,6 @@ async def _run_engine_cycle_locked(
                     )
             except Exception:  # noqa: BLE001 - best-effort, never block start
                 logger.debug("closeable-entry floor skipped", exc_info=True)
-        # NO_ORDERS_AUDIT-FIX-R1: DN needs metadata for BOTH legs (spot long +
-        # perp short), each with its OWN product_id. The old fallback keyed both
-        # legs to the SAME ``product_id`` — which would have traded the perp
-        # twice instead of spot+perp. Resolve real per-leg ids (and the perp's
-        # isolated-only flag) from the DN pair catalog.
-        if strategy == "dn":
-            _materialize_dn_leg_meta(meta, configs, client, network, product)
             # DN-CYCLES fix: a rebuild (restart / worker handoff / recovery) used
             # to reset the controller's cycle counter to 0 and re-run the whole
             # configured cycle count. Restore the persisted progress so the
