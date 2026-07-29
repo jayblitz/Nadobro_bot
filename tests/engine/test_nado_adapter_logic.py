@@ -11,7 +11,7 @@ import asyncio
 from decimal import Decimal
 
 from src.nadobro.engine.adapter.base import OrderState
-from src.nadobro.engine.adapter.nado import NadoAdapter, ProductMeta
+from src.nadobro.engine.adapter.nado import AdapterError, NadoAdapter, ProductMeta
 from src.nadobro.engine.types import OrderType, TradeType
 
 PAIR = "KBTC-USDC"
@@ -392,3 +392,140 @@ def test_client_refuses_to_bump_a_never_grow_order():
     assert "min_notional_block" in src
     for m in ("place_order", "place_market_order", "place_limit_order"):
         assert "never_grow" in inspect.signature(getattr(NadoClient, m)).parameters, m
+
+
+# ── SPOT-EXIT-GUARANTEE (pieces 1 + 2b) ─────────────────────────
+# Engine inventory is not venue truth: in the 2026-07-28 DN incident the
+# controller's hold said 0.00155 while the venue had filled 0.0031, so a size
+# taken from the book can be too HIGH (rejected: insufficient balance) as easily
+# as too low. And kBTC's $100 min notional sits ABOVE a $99 leg, so the exit
+# cannot fill as a resting limit at any size — market orders are exempt (the DN
+# $98.88 market sell did fill).
+
+class _BalanceClient(_CapturingClient):
+    """A venue with a known spot balance, and limit-call capture."""
+
+    def __init__(self, balances):
+        super().__init__()
+        self._balances = balances
+        self.limit_calls = []
+
+    def get_balance(self, *a, **k):
+        return {"exists": True, "balances": self._balances}
+
+    def place_limit_order(self, product_id, size, price, is_buy=True, **kwargs):
+        self.limit_calls.append({"product_id": product_id, "size": size,
+                                 "price": price, "is_buy": is_buy, **kwargs})
+        return {"digest": "l1", "status": "open"}
+
+
+_SPOT = {"S": ProductMeta(1, Decimal("1"), Decimal("0.00005"), Decimal(100),
+                          is_perp=False, isolated_only=False)}
+
+
+def test_held_base_reads_the_spot_balance_by_product_id():
+    async def body():
+        c = _BalanceClient({0: 164.48, 1: 0.00155})
+        assert await NadoAdapter(c, _SPOT).held_base("S") == Decimal("0.00155")
+    asyncio.run(body())
+
+
+def test_held_base_is_none_when_the_venue_cannot_be_read():
+    """None, not 0 — a failed read must not be mistaken for 'flat'."""
+    class _Broken(_CapturingClient):
+        def get_balance(self, *a, **k):
+            raise RuntimeError("gateway down")
+
+    async def body():
+        assert await NadoAdapter(_Broken(), _SPOT).held_base("S") is None
+    asyncio.run(body())
+
+
+def test_a_spot_close_is_clamped_down_to_the_venue_balance():
+    """Session 167's shape: the book asks for 0.0031, the venue holds 0.00155."""
+    async def body():
+        c = _BalanceClient({1: 0.00155})
+        await NadoAdapter(c, _SPOT).place_order(
+            "S", TradeType.SELL, OrderType.MARKET, Decimal("0.0031"),
+            reduce_only=True)
+        sold = float(c.market_calls[0]["size"])
+        assert sold <= 0.00155 + 1e-12, (
+            f"asked the venue to sell {sold} of a 0.00155 balance — this is the "
+            f"insufficient-balance rejection that strands the leg"
+        )
+        assert sold == 0.00155, "must sell the WHOLE balance, not a fraction"
+    asyncio.run(body())
+
+
+def test_the_clamp_floors_to_the_lot_size():
+    async def body():
+        c = _BalanceClient({1: 0.0015712345})
+        await NadoAdapter(c, _SPOT).place_order(
+            "S", TradeType.SELL, OrderType.MARKET, Decimal("1"), reduce_only=True)
+        sold = float(c.market_calls[0]["size"])
+        assert abs(sold - 0.00155) < 1e-12, f"lot-floored to 0.00005: got {sold}"
+    asyncio.run(body())
+
+
+def test_a_sub_minimum_spot_exit_crosses_instead_of_resting():
+    """0.00155 x 63890 = $99.03 < the $100 minimum: a resting limit can NEVER
+    fill, so the exit must cross rather than leave the leg naked."""
+    async def body():
+        c = _BalanceClient({1: 0.00155})
+        await NadoAdapter(c, _SPOT).place_order(
+            "S", TradeType.SELL, OrderType.LIMIT, Decimal("0.00155"),
+            price=Decimal("63890"), reduce_only=True)
+        assert c.market_calls and not c.limit_calls, (
+            "the exit stayed a resting limit under the venue minimum — unfillable"
+        )
+    asyncio.run(body())
+
+
+def test_an_exit_above_the_minimum_stays_a_limit():
+    """Maker-first is the standing rule; only sub-minimum exits may cross."""
+    async def body():
+        c = _BalanceClient({1: 0.01})
+        await NadoAdapter(c, _SPOT).place_order(
+            "S", TradeType.SELL, OrderType.LIMIT, Decimal("0.01"),
+            price=Decimal("63890"), reduce_only=True)
+        assert c.limit_calls and not c.market_calls
+    asyncio.run(body())
+
+
+def test_a_zero_balance_close_raises_rather_than_sending_a_doomed_order():
+    async def body():
+        c = _BalanceClient({1: 0.0})
+        try:
+            await NadoAdapter(c, _SPOT).place_order(
+                "S", TradeType.SELL, OrderType.MARKET, Decimal("0.00155"),
+                reduce_only=True)
+        except AdapterError:
+            return
+        raise AssertionError("a close against a zero balance must not be sent")
+    asyncio.run(body())
+
+
+def test_an_unreadable_balance_does_not_block_the_close():
+    """Fail OPEN on the clamp: if we cannot read the balance we still try to
+    exit (never_grow already stops the size being inflated)."""
+    class _Broken(_BalanceClient):
+        def get_balance(self, *a, **k):
+            raise RuntimeError("down")
+
+    async def body():
+        c = _Broken({})
+        await NadoAdapter(c, _SPOT).place_order(
+            "S", TradeType.SELL, OrderType.MARKET, Decimal("0.00155"),
+            reduce_only=True)
+        assert c.market_calls, "an unreadable balance must not veto the exit"
+    asyncio.run(body())
+
+
+def test_a_spot_BUY_is_never_clamped():
+    """The clamp is exit-only; an entry has no balance to be limited by."""
+    async def body():
+        c = _BalanceClient({1: 0.0})
+        await NadoAdapter(c, _SPOT).place_order(
+            "S", TradeType.BUY, OrderType.MARKET, Decimal("0.00155"))
+        assert float(c.market_calls[0]["size"]) == 0.00155
+    asyncio.run(body())

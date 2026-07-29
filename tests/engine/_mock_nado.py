@@ -38,7 +38,11 @@ class MockNadoAdapter(NadoAdapterBase):
         auto_fill_market: bool = True,
         fail_on: Optional[List[str]] = None,
         fail_times: int = 0,
+        venue_held: Optional[dict] = None,
     ) -> None:
+        # SPOT-RECONCILE: pair -> base units the VENUE reports, independent of
+        # engine inventory. None entries model an unreadable venue (fail safe).
+        self.venue_held: dict = dict(venue_held or {})
         self._mid = _dec(mid)
         self._mids = [_dec(m) for m in mids] if mids else None
         self._mid_idx = 0
@@ -130,6 +134,10 @@ class MockNadoAdapter(NadoAdapterBase):
             fill_px = price if price is not None else self._current_mid()
             self._apply_fill(order, order.amount_base, _dec(fill_px), Decimal(0), partial=False)
         return copy.copy(order)
+
+    async def held_base(self, trading_pair: str):
+        self._maybe_fail("held_base")
+        return self.venue_held.get(trading_pair)
 
     async def cancel_order(self, order_id: str) -> bool:
         self._maybe_fail("cancel_order")

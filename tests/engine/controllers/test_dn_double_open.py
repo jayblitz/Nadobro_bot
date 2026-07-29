@@ -210,3 +210,77 @@ def test_a_clean_start_still_opens_both_legs():
         assert c.hedge_broken is False
 
     asyncio.run(body())
+
+
+# ── SPOT-RECONCILE: the venue is the authority on exposure ──────
+# Session 167's engine hold recorded BTC-USDT0 as 0.00155 bought / 0.00155 sold
+# — FLAT — while the venue had filled 0.0031 and the user held ~$99 of unhedged
+# spot. `_residuals_flat` trusted that hold, so it swept the perp (whose hold
+# happened to be right) and never saw the spot leg at all.
+
+def test_venue_exposure_is_swept_even_when_inventory_says_flat():
+    """THE reported damage: inventory flat, venue long, nothing swept."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.00155"),
+                                              "BTC-PERP": Decimal(0)})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch)          # engine inventory is empty/flat
+        assert c._net_base("BTC-USDT0") == 0, "precondition: the book says flat"
+
+        assert await c._residuals_flat() is False, (
+            "the venue holds 0.00155 spot — this must not read as flat"
+        )
+        sells = [o for o in adapter.placed
+                 if o.trading_pair == "BTC-USDT0" and o.side is TradeType.SELL]
+        assert sells, "the stranded spot leg was not swept"
+
+    asyncio.run(body())
+
+
+def test_an_unreadable_venue_falls_back_to_the_book_not_to_flat():
+    """A failed read must never be interpreted as 'no exposure'."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={})       # None => unknown
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        c = _controller(adapter, orch, inventory=inv)
+
+        assert await c._venue_net_base("BTC-USDT0") == Decimal("0.00155"), (
+            "an unknown venue read must fall back to the book, not to zero"
+        )
+
+    asyncio.run(body())
+
+
+def test_the_larger_magnitude_wins_when_venue_and_book_disagree():
+    """Under-reporting exposure is what leaves a user naked."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"),
+                                  venue_held={"BTC-USDT0": Decimal("0.0031")})
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        c = _controller(adapter, orch, inventory=inv)
+        # Exactly session 167: book 0.00155, venue 0.0031.
+        assert await c._venue_net_base("BTC-USDT0") == Decimal("0.0031")
+
+    asyncio.run(body())
+
+
+def test_a_venue_stranded_leg_blocks_a_fresh_open():
+    """Residue from a previous run must be cleared before a new hedge, even when
+    this controller's book knows nothing about it."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.00155")})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch)
+        await c._open_cycle()
+        assert "duplicate_open_blocked" in [e["kind"] for e in c.consume_dn_events()]
+
+    asyncio.run(body())

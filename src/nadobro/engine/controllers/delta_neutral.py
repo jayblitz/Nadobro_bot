@@ -174,6 +174,39 @@ class DeltaNeutralController(Controller):
             return Decimal(0)
         return self.inventory.get(self.user_id, pair, self.id).net_amount_base
 
+    async def _venue_net_base(self, pair: str) -> Decimal:
+        """Exposure on ``pair`` per the VENUE, falling back to engine inventory.
+
+        SPOT-RECONCILE (prod session 167, 2026-07-28). ``_residuals_flat`` used
+        engine inventory alone, and inventory is per-controller bookkeeping that
+        can be WRONG: the hold recorded BTC-USDT0 as 0.00155 bought / 0.00155
+        sold — flat — while the venue had filled 0.0031 and the user was left
+        holding ~$99 of unhedged spot. The sweep swept the perp (whose hold
+        happened to be right) and was blind to the spot leg.
+
+        The venue is the only authority on exposure. Inventory stays as the
+        fallback so a failed read cannot make a live leg look flat — and when the
+        two disagree we take the LARGER magnitude, because under-reporting
+        exposure is what leaves a user naked.
+        """
+        book = self._net_base(pair)
+        try:
+            venue = await self.adapter.held_base(pair)
+        except Exception as exc:  # noqa: BLE001 - fall back to the book
+            logger.warning("delta_neutral: held_base failed on %s: %s", pair, exc)
+            return book
+        if venue is None:
+            return book
+        if abs(venue) > abs(book):
+            if book == 0 and venue != 0:
+                logger.warning(
+                    "delta_neutral: VENUE shows %s on %s while engine inventory "
+                    "says flat — sweeping the venue's number (controller=%s)",
+                    venue, pair, self.id,
+                )
+            return venue
+        return book
+
     async def _safe_stop(self, executor_id: Optional[str], close_type: CloseType) -> bool:
         """Stop a leg without letting a venue hiccup strand the OTHER leg.
         on_stop is idempotent, so callers may retry every tick until the
@@ -268,14 +301,16 @@ class DeltaNeutralController(Controller):
         # even if a duplicate start arrives by any other route (worker handoff,
         # FAILED-recovery rebuild, restart). Refuse to open onto a non-flat
         # book — go CLOSING so the residual sweep flattens what is there first.
-        _existing = {
-            pair: self._net_base(pair)
-            for pair in (self.long_pair, self.short_pair)
-            if self._net_base(pair) != 0
-        }
+        # Venue truth, not inventory: a leg stranded by an earlier run shows up
+        # in the balance/position feed even when the controller's book says flat.
+        _existing = {}
+        for _p in (self.long_pair, self.short_pair):
+            _n = await self._venue_net_base(_p)
+            if _n != 0:
+                _existing[_p] = _n
         if _existing:
             logger.warning(
-                "delta_neutral: refusing to open a second pair — inventory is "
+                "delta_neutral: refusing to open a second pair — the account is "
                 "already non-flat (%s). Flattening the residue first "
                 "(controller=%s)",
                 ", ".join(f"{p} {n}" for p, n in _existing.items()), self.id,
@@ -515,7 +550,7 @@ class DeltaNeutralController(Controller):
 
         residues: list[tuple[str, Decimal, Decimal]] = []  # (pair, net_base, value)
         for pair in (self.long_pair, self.short_pair):
-            net = self._net_base(pair)
+            net = await self._venue_net_base(pair)
             if net == 0:
                 continue
             try:

@@ -167,6 +167,24 @@ class NadoAdapterBase(abc.ABC):
     async def funding_rate(self, trading_pair: str) -> Optional[Decimal]:
         raise NotImplementedError
 
+    async def held_base(self, trading_pair: str) -> Optional[Decimal]:
+        """Base units of ``trading_pair`` the account ACTUALLY holds, per the
+        VENUE — the spot balance for a spot product, the signed position size for
+        a perp. ``None`` means the venue could not be read.
+
+        This exists because SPOT IS A BALANCE, NOT A POSITION. Every safety net
+        built on ``get_all_positions()`` is structurally blind to a spot leg: on
+        2026-07-28 a Delta Neutral run left ~$99 of kBTC unhedged and
+        ``get_all_positions()`` returned an empty list while it sat there. Engine
+        inventory is no substitute — it is per-controller bookkeeping and it
+        disagreed with the venue in that very incident (0.00155 recorded against
+        0.0031 filled).
+
+        ``None`` (not 0) on failure is deliberate: callers must fail SAFE rather
+        than conclude "flat" from a failed read.
+        """
+        return None
+
     async def funding_since(self, trading_pair: str, since_ts: float) -> Decimal:
         """Net funding the user has *received* on ``trading_pair`` since
         ``since_ts`` (epoch seconds), as a signed quote amount: positive = the

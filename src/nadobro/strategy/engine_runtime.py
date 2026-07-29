@@ -1812,6 +1812,31 @@ async def _run_engine_cycle_locked(
                         )
             except Exception:  # noqa: BLE001 - cap is best-effort, never block start
                 logger.debug("grid min-notional level cap skipped", exc_info=True)
+        # SPOT-EXIT-GUARANTEE: a leg sized AT the venue minimum cannot be closed
+        # by a resting limit — fees plus any adverse tick put the exit notional
+        # under the floor, the venue rejects it, and the leg strands naked (kBTC
+        # minimum $100 vs a ~$99 DN leg, 2026-07-28). Floor the ENTRY so the EXIT
+        # still clears. Only ever RAISES the size, and only for the spot-holding
+        # strategies; the perp side has no balance to strand.
+        if strategy in ("dn", "vol"):
+            try:
+                from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+
+                _key = "leg_amount_quote" if strategy == "dn" else "total_amount_quote"
+                _cur = float(configs.get(_key) or 0)
+                _spot_pair = str(configs.get("trading_pair_long") or configs.get("trading_pair") or product)
+                _mn = float(getattr(meta.get(_spot_pair), "min_notional", 0) or 0)
+                _floor = min_closeable_entry_notional(_mn)
+                if _floor > 0 and 0 < _cur < _floor:
+                    configs[_key] = _dec(str(_floor))
+                    logger.warning(
+                        "%s leg raised %.2f -> %.2f so the EXIT clears the venue "
+                        "min notional %.2f on %s — an entry at the floor cannot be "
+                        "closed by a resting limit order (user=%s)",
+                        strategy, _cur, _floor, _mn, _spot_pair, telegram_id,
+                    )
+            except Exception:  # noqa: BLE001 - best-effort, never block start
+                logger.debug("closeable-entry floor skipped", exc_info=True)
         # NO_ORDERS_AUDIT-FIX-R1: DN needs metadata for BOTH legs (spot long +
         # perp short), each with its OWN product_id. The old fallback keyed both
         # legs to the SAME ``product_id`` — which would have traded the perp

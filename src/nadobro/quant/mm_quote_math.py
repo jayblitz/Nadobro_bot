@@ -85,3 +85,34 @@ def estimate_mm_quote_capacity(
         "min_collateral_1_quote_usd": round(margin_per, 4),
         "min_collateral_2_quote_usd": round(2.0 * margin_per, 4),
     }
+
+
+# ── SPOT-EXIT-GUARANTEE: entries must be born closeable ─────────
+# A venue min NOTIONAL applies to the exit as well as the entry. An entry sized
+# AT the floor is un-closeable by a resting limit order: fees and any adverse
+# tick put the exit notional under the minimum, the venue rejects it, and the leg
+# strands. Reported 2026-07-28 — kBTC's minimum is $100 and a ~$99 Delta Neutral
+# leg left the user holding unhedged spot.
+#
+# The buffer must cover a round trip's fees plus normal drift between entry and
+# exit. 15% is deliberately generous against a taker+taker round trip (~0.07% on
+# Nado's 0.033% taker tier) because the dominant term is PRICE drift, not fees:
+# the exit notional is base * exit_price, so a 15% buffer tolerates a 13% adverse
+# move before the exit dips under the floor.
+MIN_CLOSEABLE_ENTRY_BUFFER = 0.15
+
+
+def min_closeable_entry_notional(
+    min_notional_usd: float, *, buffer: float = MIN_CLOSEABLE_ENTRY_BUFFER
+) -> float:
+    """Smallest entry notional whose EXIT still clears ``min_notional_usd``.
+
+    Returns 0.0 when the venue reports no minimum (nothing to protect against).
+    """
+    try:
+        floor = float(min_notional_usd or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if floor <= 0:
+        return 0.0
+    return floor * (1.0 + max(0.0, float(buffer)))

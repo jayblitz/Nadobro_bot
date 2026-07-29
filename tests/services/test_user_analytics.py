@@ -128,3 +128,37 @@ def test_empty_ledger_is_all_zero_not_an_error():
         assert out["nado_volume"][w]["total_usd"] == Decimal("0")
         assert out["nadobro_volume"][w]["total_usd"] == Decimal("0")
         assert out["realized_pnl"][w] == Decimal("0")
+
+
+# ── SPOT-EXIT-GUARANTEE piece 2a: entries born closeable ────────
+# A venue min NOTIONAL applies to the EXIT too. kBTC's minimum is $100 and a ~$99
+# Delta Neutral leg therefore cannot be closed by a resting limit — fees plus any
+# adverse tick put the exit under the floor, the venue rejects it, and the leg
+# strands naked (prod 2026-07-28).
+
+def test_min_closeable_entry_leaves_room_above_the_venue_floor():
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    assert min_closeable_entry_notional(100.0) > 100.0
+    # A $99 leg against a $100 floor is exactly the reported case.
+    assert 99.0 < min_closeable_entry_notional(100.0)
+
+
+def test_min_closeable_entry_is_inert_without_a_venue_minimum():
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    for bad in (0, 0.0, None, -5, "x"):
+        assert min_closeable_entry_notional(bad) == 0.0
+
+
+def test_min_closeable_entry_scales_with_the_floor():
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    assert min_closeable_entry_notional(200.0) == 2 * min_closeable_entry_notional(100.0)
+
+
+def test_the_buffer_survives_a_taker_round_trip_and_drift():
+    """The buffer must cover both fees and the price drift between entry/exit."""
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    floor = 100.0
+    entry = min_closeable_entry_notional(floor)
+    taker_round_trip = entry * 0.00033 * 2          # Nado 0.033% taker, both ways
+    adverse_drift = entry * 0.10                    # a 10% move against us
+    assert entry - taker_round_trip - adverse_drift > floor
