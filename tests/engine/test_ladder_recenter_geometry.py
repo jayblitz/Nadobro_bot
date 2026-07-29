@@ -385,3 +385,67 @@ def test_a_successful_recenter_still_requotes():
         assert min(lv.open_price for lv in ex.levels) >= Decimal("109")
 
     asyncio.run(body())
+
+
+# ── audit round 3: a re-center must never be able to KILL the ladder ──
+# Probed: 4 re-centers whose cancels fail drove _guard's failure budget to
+# terminate the executor FAILED. _terminate() does not cancel resting orders, and
+# recenter returns early on is_terminated — so the ladder never re-quoted again
+# even after the venue recovered, reproducing the exact stale-quote symptom this
+# branch exists to fix. A re-center is OPPORTUNISTIC: it retries next cycle, so a
+# transient cancel failure must cost nothing beyond that round.
+
+def test_repeated_recenter_cancel_failures_do_not_kill_the_ladder():
+    from src.nadobro.engine.executors.grid_executor import GridExecutor
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+
+        adapter.fail_on = {"cancel_order"}
+        adapter.fail_remaining = 999
+        for i in range(4):
+            await ex.recenter(Decimal(105 + i), Decimal(106 + i))
+
+        assert not ex.is_terminated, (
+            f"the ladder was terminated ({ex.close_type}) by transient re-center "
+            f"cancel failures — it can never re-quote again, which IS the original "
+            f"stale-quote bug"
+        )
+
+    asyncio.run(body())
+
+
+def test_the_ladder_requotes_once_the_venue_recovers():
+    from src.nadobro.engine.executors.grid_executor import GridExecutor
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+        original = sorted(lv.open_price for lv in ex.levels)
+
+        adapter.fail_on = {"cancel_order"}
+        adapter.fail_remaining = 999
+        for i in range(4):
+            await ex.recenter(Decimal(105 + i), Decimal(106 + i))
+
+        adapter.fail_on = set()
+        adapter.fail_remaining = 0
+        placed_before = len(adapter.placed)
+        await ex.recenter(Decimal("109"), Decimal("110"))
+
+        assert len(adapter.placed) > placed_before, (
+            "the ladder did not re-quote after the venue recovered"
+        )
+        assert sorted(lv.open_price for lv in ex.levels) != original, (
+            "quotes are still at their original prices after recovery"
+        )
+        assert min(lv.open_price for lv in ex.levels) >= Decimal("109")
+
+    asyncio.run(body())

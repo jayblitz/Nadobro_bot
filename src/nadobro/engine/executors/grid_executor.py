@@ -309,11 +309,23 @@ class GridExecutor(Executor):
                 oid = lv.open_order_id
                 cancelled = False
                 try:
-                    await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_recenter_cancel")
+                    # Deliberately NOT via self._guard: _guard counts failures
+                    # against the executor's budget and TERMINATES it FAILED after
+                    # a few, and _terminate() does not cancel resting orders — so a
+                    # spell of cancel errors killed the ladder outright and it never
+                    # re-quoted again, reproducing the very stale-quote symptom this
+                    # branch exists to fix (probed: 4 failed re-centers -> FAILED,
+                    # then zero orders on every later tick). A re-center is
+                    # OPPORTUNISTIC and runs again next cycle, so a transient cancel
+                    # failure must cost nothing but this round. Audit round 3.
+                    await self.adapter.cancel_order(oid)
                     self.orders_cancelled += 1
                     cancelled = True
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("grid %s: recenter cancel failed for %s: %s", self.id, oid, exc)
+                    logger.warning(
+                        "grid %s: recenter cancel failed for %s (retrying next "
+                        "cycle, level kept): %s", self.id, oid, exc,
+                    )
                 if not cancelled:
                     # RECENTER-ORPHAN (fail closed). ``cancel_order`` only returns
                     # after verifying the order really is off the book, so an
@@ -327,8 +339,7 @@ class GridExecutor(Executor):
                     kept.append(lv)
                     continue
                 try:
-                    refreshed = await self._guard(
-                        lambda: self.adapter.order_status(oid), label="grid_recenter_status")
+                    refreshed = await self.adapter.order_status(oid)
                     self._ingest(lv, refreshed, self.open_side, opening=True)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("grid %s: recenter status probe failed for %s: %s", self.id, oid, exc)

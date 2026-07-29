@@ -1,0 +1,253 @@
+"""END-TO-END: does this branch actually fix the four reported production symptoms?
+
+Every other test in the branch pins a MECHANISM. Nothing pinned the OUTCOME the
+user reported, which is the gap that mattered most. One test per symptom, each
+driving the real controller/adapter code with the real production numbers.
+
+Sources: Fly logs + read-only DB reads, 2026-07-28.
+"""
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+
+from tests.engine._mock_nado import MockNadoAdapter
+
+from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
+from src.nadobro.engine.inventory import InventoryRepository
+from src.nadobro.engine.orchestrator import ExecutorOrchestrator
+from src.nadobro.engine.routines import variance_regime as vr
+
+
+# ── SYMPTOM 1: rgrid quotes went stale ──────────────────────────
+# Session 165: 2080 cycles, 26 orders, 2063 cycles placed NOTHING, and the same
+# maker price (63352.4017854148) re-issued from 09:58 to 13:27. Cause: a 0.8%
+# (80bp) re-center threshold on a 20bp ladder — BTC's whole 49bp session range
+# could never reach it.
+
+_S165 = {
+    "trading_pair": "BTC-PERP",
+    "start_price": "63200", "end_price": "63400", "limit_price": "0",
+    "total_amount_quote": "1000", "min_spread_between_orders": "0.001",
+    "max_open_orders": 3, "step_pct": "0.001", "levels_count": 3,
+    "dgrid_reset_threshold_bp": 80.0,          # the user's real 0.8%
+    "regime_gate_enabled": 0.0,
+}
+
+
+def test_symptom1_the_ladder_follows_price_within_the_sessions_own_range():
+    """The ladder must re-quote on a move SMALLER than session 165's whole range."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63373.5"))
+        orch = ExecutorOrchestrator()
+        c = DynamicGridController(
+            user_id=1, orchestrator=orch, adapter=adapter,
+            inventory=InventoryRepository(),
+            configs=dict(_S165, candle_provider=lambda p: [
+                {"close": 63300 + (i % 2) * 20} for i in range(200)]),
+        )
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        ex = orch.list(c.id, active_only=True)[0]
+        before = [lv.open_price for lv in ex.levels]
+
+        # BTC's ENTIRE session range was 49bp. Move only 30bp.
+        adapter.set_mid(Decimal("63373.5") * (Decimal(1) + Decimal("0.0030")))
+        await orch.tick_controller(c.id)
+
+        after = [lv.open_price for lv in orch.list(c.id, active_only=True)[0].levels]
+        assert after != before, (
+            "a 30bp move — well inside session 165's 49bp range — still left every "
+            "quote at its old price: the stale-ladder bug is NOT fixed"
+        )
+    asyncio.run(body())
+
+
+# ── SYMPTOM 2: GRID<->RGRID flip-flop ───────────────────────────
+# Six flips in forty minutes, every notification reading "downtrend detected"
+# while half of them armed the LONG grid.
+
+_RG = dict(short_window=3, long_window=8, trend_on=1.10, range_on=1.05,
+           trend_drift_pct=0.15)
+
+
+def _choppy(drop_per_candle, n=24, period=6, amp=120.0, start=63500.0):
+    out = []
+    for i in range(n):
+        p = (i % period) / period
+        out.append({"close": start - drop_per_candle * i
+                    + amp * (1.0 - 2.0 * abs(2.0 * p - 1.0))})
+    return out
+
+
+def test_symptom2_a_downtrend_never_hands_the_short_back_to_the_long_grid():
+    """Replays the reported alternation: rates wobbling either side of the 0.15%
+    trend threshold while price falls throughout."""
+    phase, flips, directions = vr.GRID, 0, []
+    for rate in (16.0, 14.0, 18.0, 14.0, 17.0, 13.5, 16.5, 14.0):
+        info = asyncio.run(vr.run("BTC-PERP", _choppy(rate), current_phase=phase, **_RG))
+        directions.append(info["direction"])
+        if info["phase"] != phase:
+            flips += 1
+        phase = str(info["phase"])
+    assert all(d == vr.DOWN for d in directions), directions
+    assert phase == vr.RGRID, "ended a sustained downtrend on the LONG grid"
+    assert flips == 1, f"{flips} flips across one downtrend (production saw 6)"
+
+
+def test_symptom2_the_reported_notification_can_no_longer_contradict_itself():
+    """Every logged flip said 'downtrend detected'; half armed GRID. With the
+    release in place, a DOWN read while short can never resolve to GRID."""
+    for rate in (13.0, 14.0, 14.5, 15.0, 16.0, 18.0):
+        info = asyncio.run(vr.run("BTC-PERP", _choppy(rate),
+                                  current_phase=vr.RGRID, **_RG))
+        if info["direction"] == vr.DOWN:
+            assert info["phase"] == vr.RGRID, (
+                f"direction=down but phase={info['phase']} — that is exactly the "
+                f"'downtrend detected ... GRID now quoting' contradiction"
+            )
+
+
+# ── SYMPTOM 4: the phantom fill price that tripped the TP rail ──
+# Session 164: fill_size 0.00265 (requested) against base_x18 0.00395 (venue) gave
+# fill_price 250.18/0.00265 = 94,408 while BTC was 63.6k — a 1.49x inflation that
+# booked a fake profit and stopped the run at a real $0.68.
+
+def test_symptom4_the_human_fill_columns_follow_the_venue_quote():
+    from unittest.mock import patch
+    from src.nadobro.venue import nado_sync
+    from src.nadobro.utils.x18 import to_x18
+
+    calls = []
+
+    def _q(sql, *params):
+        if "NOT ILIKE" in sql:
+            return {"id": 99, "fill_size": "0.00265"}   # the corrupt recorder row
+        return None
+
+    with patch.object(nado_sync, "query_one", side_effect=_q), \
+         patch.object(nado_sync, "execute", side_effect=lambda *a, **k: calls.append(a)):
+        nado_sync._write_matches(42, "mainnet", [{
+            "submission_idx": "7", "digest": "0xdead", "product_id": 2,
+            "base_filled": str(to_x18("0.00395")),
+            "quote_filled": str(to_x18("-250.18")),
+            "fee": str(to_x18("0.05")),
+        }])
+
+    params = calls[0][1]
+    price = float(params[9])
+    assert abs(price - 250.18 / 0.00395) < 0.01, price
+    assert abs(price - 94408) > 1000, (
+        f"fill_price is still the phantom {price:,.0f} — the TP rail will keep "
+        f"booking fake profit and stopping runs early"
+    )
+
+
+# ── SYMPTOM 3: the naked spot leg ───────────────────────────────
+# Session 167: DN ran 3m18s against a 1h hold and stopped hedge_broken. Net perp 0
+# (flat) but net spot +0.00155 (~$99) left UNHEDGED. Three things had to hold for
+# that: the hedge opened twice (a race), one spot sell closed only one pair, and
+# the residual sweep was blind because engine inventory said BTC-USDT0 was flat.
+
+_DN = {
+    "trading_pair_long": "BTC-USDT0", "trading_pair_short": "BTC-PERP",
+    "trading_pair": "BTC-USDT0", "hedge_ratio": Decimal(1),
+    "leg_amount_quote": Decimal(99), "hold_seconds": 3600, "cycles": 1,
+    "leverage": 1,
+}
+
+
+def _dn(adapter, orch, inventory=None):
+    from src.nadobro.engine.controllers.delta_neutral import DeltaNeutralController
+    return DeltaNeutralController(
+        user_id=1, orchestrator=orch, adapter=adapter,
+        inventory=inventory if inventory is not None else InventoryRepository(),
+        configs=dict(_DN), controller_id="dn:1:mainnet")
+
+
+def test_symptom3_a_stranded_spot_leg_is_swept_not_left_naked():
+    """The exact session-167 state: the hold NETS flat (buy 0.00155 / sell 0.00155)
+    while the venue still holds 0.00155. The sweep must see the venue and sell."""
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.00155"),
+                                              "BTC-PERP": Decimal(0)})
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.SELL,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        c = _dn(adapter, orch, inventory=inv)
+        assert c._net_base("BTC-USDT0") == 0, "precondition: the book nets flat"
+
+        assert await c._residuals_flat() is False, (
+            "the venue holds ~$99 of spot and the controller still reads FLAT — "
+            "this is the naked-leg bug"
+        )
+        sells = [o for o in adapter.placed
+                 if o.trading_pair == "BTC-USDT0" and o.side is TradeType.SELL]
+        assert sells, "the stranded spot leg was never sold"
+
+    asyncio.run(body())
+
+
+def test_symptom3_the_hedge_is_never_opened_twice():
+    """The race that created the orphan. A duplicate start must neither stack a
+    second pair NOR tear down the healthy one."""
+    from src.nadobro.engine.controllers.delta_neutral import DNPhase
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True)
+        orch = ExecutorOrchestrator()
+        c = _dn(adapter, orch)
+        await orch.spawn_controller(c)
+        spot_buys = len([o for o in adapter.placed
+                         if o.trading_pair == "BTC-USDT0" and o.side is TradeType.BUY])
+        n_before = len(adapter.placed)
+
+        await c.on_start()                     # the racing duplicate
+
+        assert len([o for o in adapter.placed
+                    if o.trading_pair == "BTC-USDT0" and o.side is TradeType.BUY]) \
+            == spot_buys, "a SECOND spot long was opened — that made the orphan"
+        assert len(adapter.placed) == n_before, "the duplicate touched the venue"
+        assert c.phase is DNPhase.HOLDING, "the duplicate tore down a healthy hedge"
+
+    asyncio.run(body())
+
+
+def test_symptom3_a_spot_exit_is_never_sized_above_the_balance():
+    """The other half: even when the sweep fires, the order must be fillable.
+    A close grown above the held balance is rejected and the leg stays naked."""
+    from unittest.mock import patch
+    from src.nadobro.engine.adapter.nado import NadoAdapter, ProductMeta
+    from src.nadobro.engine.types import OrderType, TradeType
+
+    sent = []
+
+    class _C:
+        def get_balance(self, *a, **k):
+            return {"exists": True, "balances": {1: 0.00155}}
+
+        def place_market_order(self, product_id, size, is_buy=True, **kw):
+            sent.append(float(size))
+            return {"digest": "m", "status": "filled", "price": 63890,
+                    "filled_base": str(size), "filled_quote": str(size * 63890)}
+
+    meta = {"S": ProductMeta(1, Decimal("1"), Decimal("0.00005"), Decimal(100),
+                             is_perp=False, isolated_only=False)}
+
+    async def body():
+        await NadoAdapter(_C(), meta).place_order(
+            "S", TradeType.SELL, OrderType.MARKET, Decimal("0.0031"),
+            reduce_only=True)
+        assert sent and sent[0] <= 0.00155 + 1e-12, (
+            f"asked the venue to sell {sent[0]} of a 0.00155 balance — rejected, "
+            f"and the leg stays naked"
+        )
+
+    asyncio.run(body())

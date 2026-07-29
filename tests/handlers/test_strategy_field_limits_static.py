@@ -204,3 +204,65 @@ def test_the_effective_size_string_is_markdownv2_safe(monkeypatch):
     for i, ch in enumerate(out):
         if ch in "()":
             assert i > 0 and out[i - 1] == "\\", f"unescaped {ch!r} in {out!r}"
+
+
+def test_conf_for_card_supplies_the_selected_product(monkeypatch):
+    """The disclosure was dead because settings["strategies"][sid] has no
+    "product" key — the selected asset lives in context.user_data."""
+    from types import SimpleNamespace
+    from src.nadobro.handlers.strategy_handler import _conf_for_card
+    ctx = SimpleNamespace(user_data={"strategy_pair:dn": "btc"})
+    conf = _conf_for_card({"strategies": {"dn": {"fixed_margin_usd": 100.0}}}, "dn", ctx)
+    assert conf["product"] == "BTC"
+    assert conf["fixed_margin_usd"] == 100.0
+
+
+def test_conf_for_card_never_mutates_stored_settings():
+    from types import SimpleNamespace
+    from src.nadobro.handlers.strategy_handler import _conf_for_card
+    settings = {"strategies": {"dn": {"fixed_margin_usd": 100.0}}}
+    ctx = SimpleNamespace(user_data={"strategy_pair:dn": "ETH"})
+    _conf_for_card(settings, "dn", ctx)
+    assert "product" not in settings["strategies"]["dn"], "leaked into stored settings"
+
+
+def test_conf_for_card_tolerates_a_missing_selection_and_a_bad_context():
+    from types import SimpleNamespace
+    from src.nadobro.handlers.strategy_handler import _conf_for_card
+    assert "product" not in _conf_for_card({"strategies": {"dn": {}}}, "dn",
+                                           SimpleNamespace(user_data={}))
+    assert _conf_for_card({"strategies": {"dn": {}}}, "dn", object()) == {}
+
+
+def test_the_dn_core_card_disclosure_is_LIVE_end_to_end(monkeypatch):
+    """The whole point: a $100 leg on kBTC must render as raised to $115."""
+    from types import SimpleNamespace
+    from src.nadobro.venue import product_catalog as pc
+    from src.nadobro.handlers.strategy_handler import (
+        _conf_for_card, _strategy_config_section_text)
+    monkeypatch.setitem(pc._spot_catalog_cache, "mainnet",
+                        {"ts": 9e18, "data": {"spots": {"KBTC": _KBTC_ROW}}})
+    ctx = SimpleNamespace(user_data={"strategy_pair:dn": "BTC"})
+    conf = _conf_for_card({"strategies": {"dn": {"fixed_margin_usd": 100.0}}}, "dn", ctx)
+    line = [l for l in _strategy_config_section_text("dn", conf, "mainnet", "setup").split("\n")
+            if "per leg" in l][0]
+    assert "$115" in line, f"the disclosure is still dead: {line}"
+
+
+def test_every_card_conf_site_uses_the_helper():
+    """Guard against a new card being wired to the bare settings dict again.
+
+    Exactly TWO sites may read it directly — _append_mm_pretrade_breakdown and
+    _build_strategy_preview_text — because neither takes `context`; the preview
+    already passes a real symbol (dn_spot_symbol) of its own. Every card rendered
+    from _handle_strategy must go through _conf_for_card or its disclosure is dead.
+    """
+    import pathlib
+    src = pathlib.Path("src/nadobro/handlers/strategy_handler.py").read_text()
+    bare = src.count('conf = settings.get("strategies", {}).get(strategy_id, {})')
+    assert bare <= 2, (
+        f"{bare} sites read the stored config directly (expected <= 2). A card "
+        f"wired that way does not carry the selected product, so its "
+        f"effective-size disclosure silently renders the pre-floor number."
+    )
+    assert src.count("_conf_for_card(settings, strategy_id, context)") >= 7

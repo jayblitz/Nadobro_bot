@@ -468,7 +468,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id not in supported:
             return
         network, settings = get_user_settings(telegram_id)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         context.user_data.pop(f"strategy_config_section:{strategy_id}", None)
         await _edit_loc(query, 
             _strategy_config_menu_text(strategy_id, conf, network),
@@ -484,7 +484,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         network, settings = get_user_settings(telegram_id)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         await _edit_loc(
             query,
             _strategy_config_section_text(strategy_id, conf, network, section),
@@ -523,7 +523,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 _replace_mm_preset(cfg, strategy_id, "turbo", turbo_cfg)
 
             network, settings = update_user_settings(telegram_id, _mutate_turbo)
-            conf = settings.get("strategies", {}).get(strategy_id, {})
+            conf = _conf_for_card(settings, strategy_id, context)
             section = "setup"
             context.user_data[f"strategy_config_section:{strategy_id}"] = section
             margin_t = float(conf.get("notional_usd", 100.0) or 0.0)
@@ -558,7 +558,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 _replace_mm_preset(cfg, strategy_id, "standard")
 
             network, settings = update_user_settings(telegram_id, _mutate_std)
-            conf = settings.get("strategies", {}).get(strategy_id, {})
+            conf = _conf_for_card(settings, strategy_id, context)
             section = "setup"
             context.user_data[f"strategy_config_section:{strategy_id}"] = section
             # Confirmation note so Standard is no longer a silent no-op: it clears
@@ -635,7 +635,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             )
 
         network, settings = update_user_settings(telegram_id, _mutate_tiny)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         section = "setup"
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         notional_after = collateral * float(target_lev)
@@ -795,7 +795,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 sync_cycle_notional_with_margin(strategies, strategy_id)
 
         network, settings = update_user_settings(telegram_id, _mutate)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         await _edit_loc(query, 
@@ -833,7 +833,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 cfg[field] = raw_value
 
         network, settings = update_user_settings(telegram_id, _mutate)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         await _edit_loc(query, 
@@ -1328,6 +1328,26 @@ def _mm_sizing_line(conf: dict) -> str:
         f"Position: *{escape_md(f'${deployed:,.0f}')}* \\(margin×lev\\)\n"
         f"Preset: *{escape_md(preset_label)}*"
     )
+
+
+def _conf_for_card(settings: dict, strategy_id: str, context) -> dict:
+    """The strategy's stored config PLUS the product the user has selected.
+
+    ``settings["strategies"][sid]`` has no "product" key — the chosen asset lives
+    in ``context.user_data["strategy_pair:<sid>"]``, set during preview. The cards
+    were passing ``conf.get('product')`` to ``_leg_size_display``, which always hit
+    its `if not spot_base` early return, so the effective-size disclosure (the
+    venue exit floor raising a $100 leg to $115) was DEAD in every config card.
+    Audit round 3. This is a display-only overlay; it never mutates the stored dict.
+    """
+    conf = dict(settings.get("strategies", {}).get(strategy_id, {}) or {})
+    try:
+        sel = context.user_data.get(f"strategy_pair:{strategy_id}")
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(no context -> card falls back to the plain size)
+        sel = None
+    if sel:
+        conf.setdefault("product", str(sel).upper())
+    return conf
 
 
 def _leg_size_display(user_leg_usd: float, spot_base: str | None, network: str) -> str:
