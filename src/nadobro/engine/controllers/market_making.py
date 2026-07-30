@@ -14,6 +14,7 @@ Implemented in Phase 4.
 """
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Optional
 
@@ -28,6 +29,8 @@ from src.nadobro.engine.types import ExecutionStrategy, TradeType, _dec
 # back-loads sells); short bias is the mirror. Bounded so neither factor goes
 # non-positive for bias in [-1, 1].
 _BIAS_SKEW_STRENGTH = Decimal("0.2")
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_bias(value: object) -> Decimal:
@@ -82,6 +85,7 @@ class MarketMakingController(Controller):
         self._bid_price: Optional[Decimal] = None
         self._ask_id: Optional[str] = None
         self._ask_price: Optional[Decimal] = None
+        self._cap_floor_warned = False
 
     async def on_start(self) -> None:
         return None
@@ -224,6 +228,28 @@ class MarketMakingController(Controller):
             return True
         if cap_quote <= 0:
             return True
+        # MID-FLAT-DEADLOCK (2026-07-30): plain Mid maps order_amount_quote ==
+        # margin_quote (one full-size quote per side) while the default
+        # net-exposure cap is 30% of margin — so a FLAT book projected one
+        # order at ~3.3x the cap, both sides were refused on every tick, and
+        # the strategy never placed a single order. A cap below one order size
+        # can never admit the strategy's own first quote; floor it there. The
+        # filled-inventory gate (exposure_allowed_sides) still enforces the
+        # configured cap with reduce-only quoting after fills, and stacking a
+        # SECOND worsening full-size order beyond the floored cap stays
+        # blocked — the original purpose of this check.
+        if cap_quote < self.order_amount_quote and not self._cap_floor_warned:
+            # AUDIT-MID-2026-07-30 #2: the floor overrides an explicitly small
+            # user cap pre-fill (enforcement becomes post-fill reduce-only via
+            # exposure_allowed_sides). Surface that once so it is never silent.
+            self._cap_floor_warned = True
+            logger.warning(
+                "MM %s: net-exposure cap $%s < one order ($%s) — floored to the "
+                "order size for quoting; the configured cap applies to FILLED "
+                "inventory (reduce-only) instead",
+                self.trading_pair, cap_quote, self.order_amount_quote,
+            )
+        cap_quote = max(cap_quote, self.order_amount_quote)
         current_quote = self._base_value(mid)
         delta_quote = self.order_amount_quote if side is TradeType.BUY else -self.order_amount_quote
         projected_quote = current_quote + delta_quote

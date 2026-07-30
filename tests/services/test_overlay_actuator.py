@@ -64,6 +64,20 @@ def test_chop_suppresses_new_exposure():
     assert cfg["regime_gate_enabled"] is True
 
 
+def test_chop_suppress_keeps_mid_cap_active():
+    """SUPPRESS-CAP-ZERO (2026-07-30): both exposure checks treat a cap of 0 as
+    "cap inactive", so zeroing it for mid REMOVED the exposure cap entirely in
+    chop — and chop is exactly the regime a symmetric maker exists to quote.
+    Mid keeps its configured cap (and keeps quoting); the gate still arms."""
+    sig = Signal(bias=0.05, regime="chop", entry_ok=False, scale=0.0, spread_mult=1.0, confidence=0.2)
+    ov = oa.compute_overrides("mid", sig)
+    assert ov["suppress_new_entries"] is True
+    cfg = {"order_amount_quote": Decimal("400"), "max_net_exposure_pct": 30.0}
+    oa.apply_overrides_to_configs("mid", cfg, ov)
+    assert cfg["max_net_exposure_pct"] == 30.0         # configured cap survives
+    assert cfg["regime_gate_enabled"] is True
+
+
 def test_suppress_never_also_adds_size():
     sig = Signal(bias=0.8, regime="chop", entry_ok=False, scale=0.9, spread_mult=1.0, confidence=0.9)
     ov = oa.compute_overrides("mid", sig)
