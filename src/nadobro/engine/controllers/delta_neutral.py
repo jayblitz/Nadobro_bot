@@ -36,6 +36,7 @@ import logging
 import time
 from decimal import Decimal
 from enum import Enum
+import inspect
 from typing import Optional
 
 from src.nadobro.engine.controllers.controller_base import Controller
@@ -228,11 +229,36 @@ class DeltaNeutralController(Controller):
 
         # NET un-sold base this controller is accountable for. Perp exposure is
         # position-scoped (it nets out on the venue), so only spot needs the cap.
-        if pair != self.long_pair or self.inventory is None:
+        if pair != self.long_pair:
             return venue, Decimal(0)
-        hold = self.inventory.get(self.user_id, pair, self.id)
-        owned = abs(_dec(getattr(hold, "buy_amount_base", 0) or 0)
-                    - _dec(getattr(hold, "sell_amount_base", 0) or 0))
+
+        # DN-ATTRIBUTION: prefer the PERSISTED per-session fills. The in-memory
+        # hold is not a reliable answer to "what did this session buy?" —
+        # EngineRuntime.start clears it for the controller id on every build, so a
+        # rebuilt controller saw 0 and declared a stranded leg FLAT; and in prod
+        # session 167 it recorded net-flat while the venue held ~$99 of spot. The
+        # trades_<network> rows for that session correctly show 0.0031 bought vs
+        # 0.00155 sold, so this can close a genuine orphan while still never
+        # reaching a balance the session did not buy.
+        owned: Optional[Decimal] = None
+        provider = self.cfg("session_fill_provider")
+        if callable(provider):
+            try:
+                result = provider(pair)
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is not None:
+                    owned = abs(_dec(result))
+            except Exception as exc:  # noqa: BLE001  # policy: degrade-ok(fall back to the in-memory book below)
+                logger.warning(
+                    "delta_neutral: session-fill attribution failed on %s: %s", pair, exc,
+                )
+        if owned is None:
+            if self.inventory is None:
+                return venue, Decimal(0)
+            hold = self.inventory.get(self.user_id, pair, self.id)
+            owned = abs(_dec(getattr(hold, "buy_amount_base", 0) or 0)
+                        - _dec(getattr(hold, "sell_amount_base", 0) or 0))
         if abs(venue) <= owned:
             return venue, Decimal(0)
         sign = Decimal(1) if venue > 0 else Decimal(-1)

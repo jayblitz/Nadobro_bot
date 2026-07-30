@@ -1898,6 +1898,49 @@ async def _run_engine_cycle_locked(
         # isolated-only flag) from the DN pair catalog.
         if strategy == "dn":
             _materialize_dn_leg_meta(meta, configs, client, network, product)
+            # DN-ATTRIBUTION: give the controller a way to ask "what did THIS
+            # session actually buy?" from the PERSISTED fills. Injected here (the
+            # candle_provider pattern) because this is where the resolved per-leg
+            # product_ids exist — the controller only knows pair STRINGS, and the
+            # fill rows carry venue product names (KBTC), so names do not join.
+            # engine/ stays DB-agnostic; only this closure touches the DB, and it
+            # does so off the event loop.
+            _sid = state.get("strategy_session_id")
+            if _sid:
+                _pid_by_pair = {}
+                for _pair in (configs.get("trading_pair_long"), configs.get("trading_pair_short")):
+                    _m = meta.get(str(_pair or ""))
+                    if _m is not None:
+                        try:
+                            _pid_by_pair[str(_pair)] = int(getattr(_m, "product_id"))
+                        except (TypeError, ValueError, AttributeError):
+                            continue
+
+                async def _session_fill_provider(
+                    pair: str, _sid=int(_sid), _net=network, _map=_pid_by_pair
+                ):
+                    """Net base this session holds on ``pair``, or None if unknown."""
+                    pid = _map.get(str(pair))
+                    if pid is None:
+                        return None
+                    try:
+                        from src.nadobro.core.async_utils import run_blocking_db
+                        from src.nadobro.models.database import (
+                            get_session_net_base_by_product,
+                        )
+
+                        by_pid = await run_blocking_db(
+                            get_session_net_base_by_product, _sid, _net
+                        )
+                    except Exception:  # noqa: BLE001  # policy: degrade-ok(unknown -> caller falls back to the in-memory book)
+                        logger.warning(
+                            "dn: session-fill attribution read failed for %s", pair,
+                            exc_info=True,
+                        )
+                        return None
+                    return (by_pid or {}).get(int(pid))
+
+                configs["session_fill_provider"] = _session_fill_provider
         # SPOT-EXIT-GUARANTEE (moved AFTER _materialize_dn_leg_meta, audit round
         # 3: it used to run BEFORE the DN legs were registered, so
         # meta.get("BASE-USDT0") was always None and the floor was DEAD for DN).

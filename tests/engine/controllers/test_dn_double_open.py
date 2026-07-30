@@ -406,3 +406,114 @@ def test_the_admission_guard_sees_foreign_exposure_even_though_the_sweep_will_no
             "opened a hedge on top of a non-flat account"
         )
     asyncio.run(body())
+
+
+# ── DN-ATTRIBUTION: persisted per-session fills ─────────────────
+# The architectural blocker behind four failed rounds: DN could not answer "what
+# did THIS session buy?" The in-memory hold is not that answer —
+# EngineRuntime.start CLEARS it for the controller id on every build, and in prod
+# session 167 it recorded net-flat while the venue held ~$99 of spot. The
+# trades_<network> rows for that session DO show it: 0.0031 bought / 0.00155 sold.
+
+def _session_167_fills():
+    """The persisted truth for session 167's spot leg: net +0.00155."""
+    async def provider(pair):
+        return Decimal("0.00155") if pair == "BTC-USDT0" else None
+    return provider
+
+
+def test_a_stranded_leg_is_swept_when_the_PERSISTED_fills_prove_it_is_ours():
+    """Session 167, end to end — and with the in-memory hold EMPTY, which is what
+    a rebuilt controller actually sees."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.00155"),
+                                              "BTC-PERP": Decimal(0)})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch,                      # inventory: EMPTY
+                        session_fill_provider=_session_167_fills())
+
+        sweepable, orphan = await c._sweepable_net_base("BTC-USDT0")
+        assert sweepable == Decimal("0.00155"), (
+            f"sweepable={sweepable} — the persisted fills prove this leg is ours, "
+            f"so it must be closeable even though the in-memory hold was wiped"
+        )
+        assert orphan == 0
+
+        assert await c._residuals_flat() is False
+        sells = [o for o in adapter.placed
+                 if o.trading_pair == "BTC-USDT0" and o.side is TradeType.SELL]
+        assert sells, "the stranded leg was still not swept"
+        assert abs(float(sells[0].amount_base) - 0.00155) < 1e-9
+
+    asyncio.run(body())
+
+
+def test_the_persisted_source_survives_the_rebuild_that_defeated_the_book():
+    """The exact failure of the previous rule: start() wipes the hold, the cap went
+    to 0, and the guard declared a stranded leg FLAT."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"),
+                                  venue_held={"BTC-USDT0": Decimal("0.00155")})
+        orch = ExecutorOrchestrator()
+        wiped = InventoryRepository()                       # exactly post-start()
+        c = _controller(adapter, orch, inventory=wiped,
+                        session_fill_provider=_session_167_fills())
+        assert c._net_base("BTC-USDT0") == 0, "precondition: the book is wiped"
+        sweepable, _ = await c._sweepable_net_base("BTC-USDT0")
+        assert sweepable != 0, (
+            "a rebuilt controller still cannot see its own stranded leg — this is "
+            "the defect the persisted source exists to remove"
+        )
+    asyncio.run(body())
+
+
+def test_persisted_attribution_still_refuses_the_users_own_coins():
+    """The other half of the invariant, which must not regress."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.5")})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch,
+                        session_fill_provider=_session_167_fills())
+        sweepable, orphan = await c._sweepable_net_base("BTC-USDT0")
+        assert sweepable == Decimal("0.00155"), "must sweep only what it bought"
+        assert orphan == Decimal("0.5") - Decimal("0.00155")
+
+        await c._residuals_flat()
+        sells = [o for o in adapter.placed if o.side is TradeType.SELL]
+        assert all(abs(float(o.amount_base) - 0.00155) < 1e-9 for o in sells), (
+            "sold more than this session bought — that is the user's own balance"
+        )
+    asyncio.run(body())
+
+
+def test_a_failing_provider_falls_back_to_the_book_and_never_raises():
+    async def body():
+        async def broken(pair):
+            raise RuntimeError("db down")
+
+        adapter = MockNadoAdapter(mid=Decimal("63890"),
+                                  venue_held={"BTC-USDT0": Decimal("0.00155")})
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        c = _controller(adapter, orch, inventory=inv, session_fill_provider=broken)
+        sweepable, _ = await c._sweepable_net_base("BTC-USDT0")
+        assert sweepable == Decimal("0.00155"), "must fall back to the book"
+    asyncio.run(body())
+
+
+def test_no_provider_configured_keeps_the_previous_book_behaviour():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"),
+                                  venue_held={"BTC-USDT0": Decimal("0.00155")})
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        c = _controller(adapter, orch, inventory=inv)       # no provider at all
+        sweepable, _ = await c._sweepable_net_base("BTC-USDT0")
+        assert sweepable == Decimal("0.00155")
+    asyncio.run(body())
