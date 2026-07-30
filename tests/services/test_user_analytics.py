@@ -218,3 +218,58 @@ def test_the_closeable_entry_floor_runs_after_the_dn_legs_are_registered():
         "the closeable-entry floor runs before the DN leg meta exists — "
         "meta.get(trading_pair_long) is None and the floor is a no-op for DN"
     )
+
+
+# ── audit round 4: risk caps must follow the closeable-entry floor ──
+# map_risk_limits derives the DN cap from the PRE-floor size
+# (per_order_cap = fixed_margin_usd * hedge * 2). The floor then raises the leg,
+# so a small preset is floored ABOVE its own cap and every leg is rejected — the
+# session goes LIVE and places nothing.
+
+def test_the_dn_risk_cap_is_too_small_for_a_floored_leg_unless_recomputed():
+    """The arithmetic of the failure, stated plainly."""
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    from src.nadobro.strategy.engine_runtime import map_risk_limits
+
+    pre_floor_cap = float(map_risk_limits(
+        {"fixed_margin_usd": 50.0}, "dn", leverage=1).max_single_order_quote)
+    floored_leg = min_closeable_entry_notional(100.0)          # kBTC $100 min
+
+    assert floored_leg > pre_floor_cap, (
+        f"precondition: a $50 leg floored to ${floored_leg:.2f} must exceed its "
+        f"pre-floor cap of ${pre_floor_cap:.2f} for this bug to exist"
+    )
+    post_floor_cap = float(map_risk_limits(
+        {"fixed_margin_usd": floored_leg}, "dn", leverage=1).max_single_order_quote)
+    assert post_floor_cap >= floored_leg, (
+        "recomputing the caps from the floored size still cannot admit the leg"
+    )
+
+
+def test_engine_runtime_recomputes_limits_when_the_floor_fires():
+    """Static guard on the ordering + the recompute, since exercising
+    run_engine_cycle end to end needs a live client."""
+    import pathlib
+    src = pathlib.Path("src/nadobro/strategy/engine_runtime.py").read_text()
+    i_floor = src.index("min_closeable_entry_notional(_mn)")
+    i_recompute = src.index("limits = map_risk_limits(", i_floor)
+    i_consume = src.index("limits=limits,", i_floor)
+    assert i_floor < i_recompute < i_consume, (
+        "the floor must recompute `limits` BEFORE build_orchestrator consumes them"
+    )
+    # and the recompute must be keyed on the size field the strategy actually uses
+    window = src[i_floor:i_consume]
+    assert "fixed_margin_usd" in window and "session_margin_usd" in window, (
+        "the recompute must cover both dn (fixed_margin_usd) and vol "
+        "(session_margin_usd) — the two strategies the floor applies to"
+    )
+
+
+def test_vol_risk_cap_also_admits_a_floored_notional():
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    from src.nadobro.strategy.engine_runtime import map_risk_limits
+
+    floored = min_closeable_entry_notional(100.0)
+    cap = float(map_risk_limits(
+        {"session_margin_usd": floored}, "vol", leverage=1).max_single_order_quote)
+    assert cap >= floored

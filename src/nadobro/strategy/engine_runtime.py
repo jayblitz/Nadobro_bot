@@ -1961,11 +1961,28 @@ async def _run_engine_cycle_locked(
                 _floor = min_closeable_entry_notional(_mn)
                 if _floor > 0 and 0 < _cur < _floor:
                     configs[_key] = _dec(str(_floor))
+                    # RISK-LIMITS MUST FOLLOW THE RAISE (audit round 4).
+                    # `limits` was computed by map_risk_limits from the PRE-floor
+                    # settings — for dn, per_order_cap = fixed_margin_usd * hedge
+                    # * 2. A $50 leg therefore gets a $100 cap, and the floored
+                    # $115 leg is REJECTED by the risk engine: the session goes
+                    # LIVE and places nothing, which is the exact "LIVE but 0
+                    # orders" failure that comment block warns about. Recompute the
+                    # caps from the size we are actually going to trade. Safe here:
+                    # `limits` is not consumed until build_orchestrator below.
+                    _size_key = ("fixed_margin_usd" if strategy == "dn"
+                                 else "session_margin_usd")
+                    limits = map_risk_limits(
+                        dict(settings, **{_size_key: _floor}),
+                        strategy, leverage=_start_lev,
+                    )
                     logger.warning(
                         "%s leg raised %.2f -> %.2f so the EXIT clears the venue "
-                        "min notional %.2f on %s — an entry at the floor cannot be "
-                        "closed by a resting limit order (user=%s)",
-                        strategy, _cur, _floor, _mn, _spot_pair, telegram_id,
+                        "min notional %.2f on %s; risk caps recomputed to "
+                        "single=%s position=%s (user=%s)",
+                        strategy, _cur, _floor, _mn, _spot_pair,
+                        limits.max_single_order_quote, limits.max_position_size_quote,
+                        telegram_id,
                     )
             except Exception:  # noqa: BLE001 - best-effort, never block start
                 logger.debug("closeable-entry floor skipped", exc_info=True)

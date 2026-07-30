@@ -462,3 +462,35 @@ def test_the_ladder_requotes_once_the_venue_recovers():
         assert min(lv.open_price for lv in ex.levels) >= Decimal("109")
 
     asyncio.run(body())
+
+
+def test_a_failed_status_probe_keeps_the_level_instead_of_discarding_a_fill():
+    """AUDIT round 4: the cancel path failed CLOSED but the status probe failed
+    OPEN. The cancel succeeded, so the order is off the book — but an unknown
+    amount may have FILLED first. Freeing the slot re-quotes it as empty and the
+    held base never gets a close leg, so the real position drifts from the ladder's
+    view of it."""
+    from src.nadobro.engine.executors.grid_executor import GridExecutor, GridLevelState
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+        before = {lv.open_order_id for lv in ex.levels
+                  if lv.state is GridLevelState.OPEN_ORDER_PLACED}
+        assert before
+
+        # Cancels succeed; the STATUS probe blows up (a 429 / transient blip).
+        adapter.fail_on = {"order_status"}
+        adapter.fail_remaining = 99
+        await ex.recenter(Decimal("109"), Decimal("110"))
+
+        tracked = {lv.open_order_id for lv in ex.levels if lv.open_order_id}
+        assert before <= tracked, (
+            "a level whose fill state is UNKNOWN was freed and re-quoted — any "
+            "partial fill on it is now unaccounted for"
+        )
+
+    asyncio.run(body())

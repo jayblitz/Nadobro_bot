@@ -342,7 +342,21 @@ class GridExecutor(Executor):
                     refreshed = await self.adapter.order_status(oid)
                     self._ingest(lv, refreshed, self.open_side, opening=True)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("grid %s: recenter status probe failed for %s: %s", self.id, oid, exc)
+                    # FAIL CLOSED, like the cancel above (audit round 4). The
+                    # cancel SUCCEEDED, so this order is off the book — but we do
+                    # not know how much of it FILLED before it went. Freeing the
+                    # slot here discards that fill: the level is re-quoted as if
+                    # empty, the held base is never given a close leg, and the
+                    # position silently drifts from what the ladder thinks it
+                    # holds. Keep the level and re-probe next cycle; the id is
+                    # retained so the fill can still be recovered.
+                    logger.warning(
+                        "grid %s: recenter status probe failed for %s (%s) — keeping "
+                        "the level so an unknown partial fill is not discarded",
+                        self.id, oid, exc,
+                    )
+                    kept.append(lv)
+                    continue
                 lv.open_order_id = None
                 if lv.filled_base > 0:
                     # Partial inventory now held — book its close leg and keep it.
