@@ -204,7 +204,7 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "vol_buy_offset_bp": 0.0,
         "vol_max_cycle_loss_bp": 20.0,
         "vol_requote_seconds": 20.0,
-        "vol_cross_after_seconds": 75.0,
+        "vol_cross_after_seconds": 25.0,
         "vol_cross_slippage_bp": 15.0,
     },
     "bro": {

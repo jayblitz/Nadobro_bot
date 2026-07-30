@@ -38,7 +38,11 @@ class MockNadoAdapter(NadoAdapterBase):
         auto_fill_market: bool = True,
         fail_on: Optional[List[str]] = None,
         fail_times: int = 0,
+        venue_held: Optional[dict] = None,
     ) -> None:
+        # SPOT-RECONCILE: pair -> base units the VENUE reports, independent of
+        # engine inventory. None entries model an unreadable venue (fail safe).
+        self.venue_held: dict = dict(venue_held or {})
         self._mid = _dec(mid)
         self._mids = [_dec(m) for m in mids] if mids else None
         self._mid_idx = 0
@@ -93,6 +97,10 @@ class MockNadoAdapter(NadoAdapterBase):
             order.state = OrderState.FILLED
         else:
             order.state = OrderState.PARTIALLY_FILLED
+        if order.trading_pair in self.venue_held:
+            _delta = _dec(amount) if order.side is TradeType.BUY else -_dec(amount)
+            self.venue_held[order.trading_pair] = _dec(
+                self.venue_held.get(order.trading_pair) or 0) + _delta
         fill = Fill(order.id, order.trading_pair, order.side, amount, price, fee, time.time())
         self._fill_events.append(fill)
         return fill
@@ -130,6 +138,16 @@ class MockNadoAdapter(NadoAdapterBase):
             fill_px = price if price is not None else self._current_mid()
             self._apply_fill(order, order.amount_base, _dec(fill_px), Decimal(0), partial=False)
         return copy.copy(order)
+
+    async def held_base(self, trading_pair: str):
+        """AUDIT round 4: this used to return a STATIC dict entry that fills never
+        mutated, so `venue` and `book` could never disagree in the direction that
+        triggered the DN sweep's sell/buy oscillator — the tests were structurally
+        incapable of seeing a critical defect. Now every fill moves it."""
+        self._maybe_fail("held_base")
+        if trading_pair not in self.venue_held:
+            return None
+        return _dec(self.venue_held.get(trading_pair) or 0)
 
     async def cancel_order(self, order_id: str) -> bool:
         self._maybe_fail("cancel_order")

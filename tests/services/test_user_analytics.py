@@ -128,3 +128,148 @@ def test_empty_ledger_is_all_zero_not_an_error():
         assert out["nado_volume"][w]["total_usd"] == Decimal("0")
         assert out["nadobro_volume"][w]["total_usd"] == Decimal("0")
         assert out["realized_pnl"][w] == Decimal("0")
+
+
+# ── SPOT-EXIT-GUARANTEE piece 2a: entries born closeable ────────
+# A venue min NOTIONAL applies to the EXIT too. kBTC's minimum is $100 and a ~$99
+# Delta Neutral leg therefore cannot be closed by a resting limit — fees plus any
+# adverse tick put the exit under the floor, the venue rejects it, and the leg
+# strands naked (prod 2026-07-28).
+
+def test_min_closeable_entry_leaves_room_above_the_venue_floor():
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    assert min_closeable_entry_notional(100.0) > 100.0
+    # A $99 leg against a $100 floor is exactly the reported case.
+    assert 99.0 < min_closeable_entry_notional(100.0)
+
+
+def test_min_closeable_entry_is_inert_without_a_venue_minimum():
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    for bad in (0, 0.0, None, -5, "x"):
+        assert min_closeable_entry_notional(bad) == 0.0
+
+
+def test_min_closeable_entry_scales_with_the_floor():
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    assert min_closeable_entry_notional(200.0) == 2 * min_closeable_entry_notional(100.0)
+
+
+def test_the_buffer_survives_a_taker_round_trip_and_drift():
+    """The buffer must cover both fees and the price drift between entry/exit."""
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    floor = 100.0
+    entry = min_closeable_entry_notional(floor)
+    taker_round_trip = entry * 0.00033 * 2          # Nado 0.033% taker, both ways
+    adverse_drift = entry * 0.10                    # a 10% move against us
+    assert entry - taker_round_trip - adverse_drift > floor
+
+
+# ── audit round 3: the DN leg meta must be REAL, and the floor must see it ──
+
+def test_dn_leg_meta_uses_the_real_catalog_values_not_placeholders():
+    """Literal tick/lot/min_notional made the spot-exit clamp floor a 0.00155
+    kBTC balance to 0.001 — stranding ~35% of the leg — and made the sub-minimum
+    MARKET fallback unreachable ($99 > a fake $1 minimum)."""
+    from decimal import Decimal
+    from unittest.mock import patch
+    from src.nadobro.engine.adapter.nado import ProductMeta
+    from src.nadobro.strategy import engine_runtime as er
+
+    # The catalog-built map, keyed by SYMBOL, carrying kBTC's real venue values.
+    meta = {
+        "KBTC": ProductMeta(1, Decimal("1"), Decimal("0.00005"), Decimal(100),
+                            is_perp=False, isolated_only=False),
+        "BTC": ProductMeta(2, Decimal("1"), Decimal("0.00001"), Decimal(10),
+                           is_perp=True, isolated_only=False),
+    }
+    configs = {"trading_pair_long": "BTC-USDT0", "trading_pair_short": "BTC-PERP"}
+
+    with patch.object(er, "get_dn_pair", create=True), \
+         patch("src.nadobro.venue.product_catalog.get_dn_pair",
+               return_value={"spot_product_id": 1, "perp_product_id": 2}), \
+         patch("src.nadobro.venue.product_catalog.is_product_isolated_only",
+               return_value=False):
+        er._materialize_dn_leg_meta(meta, configs, None, "mainnet", "BTC")
+
+    spot = meta["BTC-USDT0"]
+    assert spot.product_id == 1
+    assert spot.lot_size == Decimal("0.00005"), (
+        f"lot is {spot.lot_size}, not the venue's 0.00005 — the exit clamp would "
+        f"floor 0.00155 to {int(Decimal('0.00155') / spot.lot_size) * spot.lot_size} "
+        f"and strand the rest"
+    )
+    assert spot.min_notional == Decimal(100), (
+        "min_notional is a placeholder, so the sub-minimum MARKET fallback that "
+        "rescues a $99 exit can never fire"
+    )
+    assert spot.is_perp is False
+    perp = meta["BTC-PERP"]
+    assert perp.product_id == 2 and perp.is_perp is True
+
+
+def test_the_closeable_entry_floor_runs_after_the_dn_legs_are_registered():
+    """The floor reads meta[trading_pair_long]. It used to run BEFORE
+    _materialize_dn_leg_meta created that key, so it was dead for DN."""
+    import pathlib
+    src = pathlib.Path("src/nadobro/strategy/engine_runtime.py").read_text()
+    i_mat = src.index("_materialize_dn_leg_meta(meta, configs, client, network, product)")
+    i_floor = src.index("min_closeable_entry_notional(_mn)")
+    assert i_mat < i_floor, (
+        "the closeable-entry floor runs before the DN leg meta exists — "
+        "meta.get(trading_pair_long) is None and the floor is a no-op for DN"
+    )
+
+
+# ── audit round 4: risk caps must follow the closeable-entry floor ──
+# map_risk_limits derives the DN cap from the PRE-floor size
+# (per_order_cap = fixed_margin_usd * hedge * 2). The floor then raises the leg,
+# so a small preset is floored ABOVE its own cap and every leg is rejected — the
+# session goes LIVE and places nothing.
+
+def test_the_dn_risk_cap_is_too_small_for_a_floored_leg_unless_recomputed():
+    """The arithmetic of the failure, stated plainly."""
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    from src.nadobro.strategy.engine_runtime import map_risk_limits
+
+    pre_floor_cap = float(map_risk_limits(
+        {"fixed_margin_usd": 50.0}, "dn", leverage=1).max_single_order_quote)
+    floored_leg = min_closeable_entry_notional(100.0)          # kBTC $100 min
+
+    assert floored_leg > pre_floor_cap, (
+        f"precondition: a $50 leg floored to ${floored_leg:.2f} must exceed its "
+        f"pre-floor cap of ${pre_floor_cap:.2f} for this bug to exist"
+    )
+    post_floor_cap = float(map_risk_limits(
+        {"fixed_margin_usd": floored_leg}, "dn", leverage=1).max_single_order_quote)
+    assert post_floor_cap >= floored_leg, (
+        "recomputing the caps from the floored size still cannot admit the leg"
+    )
+
+
+def test_engine_runtime_recomputes_limits_when_the_floor_fires():
+    """Static guard on the ordering + the recompute, since exercising
+    run_engine_cycle end to end needs a live client."""
+    import pathlib
+    src = pathlib.Path("src/nadobro/strategy/engine_runtime.py").read_text()
+    i_floor = src.index("min_closeable_entry_notional(_mn)")
+    i_recompute = src.index("limits = map_risk_limits(", i_floor)
+    i_consume = src.index("limits=limits,", i_floor)
+    assert i_floor < i_recompute < i_consume, (
+        "the floor must recompute `limits` BEFORE build_orchestrator consumes them"
+    )
+    # and the recompute must be keyed on the size field the strategy actually uses
+    window = src[i_floor:i_consume]
+    assert "fixed_margin_usd" in window and "session_margin_usd" in window, (
+        "the recompute must cover both dn (fixed_margin_usd) and vol "
+        "(session_margin_usd) — the two strategies the floor applies to"
+    )
+
+
+def test_vol_risk_cap_also_admits_a_floored_notional():
+    from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+    from src.nadobro.strategy.engine_runtime import map_risk_limits
+
+    floored = min_closeable_entry_notional(100.0)
+    cap = float(map_risk_limits(
+        {"session_margin_usd": floored}, "vol", leverage=1).max_single_order_quote)
+    assert cap >= floored

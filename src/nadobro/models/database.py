@@ -1,6 +1,7 @@
 import enum
 import json
 import logging
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Optional, TypeAlias
 
@@ -2319,3 +2320,49 @@ def get_vault_lp_events(telegram_id: int, network: str = "mainnet", limit: int =
             LIMIT %s""",
         (telegram_id, limit),
     )
+
+
+def get_session_net_base_by_product(session_id: int, network: str) -> dict[int, Decimal]:
+    """Net BASE this strategy session holds per product_id, from PERSISTED fills.
+
+    DN-ATTRIBUTION. The engine's in-memory ``engine_position_hold`` cannot answer
+    "what did THIS session buy?" reliably: ``EngineRuntime.start`` clears it for the
+    controller id on every build, and prod session 167 showed it disagreeing with
+    the venue outright (it recorded BTC-USDT0 as 0.00155 bought / 0.00155 sold —
+    net flat — while the venue had filled 0.0031 and the user was left holding ~$99
+    of unhedged spot).
+
+    ``trades_<network>`` is the durable record of what actually filled, stamped with
+    ``strategy_session_id``. For session 167 it correctly shows spot buys 0.0031 vs
+    sells 0.00155, i.e. net +0.00155 — so a residual sweep sourced from here can
+    close a genuine orphan while still never reaching a balance the session did not
+    buy. It also survives a process restart, a worker handoff and a controller
+    rebuild, which the in-memory hold does not.
+
+    Keyed by product_id on purpose: the DN controller's pair strings are
+    ``BASE-USDT0`` / ``BASE-PERP`` while the fill rows carry venue product names
+    (``KBTC``), so names do not join.
+    """
+    table = f"trades_{'testnet' if str(network).lower() == 'testnet' else 'mainnet'}"
+    rows = query_all(
+        f"""
+        SELECT product_id,
+               COALESCE(SUM(CASE WHEN LOWER(side) = 'long'
+                                 THEN COALESCE(fill_size, 0) ELSE 0 END), 0) AS bought,
+               COALESCE(SUM(CASE WHEN LOWER(side) = 'short'
+                                 THEN COALESCE(fill_size, 0) ELSE 0 END), 0) AS sold
+          FROM {table}
+         WHERE strategy_session_id = %s
+           AND COALESCE(fill_size, 0) > 0
+         GROUP BY product_id
+        """,
+        (int(session_id),),
+    )
+    out: dict[int, Decimal] = {}
+    for r in (rows or []):
+        try:
+            pid = int(r["product_id"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        out[pid] = Decimal(str(r["bought"] or 0)) - Decimal(str(r["sold"] or 0))
+    return out

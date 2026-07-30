@@ -288,8 +288,87 @@ class NadoAdapter(NadoAdapterBase):
         # what broke the Delta Neutral spot leg's close/rollback. Strip it for
         # spot; the DN close sells exactly the held base, so it flattens cleanly
         # without the flag.
+        # SPOT-CLOSE-BUMP: capture the REDUCING intent before the flag is
+        # stripped. The venue's min-notional retry in NadoClient.place_order used
+        # to grow ANY rejected order (`max(size, target)`), so a spot close sized
+        # to exactly the held base — a $99 leg against KBTC's $100 minimum — was
+        # bumped ABOVE the balance and could never fill, stranding the leg naked.
+        # ``never_grow`` is the flag that survives the strip; reduce_only cannot,
+        # and for spot there is nothing else that says "this is an exit".
+        never_grow = bool(reduce_only)
         if reduce_only and not bool(meta.is_perp):
             reduce_only = False
+
+        # SPOT-EXIT-GUARANTEE. A reducing SPOT sell is clamped to the balance the
+        # VENUE reports, floored to the lot size, and finished as MARKET when the
+        # remainder cannot clear the venue's min notional.
+        #
+        # Both halves are needed because engine inventory is not venue truth: in
+        # the 2026-07-28 DN incident the controller's hold said 0.00155 while the
+        # venue had filled 0.0031, so a size taken from inventory can be too HIGH
+        # (rejected: insufficient balance) as easily as too low. And KBTC's $100
+        # min notional sits ABOVE a $99 leg, so the exit is otherwise unfillable
+        # as a resting limit no matter what size we ask for — market orders are
+        # not subject to the resting minimum (the DN $98.88 market sell did fill).
+        if never_grow and not bool(meta.is_perp) and side is TradeType.SELL:
+            # (balance clamp is spot-only: a perp has no balance to clamp, and
+            # reduce_only already prevents a perp close from over-closing.)
+            held = await self.held_base(trading_pair)
+            if held is not None:
+                avail = abs(float(held))
+                if avail <= 0:
+                    raise AdapterError(
+                        f"spot close on {trading_pair}: venue balance is 0 — "
+                        f"nothing to sell (asked {amount})"
+                    )
+                if amount > avail:
+                    # DECIMAL, not float: float(0.00155) / float(0.00005) is
+                    # 30.999999... so int() floored a whole lot away and left
+                    # ~$3 of dust stranded on every exit — the very failure this
+                    # clamp exists to prevent.
+                    _avail_d = abs(_dec(str(held)))
+                    _lot_d = _dec(meta.lot_size or 0)
+                    if _lot_d > 0:
+                        _lots = (_avail_d / _lot_d).to_integral_value(rounding="ROUND_FLOOR")
+                        clamped_d = _lots * _lot_d
+                    else:
+                        clamped_d = _avail_d
+                    clamped = float(clamped_d)
+                    lot = float(_lot_d)
+                    if clamped <= 0:
+                        raise AdapterError(
+                            f"spot close on {trading_pair}: balance {avail} is "
+                            f"below one lot ({lot}) — cannot be sold"
+                        )
+                    logger.warning(
+                        "SPOT-EXIT clamp %s: asked %.10f > venue balance %.10f "
+                        "-> selling %.10f (lot %s). Engine inventory disagreed "
+                        "with the venue; the clamp keeps the exit fillable.",
+                        trading_pair, amount, avail, clamped, lot,
+                    )
+                    amount = clamped
+                    amount_base = clamped_d
+        # EXIT-MIN-NOTIONAL ESCAPE — applies to SPOT *and* PERP.
+        # A RESTING order below the venue minimum can never fill, and never_grow
+        # (correctly) forbids growing a close to reach the floor. Without an escape
+        # the exit is simply refused: audit round 4 found the perp path had none,
+        # so a sub-minimum reduce-only perp close retried 3x and terminated the
+        # executor FAILED with the position still open. Market orders are not
+        # subject to the resting minimum, and reduce_only means a market close
+        # cannot over-close, so crossing is the safe way out for both.
+        if never_grow and order_type is not OrderType.MARKET:
+            _min_notional = float(meta.min_notional or 0)
+            if _min_notional > 0:
+                _ref = float(price) if price else float(await self.mid_price(trading_pair))
+                if _ref > 0 and amount * _ref < _min_notional:
+                    logger.warning(
+                        "EXIT-MIN-NOTIONAL %s (%s): exit notional %.2f is under the "
+                        "venue minimum %.2f, so a resting limit can never fill — "
+                        "crossing instead of stranding the position.",
+                        trading_pair, "perp" if meta.is_perp else "spot",
+                        amount * _ref, _min_notional,
+                    )
+                    order_type = OrderType.MARKET
 
         # Isolated-margin routing. Nado RWA perps are isolated-only: the order
         # must carry isolated_only=True and an isolated_margin amount or the
@@ -351,7 +430,7 @@ class NadoAdapter(NadoAdapterBase):
                 resp = await asyncio.to_thread(
                     self._client.place_market_order, meta.product_id, amount, is_buy,
                     isolated_only=isolated_only, isolated_margin=isolated_margin,
-                    reduce_only=reduce_only, client_id=tag,
+                    reduce_only=reduce_only, never_grow=never_grow, client_id=tag,
                 )
             else:
                 if price is None:
@@ -360,7 +439,7 @@ class NadoAdapter(NadoAdapterBase):
                     self._client.place_limit_order, meta.product_id, amount, float(price), is_buy,
                     isolated_only=isolated_only, isolated_margin=isolated_margin,
                     post_only=order_type is OrderType.LIMIT_MAKER, reduce_only=reduce_only,
-                    client_id=tag,
+                    never_grow=never_grow, client_id=tag,
                 )
         except AdapterError:
             order_tags.forget(tag=tag)
@@ -745,6 +824,87 @@ class NadoAdapter(NadoAdapterBase):
         except Exception as exc:  # noqa: BLE001
             raise AdapterError(f"candles failed: {exc}") from exc
         return list(data or [])
+
+    async def held_base(self, trading_pair: str) -> Optional[Decimal]:
+        """Venue truth for how much of ``trading_pair`` the account holds.
+
+        SPOT -> the balance map from ``get_balance()`` keyed by product_id
+        (verified live: ``{0: 164.48, 1: 0.00155…}`` where 1 is kBTC).
+        PERP -> the signed size from ``get_all_positions()``.
+        ``None`` on any read failure so callers fail SAFE instead of reading a
+        broken call as "flat" and leaving a leg naked.
+        """
+        meta = self._meta(trading_pair)
+        try:
+            if bool(meta.is_perp):
+                rows = await asyncio.to_thread(self._client.get_all_positions)
+                for row in (rows or []):
+                    if not isinstance(row, dict):
+                        continue
+                    if int(row.get("product_id") or row.get("productId") or -1) != int(meta.product_id):
+                        continue
+                    # SIGN MATTERS. get_all_positions rows carry "amount" as the
+                    # ABSOLUTE magnitude and the signed value under
+                    # "signed_amount" (nado_client.py:1784-1797). Reading "amount"
+                    # made a SHORT look positive, and DN derives the sweep SIDE
+                    # from this sign — it would have SOLD MORE to "close" a short,
+                    # doubling the position. Prefer the signed keys, and never
+                    # fall back to an unsigned one.
+                    raw = _first(row, ("signed_amount", "net_amount", "size"))
+                    if raw is None:
+                        _abs = _first(row, ("amount", "base_amount"))
+                        if _abs is None:
+                            return Decimal(0)
+                        _side = str(row.get("side") or row.get("side_hint") or "").upper()
+                        if _side not in ("LONG", "SHORT"):
+                            logger.warning(
+                                "held_base: perp row for %s has no signed amount and "
+                                "no usable side — refusing to guess the sign", trading_pair,
+                            )
+                            return None
+                        _mag = abs(_to_dec(_abs))
+                        return _mag if _side == "LONG" else -_mag
+                    return _to_dec(raw)
+                return Decimal(0)
+            # force=True: get_balance is read-through cached (30s, no invalidation on
+            # a fill) and bot_runtime warms it on the START path — i.e. PRE-BUY. A
+            # stale map lacking this product read as Decimal(0) and the clamp then
+            # REFUSED a legitimate exit. Audit round 3. Cost is bounded: this runs
+            # once per close, not per tick.
+            data = await asyncio.to_thread(lambda: self._client.get_balance(force=True))
+            # get_balance does NOT raise on failure: a gateway-budget throttle or a
+            # total SDK+REST failure both return {"exists": False, "balances": {}}.
+            # Treating that as "flat" broke the documented None-on-failure contract
+            # and made the clamp REFUSE a legitimate exit (avail <= 0 -> raise).
+            if not data or data.get("exists") is False:
+                logger.warning(
+                    "held_base: balance read for %s returned no account data — "
+                    "reporting UNKNOWN, not flat", trading_pair,
+                )
+                return None
+            balances = data.get("balances")
+            if not isinstance(balances, dict) or not balances:
+                return None
+            for key, amount in balances.items():
+                try:
+                    if int(key) == int(meta.product_id):
+                        # A PRESENT key with 0 is genuinely flat.
+                        return _to_dec(amount)
+                except (TypeError, ValueError):
+                    continue
+            # ABSENT key = UNKNOWN, not flat (audit round 4). get_balance returns
+            # an entry for every product it saw — including explicit 0.0 — so a
+            # missing product means this snapshot cannot answer. Returning 0 here
+            # made the exit clamp raise "balance is 0 — nothing to sell" and refuse
+            # a legitimate close.
+            logger.warning(
+                "held_base: %s (product_id=%s) absent from the balance snapshot — "
+                "reporting UNKNOWN, not flat", trading_pair, meta.product_id,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - unknown, NOT flat
+            logger.warning("held_base read failed for %s: %s", trading_pair, exc)
+            return None
 
     async def funding_rate(self, trading_pair: str) -> Optional[Decimal]:
         meta = self._meta(trading_pair)

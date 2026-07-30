@@ -150,14 +150,21 @@ def test_recenter_is_not_starved_by_an_unconfirmed_phase_flip():
     """Re-center used to live in the `else` of `if flip_needed:`.
 
     dgrid needs 2 consecutive ticks to confirm a regime change, so on every tick
-    where the classifier disagreed with the live phase the ladder ALSO skipped
-    its re-center — it froze during exactly the moves big enough to shift the
-    regime read.
+    where the classifier disagreed with the live phase the ladder ALSO skipped its
+    re-center — it froze during exactly the moves big enough to shift the regime
+    read.
+
+    AUDIT round 4: the original version of this test never actually produced an
+    unconfirmed flip, and it wrapped its assertion in `if live[0] is ex:` so it
+    could pass by asserting nothing. It now asserts the precondition explicitly
+    (_phase_confirm_streak == 1, i.e. a flip IS pending) and has no escape hatch.
     """
     async def body():
         adapter = MockNadoAdapter(mid=Decimal("63373.5"))
         orch = ExecutorOrchestrator()
-        trending = [{"close": 63300 + i * 3} for i in range(200)]
+        # A decisive DOWNTREND makes the classifier want RGRID while the live
+        # phase is GRID; with flip_confirm_ticks=2 tick 1 leaves the flip PENDING.
+        downtrend = [{"close": 64000 - i * 25} for i in range(200)]
         c = DynamicGridController(
             user_id=1, orchestrator=orch, adapter=adapter,
             inventory=InventoryRepository(),
@@ -167,20 +174,26 @@ def test_recenter_is_not_starved_by_an_unconfirmed_phase_flip():
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)
         ex = orch.list(c.id, active_only=True)[0]
+        assert c.current_phase == "grid", c.current_phase
         before = [lv.open_price for lv in ex.levels]
 
-        # Force a pending-but-unconfirmed flip on the same tick as a big move.
-        c.configs["candle_provider"] = lambda p: trending
-        adapter.set_mid(Decimal("63523.5"))
+        # Same tick: the regime flips to RGRID (pending) AND price moves past the
+        # re-center threshold.
+        c.configs["candle_provider"] = lambda p: downtrend
+        adapter.set_mid(Decimal("63000.0"))
         await orch.tick_controller(c.id)
 
+        assert c._phase_confirm_streak == 1, (
+            f"precondition failed: no flip is pending (streak="
+            f"{c._phase_confirm_streak}, phase={c.current_phase}) — the test is "
+            f"not exercising the starvation path it claims to"
+        )
         live = orch.list(c.id, active_only=True)
-        if live and live[0] is ex:
-            # Still the same executor => no flip fired, so the re-center owed us
-            # a re-quote on this very tick.
-            assert [lv.open_price for lv in ex.levels] != before, (
-                "an unconfirmed flip must not suppress the re-center"
-            )
+        assert live and live[0] is ex, "the flip should still be UNCONFIRMED"
+        assert [lv.open_price for lv in ex.levels] != before, (
+            "an unconfirmed flip suppressed the re-center — the ladder froze on "
+            "exactly the move that shifted the classifier"
+        )
 
     asyncio.run(body())
 
@@ -383,5 +396,101 @@ def test_a_successful_recenter_still_requotes():
 
         assert len(adapter.placed) > placed_before, "a clean re-center must re-quote"
         assert min(lv.open_price for lv in ex.levels) >= Decimal("109")
+
+    asyncio.run(body())
+
+
+# ── audit round 3: a re-center must never be able to KILL the ladder ──
+# Probed: 4 re-centers whose cancels fail drove _guard's failure budget to
+# terminate the executor FAILED. _terminate() does not cancel resting orders, and
+# recenter returns early on is_terminated — so the ladder never re-quoted again
+# even after the venue recovered, reproducing the exact stale-quote symptom this
+# branch exists to fix. A re-center is OPPORTUNISTIC: it retries next cycle, so a
+# transient cancel failure must cost nothing beyond that round.
+
+def test_repeated_recenter_cancel_failures_do_not_kill_the_ladder():
+    from src.nadobro.engine.executors.grid_executor import GridExecutor
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+
+        adapter.fail_on = {"cancel_order"}
+        adapter.fail_remaining = 999
+        for i in range(4):
+            await ex.recenter(Decimal(105 + i), Decimal(106 + i))
+
+        assert not ex.is_terminated, (
+            f"the ladder was terminated ({ex.close_type}) by transient re-center "
+            f"cancel failures — it can never re-quote again, which IS the original "
+            f"stale-quote bug"
+        )
+
+    asyncio.run(body())
+
+
+def test_the_ladder_requotes_once_the_venue_recovers():
+    from src.nadobro.engine.executors.grid_executor import GridExecutor
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+        original = sorted(lv.open_price for lv in ex.levels)
+
+        adapter.fail_on = {"cancel_order"}
+        adapter.fail_remaining = 999
+        for i in range(4):
+            await ex.recenter(Decimal(105 + i), Decimal(106 + i))
+
+        adapter.fail_on = set()
+        adapter.fail_remaining = 0
+        placed_before = len(adapter.placed)
+        await ex.recenter(Decimal("109"), Decimal("110"))
+
+        assert len(adapter.placed) > placed_before, (
+            "the ladder did not re-quote after the venue recovered"
+        )
+        assert sorted(lv.open_price for lv in ex.levels) != original, (
+            "quotes are still at their original prices after recovery"
+        )
+        assert min(lv.open_price for lv in ex.levels) >= Decimal("109")
+
+    asyncio.run(body())
+
+
+def test_a_failed_status_probe_keeps_the_level_instead_of_discarding_a_fill():
+    """AUDIT round 4: the cancel path failed CLOSED but the status probe failed
+    OPEN. The cancel succeeded, so the order is off the book — but an unknown
+    amount may have FILLED first. Freeing the slot re-quotes it as empty and the
+    held base never gets a close leg, so the real position drifts from the ladder's
+    view of it."""
+    from src.nadobro.engine.executors.grid_executor import GridExecutor, GridLevelState
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("99.5"), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        ex = GridExecutor(_recenter_cfg(), user_id=1, controller_id="G",
+                          adapter=adapter, inventory=InventoryRepository())
+        await orch.spawn(ex)
+        before = {lv.open_order_id for lv in ex.levels
+                  if lv.state is GridLevelState.OPEN_ORDER_PLACED}
+        assert before
+
+        # Cancels succeed; the STATUS probe blows up (a 429 / transient blip).
+        adapter.fail_on = {"order_status"}
+        adapter.fail_remaining = 99
+        await ex.recenter(Decimal("109"), Decimal("110"))
+
+        tracked = {lv.open_order_id for lv in ex.levels if lv.open_order_id}
+        assert before <= tracked, (
+            "a level whose fill state is UNKNOWN was freed and re-quoted — any "
+            "partial fill on it is now unaccounted for"
+        )
 
     asyncio.run(body())

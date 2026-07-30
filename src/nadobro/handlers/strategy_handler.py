@@ -468,7 +468,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id not in supported:
             return
         network, settings = get_user_settings(telegram_id)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         context.user_data.pop(f"strategy_config_section:{strategy_id}", None)
         await _edit_loc(query, 
             _strategy_config_menu_text(strategy_id, conf, network),
@@ -484,7 +484,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         network, settings = get_user_settings(telegram_id)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         await _edit_loc(
             query,
             _strategy_config_section_text(strategy_id, conf, network, section),
@@ -523,7 +523,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 _replace_mm_preset(cfg, strategy_id, "turbo", turbo_cfg)
 
             network, settings = update_user_settings(telegram_id, _mutate_turbo)
-            conf = settings.get("strategies", {}).get(strategy_id, {})
+            conf = _conf_for_card(settings, strategy_id, context)
             section = "setup"
             context.user_data[f"strategy_config_section:{strategy_id}"] = section
             margin_t = float(conf.get("notional_usd", 100.0) or 0.0)
@@ -558,7 +558,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 _replace_mm_preset(cfg, strategy_id, "standard")
 
             network, settings = update_user_settings(telegram_id, _mutate_std)
-            conf = settings.get("strategies", {}).get(strategy_id, {})
+            conf = _conf_for_card(settings, strategy_id, context)
             section = "setup"
             context.user_data[f"strategy_config_section:{strategy_id}"] = section
             # Confirmation note so Standard is no longer a silent no-op: it clears
@@ -635,7 +635,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             )
 
         network, settings = update_user_settings(telegram_id, _mutate_tiny)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         section = "setup"
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         notional_after = collateral * float(target_lev)
@@ -795,7 +795,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 sync_cycle_notional_with_margin(strategies, strategy_id)
 
         network, settings = update_user_settings(telegram_id, _mutate)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         await _edit_loc(query, 
@@ -833,7 +833,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 cfg[field] = raw_value
 
         network, settings = update_user_settings(telegram_id, _mutate)
-        conf = settings.get("strategies", {}).get(strategy_id, {})
+        conf = _conf_for_card(settings, strategy_id, context)
         section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         await _edit_loc(query, 
@@ -1200,7 +1200,7 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
         drift_pct = float(conf.get("dn_max_drift_pct", 5.0) or 5.0)
         extra = (
             "Hedge model: *Spot long \\+ 1x perp short* \\(BTC, ETH, QQQ, SPY…\\)\n"
-            f"Size \\(per leg\\): *{escape_md(f'${leg_size:,.0f}')}* · "
+            f"Size \\(per leg\\): {_leg_size_display(leg_size, str(conf.get('product') or ''), network)} · "
             f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* · Cycles: *{escape_md(str(cycles))}*\n"
             f"Hedge drift gate: *{escape_md(f'{drift_pct:.1f}%')}*\n"
             f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
@@ -1209,12 +1209,18 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
 
 
 def _strategy_config_default_section(strategy: str) -> str:
-    return "direction" if strategy == "vol" else "setup"
+    return "risk" if strategy == "vol" else "setup"
 
 
 def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
     if strategy == "vol":
-        return [("direction", "🎯 Direction"), ("risk", "🛡 TP / SL")]
+        # NO Direction tab. Vol is spot-only, and bot_runtime FORCE-SETS
+        # vol_direction="long" for a spot market (bot_runtime.py:1089), so a
+        # SHORT the user picked could never be honoured — the card would have
+        # claimed SHORT while every run bought spot. Audit round 3: an
+        # unhonourable control is worse than no control. Re-add this tab only
+        # together with a vol market that can actually run short.
+        return [("risk", "🛡 TP / SL")]
     if strategy == "grid":
         return [("setup", "⚙️ Core"), ("execution", "📐 Spread"), ("risk", "🛡 Risk")]
     if strategy == "rgrid":
@@ -1232,7 +1238,7 @@ def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
 
 def _strategy_section_for_field(strategy: str, field: str) -> str:
     if strategy == "vol":
-        return "direction" if field == "vol_direction" else "risk"
+        return "risk"
     if strategy == "grid":
         if field in {"min_spread_bp", "max_spread_bp"}:
             return "execution"
@@ -1324,21 +1330,67 @@ def _mm_sizing_line(conf: dict) -> str:
     )
 
 
+def _conf_for_card(settings: dict, strategy_id: str, context) -> dict:
+    """The strategy's stored config PLUS the product the user has selected.
+
+    ``settings["strategies"][sid]`` has no "product" key — the chosen asset lives
+    in ``context.user_data["strategy_pair:<sid>"]``, set during preview. The cards
+    were passing ``conf.get('product')`` to ``_leg_size_display``, which always hit
+    its `if not spot_base` early return, so the effective-size disclosure (the
+    venue exit floor raising a $100 leg to $115) was DEAD in every config card.
+    Audit round 3. This is a display-only overlay; it never mutates the stored dict.
+    """
+    conf = dict(settings.get("strategies", {}).get(strategy_id, {}) or {})
+    try:
+        sel = context.user_data.get(f"strategy_pair:{strategy_id}")
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(no context -> card falls back to the plain size)
+        sel = None
+    if sel:
+        conf.setdefault("product", str(sel).upper())
+    return conf
+
+
+def _leg_size_display(user_leg_usd: float, spot_base: str | None, network: str) -> str:
+    """Render the leg size, showing the EFFECTIVE size when the venue's exit
+    floor raises it.
+
+    SPOT-EXIT-GUARANTEE: a venue min NOTIONAL applies to the EXIT as well as the
+    entry, so a leg sized at the floor cannot be closed by a resting limit — fees
+    plus any adverse tick put the exit under it and the leg strands naked (kBTC's
+    $100 minimum against a ~$99 leg, prod 2026-07-28). engine_runtime raises such
+    a leg to min_notional x 1.15, so the card must not keep claiming the smaller
+    number the user typed. Cache-only lookup: a miss falls back to the plain
+    value rather than blocking the tap on a venue read.
+    """
+    plain = f"${user_leg_usd:,.0f}"
+    if not spot_base or user_leg_usd <= 0:
+        return escape_md(plain)
+    try:
+        from src.nadobro.venue.product_catalog import spot_min_notional_cached
+        from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+
+        floor = spot_min_notional_cached(spot_base, network)
+        effective = min_closeable_entry_notional(floor or 0.0)
+    except Exception:  # noqa: BLE001 - display only, never break the card
+        return escape_md(plain)
+    if effective <= user_leg_usd:
+        return escape_md(plain)
+    return (
+        f"{escape_md(plain)} → *{escape_md(f'${effective:,.0f}')}*"
+        f" {escape_md(f'(venue exit floor ${floor:,.0f})')}"
+    )
+
+
 def _strategy_config_section_text(strategy: str, conf: dict, network: str, section: str) -> str:
     if strategy == "vol":
         direction = "SHORT" if str(conf.get("vol_direction", "long")).lower() == "short" else "LONG"
         tp_pct = float(conf.get("tp_pct", 1.0))
         sl_pct = float(conf.get("sl_pct", 1.0))
-        if section == "direction":
-            return (
-                "⚙️ *Vol Bot · Direction*\n\n"
-                f"Mode: *{escape_md(network.upper())}*\n"
-                f"Current direction: *{escape_md(direction)}*\n\n"
-                "Pick the side you want the volume loop to favor\\."
-            )
+        _vol_margin = float(conf.get("session_margin_usd", conf.get("notional_usd", 100.0)) or 100.0)
         return (
             "⚙️ *Vol Bot · TP / SL*\n\n"
-            f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n\n"
+            f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n"
+            f"Margin per cycle: {_leg_size_display(_vol_margin, str(conf.get('product') or ''), network)}\n\n"
             "Choose quick presets or set custom values\\."
         )
 
@@ -1495,7 +1547,8 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             )
         return (
             "⚙️ *Delta Neutral · Core*\n\n"
-            f"Size \\(per leg\\): *{escape_md(f'${leg_size:,.0f}')}* \\| Short: *1x*\n"
+            f"Size \\(per leg\\): {_leg_size_display(leg_size, str(conf.get('product') or ''), network)}"
+            f" \\| Short: *1x*\n"
             f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* \\| Cycles: *{escape_md(str(cycles))}*\n\n"
             "Buys spot \\+ 1x\\-shorts the perp, holds, then exits both legs together, repeated per cycle\\."
         )
@@ -1511,19 +1564,6 @@ def _strategy_config_section_kb(strategy: str, section: str):
         # vol_direction had no button anywhere in the codebase — the value was
         # validated ({"long","short"}) and consumed by bot_runtime, but nothing
         # could ever set it from the UI. Reported 2026-07-28.
-        if section == "direction":
-            return InlineKeyboardMarkup([
-                [
-                    # set_text, not set: `set` only accepts numeric fields and
-                    # explicitly rejects any vol field outside
-                    # {tp_pct, sl_pct, session_margin_usd, target_volume_usd}.
-                    InlineKeyboardButton(
-                        "📈 LONG", callback_data="strategy:set_text:vol:vol_direction:long"),
-                    InlineKeyboardButton(
-                        "📉 SHORT", callback_data="strategy:set_text:vol:vol_direction:short"),
-                ],
-                [InlineKeyboardButton("◀ Back", callback_data="strategy:config:vol")],
-            ])
         # Volume is spot-only as of 2026-05. The user-tunable params are:
         # session margin (per-cycle notional), stop loss %, target volume.
         rows = [
@@ -2622,7 +2662,10 @@ def _build_strategy_preview_text(
         f"• Balance: *{escape_md(_fmt_usd(available_margin))}*\n\n"
         "⚙️ *Current Settings*\n"
         f"• Market: *{escape_md(dn_market_label)}*\n"
-        f"• Size \\(per leg\\): *{escape_md(_fmt_usd(dn_leg_size))}*\n"
+        # Last screen before capital is committed — it must show the size that
+        # will ACTUALLY be deployed, not the one the user typed. See
+        # _leg_size_display / SPOT-EXIT-GUARANTEE.
+        f"• Size \\(per leg\\): {_leg_size_display(dn_leg_size, dn_spot_symbol, network)}\n"
         f"• Short Leverage: *1x* \\(fixed\\)\n"
         f"• Min hold: *{escape_md(dn_hold_label)}*\n"
         f"• Cycles: *{escape_md(dn_cycles_label)}*\n"

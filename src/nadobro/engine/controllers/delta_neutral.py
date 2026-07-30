@@ -36,6 +36,7 @@ import logging
 import time
 from decimal import Decimal
 from enum import Enum
+import inspect
 from typing import Optional
 
 from src.nadobro.engine.controllers.controller_base import Controller
@@ -157,6 +158,8 @@ class DeltaNeutralController(Controller):
         self._residual_ids: list[str] = []
         self._residual_attempts = 0
         self._residual_alerted = False
+        # False only while a CLOSING pass that never opened anything is in flight.
+        self._cycle_counts = True
         # User-facing execution events, drained by engine_runtime each tick
         # (same transport as the regime gate's pause/resume notifications).
         self._dn_events: list[dict] = []
@@ -173,6 +176,93 @@ class DeltaNeutralController(Controller):
         if self.inventory is None:
             return Decimal(0)
         return self.inventory.get(self.user_id, pair, self.id).net_amount_base
+
+    async def _account_net_base(self, pair: str) -> Decimal:
+        """Exposure on ``pair`` for the ADMISSION decision (may I open?).
+
+        Venue when readable, else the book. NO attribution cap: refusing to open
+        is always safe, so here we want the most pessimistic view available.
+        """
+        book = self._net_base(pair)
+        try:
+            venue = await self.adapter.held_base(pair)
+        except Exception as exc:  # noqa: BLE001  # policy: degrade-ok(fall back to the book; a failed read must not look flat)
+            logger.warning("delta_neutral: held_base failed on %s: %s", pair, exc)
+            return book
+        return book if venue is None else _dec(venue)
+
+    async def _sweepable_net_base(self, pair: str) -> tuple[Decimal, Decimal]:
+        """``(sweepable, unattributable)`` base on ``pair`` for the SWEEP.
+
+        AUDIT round 4 — this replaces a rule that was worse than the bug it fixed.
+        The previous version returned ``max(|venue|, |book|)`` capped at the
+        controller's GROSS buys, which produced two catastrophic behaviours:
+
+        * AN UNBOUNDED OSCILLATOR. The sweep's own fills are written back into the
+          same inventory the rule reads, so every sweep flipped which side was
+          larger: sell -> venue flat / book net-short -> next tick trusts the book
+          and BUYS the same size back -> venue non-flat -> sell again. Probed at 12
+          ticks / 14 taker orders with the phase pinned in CLOSING and the cycle
+          never completing — roughly $90-300/day of pure fee burn, forever.
+        * SELLING THE USER'S OWN COINS. ``buy_amount_base`` is CUMULATIVE gross
+          buys, so after a clean round trip the book nets 0 while the cap still
+          equals a whole leg — any kBTC the user held for their own reasons was
+          claimed as DN residue and market-sold. Each sweep BUY then raised the
+          cap further, so it self-inflated.
+
+        The rule now: never take a max (that is what oscillated), and never sell
+        more than this controller's own NET un-sold base. Venue exposure beyond
+        that is returned separately as ``unattributable`` — we ALERT the user and
+        leave it alone rather than trading coins we cannot prove are ours.
+        """
+        book = self._net_base(pair)
+        try:
+            venue_raw = await self.adapter.held_base(pair)
+        except Exception as exc:  # noqa: BLE001  # policy: degrade-ok(book-only sweep; the alert path still covers a bad read)
+            logger.warning("delta_neutral: held_base failed on %s: %s", pair, exc)
+            return book, Decimal(0)
+        if venue_raw is None:
+            return book, Decimal(0)
+        venue = _dec(venue_raw)
+        if venue == 0:
+            return Decimal(0), Decimal(0)
+
+        # NET un-sold base this controller is accountable for. Perp exposure is
+        # position-scoped (it nets out on the venue), so only spot needs the cap.
+        if pair != self.long_pair:
+            return venue, Decimal(0)
+
+        # DN-ATTRIBUTION: prefer the PERSISTED per-session fills. The in-memory
+        # hold is not a reliable answer to "what did this session buy?" —
+        # EngineRuntime.start clears it for the controller id on every build, so a
+        # rebuilt controller saw 0 and declared a stranded leg FLAT; and in prod
+        # session 167 it recorded net-flat while the venue held ~$99 of spot. The
+        # trades_<network> rows for that session correctly show 0.0031 bought vs
+        # 0.00155 sold, so this can close a genuine orphan while still never
+        # reaching a balance the session did not buy.
+        owned: Optional[Decimal] = None
+        provider = self.cfg("session_fill_provider")
+        if callable(provider):
+            try:
+                result = provider(pair)
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is not None:
+                    owned = abs(_dec(result))
+            except Exception as exc:  # noqa: BLE001  # policy: degrade-ok(fall back to the in-memory book below)
+                logger.warning(
+                    "delta_neutral: session-fill attribution failed on %s: %s", pair, exc,
+                )
+        if owned is None:
+            if self.inventory is None:
+                return venue, Decimal(0)
+            hold = self.inventory.get(self.user_id, pair, self.id)
+            owned = abs(_dec(getattr(hold, "buy_amount_base", 0) or 0)
+                        - _dec(getattr(hold, "sell_amount_base", 0) or 0))
+        if abs(venue) <= owned:
+            return venue, Decimal(0)
+        sign = Decimal(1) if venue > 0 else Decimal(-1)
+        return sign * owned, sign * (abs(venue) - owned)
 
     async def _safe_stop(self, executor_id: Optional[str], close_type: CloseType) -> bool:
         """Stop a leg without letting a venue hiccup strand the OTHER leg.
@@ -258,6 +348,72 @@ class DeltaNeutralController(Controller):
         per-leg quote/mid sizing let the spot and perp legs diverge enough to
         trip the drift gate on the first tick). Rolls the long back if the short
         can't spawn."""
+        # DN-DOUBLE-OPEN (prod session 167, 2026-07-28): a hedged strategy must
+        # NEVER stack a second pair on top of a live one. Two concurrent
+        # on_start calls (eager kickoff racing the scheduled cycle) each ran
+        # _open_cycle; the second overwrote long_id/short_id and orphaned the
+        # first pair's legs, leaving the user holding unhedged spot.
+        # The engine-level fix is the per-user cycle lock in
+        # engine_runtime.run_engine_cycle; this is the invariant that must hold
+        # even if a duplicate start arrives by any other route (worker handoff,
+        # FAILED-recovery rebuild, restart). Refuse to open onto a non-flat
+        # book — go CLOSING so the residual sweep flattens what is there first.
+        # ORDER MATTERS (audit round 3). A LIVE hedge is non-flat BY DEFINITION,
+        # so the venue check below always tripped first and MARKET-flattened a
+        # perfectly healthy pair on any duplicate start — turning the original
+        # double-open into a healthy-hedge teardown seconds after entry. The
+        # live-leg case must be a pure no-op, and it must restore HOLDING:
+        # _tick_waiting sets phase=OPENING before calling, and on_tick handles
+        # neither OPENING nor DONE, so a bare return would strand the controller.
+        for _leg_id in (self.long_id, self.short_id):
+            _live = self._ex(_leg_id)
+            if _live is not None and not _live.is_terminated:
+                logger.warning(
+                    "delta_neutral: duplicate open ignored — leg %s is still live; "
+                    "the existing hedge is left ALONE (controller=%s)",
+                    _leg_id, self.id,
+                )
+                self.phase = DNPhase.HOLDING
+                return
+
+        # Venue truth, not inventory: a leg stranded by an earlier run shows up
+        # in the balance/position feed even when the controller's book says flat.
+        # SAME FLATNESS RULE AS THE SWEEP (audit round 4). This used to refuse on
+        # any `!= 0` while _residuals_flat ignores anything under
+        # max($1, 0.2% of the leg) — so sub-dust the sweep would never act on made
+        # DN refuse to open, go CLOSING, read flat, return to WAITING and refuse
+        # again: a WAITING<->CLOSING spin on a fraction of a cent.
+        _existing = {}
+        _tol = self._residual_tolerance_quote()
+        for _p in (self.long_pair, self.short_pair):
+            _n = await self._account_net_base(_p)
+            if _n == 0:
+                continue
+            try:
+                _mid = await self.adapter.mid_price(_p)
+            except Exception:  # noqa: BLE001  # policy: degrade-ok(unpriceable -> treat as material and refuse, the safe side)
+                _existing[_p] = _n
+                continue
+            if abs(_n) * _mid > _tol:
+                _existing[_p] = _n
+        if _existing:
+            logger.warning(
+                "delta_neutral: refusing to open a second pair — the account is "
+                "already non-flat (%s). Flattening the residue first "
+                "(controller=%s)",
+                ", ".join(f"{p} {n}" for p, n in _existing.items()), self.id,
+            )
+            self._emit_dn(
+                "duplicate_open_blocked",
+                "a hedge was already open; flattening leftover exposure instead "
+                "of stacking a second position",
+            )
+            # A refused open never traded, so it must not count as a completed
+            # cycle — _tick_closing increments unconditionally, which at the
+            # default cycles=1 ended the whole run without ever hedging.
+            self._cycle_counts = False
+            await self._close_both_now(CloseType.EARLY_STOP)
+            return
         self.hedge_broken = False
         self.opened_at = None
 
@@ -476,8 +632,14 @@ class DeltaNeutralController(Controller):
         self._residual_ids = []
 
         residues: list[tuple[str, Decimal, Decimal]] = []  # (pair, net_base, value)
+        unattributable: list[str] = []
         for pair in (self.long_pair, self.short_pair):
-            net = self._net_base(pair)
+            net, orphan = await self._sweepable_net_base(pair)
+            if orphan != 0:
+                # Venue exposure this controller cannot prove it opened. We do NOT
+                # trade it — that is how the previous rule ended up market-selling
+                # the user's own coins. Tell them instead, with the exact size.
+                unattributable.append(f"{pair} {orphan}")
             if net == 0:
                 continue
             try:
@@ -487,7 +649,22 @@ class DeltaNeutralController(Controller):
             value = abs(net) * mid
             if value > self._residual_tolerance_quote():
                 residues.append((pair, net, value))
+        if unattributable and not self._residual_alerted:
+            self._residual_alerted = True
+            detail = "; ".join(unattributable)
+            logger.warning(
+                "delta_neutral: venue exposure NOT attributable to this hedge (%s) "
+                "— alerting instead of selling it (controller=%s)", detail, self.id,
+            )
+            self._emit_dn(
+                "residual_exposure",
+                f"exposure this hedge cannot account for is still open ({detail}). "
+                f"It was NOT closed automatically — please review it.",
+            )
         if not residues:
+            # Unattributable exposure must not spin CLOSING forever: the user has
+            # been told, so the cycle is allowed to finalize. Sweeping it would
+            # mean trading coins we cannot prove are ours.
             return True
 
         if self._residual_attempts >= 3:
@@ -666,7 +843,14 @@ class DeltaNeutralController(Controller):
         #    reduce-only MARKET orders before the cycle may count as done.
         if not await self._residuals_flat():
             return
-        self.cycles_completed += 1
+        if self._cycle_counts:
+            self.cycles_completed += 1
+        else:
+            logger.info(
+                "delta_neutral: CLOSING entered without an open (duplicate blocked) "
+                "— not counting a cycle (controller=%s)", self.id,
+            )
+        self._cycle_counts = True
         # Settle funding earned so far before clearing the cycle. Funding is
         # indexed with a lag, so this may lag the true total until the venue
         # settles; the PnL card also reads the synced funding feed independently.

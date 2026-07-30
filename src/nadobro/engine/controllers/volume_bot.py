@@ -101,7 +101,7 @@ class VolumeBotController(Controller):
         # Maker-first deadline: a leg unfilled this long is finished with a
         # marketable LIMIT priced ``cross_slippage_bp`` through the touch.
         # 0 disables crossing (pure maker mode).
-        self.cross_after_seconds = float(self.cfg("vol_cross_after_seconds", 75.0) or 0.0)
+        self.cross_after_seconds = float(self.cfg("vol_cross_after_seconds", 25.0) or 0.0)
         self.cross_slippage_bp = _non_negative_decimal(
             self.cfg("vol_cross_slippage_bp", 15.0)
         )
