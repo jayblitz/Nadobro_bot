@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nadobro — Telegram-native trading intelligence for Nado on Ink.">
+  <title>Nadobro — Trade with Bro</title>
+  <style>
+    :root {
+      --page: #07111a;
+      --panel: #0c1a28;
+      --raised: #122439;
+      --text: #fff;
+      --body: #bcc4d0;
+      --meta: #7c8aa0;
+      --line: rgba(41, 215, 230, .2);
+      --line-soft: rgba(41, 215, 230, .09);
+      --glass: rgba(12, 26, 40, .76);
+      --glass-strong: rgba(18, 36, 57, .91);
+      --primary: #44ee94;
+      --primary-ink: #07111a;
+      --cyan: #29d7e6;
+      --signal: #44ee94;
+    }
+
+    html[data-theme="light"] {
+      --page: #eaf4fa;
+      --panel: #fff;
+      --raised: #f3f9fc;
+      --text: #072b52;
+      --body: #345a78;
+      --meta: #647f96;
+      --line: rgba(13, 79, 139, .19);
+      --line-soft: rgba(13, 79, 139, .09);
+      --glass: rgba(255, 255, 255, .76);
+      --glass-strong: rgba(255, 255, 255, .91);
+      --primary: #0d4f8b;
+      --primary-ink: #fff;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      overflow-x: hidden;
+      background: var(--page);
+      color: var(--text);
+      font-family: "Arial Narrow", "Aptos Narrow", Arial, sans-serif;
+      transition: background 280ms ease, color 280ms ease;
+    }
+    a { color: inherit; }
+    .wrap { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
+    .liquid {
+      background: var(--glass);
+      border: 1px solid var(--line);
+      backdrop-filter: blur(22px) saturate(135%);
+      -webkit-backdrop-filter: blur(22px) saturate(135%);
+    }
+
+    .nav-shell {
+      position: fixed;
+      z-index: 50;
+      top: 18px;
+      left: 0;
+      right: 0;
+      pointer-events: none;
+    }
+    nav {
+      pointer-events: auto;
+      width: min(1120px, calc(100% - 36px));
+      height: 62px;
+      margin: 0 auto;
+      padding: 8px 10px 8px 14px;
+      border-radius: 17px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand { display: flex; align-items: center; gap: 7px; text-decoration: none; }
+    .logo-crop { width: 43px; height: 43px; overflow: hidden; display: grid; place-items: center; border-radius: 10px; }
+    .logo-crop img { width: 72px; height: 72px; max-width: none; object-fit: contain; transition: transform 240ms cubic-bezier(.2,.8,.2,1); }
+    .brand:hover img { transform: rotate(-6deg) scale(1.08); }
+    .brand-name { font: 900 15px/1 Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif; letter-spacing: .18em; }
+    .nav-links { display: flex; align-items: center; gap: 28px; }
+    .nav-links a {
+      color: var(--body);
+      text-decoration: none;
+      font: 700 10px/1 "Courier New", monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      transition: color 160ms ease;
+    }
+    .nav-links a:hover { color: var(--cyan); }
+    .nav-actions { display: flex; align-items: center; gap: 8px; }
+    .theme-toggle {
+      width: 38px;
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--glass-strong);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      transition: transform 160ms ease, border-color 160ms ease;
+    }
+    .theme-toggle:hover { transform: translateY(-2px) rotate(4deg); border-color: var(--cyan); }
+    .button {
+      min-height: 42px;
+      padding: 0 17px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      color: var(--text);
+      text-decoration: none;
+      font: 700 10px/1 "Courier New", monospace;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      transition: transform 160ms ease, border-color 160ms ease;
+    }
+    .button:hover { transform: translateY(-3px); border-color: var(--cyan); }
+    .button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); }
+    .button svg { transition: transform 160ms ease; }
+    .button:hover svg { transform: translateX(3px); }
+
+    .hero {
+      position: relative;
+      min-height: 860px;
+      padding: 144px 0 90px;
+      display: flex;
+      align-items: center;
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      width: min(62vw, 760px);
+      aspect-ratio: 1;
+      right: -24vw;
+      top: 60px;
+      border: 1px solid var(--line-soft);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .hero-grid { position: relative; z-index: 2; display: grid; grid-template-columns: .92fr 1.08fr; gap: 54px; align-items: center; }
+    .kicker {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+      color: var(--cyan);
+      font: 700 10px/1 "Courier New", monospace;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .kicker::before { content: ""; width: 32px; height: 1px; background: currentColor; }
+    h1 { margin: 0; text-transform: uppercase; }
+    .title-one {
+      display: block;
+      font: 900 clamp(82px, 9.5vw, 148px)/.72 Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+      letter-spacing: -.055em;
+    }
+    .title-two {
+      display: block;
+      margin: .18em 0 0 .72em;
+      color: transparent;
+      -webkit-text-stroke: 1.5px var(--text);
+      font: italic 700 clamp(45px, 5.3vw, 82px)/.82 Georgia, "Times New Roman", serif;
+      letter-spacing: -.055em;
+      transform: skewX(-8deg);
+    }
+    .hero-copy { max-width: 530px; margin: 36px 0 28px; color: var(--body); font-size: 18px; line-height: 1.55; }
+    .hero-copy strong { color: var(--text); font-weight: 800; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    .proof { display: flex; flex-wrap: wrap; gap: 17px; margin-top: 28px; color: var(--meta); font: 700 9px/1.2 "Courier New", monospace; letter-spacing: .11em; text-transform: uppercase; }
+    .proof span { display: flex; align-items: center; gap: 7px; }
+    .proof span::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--signal); }
+
+    .visual { position: relative; min-height: 630px; perspective: 1000px; }
+    .mascot {
+      position: absolute;
+      z-index: 2;
+      top: -28px;
+      right: -20px;
+      width: 405px;
+      height: 405px;
+      object-fit: contain;
+      transform-origin: center bottom;
+      animation: breathe 5s cubic-bezier(.2,.8,.2,1) infinite;
+    }
+    .terminal {
+      position: absolute;
+      z-index: 4;
+      left: -12px;
+      bottom: 16px;
+      width: min(520px, 94%);
+      overflow: hidden;
+      border-radius: 24px 24px 10px 24px;
+      transform: rotateY(-4deg) rotateX(2deg);
+      transition: transform 320ms cubic-bezier(.2,.8,.2,1), border-color 180ms ease;
+    }
+    .visual:hover .terminal { transform: translateY(-8px) rotateY(0) rotateX(0); border-color: var(--cyan); }
+    .terminal-head {
+      height: 46px;
+      padding: 0 17px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      background: var(--glass-strong);
+      font: 700 9px/1 "Courier New", monospace;
+      letter-spacing: .13em;
+    }
+    .terminal-head span { display: flex; align-items: center; gap: 8px; }
+    .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--signal); animation: pulse 1.6s ease-in-out infinite; }
+    .terminal-head b { color: var(--meta); }
+    .terminal-body { padding: 16px; }
+    .prompt {
+      min-height: 50px;
+      padding: 0 13px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--glass-strong);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--body);
+      font: 700 11px/1.3 "Courier New", monospace;
+    }
+    .prompt b { color: var(--cyan); }
+    .caret { width: 6px; height: 15px; background: var(--signal); animation: blink 1s steps(1) infinite; }
+    .intent { display: flex; align-items: center; justify-content: space-between; padding: 18px 2px 12px; }
+    .intent > span { display: flex; flex-direction: column; gap: 5px; }
+    .intent small { color: var(--meta); font: 700 8px/1 "Courier New", monospace; letter-spacing: .14em; }
+    .intent strong { font: 900 16px/1 Impact, Haettenschweiler, sans-serif; letter-spacing: .08em; }
+    .status { padding: 7px 10px; border-radius: 999px; color: var(--signal); background: rgba(68, 238, 148, .1); font: 700 8px/1 "Courier New", monospace; letter-spacing: .12em; }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+    .metrics span { padding: 11px 3px; color: var(--meta); font: 700 8px/1 "Courier New", monospace; letter-spacing: .09em; }
+    .metrics b { color: var(--text); margin-left: 5px; }
+    .chart { width: 100%; height: 94px; padding-top: 13px; overflow: visible; }
+    .chart-grid { fill: none; stroke: var(--line-soft); stroke-width: 1; }
+    .price-line { fill: none; stroke: var(--cyan); stroke-width: 2; stroke-dasharray: 700; animation: draw 3s ease-in-out infinite alternate; }
+    .fills { border-top: 1px solid var(--line-soft); }
+    .fills span { display: grid; grid-template-columns: 68px 1fr 60px 60px; gap: 7px; padding: 10px 2px; border-bottom: 1px solid var(--line-soft); font: 700 8px/1 "Courier New", monospace; }
+    .fills i { color: var(--meta); font-style: normal; }
+    .fills em { color: var(--signal); font-style: normal; }
+    .fills strong { text-align: right; }
+    .float-tag {
+      position: absolute;
+      z-index: 5;
+      right: -18px;
+      top: 270px;
+      padding: 12px 14px;
+      border-radius: 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      animation: float 4s ease-in-out infinite;
+    }
+    .float-tag small { color: var(--meta); font: 700 7px/1 "Courier New", monospace; letter-spacing: .13em; }
+    .float-tag strong { color: var(--signal); font: 700 13px/1 "Courier New", monospace; }
+    .ring { position: absolute; border: 1px solid var(--line-soft); border-radius: 50%; animation: spin 28s linear infinite; }
+    .ring.one { width: 520px; height: 520px; right: -20px; top: 40px; }
+    .ring.two { width: 380px; height: 380px; right: 50px; top: 110px; border-style: dashed; animation-direction: reverse; animation-duration: 20s; }
+
+    .tape { overflow: hidden; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--panel); }
+    .tape-track { display: flex; width: max-content; animation: marquee 24s linear infinite; }
+    .tape-copy { display: flex; }
+    .tape span { padding: 17px 28px; white-space: nowrap; color: var(--body); font: 700 10px/1 "Courier New", monospace; letter-spacing: .12em; }
+    .tape b { color: var(--cyan); margin-right: 14px; }
+
+    section.content { padding: 112px 0; }
+    .section-head { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: end; margin-bottom: 64px; }
+    .index { color: var(--cyan); font: 700 9px/1 "Courier New", monospace; letter-spacing: .16em; }
+    h2 { margin: 14px 0 0; text-transform: uppercase; font: 900 clamp(47px, 5.8vw, 78px)/.88 Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif; letter-spacing: -.035em; }
+    h2 em { color: var(--primary); font: italic 700 .76em/1 Georgia, serif; text-transform: none; }
+    .section-head p { margin: 0; max-width: 510px; color: var(--body); font-size: 16px; line-height: 1.65; }
+    .feature-grid { display: grid; grid-template-columns: repeat(2, 1fr); border-top: 1px solid var(--line); }
+    .feature { min-height: 250px; padding: 30px 34px 32px 0; border-bottom: 1px solid var(--line); transition: background 180ms ease, padding-top 180ms ease; }
+    .feature:nth-child(odd) { border-right: 1px solid var(--line); }
+    .feature:nth-child(even) { padding-left: 34px; }
+    .feature:hover { padding-top: 24px; background: var(--glass); }
+    .feature .num { color: var(--cyan); font: 700 9px/1 "Courier New", monospace; letter-spacing: .13em; }
+    .feature h3 { margin: 52px 0 13px; text-transform: uppercase; font: 900 23px/1 Impact, Haettenschweiler, sans-serif; letter-spacing: .045em; }
+    .feature p { margin: 0; max-width: 440px; color: var(--body); font-size: 14px; line-height: 1.65; }
+
+    .strategy-band { background: var(--panel); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .strategy-grid { display: grid; grid-template-columns: .78fr 1.22fr; gap: 86px; }
+    .sticky { position: sticky; top: 120px; align-self: start; }
+    .sticky p { max-width: 390px; color: var(--body); font-size: 15px; line-height: 1.65; }
+    .steps { position: relative; }
+    .steps::before { content: ""; position: absolute; top: 22px; bottom: 22px; left: 20px; width: 1px; background: var(--line); }
+    .step { position: relative; display: grid; grid-template-columns: 42px 1fr; gap: 24px; padding-bottom: 54px; }
+    .step:last-child { padding-bottom: 0; }
+    .step > i {
+      position: relative;
+      z-index: 2;
+      width: 42px;
+      height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--panel);
+      color: var(--cyan);
+      font: normal 700 9px/1 "Courier New", monospace;
+      transition: transform 160ms ease, border-color 160ms ease;
+    }
+    .step:hover > i { transform: scale(1.1); border-color: var(--cyan); }
+    .step h3 { margin: 3px 0 10px; text-transform: uppercase; font: 900 21px/1 Impact, Haettenschweiler, sans-serif; letter-spacing: .05em; }
+    .step p { margin: 0; max-width: 470px; color: var(--body); font-size: 14px; line-height: 1.65; }
+
+    .final { padding: 108px 0 28px; }
+    .final-box { position: relative; overflow: hidden; min-height: 480px; padding: 76px 64px; border: 1px solid var(--line); border-radius: 26px; background: var(--panel); }
+    .final-logo { position: absolute; right: -55px; bottom: -80px; width: 430px; height: 430px; object-fit: contain; opacity: .14; transform: rotate(-8deg); }
+    .final-box h2 { position: relative; z-index: 2; max-width: 760px; font-size: clamp(60px, 8vw, 106px); }
+    .final-box p { position: relative; z-index: 2; max-width: 510px; margin: 24px 0 28px; color: var(--body); font-size: 16px; line-height: 1.6; }
+    .final-actions { position: relative; z-index: 2; display: flex; flex-wrap: wrap; gap: 10px; }
+    footer { padding: 26px 0 38px; display: flex; justify-content: space-between; gap: 20px; color: var(--meta); font: 700 9px/1 "Courier New", monospace; letter-spacing: .11em; text-transform: uppercase; }
+    footer span:last-child { display: flex; gap: 20px; }
+    footer a { text-decoration: none; }
+    footer a:hover { color: var(--cyan); }
+    :focus-visible { outline: 2px solid var(--cyan); outline-offset: 4px; }
+
+    @keyframes breathe { 0%,100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-7px) rotate(1deg); } }
+    @keyframes pulse { 0%,100% { opacity: .45; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.25); } }
+    @keyframes blink { 0%,48% { opacity: 1; } 49%,100% { opacity: 0; } }
+    @keyframes draw { from { stroke-dashoffset: 700; } to { stroke-dashoffset: 0; } }
+    @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes marquee { to { transform: translateX(-50%); } }
+
+    @media (max-width: 930px) {
+      .nav-links { display: none; }
+      .hero-grid { grid-template-columns: 1fr; }
+      .hero { padding-top: 138px; }
+      .visual { min-height: 650px; }
+      .section-head, .strategy-grid { grid-template-columns: 1fr; }
+      .section-head { gap: 24px; }
+      .strategy-grid { gap: 58px; }
+      .sticky { position: static; }
+    }
+    @media (max-width: 640px) {
+      .wrap { width: calc(100% - 28px); }
+      nav { width: calc(100% - 24px); }
+      nav .button { display: none; }
+      .title-one { font-size: clamp(80px, 27vw, 112px); }
+      .title-two { margin-left: .3em; font-size: clamp(40px, 13vw, 60px); }
+      .hero-copy { font-size: 17px; }
+      .visual { min-height: 600px; }
+      .mascot { width: 310px; height: 310px; right: -26px; }
+      .terminal { left: 0; width: 100%; bottom: 0; transform: none; }
+      .visual:hover .terminal { transform: translateY(-5px); }
+      .float-tag { display: none; }
+      .ring.one { width: 360px; height: 360px; }
+      .ring.two { width: 260px; height: 260px; }
+      section.content { padding: 84px 0; }
+      .feature-grid { grid-template-columns: 1fr; }
+      .feature, .feature:nth-child(even) { padding-left: 0; border-right: 0; }
+      .final-box { min-height: 500px; padding: 58px 23px; }
+      footer { flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="nav-shell">
+    <nav class="liquid" aria-label="Primary navigation">
+      <a class="brand" href="#top" aria-label="Nadobro home">
+        <span class="logo-crop"><img src="../assets/logos/Nadobro Logo trans v2.png" alt=""></span>
+        <span class="brand-name">NADOBRO</span>
+      </a>
+      <div class="nav-links">
+        <a href="#edge">The edge</a>
+        <a href="#engine">Strategies</a>
+        <a href="https://nadobro.gitbook.io/docs" target="_blank" rel="noreferrer">Docs</a>
+      </div>
+      <div class="nav-actions">
+        <button class="theme-toggle" type="button" aria-label="Switch to light mode" title="Switch theme">
+          <svg aria-hidden="true" viewBox="0 0 20 20" width="16" height="16" fill="none">
+            <circle cx="10" cy="10" r="3.3" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.4 4.4l1.4 1.4M14.2 14.2l1.4 1.4M15.6 4.4l-1.4 1.4M5.8 14.2l-1.4 1.4" stroke="currentColor" stroke-width="1.4"/>
+          </svg>
+        </button>
+        <a class="button primary" href="https://t.me/Nadbro_bot" target="_blank" rel="noreferrer">
+          Open Telegram
+          <svg aria-hidden="true" viewBox="0 0 18 18" width="16" height="16" fill="none"><path d="M3 9h11M10 5l4 4-4 4" stroke="currentColor" stroke-width="1.5"/></svg>
+        </a>
+      </div>
+    </nav>
+  </div>
+
+  <header class="hero" id="top">
+    <div class="wrap hero-grid">
+      <div>
+        <div class="kicker">Telegram-native trading intelligence</div>
+        <h1><span class="title-one">TRADE</span><span class="title-two">with Bro.</span></h1>
+        <p class="hero-copy">Your trading buddy who happens to be a quant. <strong>Ask markets, place perp trades and run strategies</strong> on Nado—without leaving Telegram.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="https://t.me/Nadbro_bot" target="_blank" rel="noreferrer">
+            Start trading
+            <svg aria-hidden="true" viewBox="0 0 18 18" width="16" height="16" fill="none"><path d="M3 9h11M10 5l4 4-4 4" stroke="currentColor" stroke-width="1.5"/></svg>
+          </a>
+          <a class="button" href="https://nadobro.gitbook.io/docs" target="_blank" rel="noreferrer">Read the docs</a>
+        </div>
+        <div class="proof"><span>Secure 1CT signer</span><span>Live Nado context</span><span>Risk-managed automation</span></div>
+      </div>
+
+      <div class="visual">
+        <div class="ring one"></div>
+        <div class="ring two"></div>
+        <img class="mascot" src="../assets/mascots/nadobro_mascot_trans.png" alt="Nadobro trading mascot">
+        <div class="terminal liquid" aria-label="Illustrative Nadobro trade console">
+          <div class="terminal-head"><span><i class="live-dot"></i>BRO / TRADE INTENT</span><b>NADO · INK</b></div>
+          <div class="terminal-body">
+            <div class="prompt"><b>&gt;</b> long ETH 0.1 at 10x <i class="caret"></i></div>
+            <div class="intent">
+              <span><small>INTENT PARSED</small><strong>ETH-PERP / LONG</strong></span>
+              <b class="status">READY</b>
+            </div>
+            <div class="metrics"><span>SIZE <b>0.10 ETH</b></span><span>LEV <b>10×</b></span><span>TYPE <b>MARKET</b></span></div>
+            <svg class="chart" viewBox="0 0 480 100" preserveAspectRatio="none" aria-label="Illustrative ETH price trace">
+              <path class="chart-grid" d="M0 25h480M0 50h480M0 75h480M80 0v100M160 0v100M240 0v100M320 0v100M400 0v100"/>
+              <path class="price-line" d="M0 77 32 70 60 74 92 59 126 63 157 45 190 53 220 38 252 44 284 26 316 35 350 19 384 26 416 10 450 17 480 8"/>
+            </svg>
+            <div class="fills">
+              <span><i>09:41:02</i><b>ETH-PERP</b><em>LONG</em><strong>$2,400</strong></span>
+              <span><i>09:38:17</i><b>BTC-PERP</b><em>TP HIT</em><strong>+$184</strong></span>
+            </div>
+          </div>
+        </div>
+        <div class="float-tag liquid"><small>SESSION PNL</small><strong>+$184.20</strong></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="tape" aria-hidden="true">
+    <div class="tape-track">
+      <div class="tape-copy"><span><b>01</b>MARKET INTELLIGENCE</span><span><b>02</b>NATURAL-LANGUAGE TRADES</span><span><b>03</b>AUTOMATED STRATEGIES</span><span><b>04</b>LIVE PNL + ALERTS</span></div>
+      <div class="tape-copy"><span><b>01</b>MARKET INTELLIGENCE</span><span><b>02</b>NATURAL-LANGUAGE TRADES</span><span><b>03</b>AUTOMATED STRATEGIES</span><span><b>04</b>LIVE PNL + ALERTS</span></div>
+    </div>
+  </div>
+
+  <section class="content" id="edge">
+    <div class="wrap">
+      <div class="section-head">
+        <div><span class="index">01 / THE EDGE</span><h2>Your whole desk.<br><em>Inside chat.</em></h2></div>
+        <p>Nadobro brings market questions, execution, portfolio context, alerts and automated strategies into one Telegram-native command center.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature"><span class="num">01</span><h3>Speak the trade</h3><p>Type “long ETH 0.1 at 10x.” Nadobro parses the intent and presents a confirmation before execution.</p></article>
+        <article class="feature"><span class="num">02</span><h3>See the market</h3><p>Ask Trading Bro about live Nado context, positions, portfolio, funding and market conditions.</p></article>
+        <article class="feature"><span class="num">03</span><h3>Run the machine</h3><p>Grid, Reverse Grid, Dynamic Grid, Market Making, Volume and Delta Neutral strategies—inside Telegram.</p></article>
+        <article class="feature"><span class="num">04</span><h3>Keep control</h3><p>Use Nado’s encrypted 1CT trade signer. It can authorize trades, but it cannot withdraw from your account.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="content strategy-band" id="engine">
+    <div class="wrap strategy-grid">
+      <div class="sticky">
+        <span class="index">02 / ENGINE V2</span>
+        <h2>Set the rules.<br><em>Let it run.</em></h2>
+        <p>Maker-first strategies with visible controls, live status and session SL/TP rails judged net of fees.</p>
+      </div>
+      <div class="steps">
+        <article class="step"><i>01</i><div><h3>Grid / Reverse Grid</h3><p>Structured quoting across a price range, with direction chosen for the market you expect.</p></div></article>
+        <article class="step"><i>02</i><div><h3>Dynamic Grid</h3><p>A grid that adapts its operating range as market conditions change.</p></div></article>
+        <article class="step"><i>03</i><div><h3>Market Making / Volume</h3><p>Maker-first quoting and controlled participation built around explicit budgets and limits.</p></div></article>
+        <article class="step"><i>04</i><div><h3>Delta Neutral</h3><p>Automated exposure management for a more balanced directional profile.</p></div></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <div class="final-box">
+        <img class="final-logo" src="../assets/logos/Nadobro Logo trans v2.png" alt="">
+        <h2>Trade smarter.<br><em>Move faster.</em></h2>
+        <p>Open Nadobro in Telegram, link your Nado 1CT signer and take the shortest route from market question to managed position.</p>
+        <div class="final-actions">
+          <a class="button primary" href="https://t.me/Nadbro_bot" target="_blank" rel="noreferrer">Launch Nadobro</a>
+          <a class="button" href="https://x.com/Nadobro_" target="_blank" rel="noreferrer">Follow on X</a>
+        </div>
+      </div>
+      <footer>
+        <span>NADOBRO / BUILT FOR NADO ON INK</span>
+        <span><a href="https://x.com/Nadobro_" target="_blank" rel="noreferrer">X</a><a href="https://nadobro.gitbook.io/docs" target="_blank" rel="noreferrer">Docs</a><a href="https://t.me/Nadbro_bot" target="_blank" rel="noreferrer">Telegram</a></span>
+      </footer>
+    </div>
+  </section>
+
+  <script>
+    const root = document.documentElement;
+    const toggle = document.querySelector(".theme-toggle");
+    const savedTheme = localStorage.getItem("nadobro-theme");
+
+    if (savedTheme === "light" || savedTheme === "dark") {
+      root.dataset.theme = savedTheme;
+    }
+
+    function updateThemeLabel() {
+      const next = root.dataset.theme === "dark" ? "light" : "dark";
+      toggle.setAttribute("aria-label", `Switch to ${next} mode`);
+    }
+
+    toggle.addEventListener("click", () => {
+      root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+      localStorage.setItem("nadobro-theme", root.dataset.theme);
+      updateThemeLabel();
+    });
+
+    updateThemeLabel();
+  </script>
+</body>
+</html>
