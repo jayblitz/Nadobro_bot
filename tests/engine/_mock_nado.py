@@ -97,6 +97,10 @@ class MockNadoAdapter(NadoAdapterBase):
             order.state = OrderState.FILLED
         else:
             order.state = OrderState.PARTIALLY_FILLED
+        if order.trading_pair in self.venue_held:
+            _delta = _dec(amount) if order.side is TradeType.BUY else -_dec(amount)
+            self.venue_held[order.trading_pair] = _dec(
+                self.venue_held.get(order.trading_pair) or 0) + _delta
         fill = Fill(order.id, order.trading_pair, order.side, amount, price, fee, time.time())
         self._fill_events.append(fill)
         return fill
@@ -136,8 +140,14 @@ class MockNadoAdapter(NadoAdapterBase):
         return copy.copy(order)
 
     async def held_base(self, trading_pair: str):
+        """AUDIT round 4: this used to return a STATIC dict entry that fills never
+        mutated, so `venue` and `book` could never disagree in the direction that
+        triggered the DN sweep's sell/buy oscillator — the tests were structurally
+        incapable of seeing a critical defect. Now every fill moves it."""
         self._maybe_fail("held_base")
-        return self.venue_held.get(trading_pair)
+        if trading_pair not in self.venue_held:
+            return None
+        return _dec(self.venue_held.get(trading_pair) or 0)
 
     async def cancel_order(self, order_id: str) -> bool:
         self._maybe_fail("cancel_order")

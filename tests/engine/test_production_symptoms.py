@@ -15,6 +15,7 @@ from tests.engine._mock_nado import MockNadoAdapter
 
 from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
 from src.nadobro.engine.inventory import InventoryRepository
+from src.nadobro.engine.types import TradeType
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
 from src.nadobro.engine.routines import variance_regime as vr
 
@@ -165,31 +166,59 @@ def _dn(adapter, orch, inventory=None):
         configs=dict(_DN), controller_id="dn:1:mainnet")
 
 
-def test_symptom3_a_stranded_spot_leg_is_swept_not_left_naked():
-    """The exact session-167 state: the hold NETS flat (buy 0.00155 / sell 0.00155)
-    while the venue still holds 0.00155. The sweep must see the venue and sell."""
-    from src.nadobro.engine.types import TradeType
+def test_symptom3_a_stranded_spot_leg_is_SURFACED_not_silently_naked():
+    """SYMPTOM 3 — partially fixed, and the limit is stated on purpose.
 
+    Session 167 left net spot +0.00155 (~$99) unhedged while the perp was flat.
+    The engine hold recorded buy 0.00155 / sell 0.00155 — it NETS FLAT — so the
+    controller cannot prove that balance is its own.
+
+    Audit round 4 established that auto-selling it is NOT acceptable: the rule that
+    did so (max of venue/book, capped at GROSS buys) also market-sold balances the
+    user held for their own reasons, and oscillated sell/buy forever because the
+    sweep's own fills moved the book.
+
+    So the guarantee today is: exposure the hedge CAN attribute is swept; exposure
+    it CANNOT is reported to the user and left alone, and the account is refused a
+    new hedge while it is non-flat. The user is never silently naked, and we never
+    dispose of coins we cannot prove we bought.
+
+    TO FULLY CLOSE THIS: attribute residue from the PERSISTED per-session fills
+    (trades_<network>.strategy_session_id — which for session 167 correctly shows
+    spot buys 0.0031 vs sells 0.00155, i.e. net +0.00155) instead of the in-memory
+    hold that EngineRuntime.start() wipes on every build. Then the leg becomes
+    attributable and is swept automatically.
+    """
     async def body():
         adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
                                   venue_held={"BTC-USDT0": Decimal("0.00155"),
                                               "BTC-PERP": Decimal(0)})
         orch = ExecutorOrchestrator()
         inv = InventoryRepository()
-        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
-                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
-        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.SELL,
-                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        for side in (TradeType.BUY, TradeType.SELL):     # the real hold: nets flat
+            inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", side,
+                           Decimal("0.00155"), Decimal("63890"), Decimal(0))
         c = _dn(adapter, orch, inventory=inv)
         assert c._net_base("BTC-USDT0") == 0, "precondition: the book nets flat"
 
-        assert await c._residuals_flat() is False, (
-            "the venue holds ~$99 of spot and the controller still reads FLAT — "
-            "this is the naked-leg bug"
+        flat = await c._residuals_flat()
+
+        # 1) the user is TOLD, with the size
+        kinds = [e["kind"] for e in c.consume_dn_events()]
+        assert "residual_exposure" in kinds, (
+            "the venue holds ~$99 of spot the hedge cannot account for and the user "
+            "was never told — that is the silent naked leg from session 167"
         )
-        sells = [o for o in adapter.placed
-                 if o.trading_pair == "BTC-USDT0" and o.side is TradeType.SELL]
-        assert sells, "the stranded spot leg was never sold"
+        # 2) it is NOT sold, because it cannot be proven ours
+        assert not [o for o in adapter.placed if o.side is TradeType.SELL], (
+            "sold a balance the controller cannot attribute to itself"
+        )
+        # 3) and it does not spin CLOSING forever
+        assert flat is True
+
+        # 4) a fresh hedge must NOT be stacked on top of it
+        await c._open_cycle()
+        assert "duplicate_open_blocked" in [e["kind"] for e in c.consume_dn_events()]
 
     asyncio.run(body())
 
@@ -225,7 +254,7 @@ def test_symptom3_a_spot_exit_is_never_sized_above_the_balance():
     A close grown above the held balance is rejected and the leg stays naked."""
     from unittest.mock import patch
     from src.nadobro.engine.adapter.nado import NadoAdapter, ProductMeta
-    from src.nadobro.engine.types import OrderType, TradeType
+    from src.nadobro.engine.types import OrderType, TradeType, TradeType
 
     sent = []
 

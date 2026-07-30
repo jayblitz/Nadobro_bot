@@ -176,68 +176,67 @@ class DeltaNeutralController(Controller):
             return Decimal(0)
         return self.inventory.get(self.user_id, pair, self.id).net_amount_base
 
-    async def _venue_net_base(self, pair: str) -> Decimal:
-        """Exposure on ``pair`` per the VENUE, falling back to engine inventory.
+    async def _account_net_base(self, pair: str) -> Decimal:
+        """Exposure on ``pair`` for the ADMISSION decision (may I open?).
 
-        SPOT-RECONCILE (prod session 167, 2026-07-28). ``_residuals_flat`` used
-        engine inventory alone, and inventory is per-controller bookkeeping that
-        can be WRONG: the hold recorded BTC-USDT0 as 0.00155 bought / 0.00155
-        sold — flat — while the venue had filled 0.0031 and the user was left
-        holding ~$99 of unhedged spot. The sweep swept the perp (whose hold
-        happened to be right) and was blind to the spot leg.
-
-        The venue is the only authority on exposure. Inventory stays as the
-        fallback so a failed read cannot make a live leg look flat — and when the
-        two disagree we take the LARGER magnitude, because under-reporting
-        exposure is what leaves a user naked.
+        Venue when readable, else the book. NO attribution cap: refusing to open
+        is always safe, so here we want the most pessimistic view available.
         """
         book = self._net_base(pair)
         try:
             venue = await self.adapter.held_base(pair)
-        except Exception as exc:  # noqa: BLE001 - fall back to the book
+        except Exception as exc:  # noqa: BLE001  # policy: degrade-ok(fall back to the book; a failed read must not look flat)
             logger.warning("delta_neutral: held_base failed on %s: %s", pair, exc)
             return book
-        if venue is None:
-            return book
-        if abs(venue) <= abs(book):
-            return book
+        return book if venue is None else _dec(venue)
 
-        # AUDIT 2026-07-29 — NEVER SELL WHAT THIS CONTROLLER DID NOT BUY.
-        # For a SPOT pair held_base() returns the subaccount's ENTIRE balance of
-        # that token; there is no per-controller attribution on a spot balance.
-        # Preferring it outright meant a user's unrelated kBTC — bought manually or
-        # by another strategy — read as DN "residue" and would have been
-        # MARKET-SOLD. Cap the venue-derived figure at the gross base this
-        # controller has actually BOUGHT, so it can correct an under-reporting
-        # book (the session-167 failure: sells double-counted, net read 0) without
-        # ever reaching someone else's coins. Perp positions are position-scoped
-        # and net out, so they need no cap.
-        if pair == self.long_pair and self.inventory is not None:
-            hold = self.inventory.get(self.user_id, pair, self.id)
-            cap = abs(_dec(getattr(hold, "buy_amount_base", 0) or 0))
-            if cap <= 0:
-                logger.warning(
-                    "delta_neutral: venue shows %s on spot %s but this controller "
-                    "has bought nothing — NOT claiming it as residue (controller=%s)",
-                    venue, pair, self.id,
-                )
-                return book
-            if abs(venue) > cap:
-                sign = Decimal(1) if venue > 0 else Decimal(-1)
-                logger.warning(
-                    "delta_neutral: venue spot balance %s on %s exceeds this "
-                    "controller's gross buys %s — capping the sweep to its own "
-                    "exposure (controller=%s)",
-                    venue, pair, cap, self.id,
-                )
-                return sign * cap
-        if book == 0 and venue != 0:
-            logger.warning(
-                "delta_neutral: VENUE shows %s on %s while engine inventory "
-                "says flat — sweeping the venue's number (controller=%s)",
-                venue, pair, self.id,
-            )
-        return venue
+    async def _sweepable_net_base(self, pair: str) -> tuple[Decimal, Decimal]:
+        """``(sweepable, unattributable)`` base on ``pair`` for the SWEEP.
+
+        AUDIT round 4 — this replaces a rule that was worse than the bug it fixed.
+        The previous version returned ``max(|venue|, |book|)`` capped at the
+        controller's GROSS buys, which produced two catastrophic behaviours:
+
+        * AN UNBOUNDED OSCILLATOR. The sweep's own fills are written back into the
+          same inventory the rule reads, so every sweep flipped which side was
+          larger: sell -> venue flat / book net-short -> next tick trusts the book
+          and BUYS the same size back -> venue non-flat -> sell again. Probed at 12
+          ticks / 14 taker orders with the phase pinned in CLOSING and the cycle
+          never completing — roughly $90-300/day of pure fee burn, forever.
+        * SELLING THE USER'S OWN COINS. ``buy_amount_base`` is CUMULATIVE gross
+          buys, so after a clean round trip the book nets 0 while the cap still
+          equals a whole leg — any kBTC the user held for their own reasons was
+          claimed as DN residue and market-sold. Each sweep BUY then raised the
+          cap further, so it self-inflated.
+
+        The rule now: never take a max (that is what oscillated), and never sell
+        more than this controller's own NET un-sold base. Venue exposure beyond
+        that is returned separately as ``unattributable`` — we ALERT the user and
+        leave it alone rather than trading coins we cannot prove are ours.
+        """
+        book = self._net_base(pair)
+        try:
+            venue_raw = await self.adapter.held_base(pair)
+        except Exception as exc:  # noqa: BLE001  # policy: degrade-ok(book-only sweep; the alert path still covers a bad read)
+            logger.warning("delta_neutral: held_base failed on %s: %s", pair, exc)
+            return book, Decimal(0)
+        if venue_raw is None:
+            return book, Decimal(0)
+        venue = _dec(venue_raw)
+        if venue == 0:
+            return Decimal(0), Decimal(0)
+
+        # NET un-sold base this controller is accountable for. Perp exposure is
+        # position-scoped (it nets out on the venue), so only spot needs the cap.
+        if pair != self.long_pair or self.inventory is None:
+            return venue, Decimal(0)
+        hold = self.inventory.get(self.user_id, pair, self.id)
+        owned = abs(_dec(getattr(hold, "buy_amount_base", 0) or 0)
+                    - _dec(getattr(hold, "sell_amount_base", 0) or 0))
+        if abs(venue) <= owned:
+            return venue, Decimal(0)
+        sign = Decimal(1) if venue > 0 else Decimal(-1)
+        return sign * owned, sign * (abs(venue) - owned)
 
     async def _safe_stop(self, executor_id: Optional[str], close_type: CloseType) -> bool:
         """Stop a leg without letting a venue hiccup strand the OTHER leg.
@@ -355,7 +354,7 @@ class DeltaNeutralController(Controller):
         # in the balance/position feed even when the controller's book says flat.
         _existing = {}
         for _p in (self.long_pair, self.short_pair):
-            _n = await self._venue_net_base(_p)
+            _n = await self._account_net_base(_p)
             if _n != 0:
                 _existing[_p] = _n
         if _existing:
@@ -594,8 +593,14 @@ class DeltaNeutralController(Controller):
         self._residual_ids = []
 
         residues: list[tuple[str, Decimal, Decimal]] = []  # (pair, net_base, value)
+        unattributable: list[str] = []
         for pair in (self.long_pair, self.short_pair):
-            net = await self._venue_net_base(pair)
+            net, orphan = await self._sweepable_net_base(pair)
+            if orphan != 0:
+                # Venue exposure this controller cannot prove it opened. We do NOT
+                # trade it — that is how the previous rule ended up market-selling
+                # the user's own coins. Tell them instead, with the exact size.
+                unattributable.append(f"{pair} {orphan}")
             if net == 0:
                 continue
             try:
@@ -605,7 +610,22 @@ class DeltaNeutralController(Controller):
             value = abs(net) * mid
             if value > self._residual_tolerance_quote():
                 residues.append((pair, net, value))
+        if unattributable and not self._residual_alerted:
+            self._residual_alerted = True
+            detail = "; ".join(unattributable)
+            logger.warning(
+                "delta_neutral: venue exposure NOT attributable to this hedge (%s) "
+                "— alerting instead of selling it (controller=%s)", detail, self.id,
+            )
+            self._emit_dn(
+                "residual_exposure",
+                f"exposure this hedge cannot account for is still open ({detail}). "
+                f"It was NOT closed automatically — please review it.",
+            )
         if not residues:
+            # Unattributable exposure must not spin CLOSING forever: the user has
+            # been told, so the cycle is allowed to finalize. Sweeping it would
+            # mean trading coins we cannot prove are ours.
             return True
 
         if self._residual_attempts >= 3:

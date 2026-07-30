@@ -236,60 +236,7 @@ def _session_167_inventory():
     return inv
 
 
-def test_venue_exposure_is_swept_even_when_inventory_says_flat():
-    """THE reported damage: inventory flat, venue long, nothing swept."""
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
-                                  venue_held={"BTC-USDT0": Decimal("0.00155"),
-                                              "BTC-PERP": Decimal(0)})
-        orch = ExecutorOrchestrator()
-        c = _controller(adapter, orch, inventory=_session_167_inventory())
-        assert c._net_base("BTC-USDT0") == 0, "precondition: the book NETS to flat"
 
-        assert await c._residuals_flat() is False, (
-            "the venue holds 0.00155 spot — this must not read as flat"
-        )
-        sells = [o for o in adapter.placed
-                 if o.trading_pair == "BTC-USDT0" and o.side is TradeType.SELL]
-        assert sells, "the stranded spot leg was not swept"
-
-    asyncio.run(body())
-
-
-def test_an_unreadable_venue_falls_back_to_the_book_not_to_flat():
-    """A failed read must never be interpreted as 'no exposure'."""
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
-                                  venue_held={})       # None => unknown
-        orch = ExecutorOrchestrator()
-        inv = InventoryRepository()
-        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
-                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
-        c = _controller(adapter, orch, inventory=inv)
-
-        assert await c._venue_net_base("BTC-USDT0") == Decimal("0.00155"), (
-            "an unknown venue read must fall back to the book, not to zero"
-        )
-
-    asyncio.run(body())
-
-
-def test_the_larger_magnitude_wins_when_venue_and_book_disagree():
-    """Under-reporting exposure is what leaves a user naked."""
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal("63890"),
-                                  venue_held={"BTC-USDT0": Decimal("0.0031")})
-        orch = ExecutorOrchestrator()
-        inv = InventoryRepository()
-        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
-                       Decimal("0.0031"), Decimal("63890"), Decimal(0))
-        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.SELL,
-                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
-        c = _controller(adapter, orch, inventory=inv)
-        # book nets 0.00155, venue says 0.0031, gross buys 0.0031 -> venue wins.
-        assert await c._venue_net_base("BTC-USDT0") == Decimal("0.0031")
-
-    asyncio.run(body())
 
 
 def test_a_venue_stranded_leg_blocks_a_fresh_open():
@@ -306,48 +253,7 @@ def test_a_venue_stranded_leg_blocks_a_fresh_open():
     asyncio.run(body())
 
 
-def test_a_spot_balance_this_controller_never_bought_is_NEVER_sold():
-    """AUDIT 2026-07-29 — the worst possible outcome of a venue-truth sweep.
 
-    held_base() returns the subaccount's ENTIRE spot balance; there is no
-    per-controller attribution on a spot balance. If the user holds kBTC bought
-    manually or by another strategy, DN must not read it as its own residue and
-    MARKET-SELL it. The venue figure is capped at this controller's gross buys.
-    """
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
-                                  venue_held={"BTC-USDT0": Decimal("0.5")})
-        orch = ExecutorOrchestrator()
-        c = _controller(adapter, orch)          # this controller bought NOTHING
-        assert await c._venue_net_base("BTC-USDT0") == 0, (
-            "claimed 0.5 BTC of someone else's spot as its own residue"
-        )
-        assert await c._residuals_flat() is True
-        assert not [o for o in adapter.placed if o.side is TradeType.SELL], (
-            "market-sold a balance this controller never bought"
-        )
-
-    asyncio.run(body())
-
-
-def test_the_cap_limits_a_partial_orphan_to_our_own_buys():
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
-                                  venue_held={"BTC-USDT0": Decimal("0.5")})
-        orch = ExecutorOrchestrator()
-        c = _controller(adapter, orch, inventory=_session_167_inventory())
-        # We bought 0.00155 gross; the venue shows 0.5 (mostly the user's own).
-        assert await c._venue_net_base("BTC-USDT0") == Decimal("0.00155")
-
-    asyncio.run(body())
-
-
-# ── audit round 3 ───────────────────────────────────────────────
-# Round 2's guard checked the VENUE before the live-leg case. A live hedge is
-# non-flat by definition, so a duplicate start always took the flatten branch and
-# MARKET-closed a healthy pair seconds after entry — the original double-open had
-# been turned into a healthy-hedge teardown. And _tick_closing counts a cycle
-# unconditionally, so a refused open burned the run at the default cycles=1.
 
 def test_a_duplicate_start_leaves_a_healthy_hedge_completely_alone():
     async def body():
@@ -395,4 +301,108 @@ def test_a_refused_open_does_not_burn_a_cycle():
             "that ends the run without ever hedging"
         )
 
+    asyncio.run(body())
+
+# ── audit round 4: the sweep must CONVERGE and never trade foreign coins ──
+# The previous rule was max(|venue|, |book|) capped at GROSS buys. The sweep's own
+# fills mutate the book, so every sweep flipped which side was larger: sell ->
+# book net-short -> BUY back -> sell... 12 ticks / 14 taker orders in a probe, phase
+# pinned in CLOSING, cycle never completing. And because the cap was gross buys, a
+# balance the user held for their own reasons was claimed as DN residue and sold.
+
+def test_the_sweep_converges_and_does_not_ping_pong():
+    """THE oscillator regression. The mock's venue balance now tracks fills, so a
+    non-converging rule shows up as an unbounded order stream."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.00155"),
+                                              "BTC-PERP": Decimal(0)})
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        c = _controller(adapter, orch, inventory=inv)
+
+        for _ in range(12):
+            if await c._residuals_flat():
+                break
+        assert len(adapter.placed) <= 2, (
+            f"the sweep placed {len(adapter.placed)} orders for ONE residue — "
+            f"sell/buy oscillation: {[(o.side.name, str(o.amount_base)) for o in adapter.placed]}"
+        )
+        assert await c._residuals_flat() is True, "the sweep never converged"
+
+    asyncio.run(body())
+
+
+def test_a_balance_the_controller_cannot_account_for_is_alerted_not_sold():
+    """We never trade coins we cannot prove we opened — the user is told instead."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.5")})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch)          # this controller bought NOTHING
+        flat = await c._residuals_flat()
+
+        sells = [o for o in adapter.placed if o.side is TradeType.SELL]
+        assert not sells, f"market-sold {sells[0].amount_base} of someone else's coins"
+        kinds = [e["kind"] for e in c.consume_dn_events()]
+        assert "residual_exposure" in kinds, "unattributable exposure was silent"
+        assert flat is True, "must finalize after alerting, not spin in CLOSING"
+
+    asyncio.run(body())
+
+
+def test_the_cap_is_NET_unsold_base_not_gross_buys():
+    """Gross buys let the cap self-inflate: each sweep BUY raised it, so the
+    'protection' grew until it covered the user's entire balance."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"),
+                                  venue_held={"BTC-USDT0": Decimal("0.5")})
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        # A COMPLETED round trip: gross buys 0.00155, net un-sold 0.
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.SELL,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        c = _controller(adapter, orch, inventory=inv)
+
+        sweepable, orphan = await c._sweepable_net_base("BTC-USDT0")
+        assert sweepable == 0, (
+            f"claimed {sweepable} as sweepable after a completed round trip — "
+            f"gross-buys accounting would have claimed a whole leg of the user's coins"
+        )
+        assert orphan == Decimal("0.5")
+
+    asyncio.run(body())
+
+
+def test_an_unreadable_venue_falls_back_to_the_book():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), venue_held={})
+        orch = ExecutorOrchestrator()
+        inv = InventoryRepository()
+        inv.apply_fill(1, "BTC-USDT0", "dn:1:mainnet", TradeType.BUY,
+                       Decimal("0.00155"), Decimal("63890"), Decimal(0))
+        c = _controller(adapter, orch, inventory=inv)
+        assert await c._account_net_base("BTC-USDT0") == Decimal("0.00155")
+        sweepable, orphan = await c._sweepable_net_base("BTC-USDT0")
+        assert sweepable == Decimal("0.00155") and orphan == 0
+    asyncio.run(body())
+
+
+def test_the_admission_guard_sees_foreign_exposure_even_though_the_sweep_will_not_sell_it():
+    """Refusing to OPEN is always safe, so the guard is uncapped: it must never
+    stack a hedge on top of exposure the sweep is not allowed to clear."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal("63890"), auto_fill_market=True,
+                                  venue_held={"BTC-USDT0": Decimal("0.5")})
+        orch = ExecutorOrchestrator()
+        c = _controller(adapter, orch)          # no recorded buys
+        assert await c._account_net_base("BTC-USDT0") == Decimal("0.5")
+        await c._open_cycle()
+        assert "duplicate_open_blocked" in [e["kind"] for e in c.consume_dn_events()], (
+            "opened a hedge on top of a non-flat account"
+        )
     asyncio.run(body())
