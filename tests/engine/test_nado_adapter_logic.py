@@ -529,3 +529,78 @@ def test_a_spot_BUY_is_never_clamped():
             "S", TradeType.BUY, OrderType.MARKET, Decimal("0.00155"))
         assert float(c.market_calls[0]["size"]) == 0.00155
     asyncio.run(body())
+
+
+# ── held_base perp sign, against the REAL wrapper row shape ─────
+# Audit round 4 flagged this path as completely uncovered, and a sign error here
+# makes DN pick side=SELL to "close" a short — DOUBLING it. Grounded in the actual
+# Nado SDK: PerpBalance.amount is SIGNED (negative = short, x18). nado_client's
+# wrapper then normalizes that into a dict with "amount" = ABSOLUTE magnitude and
+# "signed_amount" = the signed value (nado_client.py:1784-1797), so held_base must
+# read the signed key — reading "amount" is what inverted the sweep side.
+
+class _PositionsClient(_FakeClient):
+    def __init__(self, rows):
+        super().__init__()
+        self.rows = rows
+
+    def get_all_positions(self):
+        return self.rows
+
+
+_PERP_META = {"P": ProductMeta(2, Decimal("1"), Decimal("0.00001"), Decimal(10),
+                              is_perp=True, isolated_only=False)}
+
+
+def _wrapper_row(signed):
+    """A row shaped exactly as NadoClient.get_all_positions emits."""
+    return {"product_id": 2, "product_name": "BTC-PERP",
+            "amount": abs(signed), "signed_amount": signed,
+            "price": 63890.0, "side": "LONG" if signed >= 0 else "SHORT"}
+
+
+def test_held_base_reports_a_perp_short_as_NEGATIVE():
+    async def body():
+        got = await NadoAdapter(_PositionsClient([_wrapper_row(-0.00155)]),
+                                _PERP_META).held_base("P")
+        assert got < 0, (
+            f"a SHORT read as {got}: the DN sweep derives its SIDE from this sign, "
+            f"so a positive value makes it SELL MORE to 'close' a short"
+        )
+        assert abs(float(got) + 0.00155) < 1e-12
+    asyncio.run(body())
+
+
+def test_held_base_reports_a_perp_long_as_POSITIVE():
+    async def body():
+        got = await NadoAdapter(_PositionsClient([_wrapper_row(0.00155)]),
+                                _PERP_META).held_base("P")
+        assert got > 0 and abs(float(got) - 0.00155) < 1e-12
+    asyncio.run(body())
+
+
+def test_held_base_derives_the_sign_from_side_when_only_a_magnitude_is_present():
+    """Older/partial rows carry an unsigned amount plus a side."""
+    async def body():
+        legacy = {"product_id": 2, "amount": 0.00155, "side": "SHORT", "price": 63890.0}
+        got = await NadoAdapter(_PositionsClient([legacy]), _PERP_META).held_base("P")
+        assert got is not None and got < 0
+    asyncio.run(body())
+
+
+def test_held_base_refuses_to_GUESS_an_unsigned_perp_row():
+    """No signed value and no usable side => UNKNOWN (None), never a guess. A wrong
+    guess here doubles a position; None makes the caller fall back safely."""
+    async def body():
+        blind = {"product_id": 2, "amount": 0.00155, "price": 63890.0}
+        got = await NadoAdapter(_PositionsClient([blind]), _PERP_META).held_base("P")
+        assert got is None
+    asyncio.run(body())
+
+
+def test_held_base_returns_zero_for_a_genuinely_flat_perp():
+    """Flat must be 0, not None — otherwise the DN guard can never conclude flat."""
+    async def body():
+        got = await NadoAdapter(_PositionsClient([]), _PERP_META).held_base("P")
+        assert got == Decimal(0)
+    asyncio.run(body())
