@@ -742,6 +742,9 @@ class PhantomFillPriceTests(unittest.TestCase):
         return calls[0][0], calls[0][1]
 
     def test_the_reported_phantom_price_row_is_resynced(self):
+        """Value check. NOTE: this pins the PARAMS, which the buggy SQL also
+        produced — the behavioural guard is
+        test_no_human_column_gates_its_own_update_on_its_current_value."""
         sql, params = self._enrich(recorder_size="0.00265", venue_base="0.00395",
                                    venue_quote="-250.18", venue_fee="0.05")
         # 250.18 / 0.00395 = 63,336.7… — NOT 250.18 / 0.00265 = 94,407.5
@@ -751,15 +754,35 @@ class PhantomFillPriceTests(unittest.TestCase):
         self.assertNotAlmostEqual(float(params[9]), 250.18 / 0.00265, places=0)
         self.assertAlmostEqual(float(params[7]), 0.00395, places=8)
 
-    def test_human_columns_are_no_longer_gated_on_being_zero(self):
-        """The exact code shape that caused it must not come back."""
+    def test_no_human_column_gates_its_own_update_on_its_current_value(self):
+        """The DEFECT CLASS, not one literal.
+
+        AUDIT: four of the five tests in this class originally asserted on the
+        PARAMS tuple — which is byte-identical before and after the fix, because
+        only the SQL's CASE *conditions* changed. Restoring the buggy SQL left
+        them all green. Verified by reverting nado_sync's four CASE expressions to
+        `COALESCE(col,0) = 0 AND %s > 0`: 4 passed, 1 failed.
+
+        The real property is that a human column's update must not depend on that
+        column's CURRENT value — a self-referential gate is exactly what let the
+        row keep a requested size while the x18 columns became the venue's fill.
+        """
         sql, _ = self._enrich(recorder_size="0.00265", venue_base="0.00395",
                               venue_quote="-250.18", venue_fee="0.05")
+        body = sql[sql.index("UPDATE"):sql.index("WHERE id")]
         for col in ("fill_size", "fill_price", "price", "fill_fee"):
+            # isolate `col = CASE ... END` (the assignment, not a mention elsewhere)
+            marker = f"{col} = CASE"
+            self.assertIn(marker, body, f"{col} is no longer updated at all")
+            expr = body[body.index(marker) + len(f"{col} = "):]
+            expr = expr[:expr.index(" END") + 4]
+            condition = expr[: expr.index(" THEN")]
             self.assertNotIn(
-                f"COALESCE({col}, 0) = 0", sql,
-                f"{col} is gated on being zero again — it can drift out of sync "
-                f"with the x18 columns overwritten in the same statement",
+                col, condition,
+                f"{col}'s update is gated on its OWN current value "
+                f"({condition.strip()}) — it can drift out of sync with the x18 "
+                f"columns overwritten in the same statement, which is the phantom "
+                f"94,408 price",
             )
 
     def test_fee_follows_the_venue_too(self):
