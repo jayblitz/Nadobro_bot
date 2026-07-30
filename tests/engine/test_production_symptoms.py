@@ -115,6 +115,23 @@ def test_symptom2_the_reported_notification_can_no_longer_contradict_itself():
 # booked a fake profit and stopped the run at a real $0.68.
 
 def test_symptom4_the_human_fill_columns_follow_the_venue_quote():
+    """SYMPTOM 4 — the $0.68 take-profit stop (phantom 94,408 fill price).
+
+    AUDIT round 4: this was the branch's only end-to-end proof of the fix, and it
+    was VACUOUS. It asserted on the params tuple, which is byte-identical before and
+    after the fix — only the SQL's CASE *conditions* changed. Reverting the four
+    CASE expressions left it green.
+
+    The real proof now lives in tests/services/test_nado_sync_enrich_db.py, which
+    runs the statement against a REAL Postgres row that already holds the phantom
+    price, so the ELSE branch is actually observed. Verified: with the buggy SQL
+    restored, 4 of its 5 tests FAIL (the mock-based ones passed).
+
+    What is left here is the part a mock CAN prove, stated honestly: the params the
+    enrich sends are derived from the VENUE quote and not from the recorder's
+    requested size. That is necessary but NOT sufficient — do not treat this as the
+    behavioural guard.
+    """
     from unittest.mock import patch
     from src.nadobro.venue import nado_sync
     from src.nadobro.utils.x18 import to_x18
@@ -139,18 +156,23 @@ def test_symptom4_the_human_fill_columns_follow_the_venue_quote():
     price = float(params[9])
     assert abs(price - 250.18 / 0.00395) < 0.01, price
     assert abs(price - 94408) > 1000, (
-        f"fill_price is still the phantom {price:,.0f} — the TP rail will keep "
-        f"booking fake profit and stopping runs early"
+        f"the params carry the phantom {price:,.0f} — priced off the REQUESTED size"
     )
 
+    # And the behavioural guard is reachable, so a future edit cannot quietly
+    # delete the only real proof.
+    import pathlib as _p
+    db_test = _p.Path("tests/services/test_nado_sync_enrich_db.py")
+    assert db_test.exists(), (
+        "the DB-backed enrich test is gone — without it nothing observes the "
+        "CASE/ELSE branch and this symptom has no real coverage"
+    )
+    body = db_test.read_text()
+    assert "test_the_phantom_price_is_overwritten_on_a_real_row" in body
 
-# ── SYMPTOM 3: the naked spot leg ───────────────────────────────
-# Session 167: DN ran 3m18s against a 1h hold and stopped hedge_broken. Net perp 0
-# (flat) but net spot +0.00155 (~$99) left UNHEDGED. Three things had to hold for
-# that: the hedge opened twice (a race), one spot sell closed only one pair, and
-# the residual sweep was blind because engine inventory said BTC-USDT0 was flat.
 
 _DN = {
+    # Session 167's shape: BTC spot long + BTC perp short, $99 a leg, 1h hold.
     "trading_pair_long": "BTC-USDT0", "trading_pair_short": "BTC-PERP",
     "trading_pair": "BTC-USDT0", "hedge_ratio": Decimal(1),
     "leg_amount_quote": Decimal(99), "hold_seconds": 3600, "cycles": 1,
