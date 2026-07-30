@@ -311,6 +311,8 @@ class NadoAdapter(NadoAdapterBase):
         # as a resting limit no matter what size we ask for — market orders are
         # not subject to the resting minimum (the DN $98.88 market sell did fill).
         if never_grow and not bool(meta.is_perp) and side is TradeType.SELL:
+            # (balance clamp is spot-only: a perp has no balance to clamp, and
+            # reduce_only already prevents a perp close from over-closing.)
             held = await self.held_base(trading_pair)
             if held is not None:
                 avail = abs(float(held))
@@ -346,21 +348,27 @@ class NadoAdapter(NadoAdapterBase):
                     )
                     amount = clamped
                     amount_base = clamped_d
-            # Only a RESTING order is subject to the venue minimum, so don't
-            # spend a mid_price gateway read on a close that already crosses.
+        # EXIT-MIN-NOTIONAL ESCAPE — applies to SPOT *and* PERP.
+        # A RESTING order below the venue minimum can never fill, and never_grow
+        # (correctly) forbids growing a close to reach the floor. Without an escape
+        # the exit is simply refused: audit round 4 found the perp path had none,
+        # so a sub-minimum reduce-only perp close retried 3x and terminated the
+        # executor FAILED with the position still open. Market orders are not
+        # subject to the resting minimum, and reduce_only means a market close
+        # cannot over-close, so crossing is the safe way out for both.
+        if never_grow and order_type is not OrderType.MARKET:
             _min_notional = float(meta.min_notional or 0)
-            _ref = 0.0
-            if order_type is not OrderType.MARKET and _min_notional > 0:
+            if _min_notional > 0:
                 _ref = float(price) if price else float(await self.mid_price(trading_pair))
-            if (order_type is not OrderType.MARKET and _min_notional > 0
-                    and _ref > 0 and amount * _ref < _min_notional):
-                logger.warning(
-                    "SPOT-EXIT market fallback %s: exit notional %.2f is under the "
-                    "venue minimum %.2f, so a resting limit can never fill — "
-                    "crossing instead of leaving the leg naked.",
-                    trading_pair, amount * _ref, _min_notional,
-                )
-                order_type = OrderType.MARKET
+                if _ref > 0 and amount * _ref < _min_notional:
+                    logger.warning(
+                        "EXIT-MIN-NOTIONAL %s (%s): exit notional %.2f is under the "
+                        "venue minimum %.2f, so a resting limit can never fill — "
+                        "crossing instead of stranding the position.",
+                        trading_pair, "perp" if meta.is_perp else "spot",
+                        amount * _ref, _min_notional,
+                    )
+                    order_type = OrderType.MARKET
 
         # Isolated-margin routing. Nado RWA perps are isolated-only: the order
         # must carry isolated_only=True and an isolated_margin amount or the
@@ -880,10 +888,20 @@ class NadoAdapter(NadoAdapterBase):
             for key, amount in balances.items():
                 try:
                     if int(key) == int(meta.product_id):
+                        # A PRESENT key with 0 is genuinely flat.
                         return _to_dec(amount)
                 except (TypeError, ValueError):
                     continue
-            return Decimal(0)
+            # ABSENT key = UNKNOWN, not flat (audit round 4). get_balance returns
+            # an entry for every product it saw — including explicit 0.0 — so a
+            # missing product means this snapshot cannot answer. Returning 0 here
+            # made the exit clamp raise "balance is 0 — nothing to sell" and refuse
+            # a legitimate close.
+            logger.warning(
+                "held_base: %s (product_id=%s) absent from the balance snapshot — "
+                "reporting UNKNOWN, not flat", trading_pair, meta.product_id,
+            )
+            return None
         except Exception as exc:  # noqa: BLE001 - unknown, NOT flat
             logger.warning("held_base read failed for %s: %s", trading_pair, exc)
             return None

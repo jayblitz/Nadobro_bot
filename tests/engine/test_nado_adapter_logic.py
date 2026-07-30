@@ -604,3 +604,68 @@ def test_held_base_returns_zero_for_a_genuinely_flat_perp():
         got = await NadoAdapter(_PositionsClient([]), _PERP_META).held_base("P")
         assert got == Decimal(0)
     asyncio.run(body())
+
+
+# ── audit round 4: the PERP exit had no escape, and an absent key read as flat ──
+
+def test_a_sub_minimum_PERP_close_crosses_instead_of_being_refused():
+    """The spot path got a MARKET fallback; the perp path did not — so a
+    sub-minimum reduce-only perp close was refused client-side, retried 3x and
+    terminated the executor FAILED with the position still OPEN."""
+    async def body():
+        c = _BalanceClient({})
+        perp = {"P": ProductMeta(2, Decimal("1"), Decimal("0.00001"), Decimal(100),
+                                 is_perp=True, isolated_only=False)}
+        await NadoAdapter(c, perp).place_order(
+            "P", TradeType.BUY, OrderType.LIMIT, Decimal("0.00155"),
+            price=Decimal("63890"), reduce_only=True)          # $99 < $100 min
+        assert c.market_calls and not c.limit_calls, (
+            "the perp exit stayed a resting limit below the venue minimum — it can "
+            "never fill, so the position is stranded"
+        )
+    asyncio.run(body())
+
+
+def test_a_perp_close_above_the_minimum_stays_a_limit():
+    async def body():
+        c = _BalanceClient({})
+        perp = {"P": ProductMeta(2, Decimal("1"), Decimal("0.00001"), Decimal(100),
+                                 is_perp=True, isolated_only=False)}
+        await NadoAdapter(c, perp).place_order(
+            "P", TradeType.BUY, OrderType.LIMIT, Decimal("0.01"),
+            price=Decimal("63890"), reduce_only=True)
+        assert c.limit_calls and not c.market_calls
+    asyncio.run(body())
+
+
+def test_an_OPENING_perp_order_below_the_minimum_is_left_alone():
+    """The escape is exit-only — an open must still go to the client, which bumps
+    it to the floor."""
+    async def body():
+        c = _BalanceClient({})
+        perp = {"P": ProductMeta(2, Decimal("1"), Decimal("0.00001"), Decimal(100),
+                                 is_perp=True, isolated_only=False)}
+        await NadoAdapter(c, perp).place_order(
+            "P", TradeType.SELL, OrderType.LIMIT, Decimal("0.00155"),
+            price=Decimal("63890"))
+        assert c.limit_calls and not c.market_calls
+    asyncio.run(body())
+
+
+def test_a_product_absent_from_the_balance_snapshot_is_UNKNOWN_not_flat():
+    """get_balance returns an entry for every product it saw — including explicit
+    0.0 — so a MISSING product means the snapshot cannot answer. Returning 0 made
+    the exit clamp raise 'balance is 0 — nothing to sell' and refuse a real close."""
+    async def body():
+        c = _BalanceClient({0: 164.48, 3: 0.0})        # product 1 absent
+        got = await NadoAdapter(c, _SPOT).held_base("S")
+        assert got is None, f"absent product read as {got} — that blocks the exit"
+    asyncio.run(body())
+
+
+def test_a_present_zero_balance_IS_flat():
+    """Only an explicit zero for a PRESENT key justifies concluding flat."""
+    async def body():
+        c = _BalanceClient({1: 0.0})
+        assert await NadoAdapter(c, _SPOT).held_base("S") == Decimal(0)
+    asyncio.run(body())

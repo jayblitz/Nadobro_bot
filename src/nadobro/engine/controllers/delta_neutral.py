@@ -378,10 +378,23 @@ class DeltaNeutralController(Controller):
 
         # Venue truth, not inventory: a leg stranded by an earlier run shows up
         # in the balance/position feed even when the controller's book says flat.
+        # SAME FLATNESS RULE AS THE SWEEP (audit round 4). This used to refuse on
+        # any `!= 0` while _residuals_flat ignores anything under
+        # max($1, 0.2% of the leg) — so sub-dust the sweep would never act on made
+        # DN refuse to open, go CLOSING, read flat, return to WAITING and refuse
+        # again: a WAITING<->CLOSING spin on a fraction of a cent.
         _existing = {}
+        _tol = self._residual_tolerance_quote()
         for _p in (self.long_pair, self.short_pair):
             _n = await self._account_net_base(_p)
-            if _n != 0:
+            if _n == 0:
+                continue
+            try:
+                _mid = await self.adapter.mid_price(_p)
+            except Exception:  # noqa: BLE001  # policy: degrade-ok(unpriceable -> treat as material and refuse, the safe side)
+                _existing[_p] = _n
+                continue
+            if abs(_n) * _mid > _tol:
                 _existing[_p] = _n
         if _existing:
             logger.warning(

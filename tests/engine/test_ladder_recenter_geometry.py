@@ -150,14 +150,21 @@ def test_recenter_is_not_starved_by_an_unconfirmed_phase_flip():
     """Re-center used to live in the `else` of `if flip_needed:`.
 
     dgrid needs 2 consecutive ticks to confirm a regime change, so on every tick
-    where the classifier disagreed with the live phase the ladder ALSO skipped
-    its re-center — it froze during exactly the moves big enough to shift the
-    regime read.
+    where the classifier disagreed with the live phase the ladder ALSO skipped its
+    re-center — it froze during exactly the moves big enough to shift the regime
+    read.
+
+    AUDIT round 4: the original version of this test never actually produced an
+    unconfirmed flip, and it wrapped its assertion in `if live[0] is ex:` so it
+    could pass by asserting nothing. It now asserts the precondition explicitly
+    (_phase_confirm_streak == 1, i.e. a flip IS pending) and has no escape hatch.
     """
     async def body():
         adapter = MockNadoAdapter(mid=Decimal("63373.5"))
         orch = ExecutorOrchestrator()
-        trending = [{"close": 63300 + i * 3} for i in range(200)]
+        # A decisive DOWNTREND makes the classifier want RGRID while the live
+        # phase is GRID; with flip_confirm_ticks=2 tick 1 leaves the flip PENDING.
+        downtrend = [{"close": 64000 - i * 25} for i in range(200)]
         c = DynamicGridController(
             user_id=1, orchestrator=orch, adapter=adapter,
             inventory=InventoryRepository(),
@@ -167,20 +174,26 @@ def test_recenter_is_not_starved_by_an_unconfirmed_phase_flip():
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)
         ex = orch.list(c.id, active_only=True)[0]
+        assert c.current_phase == "grid", c.current_phase
         before = [lv.open_price for lv in ex.levels]
 
-        # Force a pending-but-unconfirmed flip on the same tick as a big move.
-        c.configs["candle_provider"] = lambda p: trending
-        adapter.set_mid(Decimal("63523.5"))
+        # Same tick: the regime flips to RGRID (pending) AND price moves past the
+        # re-center threshold.
+        c.configs["candle_provider"] = lambda p: downtrend
+        adapter.set_mid(Decimal("63000.0"))
         await orch.tick_controller(c.id)
 
+        assert c._phase_confirm_streak == 1, (
+            f"precondition failed: no flip is pending (streak="
+            f"{c._phase_confirm_streak}, phase={c.current_phase}) — the test is "
+            f"not exercising the starvation path it claims to"
+        )
         live = orch.list(c.id, active_only=True)
-        if live and live[0] is ex:
-            # Still the same executor => no flip fired, so the re-center owed us
-            # a re-quote on this very tick.
-            assert [lv.open_price for lv in ex.levels] != before, (
-                "an unconfirmed flip must not suppress the re-center"
-            )
+        assert live and live[0] is ex, "the flip should still be UNCONFIRMED"
+        assert [lv.open_price for lv in ex.levels] != before, (
+            "an unconfirmed flip suppressed the re-center — the ladder froze on "
+            "exactly the move that shifted the classifier"
+        )
 
     asyncio.run(body())
 

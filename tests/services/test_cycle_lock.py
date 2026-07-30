@@ -116,3 +116,74 @@ def test_multiprocess_mode_is_loudly_flagged_as_unprotected(monkeypatch, caplog)
                    for r in caplog.records), "switching to multiprocess was silent"
     asyncio.run(body())
     er.release_cycle_lock(555, "mainnet", "dn")
+
+
+# ── audit round 4: nothing asserted run_engine_cycle actually TAKES the lock ──
+# Every test above exercised _cycle_lock() directly, so the DN double-open
+# guarantee — that two concurrent run_engine_cycle calls for the same key cannot
+# both run on_start — was never covered. That is the whole point of 71ca009.
+
+def test_run_engine_cycle_serializes_two_concurrent_calls_for_the_same_key():
+    async def body():
+        marks = []
+
+        async def fake_locked(telegram_id, network, state, client, mid, product, product_id):
+            marks.append(f"enter:{state['tag']}")
+            await asyncio.sleep(0.02)
+            marks.append(f"exit:{state['tag']}")
+            return {"success": True}
+
+        orig = er._run_engine_cycle_locked
+        er._run_engine_cycle_locked = fake_locked
+        try:
+            await asyncio.gather(
+                er.run_engine_cycle(1, "mainnet", {"strategy": "dn", "tag": "kickoff"},
+                                    None, 0.0, "BTC", 2),
+                er.run_engine_cycle(1, "mainnet", {"strategy": "dn", "tag": "scheduled"},
+                                    None, 0.0, "BTC", 2),
+            )
+        finally:
+            er._run_engine_cycle_locked = orig
+            er.release_cycle_lock(1, "mainnet", "dn")
+
+        assert len(marks) == 4, marks
+        # The two critical sections must NOT interleave — an interleave is the
+        # double-open that left ~$99 of unhedged spot in prod session 167.
+        assert marks[1].startswith("exit:") and marks[1].split(":")[1] == marks[0].split(":")[1], (
+            f"run_engine_cycle did not serialize: {marks}"
+        )
+
+    asyncio.run(body())
+
+
+def test_run_engine_cycle_does_NOT_serialize_different_keys():
+    """The lock must not make two users (or two strategies) wait on each other."""
+    async def body():
+        active = {"n": 0, "max": 0}
+
+        async def fake_locked(telegram_id, network, state, client, mid, product, product_id):
+            active["n"] += 1
+            active["max"] = max(active["max"], active["n"])
+            await asyncio.sleep(0.02)
+            active["n"] -= 1
+            return {"success": True}
+
+        orig = er._run_engine_cycle_locked
+        er._run_engine_cycle_locked = fake_locked
+        try:
+            await asyncio.gather(
+                er.run_engine_cycle(1, "mainnet", {"strategy": "dn"}, None, 0.0, "BTC", 2),
+                er.run_engine_cycle(2, "mainnet", {"strategy": "dn"}, None, 0.0, "BTC", 2),
+                er.run_engine_cycle(1, "mainnet", {"strategy": "vol"}, None, 0.0, "BTC", 2),
+            )
+        finally:
+            er._run_engine_cycle_locked = orig
+            for u, n, s in ((1, "mainnet", "dn"), (2, "mainnet", "dn"), (1, "mainnet", "vol")):
+                er.release_cycle_lock(u, n, s)
+
+        assert active["max"] > 1, (
+            "distinct keys were serialized — the lock is too coarse and would "
+            "starve other users' strategies"
+        )
+
+    asyncio.run(body())
