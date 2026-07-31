@@ -443,6 +443,65 @@ def _net_abs_for_subaccount(positions: list, product_id: int, subaccount: str | 
     return 0.0, 0
 
 
+def _resting_orders_by_sender(
+    client, only_pid: int | None = None
+) -> tuple[dict[tuple[int, str | None], list[str]], list[str]]:
+    """Every resting order as ``{(product_id, sender): [digests]}`` in ONE
+    gateway call per sender.
+
+    CLOSE-ALL-SWEEP (prod 2026-07-31): the close paths probed
+    ``products x senders`` with a single-product ``get_open_orders`` each — for
+    one open BTC position that is 90 serial round-trips BEFORE the close order
+    is even sent, and 90 more to verify it, so a tap took minutes while holding
+    a worker (measured; see tests/services/test_close_all_sweep.py). The venue
+    exposes a batched multi-product read, which ``get_all_open_orders`` already
+    uses for the portfolio poller — same senders (both derive from
+    ``query_isolated_subaccounts_for_parent``), same coverage, 1 call each.
+
+    ``sender`` is ``None`` for the parent subaccount, matching
+    ``_order_sender_params`` and ``cancel_order(sender=...)``.
+    """
+    grouped: dict[tuple[int, str | None], list[str]] = {}
+    errors: list[str] = []
+    try:
+        rows = client.get_all_open_orders() or []
+    except Exception as e:
+        return {}, [f"open-orders lookup failed ({e})"]
+    for row in rows:
+        try:
+            pid = int(row.get("product_id"))
+        except (TypeError, ValueError):
+            continue
+        if only_pid is not None and pid != int(only_pid):
+            continue
+        digest = str(row.get("digest") or "").strip()
+        if not digest:
+            continue
+        sender = row.get("subaccount") or None
+        grouped.setdefault((pid, sender), []).append(digest)
+    return grouped, errors
+
+
+def _cancel_resting_orders(
+    client, grouped: dict[tuple[int, str | None], list[str]]
+) -> tuple[int, list[str]]:
+    """Cancel every digest in ``grouped``. Only touches products that actually
+    hold an order, so a flat book costs zero execute round-trips."""
+    cancelled = 0
+    errors: list[str] = []
+    for (pid, sender), digests in grouped.items():
+        for digest in digests:
+            try:
+                r = client.cancel_order(pid, digest, sender=sender)
+                if r.get("success"):
+                    cancelled += 1
+                else:
+                    errors.append(f"{get_product_name(pid)}: cancel failed ({r.get('error', 'unknown')})")
+            except Exception as e:
+                errors.append(f"{get_product_name(pid)}: cancel exception ({e})")
+    return cancelled, errors
+
+
 def _cancel_open_orders_for_product(
     client, product_id: int, sender: str | None = None
 ) -> tuple[int, list[str]]:
@@ -2716,32 +2775,21 @@ def close_all_positions(
         return {"success": False, "error": "Wallet not initialized or key migration required."}
 
     # Scope: a strategy stop only needs to flatten the one product it traded.
-    # When ``only_product`` resolves to a pid, cancel/close JUST that market
-    # instead of sweeping every perp on the venue (the old behavior — two full
-    # all-products sweeps of serial gateway round-trips that made a stop take
-    # minutes under rate-limiting). Unresolvable/None falls back to the full
-    # sweep, so manual "close all" and safety flattens are unchanged.
+    # When ``only_product`` resolves to a pid, cancel/close JUST that market.
+    # Unresolvable/None means every market — which the batched order read below
+    # covers at the same cost, so an unscoped manual "close all" is no longer
+    # the slow path it used to be.
     only_pid = (
         get_product_id(only_product, network=selected_network, client=client)
         if only_product else None
     )
-    scoped_products = (
-        [only_product] if (only_product and only_pid is not None)
-        else get_perp_products(network=selected_network, client=client)
-    )
 
-    cancelled_orders = 0
-    order_errors = []
-    # Cancel on default + isolated margin subaccounts (orders rest on the same sender as quotes).
-    for snd in _order_sender_params(client, selected_network):
-        for product_name in scoped_products:
-            pid = get_product_id(product_name, network=selected_network, client=client)
-            if pid is None:
-                continue
-            c_count, c_errors = _cancel_open_orders_for_product(client, pid, sender=snd)
-            cancelled_orders += c_count
-            if c_errors:
-                order_errors.extend(c_errors)
+    # Cancel on default + isolated margin subaccounts (orders rest on the same
+    # sender as quotes). ONE batched read per sender — see
+    # ``_resting_orders_by_sender`` for why this must not fan out per product.
+    resting, order_errors = _resting_orders_by_sender(client, only_pid=only_pid)
+    cancelled_orders, cancel_errors = _cancel_resting_orders(client, resting)
+    order_errors.extend(cancel_errors)
 
     net_positions = _normalize_net_positions(client.get_all_positions() or [])
     if not net_positions:
@@ -2893,21 +2941,13 @@ def close_all_positions(
             "Close-all verification failed: open positions remain on "
             + ", ".join(get_product_name(pid, network=selected_network) for pid in post_positions.keys())
         )
-    remaining_orders = 0
-    for snd in _order_sender_params(client, selected_network):
-        for product_name in scoped_products:
-            pid = get_product_id(product_name, network=selected_network, client=client)
-            if pid is None:
-                continue
-            try:
-                remaining_orders += len(client.get_open_orders(pid, sender=snd) or [])
-            except Exception as e:
-                logger.warning(
-                    "open-orders read failed for product %s during stop-all report — "
-                    "remaining-orders count may understate: %s",
-                    pid, e,
-                )
-                continue
+    still_resting, verify_errors = _resting_orders_by_sender(client, only_pid=only_pid)
+    remaining_orders = sum(len(d) for d in still_resting.values())
+    for err in verify_errors:
+        logger.warning(
+            "open-orders read failed during stop-all report — remaining-orders "
+            "count may understate: %s", err,
+        )
     if remaining_orders > 0:
         result["success"] = False
         existing_error = result.get("error", "")
