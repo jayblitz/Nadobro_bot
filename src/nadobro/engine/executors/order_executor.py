@@ -97,6 +97,17 @@ class OrderExecutor(Executor):
         self.last_fill: Optional[Fill] = None
         self.refreshes = 0
         self.orders_placed = 0
+        # COUNTERS-FIX (2026-07-31): orders_filled / orders_cancelled were
+        # never defined here, so Controller.order_counts() getattr-defaulted
+        # them to 0 and /status reported "filled 0 | cancelled 0" forever for
+        # every OrderExecutor-based strategy (mid/MM quotes) — even while real
+        # cancels were happening. GridExecutor already tracks all three.
+        self.orders_filled = 0
+        self.orders_cancelled = 0
+        # One count per venue order: _place() resets this, the first terminal
+        # observation (fill/cancel/reject) sets it. The chaser cycles through
+        # several orders per executor, hence per-order (not per-executor).
+        self._terminal_counted = True
         self._placement_mid: Optional[Decimal] = None
         self._recorded_base = Decimal(0)
         self._recorded_quote = Decimal(0)
@@ -128,7 +139,25 @@ class OrderExecutor(Executor):
         )
         self.order = order
         self.orders_placed += 1
+        self._terminal_counted = False
         self._ingest(order)
+
+    def _count_terminal_order(self) -> None:
+        """Count the current order's terminal outcome exactly once.
+
+        FILLED → orders_filled; CANCELLED/REJECTED → orders_cancelled. Called
+        from every place a terminal state is observed (_check_complete,
+        on_stop, the chaser's explicit cancel) — the flag makes multiple
+        observations of the same terminal order idempotent.
+        """
+        if self._terminal_counted or self.order is None:
+            return
+        if self.order.state is OrderState.FILLED:
+            self.orders_filled += 1
+            self._terminal_counted = True
+        elif self.order.state in (OrderState.CANCELLED, OrderState.REJECTED):
+            self.orders_cancelled += 1
+            self._terminal_counted = True
 
     def _ingest(self, order: NadoOrder) -> None:
         """Record any newly-filled quantity since the last poll."""
@@ -190,12 +219,14 @@ class OrderExecutor(Executor):
 
     async def _check_complete(self) -> bool:
         if self.order is not None and self.order.state is OrderState.FILLED:
+            self._count_terminal_order()
             self._terminate(CloseType.COMPLETED)
             return True
         if self.order is not None and self.order.state in (
             OrderState.CANCELLED,
             OrderState.REJECTED,
         ) and self.config.execution_strategy is not ExecutionStrategy.LIMIT_CHASER:
+            self._count_terminal_order()
             self._terminate(CloseType.EARLY_STOP)
             return True
         return False
@@ -230,6 +261,12 @@ class OrderExecutor(Executor):
                 )
                 self._terminate(CloseType.FAILED)
                 return
+            # The refresh cancelled a live venue order; count it here — the
+            # stale snapshot in self.order won't show CANCELLED before _place
+            # swaps in the replacement order.
+            if not self._terminal_counted:
+                self.orders_cancelled += 1
+                self._terminal_counted = True
             try:
                 price = await self._chaser_price()
                 await self._place(OrderType.LIMIT_MAKER, price)
@@ -250,6 +287,7 @@ class OrderExecutor(Executor):
         if order is None or order.state in (
             OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED,
         ):
+            self._count_terminal_order()
             self._terminate(close_type)
             return
 
@@ -278,6 +316,7 @@ class OrderExecutor(Executor):
         if self.order is None or self.order.state in (
             OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED,
         ):
+            self._count_terminal_order()
             self._terminate(close_type)
             return
 

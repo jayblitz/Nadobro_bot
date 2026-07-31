@@ -60,7 +60,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Mapping, Optional, Sequence
 
-from src.nadobro.engine.routines.technical_analysis import _closes
+from src.nadobro.engine.routines.technical_analysis import _closes, chronological
 
 Candle = Mapping[str, float]
 
@@ -144,6 +144,12 @@ async def run(
     # Need at least one full long-horizon return window plus a couple of points
     # to estimate variance.
     required = long_window + 2
+    # CANDLE-ORDER guardrail (2026-07-31): the drift window reads the LAST
+    # long_window closes and its sign encodes direction — a newest-first feed
+    # negated it on a ~3h-stale window (long grids bought persistent declines).
+    # The venue client now sorts, but this routine must stay correct for ANY
+    # provider. (The variance ratio itself is reversal-invariant.)
+    candles = chronological(candles) if candles else candles
     closes = _closes(candles) if candles else []
     if len(closes) < required:
         return {

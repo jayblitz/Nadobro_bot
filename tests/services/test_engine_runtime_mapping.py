@@ -111,6 +111,47 @@ def test_map_mid_config():
     assert cfg["max_base_quote"] == Decimal("60")
 
 
+def test_mid_regime_gate_defaults_off_and_is_rearmable():
+    """MID-GATE-DEFAULT (2026-07-31): the regime gate is OFF by default for Mid
+    — same decision GRID-IN-TRENDS made for grid/rgrid. Session 178 post-mortem:
+    the gate read PAUSE 46-61% of minutes on Nado's thin books and a paused
+    FLAT book quotes nothing, so Mid sessions sat dark ($0 volume). An explicit
+    regime_gate_enabled=1 must still re-arm it (user override)."""
+    base = {"notional_usd": 100.0, "spread_bp": 5.0}
+    cfg = er.map_strategy_config("mid", dict(base), Decimal(100), product="BTC-PERP")
+    assert not bool(cfg["regime_gate_enabled"])
+
+    armed = er.map_strategy_config(
+        "mid", {**base, "regime_gate_enabled": 1.0}, Decimal(100), product="BTC-PERP",
+    )
+    assert bool(armed["regime_gate_enabled"])
+
+    disarmed = er.map_strategy_config(
+        "mid", {**base, "regime_gate_enabled": 0.0}, Decimal(100), product="BTC-PERP",
+    )
+    assert not bool(disarmed["regime_gate_enabled"])
+
+
+def test_negative_min_spread_bp_is_the_no_floor_sentinel():
+    """Mid's SHIPPED registry default is min_spread_bp = -10 ("user-tunable in
+    [-10, +100]" — strategy_registry) and means NO spread floor: the
+    Tread-parity volume product may concede spread all the way to 0. The clamp
+    must map any negative to floor 0, never reinterpret it as garbage and
+    substitute the 1.5bp fee floor (audit 2026-07-31 caught exactly that
+    regression: it would have silently widened every default mid config)."""
+    neg = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "spread_bp": 5.0, "min_spread_bp": -10.0},
+        Decimal(100), product="BTC-PERP",
+    )
+    assert neg["spread_floor_half_pct"] == Decimal(0)
+
+    zero = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "spread_bp": 5.0, "min_spread_bp": 0.0},
+        Decimal(100), product="BTC-PERP",
+    )
+    assert zero["spread_floor_half_pct"] == Decimal(0)
+
+
 def test_participation_chunk_overrides_per_order_size():
     """mm_cycle_notional_usd (set by bot_runtime at start when a participation
     preset is active) replaces the deployed-based per-order size across the MM

@@ -37,6 +37,9 @@ from __future__ import annotations
 from typing import Dict, Mapping, Sequence
 
 from src.nadobro.engine.routines import volatility_regime
+from src.nadobro.engine.routines.technical_analysis import (
+    chronological as technical_analysis_chronological,
+)
 from src.nadobro.engine.routines.volatility_regime import (
     RANGING,
     TRENDING_DOWN,
@@ -47,6 +50,20 @@ Candle = Mapping[str, float]
 
 QUOTE = "QUOTE"
 PAUSE = "PAUSE"
+
+# Human-readable pause reasons — the single source for user-facing copy
+# (cycle-1 "no orders" notify, gate flip messages, /status "Quoting" line).
+GATE_REASON_HUMAN: Dict[str, str] = {
+    "trending_up": "market trending up",
+    "trending_down": "market trending down",
+    "breakout": "price broke out of its range",
+    "expansion": "range is expanding",
+}
+
+
+# CANDLE-ORDER guardrail (2026-07-31): shared with variance_regime — see
+# technical_analysis.chronological for the rationale.
+_chronological = technical_analysis_chronological
 
 # Value-area width (as a fraction of the window's full price range) above
 # which the profile reads as expansion rather than compression. A perfectly
@@ -134,6 +151,7 @@ async def run(
     profile_bins: int = 24,
 ) -> Dict[str, object]:
     """Combine trend + acceptance into one QUOTE / PAUSE verdict."""
+    candles = _chronological(candles)
     vol = await volatility_regime.run(trading_pair, candles)
     base: Dict[str, object] = {
         "verdict": QUOTE,

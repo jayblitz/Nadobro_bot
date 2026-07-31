@@ -200,8 +200,27 @@ class Controller(abc.ABC):
             self.gate_atr_pct: float = 0.0
             self._gate_event: Optional[Dict[str, str]] = None
             self._gate_resume_streak: int = 0
+            self._gate_prev_enabled: bool = False
         if not bool(self.cfg("regime_gate_enabled", False)):
+            # MID-GATE-STALE-PAUSE (audit 2026-07-31): a gate disabled MID-RUN
+            # (the signal overlay arms it while suppressing, then disarms —
+            # overlay_actuator sets regime_gate_enabled=True and the next
+            # un-suppressed cycle reverts it) must not freeze its last verdict.
+            # This early return used to hand back a stale PAUSE forever; with a
+            # flat book that quotes nothing — LIVE session, zero orders,
+            # indefinitely. Reset ONLY on the enabled→disabled transition: a
+            # verdict the gate itself produced dies with the gate, but a
+            # never-enabled gate stays a passive carrier (dgrid's own
+            # classifier drives gate_verdict directly in that mode and its
+            # breakout sit-out must not be clobbered).
+            if getattr(self, "_gate_prev_enabled", False):
+                self._gate_prev_enabled = False
+                if self.gate_verdict != "QUOTE":
+                    self.gate_verdict, self.gate_reason = "QUOTE", ""
+                    self._gate_resume_streak = 0
+                    self._gate_event = {"state": "QUOTE", "reason": ""}
             return self.gate_verdict
+        self._gate_prev_enabled = True
         provider = self.cfg("candle_provider")
         if provider is None:
             return self.gate_verdict

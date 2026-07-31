@@ -1050,6 +1050,11 @@ def start_user_bot(
             "last_run_ts": 0.0,
             "last_error": None,
             "runs": 0,
+            # Reset quote-gate telemetry: a stale PAUSED verdict from the
+            # previous session must not render on the new session's /status.
+            "mm_gate_verdict": "",
+            "mm_gate_reason": "",
+            "mm_gate_since_ts": 0.0,
         }
     )
     if strategy in ("grid", "rgrid", "dgrid", "mid"):
@@ -1681,6 +1686,12 @@ def get_user_bot_status(telegram_id: int) -> dict:
         "error_streak": int(state.get("error_streak") or 0),
         "pause_reason": state.get("mm_pause_reason") or "",
         "is_paused": bool(state.get("mm_paused")),
+        # Quote-gate visibility (audit 2026-07-31, MID-GATE-STATUS-DEAD): the
+        # worker persists these each engine cycle; without them here the
+        # /status "Quoting: PAUSED (…)" line can never render.
+        "mm_gate_verdict": str(state.get("mm_gate_verdict") or ""),
+        "mm_gate_reason": str(state.get("mm_gate_reason") or ""),
+        "mm_gate_since_ts": float(state.get("mm_gate_since_ts") or 0.0),
         "bro_state": state.get("bro_state"),
         "maker_fill_ratio": (state.get("mm_last_metrics") or {}).get("maker_fill_ratio"),
         "cancellation_ratio": (state.get("mm_last_metrics") or {}).get("cancellation_ratio"),
@@ -3104,17 +3115,27 @@ async def _run_cycle(
                 _k: int(_counts.get(_k, 0) or 0)
                 for _k in ("orders_placed", "orders_filled", "orders_cancelled")
             }
+        # Gate visibility (2026-07-31): persist the live quote-gate verdict so
+        # /status can show "Quoting: PAUSED (…)" instead of a green "Last
+        # cycle: OK" while the strategy sits dark. engine_diag carries the
+        # controller's verdict every cycle; "since" only moves on a flip. The
+        # keys ride the state saves already on this path (telemetry block /
+        # end-of-cycle observability save).
+        _gate_diag = result.get("engine_diag") if isinstance(result, dict) else None
+        if isinstance(_gate_diag, dict) and _gate_diag.get("gate_verdict"):
+            _gate_v = str(_gate_diag.get("gate_verdict") or "")
+            if state.get("mm_gate_verdict") != _gate_v:
+                state["mm_gate_since_ts"] = time.time()
+            state["mm_gate_verdict"] = _gate_v
+            state["mm_gate_reason"] = str(_gate_diag.get("gate_reason") or "")
         # Regime-gate flip: tell the user once per transition. Pause never
         # touches open positions — exits/close legs keep managing; only NEW
         # opening quotes wait for the range to return.
         gate_event = result.get("gate_event") if isinstance(result, dict) else None
         if gate_event:
-            _gate_reasons = {
-                "trending_up": "market trending up",
-                "trending_down": "market trending down",
-                "breakout": "price broke out of its range",
-                "expansion": "range is expanding",
-            }
+            from src.nadobro.engine.routines.regime_gate import (
+                GATE_REASON_HUMAN as _gate_reasons,
+            )
             if str(gate_event.get("state")) == "PAUSE":
                 await _notify(
                     telegram_id,
@@ -3360,6 +3381,22 @@ async def _run_cycle(
             )
         else:
             reason = result.get("reason") or result.get("detail") or result.get("action") or "waiting for conditions"
+            reason = str(reason)
+            # HUMANIZE-CYCLE1 (2026-07-31): "engine_ticked" is an internal
+            # action name, not an explanation — users read it as a fault code.
+            # Name the regime gate when it is the actual blocker; otherwise
+            # translate the known action names into plain language.
+            _diag1 = result.get("engine_diag") if isinstance(result, dict) else None
+            if isinstance(_diag1, dict) and _diag1.get("gate_paused"):
+                from src.nadobro.engine.routines.regime_gate import GATE_REASON_HUMAN
+                _why = GATE_REASON_HUMAN.get(
+                    str(_diag1.get("gate_reason") or ""), "unfavourable regime")
+                reason = (
+                    f"quoting is paused by the regime gate ({_why}); "
+                    "it resumes when the market ranges again"
+                )
+            elif reason in ("engine_ticked", "engine_completed"):
+                reason = "no quoting opportunity this cycle; the engine keeps watching"
             await _notify(
                 telegram_id,
                 "{strategy} cycle #1 on {market} ({network}): no orders placed — {reason}",
