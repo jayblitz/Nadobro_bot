@@ -10,7 +10,10 @@ immediately and let a background task refresh + edit the message in place.
 A tap must NEVER wait on the venue read storm inline — that was producing
 24-55s callbacks whenever the gateway was throttled or the per-user sync
 lock was held by the background poller. Destructive actions (cancel/close)
-still force an inline sync: correctness of order indices over latency.
+still run the venue mutation inline (correctness of the flatten), but the
+post-close deck refresh is backgrounded — awaiting a forced sync after a
+successful close left the UI stuck on "Closing all positions…" for minutes
+even after History already showed the trade closed (CLOSE-ALL-UI 2026-07-31).
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ import logging
 import time
 
 from src.nadobro.handlers.keyboards import portfolio_analytics_kb
-from src.nadobro.core.async_utils import run_blocking
+from src.nadobro.core.async_utils import run_blocking, run_blocking_sdk
 from src.nadobro.core.perf import timed_metric
 from src.nadobro.trading.trade_service import close_all_positions
 from src.nadobro.users.user_service import get_user_nado_client, get_user
@@ -126,17 +129,63 @@ async def _handle_portfolio(query, data, telegram_id):
         return
 
     if action == "close_all_yes":
-        await _edit_loc(query, "⏳ Closing all positions…")
-        network = user.network_mode.value if user else "mainnet"
-        result = await run_blocking(close_all_positions, telegram_id, network=network)
-        if isinstance(result, dict) and not result.get("success", False):
-            await _edit_loc(query, f"⚠ Close all failed: {str(result.get('error') or result.get('message') or 'unknown error')[:240]}")
-            return
-        from src.nadobro.handlers.portfolio_deck import render_portfolio_deck, snapshot_for_user
+        # Keep a way out on the progress card. An edit without reply_markup
+        # STRIPS the keyboard, so if the close chain dies mid-flight (deploy,
+        # venue stall) the user is left staring at "Closing all positions…"
+        # with no button to leave — exactly how a slow close looked stuck.
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        snapshot = await snapshot_for_user(telegram_id, force=True)
-        text, kb = render_portfolio_deck(snapshot)
-        await _edit_loc(query, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        await _edit_loc(
+            query, "⏳ Closing all positions…",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh Portfolio", callback_data="portfolio:view")],
+            ]),
+        )
+        network = user.network_mode.value if user else "mainnet"
+        # SDK pool, NOT the 8-worker misc pool that renders every card: a venue
+        # close holds its worker for the whole cancel/flatten/verify chain, so
+        # running it here queued unrelated taps behind it (the callback.total
+        # SLO breach). Matches the /status stop and text close-all paths.
+        result = await run_blocking_sdk(close_all_positions, telegram_id, network=network)
+        if isinstance(result, dict) and not result.get("success", False):
+            await _edit_loc(
+                query,
+                f"⚠ Close all failed: {str(result.get('error') or result.get('message') or 'unknown error')[:240]}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Refresh Portfolio", callback_data="portfolio:view")],
+                ]),
+            )
+            return
+        # CLOSE-ALL-UI (2026-07-31): leave the progress text the moment the
+        # venue close returns. A forced snapshot_for_user can still hang for
+        # minutes under gateway throttling / the per-user sync lock — History
+        # already showed Trade #2220 closed while this card stayed on
+        # "Closing all positions…". Show the outcome now; refresh the deck
+        # in the background (same pattern as the read-only portfolio views).
+        products = [str(p) for p in (result.get("products") or []) if p]
+        product_bits = ", ".join(products[:6]) if products else "all markets"
+        if len(products) > 6:
+            product_bits += f" (+{len(products) - 6} more)"
+        cancelled = float(result.get("cancelled") or 0)
+        size_bits = f" ({cancelled:g} base)" if cancelled else ""
+        done_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh Portfolio", callback_data="portfolio:view")],
+            [InlineKeyboardButton("🏠 Home", callback_data="nav:main")],
+        ])
+        await _edit_loc(
+            query,
+            f"✅ Closed positions on {product_bits}{size_bits}.",
+            reply_markup=done_kb,
+        )
+        from src.nadobro.handlers.portfolio_deck import render_portfolio_deck
+
+        _spawn_background_refresh(
+            query,
+            telegram_id,
+            "overview",
+            lambda snap: render_portfolio_deck(snap),
+            force=True,
+        )
         return
 
     if action == "cancel_all_confirm":
