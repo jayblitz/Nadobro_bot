@@ -192,20 +192,33 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
     "vol": {
         "notional_usd": 100.0,
         "fixed_margin_usd": 100.0,
+        # Per-cycle size. Product band is $100-$500 (docs/volume_bot_taker_v4.md);
+        # the UI enforces it and map_strategy_config re-clamps.
+        "session_margin_usd": 100.0,
         "target_volume_usd": 10000.0,
         # v3 ping-pong is timer-driven (requote/cross deadlines) — 5s ticks
         # via the fast-cadence set; the old 10s doubled every reaction lag.
         "interval_seconds": 5,
         "tp_pct": 1.0,
-        "sl_pct": 1.0,
+        # Session stop: cumulative realized PnL NET OF FEES reaching -5% of
+        # margin (-$5 on $100) stops the bot and flattens. Every taker round
+        # trip costs spread + both legs' fees by construction, so this is the
+        # binding limit on how much volume a run completes.
+        "sl_pct": 5.0,
         # v3 quoting knobs (see engine_runtime.map_strategy_config vol branch
         # for semantics). The signal-filter/direction keys retired in 2026-05
         # (docs/volume_bot.md) were dropped from these defaults 2026-07-11.
+        # They stay mapped because vol_taker_mode=0 restores the v3 path.
         "vol_buy_offset_bp": 0.0,
         "vol_max_cycle_loss_bp": 20.0,
         "vol_requote_seconds": 20.0,
         "vol_cross_after_seconds": 25.0,
         "vol_cross_slippage_bp": 15.0,
+        # v4 taker mode (default ON): market orders both legs; the sell waits
+        # for a price above the entry that also clears both legs' fees.
+        "vol_taker_mode": 1.0,
+        # Price bound on the marketable-limit taker legs.
+        "vol_taker_slippage_bp": 15.0,
     },
     "bro": {
         "budget_usd": 500.0,

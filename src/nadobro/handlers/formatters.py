@@ -1774,7 +1774,20 @@ def fmt_status_overview(status: dict, onboarding: dict):
         volume_remaining = float(status.get("volume_remaining_usd") or 0.0)
         target_volume = float(status.get("target_volume_usd") or 0.0)
         progress_pct = (volume_done / target_volume * 100.0) if target_volume > 0 else 0.0
-        vol_phase = str(status.get("vol_phase") or "").strip() or "idle"
+        # Internal phase ids are not user copy — name what the bot is doing.
+        _VOL_PHASE_LABELS = {
+            "idle": "idle",
+            "pending_fill": "buying",
+            "pending_entry_fill": "buying",
+            "filled_wait_close": "preparing exit",
+            "hold_for_profit": "closing a held position",
+            "pending_close_fill": "selling",
+            "cycle_gap": "between cycles",
+            "market_closed": "waiting for the market to open",
+            "done": "finished",
+        }
+        _vol_phase_raw = str(status.get("vol_phase") or "").strip() or "idle"
+        vol_phase = _VOL_PHASE_LABELS.get(_vol_phase_raw, _vol_phase_raw)
         lines.extend(["", "*Volume Progress*"])
         lines.append(
             f"{_loc('Done')}: *{escape_md(_fmt_compact_usd(volume_done))}* \\| "

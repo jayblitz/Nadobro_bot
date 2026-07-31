@@ -11,12 +11,20 @@ from src.nadobro.engine.orchestrator import ExecutorOrchestrator
 
 
 def _vb_kwargs(configs, *, adapter=None):
+    # Every test in THIS file exercises the v3 MAKER path (post-only quoting,
+    # requote timers, cross-on-deadline). v4 defaults the controller to taker
+    # market orders (docs/volume_bot_taker_v4.md), so the maker path must be
+    # requested explicitly here — the v4 behavior has its own suite in
+    # tests/engine/controllers/test_volume_bot_taker.py. A test that omits
+    # vol_taker_mode gets the PRODUCTION default, which is what we want:
+    # controller defaults and shipped defaults must never diverge silently.
+    cfg = {"vol_taker_mode": 0, **configs}
     return dict(
         user_id=1,
         orchestrator=ExecutorOrchestrator(),
         adapter=adapter or MockNadoAdapter(mid=Decimal(100)),
         inventory=InventoryRepository(),
-        configs=configs,
+        configs=cfg,
         controller_id="VB",
     )
 
@@ -51,7 +59,7 @@ def test_partial_buy_waits_until_fully_filled_before_sell():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -91,6 +99,7 @@ def test_sell_joins_the_ask_instead_of_forcing_profit():
             adapter=adapter,
             inventory=InventoryRepository(),
             configs={
+                "vol_taker_mode": 0,
                 "trading_pair": "KBTC",
                 "total_amount_quote": "100",
                 "spot_maker_fee_rate": "0.001",
@@ -125,6 +134,7 @@ def test_sell_floor_bounds_the_cycle_loss():
             adapter=adapter,
             inventory=InventoryRepository(),
             configs={
+                "vol_taker_mode": 0,
                 "trading_pair": "KBTC",
                 "total_amount_quote": "100",
                 "spot_maker_fee_rate": "0.01",
@@ -157,7 +167,7 @@ def test_sell_waits_for_live_book_and_resumes(caplog):
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -198,7 +208,7 @@ def test_single_round_trip_completes_when_no_target():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "40"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "40"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -224,6 +234,7 @@ def test_loops_until_target_volume_then_completes():
             adapter=adapter,
             inventory=InventoryRepository(),
             configs={
+                "vol_taker_mode": 0,
                 "trading_pair": "KBTC",
                 "total_amount_quote": "40",
                 "target_volume_usd": "200",
@@ -257,7 +268,7 @@ def test_buy_requotes_to_fresh_touch_on_timer():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -289,7 +300,7 @@ def test_buy_does_not_requote_before_timer():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -317,7 +328,7 @@ def test_partial_buy_then_external_cancel_sells_the_partial():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -347,7 +358,7 @@ def test_partial_sell_replaces_remainder_and_books_cycle_once():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -393,7 +404,7 @@ def test_zero_fill_buy_requotes_then_completes_no_fill():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -420,7 +431,7 @@ def test_sell_spawn_raise_recovers_instead_of_stranding():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -462,6 +473,7 @@ def test_max_cycles_caps_runaway_loop():
             adapter=adapter,
             inventory=InventoryRepository(),
             configs={
+                "vol_taker_mode": 0,
                 "trading_pair": "KBTC",
                 "total_amount_quote": "40",
                 "target_volume_usd": "1000000",
@@ -494,7 +506,7 @@ def test_buy_crosses_with_marketable_limit_after_deadline():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "KBTC", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "KBTC", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)
@@ -531,6 +543,7 @@ def test_sell_cross_respects_loss_floor():
             adapter=adapter,
             inventory=InventoryRepository(),
             configs={
+                "vol_taker_mode": 0,
                 "trading_pair": "KBTC",
                 "total_amount_quote": "100",
                 "spot_maker_fee_rate": "0",
@@ -566,6 +579,7 @@ def test_sell_cross_executes_within_loss_budget():
             adapter=adapter,
             inventory=InventoryRepository(),
             configs={
+                "vol_taker_mode": 0,
                 "trading_pair": "KBTC",
                 "total_amount_quote": "100",
                 "spot_maker_fee_rate": "0",
@@ -604,7 +618,7 @@ def test_market_closed_on_start_waits_and_resumes():
             orchestrator=orch,
             adapter=adapter,
             inventory=InventoryRepository(),
-            configs={"trading_pair": "WNVDAX", "total_amount_quote": "100"},
+            configs={"vol_taker_mode": 0, "trading_pair": "WNVDAX", "total_amount_quote": "100"},
             controller_id="VB",
         )
         await orch.spawn_controller(c)

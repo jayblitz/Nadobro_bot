@@ -70,7 +70,11 @@ def infer_phase(state: dict) -> StrategyPhase:
     vol_phase = str(state.get("vol_phase") or "")
     if vol_phase in {"pending_entry_fill", "pending_fill", "pending_close_fill"}:
         return StrategyPhase(PHASE_WAITING_FILL, vol_phase, allowed_actions=("stop", "recover"))
-    if vol_phase in {"filled_wait_close"}:
+    if vol_phase in {"filled_wait_close", "hold_for_profit"}:
+        # Both are "position open, exit pending", so "flatten" must stay
+        # offered. hold_for_profit is the legacy v4 park state — v4.1 sells
+        # immediately and never enters it, but a session restarted across the
+        # deploy can still be sitting in it holding base.
         return StrategyPhase(PHASE_CLOSING, vol_phase, allowed_actions=("stop", "flatten"))
 
     action = str(state.get("last_action") or "").lower()

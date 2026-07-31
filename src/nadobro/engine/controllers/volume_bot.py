@@ -43,6 +43,10 @@ from src.nadobro.engine.executor_base import Executor
 from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExecutorConfig
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import ExecutionStrategy, PositionAction, TradeType, _dec
+from src.nadobro.quant.vol_fee_estimator import (
+    DEFAULT_BUILDER_FEE_RATE,
+    DEFAULT_SPOT_TAKER_FEE_RATE,
+)
 
 # Quote-like symbols that must never be selected as a base for Volume.
 # Kept in sync with ``product_catalog._QUOTE_LIKE_SYMBOLS``.
@@ -106,6 +110,42 @@ class VolumeBotController(Controller):
             self.cfg("vol_cross_slippage_bp", 15.0)
         )
         self.maker_fee_rate = self._maker_fee_rate()
+        # v4 TAKER MODE (2026-07-31, docs/volume_bot_taker_v4.md). Both legs
+        # are MARKET orders so every cycle fills on demand and the volume
+        # target actually completes (v3's resting quotes stalled: one sell
+        # rested 8.5h; a session reached $101 of a $10,000 target). 0 restores
+        # the v3 maker path — a reversible kill-switch, not dead config.
+        self.taker_mode = bool(_dec(self.cfg("vol_taker_mode", 1)) != 0)
+        self.taker_fee_rate = self._taker_fee_rate()
+        self.builder_fee_rate = _non_negative_decimal(
+            self.cfg("vol_builder_fee_rate", DEFAULT_BUILDER_FEE_RATE)
+        )
+        # v4.1 (2026-07-31, user directive): PnL is explicitly not the goal —
+        # both legs fire as taker, back to back, with NO wait for a profitable
+        # exit. Every round trip therefore costs spread + both legs' fees by
+        # construction; the session loss limit below is what bounds the run.
+        # (The v4 patient-hold gate and its hold-stop knobs are gone: with no
+        # hold there is no unwatched inventory for them to protect.)
+        #
+        # Session loss limit: STOP and flatten once cumulative realized PnL
+        # NET OF FEES reaches -limit. Default 5% of margin => -$5 on $100.
+        self.session_loss_limit_usd = _non_negative_decimal(
+            self.cfg("vol_session_loss_limit_usd", 0)
+        )
+        # AUDIT-VOL-2026-07-31 F1: "taker" is executed as a MARKETABLE LIMIT,
+        # not a naked MARKET. NadoClient.place_market_order is an IOC priced
+        # +/-slippage_pct through the touch (default 1%) and the adapter never
+        # passes that argument — so a bare MARKET could fill up to 99bp through
+        # the loss floor and the "never below the floor" guarantee was false.
+        # A marketable limit still fills immediately as taker (it crosses the
+        # book) but carries a hard price bound.
+        self.taker_slippage_bp = _non_negative_decimal(
+            self.cfg("vol_taker_slippage_bp", 15.0)
+        )
+        # Set when a stop fires while inventory is still held: the controller
+        # flattens FIRST and only then completes, so a stop can never leave the
+        # user holding base the bot opened.
+        self._emergency_exit_reason = ""
 
         self.session_volume_usd: Decimal = Decimal(0)
         self.session_realized_pnl_usd: Decimal = Decimal(0)
@@ -157,6 +197,40 @@ class VolumeBotController(Controller):
         rate = _non_negative_decimal(raw, "0")
         # A malformed rate >= 100% would make the breakeven denominator invalid.
         return min(rate, Decimal("0.99"))
+
+    def _taker_fee_rate(self) -> Decimal:
+        """Venue taker fee as a positive fraction.
+
+        Falls back to the production-measured default (4.3 bp) when the
+        catalog carries no rate — never to 0, which would make the breakeven
+        gate think a round trip is free and sell at a real loss.
+        """
+        raw = self.cfg("spot_taker_fee_rate", self.cfg("vol_taker_fee_rate"))
+        rate = _non_negative_decimal(raw, "0")
+        if rate <= 0:
+            rate = DEFAULT_SPOT_TAKER_FEE_RATE
+        return min(rate, Decimal("0.99"))
+
+    def _taker_all_in_rate(self) -> Decimal:
+        return self.taker_fee_rate + self.builder_fee_rate
+
+    def _session_loss_breached(self) -> bool:
+        """Has cumulative realized PnL, NET OF FEES, hit the session limit?
+
+        ``session_realized_pnl_usd`` is booked per completed round trip as
+        ``sold_quote - entry_quote - entry_fee - sold_fee`` (_finish_cycle), so
+        it is already net of both legs' venue fees. Default limit is 5% of
+        margin: -$5 on a $100 cycle. 0 disables the check.
+
+        This lives in the CONTROLLER, not the live-session rail, because that
+        rail is structurally blind to spot (strategy_sessions.product_id is
+        resolved perp-only, so it is NULL for a spot session and unrealized
+        PnL short-circuits to 0). The controller knows exactly what it bought
+        and sold, so its own book is the authoritative stop for this strategy.
+        """
+        if self.session_loss_limit_usd <= 0:
+            return False
+        return self.session_realized_pnl_usd <= -self.session_loss_limit_usd
 
     def _target_reached(self) -> bool:
         return self.target_volume_usd > 0 and self.session_volume_usd >= self.target_volume_usd
@@ -253,18 +327,23 @@ class VolumeBotController(Controller):
         self,
         side: TradeType,
         amount_base: Decimal,
-        price: Decimal,
+        price: Optional[Decimal],
         *,
         kind: str,
         execution: ExecutionStrategy = ExecutionStrategy.LIMIT_MAKER,
         position_action: PositionAction = PositionAction.OPEN,
+        ref_price: Optional[Decimal] = None,
     ) -> tuple[bool, Optional[OrderExecutor]]:
+        # MARKET carries no price (the venue fills at the touch); ``ref_price``
+        # still sizes the risk request so a taker order is never submitted to
+        # the risk engine as a $0 notional.
+        sizing_price = price if price is not None and price > 0 else (ref_price or Decimal(0))
         cfg = OrderExecutorConfig(
             self.trading_pair,
             side,
             amount_base,
             execution,
-            price=price,
+            price=price if execution is not ExecutionStrategy.MARKET else None,
             leverage=1,
             position_action=position_action,
         )
@@ -276,7 +355,7 @@ class VolumeBotController(Controller):
             inventory=self.inventory,
         )
         ok = await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=amount_base * price)
+            ex, ExecutorRequest(order_amount_quote=amount_base * sizing_price)
         )
         if ok and ex.order is not None:
             self.last_order_digest = ex.order.id
@@ -296,14 +375,32 @@ class VolumeBotController(Controller):
             self._enter_market_closed()
             return False
         self._exit_market_closed()
-        buy_price = self._buy_price(*touch)
-        if buy_price <= 0:
-            self._complete("invalid_buy_price")
-            return False
-        amount_base = self.total_amount_quote / buy_price
-        ok, ex = await self._spawn_order(
-            TradeType.BUY, amount_base, buy_price, kind="buy"
-        )
+        bid, ask = touch
+        if self.taker_mode:
+            # v4: take the ask. Executed as a MARKETABLE LIMIT priced through
+            # the ask — it crosses the book and fills immediately as taker, but
+            # a bare MARKET is an IOC at 1% slippage (F1) that could overspend
+            # the risk-approved cycle size. Size off the ask so the notional
+            # lands on the user's margin.
+            if ask <= 0:
+                self._complete("invalid_buy_price")
+                return False
+            slip = self.taker_slippage_bp / Decimal(10000)
+            buy_cap = self._snap(ask * (Decimal(1) + slip), self._tick(), up=True)
+            amount_base = self.total_amount_quote / ask
+            ok, ex = await self._spawn_order(
+                TradeType.BUY, amount_base, buy_cap, kind="buy_taker",
+                execution=ExecutionStrategy.LIMIT, ref_price=ask,
+            )
+        else:
+            buy_price = self._buy_price(bid, ask)
+            if buy_price <= 0:
+                self._complete("invalid_buy_price")
+                return False
+            amount_base = self.total_amount_quote / buy_price
+            ok, ex = await self._spawn_order(
+                TradeType.BUY, amount_base, buy_price, kind="buy"
+            )
         if ok and ex is not None:
             self.buy_id = ex.id
             self.sell_id = None
@@ -364,6 +461,11 @@ class VolumeBotController(Controller):
             self.close_base_remaining = amount
             return False
         self._exit_market_closed()
+        if self.taker_mode:
+            # Every sell path (first close, requote remainder, cross remainder,
+            # market-closed resume) funnels through the patient gate here, so
+            # no caller has to know about it.
+            return await self._taker_sell_now(amount, touch)
         sell_price = self._sell_price(*touch)
         if sell_price <= 0:
             self._complete("invalid_sell_price")
@@ -374,6 +476,50 @@ class VolumeBotController(Controller):
             sell_price,
             kind="sell",
             position_action=PositionAction.CLOSE,
+        )
+        if ok and ex is not None:
+            self.sell_id = ex.id
+            self.close_base_remaining = amount
+            new_leg = self.phase != "pending_close_fill"
+            self.phase = "pending_close_fill"
+            self._mark_quoted(new_leg=new_leg)
+            return True
+        self._complete("sell_spawn_failed")
+        return False
+
+    async def _taker_sell_now(
+        self, amount: Decimal, touch: tuple[Decimal, Decimal]
+    ) -> bool:
+        """Sell the whole position immediately as taker. No profit gate.
+
+        v4.1 (user directive 2026-07-31): PnL is not the objective — volume
+        is. The v4 patient gate (wait for a price above entry that also clears
+        both legs' fees) is gone, so a cycle is buy-then-sell back to back and
+        the bot is FLAT between cycles. That is what makes the session loss
+        limit a sufficient bound: there is no held bag for it to miss.
+
+        Execution is still a MARKETABLE LIMIT rather than a naked MARKET —
+        that is an execution-safety bound, not a profit gate.
+        ``place_market_order`` is an IOC priced 1% through the touch by default
+        and the adapter never overrides it, so a bare MARKET could fill ~99bp
+        away from the book (AUDIT-VOL-2026-07-31 F1). A limit priced
+        ``vol_taker_slippage_bp`` through the bid crosses and fills at once,
+        with a hard worst-case price.
+        """
+        bid, _ask = touch
+        if bid <= 0:
+            self._enter_market_closed()
+            self.close_base_remaining = amount
+            return False
+        slip = self.taker_slippage_bp / Decimal(10000)
+        sell_cap = self._snap(bid * (Decimal(1) - slip), self._tick(), up=False)
+        if sell_cap <= 0:
+            self._complete("invalid_sell_price")
+            return False
+        ok, ex = await self._spawn_order(
+            TradeType.SELL, amount, sell_cap, kind="sell_taker",
+            execution=ExecutionStrategy.LIMIT,
+            position_action=PositionAction.CLOSE, ref_price=bid,
         )
         if ok and ex is not None:
             self.sell_id = ex.id
@@ -557,7 +703,22 @@ class VolumeBotController(Controller):
         self._finish_cycle()
         self.sell_id = None
         self.phase = "cycle_gap"
-        if self.target_volume_usd <= 0:
+        if self._emergency_exit_reason:
+            # The bag was flattened by the controller's own stop — do NOT open
+            # a fresh cycle on top of a stop that just fired.
+            self._complete(self._emergency_exit_reason)
+        elif self._session_loss_breached():
+            # Cumulative realized PnL net of fees hit the user's limit
+            # (default 5% of margin). Stop here: the cycle just closed, so the
+            # book is flat and nothing is left exposed.
+            logger.warning(
+                "volume_bot: session loss limit hit — net PnL %s <= -%s after "
+                "%s cycles; stopping pair=%s controller=%s",
+                self.session_realized_pnl_usd, self.session_loss_limit_usd,
+                self.cycles_completed, self.trading_pair, self.id,
+            )
+            self._complete("session_loss_limit")
+        elif self.target_volume_usd <= 0:
             self._complete("round_trip_complete")
         elif self._target_reached():
             self._complete("target_volume_hit")
@@ -589,6 +750,18 @@ class VolumeBotController(Controller):
                 await self._start_buy_cycle()
             return
 
+        if self.phase == "hold_for_profit":
+            # v4.1 removed the patient hold, but a session that was RESTARTED
+            # while parked in this phase (or an in-flight worker mid-deploy)
+            # can still land here holding base. Sell it immediately rather
+            # than leaving the user exposed in a phase nothing else services.
+            remaining = self.entry_base - self.sold_base
+            if remaining <= 0:
+                await self._after_cycle()
+                return
+            await self._start_sell_cycle(remaining)
+            return
+
         now = time.time()
 
         if self.phase == "pending_fill" and self.buy_id is not None:
@@ -604,15 +777,20 @@ class VolumeBotController(Controller):
                     self._sync_buy_progress(buy_ex)
                 leg_age = now - self.leg_started_ts if self.leg_started_ts else 0.0
                 quote_age = now - self.leg_quoted_ts if self.leg_quoted_ts else 0.0
+                # Requote/cross are MAKER mechanics: they exist to rescue a
+                # resting quote. A market order has no resting state to
+                # rescue, so they must never fire in taker mode.
                 if (
-                    self.cross_after_seconds > 0
+                    not self.taker_mode
+                    and self.cross_after_seconds > 0
                     and not self.leg_crossed
                     and leg_age >= self.cross_after_seconds
                 ):
                     await self._cross_leg(buy_ex, TradeType.BUY)
                     return
                 if (
-                    self.requote_seconds > 0
+                    not self.taker_mode
+                    and self.requote_seconds > 0
                     and not was_cross
                     and quote_age >= self.requote_seconds
                     and self.requotes < self._MAX_REQUOTES_PER_CYCLE
@@ -678,15 +856,18 @@ class VolumeBotController(Controller):
                 leg_age = now - self.leg_started_ts if self.leg_started_ts else 0.0
                 quote_age = now - self.leg_quoted_ts if self.leg_quoted_ts else 0.0
                 was_cross = self.last_order_kind == "sell_cross"
+                # Maker-only rescue mechanics (see the buy leg above).
                 if (
-                    self.cross_after_seconds > 0
+                    not self.taker_mode
+                    and self.cross_after_seconds > 0
                     and not self.leg_crossed
                     and leg_age >= self.cross_after_seconds
                 ):
                     await self._cross_leg(sell_ex, TradeType.SELL)
                     return
                 if (
-                    self.requote_seconds > 0
+                    not self.taker_mode
+                    and self.requote_seconds > 0
                     and not was_cross
                     and quote_age >= self.requote_seconds
                     and self.requotes < self._MAX_REQUOTES_PER_CYCLE
@@ -706,9 +887,26 @@ class VolumeBotController(Controller):
                     self.sell_attempts += 1
                     await self._start_sell_cycle(remaining)
                     return
+                if self._sell_remainder_placeable(remaining):
+                    # AUDIT-VOL-2026-07-31 F4: attempts are exhausted but this
+                    # is a REAL, sellable position — not dust. Falling through
+                    # to _after_cycle() would zero entry_base in the next
+                    # _start_buy_cycle and buy AGAIN on top of it, accumulating
+                    # orphaned spot the controller can no longer see (and
+                    # booking a phantom full-notional realized loss). End the
+                    # session instead and leave the bag visible to the user.
+                    logger.error(
+                        "volume_bot: %s base still unsold after %s attempts — "
+                        "STOPPING the session rather than buying on top of it "
+                        "pair=%s controller=%s",
+                        remaining, self.sell_attempts, self.trading_pair, self.id,
+                    )
+                    self.close_base_remaining = remaining
+                    self._complete("unsold_inventory")
+                    return
                 logger.warning(
                     "volume_bot: %s base unsold after %s sell attempts "
-                    "(dust or exhausted) — finishing cycle with the residue held "
+                    "(venue dust) — finishing cycle with the residue held "
                     "pair=%s controller=%s",
                     remaining, self.sell_attempts, self.trading_pair, self.id,
                 )
@@ -729,6 +927,12 @@ class VolumeBotController(Controller):
             "vol_entry_price": float(self.entry_price),
             "vol_entry_fill_ts": float(self.entry_fill_ts or 0.0),
             "vol_close_size": float(self.close_base_remaining),
+            # Expected all-in cost of one taker round trip (both legs' fees;
+            # the spread is on top and varies with the book). Surfaced so the
+            # user can see WHY the session loss limit approaches — with no
+            # profit gate, every cycle costs this by construction.
+            "vol_round_trip_fee_bp": float(self._taker_all_in_rate() * Decimal(20000)),
+            "vol_session_loss_limit_usd": float(self.session_loss_limit_usd),
             "vol_requotes": int(self.requotes),
             "vol_crosses": int(self.crosses),
             "vol_market_closed": bool(self.market_closed),

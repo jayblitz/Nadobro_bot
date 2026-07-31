@@ -1,5 +1,12 @@
 # Volume Bot (Spot) — v3
 
+> **Superseded for the default path (2026-07-31).** v4 runs **taker market
+> orders on both legs** with a patient, fee-aware sell gate, a $100–$500 margin
+> band, and an explicit fee-agreement card before start — see
+> [volume_bot_taker_v4.md](volume_bot_taker_v4.md). Everything below still
+> describes the v3 maker path, which remains in the controller behind
+> `vol_taker_mode=0` as a reversible kill-switch.
+
 Volume Bot is Nadobro's automated spot maker-volume strategy: a fast
 buy → sell ping-pong of a fixed USDT0 amount through one Nado spot product,
 **limit orders on both legs**, repeating until the cumulative executed volume

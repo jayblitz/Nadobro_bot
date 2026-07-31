@@ -1672,7 +1672,9 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "dgrid_short_window_points": (2, 50),
         "dgrid_long_window_points": (4, 200),
         # Volume Bot (spot) custom inputs — mirror strategy_handler set limits.
-        "session_margin_usd": (10, 1000000),
+        # Band $100-$500 per docs/volume_bot_taker_v4.md (was 10..1_000_000,
+        # which disagreed with the handler's own floor of 100).
+        "session_margin_usd": (100, 500),
         "target_volume_usd": (100, 100000000),
         # Delta Neutral (engine v2) custom inputs.
         "fixed_margin_usd": (1, 1000000),
