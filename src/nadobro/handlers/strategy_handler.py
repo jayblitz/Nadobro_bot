@@ -1505,15 +1505,20 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         )
 
     if strategy == "mid":
-        # Mid Mode: lean Tread parity — pure mid ± spread×level. No anchor /
-        # no soft-reset. Bias is a continuous float; we render it numerically.
-        levels = str(int(conf.get("levels", 2)))
-        ref_mode = str(conf.get("reference_mode", "mid")).upper()
+        # Mid Mode: lean Tread parity — pure mid ± spread. No anchor / no
+        # soft-reset. AUDIT-MID-2026-07-30 #5: "Levels" and "Reference" were
+        # displayed here but are NOT consumed by the mid mapping (a single bid
+        # + ask at full size, always mid-referenced) — dead knobs off the card.
         try:
             bias_val = float(conf.get("directional_bias", 0.0) or 0.0)
         except (TypeError, ValueError):
             bias_val = 0.0
-        bias_str = f"{bias_val:+.2f}"
+        if bias_val > 0:
+            bias_str = f"LONG {bias_val:+.2f}"
+        elif bias_val < 0:
+            bias_str = f"SHORT {bias_val:+.2f}"
+        else:
+            bias_str = "NEUTRAL"
         if section == "risk":
             return (
                 "⚙️ *MID MODE · Risk*\n\n"
@@ -1524,12 +1529,11 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         return (
             "⚙️ *MID MODE · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
-            f"Spread: *{escape_md(f'{spread_bp:+.1f} bp')}* \\| Levels: *{escape_md(levels)}*\n"
-            f"Reference: *{escape_md(ref_mode)}* \\| Bias: *{escape_md(bias_str)}*\n"
+            f"Spread: *{escape_md(f'{spread_bp:+.1f} bp')}* \\| Bias: *{escape_md(bias_str)}*\n"
             f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n"
             f"{_mm_sizing_line(conf)}\n\n"
-            "Pure mid ± spread×level\\. No anchor, no soft\\-reset\\. "
-            "Bias range −1\\.0 → \\+1\\.0; \\|1\\.0\\| adds 20% margin\\."
+            "Pure mid ± spread, one bid \\+ one ask\\. No anchor, no soft\\-reset\\. "
+            "Bias range −1\\.0 → \\+1\\.0 \\(short → long\\); \\|1\\.0\\| adds 20% margin\\."
         )
 
     if strategy == "dn":
@@ -1960,9 +1964,9 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("120s", callback_data="strategy:set:mid:interval_seconds:120"),
                 ],
                 [
-                    InlineKeyboardButton("Bias −0.5", callback_data="strategy:set:mid:directional_bias:-0.5"),
-                    InlineKeyboardButton("Bias 0", callback_data="strategy:set:mid:directional_bias:0"),
-                    InlineKeyboardButton("Bias +0.5", callback_data="strategy:set:mid:directional_bias:0.5"),
+                    InlineKeyboardButton("Short −0.5", callback_data="strategy:set:mid:directional_bias:-0.5"),
+                    InlineKeyboardButton("Neutral", callback_data="strategy:set:mid:directional_bias:0"),
+                    InlineKeyboardButton("Long +0.5", callback_data="strategy:set:mid:directional_bias:0.5"),
                 ],
                 [
                     InlineKeyboardButton("Min Spread 2bp", callback_data="strategy:set:mid:min_spread_bp:2"),
@@ -2569,8 +2573,16 @@ def _build_strategy_preview_text(
         )
 
     if strategy_id == "mid":
-        levels = int(conf.get("levels", 2) or 2)
-        directional_bias = float(conf.get("directional_bias", 0.0) or 0.0)
+        # Tolerates legacy TEXT bias values ("long_bias"/"neutral"/...) — a bare
+        # float() would raise and break the dashboard render.
+        from src.nadobro.quant.mm_quote_math import _resolve_directional_bias_value
+        directional_bias = _resolve_directional_bias_value(conf.get("directional_bias"))
+        if directional_bias > 0:
+            bias_label = f"LONG {directional_bias:+.2f}"
+        elif directional_bias < 0:
+            bias_label = f"SHORT {directional_bias:+.2f}"
+        else:
+            bias_label = "NEUTRAL"
         warning = ""
         if not wallet_ready:
             warning = "⚠️ Open Wallet to link your 1CT signer and fund this mode\\."
@@ -2597,9 +2609,8 @@ def _build_strategy_preview_text(
             f"• Margin \\(collateral cap\\): *{escape_md(_fmt_usd(margin_usd))}*\n"
             f"• Est\\. max resting quotes: *{escape_md(str(mm_max_quotes_est))}* \\| "
             f"*~{escape_md(_fmt_usd(mm_margin_per_quote_est))}* margin/quote \\(est\\.\\)\n"
-            f"• Levels: *{escape_md(str(levels))}*\n"
             f"• Spread: *{escape_md(f'{spread_bp:.0f}bp')}*\n"
-            f"• Directional bias: *{escape_md(f'{directional_bias:+.2f}')}*\n"
+            f"• Directional bias: *{escape_md(bias_label)}*\n"
             f"• Timing: *{escape_md(f'{interval_seconds}s')}*\n"
             f"• Leverage: *{escape_md(f'MAX ({leverage:.0f}x per-asset)')}*\n"
             f"• TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n\n"

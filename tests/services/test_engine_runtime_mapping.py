@@ -552,6 +552,15 @@ def test_mid_directional_bias_scales_net_exposure_cap_and_clamps():
         "mid", {"notional_usd": 100.0, "levels": 1, "directional_bias": 5.0}, mid, product="BTC-PERP",
     )
     assert clamped["directional_bias"] == 1.0
+
+    # BIAS-TEXT-COERCION (2026-07-30): legacy TEXT bias values must resolve to
+    # the same lean everywhere, not silently coerce to neutral via _f().
+    for text, expected in (("long_bias", 1.0), ("short_bias", -1.0), ("neutral", 0.0)):
+        mapped = map_strategy_config(
+            "mid", {"notional_usd": 100.0, "levels": 1, "directional_bias": text},
+            mid, product="BTC-PERP",
+        )
+        assert mapped["directional_bias"] == expected, text
     assert abs(clamped["max_net_exposure_pct"] - 36.0) < 1e-9
 
 

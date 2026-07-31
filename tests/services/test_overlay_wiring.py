@@ -49,6 +49,49 @@ def test_overlay_steers_mid_bias_and_size():
     assert Decimal(str(cfg["order_amount_quote"])) > Decimal("500")
 
 
+def test_overlay_never_overwrites_user_set_bias():
+    """USER-BIAS-WINS (2026-07-30): a user-set directional lean is a binding
+    contract. The uptrend fixture makes the overlay want a long bias, but the
+    user's explicit short lean must survive untouched (the overlay may steer
+    the bias only while the user is neutral — see the test above)."""
+    cfg = {
+        "order_amount_quote": Decimal("500"),
+        "spread_bid_pct": Decimal("0.0005"),
+        "spread_ask_pct": Decimal("0.0005"),
+        "directional_bias": -0.5,   # mapped from the user's setting
+    }
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5,
+             "tp_pct": 1.0, "directional_bias": -0.5}
+    asyncio.run(er._maybe_apply_overlay(
+        7, "mainnet", "mid", "BTC", 2, cfg, state, client=_FakeClient(), mid=131.6,
+    ))
+    assert cfg["directional_bias"] == -0.5
+
+
+def test_overlay_size_up_never_exceeds_risk_cap():
+    """OVERLAY-SIZE-VS-RISK-CAP (2026-07-30): Mid's base order sits exactly at
+    max_single_order_quote (one full deployed quote per side). The uptrend
+    fixture makes the overlay scale size UP; unclamped, the risk engine would
+    refuse every spawn and the session goes LIVE with 0 orders."""
+    from src.nadobro.engine.types import RiskLimits
+
+    cfg = {
+        "order_amount_quote": Decimal("500"),
+        "spread_bid_pct": Decimal("0.0005"),
+        "spread_ask_pct": Decimal("0.0005"),
+        "directional_bias": 0.0,
+    }
+    state = {"strategy": "mid", "strategy_session_id": 1, "sl_pct": 0.5, "tp_pct": 1.0}
+    limits = RiskLimits(max_single_order_quote=Decimal("500"))
+    asyncio.run(er._maybe_apply_overlay(
+        7, "mainnet", "mid", "BTC", 2, cfg, state,
+        client=_FakeClient(), mid=131.6, limits=limits,
+    ))
+    # The overlay wanted a size-up (see test above), but the order must stay
+    # within the risk cap so the spawn is never refused.
+    assert Decimal(str(cfg["order_amount_quote"])) == Decimal("500")
+
+
 def test_overlay_noop_for_non_mm_strategy():
     cfg = {"leg_amount_quote": Decimal("50")}
     before = dict(cfg)

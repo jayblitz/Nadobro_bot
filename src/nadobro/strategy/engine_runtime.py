@@ -769,7 +769,16 @@ def map_strategy_config(
     sl = Decimal(str(_sl_pct)) / Decimal(100)
 
     if strategy == "mid":
-        _mid_bias = max(-1.0, min(_f(settings, "directional_bias", 0.0), 1.0))
+        # BIAS-TEXT-COERCION (2026-07-30): settings may carry the legacy TEXT
+        # values ("neutral"/"long_bias"/"short_bias" — the set_text UI path and
+        # old configs store them). _f() coerced any text to 0.0, silently
+        # neutralizing an explicit user lean, while the overlay's user-bias
+        # filter resolved the same text to ±1 — the two paths disagreed. Use
+        # the shared resolver so text and float biases mean the same thing
+        # everywhere.
+        from src.nadobro.quant.mm_quote_math import _resolve_directional_bias_value
+
+        _mid_bias = _resolve_directional_bias_value(settings.get("directional_bias"))
         # Directional bias intentionally builds one-sided inventory, which would
         # otherwise be choked by the symmetric net-exposure cap. Per the docs,
         # extreme bias (±1) is allowed up to 20% more directional exposure (and
@@ -1505,10 +1514,14 @@ async def _maybe_apply_overlay(
     *,
     client: object,
     mid: float,
+    limits: Optional[RiskLimits] = None,
 ) -> None:
     """Compute the multi-timeframe signal and apply BOUNDED overrides to the
     mapped ``configs`` in place. Best-effort: any failure leaves the base config
-    untouched. Candle fetch + persistence run off the event loop."""
+    untouched. Candle fetch + persistence run off the event loop.
+
+    ``limits`` are the risk caps mapped from the user's settings BEFORE the
+    overlay ran; the per-order size is clamped back to them (see below)."""
     try:
         from src.nadobro.strategy.overlay_actuator import (
             APPLIED_OVERRIDE_KEYS,
@@ -1586,6 +1599,16 @@ async def _maybe_apply_overlay(
             base_tp_pct=(base_tp if base_tp > 0 else 1.0),
         )
         overrides = compute_overrides(strategy, signal)
+        # USER-BIAS-WINS (2026-07-30): Mid's directional_bias is a user-facing
+        # Long/Short/Neutral control, but the overlay stamped the AI signal's
+        # bias over it every cycle (even at confidence 0.01), so the setting
+        # never reached live quoting. The overlay may steer the lean only while
+        # the user is neutral; an explicit user lean is a binding contract.
+        if strategy == "mid" and "directional_bias" in overrides:
+            from src.nadobro.quant.mm_quote_math import _resolve_directional_bias_value
+
+            if abs(_resolve_directional_bias_value(state.get("directional_bias"))) > 1e-9:
+                overrides.pop("directional_bias")
         # Dead-band against the previously APPLIED values so a 4th-decimal
         # signal wobble doesn't flip the live-config signature every candle
         # refresh (each flip recenters the grid ladder / resets Mid quotes).
@@ -1597,6 +1620,20 @@ async def _maybe_apply_overlay(
         applied_changed = applied != prev_applied
         state["overlay_applied"] = applied
         changed = apply_overrides_to_configs(strategy, configs, overrides)
+
+        # OVERLAY-SIZE-VS-RISK-CAP (2026-07-30): the overlay's size_factor can
+        # scale order_amount_quote up to 1.25x, but ``limits`` were mapped from
+        # the user's settings before the overlay — for Mid the base order
+        # already sits exactly AT max_single_order_quote (one full deployed
+        # quote per side), so any up-scale made the risk engine refuse every
+        # spawn ("LIVE but 0 orders", the DN/vol cap-bug class). The user's
+        # deployed margin is the binding budget: clamp the per-order size back
+        # to the cap rather than raising the cap.
+        _cap = getattr(limits, "max_single_order_quote", None)
+        _oaq = configs.get("order_amount_quote")
+        if _cap is not None and _oaq is not None and Decimal(str(_oaq)) > _cap:
+            configs["order_amount_quote"] = _cap
+            changed["order_amount_quote"] = str(_cap)
 
         # Surface the regime-adjusted barriers to the session SL/TP rail (which
         # reads state, not configs). Persisted with state at end of cycle, so
@@ -1798,7 +1835,7 @@ async def _run_engine_cycle_locked(
     # overlay's own drawdown kill-switch lives in bot_runtime's session rail.
     await _maybe_apply_overlay(
         telegram_id, network, strategy, product, product_id, configs, state,
-        client=client, mid=mid,
+        client=client, mid=mid, limits=limits,
     )
 
     # NO_ORDERS_AUDIT-FIX-R2: inject the dgrid candle_provider HERE, because

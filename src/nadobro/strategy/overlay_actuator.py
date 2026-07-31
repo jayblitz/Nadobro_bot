@@ -238,7 +238,15 @@ def apply_overrides_to_configs(
         # Choke NEW exposure via the existing net-exposure cap (the inventory
         # gate keeps the reducing side quoting), and arm the regime gate so
         # trends/breakouts pause new opens. Both are honored by the controllers.
-        configs["max_net_exposure_pct"] = 0.0
+        # SUPPRESS-CAP-ZERO (2026-07-30): NOT for mid — suppress fires on chop,
+        # which is exactly the regime a symmetric maker exists to quote, and
+        # both exposure checks treat a cap of 0 as "cap INACTIVE", so zeroing
+        # removed mid's exposure cap entirely instead of choking entries. Mid
+        # keeps its configured cap active and keeps quoting; its rails are the
+        # inventory cap, the regime gate (pauses trends/breakouts, not chop)
+        # and the session SL. The grid family keeps the legacy zeroing.
+        if str(strategy or "").lower() != "mid":
+            configs["max_net_exposure_pct"] = 0.0
         configs["regime_gate_enabled"] = True
         changed["suppress_new_entries"] = True
 

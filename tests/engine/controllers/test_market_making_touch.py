@@ -236,3 +236,41 @@ def test_projected_cap_keeps_reducing_side_open_above_cap():
     # Selling $1,000 reduces $2,500 long exposure to $1,500. It remains above
     # cap, but must stay allowed so the controller can work inventory down.
     assert c._projected_order_within_exposure(TradeType.SELL, Decimal("100"))
+
+
+def test_flat_book_places_first_quotes_when_cap_is_below_order_size():
+    """MID-FLAT-DEADLOCK (2026-07-30): plain Mid maps order_amount_quote ==
+    margin_quote with the default 30% net-exposure cap, so the projected check
+    refused BOTH sides on a flat book forever — the strategy never placed a
+    single order (prod session 176). The cap floors at one order size: the
+    first quote per side must go out; stacking a SECOND worsening full-size
+    order beyond the floored cap must stay blocked."""
+
+    async def body():
+        cfg = dict(TOUCH_CFG)
+        cfg.pop("quote_mode")  # plain Mid: classic mid ± spread pricing
+        cfg.update({
+            "order_amount_quote": "100",
+            "max_base_quote": "100",
+            "margin_quote": "100",
+            "max_net_exposure_pct": 30,
+        })
+        adapter = BookAdapter(bid="100.00", ask="100.10", mid=Decimal(100), tick="0.01")
+        orch, c = _mm(adapter, cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+
+        # Flat book: one bid AND one ask despite cap (30) < order size (100).
+        assert len([o for o in adapter.placed if o.side is TradeType.BUY]) == 1
+        assert len([o for o in adapter.placed if o.side is TradeType.SELL]) == 1
+
+        # After a full bid fill, a further worsening buy projects ~2x the
+        # floored cap and must stay blocked (the original 2x guard).
+        bid = orch.get(c._bid_id)
+        adapter.fill_order(bid.order.id)
+        await orch.tick_controller(c.id)
+        assert not c._projected_order_within_exposure(TradeType.BUY, Decimal("100"))
+        # The reducing sell side keeps quoting so inventory can trim back.
+        assert c._projected_order_within_exposure(TradeType.SELL, Decimal("100"))
+
+    asyncio.run(body())
