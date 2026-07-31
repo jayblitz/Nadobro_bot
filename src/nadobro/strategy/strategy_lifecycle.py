@@ -15,7 +15,15 @@ def _volume_spot_managed_size(state: dict[str, Any]) -> float:
         entry_ts = float(state.get("vol_entry_fill_ts") or 0.0)
     except (TypeError, ValueError):
         entry_ts = 0.0
-    if phase not in ("filled_wait_close", "pending_close_fill") and entry_ts <= 0:
+    # Any phase that can hold base must be able to size a sweep. ``entry_ts``
+    # already covers most stops, but naming the holding phases explicitly means
+    # a stop landing mid-cycle never resolves to "nothing to close" and leaves
+    # the user exposed (hold_for_profit is the legacy v4 park state — reachable
+    # on a session restarted across the v4.1 deploy).
+    if (
+        phase not in ("filled_wait_close", "pending_close_fill", "hold_for_profit")
+        and entry_ts <= 0
+    ):
         return 0.0
     if phase == "pending_close_fill":
         for key in ("vol_close_size", "vol_entry_size"):

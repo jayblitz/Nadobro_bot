@@ -675,6 +675,48 @@ def _f(settings: Dict[str, Any], key: str, default: float) -> float:
         return default
 
 
+def resolve_vol_fee_rates(product: str, network: str = "mainnet") -> tuple[float, float]:
+    """Return ``(venue_taker_rate, builder_rate)`` for the spot Volume Bot.
+
+    THE single source of truth for both the fee-agreement card and the engine
+    config. They previously resolved rates through two independent call sites
+    with different symbol normalization, so a card could quote one rate while
+    the run traded another — the user would be agreeing to a price that was
+    not the price. Both now call this.
+
+    Never returns a 0 taker rate: a 0 would make the breakeven gate think a
+    round trip is free and sell into a real fee loss. See
+    src/nadobro/quant/vol_fee_estimator.py for the measured fallback.
+    """
+    from src.nadobro.quant.vol_fee_estimator import (
+        DEFAULT_BUILDER_FEE_RATE,
+        DEFAULT_SPOT_TAKER_FEE_RATE,
+    )
+
+    try:
+        from src.nadobro.config import normalize_volume_spot_symbol
+
+        pair = normalize_volume_spot_symbol(str(product or "")) or str(product or "")
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(raw symbol still resolves for most pairs)
+        pair = str(product or "")
+    try:
+        from src.nadobro.venue.product_catalog import get_spot_taker_fee_rate
+
+        taker = get_spot_taker_fee_rate(pair, network=network)
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(measured default applies)
+        taker = None
+    if not taker or float(taker) <= 0:
+        taker = float(DEFAULT_SPOT_TAKER_FEE_RATE)
+    try:
+        from src.nadobro.config import get_nado_builder_routing_config
+
+        # Units are 0.1 bps: 10 units = 1 bps = 0.0001. Testnet returns 0.
+        builder = float(get_nado_builder_routing_config(network)[1]) / 100000.0
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(assume the locked 1bps policy rate)
+        builder = float(DEFAULT_BUILDER_FEE_RATE)
+    return float(taker), builder
+
+
 def _quote_defense_defaults(settings, notional, *, auto_spread: bool) -> dict:
     """Regime gate / inventory cap / ATR-spread knobs for grid family + MM.
 
@@ -902,6 +944,12 @@ def map_strategy_config(
             "leverage": 1,
         }
     if strategy == "vol":
+        from src.nadobro.quant.vol_fee_estimator import (
+            DEFAULT_BUILDER_FEE_RATE as _VOL_DEFAULT_BUILDER_RATE,
+            DEFAULT_SPOT_TAKER_FEE_RATE as _VOL_DEFAULT_TAKER_RATE,
+            clamp_margin_usd as _vol_clamp_margin,
+        )
+
         interval = max(1.0, _f(settings, "interval_seconds", 60))
         # VOL-MARGIN fix: the vol card collects the run size under
         # ``session_margin_usd`` (strategy_handler), but the generic ``notional``
@@ -912,6 +960,11 @@ def map_strategy_config(
             settings, "session_margin_usd",
             _f(settings, "cycle_notional_usd", _f(settings, "notional_usd", 100.0)),
         )
+        # Product band $100-$500 (2026-07-31). The UI enforces it on entry;
+        # re-clamp here so a stale or hand-edited config can never start an
+        # out-of-band run — the fee estimate the user agreed to was quoted
+        # against a banded margin.
+        vol_notional = float(_vol_clamp_margin(vol_notional))
         # Normalize the trading pair so the VolumeBotController validation
         # sees a canonical base (e.g. ``KBTC``) regardless of whether
         # ``state.product`` was stored as ``KBTC`` (current UI) or as a
@@ -928,6 +981,12 @@ def map_strategy_config(
             spot_maker_fee_rate = get_spot_maker_fee_rate(vol_pair, network=network)
         except Exception:
             spot_maker_fee_rate = None
+        # v4 taker mode: the venue taker rate drives BOTH the breakeven gate
+        # and the fee estimate the user agreed to, so both MUST come from the
+        # same resolver — see resolve_vol_fee_rates. The builder fee is charged
+        # ON TOP of the venue fee (trades_mainnet keeps builder_fee in its own
+        # column), so the breakeven carries it explicitly.
+        spot_taker_fee_rate, builder_fee_rate = resolve_vol_fee_rates(vol_pair, network)
         if spot_maker_fee_rate is None:
             if settings.get("vol_maker_fee_rate") is not None:
                 spot_maker_fee_rate = _f(settings, "vol_maker_fee_rate", 0.0)
@@ -963,6 +1022,27 @@ def map_strategy_config(
             # touch (still price-bounded; fills as taker). 0 = pure maker.
             "vol_cross_after_seconds": _f(settings, "vol_cross_after_seconds", 25.0),
             "vol_cross_slippage_bp": _f(settings, "vol_cross_slippage_bp", 15.0),
+            # v4 TAKER MODE (docs/volume_bot_taker_v4.md): market orders on
+            # both legs, with a patient sell that waits for a price strictly
+            # above the entry AND at/above fee-inclusive breakeven. 0 restores
+            # the v3 maker path.
+            "vol_taker_mode": 1.0 if _f(settings, "vol_taker_mode", 1.0) != 0 else 0.0,
+            "spot_taker_fee_rate": Decimal(str(spot_taker_fee_rate)),
+            "vol_builder_fee_rate": Decimal(str(builder_fee_rate)),
+            # Taker execution bound: both legs are marketable LIMITs priced
+            # this far through the touch (AUDIT-VOL-2026-07-31 F1 — a naked
+            # MARKET is an IOC at 1% that the adapter never overrides).
+            "vol_taker_slippage_bp": _f(settings, "vol_taker_slippage_bp", 15.0),
+            # SESSION LOSS LIMIT (user directive 2026-07-31): stop and flatten
+            # once cumulative realized PnL NET OF FEES reaches -sl_pct% of
+            # margin — 5% of a $100 margin is -$5. Enforced in the CONTROLLER
+            # off its own fill accounting, because the live-session rail is
+            # structurally blind to spot (session product_id is perp-only, so
+            # it is NULL for a spot session). Absolute USD so the controller
+            # needs no margin context.
+            "vol_session_loss_limit_usd": Decimal(str(
+                vol_notional * max(0.0, _f(settings, "sl_pct", 5.0)) / 100.0
+            )),
         }
     # grid / rgrid / dgrid family.
     #

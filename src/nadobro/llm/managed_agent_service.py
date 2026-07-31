@@ -145,6 +145,25 @@ async def handle_managed_agent_turn(
         leverage = _extract_leverage(prompt_text)
         direction = _extract_direction(prompt_text)
 
+        if strategy == "vol":
+            # VOL-FEE-AGREEMENT (2026-07-31): the spot Volume Bot trades TAKER
+            # on both legs, so a run carries a quantifiable fee the user must
+            # see and accept BEFORE any order is placed (the estimate depends
+            # on their margin + target, so it cannot be pre-agreed here).
+            # This chat path has no way to render and capture that consent, so
+            # it routes to the card that does rather than starting uninformed.
+            return {
+                "handled": True,
+                "response": (
+                    "Volume Bot charges a taker fee on every leg, so I need you to "
+                    "see the estimate before it runs. Open Strategies → Volume Bot: "
+                    "set your margin ($100-$500) and volume target, and the confirm "
+                    "screen shows the exact fee before you agree to it."
+                ),
+                "show_menu": True,
+                "route": "strategy_start_needs_fee_ack",
+            }
+
         ok, msg = start_user_bot(
             telegram_id,
             strategy=strategy,

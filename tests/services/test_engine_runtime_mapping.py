@@ -287,8 +287,46 @@ def test_map_vol_config_is_spot():
         "vol", {"notional_usd": 40.0, "interval_seconds": 60}, Decimal(100), product="KBTC-USDC",
     )
     assert cfg["market"] == "spot" and cfg["leverage"] == 1
-    assert cfg["total_amount_quote"] == Decimal("40")
+    # $40 is below the product's $100-$500 band and is clamped UP to the floor
+    # (docs/volume_bot_taker_v4.md) — the fee estimate the user agreed to was
+    # quoted against a banded margin, so the run must use one.
+    assert cfg["total_amount_quote"] == Decimal("100")
     assert cfg["total_duration"] == 240.0 and cfg["order_interval"] == 60.0
+
+
+def test_map_vol_config_enforces_the_margin_band():
+    """Margin band $100-$500. The UI enforces it on entry; the mapping
+    re-clamps so a stale or hand-edited config cannot start an out-of-band run."""
+    lo = er.map_strategy_config(
+        "vol", {"session_margin_usd": 25.0}, Decimal(100), product="KBTC-USDC",
+    )
+    hi = er.map_strategy_config(
+        "vol", {"session_margin_usd": 5000.0}, Decimal(100), product="KBTC-USDC",
+    )
+    ok = er.map_strategy_config(
+        "vol", {"session_margin_usd": 250.0}, Decimal(100), product="KBTC-USDC",
+    )
+    assert lo["total_amount_quote"] == Decimal("100")
+    assert hi["total_amount_quote"] == Decimal("500")
+    assert ok["total_amount_quote"] == Decimal("250")
+
+
+def test_map_vol_config_defaults_to_taker_with_nonzero_fee_rates():
+    """v4: market orders both legs by default, and the breakeven gate must
+    never see a 0 fee rate (that would make a round trip look free and sell
+    at a real loss). vol_taker_mode=0 restores the v3 maker path."""
+    cfg = er.map_strategy_config(
+        "vol", {"session_margin_usd": 100.0}, Decimal(100), product="KBTC-USDC",
+    )
+    assert cfg["vol_taker_mode"] == 1.0
+    assert Decimal(str(cfg["spot_taker_fee_rate"])) > 0
+    assert Decimal(str(cfg["vol_builder_fee_rate"])) >= 0
+
+    maker = er.map_strategy_config(
+        "vol", {"session_margin_usd": 100.0, "vol_taker_mode": 0},
+        Decimal(100), product="KBTC-USDC",
+    )
+    assert maker["vol_taker_mode"] == 0.0
 
 
 def test_map_vol_config_normalizes_dashed_and_bare_product():
@@ -920,3 +958,34 @@ def test_apply_mid_controller_config_syncs_quote_mode():
     assert controller.quote_mode == "touch"
     # POLICY 2026-07-15: maker-only — no cross knobs exist on the controller.
     assert not hasattr(controller, "cross_close_after_seconds")
+
+
+def test_vol_session_loss_limit_is_mapped_from_sl_pct():
+    """User directive 2026-07-31: the session stop is 5% of margin — cumulative
+    realized PnL net of fees reaching -$5 on a $100 margin stops the bot. It is
+    mapped to an absolute USD limit the CONTROLLER enforces, because the
+    live-session rail is structurally blind to spot inventory."""
+    cfg = er.map_strategy_config(
+        "vol", {"session_margin_usd": 100.0, "sl_pct": 5.0},
+        Decimal(100), product="KBTC-USDC",
+    )
+    assert Decimal(str(cfg["vol_session_loss_limit_usd"])) == Decimal("5")
+    assert cfg["vol_taker_slippage_bp"] == 15.0
+
+    # Scales with margin, and honors a user override.
+    big = er.map_strategy_config(
+        "vol", {"session_margin_usd": 500.0, "sl_pct": 5.0},
+        Decimal(100), product="KBTC-USDC",
+    )
+    assert Decimal(str(big["vol_session_loss_limit_usd"])) == Decimal("25")
+    tight = er.map_strategy_config(
+        "vol", {"session_margin_usd": 100.0, "sl_pct": 2.0},
+        Decimal(100), product="KBTC-USDC",
+    )
+    assert Decimal(str(tight["vol_session_loss_limit_usd"])) == Decimal("2")
+
+
+def test_vol_registry_default_sl_is_5_pct():
+    from src.nadobro.strategy.strategy_registry import settings_strategy_defaults
+
+    assert float(settings_strategy_defaults()["vol"]["sl_pct"]) == 5.0

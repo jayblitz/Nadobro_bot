@@ -1105,6 +1105,16 @@ def start_user_bot(
             or state.get("fixed_margin_usd")
             or 100.0
         )
+        # AUDIT-VOL-2026-07-31 F5: clamp to the $100-$500 band HERE, at the one
+        # place the session state is written, so every downstream reader agrees:
+        # map_strategy_config (order size), map_risk_limits (single-order cap)
+        # and live_session._resolve_margin (the SL/TP denominator) all read
+        # these keys. Clamping only in the config mapping left a stale $1000
+        # config trading $500 while the stop measured against $1000 (a 2x
+        # looser stop), and a stale sub-$100 config with a risk cap below its
+        # own clamped order size (every buy rejected — a silent dead session).
+        from src.nadobro.quant.vol_fee_estimator import clamp_margin_usd as _clamp_vol
+        _vol_margin = float(_clamp_vol(_vol_margin))
         state["session_margin_usd"] = _vol_margin
         state["fixed_margin_usd"] = _vol_margin
         state["notional_usd"] = _vol_margin
@@ -3292,6 +3302,15 @@ async def _run_cycle(
         if rail is not None:
             return rail
     if strategy == "vol":
+        # NO-EXPOSED-POSITION (2026-07-31): fold THIS cycle's vol counters into
+        # state BEFORE the rail can fire. The rail's close path sizes its spot
+        # sweep from state (vol_close_size / vol_entry_size via
+        # _volume_spot_managed_size); merging afterwards meant a stop that
+        # tripped on the same cycle as the first buy fill swept against a stale
+        # 0, sold nothing, and still reported "positions closed" — leaving the
+        # base sitting in the user's wallet. Merging is idempotent, and the
+        # merge below still runs for the non-rail path.
+        _merge_vol_order_counters(state, result)
         # Volume strategy session SL/TP on live Nado PnL (% of margin). Replaces
         # the dead ``result.get("done") + stop_reason`` branch — run_engine_cycle
         # never sets those, so the vol session stop never fired either.

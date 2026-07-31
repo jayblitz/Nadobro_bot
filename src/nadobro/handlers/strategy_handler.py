@@ -190,6 +190,122 @@ def _vol_market_pref(context) -> str:
     return "spot"
 
 
+def _vol_fee_estimate(telegram_id: int, product: str, network: str):
+    """Build the Volume Bot fee estimate the agreement card renders.
+
+    Sync (catalog + settings reads) — call via run_blocking. Rates resolve
+    venue-first with the production-measured fallback; see
+    src/nadobro/quant/vol_fee_estimator.py for the provenance.
+    """
+    from src.nadobro.quant.vol_fee_estimator import estimate_vol_fees
+    from src.nadobro.strategy.engine_runtime import resolve_vol_fee_rates
+
+    _, conf = get_strategy_settings(telegram_id, "vol")
+    # SAME resolver the engine uses (normalized symbol, same fallbacks), so the
+    # rate on this card is provably the rate the run trades at.
+    taker, builder = resolve_vol_fee_rates(product, network)
+    margin = conf.get("session_margin_usd", conf.get("notional_usd", 100.0))
+    # AUDIT-VOL-2026-07-31 F7: run_engine_cycle raises the per-cycle size to
+    # min_closeable_entry_notional(venue_min) when the configured size would
+    # leave an unclosable position — on a $100-min pair a $100 cycle actually
+    # trades $115. Quote the size the engine will really use; a consent card
+    # that understates the money at risk is not consent.
+    try:
+        from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
+        from src.nadobro.venue.product_catalog import get_product_min_quote_notional_usd
+
+        venue_min = get_product_min_quote_notional_usd(product, network=network) or 0.0
+        floor = float(min_closeable_entry_notional(float(venue_min)) or 0.0)
+        if floor > float(margin or 0):
+            margin = floor
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(configured size is still quoted)
+        pass
+    return estimate_vol_fees(
+        margin_usd=margin,
+        target_volume_usd=conf.get("target_volume_usd", 0.0),
+        taker_fee_rate=taker,
+        builder_fee_rate=builder,
+    )
+
+
+def _vol_fee_agreement_text(est, product: str, network: str, sl_pct: float = 0.0) -> str:
+    """The charges the user is agreeing to. Every number here is quoted from
+    the same estimate object that gets persisted on consent."""
+    basis = (
+        "venue rate" if est.rate_source == "venue"
+        else "measured avg (venue does not publish this pair's rate)"
+    )
+    # AUDIT-VOL-2026-07-31 F6: the session stop is judged NET OF FEES, so if
+    # the fees for the whole run exceed the stop budget the rail must trip
+    # before the target can complete. Say so here rather than let the user
+    # consent to a run that provably cannot finish.
+    warning = ""
+    fee_pct = float(est.fee_pct_of_margin)
+    if sl_pct > 0:
+        # Both legs are taker with no profit gate, so each round trip costs
+        # fees (plus spread) by construction and the loss accumulates toward
+        # the stop. Volume reachable before the stop trips ~= budget / rate.
+        budget = float(est.margin_usd) * sl_pct / 100.0
+        rate = float(est.total_rate)
+        reachable = (budget / rate) if rate > 0 else 0.0
+        stop_line = (
+            f"\n\n🛑 *Session stop: {escape_md(f'{sl_pct:.0f}%')} of margin "
+            f"\\({escape_md(f'${budget:,.2f}')}\\)*\n"
+            f"Both legs take liquidity, so every round trip costs fees \\+ spread — "
+            f"there is no profit target\\. The bot stops and closes everything once "
+            f"cumulative loss net of fees hits "
+            f"*{escape_md(f'-${budget:,.2f}')}*\\."
+        )
+        if reachable > 0 and reachable < float(est.target_volume_usd):
+            stop_line += (
+                f"\n⚠️ On fees alone that is about "
+                f"*{escape_md(f'${reachable:,.0f}')}* of volume — **less than your "
+                f"{escape_md(f'${float(est.target_volume_usd):,.0f}')} target**, and "
+                f"spread will bring it lower\\. Raise the stop or lower the target "
+                f"to finish the run\\."
+            )
+        warning = stop_line
+    return (
+        "💳 *Volume Bot — confirm charges*\n\n"
+        f"Market: *{escape_md(str(product).upper())} SPOT* \\({escape_md(network.upper())}\\)\n"
+        f"Margin per cycle: *{escape_md(f'${float(est.margin_usd):,.0f}')}*\n"
+        f"Volume target: *{escape_md(f'${float(est.target_volume_usd):,.0f}')}*\n"
+        f"Estimated round trips: *{escape_md(str(est.estimated_cycles))}*\n\n"
+        "*Fees*\n"
+        f"Taker fee: *{escape_md(f'{float(est.taker_fee_rate) * 10000:.2f} bp')}* "
+        f"\\({escape_md(basis)}\\)\n"
+        f"Builder fee: *{escape_md(f'{float(est.builder_fee_rate) * 10000:.2f} bp')}*\n"
+        f"Total: *{escape_md(f'{float(est.total_rate_bp):.2f} bp')}* of traded volume\n\n"
+        f"➡️ *Estimated total fee: {escape_md(f'${float(est.estimated_fee_usd):,.2f}')}* "
+        f"\\({escape_md(f'{float(est.fee_pct_of_margin):.1f}%')} of your margin\\)\n\n"
+        "⚠️ *Spot slippage:* both legs take liquidity at market\\. They fill at "
+        "the best available price, which can be worse than the quoted touch — "
+        "so your *actual total cost can exceed this estimate*\\. The estimate "
+        "prices fees only, not the price you fill at\\."
+        f"{warning}\n\n"
+        "Starting the bot means you *agree to these charges*\\."
+    )
+
+
+def _vol_record_fee_ack(telegram_id: int, est) -> None:
+    """Persist what the user agreed to (rate, estimate, size) for audit.
+
+    Per start, not once-ever: the estimate depends on the margin, target and
+    rates in force at that moment, so each run re-quotes and re-consents.
+    """
+    import time as _time
+
+    def _mutate(s):
+        cfg = s.setdefault("strategies", {}).setdefault("vol", {})
+        cfg["vol_fee_ack_ts"] = _time.time()
+        cfg["vol_fee_ack_margin_usd"] = float(est.margin_usd)
+        cfg["vol_fee_ack_volume_usd"] = float(est.target_volume_usd)
+        cfg["vol_fee_ack_rate_bp"] = float(est.total_rate_bp)
+        cfg["vol_fee_ack_estimate_usd"] = float(est.estimated_fee_usd)
+
+    update_user_settings(telegram_id, _mutate)
+
+
 def _mid_bias_value(telegram_id: int) -> float:
     """Current Mid Mode directional bias as a float in [-1, 1] (sync DB read —
     call via run_blocking). Tolerates the legacy text values via the shared
@@ -777,7 +893,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "interval_seconds": (5, 3600),
             "tp_pct": (0.05, 100),
             "sl_pct": (0.05, 100),
-            "session_margin_usd": (100, 1000000),
+            # Volume Bot per-cycle size band (docs/volume_bot_taker_v4.md).
+            "session_margin_usd": (100, 500),
             "target_volume_usd": (100, 100000000),
             "levels": (1, 20),
             "min_range_pct": (0.1, 20),
@@ -990,9 +1107,14 @@ async def _handle_strategy(query, data, context, telegram_id):
             "Next: open Buy/Long or Sell/Short and execute with preview\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
-    elif action == "start" and len(parts) >= 4:
+    elif action in ("start", "startok") and len(parts) >= 4:
         strategy_id = parts[2]
         product = str(parts[3] or "").upper()
+        # VOL-FEE-AGREEMENT (2026-07-31): "startok" is the same start path,
+        # re-entered after the user accepted the fee estimate. Sharing this
+        # branch means the agreement gate sits BEHIND every existing preflight
+        # (onboarding, wallet, collateral) instead of duplicating it.
+        fee_agreed = action == "startok"
         start_direction = "long"
         if strategy_id == "vol" and len(parts) >= 5:
             start_direction = "short" if str(parts[4]).lower() == "short" else "long"
@@ -1085,6 +1207,48 @@ async def _handle_strategy(query, data, context, telegram_id):
         vol_m = _vol_market_pref(context) if strategy_id == "vol" else "perp"
         if strategy_id == "vol" and vol_m == "spot":
             start_direction = "long"
+        # Charges gate: the Volume Bot trades taker on both legs, so fees are
+        # a real, quantifiable cost the user must see and accept BEFORE any
+        # order is placed. Everything above (onboarding, wallet, collateral)
+        # has already passed, so this card is the last thing before the start.
+        if strategy_id == "vol" and not fee_agreed:
+            vol_est = await run_blocking(
+                _vol_fee_estimate, telegram_id, product, network
+            )
+            _vol_sl = float((strategy_conf or {}).get("sl_pct") or 0.0)
+            await _edit_loc(
+                query,
+                _vol_fee_agreement_text(vol_est, product, network, sl_pct=_vol_sl),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✅ Agree & Start",
+                        callback_data=f"strategy:startok:vol:{product}",
+                    )],
+                    [InlineKeyboardButton(
+                        "◀ Back", callback_data="strategy:preview:vol",
+                    )],
+                ]),
+            )
+            return
+        if strategy_id == "vol" and fee_agreed:
+            # AUDIT-VOL-2026-07-31 F8: the start result arrives as a NEW
+            # message, so the fee card and its "Agree & Start" button stay
+            # live. Re-tapping later re-reads settings and could start with a
+            # margin/target the user never saw quoted. Strip the keyboard so
+            # the consent is single-use.
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001  # policy: degrade-ok(cosmetic; consent already captured)
+                pass
+            # Record what was agreed to, against the SAME inputs the run uses.
+            try:
+                _ack_est = await run_blocking(
+                    _vol_fee_estimate, telegram_id, product, network
+                )
+                await run_blocking(_vol_record_fee_ack, telegram_id, _ack_est)
+            except Exception:  # noqa: BLE001  # policy: degrade-ok(audit stamp only; never block a consented start)
+                logger.warning("vol fee-ack persist failed", exc_info=True)
         start_payload = {
             "type": "start_strategy",
             "strategy": strategy_id,
@@ -1626,9 +1790,12 @@ def _strategy_config_section_kb(strategy: str, section: str):
         # session margin (per-cycle notional), stop loss %, target volume.
         rows = [
             [
+                # Band $100-$500 (docs/volume_bot_taker_v4.md). The old $1000
+                # button wrote a value the mapping now clamps back to 500 —
+                # a control that silently disagreed with the engine.
                 InlineKeyboardButton("Margin $100", callback_data="strategy:set:vol:session_margin_usd:100"),
+                InlineKeyboardButton("Margin $250", callback_data="strategy:set:vol:session_margin_usd:250"),
                 InlineKeyboardButton("Margin $500", callback_data="strategy:set:vol:session_margin_usd:500"),
-                InlineKeyboardButton("Margin $1000", callback_data="strategy:set:vol:session_margin_usd:1000"),
             ],
             [
                 InlineKeyboardButton("✍️ Custom Margin", callback_data="strategy:input:vol:session_margin_usd"),
@@ -1642,9 +1809,13 @@ def _strategy_config_section_kb(strategy: str, section: str):
                 InlineKeyboardButton("✍️ Custom TP", callback_data="strategy:input:vol:tp_pct"),
             ],
             [
-                InlineKeyboardButton("SL 0.5%", callback_data="strategy:set:vol:sl_pct:0.5"),
-                InlineKeyboardButton("SL 1.0%", callback_data="strategy:set:vol:sl_pct:1.0"),
-                InlineKeyboardButton("SL 2.0%", callback_data="strategy:set:vol:sl_pct:2.0"),
+                # Every taker round trip costs spread + both legs' fees, so
+                # the session stop is the binding limit on how much volume a
+                # run completes. 5% of margin (-$5 on $100) is the default;
+                # sub-1% stops trip almost immediately and are not offered.
+                InlineKeyboardButton("SL 2%", callback_data="strategy:set:vol:sl_pct:2"),
+                InlineKeyboardButton("SL 5%", callback_data="strategy:set:vol:sl_pct:5"),
+                InlineKeyboardButton("SL 10%", callback_data="strategy:set:vol:sl_pct:10"),
             ],
             [
                 InlineKeyboardButton("✍️ Custom SL", callback_data="strategy:input:vol:sl_pct"),
