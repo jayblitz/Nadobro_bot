@@ -878,6 +878,7 @@ def strategy_action_kb(
     available_products: list[str] | None = None,
     is_running: bool = False,
     vol_market: str = "spot",  # retained for signature compatibility; volume is spot-only.
+    mid_bias: float | None = None,  # Mid Mode: current directional bias for the ✅ marker
 ):
     if strategy_id == "dn":
         products = [p.upper() for p in (available_products or ["BTC", "ETH"])]
@@ -928,6 +929,23 @@ def strategy_action_kb(
             ],
             [*pair_buttons],
         ]
+        if strategy_id == "mid":
+            # BIAS-ON-CARD (2026-07-31): direction was only reachable via
+            # Advanced → Core (row 7 of 13) and users reported Mid had "no
+            # long/short setting". Surface it on the start card. ✅ marks the
+            # active lean; taps route through strategy:bias which saves and
+            # re-renders this card (not the Advanced section).
+            def _bias_btn(label: str, value: str, active: bool):
+                return InlineKeyboardButton(
+                    f"{'✅ ' if active else ''}{label}",
+                    callback_data=f"strategy:bias:mid:{value}",
+                )
+
+            rows.insert(1, [
+                _bias_btn("📉 Short", "-0.5", mid_bias is not None and mid_bias < 0),
+                _bias_btn("⚖ Neutral", "0", mid_bias is not None and mid_bias == 0),
+                _bias_btn("📈 Long", "0.5", mid_bias is not None and mid_bias > 0),
+            ])
         if strategy_id == "dn":
             # Rank DN pairs by perp funding so users can pick the best short carry
             # before sizing margin (callback handled in strategy_handler).

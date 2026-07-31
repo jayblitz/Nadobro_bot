@@ -31,6 +31,10 @@ from src.nadobro.engine.controllers.market_making import MarketMakingController
 from src.nadobro.engine.controllers.volume_bot import VolumeBotController
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
 from src.nadobro.engine.risk import RiskEngine
+# Re-exported for the handlers layer (handlers may import strategy but not
+# engine — see tests/lint/test_architecture_layers.py): the human-readable
+# quote-gate pause reasons rendered on /status and in gate notifications.
+from src.nadobro.engine.routines.regime_gate import GATE_REASON_HUMAN as GATE_REASON_HUMAN  # noqa: F401
 from src.nadobro.engine.types import RiskLimits, RiskState, TradeType, TripleBarrierConfig, _dec
 
 logger = logging.getLogger(__name__)
@@ -683,8 +687,11 @@ def _quote_defense_defaults(settings, notional, *, auto_spread: bool) -> dict:
     # Previously hardcoded (1.5 bp floor / 50 bp cap) so min_spread_bp /
     # max_spread_bp were dead inputs; now they drive the manual floor AND the
     # ATR auto-spread clamp. Defaults match the old constants, so an unset config
-    # behaves exactly as before. floor clamped ≥0 (mid may concede to 0) and the
-    # cap is held ≥ floor so a stray min>max can't invert the band.
+    # behaves exactly as before. floor clamped ≥0: a negative value is mid's
+    # SHIPPED registry default (-10 — see strategy_registry "user-tunable in
+    # [-10, +100]") and means "no floor" (the Tread-parity volume product may
+    # concede spread to 0); do NOT reinterpret it as garbage (audit 2026-07-31).
+    # The cap is held ≥ floor so a stray min>max can't invert the band.
     floor_half = Decimal(str(max(0.0, _f(settings, "min_spread_bp", 1.5)))) / Decimal(10000)
     cap_half = Decimal(str(_f(settings, "max_spread_bp", 50.0))) / Decimal(10000)
     if cap_half < floor_half:
@@ -821,6 +828,22 @@ def map_strategy_config(
             # Bias-scaled net-exposure cap (overrides the _quote_defense_defaults
             # value): +20% at |bias|=1 so a directional lean isn't suppressed.
             "max_net_exposure_pct": _f(settings, "max_net_exposure_pct", 30.0) * _bias_exposure_mult,
+            # MID-GATE-DEFAULT (2026-07-31): regime gate OFF by default for Mid —
+            # the same decision GRID-IN-TRENDS made for grid/rgrid, for the same
+            # symptom ("always paused, silently never quotes"). Mid is the
+            # volume product: on Nado's thin books the gate's volume-profile
+            # verdicts (breakout/expansion) read PAUSE 46-61% of minutes and a
+            # paused FLAT book quotes nothing at all, so sessions sat dark.
+            # Backstops that stay armed: session SL/TP rail, net-exposure cap,
+            # inventory ceiling (the TWAP fast-move pause exists too but is
+            # opt-in — twap_pause_move_bp defaults to 0). An explicit
+            # regime_gate_enabled=1 in settings re-arms the gate, and the
+            # signal overlay still arms it while suppressing entries.
+            **(
+                {"regime_gate_enabled": 0.0}
+                if "regime_gate_enabled" not in settings
+                else {}
+            ),
         }
     if strategy == "dn":
         # NO_ORDERS_AUDIT-FIX-R1: DN config keys for DeltaNeutralController.

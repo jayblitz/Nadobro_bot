@@ -19,7 +19,11 @@ from src.nadobro.core.async_utils import run_blocking
 from src.nadobro.strategy.bot_runtime import stop_user_bot, get_user_bot_status
 from src.nadobro.users.onboarding_service import is_new_onboarding_complete
 from src.nadobro.core.perf import timed_metric
-from src.nadobro.users.settings_service import get_user_settings, update_user_settings
+from src.nadobro.users.settings_service import (
+    get_strategy_settings,
+    get_user_settings,
+    update_user_settings,
+)
 from src.nadobro.strategy.strategy_pending_input import persist_strategy_pending_input
 from src.nadobro.users.user_service import get_user_readonly_client, get_user_wallet_info, get_user, ensure_active_wallet_ready
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -184,6 +188,19 @@ def _vol_market_pref(context) -> str:
     # ``strategy:volmarket`` callback are retained as no-ops only so cached
     # menus / deep links don't crash; we always return "spot".
     return "spot"
+
+
+def _mid_bias_value(telegram_id: int) -> float:
+    """Current Mid Mode directional bias as a float in [-1, 1] (sync DB read —
+    call via run_blocking). Tolerates the legacy text values via the shared
+    resolver so "long_bias"/"neutral" render the same ✅ as their numbers."""
+    from src.nadobro.quant.mm_quote_math import _resolve_directional_bias_value
+
+    _, conf = get_strategy_settings(telegram_id, "mid")
+    try:
+        return float(_resolve_directional_bias_value(conf.get("directional_bias")))
+    except Exception:  # noqa: BLE001 - unreadable bias renders as neutral
+        return 0.0
 
 
 def _build_dn_funding_ranking(telegram_id: int) -> tuple[str, list[tuple[str, float | None, bool]]]:
@@ -364,7 +381,11 @@ async def _handle_strategy(query, data, context, telegram_id):
             and str(bot_status.get("strategy") or "").lower() == strategy_id
         )
         vkb = _vol_market_pref(context) if strategy_id == "vol" else "perp"
-        await _edit_loc(query, 
+        mid_bias = (
+            await run_blocking(_mid_bias_value, telegram_id)
+            if strategy_id == "mid" else None
+        )
+        await _edit_loc(query,
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=strategy_action_kb(
@@ -373,6 +394,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 list(available_pairs),
                 is_running=is_running,
                 vol_market=vkb,
+                mid_bias=mid_bias,
             ),
         )
     elif action == "custom" and len(parts) >= 4:
@@ -439,6 +461,10 @@ async def _handle_strategy(query, data, context, telegram_id):
             and str(bot_status.get("strategy") or "").lower() == strategy_id
         )
         vkb = _vol_market_pref(context) if strategy_id == "vol" else "perp"
+        mid_bias = (
+            await run_blocking(_mid_bias_value, telegram_id)
+            if strategy_id == "mid" else None
+        )
         await _edit_loc(query,
             preview_text,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -448,8 +474,36 @@ async def _handle_strategy(query, data, context, telegram_id):
                 list(allowed_pairs),
                 is_running=is_running,
                 vol_market=vkb,
+                mid_bias=mid_bias,
             ),
         )
+    elif action == "bias" and len(parts) >= 4:
+        # BIAS-ON-CARD (2026-07-31): one-tap Long/Neutral/Short from the Mid
+        # start card. Persists directional_bias and re-renders the SAME card
+        # (the Advanced → Core path with the fine-grained ±/custom values is
+        # unchanged). Mid-only: other strategies keep their set_text path.
+        if strategy_id != "mid":
+            return
+        try:
+            bias_value = float(parts[3])
+        except (TypeError, ValueError):
+            return
+        bias_value = max(-1.0, min(1.0, bias_value))
+
+        def _mutate_bias(s):
+            strategies = s.setdefault("strategies", {})
+            cfg = strategies.setdefault("mid", {})
+            cfg["directional_bias"] = bias_value
+
+        await run_blocking(update_user_settings, telegram_id, _mutate_bias)
+        label = (
+            "Long" if bias_value > 0 else "Short" if bias_value < 0 else "Neutral"
+        )
+        try:
+            await query.answer(f"Bias: {label} ({bias_value:+.1f})")
+        except Exception:  # noqa: BLE001 - toast is best-effort
+            pass
+        await _handle_strategy(query, f"strategy:preview:{strategy_id}", context, telegram_id)
     elif action == "funding":
         # DN-only: rank the corresponding-spot perps by funding so the user picks
         # the best short carry before sizing margin. Tapping a row routes through

@@ -1711,6 +1711,29 @@ def fmt_status_overview(status: dict, onboarding: dict):
         f"*{escape_md(strategy)} · {escape_md(product_label)}*",
         f"{_loc('Status')}: *{escape_md(state_label)}* \\| {runtime_summary}",
     ])
+    # GATE-VISIBILITY (2026-07-31): while the regime gate pauses quoting, the
+    # card used to read "LIVE … Last cycle: OK" with zero orders — dark quoting
+    # was invisible. Name the state, the reason, and how long it has held.
+    gate_verdict = str(status.get("mm_gate_verdict") or "").strip().upper()
+    if gate_verdict == "PAUSE":
+        # Via the strategy layer: handlers must not import engine directly
+        # (tests/lint/test_architecture_layers.py pins the edge set).
+        from src.nadobro.strategy.engine_runtime import GATE_REASON_HUMAN
+        gate_why = GATE_REASON_HUMAN.get(
+            str(status.get("mm_gate_reason") or "").strip(), "unfavourable regime")
+        gate_age = _fmt_age_seconds(float(status.get("mm_gate_since_ts") or 0.0))
+        gate_line = (
+            f"⏸ {_loc('Quoting')}: *{_loc_md('PAUSED')}* \\({_loc_md(gate_why)}\\)"
+        )
+        if gate_age != "—":
+            gate_line += f" \\| {_loc('for')} *{escape_md(gate_age)}*"
+        lines.append(gate_line)
+        lines.append(
+            f"{escape_md(_loc('New quotes resume automatically when the market ranges again.'))}"
+        )
+    elif gate_verdict == "QUOTE" and str(status.get("mm_gate_reason") or "") == "":
+        # Quiet confirmation only — the pause state is the one that matters.
+        lines.append(f"{_loc('Quoting')}: {_loc_md('active')} ✅")
     lines.extend(readiness_lines)
 
     if strategy == "DN":

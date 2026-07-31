@@ -17,6 +17,30 @@ def _closes(candles: Sequence[Candle]) -> List[float]:
     return [float(c["close"]) for c in candles]
 
 
+def chronological(candles: Sequence[Candle]) -> Sequence[Candle]:
+    """Return candles oldest-first regardless of feed order.
+
+    CANDLE-ORDER guardrail (2026-07-31): the Nado indexer serves candles
+    newest-first; the venue client normalizes, but every TA consumer
+    (EMA stack, drift windows, ``candles[-1]`` as "current") must stay correct
+    for ANY provider — reversed input silently negates trend/drift direction.
+    Candles without a usable ``time`` key keep their input order (test
+    fixtures are chronological by construction).
+    """
+    def _ts(c: Candle) -> int:
+        try:
+            return int(c.get("time") or 0)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        if any(_ts(c) for c in candles):
+            return sorted(candles, key=_ts)
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(unsortable candle feed keeps input order; consumers stay fail-open)
+        pass
+    return candles
+
+
 def ema(values: Sequence[float], period: int) -> Optional[float]:
     """Exponential moving average.
 

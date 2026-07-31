@@ -39,6 +39,29 @@ _INCREMENTS_CACHE_TTL = env_int("NADO_INCREMENTS_CACHE_TTL_SECONDS", 3600)
 _ALL_PRICES_CACHE = {}
 
 
+def _candles_sorted_asc(candles: list) -> list:
+    """Normalize a candle list to OLDEST-FIRST (chronological) order.
+
+    The Nado indexer returns candles NEWEST-first while every consumer of
+    ``get_candlesticks`` (EMA/ATR/RSI, regime gate, variance ratio, the
+    backtester) assumes chronological input — reversed input silently flips
+    trend classification and makes ``candles[-1]`` the stale oldest bar.
+    Timestamps arrive as digit strings from the indexer; coerce to int so the
+    sort is numeric, and fail open (input order) on malformed rows.
+    """
+    def _ts(c: object) -> int:
+        try:
+            get = c.get if isinstance(c, dict) else lambda k, d=None: getattr(c, k, d)  # type: ignore[union-attr]
+            return int(get("time") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        return sorted(candles, key=_ts)
+    except Exception:  # noqa: BLE001 - never let ordering break a market read
+        return list(candles)
+
+
 def _format_sdk_error(exc: Exception, *, max_len: int = 200) -> str:
     """Compact SDK error text; never dump Cloudflare HTML into logs."""
     msg = str(exc)
@@ -670,7 +693,15 @@ class NadoClient:
         return {"bid": 0, "ask": 0, "mid": 0}
 
     def get_candlesticks(self, product_id: int, timeframe: str = "1h", limit: int = 200, max_time: int | None = None) -> list[dict]:
-        """Fetch OHLCV candles from the Nado indexer through the official SDK."""
+        """Fetch OHLCV candles from the Nado indexer through the official SDK.
+
+        Returns candles OLDEST-FIRST. CANDLE-ORDER fix (2026-07-31): the
+        indexer serves candles NEWEST-first, and every downstream consumer
+        (regime gate, EMA/ATR/RSI, dgrid variance ratio, vol signal filter,
+        market_features, HOWL backtester) assumes chronological order — the
+        regime gate was reading a 3.3h-old close as "last" and classifying the
+        trend backwards. Normalize once here so no consumer can regress.
+        """
         if not self._initialized or not self.client:
             if self.private_key is not None:
                 self.initialize()
@@ -687,7 +718,9 @@ class NadoClient:
             )
             cached = self._read_shared_cache(candles_redis_key)
             if isinstance(cached, list):
-                return cached
+                # Sort cache hits too: entries written before this fix (or by an
+                # older worker during a rolling deploy) are newest-first.
+                return _candles_sorted_asc(cached)
         from src.nadobro.venue.nado_weights import query_weight
         if not self._gateway_allowed(
             weight=query_weight("candlesticks", {"limit": limit}),
@@ -737,6 +770,7 @@ class NadoClient:
                         "volume": float(get("volume", 0) or 0),
                     }
                 )
+            candles = _candles_sorted_asc(candles)
             if candles_redis_key is not None and candles:
                 self._write_shared_cache(candles_redis_key, candles, _CANDLES_CACHE_TTL)
             return candles

@@ -198,3 +198,91 @@ def test_sell_chaser_posts_above_mid():
         assert adapter.placed[0].price == Decimal("100.1")
 
     asyncio.run(body())
+
+
+# --------------------------------------------------------------------------
+# COUNTERS-FIX (2026-07-31): orders_filled / orders_cancelled were never
+# defined on OrderExecutor, so Controller.order_counts() getattr-defaulted
+# them to 0 and /status showed "filled 0 | cancelled 0" forever for every
+# OrderExecutor-based strategy (mid/MM) — even while real cancels happened
+# (session 178: 2 placed, 2 cancelled on the venue, card showed 0/0).
+# --------------------------------------------------------------------------
+def test_counters_market_fill():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        cfg = OrderExecutorConfig(PAIR, TradeType.BUY, Decimal(1), ExecutionStrategy.MARKET)
+        ex = _ex(cfg, adapter)
+        await ex.on_create()
+        assert ex.orders_placed == 1
+        assert ex.orders_filled == 1
+        assert ex.orders_cancelled == 0
+
+    asyncio.run(body())
+
+
+def test_counters_limit_fill_on_tick():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        cfg = OrderExecutorConfig(
+            PAIR, TradeType.BUY, Decimal(1), ExecutionStrategy.LIMIT, price=Decimal(99)
+        )
+        ex = _ex(cfg, adapter)
+        await ex.on_create()
+        assert (ex.orders_placed, ex.orders_filled, ex.orders_cancelled) == (1, 0, 0)
+        adapter.fill_order(ex.order.id, price=Decimal(99))
+        await ex.on_tick()
+        assert (ex.orders_placed, ex.orders_filled, ex.orders_cancelled) == (1, 1, 0)
+
+    asyncio.run(body())
+
+
+def test_counters_stop_counts_cancel_exactly_once():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        cfg = OrderExecutorConfig(
+            PAIR, TradeType.SELL, Decimal(1), ExecutionStrategy.LIMIT_MAKER, price=Decimal(101)
+        )
+        ex = _ex(cfg, adapter)
+        await ex.on_create()
+        await ex.on_stop()  # the mid gate-pause path: resting quote pulled
+        assert ex.is_terminated
+        assert (ex.orders_placed, ex.orders_filled, ex.orders_cancelled) == (1, 0, 1)
+        # A second stop on the already-terminal executor must not double count.
+        await ex.on_stop()
+        assert ex.orders_cancelled == 1
+
+    asyncio.run(body())
+
+
+def test_counters_venue_cancel_seen_on_tick():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        cfg = OrderExecutorConfig(
+            PAIR, TradeType.BUY, Decimal(1), ExecutionStrategy.LIMIT, price=Decimal(99)
+        )
+        ex = _ex(cfg, adapter)
+        await ex.on_create()
+        await adapter.cancel_order(ex.order.id)  # venue-side cancel
+        await ex.on_tick()
+        assert ex.is_terminated
+        assert (ex.orders_placed, ex.orders_filled, ex.orders_cancelled) == (1, 0, 1)
+
+    asyncio.run(body())
+
+
+def test_counters_chaser_refresh_counts_cancel_and_new_placement():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        chaser = LimitChaserConfig(distance=Decimal("0.001"), refresh_threshold=Decimal("0.01"))
+        cfg = OrderExecutorConfig(
+            PAIR, TradeType.BUY, Decimal(1), ExecutionStrategy.LIMIT_CHASER, chaser_config=chaser
+        )
+        ex = _ex(cfg, adapter)
+        await ex.on_create()
+        assert (ex.orders_placed, ex.orders_cancelled) == (1, 0)
+        adapter.set_mid(Decimal(102))  # past the 1% refresh threshold
+        await ex.on_tick()
+        assert (ex.orders_placed, ex.orders_cancelled) == (2, 1)
+        assert ex.orders_filled == 0
+
+    asyncio.run(body())

@@ -501,3 +501,43 @@ def test_gate_resume_requires_consecutive_quote_verdicts():
         assert c.consume_gate_event() == {"state": "QUOTE", "reason": ""}
 
     asyncio.run(body())
+
+
+# --------------------------------------------------------------------------
+# MID-GATE-STALE-PAUSE (audit 2026-07-31): a gate disabled MID-RUN (the signal
+# overlay arms it while suppressing, then the next un-suppressed cycle reverts
+# regime_gate_enabled to 0) must not freeze its last verdict. The disabled-gate
+# early return used to hand back a stale PAUSE forever — with a flat book that
+# quotes NOTHING: a LIVE session with zero orders, indefinitely.
+# --------------------------------------------------------------------------
+def test_disabling_the_gate_clears_a_stale_pause():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch, c = _mm(adapter, trending_candles())
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        assert adapter.placed == []
+        assert c.consume_gate_event() == {"state": "PAUSE", "reason": "trending_up"}
+        assert c.gate_paused
+
+        # Overlay disarm: the next cycle's configs carry the gate OFF again.
+        c.configs["regime_gate_enabled"] = False
+        await orch.tick_controller(c.id)
+        assert not c.gate_paused, "a disabled gate has exactly one honest verdict"
+        assert c.consume_gate_event() == {"state": "QUOTE", "reason": ""}
+        assert adapter.placed, "flat book must quote again once the gate is off"
+
+    asyncio.run(body())
+
+
+def test_disabled_gate_from_start_emits_no_event():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch, c = _mm(adapter, trending_candles(), extra={"regime_gate_enabled": False})
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        assert not c.gate_paused
+        assert c.consume_gate_event() is None, "no flip happened — no user notify"
+        assert adapter.placed
+
+    asyncio.run(body())
