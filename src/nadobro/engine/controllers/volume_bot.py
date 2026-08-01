@@ -719,6 +719,11 @@ class VolumeBotController(Controller):
         self.close_base_remaining = Decimal(0)
         self.buy_retries = 0
         self.sell_attempts = 0
+        # _MAX_REQUOTES_PER_CYCLE says PER CYCLE, but this counter was never
+        # reset — making it a per-SESSION budget. The taker rest-stall rescue
+        # is bounded by it, so after 120 cumulative requotes the rescue would
+        # stop firing and the stall would come back (self-review 2026-07-31).
+        self.requotes = 0
 
     # Set by requote/cross paths when the remainder went to zero mid-transition
     # (the fill landed between our cancel and the re-place).
@@ -947,6 +952,11 @@ class VolumeBotController(Controller):
                         "pair=%s controller=%s",
                         remaining, self.sell_attempts, self.trading_pair, self.id,
                     )
+                    # Book what this cycle DID trade before stopping —
+                    # returning straight to _complete skipped _finish_cycle,
+                    # losing the sold volume and the realized loss from the
+                    # session totals (and so from the loss limit).
+                    self._finish_cycle()
                     self.close_base_remaining = remaining
                     self._complete("unsold_inventory")
                     return
@@ -979,6 +989,15 @@ class VolumeBotController(Controller):
             # fallback let a FLAT bot authorise a sweep capped at the last
             # cycle's size — which min()s against the wallet and sells the
             # USER'S OWN pre-existing spot (self-review 2026-07-31).
+            # AUTHORITATIVE "how much base does the BOT still hold right now".
+            # KNOWN WINDOW: this is refreshed when the controller ticks, so a
+            # manual stop landing between a venue fill and the next tick (~5s)
+            # sizes 0 and leaves that base in the wallet. Reading the executor's
+            # cached order does NOT close it (the snapshot is equally stale),
+            # and capping by the ORDER SIZE instead would let an UNFILLED buy
+            # authorise selling the user's own pre-existing spot — strictly
+            # worse, since that is irreversible. The rail path is already
+            # covered: bot_runtime merges these counters before it can fire.
             "vol_open_base": float(max(Decimal(0), self.entry_base - self.sold_base)),
             # Expected all-in cost of one taker round trip (both legs' fees;
             # the spread is on top and varies with the book). Surfaced so the

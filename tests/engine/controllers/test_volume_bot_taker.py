@@ -529,3 +529,73 @@ def test_unsold_inventory_stop_still_reports_what_is_held():
         )
 
     asyncio.run(body())
+
+
+def test_unfilled_buy_authorises_no_sweep():
+    """An in-flight buy must NOT authorise a sweep sized by its order size —
+    if it never filled, that would sell the user's own pre-existing spot.
+    Capping at booked inventory keeps the irreversible mistake impossible."""
+    async def body():
+        from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch)
+        await orch.spawn_controller(c)
+        assert c.phase == "pending_fill"
+        assert _volume_spot_managed_size(dict(c.volume_metrics())) == 0.0
+
+    asyncio.run(body())
+
+
+def test_requote_budget_is_per_cycle_not_per_session():
+    """_MAX_REQUOTES_PER_CYCLE bounds the taker rest-stall rescue. If the
+    counter never resets it becomes a session budget, and after 120 cumulative
+    requotes the rescue stops firing and the stall returns."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="0")
+        await orch.spawn_controller(c)
+        c.requotes = 42
+        adapter.fill_order(orch.get(c.buy_id).order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+        sell = orch.get(c.sell_id)
+        adapter.fill_order(sell.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        assert c.cycles_completed == 1
+        assert c.requotes == 0, "the per-cycle requote budget must reset"
+
+    asyncio.run(body())
+
+
+def test_unsold_inventory_stop_still_books_the_cycle():
+    """Stopping on unsold base must not lose the volume and realized loss the
+    cycle DID trade — that under-reports volume and under-counts the loss
+    limit."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="1000000")
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        # Partially close, then exhaust the attempts on the remainder.
+        sell = orch.get(c.sell_id)
+        part = sell.order.amount_base / Decimal(4)
+        adapter.fill_order(sell.order.id, amount=part, price=Decimal("100"), partial=True)
+        c.sell_attempts = c._MAX_SELL_ATTEMPTS
+        await adapter.cancel_order(sell.order.id)
+        await orch.tick_controller(c.id)
+
+        assert c.completed and c.stop_reason == "unsold_inventory"
+        assert c.cycles_completed == 1, "the cycle must be booked, not dropped"
+        assert c.session_volume_usd > 0, "the volume actually traded must count"
+
+    asyncio.run(body())
