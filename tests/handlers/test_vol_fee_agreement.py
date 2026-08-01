@@ -177,7 +177,7 @@ def test_consent_is_single_use():
     import src.nadobro.handlers.strategy_handler as sh
 
     src = open(sh.__file__).read()
-    ack = src.split('if strategy_id == "vol" and fee_agreed:')[1][:800]
+    ack = src.split('if strategy_id == "vol" and fee_agreed:')[1][:2400]
     assert "edit_message_reply_markup(reply_markup=None)" in ack
 
 
@@ -201,3 +201,31 @@ def test_card_min_notional_floor_works_for_SPOT_pairs():
     src = open(sh.__file__).read()
     assert "get_spot_min_notional_usd" in src
     assert "get_product_min_quote_notional_usd" not in src.split("_vol_fee_estimate")[1][:1200]
+
+
+def test_consent_is_bound_to_the_quoted_numbers():
+    """The startok callback carries only the product, so the estimate is
+    recomputed at ack time. Without binding consent to what was SHOWN, a
+    settings change between rendering and tapping starts the run on numbers
+    the user never saw — and the ack record rewrites itself to match,
+    destroying the audit trail too."""
+    from src.nadobro.handlers.strategy_handler import _vol_fee_quote_key
+
+    shown = _vol_fee_quote_key(_est(), sl_pct=5.0)
+    assert _vol_fee_quote_key(_est(), sl_pct=5.0) == shown, "stable when nothing moved"
+
+    # Each user-agreed dimension must invalidate the consent.
+    assert _vol_fee_quote_key(_est(margin_usd=250), sl_pct=5.0) != shown
+    assert _vol_fee_quote_key(_est(target_volume_usd=50_000), sl_pct=5.0) != shown
+    assert _vol_fee_quote_key(_est(taker_fee_rate=Decimal("0.0009")), sl_pct=5.0) != shown
+    assert _vol_fee_quote_key(_est(), sl_pct=10.0) != shown, "the stop is agreed to as well"
+
+
+def test_ack_path_rechecks_the_quote_before_starting():
+    import src.nadobro.handlers.strategy_handler as sh
+
+    src = open(sh.__file__).read()
+    ack = src.split('if strategy_id == "vol" and fee_agreed:')[1][:1600]
+    assert '_vol_fee_quote_key' in ack
+    assert 'context.user_data.get("vol_fee_quote") != _live_key' in ack
+    assert "settings changed" in ack.lower()

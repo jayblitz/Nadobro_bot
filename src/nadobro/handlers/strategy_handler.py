@@ -231,6 +231,20 @@ def _vol_fee_estimate(telegram_id: int, product: str, network: str):
     )
 
 
+def _vol_fee_quote_key(est, sl_pct: float) -> tuple:
+    """Identity of the charges a fee card quoted.
+
+    Compared at ack time so consent can only start a run on the numbers the
+    user actually saw. Every field here is one the user is agreeing to.
+    """
+    return (
+        str(est.margin_usd),
+        str(est.target_volume_usd),
+        str(est.total_rate),
+        f"{float(sl_pct):.4f}",
+    )
+
+
 def _vol_fee_agreement_text(est, product: str, network: str, sl_pct: float = 0.0) -> str:
     """The charges the user is agreeing to. Every number here is quoted from
     the same estimate object that gets persisted on consent."""
@@ -1219,6 +1233,12 @@ async def _handle_strategy(query, data, context, telegram_id):
                 _vol_fee_estimate, telegram_id, product, network
             )
             _vol_sl = float((strategy_conf or {}).get("sl_pct") or 0.0)
+            # CONSENT INTEGRITY: remember exactly what this card quoted. The
+            # callback carries only the product, so without this a settings
+            # change between rendering and tapping would start the run on
+            # numbers the user never saw — and the ack record would rewrite
+            # itself to match, destroying the audit trail too.
+            context.user_data["vol_fee_quote"] = _vol_fee_quote_key(vol_est, _vol_sl)
             await _edit_loc(
                 query,
                 _vol_fee_agreement_text(vol_est, product, network, sl_pct=_vol_sl),
@@ -1235,6 +1255,35 @@ async def _handle_strategy(query, data, context, telegram_id):
             )
             return
         if strategy_id == "vol" and fee_agreed:
+            # Re-quote and compare against what the card actually showed. Any
+            # drift (margin, target, rate, stop) means this consent was given
+            # for different charges — re-render and make the user agree again
+            # rather than trade on numbers they never saw.
+            _live_est = await run_blocking(
+                _vol_fee_estimate, telegram_id, product, network
+            )
+            _live_sl = float((strategy_conf or {}).get("sl_pct") or 0.0)
+            _live_key = _vol_fee_quote_key(_live_est, _live_sl)
+            if context.user_data.get("vol_fee_quote") != _live_key:
+                context.user_data["vol_fee_quote"] = _live_key
+                await _edit_loc(
+                    query,
+                    "⚠️ *Your settings changed since this quote\\.*\n\n"
+                    + _vol_fee_agreement_text(
+                        _live_est, product, network, sl_pct=_live_sl
+                    ),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "✅ Agree & Start",
+                            callback_data=f"strategy:startok:vol:{product}",
+                        )],
+                        [InlineKeyboardButton(
+                            "◀ Back", callback_data="strategy:preview:vol",
+                        )],
+                    ]),
+                )
+                return
             # AUDIT-VOL-2026-07-31 F8: the start result arrives as a NEW
             # message, so the fee card and its "Agree & Start" button stay
             # live. Re-tapping later re-reads settings and could start with a
