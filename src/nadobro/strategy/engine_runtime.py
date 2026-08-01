@@ -1026,13 +1026,32 @@ def map_strategy_config(
             # both legs, with a patient sell that waits for a price strictly
             # above the entry AND at/above fee-inclusive breakeven. 0 restores
             # the v3 maker path.
-            "vol_taker_mode": 1.0 if _f(settings, "vol_taker_mode", 1.0) != 0 else 0.0,
+            # Only forward the legacy kill-switch when the user actually set
+            # it — mapping a default here would pin every run to taker and the
+            # execution-algo default could never apply.
+            **(
+                {"vol_taker_mode": 1.0 if _f(settings, "vol_taker_mode", 1.0) != 0 else 0.0}
+                if "vol_taker_mode" in settings else {}
+            ),
             "spot_taker_fee_rate": Decimal(str(spot_taker_fee_rate)),
             "vol_builder_fee_rate": Decimal(str(builder_fee_rate)),
             # Taker execution bound: both legs are marketable LIMITs priced
             # this far through the touch (AUDIT-VOL-2026-07-31 F1 — a naked
             # MARKET is an IOC at 1% that the adapter never overrides).
             "vol_taker_slippage_bp": _f(settings, "vol_taker_slippage_bp", 15.0),
+            # EXECUTION ALGO (2026-07-31): maker TWAP is the DEFAULT. Measured
+            # on KBTC spot, resting instead of crossing costs 3.6bp vs 14.3bp
+            # per round trip — ~4x the volume per unit of the session loss
+            # budget. Price impact at this size is 0.00bp, so this is a fee
+            # decision, not an impact one. "chase" = same ladder, impatient;
+            # "taker" = cross immediately (v4.1 behaviour / kill-switch).
+            "vol_execution_algo": str(
+                settings.get("vol_execution_algo") or "twap"
+            ).strip().lower(),
+            "vol_twap_horizon_seconds": _f(settings, "vol_twap_horizon_seconds", 120.0),
+            "vol_chase_interval_seconds": _f(settings, "vol_chase_interval_seconds", 20.0),
+            "vol_cross_tolerance_frac": _f(settings, "vol_cross_tolerance_frac", 0.5),
+            "vol_max_taker_frac": _f(settings, "vol_max_taker_frac", 0.25),
             # A marketable limit RESTS if it cannot fully sweep, and taker mode
             # disables the maker rescues — so a taker leg still live after this
             # long is cancelled and re-placed (TAKER-REST-STALL).

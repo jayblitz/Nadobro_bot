@@ -216,7 +216,16 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "vol_cross_slippage_bp": 15.0,
         # v4 taker mode (default ON): market orders both legs; the sell waits
         # for a price above the entry that also clears both legs' fees.
-        "vol_taker_mode": 1.0,
+        # Execution algo: maker TWAP by default (rest post-only, chase, cross
+        # only when materially behind schedule). "chase" | "taker" also valid.
+        # vol_taker_mode is NOT defaulted here — setting it would pin every run
+        # to the taker path and the default below could never apply. It remains
+        # available as an explicit per-user kill-switch.
+        "vol_execution_algo": "twap",
+        "vol_twap_horizon_seconds": 120.0,
+        "vol_chase_interval_seconds": 20.0,
+        "vol_cross_tolerance_frac": 0.5,
+        "vol_max_taker_frac": 0.25,
         # Price bound on the marketable-limit taker legs.
         "vol_taker_slippage_bp": 15.0,
         # A marketable limit rests if it cannot fully sweep; cancel + re-place

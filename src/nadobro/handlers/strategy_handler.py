@@ -1004,6 +1004,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "funding_entry_mode": {"wait", "enter_anyway"},
             # Phase 2: Tread Fi POV / participation preset.
             "participation_preset": {"aggressive", "normal", "passive", "off"},
+            # Volume Bot execution algo (maker TWAP default / chase / taker).
+            "vol_execution_algo": {"twap", "chase", "taker"},
         }
         allowed_vals = allowed_text.get(field, set())
         if raw_value not in allowed_vals:
@@ -1657,8 +1659,15 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         tp_pct = float(conf.get("tp_pct", 1.0))
         sl_pct = float(conf.get("sl_pct", 1.0))
         _vol_margin = float(conf.get("session_margin_usd", conf.get("notional_usd", 100.0)) or 100.0)
+        _algo = str(conf.get("vol_execution_algo") or "twap").lower()
+        _algo_label = {
+            "twap": "Maker TWAP (rests, ~4x cheaper)",
+            "chase": "Chase (maker, fills faster)",
+            "taker": "Taker (crosses, most expensive)",
+        }.get(_algo, _algo)
         return (
             "⚙️ *Vol Bot · TP / SL*\n\n"
+            f"Execution: *{escape_md(_algo_label)}*\n"
             f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n"
             f"Margin per cycle: {_leg_size_display(_vol_margin, str(conf.get('product') or ''), network)}\n\n"
             "Choose quick presets or set custom values\\."
@@ -1859,6 +1868,14 @@ def _strategy_config_section_kb(strategy: str, section: str):
             ],
             [
                 InlineKeyboardButton("✍️ Custom TP", callback_data="strategy:input:vol:tp_pct"),
+            ],
+            [
+                # EXECUTION ALGO. Maker TWAP is the default: measured on KBTC
+                # spot a taker round trip costs 14.3bp vs 3.6bp resting, i.e.
+                # ~4x the volume for the same stop budget.
+                InlineKeyboardButton("⏱ Maker TWAP", callback_data="strategy:set_text:vol:vol_execution_algo:twap"),
+                InlineKeyboardButton("🏃 Chase", callback_data="strategy:set_text:vol:vol_execution_algo:chase"),
+                InlineKeyboardButton("⚡ Taker", callback_data="strategy:set_text:vol:vol_execution_algo:taker"),
             ],
             [
                 # Every taker round trip costs spread + both legs' fees, so

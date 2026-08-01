@@ -23,8 +23,12 @@ PAIR = "KBTC"
 
 
 def _vb(adapter, orch, **cfg):
+    # This suite exercises the TAKER path specifically. v4.2 ships maker TWAP
+    # as the default, so taker must now be requested explicitly — the same
+    # discipline the v3 maker suite uses for vol_taker_mode:0.
     configs = {
         "trading_pair": PAIR,
+        "vol_execution_algo": "taker",
         "total_amount_quote": "100",
         # 10 bp/leg all-in keeps the arithmetic legible in assertions.
         "spot_taker_fee_rate": "0.0009",
@@ -40,12 +44,12 @@ def _vb(adapter, orch, **cfg):
     )
 
 
-def test_taker_is_the_default_and_buys_at_market():
+def test_taker_mode_crosses_with_a_bounded_limit():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
         orch = ExecutorOrchestrator()
         c = _vb(adapter, orch)
-        assert c.taker_mode is True, "v4 ships taker-by-default"
+        assert c.taker_mode is True and c.execution_algo == "taker"
         await orch.spawn_controller(c)
         assert adapter.placed, "a taker buy must be submitted on start"
         # Marketable LIMIT, not naked MARKET: it crosses the book (immediate
