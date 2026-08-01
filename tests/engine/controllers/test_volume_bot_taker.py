@@ -447,3 +447,85 @@ def test_fresh_controller_starts_from_zero():
     assert c.session_realized_pnl_usd == Decimal(0)
     assert c.cycles_completed == 0
     assert c.session_volume_usd == Decimal(0)
+
+
+# --------------------------------------------------------------------------
+# VOL-SWEEP-OVERREACH (self-review 2026-07-31). The stop sweep is sized from
+# state. It used to fall back to vol_entry_size — the last cycle's BUY size,
+# which _finish_cycle never resets — so a FLAT bot authorised a sweep capped
+# at that size, and stop_volume_spot_cleanup's min(wallet, cap) would sell the
+# user's OWN pre-existing spot. Selling a user's unrelated assets is
+# irreversible; this is the most dangerous direction to get wrong.
+# --------------------------------------------------------------------------
+def test_flat_bot_authorises_no_sweep_at_all():
+    from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="0")
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+        sell = orch.get(c.sell_id)
+        adapter.fill_order(sell.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        assert c.entry_base - c.sold_base == 0, "precondition: the bot is flat"
+        state = dict(c.volume_metrics())
+        assert state["vol_entry_size"] > 0, "the stale key is still populated"
+        assert _volume_spot_managed_size(state) == 0.0, (
+            "a flat bot must authorise NO sweep — otherwise min(wallet, cap) "
+            "sells the user's own pre-existing spot balance"
+        )
+
+    asyncio.run(body())
+
+
+def test_holding_bot_authorises_exactly_what_it_holds():
+    from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="1000000")
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        held = float(c.entry_base - c.sold_base)
+        assert held > 0
+        assert _volume_spot_managed_size(dict(c.volume_metrics())) == held
+
+    asyncio.run(body())
+
+
+def test_unsold_inventory_stop_still_reports_what_is_held():
+    """_complete("unsold_inventory") means base IS still held — the sweep must
+    be able to size it, or the completion path strands the position."""
+    from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="1000000")
+        await orch.spawn_controller(c)
+        adapter.fill_order(orch.get(c.buy_id).order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        held = float(c.entry_base - c.sold_base)
+        c.sell_attempts = c._MAX_SELL_ATTEMPTS
+        await adapter.cancel_order(orch.get(c.sell_id).order.id)
+        await orch.tick_controller(c.id)
+
+        assert c.completed and c.stop_reason == "unsold_inventory"
+        assert _volume_spot_managed_size(dict(c.volume_metrics())) == held, (
+            "the completion sweep must know exactly what is still held"
+        )
+
+    asyncio.run(body())

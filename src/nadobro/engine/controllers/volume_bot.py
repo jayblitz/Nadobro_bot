@@ -973,6 +973,13 @@ class VolumeBotController(Controller):
             "vol_entry_price": float(self.entry_price),
             "vol_entry_fill_ts": float(self.entry_fill_ts or 0.0),
             "vol_close_size": float(self.close_base_remaining),
+            # AUTHORITATIVE "how much base does the BOT still hold right now".
+            # The stop sweep sizes from this. vol_entry_size is the last cycle's
+            # BUY size and is never reset by _finish_cycle, so using it as a
+            # fallback let a FLAT bot authorise a sweep capped at the last
+            # cycle's size — which min()s against the wallet and sells the
+            # USER'S OWN pre-existing spot (self-review 2026-07-31).
+            "vol_open_base": float(max(Decimal(0), self.entry_base - self.sold_base)),
             # Expected all-in cost of one taker round trip (both legs' fees;
             # the spread is on top and varies with the book). Surfaced so the
             # user can see WHY the session loss limit approaches — with no

@@ -3342,6 +3342,31 @@ async def _run_cycle(
     # would sit "running" forever (the old idle-in-'done'-phase bug).
     if isinstance(result, dict) and result.get("done"):
         reason = str(result.get("stop_reason") or "completed")
+        # VOL-DONE-NO-SWEEP (self-review 2026-07-31): the controller can
+        # self-complete while STILL HOLDING base — _complete("unsold_inventory")
+        # means exactly that. This branch finalized the session and tore the
+        # engine down without ever sweeping, stranding the position in the
+        # user's wallet permanently. Flatten FIRST, then finalize. The sweep is
+        # sized from vol_open_base (what the bot actually still holds), so a
+        # normal completion that ended flat is a no-op and can never touch the
+        # user's own spot balance.
+        if strategy == "vol":
+            _merge_vol_order_counters(state, result)
+            try:
+                _swept = await run_blocking(
+                    cleanup_strategy_positions, telegram_id, network, state
+                )
+                if isinstance(_swept, dict) and not _swept.get("skipped"):
+                    logger.warning(
+                        "vol completion (%s) held inventory — swept before "
+                        "finalizing user=%s result=%s",
+                        reason, telegram_id, _swept.get("success"),
+                    )
+            except Exception:  # noqa: BLE001  # policy: degrade-ok(finalize still runs; sweep is logged)
+                logger.error(
+                    "vol completion sweep FAILED user=%s reason=%s — a position "
+                    "may still be open", telegram_id, reason, exc_info=True,
+                )
         _finalize_session(state, stop_reason=reason)
         state["running"] = False
         state["last_action"] = "engine_completed"

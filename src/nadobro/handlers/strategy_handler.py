@@ -212,9 +212,12 @@ def _vol_fee_estimate(telegram_id: int, product: str, network: str):
     # that understates the money at risk is not consent.
     try:
         from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
-        from src.nadobro.venue.product_catalog import get_product_min_quote_notional_usd
+        from src.nadobro.venue.product_catalog import get_spot_min_notional_usd
 
-        venue_min = get_product_min_quote_notional_usd(product, network=network) or 0.0
+        # SPOT accessor: get_product_min_quote_notional_usd resolves a PERP row
+        # and returns None for every spot Volume pair (KBTC, WETH, …), so this
+        # floor was dead exactly where it applies (self-review 2026-07-31).
+        venue_min = get_spot_min_notional_usd(product, network=network) or 0.0
         floor = float(min_closeable_entry_notional(float(venue_min)) or 0.0)
         if floor > float(margin or 0):
             margin = floor

@@ -179,3 +179,25 @@ def test_consent_is_single_use():
     src = open(sh.__file__).read()
     ack = src.split('if strategy_id == "vol" and fee_agreed:')[1][:800]
     assert "edit_message_reply_markup(reply_markup=None)" in ack
+
+
+def test_card_min_notional_floor_works_for_SPOT_pairs():
+    """The card's size floor used the PERP-only accessor, which returns None
+    for every spot Volume pair — so it was dead exactly where it applies and
+    the card quoted $100 while the engine traded $115."""
+    from src.nadobro.venue.product_catalog import (
+        get_product_min_quote_notional_usd,
+        get_spot_min_notional_usd,
+    )
+
+    # The perp accessor is genuinely blind to spot (this is the bug's root).
+    assert get_product_min_quote_notional_usd("KBTC", network="mainnet") is None
+    # The spot accessor sees it.
+    assert (get_spot_min_notional_usd("KBTC", network="mainnet") or 0) > 0
+
+    # And the card now quotes the floored size the engine will really trade.
+    import src.nadobro.handlers.strategy_handler as sh
+
+    src = open(sh.__file__).read()
+    assert "get_spot_min_notional_usd" in src
+    assert "get_product_min_quote_notional_usd" not in src.split("_vol_fee_estimate")[1][:1200]
